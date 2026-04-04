@@ -176,6 +176,21 @@ pub trait Window: Send {
 
     /// Set the window size in logical pixels
     fn set_size(&self, _width: u32, _height: u32) {}
+
+    /// Start a window drag operation (for custom title bars).
+    ///
+    /// Call this from a mouse-down handler on a draggable region.
+    /// The OS takes over the drag and the window follows the cursor.
+    fn drag_window(&self) {}
+
+    /// Minimize the window
+    fn minimize(&self) {}
+
+    /// Maximize or restore the window
+    fn maximize(&self) {}
+
+    /// Close the window
+    fn close(&self) {}
 }
 
 /// Cursor icons

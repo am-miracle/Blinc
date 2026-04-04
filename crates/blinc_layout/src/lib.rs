@@ -90,6 +90,7 @@ pub mod css_parser;
 
 // Stable unique key generation for components
 pub mod key;
+pub mod window_actions;
 
 // Re-export InstanceKey and reset function at crate root
 pub use key::{reset_call_counters, InstanceKey};

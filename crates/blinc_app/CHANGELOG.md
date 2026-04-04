@@ -7,11 +7,20 @@ All notable changes to `blinc_app` will be documented in this file.
 ### Added
 
 - Multi-window support (desktop):
-  - `ctx.open_window(config)` API for creating additional windows
+  - `open_window(config)` / `open_window_with(config, builder)` — global APIs
   - `WindowId` type for platform-agnostic window identification
   - `WindowState` struct bundles all per-window state
   - `AppCommand` enum for cross-thread window creation via `EventLoopProxy`
   - `GpuRenderer::create_surface()` for shared-device surface creation
+  - Secondary windows render custom UI via builder closures with DPI scaling
+- Window management:
+  - `WindowConfig::min_size()`, `max_size()` — size constraints
+  - `WindowConfig::position()`, `center()` — initial positioning
+  - `Window::set_position()`, `center_on_screen()`, `set_size()` — runtime positioning
+  - `Window::drag_window()`, `minimize()`, `maximize()`, `close()` — window controls
+- Custom title bars:
+  - `.drag_region()` on Div — OS window drag on mouse down
+  - `window_actions` module — `drag_window()`, `minimize_window()`, `maximize_window()`, `close_window()` callable from anywhere
   - `DesktopApp` manages `HashMap<WinitWindowId, DesktopWindow>`
   - Events tagged with `WindowId` for per-window routing
 - Native file dialogs: `open_file()`, `save_file()`, `pick_folder()` with builder API

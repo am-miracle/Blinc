@@ -164,6 +164,25 @@ impl Window for DesktopWindow {
             .window
             .request_inner_size(LogicalSize::new(width, height));
     }
+
+    fn drag_window(&self) {
+        let _ = self.window.drag_window();
+    }
+
+    fn minimize(&self) {
+        self.window.set_minimized(true);
+    }
+
+    fn maximize(&self) {
+        self.window.set_maximized(!self.window.is_maximized());
+    }
+
+    fn close(&self) {
+        // winit doesn't have a close method — we request the event loop to close
+        // by not requesting redraws. The actual close is handled by the event loop
+        // when it receives CloseRequested.
+        self.window.set_visible(false);
+    }
 }
 
 // Safety: Window operations are thread-safe via winit's internal synchronization

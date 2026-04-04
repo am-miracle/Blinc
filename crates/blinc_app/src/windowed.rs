@@ -91,6 +91,20 @@ fn pending_builders() -> &'static Mutex<Vec<PendingWindowRequest>> {
 static OPEN_WINDOW_FN: std::sync::OnceLock<Arc<dyn Fn(WindowConfig) + Send + Sync>> =
     std::sync::OnceLock::new();
 
+/// Global callback for initiating a window drag operation (custom title bars).
+static DRAG_WINDOW_FN: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+/// Start a window drag operation (for custom title bars).
+///
+/// Call this from a mouse-down handler on a draggable element.
+/// The OS takes over and the window follows the cursor until release.
+pub fn drag_window() {
+    if let Some(f) = DRAG_WINDOW_FN.get() {
+        f();
+    }
+}
+
 /// Open a new window with a UI builder from anywhere in the application.
 ///
 /// The builder closure is called each frame to produce the window's UI.
@@ -2170,6 +2184,26 @@ impl WindowedApp {
                                     }
                                     // Register globally so open_window() works from anywhere
                                     let _ = OPEN_WINDOW_FN.set(open_fn);
+
+                                    // Register window action callbacks for custom title bars
+                                    {
+                                        let win_drag = window.winit_window_arc();
+                                        blinc_layout::window_actions::set_drag_window_callback(
+                                            move || { let _ = win_drag.drag_window(); },
+                                        );
+                                        let win_min = window.winit_window_arc();
+                                        blinc_layout::window_actions::set_minimize_callback(
+                                            move || win_min.set_minimized(true),
+                                        );
+                                        let win_max = window.winit_window_arc();
+                                        blinc_layout::window_actions::set_maximize_callback(
+                                            move || win_max.set_maximized(!win_max.is_maximized()),
+                                        );
+                                        let win_close = window.winit_window_arc();
+                                        blinc_layout::window_actions::set_close_callback(
+                                            move || win_close.set_visible(false),
+                                        );
+                                    }
 
                                     // Set initial viewport size in BlincContextState
                                     if let Some(ref windowed_ctx) = ws.ctx {

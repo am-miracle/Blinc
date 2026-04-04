@@ -28,11 +28,11 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Multi-window support | **Done** | `ctx.open_window(config)`, `WindowState`, `AppCommand` event loop |
-| Window min/max size constraints | Planned | Extend WindowConfig |
-| Programmatic window positioning | Planned | set_position(), center() |
+| Window min/max size constraints | **Done** | `WindowConfig::min_size()`, `max_size()` |
+| Programmatic window positioning | **Done** | `set_position()`, `center()`, `set_size()` on Window trait |
 | Window state persistence | Planned | Save/restore size, position, maximized |
 | Modal window API | Planned | Parent-child window relationships |
-| Custom title bar / drag regions | Planned | Frameless windows with drag zones |
+| Custom title bar / drag regions | **Done** | `.drag_region()` on Div, `window_actions` module |
 
 ### 1.3 Input (P1)
 

@@ -3371,6 +3371,27 @@ impl Div {
         self
     }
 
+    /// Mark this element as a window drag region (custom title bar).
+    ///
+    /// When the user presses the mouse on this element, the OS window drag
+    /// operation starts — the window follows the cursor until release.
+    /// Use with `WindowConfig { decorations: false, .. }` for frameless windows.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Custom title bar
+    /// div()
+    ///     .w_full().h(32.0)
+    ///     .bg(Color::rgba(0.1, 0.1, 0.1, 1.0))
+    ///     .drag_region()
+    ///     .child(text("My App").color(Color::WHITE))
+    /// ```
+    pub fn drag_region(self) -> Self {
+        self.on_mouse_down(|_ctx| {
+            crate::window_actions::drag_window();
+        })
+    }
+
     /// Register a drag handler (pointer movement while button is pressed)
     pub fn on_drag<F>(mut self, handler: F) -> Self
     where
