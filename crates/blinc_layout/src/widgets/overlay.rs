@@ -2871,7 +2871,7 @@ mod tests {
         let mgr = overlay_manager();
 
         // Add a modal
-        let handle = mgr.lock().unwrap().add(OverlayConfig::modal(), || div());
+        let handle = mgr.lock().unwrap().add(OverlayConfig::modal(), div);
 
         assert!(mgr.lock().unwrap().has_visible_overlays());
 
@@ -2889,7 +2889,7 @@ mod tests {
         // Add modal with dismiss_on_escape
         let _handle = {
             let mut m = mgr.lock().unwrap();
-            let h = m.add(OverlayConfig::modal(), || div());
+            let h = m.add(OverlayConfig::modal(), div);
             // Manually transition to Open state
             if let Some(o) = m.overlays.get_mut(&h) {
                 o.state = OverlayState::Open;

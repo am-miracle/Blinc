@@ -4348,7 +4348,7 @@ mod tests {
         assert!(div_ref.is_bound());
 
         // Read from the ref
-        let width = div_ref.with(|d| d.style.size.width.clone());
+        let width = div_ref.with(|d| d.style.size.width);
         assert!(matches!(width, Some(Dimension::Length(100.0))));
     }
 
@@ -4364,7 +4364,7 @@ mod tests {
         });
 
         // Verify modification
-        let height = div_ref.with(|d| d.style.size.height.clone());
+        let height = div_ref.with(|d| d.style.size.height);
         assert!(matches!(height, Some(Dimension::Length(200.0))));
     }
 
@@ -4378,7 +4378,7 @@ mod tests {
 
         // Should be visible on clone (shared storage)
         assert!(div_ref_clone.is_bound());
-        let width = div_ref_clone.with(|d| d.style.size.width.clone());
+        let width = div_ref_clone.with(|d| d.style.size.width);
         assert!(matches!(width, Some(Dimension::Length(100.0))));
     }
 }

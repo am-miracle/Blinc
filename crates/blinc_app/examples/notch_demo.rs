@@ -340,6 +340,7 @@ fn stateful_icon_button(
 }
 
 /// The notched dropdown panel with collapse animation
+#[allow(clippy::too_many_arguments)]
 fn notched_dropdown(
     active_item: Option<MenuItem>,
     center_x: f32,
@@ -660,7 +661,7 @@ fn bottom_dock_bar(_width: f32) -> impl ElementBuilder {
     let scoop_corner_radius = 6.0; // Smooth corner transitions at scoop edges
 
     let circle_gap = 6.0;
-    let diameter = (scoop_depth * 2.0) - circle_gap;
+    let _diameter = (scoop_depth * 2.0) - circle_gap;
 
     // Container with bottom margin
     div().w_full().flex_row().justify_center().child(

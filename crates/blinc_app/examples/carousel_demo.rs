@@ -181,7 +181,7 @@ fn build_carousel(
                 .on_state(move |_ctx| {
                     let current = current_index_clone.get();
                     div().child(
-                        text(&format!("Card {} of {}", current + 1, CARD_COUNT))
+                        text(format!("Card {} of {}", current + 1, CARD_COUNT))
                             .size(14.0)
                             .color(Color::rgba(0.5, 0.5, 0.6, 1.0)),
                     )
@@ -213,7 +213,7 @@ fn build_card(index: usize, title: &str, description: &str, accent: Color) -> im
                 .items_center()
                 .justify_center()
                 .child(
-                    text(&format!("{}", index + 1))
+                    text(format!("{}", index + 1))
                         .size(18.0)
                         .weight(FontWeight::Bold)
                         .color(accent),
@@ -243,7 +243,7 @@ fn build_card(index: usize, title: &str, description: &str, accent: Color) -> im
                 .px(12.0)
                 .py(8.0)
                 .child(
-                    text(&format!("id=\"card-{}\"", index))
+                    text(format!("id=\"card-{}\"", index))
                         .size(12.0)
                         .color(Color::rgba(0.5, 0.8, 0.5, 1.0)),
                 ),

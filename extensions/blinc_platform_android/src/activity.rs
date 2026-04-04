@@ -208,6 +208,5 @@ mod tests {
     #[test]
     fn test_placeholder() {
         // Android-specific code can't be tested on host
-        assert!(true);
     }
 }

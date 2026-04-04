@@ -1346,9 +1346,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_expr_to_wgsl_literal() {
         assert_eq!(expr_to_wgsl(&FlowExpr::Float(1.0)).unwrap(), "1.0");
-        assert_eq!(expr_to_wgsl(&FlowExpr::Float(3.14)).unwrap(), "3.14");
+        assert_eq!(expr_to_wgsl(&FlowExpr::Float(3.14_f32)).unwrap(), "3.14");
         assert_eq!(expr_to_wgsl(&FlowExpr::Float(0.0)).unwrap(), "0.0");
     }
 
@@ -1747,10 +1748,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_format_float() {
         assert_eq!(format_float(1.0), "1.0");
         assert_eq!(format_float(0.0), "0.0");
-        assert_eq!(format_float(3.14), "3.14");
+        assert_eq!(format_float(3.14_f32), "3.14");
         assert_eq!(format_float(100.0), "100.0");
     }
 }

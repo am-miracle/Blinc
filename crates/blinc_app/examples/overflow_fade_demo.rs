@@ -186,7 +186,7 @@ fn color_rows(count: usize) -> Div {
                 .justify_center()
                 .items_center()
                 .child(
-                    text(&format!("Item {}", i + 1))
+                    text(format!("Item {}", i + 1))
                         .size(13.0)
                         .color(Color::WHITE),
                 ),
@@ -347,7 +347,7 @@ fn horizontal_chips(count: usize) -> Div {
                 .flex_col()
                 .justify_center()
                 .items_center()
-                .child(text(&format!("{}", i + 1)).size(12.0).color(Color::WHITE)),
+                .child(text(format!("{}", i + 1)).size(12.0).color(Color::WHITE)),
         );
     }
     row

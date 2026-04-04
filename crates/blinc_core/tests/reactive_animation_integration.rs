@@ -72,7 +72,7 @@ fn test_effect_updates_spring_on_signal_change() {
 #[test]
 fn test_scheduler_with_reactive_signals() {
     let mut graph = ReactiveGraph::new();
-    let mut scheduler = AnimationScheduler::new();
+    let scheduler = AnimationScheduler::new();
 
     // Create signals for multiple animated properties
     let scale = graph.create_signal(1.0f32);
@@ -398,7 +398,7 @@ fn test_complete_widget_integration() {
     // - Spring animations for smooth transitions
 
     let mut graph = ReactiveGraph::new();
-    let mut scheduler = AnimationScheduler::new();
+    let scheduler = AnimationScheduler::new();
 
     // Reactive state
     let fsm_state = graph.create_signal(IDLE);

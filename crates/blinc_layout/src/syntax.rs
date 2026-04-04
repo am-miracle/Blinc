@@ -477,7 +477,7 @@ mod tests {
 
         assert_eq!(styled.line_count(), 1);
         // Should have spans for: "fn", " ", "main", "()", " ", "{}"
-        assert!(styled.lines[0].spans.len() >= 1);
+        assert!(!styled.lines[0].spans.is_empty());
     }
 
     #[test]
@@ -495,7 +495,7 @@ mod tests {
         let styled = highlighter.highlight(r#"{"key": "value", "num": 42}"#);
 
         assert_eq!(styled.line_count(), 1);
-        assert!(styled.lines[0].spans.len() >= 1);
+        assert!(!styled.lines[0].spans.is_empty());
     }
 
     #[test]

@@ -166,7 +166,7 @@ fn build_values_display(
         )
         .child(
             // Todo: Use stateful element for proper dynamic value tracking
-            text(&format!(
+            text(format!(
                 "Username: {}",
                 if username_val.is_empty() {
                     "(empty)"
@@ -179,7 +179,7 @@ fn build_values_display(
         )
         .child(
             // Todo: Use stateful element for proper dynamic value tracking
-            text(&format!(
+            text(format!(
                 "Email: {}",
                 if email_val.is_empty() {
                     "(empty)"

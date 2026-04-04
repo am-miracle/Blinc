@@ -97,7 +97,7 @@ fn counter_button() -> impl ElementBuilder {
                 .cursor_pointer()
                 .transform(Transform::scale(current_scale, current_scale))
                 .child(
-                    text(&format!("{}", count.get()))
+                    text(format!("{}", count.get()))
                         .size(36.0)
                         .weight(FontWeight::Bold)
                         .color(Color::WHITE)
@@ -185,7 +185,7 @@ fn event_info_display() -> impl ElementBuilder {
                             .color(Color::rgba(1.0, 1.0, 1.0, 0.6)),
                     )
                     .child(
-                        text(&last_event.get())
+                        text(last_event.get())
                             .size(16.0)
                             .weight(FontWeight::SemiBold)
                             .color(Color::rgba(0.4, 0.8, 1.0, 1.0)),

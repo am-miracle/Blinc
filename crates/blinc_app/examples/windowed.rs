@@ -243,7 +243,7 @@ fn build_info_panel(
                 .gap(4.0)
                 .child(text("Size").bold().size(24.0).color(Color::WHITE))
                 .child(
-                    text(&format!("{}x{}", width as u32, height as u32))
+                    text(format!("{}x{}", width as u32, height as u32))
                         .size(30.0)
                         .color(Color::WHITE),
                 ),

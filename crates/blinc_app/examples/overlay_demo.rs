@@ -28,7 +28,7 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    WindowedApp::run(config, |ctx| build_ui(ctx))
+    WindowedApp::run(config, build_ui)
 }
 
 fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
@@ -94,7 +94,7 @@ fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                                 mgr.toast()
                                     .corner(Corner::TopRight)
                                     .duration_ms(3000)
-                                    .content(|| toast_content())
+                                    .content(toast_content)
                                     .show();
                             }
                         }),

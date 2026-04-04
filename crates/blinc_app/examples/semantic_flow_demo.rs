@@ -206,6 +206,7 @@ fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn card(
     id: &str,
     title: &str,

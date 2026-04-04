@@ -119,7 +119,7 @@ mod tests {
         let mut tree = LayoutTree::new();
         let rule = hr();
         rule.build(&mut tree);
-        assert!(tree.len() > 0);
+        assert!(!tree.is_empty());
     }
 
     #[test]
@@ -128,6 +128,6 @@ mod tests {
         let mut tree = LayoutTree::new();
         let rule = hr_color(Color::RED);
         rule.build(&mut tree);
-        assert!(tree.len() > 0);
+        assert!(!tree.is_empty());
     }
 }

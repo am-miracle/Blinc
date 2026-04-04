@@ -171,7 +171,7 @@ mod tests {
         let mut tree = LayoutTree::new();
         let bq = blockquote();
         bq.build(&mut tree);
-        assert!(tree.len() > 0);
+        assert!(!tree.is_empty());
     }
 
     #[test]

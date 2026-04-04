@@ -29,7 +29,7 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    WindowedApp::run(config, |ctx| build_ui(ctx))
+    WindowedApp::run(config, build_ui)
 }
 
 const DEFAULT_MARKDOWN: &str = r#"# Welcome to Markdown Editor

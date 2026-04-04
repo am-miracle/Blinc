@@ -1,3 +1,4 @@
+#![allow(deprecated, dead_code, clippy::manual_clamp)]
 //! Motion Container Demo
 //!
 //! Demonstrates the motion() element for declarative enter/exit animations:
@@ -20,7 +21,6 @@ use blinc_core::Color;
 use blinc_layout::motion::{motion, StaggerConfig};
 use blinc_layout::prelude::stateful_from_handle;
 use blinc_layout::widgets::scroll::Scroll;
-use blinc_theme::theme;
 use std::sync::{Arc, Mutex};
 
 /// Component for the pull-to-refresh demo.
@@ -127,7 +127,7 @@ fn single_element_demo() -> Div {
 
 /// Demo 2: Staggered list (forward direction)
 fn stagger_forward_demo() -> Div {
-    let items = vec!["Item 1", "Item 2", "Item 3", "Item 4", "Item 5"];
+    let items = ["Item 1", "Item 2", "Item 3", "Item 4", "Item 5"];
 
     demo_card("Stagger Forward", "delay: 300ms").child(
         motion()
@@ -139,7 +139,7 @@ fn stagger_forward_demo() -> Div {
 
 /// Demo 3: Staggered list (reverse direction)
 fn stagger_reverse_demo() -> Div {
-    let items = vec!["Item 1", "Item 2", "Item 3", "Item 4", "Item 5"];
+    let items = ["Item 1", "Item 2", "Item 3", "Item 4", "Item 5"];
 
     demo_card("Stagger Reverse", "delay: 300ms").child(
         motion()
@@ -151,7 +151,7 @@ fn stagger_reverse_demo() -> Div {
 
 /// Demo 4: Staggered list (from center)
 fn stagger_center_demo() -> Div {
-    let items = vec!["Item 1", "Item 2", "Item 3", "Item 4", "Item 5"];
+    let items = ["Item 1", "Item 2", "Item 3", "Item 4", "Item 5"];
 
     demo_card("Stagger Center", "delay: 300ms").child(
         motion()

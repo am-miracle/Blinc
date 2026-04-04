@@ -348,7 +348,7 @@ mod tests {
         let mut tree = LayoutTree::new();
         let lnk = link("Test", "https://example.com");
         lnk.build(&mut tree);
-        assert!(tree.len() > 0);
+        assert!(!tree.is_empty());
     }
 
     #[test]

@@ -313,7 +313,7 @@ fn typo_sample(name: &str, size: f32, color: Color) -> impl ElementBuilder {
             ),
         )
         .child(
-            text(&format!("The quick brown fox ({:.0}px)", size))
+            text(format!("The quick brown fox ({:.0}px)", size))
                 .size(size)
                 .color(color),
         )

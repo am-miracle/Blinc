@@ -121,7 +121,7 @@ fn build_direction_toggle(
 
                     // Merge changes into the div
 
-                    return div()
+                    div()
                         .bg(bg)
                         .px(4.0)
                         .py(2.0)
@@ -133,7 +133,7 @@ fn build_direction_toggle(
                                 .weight(FontWeight::SemiBold)
                                 .color(Color::WHITE)
                                 .no_wrap(),
-                        );
+                        )
                 })
                 .on_click(move |_| {
                     let current = direction_state_for_click.get();
@@ -174,7 +174,7 @@ fn build_scroll_container(
             let direction = direction_clone.get();
 
             // The scroll container with shared physics for state persistence
-            return div().child(
+            div().child(
                 Scroll::with_physics(physics.clone())
                     .w(viewport_width)
                     .h(viewport_height)
@@ -190,7 +190,7 @@ fn build_scroll_container(
                     })
                     // Scrollable content - layout differs based on direction
                     .child(build_scroll_content(direction)),
-            );
+            )
         })
 }
 

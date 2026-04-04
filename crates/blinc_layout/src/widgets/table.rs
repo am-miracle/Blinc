@@ -565,7 +565,7 @@ mod tests {
             .child(tbody().child(tr().child(td("Data"))));
 
         tbl.build(&mut tree);
-        assert!(tree.len() > 0);
+        assert!(!tree.is_empty());
     }
 
     #[test]
@@ -581,7 +581,7 @@ mod tests {
             .build();
 
         tbl.build(&mut tree);
-        assert!(tree.len() > 0);
+        assert!(!tree.is_empty());
     }
 
     #[test]
@@ -595,6 +595,6 @@ mod tests {
             .bg(Color::from_hex(0x333333));
 
         cell.build(&mut tree);
-        assert!(tree.len() > 0);
+        assert!(!tree.is_empty());
     }
 }

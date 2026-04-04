@@ -204,7 +204,7 @@ fn rebuild_button(count: State<i32>) -> impl ElementBuilder {
                 .p(2.0)
                 .px(4.0)
                 .child(
-                    text(&format!("Rebuild ({})", n))
+                    text(format!("Rebuild ({})", n))
                         .size(16.0)
                         .weight(FontWeight::Bold)
                         .color(Color::WHITE),
@@ -457,7 +457,7 @@ fn test_inner_click_persistence(ctx: &WindowedContext, count: State<i32>) -> imp
                 )
                 .child(
                     div().child(
-                        text(&format!(
+                        text(format!(
                             "Parent rebuild count: {} | Inner click count: {}",
                             n, clicks
                         ))

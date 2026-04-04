@@ -1115,7 +1115,7 @@ mod tests {
         let mut tree = LayoutTree::new();
         let content = markdown("Hello world");
         content.build(&mut tree);
-        assert!(tree.len() > 0);
+        assert!(!tree.is_empty());
     }
 
     #[test]
@@ -1225,7 +1225,7 @@ mod tests {
         let mut tree = LayoutTree::new();
         let content = markdown("# Hello");
         content.build(&mut tree);
-        assert!(tree.len() > 0);
+        assert!(!tree.is_empty());
     }
 
     #[test]
@@ -1234,7 +1234,7 @@ mod tests {
         let mut tree = LayoutTree::new();
         let content = markdown("- Item 1\n- Item 2");
         content.build(&mut tree);
-        assert!(tree.len() > 0);
+        assert!(!tree.is_empty());
     }
 
     #[test]
@@ -1243,7 +1243,7 @@ mod tests {
         let mut tree = LayoutTree::new();
         let content = markdown("```rust\nfn main() {}\n```");
         content.build(&mut tree);
-        assert!(tree.len() > 0);
+        assert!(!tree.is_empty());
     }
 
     #[test]
@@ -1252,7 +1252,7 @@ mod tests {
         let mut tree = LayoutTree::new();
         let content = markdown("> A quote");
         content.build(&mut tree);
-        assert!(tree.len() > 0);
+        assert!(!tree.is_empty());
     }
 
     #[test]
@@ -1261,7 +1261,7 @@ mod tests {
         let mut tree = LayoutTree::new();
         let content = markdown("---");
         content.build(&mut tree);
-        assert!(tree.len() > 0);
+        assert!(!tree.is_empty());
     }
 
     #[test]

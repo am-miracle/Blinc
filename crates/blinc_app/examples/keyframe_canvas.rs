@@ -199,10 +199,10 @@ fn progress_bar_demo(ctx: &WindowedContext) -> Div {
     let timeline = ctx.use_animated_timeline();
 
     // Configure timeline on first use (closure only runs once, returns existing IDs after)
-    let entry_id = timeline.lock().unwrap().configure(|t| {
-        let entry = t.add(0, 2000, 0.0, 1.0);
-        entry
-    });
+    let entry_id = timeline
+        .lock()
+        .unwrap()
+        .configure(|t| t.add(0, 2000, 0.0, 1.0));
 
     let render_timeline = Arc::clone(&timeline);
     let click_timeline = Arc::clone(&timeline);
@@ -308,7 +308,7 @@ fn bouncing_ball_demo(ctx: &WindowedContext) -> Div {
             };
 
             // Squash/stretch based on velocity
-            let (scale_x, scale_y) = if t < 0.45 || t > 0.55 {
+            let (scale_x, scale_y) = if !(0.45..=0.55).contains(&t) {
                 // In air - slight stretch
                 (0.9, 1.1)
             } else {

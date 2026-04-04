@@ -467,6 +467,5 @@ mod tests {
 
         // The initial values should be applied
         // (We can't easily test this without accessing private fields)
-        assert!(true);
     }
 }

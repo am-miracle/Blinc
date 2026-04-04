@@ -361,7 +361,7 @@ fn sortable_list_section() -> Div {
                 .map(|(i, item)| {
                     let is_dragged = st.drag_idx == Some(i);
                     let mut d = div()
-                        .id(&format!("sort-{}", item.id))
+                        .id(format!("sort-{}", item.id))
                         .class("sort-item")
                         .bg(item.color)
                         .child(
@@ -637,7 +637,7 @@ fn sortable_grid_section() -> Div {
                 .map(|(i, item)| {
                     let is_dragged = st.drag_idx == Some(i);
                     let mut d = div()
-                        .id(&format!("grid-{}", item.id))
+                        .id(format!("grid-{}", item.id))
                         .class("grid-item")
                         .bg(item.color)
                         .child(

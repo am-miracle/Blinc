@@ -2401,6 +2401,7 @@ pub fn scroll_no_bounce() -> Scroll {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 

@@ -147,7 +147,7 @@ fn nested_shapes_canvas() -> Canvas {
         ];
 
         for (i, color) in colors.iter().enumerate() {
-            let offset = i as f32 * 12.0;
+            let _offset = i as f32 * 12.0;
             let size = (4 - i) as f32 * 24.0;
             ctx.fill_rect(
                 Rect::new(cx - size / 2.0, cy - size / 2.0, size, size),

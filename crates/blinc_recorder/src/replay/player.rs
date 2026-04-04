@@ -433,38 +433,35 @@ mod tests {
     use crate::{Modifiers, MouseButton, MouseEvent, Point, RecordedEvent, RecordingConfig};
 
     fn create_test_export() -> RecordingExport {
-        let mut events = Vec::new();
-
-        // Add some test events at different timestamps
-        events.push(TimestampedEvent::new(
-            Timestamp::from_micros(0),
-            RecordedEvent::Click(MouseEvent {
-                position: Point::new(100.0, 100.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-                target_element: None,
-            }),
-        ));
-
-        events.push(TimestampedEvent::new(
-            Timestamp::from_micros(100_000), // 100ms
-            RecordedEvent::Click(MouseEvent {
-                position: Point::new(200.0, 200.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-                target_element: None,
-            }),
-        ));
-
-        events.push(TimestampedEvent::new(
-            Timestamp::from_micros(200_000), // 200ms
-            RecordedEvent::Click(MouseEvent {
-                position: Point::new(300.0, 300.0),
-                button: MouseButton::Left,
-                modifiers: Modifiers::none(),
-                target_element: None,
-            }),
-        ));
+        let events = vec![
+            TimestampedEvent::new(
+                Timestamp::from_micros(0),
+                RecordedEvent::Click(MouseEvent {
+                    position: Point::new(100.0, 100.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                    target_element: None,
+                }),
+            ),
+            TimestampedEvent::new(
+                Timestamp::from_micros(100_000), // 100ms
+                RecordedEvent::Click(MouseEvent {
+                    position: Point::new(200.0, 200.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                    target_element: None,
+                }),
+            ),
+            TimestampedEvent::new(
+                Timestamp::from_micros(200_000), // 200ms
+                RecordedEvent::Click(MouseEvent {
+                    position: Point::new(300.0, 300.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                    target_element: None,
+                }),
+            ),
+        ];
 
         RecordingExport {
             config: RecordingConfig::minimal(),

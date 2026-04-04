@@ -626,7 +626,7 @@ mod tests {
         let (text, spans) = parse("<b>bold <i>and italic</i></b>");
         assert_eq!(text, "bold and italic");
         // Should have span for inner italic, then outer bold
-        assert!(spans.len() >= 1);
+        assert!(!spans.is_empty());
     }
 
     #[test]

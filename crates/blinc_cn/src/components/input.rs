@@ -673,9 +673,9 @@ mod tests {
         let typography = TypographyTokens::default();
 
         // Sizes use spacing tokens
-        assert!(InputSize::Small.height(&theme) > 0.0);
-        assert!(InputSize::Medium.height(&theme) > InputSize::Small.height(&theme));
-        assert!(InputSize::Large.height(&theme) > InputSize::Medium.height(&theme));
+        assert!(InputSize::Small.height(theme) > 0.0);
+        assert!(InputSize::Medium.height(theme) > InputSize::Small.height(theme));
+        assert!(InputSize::Large.height(theme) > InputSize::Medium.height(theme));
 
         // Font sizes use typography tokens
         assert_eq!(InputSize::Small.font_size(&typography), typography.text_xs);

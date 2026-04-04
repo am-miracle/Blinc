@@ -8662,7 +8662,7 @@ mod tests {
 
     #[test]
     fn layer_texture_cache_acquire_and_release() {
-        let result = pollster::block_on(async {
+        pollster::block_on(async {
             let Some((device, _queue)) = create_test_device().await else {
                 // Skip test if no GPU available
                 return;
@@ -8695,12 +8695,11 @@ mod tests {
             cache.release(tex3);
             assert_eq!(cache.pool_size(), 2);
         });
-        result
     }
 
     #[test]
     fn layer_texture_cache_named_textures() {
-        let result = pollster::block_on(async {
+        pollster::block_on(async {
             let Some((device, _queue)) = create_test_device().await else {
                 return;
             };
@@ -8727,12 +8726,11 @@ mod tests {
             cache.release(removed.unwrap());
             assert_eq!(cache.pool_size(), 1);
         });
-        result
     }
 
     #[test]
     fn layer_texture_cache_clear_named_releases_to_pool() {
-        let result = pollster::block_on(async {
+        pollster::block_on(async {
             let Some((device, _queue)) = create_test_device().await else {
                 return;
             };
@@ -8752,12 +8750,11 @@ mod tests {
             assert_eq!(cache.named_count(), 0);
             assert_eq!(cache.pool_size(), 2);
         });
-        result
     }
 
     #[test]
     fn layer_texture_cache_pool_size_limit() {
-        let result = pollster::block_on(async {
+        pollster::block_on(async {
             let Some((device, _queue)) = create_test_device().await else {
                 return;
             };
@@ -8779,12 +8776,11 @@ mod tests {
             // Pool should be capped at max_per_bucket (2) for the Small bucket
             assert_eq!(cache.pool_size(), 2);
         });
-        result
     }
 
     #[test]
     fn layer_texture_with_depth() {
-        let result = pollster::block_on(async {
+        pollster::block_on(async {
             let Some((device, _queue)) = create_test_device().await else {
                 return;
             };
@@ -8811,12 +8807,11 @@ mod tests {
             assert!(tex_reacquire.has_depth);
             assert_eq!(cache.pool_size(), 1); // The no-depth one remains
         });
-        result
     }
 
     #[test]
     fn layer_texture_reuse_larger() {
-        let result = pollster::block_on(async {
+        pollster::block_on(async {
             let Some((device, _queue)) = create_test_device().await else {
                 return;
             };
@@ -8835,6 +8830,5 @@ mod tests {
             assert!(small_tex.size.0 >= 256 && small_tex.size.1 >= 256);
             assert_eq!(cache.pool_size(), 0);
         });
-        result
     }
 }
