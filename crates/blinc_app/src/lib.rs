@@ -139,6 +139,11 @@ mod text_measurer;
 ))]
 pub mod windowed;
 
+/// Native file dialogs (open, save, folder picker).
+/// Available on desktop when the `windowed` feature is enabled.
+#[cfg(feature = "rfd")]
+pub mod dialog;
+
 #[cfg(all(feature = "android", target_os = "android"))]
 pub mod android;
 #[cfg(all(feature = "android", target_os = "android"))]

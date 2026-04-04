@@ -2,6 +2,33 @@
 
 All notable changes to `blinc_layout` will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+#### Code Editor Enhancements
+
+- VS Code-style search bar via overlay (Cmd+F)
+  - Find with case sensitive, whole word, regex toggles
+  - Replace with replace current / replace all
+  - Match highlighting with active match indicator
+  - Signal-driven Stateful overlay (no deadlocks, no infinite rebuilds)
+- Code folding with SVG chevron icons in gutter
+- Bracket matching highlight (cursor adjacent to brace)
+- Indentation guides (vertical lines at indent levels)
+- Current line highlight
+- Minimap (scaled-down code overview sidebar)
+- Gutter: separate fold column, line numbers, separator with proper alignment
+
+### Fixed
+
+- Gutter line numbers vertically centered instead of top-aligned
+- Fold toggle click not reaching correct line when lines folded
+- Cursor X offset due to gutter width not subtracted from click coordinates
+- Editor expanding vertically instead of scrolling on new lines
+- Hover artifacts on sidebar, nav, and menubar components
+- Checkbox background not updating on check/uncheck state change
+
 ## [0.1.15] - 2026-03-22
 
 ### Added

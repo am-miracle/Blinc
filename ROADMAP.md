@@ -16,7 +16,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| File dialogs (open/save/folder) | Planned | Via `rfd` crate, cross-platform |
+| File dialogs (open/save/folder) | **Done** | Via `rfd` crate, `blinc_app::dialog` module |
 | System tray / status bar icon | Planned | Via `tray-icon` crate |
 | Native OS notifications | Planned | Via `notify-rust` / platform APIs |
 | Drag and drop | Planned | Winit DnD events + drop zone API |
@@ -65,7 +65,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Soft keyboard show/hide | Done | Atomic flags polled in frame loop |
+| Soft keyboard show/hide | **Done** | Atomic flags polled in frame loop |
 | IME / compose input (mobile) | Planned | Android InputConnection, iOS UITextInput |
 | Gesture recognizers | Planned | Tap, long-press, swipe, pinch, rotate |
 | Pull-to-refresh | Planned | Common mobile pattern |

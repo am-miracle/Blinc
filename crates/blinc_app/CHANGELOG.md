@@ -2,6 +2,24 @@
 
 All notable changes to `blinc_app` will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Native file dialogs: `open_file()`, `save_file()`, `pick_folder()` with builder API
+  - File type filters via `FileFilter::new("Images").ext("png").ext("jpg")`
+  - Multi-file selection via `pick_many()`
+  - Starting directory and default file name options
+  - Desktop-only (behind `windowed` feature, uses `rfd` crate)
+- Soft keyboard show/hide on mobile text widget focus (Android + iOS)
+
+### Fixed
+
+- Combobox dropdown scroll by using registered scroll physics directly
+- Checkbox background not updating on check/uncheck
+- Toast slide-in entering from middle instead of right edge
+- Toast positioning via absolute layout for full viewport coverage
+
 ## [0.1.15] - 2026-03-22
 
 ### Fixed
