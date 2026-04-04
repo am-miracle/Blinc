@@ -289,6 +289,24 @@ impl BlincApp {
         self.ctx.queue()
     }
 
+    /// Create a new wgpu surface for an additional window.
+    ///
+    /// Uses the existing GPU instance to create a surface that shares
+    /// the device and queue with the primary renderer. For multi-window support.
+    pub fn create_surface_for_window<W>(
+        &self,
+        window: std::sync::Arc<W>,
+    ) -> std::result::Result<wgpu::Surface<'static>, blinc_gpu::RendererError>
+    where
+        W: raw_window_handle::HasWindowHandle
+            + raw_window_handle::HasDisplayHandle
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.ctx.create_surface(window)
+    }
+
     /// Get the texture format used by the renderer's pipelines
     ///
     /// This should match the format used for the surface configuration

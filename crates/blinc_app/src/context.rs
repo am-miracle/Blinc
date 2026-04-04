@@ -3455,6 +3455,21 @@ impl RenderContext {
         self.renderer.texture_format()
     }
 
+    /// Create a new wgpu surface for an additional window (multi-window support)
+    pub fn create_surface<W>(
+        &self,
+        window: Arc<W>,
+    ) -> std::result::Result<wgpu::Surface<'static>, blinc_gpu::RendererError>
+    where
+        W: raw_window_handle::HasWindowHandle
+            + raw_window_handle::HasDisplayHandle
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.renderer.create_surface(window)
+    }
+
     /// Render a layout tree with dynamic render state overlays
     ///
     /// This method renders:

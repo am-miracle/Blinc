@@ -2751,6 +2751,24 @@ impl GpuRenderer {
         self.queue.clone()
     }
 
+    /// Create a new surface for an additional window.
+    ///
+    /// Uses the existing wgpu Instance to create a surface that can be
+    /// configured and rendered to using the shared device and queue.
+    /// This is used for multi-window support.
+    pub fn create_surface<W>(&self, window: Arc<W>) -> Result<wgpu::Surface<'static>, RendererError>
+    where
+        W: raw_window_handle::HasWindowHandle
+            + raw_window_handle::HasDisplayHandle
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.instance
+            .create_surface(wgpu::SurfaceTarget::from(window))
+            .map_err(RendererError::SurfaceError)
+    }
+
     /// Get the texture format used by this renderer's pipelines
     pub fn texture_format(&self) -> wgpu::TextureFormat {
         self.texture_format

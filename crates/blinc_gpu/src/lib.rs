@@ -42,7 +42,7 @@ pub use primitives::{
     LayerCommand, LayerCommandEntry, LayerCompositeUniforms, ParticleViewport3D, PathBatch,
     PathUniforms, PrimitiveBatch, PrimitiveType, Uniforms,
 };
-pub use renderer::{GpuRenderer, LayerTexture, LayerTextureCache, RendererConfig};
+pub use renderer::{GpuRenderer, LayerTexture, LayerTextureCache, RendererConfig, RendererError};
 pub use shaders::{
     BLUR_SHADER, COLOR_MATRIX_SHADER, COMPOSITE_SHADER, DROP_SHADOW_SHADER, GLASS_SHADER,
     GLOW_SHADER, IMAGE_SHADER, LAYER_COMPOSITE_SHADER, PATH_SHADER, SDF_SHADER,
