@@ -3248,6 +3248,30 @@ impl Div {
         self
     }
 
+    /// Register a right-click handler (mouse button 2)
+    ///
+    /// The handler fires on POINTER_DOWN with the right mouse button.
+    /// Use this for context menus, secondary actions, etc.
+    pub fn on_right_click<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&crate::event_handler::EventContext) + 'static,
+    {
+        self.event_handlers.on_mouse_down(move |ctx| {
+            if ctx.mouse_button == 2 {
+                handler(ctx);
+            }
+        });
+        self
+    }
+
+    /// Alias for `on_right_click` — register a context menu handler
+    pub fn on_context_menu<F>(self, handler: F) -> Self
+    where
+        F: Fn(&crate::event_handler::EventContext) + 'static,
+    {
+        self.on_right_click(handler)
+    }
+
     /// Register a hover enter handler
     ///
     /// # Example

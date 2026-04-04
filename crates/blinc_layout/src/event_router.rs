@@ -551,10 +551,21 @@ impl EventRouter {
         tree: &RenderTree,
         x: f32,
         y: f32,
-        _button: MouseButton,
+        button: MouseButton,
     ) -> Vec<(LayoutNodeId, u32)> {
         self.mouse_x = x;
         self.mouse_y = y;
+
+        // Store button info for EventContext population
+        let button_code = match button {
+            MouseButton::Left => 0u8,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+            MouseButton::Back => 3,
+            MouseButton::Forward => 4,
+            MouseButton::Other(_) => 5,
+        };
+        crate::event_handler::set_current_mouse_button(button_code);
 
         // Initialize drag tracking
         self.drag_start_x = x;
@@ -595,7 +606,7 @@ impl EventRouter {
                 recorder_bridge::record_event(RecorderEventData::MouseDown {
                     x,
                     y,
-                    button: RecorderMouseButton::from(_button),
+                    button: RecorderMouseButton::from(button),
                     target_element: Some(format!("{:?}", hit.node)),
                 });
             }
@@ -635,7 +646,7 @@ impl EventRouter {
         _tree: &RenderTree,
         x: f32,
         y: f32,
-        _button: MouseButton,
+        button: MouseButton,
     ) -> Vec<(LayoutNodeId, u32)> {
         self.mouse_x = x;
         self.mouse_y = y;
@@ -667,7 +678,7 @@ impl EventRouter {
                 recorder_bridge::record_event(RecorderEventData::MouseUp {
                     x,
                     y,
-                    button: RecorderMouseButton::from(_button),
+                    button: RecorderMouseButton::from(button),
                     target_element: Some(format!("{:?}", target)),
                 });
 
@@ -676,7 +687,7 @@ impl EventRouter {
                     recorder_bridge::record_event(RecorderEventData::Click {
                         x,
                         y,
-                        button: RecorderMouseButton::from(_button),
+                        button: RecorderMouseButton::from(button),
                         target_element: Some(format!("{:?}", target)),
                     });
                 }

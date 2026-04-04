@@ -33,10 +33,25 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use blinc_core::events::{event_types, EventType};
 
 use crate::tree::LayoutNodeId;
+
+/// Current mouse button for POINTER_DOWN/UP events (0=left, 1=middle, 2=right).
+/// Set by the event router before dispatching, read by EventContext construction.
+static CURRENT_MOUSE_BUTTON: AtomicU8 = AtomicU8::new(0);
+
+/// Set the current mouse button before dispatching pointer events.
+pub fn set_current_mouse_button(button: u8) {
+    CURRENT_MOUSE_BUTTON.store(button, Ordering::Relaxed);
+}
+
+/// Get the current mouse button (for EventContext population).
+pub fn current_mouse_button() -> u8 {
+    CURRENT_MOUSE_BUTTON.load(Ordering::Relaxed)
+}
 
 /// Callback for handling events
 ///
@@ -90,6 +105,8 @@ pub struct EventContext {
     pub alt: bool,
     /// Whether meta modifier is held (Cmd on macOS, Win on Windows)
     pub meta: bool,
+    /// Mouse button for POINTER_DOWN/POINTER_UP events (0=left, 1=middle, 2=right)
+    pub mouse_button: u8,
 }
 
 impl EventContext {
@@ -120,6 +137,7 @@ impl EventContext {
             ctrl: false,
             alt: false,
             meta: false,
+            mouse_button: current_mouse_button(),
         }
     }
 
