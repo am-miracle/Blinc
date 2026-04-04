@@ -147,6 +147,9 @@ pub mod dialog;
 /// Window state persistence (save/restore position, size, maximized).
 pub mod window_state;
 
+/// System tray icon support (desktop only).
+pub mod tray;
+
 #[cfg(all(feature = "android", target_os = "android"))]
 pub mod android;
 #[cfg(all(feature = "android", target_os = "android"))]
