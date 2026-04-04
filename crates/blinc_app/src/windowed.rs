@@ -2065,7 +2065,13 @@ impl WindowedApp {
                                                     )
                                             };
 
+                                        let sf = sws
+                                            .ctx
+                                            .as_ref()
+                                            .map(|c| c.scale_factor as f32)
+                                            .unwrap_or(1.0);
                                         let mut tree = RenderTree::from_element(&ui);
+                                        tree.set_scale_factor(sf);
                                         tree.compute_layout(w, h);
                                         sws.render_tree = Some(tree);
                                         sws.needs_rebuild = false;
