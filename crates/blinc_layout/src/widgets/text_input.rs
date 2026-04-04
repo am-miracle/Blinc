@@ -63,6 +63,15 @@ static FOCUSED_TEXT_AREA: Mutex<Option<Weak<Mutex<crate::widgets::text_area::Tex
 static CONTINUOUS_REDRAW_CALLBACK: Mutex<Option<Box<dyn Fn(bool) + Send + Sync>>> =
     Mutex::new(None);
 
+/// Tracks whether the soft keyboard should be visible on mobile platforms.
+/// Set to `true` when the first text widget gains focus, `false` when all lose focus.
+/// Polled by the platform runner (android.rs / ios.rs) in the frame loop.
+static KEYBOARD_SHOULD_SHOW: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Set when keyboard visibility state changes and needs platform action.
+static KEYBOARD_STATE_CHANGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Set the callback for continuous redraw requests
 ///
 /// This should be called once during app initialization to connect
@@ -81,6 +90,24 @@ fn notify_continuous_redraw(enabled: bool) {
         if let Some(ref callback) = *guard {
             callback(enabled);
         }
+    }
+}
+
+/// Internal function to flag that the soft keyboard visibility should change.
+/// The platform runner polls this via `take_keyboard_state_change()`.
+fn notify_keyboard_visibility(show: bool) {
+    KEYBOARD_SHOULD_SHOW.store(show, Ordering::SeqCst);
+    KEYBOARD_STATE_CHANGED.store(true, Ordering::SeqCst);
+}
+
+/// Check if the keyboard visibility state changed and needs platform action.
+/// Returns `Some(true)` = show keyboard, `Some(false)` = hide keyboard, `None` = no change.
+/// The flag is consumed (cleared) on read.
+pub fn take_keyboard_state_change() -> Option<bool> {
+    if KEYBOARD_STATE_CHANGED.swap(false, Ordering::SeqCst) {
+        Some(KEYBOARD_SHOULD_SHOW.load(Ordering::SeqCst))
+    } else {
+        None
     }
 }
 
@@ -143,8 +170,10 @@ pub fn request_css_reparse() {
 pub(crate) fn increment_focus_count() {
     let prev = GLOBAL_FOCUS_COUNT.fetch_add(1, Ordering::Relaxed);
     // If this is the first focused text widget, enable continuous redraw for cursor animation
+    // and show the soft keyboard on mobile platforms
     if prev == 0 {
         notify_continuous_redraw(true);
+        notify_keyboard_visibility(true);
     }
 }
 
@@ -153,9 +182,11 @@ pub(crate) fn decrement_focus_count() {
         Some(v.saturating_sub(1))
     });
     // If no more focused text widgets, disable continuous redraw
+    // and hide the soft keyboard on mobile platforms
     if let Ok(prev_val) = prev {
         if prev_val == 1 {
             notify_continuous_redraw(false);
+            notify_keyboard_visibility(false);
         }
     }
 }

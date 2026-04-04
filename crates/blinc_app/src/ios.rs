@@ -889,6 +889,19 @@ pub extern "C" fn blinc_build_frame(ctx: *mut IOSRenderContext) {
             sched.tick();
         }
 
+        // Soft keyboard: show/hide based on text widget focus
+        if let Some(show) = blinc_layout::widgets::text_input::take_keyboard_state_change() {
+            extern "C" {
+                fn blinc_ios_show_keyboard();
+                fn blinc_ios_hide_keyboard();
+            }
+            if show {
+                blinc_ios_show_keyboard();
+            } else {
+                blinc_ios_hide_keyboard();
+            }
+        }
+
         // PHASE 1: Process incremental updates (prop changes, subtree rebuilds)
         // This avoids full rebuild for simple state changes like ButtonState
         let has_stateful_updates = blinc_layout::take_needs_redraw();

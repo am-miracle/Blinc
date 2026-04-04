@@ -765,6 +765,17 @@ impl AndroidApp {
             }
 
             // =========================================================
+            // Soft keyboard: show/hide based on text widget focus
+            // =========================================================
+            if let Some(show) = blinc_layout::widgets::text_input::take_keyboard_state_change() {
+                if show {
+                    app.show_soft_input(true);
+                } else {
+                    app.hide_soft_input(true);
+                }
+            }
+
+            // =========================================================
             // PHASE 1: Check for incremental updates (prop changes, subtree rebuilds)
             // This avoids full rebuild for simple state changes
             // =========================================================

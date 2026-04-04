@@ -30,6 +30,7 @@ import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.view.inputmethod.InputMethodManager
 import androidx.core.content.getSystemService
 import org.json.JSONArray
 import org.json.JSONObject
@@ -216,6 +217,32 @@ object BlincNativeBridge {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 clipboard?.clearPrimaryClip()
             }
+        }
+
+        // =====================================================================
+        // Keyboard namespace
+        // =====================================================================
+
+        register("keyboard", "show") { _ ->
+            val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            // For NativeActivity, use the decor view to request focus
+            val activity = appContext as? android.app.Activity
+            activity?.runOnUiThread {
+                val view = activity.window?.decorView?.rootView
+                view?.requestFocus()
+                imm?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+            }
+            null
+        }
+
+        register("keyboard", "hide") { _ ->
+            val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            val activity = appContext as? android.app.Activity
+            activity?.runOnUiThread {
+                val view = activity.window?.decorView?.rootView
+                imm?.hideSoftInputFromWindow(view?.windowToken, 0)
+            }
+            null
         }
 
         // =====================================================================

@@ -218,6 +218,24 @@ public final class BlincNativeBridge {
         }
 
         // =====================================================================
+        // Keyboard namespace
+        // =====================================================================
+
+        register(namespace: "keyboard", name: "show") { _ in
+            DispatchQueue.main.async {
+                BlincKeyboardHelper.shared.showKeyboard()
+            }
+            return nil
+        }
+
+        register(namespace: "keyboard", name: "hide") { _ in
+            DispatchQueue.main.async {
+                BlincKeyboardHelper.shared.hideKeyboard()
+            }
+            return nil
+        }
+
+        // =====================================================================
         // App namespace
         // =====================================================================
 
@@ -316,6 +334,50 @@ public final class BlincNativeBridge {
     }
 }
 
+// MARK: - Keyboard Helper
+
+/// Helper class that uses a hidden UITextField to trigger the iOS soft keyboard.
+/// iOS requires a UITextInput responder to show the keyboard — there's no
+/// standalone API like Android's InputMethodManager.
+class BlincKeyboardHelper: NSObject, UITextFieldDelegate {
+    static let shared = BlincKeyboardHelper()
+
+    private var hiddenTextField: UITextField?
+
+    private override init() {
+        super.init()
+    }
+
+    func showKeyboard() {
+        if hiddenTextField == nil {
+            let tf = UITextField(frame: CGRect(x: -1000, y: -1000, width: 1, height: 1))
+            tf.autocorrectionType = .no
+            tf.autocapitalizationType = .none
+            tf.spellCheckingType = .no
+            tf.delegate = self
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let window = windowScene.windows.first {
+                window.addSubview(tf)
+            }
+            hiddenTextField = tf
+        }
+        hiddenTextField?.becomeFirstResponder()
+    }
+
+    func hideKeyboard() {
+        hiddenTextField?.resignFirstResponder()
+    }
+
+    // Forward text input events to Blinc's event system
+    func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
+        // The actual text input is handled by Blinc's event system,
+        // not by UITextField. We just need the keyboard visible.
+        // Clear the hidden field to prevent accumulation.
+        textField.text = ""
+        return false
+    }
+}
+
 // MARK: - C FFI Entry Point
 
 /// C function called by Rust to execute native handlers
@@ -344,5 +406,21 @@ public func blinc_ios_native_call(
 public func blinc_free_string(ptr: UnsafeMutablePointer<CChar>?) {
     if let ptr = ptr {
         free(ptr)
+    }
+}
+
+/// Show the soft keyboard (called from Rust frame loop)
+@_cdecl("blinc_ios_show_keyboard")
+public func blinc_ios_show_keyboard() {
+    DispatchQueue.main.async {
+        BlincKeyboardHelper.shared.showKeyboard()
+    }
+}
+
+/// Hide the soft keyboard (called from Rust frame loop)
+@_cdecl("blinc_ios_hide_keyboard")
+public func blinc_ios_hide_keyboard() {
+    DispatchQueue.main.async {
+        BlincKeyboardHelper.shared.hideKeyboard()
     }
 }
