@@ -52,6 +52,9 @@ impl DesktopWindow {
             }
         }
 
+        // Enable IME (Input Method Editor) for international text input
+        window.set_ime_allowed(true);
+
         Ok(Self {
             window: Arc::new(window),
             focused: AtomicBool::new(true),

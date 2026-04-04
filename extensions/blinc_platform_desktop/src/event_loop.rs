@@ -373,6 +373,38 @@ where
                 );
             }
 
+            WinitWindowEvent::Ime(ime_event) => {
+                match ime_event {
+                    winit::event::Ime::Commit(text) => {
+                        // IME committed text — deliver each character as a Char key event
+                        for c in text.chars() {
+                            let input_event = blinc_platform::InputEvent::Keyboard(
+                                blinc_platform::KeyboardEvent {
+                                    key: blinc_platform::Key::Char(c),
+                                    state: blinc_platform::KeyState::Pressed,
+                                    modifiers: blinc_platform::Modifiers::default(),
+                                },
+                            );
+                            self.handle_event_for(winit_id, Event::Input(wid, input_event));
+                        }
+                        if let Some(window) = self.windows.get(&winit_id) {
+                            window.request_redraw();
+                        }
+                    }
+                    winit::event::Ime::Preedit(text, cursor) => {
+                        // IME pre-edit (composition in progress)
+                        // TODO: render pre-edit text with underline at cursor position
+                        let _ = (text, cursor);
+                    }
+                    winit::event::Ime::Enabled => {
+                        tracing::debug!("IME enabled for window {:?}", winit_id);
+                    }
+                    winit::event::Ime::Disabled => {
+                        tracing::debug!("IME disabled for window {:?}", winit_id);
+                    }
+                }
+            }
+
             _ => {}
         }
 

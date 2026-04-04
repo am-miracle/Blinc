@@ -38,7 +38,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| IME / compose input | Planned | Winit IME APIs, CJK text entry |
+| IME / compose input | **Done** | Winit Ime::Commit routed as Key::Char events, `set_ime_allowed(true)` |
 | Context menu wiring | **Done** | `.on_right_click()` / `.on_context_menu()` on Div |
 | Trackpad gestures (pinch/rotate) | Planned | Multi-touch event handling |
 
