@@ -1922,22 +1922,35 @@ impl WindowedApp {
         Arc<dyn Fn() + Send + Sync>,
         Arc<dyn Fn() + Send + Sync>,
     ) {
-        let d = win.clone();
-        let mi = win.clone();
-        let ma = win.clone();
-        let cl = win;
+        let d = Arc::downgrade(&win);
+        let mi = Arc::downgrade(&win);
+        let ma = Arc::downgrade(&win);
+        let cl = Arc::downgrade(&win);
+        let wake_for_close = wake;
         (
             Arc::new(move || {
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                cl.id().hash(&mut hasher);
-                wake.close_window(blinc_platform::WindowId(hasher.finish()));
+                if let Some(w) = cl.upgrade() {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    w.id().hash(&mut hasher);
+                    wake_for_close.close_window(blinc_platform::WindowId(hasher.finish()));
+                }
             }),
             Arc::new(move || {
-                let _ = d.drag_window();
+                if let Some(w) = d.upgrade() {
+                    let _ = w.drag_window();
+                }
             }),
-            Arc::new(move || mi.set_minimized(true)),
-            Arc::new(move || ma.set_maximized(!ma.is_maximized())),
+            Arc::new(move || {
+                if let Some(w) = mi.upgrade() {
+                    w.set_minimized(true);
+                }
+            }),
+            Arc::new(move || {
+                if let Some(w) = ma.upgrade() {
+                    w.set_maximized(!w.is_maximized());
+                }
+            }),
         )
     }
 

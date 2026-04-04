@@ -221,7 +221,10 @@ fn modal_ui(ctx: &mut WindowedContext) -> Div {
                         .child(text("Cancel").size(13.0).color(Color::WHITE))
                         .on_click({
                             let close = close_cb.clone();
-                            move |_| close()
+                            move |_| {
+                                tracing::info!("Cancel button clicked!");
+                                close();
+                            }
                         }),
                 )
                 .child(
@@ -266,7 +269,7 @@ fn frameless_window_ui(ctx: &mut WindowedContext) -> Div {
         .bg(Color::rgba(0.08, 0.08, 0.1, 1.0))
         .border(1.0, Color::rgba(0.25, 0.25, 0.3, 1.0))
         .flex_col()
-        // Custom title bar (draggable)
+        // Custom title bar: drag zone + control buttons as siblings (no bubbling)
         .child(
             div()
                 .w_full()
@@ -275,18 +278,25 @@ fn frameless_window_ui(ctx: &mut WindowedContext) -> Div {
                 .flex_row()
                 .items_center()
                 .padding_x_px(12.0)
-                .on_mouse_down({
-                    let drag = drag_cb;
-                    move |_| drag()
-                })
-                // Title
+                // Drag zone (title text area, grows to fill)
                 .child(
-                    text("Frameless Window")
-                        .size(13.0)
-                        .color(Color::rgba(0.7, 0.7, 0.8, 1.0))
-                        .flex_grow(),
+                    div()
+                        .flex_grow()
+                        .h_full()
+                        .flex_row()
+                        .items_center()
+                        .cursor_pointer()
+                        .on_mouse_down({
+                            let drag = drag_cb;
+                            move |_| drag()
+                        })
+                        .child(
+                            text("Frameless Window")
+                                .size(13.0)
+                                .color(Color::rgba(0.7, 0.7, 0.8, 1.0)),
+                        ),
                 )
-                // Window control buttons
+                // Window control buttons (sibling, not child of drag zone)
                 .child(
                     div()
                         .flex_row()
