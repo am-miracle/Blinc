@@ -221,10 +221,7 @@ fn modal_ui(ctx: &mut WindowedContext) -> Div {
                         .child(text("Cancel").size(13.0).color(Color::WHITE))
                         .on_click({
                             let close = close_cb.clone();
-                            move |_| {
-                                eprintln!(">>> CANCEL CLICKED");
-                                close();
-                            }
+                            move |_| close()
                         }),
                 )
                 .child(
