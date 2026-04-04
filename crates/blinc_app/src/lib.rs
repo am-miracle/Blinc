@@ -144,6 +144,9 @@ pub mod windowed;
 #[cfg(feature = "rfd")]
 pub mod dialog;
 
+/// Window state persistence (save/restore position, size, maximized).
+pub mod window_state;
+
 #[cfg(all(feature = "android", target_os = "android"))]
 pub mod android;
 #[cfg(all(feature = "android", target_os = "android"))]

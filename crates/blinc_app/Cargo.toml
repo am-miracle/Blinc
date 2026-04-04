@@ -48,6 +48,10 @@ tracing.workspace = true
 # Data structures
 lru = { workspace = true }
 
+# Serialization (window state persistence)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 # File dialogs (desktop only)
 rfd = { version = "0.15", optional = true }
 

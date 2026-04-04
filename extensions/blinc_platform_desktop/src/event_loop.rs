@@ -131,6 +131,8 @@ where
     mouse_position: (f32, f32),
     /// Whether the app should exit
     should_exit: bool,
+    /// Currently active modal window (blocks input to other windows)
+    modal_window: Option<WinitWindowId>,
 }
 
 impl<F> DesktopApp<F>
@@ -146,6 +148,7 @@ where
             modifiers: ModifiersState::empty(),
             mouse_position: (0.0, 0.0),
             should_exit: false,
+            modal_window: None,
         }
     }
 
@@ -222,6 +225,21 @@ where
         winit_id: WinitWindowId,
         event: WinitWindowEvent,
     ) {
+        // Block input to non-modal windows when a modal is active
+        if let Some(modal_id) = self.modal_window {
+            if winit_id != modal_id {
+                // Allow close/resize/redraw but block input events
+                match &event {
+                    WinitWindowEvent::KeyboardInput { .. }
+                    | WinitWindowEvent::MouseInput { .. }
+                    | WinitWindowEvent::CursorMoved { .. }
+                    | WinitWindowEvent::MouseWheel { .. }
+                    | WinitWindowEvent::Touch(_) => return,
+                    _ => {}
+                }
+            }
+        }
+
         let wid = to_window_id(winit_id);
 
         match event {
@@ -230,6 +248,11 @@ where
 
                 // Remove the window
                 self.windows.remove(&winit_id);
+
+                // Clear modal if the closed window was the modal
+                if self.modal_window == Some(winit_id) {
+                    self.modal_window = None;
+                }
 
                 // If no windows remain, exit
                 if self.windows.is_empty() {
@@ -371,10 +394,19 @@ where
                 }
             }
             AppCommand::CreateWindow(config) => {
+                let is_modal = config.modal;
                 if let Some(winit_id) = self.create_window(event_loop, &config) {
+                    if is_modal {
+                        self.modal_window = Some(winit_id);
+                    }
                     let wid = to_window_id(winit_id);
                     self.handle_event_for(winit_id, Event::Lifecycle(LifecycleEvent::Resumed));
-                    tracing::info!("Created new window {:?} (wid={:?})", winit_id, wid);
+                    tracing::info!(
+                        "Created new window {:?} (wid={:?}, modal={})",
+                        winit_id,
+                        wid,
+                        is_modal
+                    );
                 }
             }
             AppCommand::CloseWindow(wid) => {

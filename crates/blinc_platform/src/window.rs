@@ -39,6 +39,10 @@ pub struct WindowConfig {
     pub position: Option<(i32, i32)>,
     /// Whether to center the window on the screen at creation
     pub center: bool,
+    /// Whether this window is modal (blocks input to other windows while open)
+    pub modal: bool,
+    /// Parent window ID for modal relationships (None = top-level)
+    pub parent: Option<WindowId>,
 }
 
 impl Default for WindowConfig {
@@ -56,6 +60,8 @@ impl Default for WindowConfig {
             max_size: None,
             position: None,
             center: false,
+            modal: false,
+            parent: None,
         }
     }
 }
@@ -133,6 +139,18 @@ impl WindowConfig {
     /// Center the window on the screen at creation
     pub fn center(mut self) -> Self {
         self.center = true;
+        self
+    }
+
+    /// Make this a modal window that blocks input to other windows while open
+    pub fn modal(mut self) -> Self {
+        self.modal = true;
+        self
+    }
+
+    /// Set the parent window for modal relationships
+    pub fn parent(mut self, parent_id: WindowId) -> Self {
+        self.parent = Some(parent_id);
         self
     }
 }
