@@ -222,7 +222,7 @@ fn modal_ui(ctx: &mut WindowedContext) -> Div {
                         .on_click({
                             let close = close_cb.clone();
                             move |_| {
-                                tracing::info!("Cancel button clicked!");
+                                eprintln!(">>> CANCEL CLICKED");
                                 close();
                             }
                         }),

@@ -2192,21 +2192,8 @@ impl WindowedApp {
                             secondary_windows.remove(&wid);
                             tracing::info!("Secondary window closed (wid={:?})", wid);
                         }
-                        Event::Window(_, WindowEvent::Focused(focused)) => {
-                            if focused {
-                                // Update window actions to target this secondary window
-                                WindowedApp::register_window_actions_static(
-                                    window.winit_window_arc(),
-                                    wake_proxy_for_windows.clone(),
-                                );
-                            }
-                        }
+                        Event::Window(_, WindowEvent::Focused(_focused)) => {}
                         Event::Input(_, ref input_event) => {
-                            // Ensure window actions target this window for click handlers
-                            WindowedApp::register_window_actions_static(
-                                window.winit_window_arc(),
-                                wake_proxy_for_windows.clone(),
-                            );
 
                             if let Some(sws) = secondary_windows.get_mut(&wid) {
                                 if let (Some(ref mut ctx), Some(ref mut tree)) =
@@ -2287,11 +2274,6 @@ impl WindowedApp {
                         }
                         Event::Frame(_) => {
                             if let Some(sws) = secondary_windows.get_mut(&wid) {
-                                // Ensure window actions target this window during its frame
-                                WindowedApp::register_window_actions_static(
-                                    window.winit_window_arc(),
-                                    wake_proxy_for_windows.clone(),
-                                );
 
                                 if let (Some(ref mut blinc_app), Some(ref surf), Some(ref config)) =
                                     (&mut ws.app, &sws.surface, &sws.surface_config)
@@ -2562,11 +2544,9 @@ impl WindowedApp {
                                                 }
                                             }
 
-                                            // Register window actions for this window
-                                            WindowedApp::register_window_actions_static(
-                                                window.winit_window_arc(),
-                                                wake_proxy_for_windows.clone(),
-                                            );
+                                            // Per-window callbacks are set via set_window_actions above.
+                                            // Global window_actions is NOT set — secondary windows
+                                            // use ctx.close_callback() etc. instead.
 
                                             secondary_windows.insert(wid, sws);
                                             tracing::info!(
@@ -2637,14 +2617,6 @@ impl WindowedApp {
 
                             if !focused {
                                 blinc_layout::widgets::blur_all_text_inputs();
-                            }
-
-                            // Re-register window actions for primary on focus
-                            if focused {
-                                WindowedApp::register_window_actions_static(
-                                    window.winit_window_arc(),
-                                    wake_proxy_for_windows.clone(),
-                                );
                             }
                         }
                     }
