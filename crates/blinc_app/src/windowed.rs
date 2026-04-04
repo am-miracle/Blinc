@@ -68,6 +68,29 @@ pub type ReadyCallback = Box<dyn FnOnce() + Send + Sync>;
 /// Shared storage for ready callbacks
 pub type SharedReadyCallbacks = Arc<Mutex<Vec<ReadyCallback>>>;
 
+/// Global callback for opening new windows.
+/// Set by the desktop runner, callable from anywhere in the app.
+static OPEN_WINDOW_FN: std::sync::OnceLock<Arc<dyn Fn(WindowConfig) + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+/// Open a new window from anywhere in the application.
+///
+/// This is a global convenience function. Only works on desktop after
+/// the windowed app has initialized.
+///
+/// # Example
+/// ```ignore
+/// use blinc_app::windowed::open_window;
+/// open_window(WindowConfig::new("Settings").size(400, 300));
+/// ```
+pub fn open_window(config: WindowConfig) {
+    if let Some(f) = OPEN_WINDOW_FN.get() {
+        f(config);
+    } else {
+        tracing::warn!("open_window() called before app initialization");
+    }
+}
+
 /// Per-window state bundle.
 ///
 /// Groups all state that is specific to a single window, extracted from the
@@ -1877,18 +1900,121 @@ impl WindowedApp {
             OverlayContext::init(Arc::clone(&overlays));
         }
 
-        // Bundle all per-window state into WindowState
+        // Primary window state
         let mut ws = WindowState::new(
             Arc::clone(&css_anim_store),
             Arc::clone(&shared_motion_states),
         );
+        // Track primary window ID once known
+        let mut primary_wid: Option<blinc_platform::WindowId> = None;
+        // Secondary windows (opened via ctx.open_window())
+        let mut secondary_windows: std::collections::HashMap<
+            blinc_platform::WindowId,
+            WindowState,
+        > = std::collections::HashMap::new();
+        // UI builders for secondary windows (queued via open_window)
+        // For now secondary windows get a blank UI — full UI builder support is future work
 
         event_loop
             .run(move |event, window| {
+                // Check if this event is for a secondary window
+                let event_wid = match &event {
+                    Event::Window(wid, _) | Event::Input(wid, _) | Event::Frame(wid) => Some(*wid),
+                    _ => None,
+                };
+                let is_secondary = event_wid
+                    .map(|wid| primary_wid.is_some_and(|p| wid != p))
+                    .unwrap_or(false);
+
+                // Handle secondary window events
+                if is_secondary {
+                    let wid = event_wid.unwrap();
+                    match event {
+                        Event::Window(_, WindowEvent::Resized { width, height }) => {
+                            if let Some(sws) = secondary_windows.get_mut(&wid) {
+                                if let (Some(ref surf), Some(ref mut config)) =
+                                    (&sws.surface, &mut sws.surface_config)
+                                {
+                                    if width > 0 && height > 0 {
+                                        config.width = width;
+                                        config.height = height;
+                                        if let Some(ref blinc_app) = ws.app {
+                                            surf.configure(blinc_app.device(), config);
+                                        }
+                                        sws.needs_rebuild = true;
+                                        if let Some(ref mut ctx) = sws.ctx {
+                                            let sf = window.scale_factor();
+                                            ctx.width = width as f32 / sf as f32;
+                                            ctx.height = height as f32 / sf as f32;
+                                            ctx.physical_width = width as f32;
+                                            ctx.physical_height = height as f32;
+                                            ctx.scale_factor = sf;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Event::Window(_, WindowEvent::CloseRequested) => {
+                            secondary_windows.remove(&wid);
+                            tracing::info!("Secondary window closed (wid={:?})", wid);
+                        }
+                        Event::Frame(_) => {
+                            if let Some(sws) = secondary_windows.get_mut(&wid) {
+                                // Render secondary window with blank or cached content
+                                if let (Some(ref blinc_app), Some(ref surf), Some(ref config)) =
+                                    (&ws.app, &sws.surface, &sws.surface_config)
+                                {
+                                    if let Ok(frame) = surf.get_current_texture() {
+                                        let view = frame.texture.create_view(
+                                            &wgpu::TextureViewDescriptor::default(),
+                                        );
+                                        let mut encoder = blinc_app.device().create_command_encoder(
+                                            &wgpu::CommandEncoderDescriptor { label: Some("secondary_window") },
+                                        );
+                                        // Clear to dark background
+                                        {
+                                            let _pass = encoder.begin_render_pass(
+                                                &wgpu::RenderPassDescriptor {
+                                                    label: Some("secondary_clear"),
+                                                    color_attachments: &[Some(
+                                                        wgpu::RenderPassColorAttachment {
+                                                            view: &view,
+                                                            resolve_target: None,
+                                                            ops: wgpu::Operations {
+                                                                load: wgpu::LoadOp::Clear(
+                                                                    wgpu::Color {
+                                                                        r: 0.08,
+                                                                        g: 0.08,
+                                                                        b: 0.1,
+                                                                        a: 1.0,
+                                                                    },
+                                                                ),
+                                                                store: wgpu::StoreOp::Store,
+                                                            },
+                                                        },
+                                                    )],
+                                                    depth_stencil_attachment: None,
+                                                    ..Default::default()
+                                                },
+                                            );
+                                        }
+                                        blinc_app.queue().submit(std::iter::once(encoder.finish()));
+                                        frame.present();
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    return ControlFlow::Continue;
+                }
+
                 match event {
                     Event::Lifecycle(LifecycleEvent::Resumed) => {
-                        // Initialize GPU if not already done
+                        let wid = window.id();
+                        // Initialize GPU if not already done (primary window)
                         if ws.app.is_none() {
+                            primary_wid = Some(wid);
                             let winit_window = window.winit_window_arc();
 
                             match BlincApp::with_window(winit_window, None) {
@@ -1932,12 +2058,16 @@ impl WindowedApp {
                                     ));
 
                                     // Wire open_window callback using the event loop's wake proxy
+                                    let wp_for_ctx = wake_proxy_for_windows.clone();
+                                    let open_fn: Arc<dyn Fn(WindowConfig) + Send + Sync> =
+                                        Arc::new(move |config| {
+                                            wp_for_ctx.create_window(config);
+                                        });
                                     if let Some(ref mut windowed_ctx) = ws.ctx {
-                                        let wp = wake_proxy_for_windows.clone();
-                                        windowed_ctx.set_open_window_fn(Arc::new(move |config| {
-                                            wp.create_window(config);
-                                        }));
+                                        windowed_ctx.set_open_window_fn(Arc::clone(&open_fn));
                                     }
+                                    // Register globally so open_window() works from anywhere
+                                    let _ = OPEN_WINDOW_FN.set(open_fn);
 
                                     // Set initial viewport size in BlincContextState
                                     if let Some(ref windowed_ctx) = ws.ctx {
@@ -1956,6 +2086,79 @@ impl WindowedApp {
                                 Err(e) => {
                                     tracing::error!("Failed to initialize Blinc: {}", e);
                                     return ControlFlow::Exit;
+                                }
+                            }
+                        } else {
+                            // Resumed for a secondary window
+                            let wid = window.id();
+                            #[allow(clippy::map_entry)]
+                            if !secondary_windows.contains_key(&wid) {
+                                if let Some(ref blinc_app) = ws.app {
+                                    let winit_window = window.winit_window_arc();
+                                    match blinc_app.create_surface_for_window(winit_window) {
+                                        Ok(surf) => {
+                                            let (w, h) = window.size();
+                                            let format = blinc_app.texture_format();
+                                            let config = wgpu::SurfaceConfiguration {
+                                                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                                                    | wgpu::TextureUsages::COPY_SRC,
+                                                format,
+                                                width: w,
+                                                height: h,
+                                                present_mode: wgpu::PresentMode::AutoVsync,
+                                                alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                                                view_formats: vec![],
+                                                desired_maximum_frame_latency: 2,
+                                            };
+                                            surf.configure(blinc_app.device(), &config);
+
+                                            let mut sws = WindowState::new(
+                                                Arc::clone(&css_anim_store),
+                                                Arc::clone(&shared_motion_states),
+                                            );
+                                            sws.surface = Some(surf);
+                                            sws.surface_config = Some(config);
+
+                                            sws.ctx = Some(WindowedContext::from_window(
+                                                window,
+                                                EventRouter::new(),
+                                                Arc::clone(&animations),
+                                                Arc::clone(&ref_dirty_flag),
+                                                Arc::clone(&reactive),
+                                                Arc::clone(&hooks),
+                                                Arc::clone(&overlays),
+                                                Arc::clone(&element_registry),
+                                                Arc::clone(&ready_callbacks),
+                                            ));
+
+                                            if let Some(ref mut ctx) = sws.ctx {
+                                                let wp = wake_proxy_for_windows.clone();
+                                                ctx.set_open_window_fn(Arc::new(move |c| {
+                                                    wp.create_window(c);
+                                                }));
+                                            }
+
+                                            let mut rs = blinc_layout::RenderState::new(
+                                                Arc::clone(&animations),
+                                            );
+                                            rs.set_shared_motion_states(
+                                                Arc::clone(&shared_motion_states),
+                                            );
+                                            sws.render_state = Some(rs);
+
+                                            secondary_windows.insert(wid, sws);
+                                            tracing::info!(
+                                                "Secondary window initialized (wid={:?})",
+                                                wid
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Failed to create surface for window: {}",
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
