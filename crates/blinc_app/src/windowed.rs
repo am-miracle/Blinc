@@ -2070,6 +2070,12 @@ impl WindowedApp {
                             }
                         }
                         Event::Input(_, ref input_event) => {
+                            // Ensure window actions target this window for click handlers
+                            WindowedApp::register_window_actions_static(
+                                window.winit_window_arc(),
+                                wake_proxy_for_windows.clone(),
+                            );
+
                             if let Some(sws) = secondary_windows.get_mut(&wid) {
                                 if let (Some(ref mut ctx), Some(ref mut tree)) =
                                     (&mut sws.ctx, &mut sws.render_tree)
@@ -2149,6 +2155,12 @@ impl WindowedApp {
                         }
                         Event::Frame(_) => {
                             if let Some(sws) = secondary_windows.get_mut(&wid) {
+                                // Ensure window actions target this window during its frame
+                                WindowedApp::register_window_actions_static(
+                                    window.winit_window_arc(),
+                                    wake_proxy_for_windows.clone(),
+                                );
+
                                 if let (Some(ref mut blinc_app), Some(ref surf), Some(ref config)) =
                                     (&mut ws.app, &sws.surface, &sws.surface_config)
                                 {
@@ -2204,29 +2216,32 @@ impl WindowedApp {
                                         sws.needs_rebuild = false;
                                     }
 
-                                    // Render the tree
-                                    if let (Some(ref tree), Some(ref rs)) =
-                                        (&sws.render_tree, &sws.render_state)
-                                    {
-                                        match surf.get_current_texture() {
-                                            Ok(frame) => {
-                                                let view = frame.texture.create_view(
-                                                    &wgpu::TextureViewDescriptor::default(),
-                                                );
-                                                let _ = blinc_app.render_tree_with_motion(
-                                                    tree,
-                                                    rs,
-                                                    &view,
-                                                    config.width,
-                                                    config.height,
-                                                );
-                                                frame.present();
-                                            }
-                                            Err(wgpu::SurfaceError::Lost) => {
-                                                surf.configure(blinc_app.device(), config);
-                                            }
-                                            Err(e) => {
-                                                tracing::error!("Secondary window surface error: {}", e);
+                                    // Render the tree (skip if minimized / zero size)
+                                    if config.width > 0 && config.height > 0 {
+                                        if let (Some(ref tree), Some(ref rs)) =
+                                            (&sws.render_tree, &sws.render_state)
+                                        {
+                                            match surf.get_current_texture() {
+                                                Ok(frame) => {
+                                                    let view = frame.texture.create_view(
+                                                        &wgpu::TextureViewDescriptor::default(),
+                                                    );
+                                                    let _ = blinc_app.render_tree_with_motion(
+                                                        tree,
+                                                        rs,
+                                                        &view,
+                                                        config.width,
+                                                        config.height,
+                                                    );
+                                                    frame.present();
+                                                }
+                                                Err(
+                                                    wgpu::SurfaceError::Lost
+                                                    | wgpu::SurfaceError::Outdated,
+                                                ) => {
+                                                    surf.configure(blinc_app.device(), config);
+                                                }
+                                                Err(_) => {}
                                             }
                                         }
                                     }
