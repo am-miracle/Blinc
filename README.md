@@ -501,37 +501,15 @@ Easing::EaseOutBounce    // Bounce effect
 
 ## Roadmap
 
-### Completed
+See [ROADMAP.md](ROADMAP.md) for the full roadmap with detailed milestones.
 
-- GPU-accelerated SDF rendering
-- Glassmorphism with backdrop blur
-- GPUI-style builder API
-- Flexbox layout (Taffy)
-- Text rendering with shaping
-- SVG rendering
-- Image support with cross-platform loading
-- Spring physics animations
-- Keyframe animations with presets
-- Motion containers (enter/exit animations)
-- Stagger animations for lists
-- Reactive signals and state machines
-- Desktop and Android platforms
-- Theming system with animated transitions
-- Components library
-
-### In Progress
-
-- ~~iOS platform completion~~
-- ~~Widget library (Button, Checkbox, Toggle, etc.)~~
-- Fuschia platform support
-- HarmonyOS platform support
-
-### Future
-
-- **Zyntax DSL** - `.blinc` file syntax with compile-time optimization
-- Hot reload during development
-- Developer tools (inspector, animation debugger)
-- IDE integration (VS Code extension, LSP)
+**Current priorities:**
+1. Desktop production readiness (file dialogs, multi-window, IME)
+2. Mobile production readiness (gestures, navigation, platform APIs)
+3. **Zyntax DSL** — `.blinc` file syntax with compile-time optimization to Rust
+4. 3D mesh rendering and custom shader pipeline
+5. Accessibility (screen reader, keyboard navigation)
+6. Developer tooling (hot reload, visual inspector, LSP)
 
 ## Documentation
 
