@@ -68,6 +68,65 @@ pub type ReadyCallback = Box<dyn FnOnce() + Send + Sync>;
 /// Shared storage for ready callbacks
 pub type SharedReadyCallbacks = Arc<Mutex<Vec<ReadyCallback>>>;
 
+/// Per-window state bundle.
+///
+/// Groups all state that is specific to a single window, extracted from the
+/// monolithic event loop closure. This is the foundation for multi-window support.
+#[cfg(all(feature = "windowed", not(target_os = "android")))]
+pub(crate) struct WindowState {
+    /// GPU app (renderer, device, queue)
+    pub app: Option<BlincApp>,
+    /// Window surface for rendering
+    pub surface: Option<wgpu::Surface<'static>>,
+    /// Surface configuration
+    pub surface_config: Option<wgpu::SurfaceConfiguration>,
+    /// UI context (dimensions, event router, shared handles)
+    pub ctx: Option<WindowedContext>,
+    /// Render tree (layout + render nodes)
+    pub render_tree: Option<RenderTree>,
+    /// Render state (cursor blink, animated values, motion)
+    pub render_state: Option<blinc_layout::RenderState>,
+    /// CSS animation/transition store
+    pub css_anim_store: Arc<Mutex<blinc_layout::CssAnimationStore>>,
+    /// Shared motion animation states
+    pub shared_motion_states:
+        Arc<std::sync::RwLock<std::collections::HashMap<String, blinc_core::MotionAnimationState>>>,
+    /// Whether the UI tree needs rebuilding
+    pub needs_rebuild: bool,
+    /// Whether layout needs recomputing
+    pub needs_relayout: bool,
+    /// Last frame timestamp for CSS animation delta
+    pub last_frame_time_ms: u64,
+    /// Active touch point IDs
+    pub active_touch_ids: std::collections::HashSet<u64>,
+}
+
+#[cfg(all(feature = "windowed", not(target_os = "android")))]
+impl WindowState {
+    /// Create a new empty WindowState with shared resources
+    pub fn new(
+        css_anim_store: Arc<Mutex<blinc_layout::CssAnimationStore>>,
+        shared_motion_states: Arc<
+            std::sync::RwLock<std::collections::HashMap<String, blinc_core::MotionAnimationState>>,
+        >,
+    ) -> Self {
+        Self {
+            app: None,
+            surface: None,
+            surface_config: None,
+            ctx: None,
+            render_tree: None,
+            render_state: None,
+            css_anim_store,
+            shared_motion_states,
+            needs_rebuild: true,
+            needs_relayout: false,
+            last_frame_time_ms: 0,
+            active_touch_ids: std::collections::HashSet::new(),
+        }
+    }
+}
+
 /// Context passed to the UI builder function
 pub struct WindowedContext {
     /// Current window width in logical pixels (for UI layout)
@@ -1656,21 +1715,6 @@ impl WindowedApp {
         // Get a wake proxy to allow the animation thread to wake up the event loop
         let wake_proxy = event_loop.wake_proxy();
 
-        // We need to defer BlincApp creation until we have a window
-        let mut app: Option<BlincApp> = None;
-        let mut surface: Option<wgpu::Surface<'static>> = None;
-        let mut surface_config: Option<wgpu::SurfaceConfiguration> = None;
-
-        // Persistent context with event router
-        let mut ctx: Option<WindowedContext> = None;
-        // Persistent render tree for hit testing and dirty tracking
-        let mut render_tree: Option<RenderTree> = None;
-        // Track last frame time for CSS animation delta calculation
-        let mut last_frame_time_ms: u64 = 0;
-        // Track if we need to rebuild UI (e.g., after resize)
-        let mut needs_rebuild = true;
-        // Track if we need to relayout (e.g., after resize even if tree unchanged)
-        let mut needs_relayout = false;
         // Shared dirty flag for element refs
         let ref_dirty_flag: RefDirtyFlag = Arc::new(AtomicBool::new(false));
         // Shared reactive graph for signal-based state management
@@ -1800,15 +1844,18 @@ impl WindowedApp {
             OverlayContext::init(Arc::clone(&overlays));
         }
 
-        // Track active touch IDs for pointer query touch count
-        let mut active_touch_ids = std::collections::HashSet::<u64>::new();
+        // Bundle all per-window state into WindowState
+        let mut ws = WindowState::new(
+            Arc::clone(&css_anim_store),
+            Arc::clone(&shared_motion_states),
+        );
 
         event_loop
             .run(move |event, window| {
                 match event {
                     Event::Lifecycle(LifecycleEvent::Resumed) => {
                         // Initialize GPU if not already done
-                        if app.is_none() {
+                        if ws.app.is_none() {
                             let winit_window = window.winit_window_arc();
 
                             match BlincApp::with_window(winit_window, None) {
@@ -1834,12 +1881,12 @@ impl WindowedApp {
                                         blinc_app.font_registry(),
                                     );
 
-                                    surface = Some(surf);
-                                    surface_config = Some(config);
-                                    app = Some(blinc_app);
+                                    ws.surface = Some(surf);
+                                    ws.surface_config = Some(config);
+                                    ws.app = Some(blinc_app);
 
                                     // Initialize context with event router, animations, dirty flag, reactive graph, hooks, overlay manager, registry, and ready callbacks
-                                    ctx = Some(WindowedContext::from_window(
+                                    ws.ctx = Some(WindowedContext::from_window(
                                         window,
                                         EventRouter::new(),
                                         Arc::clone(&animations),
@@ -1852,7 +1899,7 @@ impl WindowedApp {
                                     ));
 
                                     // Set initial viewport size in BlincContextState
-                                    if let Some(ref windowed_ctx) = ctx {
+                                    if let Some(ref windowed_ctx) = ws.ctx {
                                         BlincContextState::get().set_viewport_size(windowed_ctx.width, windowed_ctx.height);
                                     }
 
@@ -1861,9 +1908,9 @@ impl WindowedApp {
                                     // independently from tree structure changes
                                     let mut rs = blinc_layout::RenderState::new(Arc::clone(&animations));
                                     rs.set_shared_motion_states(Arc::clone(&shared_motion_states));
-                                    render_state = Some(rs);
+                                    ws.render_state = Some(rs);
 
-                                    tracing::debug!("Blinc windowed app initialized");
+                                    tracing::debug!("Blinc windowed ws.app initialized");
                                 }
                                 Err(e) => {
                                     tracing::error!("Failed to initialize Blinc: {}", e);
@@ -1875,18 +1922,18 @@ impl WindowedApp {
 
                     Event::Window(_, WindowEvent::Resized { width, height }) => {
                         if let (Some(ref blinc_app), Some(ref surf), Some(ref mut config)) =
-                            (&app, &surface, &mut surface_config)
+                            (&ws.app, &ws.surface, &mut ws.surface_config)
                         {
                             if width > 0 && height > 0 {
                                 config.width = width;
                                 config.height = height;
                                 surf.configure(blinc_app.device(), config);
-                                needs_rebuild = true;
-                                needs_relayout = true;
+                                ws.needs_rebuild = true;
+                                ws.needs_relayout = true;
 
                                 // Dispatch RESIZE event to elements (use logical dimensions)
                                 if let (Some(ref mut windowed_ctx), Some(ref tree)) =
-                                    (&mut ctx, &render_tree)
+                                    (&mut ws.ctx, &ws.render_tree)
                                 {
                                     let logical_width = width as f32 / windowed_ctx.scale_factor as f32;
                                     let logical_height = height as f32 / windowed_ctx.scale_factor as f32;
@@ -1918,7 +1965,7 @@ impl WindowedApp {
 
                     Event::Window(_, WindowEvent::Focused(focused)) => {
                         // Update context focus state
-                        if let Some(ref mut windowed_ctx) = ctx {
+                        if let Some(ref mut windowed_ctx) = ws.ctx {
                             windowed_ctx.focused = focused;
 
                             // Dispatch WINDOW_FOCUS or WINDOW_BLUR to the focused element
@@ -1995,7 +2042,7 @@ impl WindowedApp {
 
                         // First phase: collect events using immutable borrow
                         let (pending_events, keyboard_events, scroll_ended, gesture_ended, scroll_info) = if let (Some(ref mut windowed_ctx), Some(ref tree)) =
-                            (&mut ctx, &render_tree)
+                            (&mut ws.ctx, &ws.render_tree)
                         {
                             let router = &mut windowed_ctx.event_router;
 
@@ -2328,16 +2375,16 @@ impl WindowedApp {
                                     // Track active touch IDs for touch count
                                     match &touch_event {
                                         TouchEvent::Started { .. } => {
-                                            active_touch_ids.insert(touch_event.id());
-                                            windowed_ctx.pointer_query.set_touch_count(active_touch_ids.len() as u32);
+                                            ws.active_touch_ids.insert(touch_event.id());
+                                            windowed_ctx.pointer_query.set_touch_count(ws.active_touch_ids.len() as u32);
                                         }
                                         TouchEvent::Ended { .. } => {
-                                            active_touch_ids.remove(&touch_event.id());
-                                            windowed_ctx.pointer_query.set_touch_count(active_touch_ids.len() as u32);
+                                            ws.active_touch_ids.remove(&touch_event.id());
+                                            windowed_ctx.pointer_query.set_touch_count(ws.active_touch_ids.len() as u32);
                                         }
                                         TouchEvent::Cancelled { .. } => {
-                                            active_touch_ids.remove(&touch_event.id());
-                                            windowed_ctx.pointer_query.set_touch_count(active_touch_ids.len() as u32);
+                                            ws.active_touch_ids.remove(&touch_event.id());
+                                            windowed_ctx.pointer_query.set_touch_count(ws.active_touch_ids.len() as u32);
                                         }
                                         _ => {}
                                     }
@@ -2439,7 +2486,7 @@ impl WindowedApp {
 
                         // Second phase: dispatch events with mutable borrow
                         // This automatically marks the tree dirty when handlers fire
-                        if let Some(ref mut tree) = render_tree {
+                        if let Some(ref mut tree) = ws.render_tree {
                             // IMPORTANT: Process gesture_ended BEFORE scroll delta dispatch
                             // When gesture ends while overscrolling, we start bounce which
                             // sets state to Bouncing. Then apply_scroll_delta will early-return
@@ -2460,7 +2507,7 @@ impl WindowedApp {
                             // Note: We only check has_blocking_overlay(), not has_dismissable_overlay(),
                             // because overlays with dismiss_on_click_outside (like popovers) should allow
                             // scroll events to pass through to content behind them.
-                            let has_overlay_backdrop = ctx
+                            let has_overlay_backdrop = ws.ctx
                                 .as_ref()
                                 .map(|c| c.overlay_manager.has_blocking_overlay())
                                 .unwrap_or(false);
@@ -2495,7 +2542,7 @@ impl WindowedApp {
 
                                     // Re-do hit test with mutable borrow to get ancestor chain
                                     // Then use dispatch_scroll_chain for proper nested scroll handling
-                                    if let Some(ref mut windowed_ctx) = ctx {
+                                    if let Some(ref mut windowed_ctx) = ws.ctx {
                                         let router = &mut windowed_ctx.event_router;
                                         if let Some(hit) = router.hit_test(tree, mouse_x, mouse_y) {
                                             tree.dispatch_scroll_chain(
@@ -2512,7 +2559,7 @@ impl WindowedApp {
                             }
 
                             // Dispatch mouse/touch events (scroll is handled above with nested support)
-                            if let Some(ref mut windowed_ctx) = ctx {
+                            if let Some(ref mut windowed_ctx) = ws.ctx {
                                 let router = &windowed_ctx.event_router;
                                 for event in pending_events {
                                     // Skip scroll events - already handled with nested scroll support
@@ -2598,7 +2645,7 @@ impl WindowedApp {
                             Some(ref config),
                             Some(ref mut windowed_ctx),
                             Some(ref mut rs),
-                        ) = (&mut app, &surface, &surface_config, &mut ctx, &mut render_state)
+                        ) = (&mut ws.app, &ws.surface, &ws.surface_config, &mut ws.ctx, &mut ws.render_state)
                         {
                             // Get current frame
                             let frame = match surf.get_current_texture() {
@@ -2638,7 +2685,7 @@ impl WindowedApp {
                             // Tick scroll physics and sync ScrollRef state BEFORE any rebuilds
                             // This ensures ScrollRef has up-to-date values when stateful components
                             // query scroll position during rebuild
-                            let scroll_animating = if let Some(ref mut tree) = render_tree {
+                            let scroll_animating = if let Some(ref mut tree) = ws.render_tree {
                                 let animating = tree.tick_scroll_physics(current_time);
                                 tree.process_pending_scroll_refs();
                                 animating
@@ -2652,29 +2699,29 @@ impl WindowedApp {
                             // =========================================================
 
                             // Check if event handlers marked anything dirty (auto-rebuild)
-                            if let Some(ref tree) = render_tree {
+                            if let Some(ref tree) = ws.render_tree {
                                 if tree.needs_rebuild() {
                                     tracing::debug!("Rebuild triggered by: dirty_tracker");
-                                    needs_rebuild = true;
+                                    ws.needs_rebuild = true;
                                 }
                             }
 
                             // Check if element refs were modified (triggers rebuild)
                             if ref_dirty_flag.swap(false, Ordering::SeqCst) {
                                 tracing::debug!("Rebuild triggered by: ref_dirty_flag (State::set)");
-                                needs_rebuild = true;
+                                ws.needs_rebuild = true;
                             }
 
                             // Check if text widgets requested a rebuild (focus/text changes)
                             if blinc_layout::widgets::take_needs_rebuild() {
                                 tracing::debug!("Rebuild triggered by: text widget state change");
-                                needs_rebuild = true;
+                                ws.needs_rebuild = true;
                             }
 
                             // Check if a full relayout was requested (e.g., theme changes)
                             if blinc_layout::widgets::take_needs_relayout() {
                                 tracing::debug!("Relayout triggered by: theme or global state change");
-                                needs_relayout = true;
+                                ws.needs_relayout = true;
                             }
 
                             // Check if CSS stylesheets need reparsing (e.g., theme color scheme changed)
@@ -2753,7 +2800,7 @@ impl WindowedApp {
 
                                 // Apply prop updates to the main tree
                                 // (Overlays are now part of the main tree, so all nodes are here)
-                                if let Some(ref mut tree) = render_tree {
+                                if let Some(ref mut tree) = ws.render_tree {
                                     for (node_id, props) in &prop_updates {
                                         tree.update_render_props(*node_id, |p| *p = props.clone());
                                     }
@@ -2761,12 +2808,12 @@ impl WindowedApp {
 
                                 // Process subtree rebuilds (from stateful changes OR overlay changes)
                                 let mut needs_layout = false;
-                                if let Some(ref mut tree) = render_tree {
+                                if let Some(ref mut tree) = ws.render_tree {
                                     needs_layout = tree.process_pending_subtree_rebuilds();
                                 }
 
                                 if needs_layout {
-                                    if let Some(ref mut tree) = render_tree {
+                                    if let Some(ref mut tree) = ws.render_tree {
                                         tracing::debug!("Subtree rebuilds processed, recomputing layout");
                                         tree.apply_stylesheet_layout_overrides();
                                         tree.compute_layout(windowed_ctx.width, windowed_ctx.height);
@@ -2800,7 +2847,7 @@ impl WindowedApp {
                             // This clears the "used" set so we can detect which motions are no longer in the tree
                             rs.begin_stable_motion_frame();
 
-                            if needs_rebuild || render_tree.is_none() {
+                            if ws.needs_rebuild || ws.render_tree.is_none() {
                                 // Reset call counters for stable key generation
                                 reset_call_counters();
                                 // Clear stale Stateful base_render_props updaters
@@ -2830,8 +2877,8 @@ impl WindowedApp {
                                 // Use incremental update if we have an existing tree
                                 // BUT: Skip incremental update during resize - do full rebuild instead
                                 // This ensures parent constraints properly propagate to all children
-                                if let Some(ref mut existing_tree) = render_tree {
-                                    if needs_relayout {
+                                if let Some(ref mut existing_tree) = ws.render_tree {
+                                    if ws.needs_relayout {
                                         // Window resize: bypass incremental update, do full rebuild
                                         // This ensures proper constraint propagation from parents to children
                                         tracing::debug!("Window resize: full tree rebuild (bypassing incremental update)");
@@ -2885,7 +2932,7 @@ impl WindowedApp {
                                         *existing_tree = tree;
 
                                         // Clear relayout flag after full rebuild
-                                        needs_relayout = false;
+                                        ws.needs_relayout = false;
                                     } else {
                                         // Normal incremental update (no resize)
                                         use blinc_layout::UpdateResult;
@@ -2986,10 +3033,10 @@ impl WindowedApp {
                                     // Start CSS animations for elements with animation properties
                                     tree.start_all_css_animations();
 
-                                    render_tree = Some(tree);
+                                    ws.render_tree = Some(tree);
                                 }
 
-                                needs_rebuild = false;
+                                ws.needs_rebuild = false;
                                 let was_first_rebuild = windowed_ctx.rebuild_count == 0;
                                 windowed_ctx.rebuild_count = windowed_ctx.rebuild_count.saturating_add(1);
 
@@ -3004,7 +3051,7 @@ impl WindowedApp {
                             } else {
                                 // No rebuild needed - still need to end the motion frame
                                 // If an existing tree exists, initialize motions to mark them as used
-                                if let Some(ref tree) = render_tree {
+                                if let Some(ref tree) = ws.render_tree {
                                     tree.initialize_motion_animations(rs);
                                 }
                                 rs.end_stable_motion_frame();
@@ -3037,12 +3084,12 @@ impl WindowedApp {
                             // Tick CSS animations/transitions synchronously on the main thread.
                             // The scheduler's bg thread drives 120fps redraws via wake_callback,
                             // but actual ticking is done here to stay in phase with rendering.
-                            let dt_ms = if last_frame_time_ms > 0 {
-                                (current_time - last_frame_time_ms) as f32
+                            let dt_ms = if ws.last_frame_time_ms > 0 {
+                                (current_time - ws.last_frame_time_ms) as f32
                             } else {
                                 16.0
                             };
-                            let css_active = if let Some(ref mut tree) = render_tree {
+                            let css_active = if let Some(ref mut tree) = ws.render_tree {
                                 let store = tree.css_anim_store();
                                 let mut s = store.lock().unwrap();
                                 let (anim, trans) = s.tick(dt_ms);
@@ -3052,7 +3099,7 @@ impl WindowedApp {
                             } else {
                                 false
                             };
-                            last_frame_time_ms = current_time;
+                            ws.last_frame_time_ms = current_time;
 
                             // Sync motion states to shared store for query_motion API
                             rs.sync_shared_motion_states();
@@ -3080,7 +3127,7 @@ impl WindowedApp {
 
                             // Apply CSS state styles (:hover, :active, :focus) from stylesheet
                             // This also detects property changes and starts new transitions
-                            if let Some(ref mut tree) = render_tree {
+                            if let Some(ref mut tree) = ws.render_tree {
                                 if tree.stylesheet().is_some() {
                                     let state_changed = tree.apply_stylesheet_state_styles(&windowed_ctx.event_router);
                                     // Recompute layout if state styles affected layout properties
@@ -3094,8 +3141,8 @@ impl WindowedApp {
 
                             // Apply CSS animation/transition values AFTER state styles
                             // (state styles reset to base, animations must override)
-                            if css_active || !render_tree.as_ref().map_or(true, |t| t.css_transitions_empty()) {
-                                if let Some(ref mut tree) = render_tree {
+                            if css_active || !ws.render_tree.as_ref().map_or(true, |t| t.css_transitions_empty()) {
+                                if let Some(ref mut tree) = ws.render_tree {
                                     tree.apply_all_css_animation_props();
                                     tree.apply_all_css_transition_props();
                                     tree.apply_flip_animation_props();
@@ -3127,7 +3174,7 @@ impl WindowedApp {
                                     },
                                 );
                                 // Evaluate dynamic calc(env(...)) properties with current pointer state
-                                if let Some(ref mut tree) = render_tree {
+                                if let Some(ref mut tree) = ws.render_tree {
                                     tree.apply_pointer_styles(
                                         &windowed_ctx.pointer_query,
                                         &windowed_ctx.event_router,
@@ -3135,7 +3182,7 @@ impl WindowedApp {
                                 }
                             }
 
-                            if let Some(ref tree) = render_tree {
+                            if let Some(ref tree) = ws.render_tree {
                                 // Set blend target for mix-blend-mode support
                                 blinc_app.set_blend_target(&frame.texture);
 
@@ -3198,7 +3245,7 @@ impl WindowedApp {
                             let needs_cursor_redraw = blinc_layout::widgets::take_needs_continuous_redraw();
 
                             // Check if motion animations are active (enter/exit animations)
-                            let needs_motion_redraw = if let Some(ref rs) = render_state {
+                            let needs_motion_redraw = if let Some(ref rs) = ws.render_state {
                                 rs.has_active_motions()
                             } else {
                                 false
@@ -3213,10 +3260,10 @@ impl WindowedApp {
                             // Check if CSS animations/transitions/FLIP need continued redraws
                             // (includes transitions created during apply_complex_selector_styles)
                             let css_needs_redraw = css_active
-                                || !render_tree
+                                || !ws.render_tree
                                     .as_ref()
                                     .map_or(true, |t| t.css_transitions_empty())
-                                || render_tree
+                                || ws.render_tree
                                     .as_ref()
                                     .is_some_and(|t| t.has_active_flip_animations());
 
@@ -3298,7 +3345,7 @@ fn convert_cursor_style(cursor: CursorStyle) -> blinc_platform::Cursor {
     }
 }
 
-/// Convenience function to run a windowed app with default configuration
+/// Convenience function to run a windowed ws.app with default configuration
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
 pub fn run_windowed<F, E>(ui_builder: F) -> Result<()>
 where
@@ -3308,7 +3355,7 @@ where
     WindowedApp::run(WindowConfig::default(), ui_builder)
 }
 
-/// Convenience function to run a windowed app with a title
+/// Convenience function to run a windowed ws.app with a title
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
 pub fn run_windowed_with_title<F, E>(title: &str, ui_builder: F) -> Result<()>
 where
