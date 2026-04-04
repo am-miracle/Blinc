@@ -31,6 +31,14 @@ pub struct WindowConfig {
     pub always_on_top: bool,
     /// Whether to start in fullscreen mode
     pub fullscreen: bool,
+    /// Minimum window size in logical pixels (None = no constraint)
+    pub min_size: Option<(u32, u32)>,
+    /// Maximum window size in logical pixels (None = no constraint)
+    pub max_size: Option<(u32, u32)>,
+    /// Initial window position in logical pixels (None = OS default)
+    pub position: Option<(i32, i32)>,
+    /// Whether to center the window on the screen at creation
+    pub center: bool,
 }
 
 impl Default for WindowConfig {
@@ -44,6 +52,10 @@ impl Default for WindowConfig {
             transparent: false,
             always_on_top: false,
             fullscreen: false,
+            min_size: None,
+            max_size: None,
+            position: None,
+            center: false,
         }
     }
 }
@@ -99,6 +111,30 @@ impl WindowConfig {
         self.fullscreen = fullscreen;
         self
     }
+
+    /// Set minimum window size in logical pixels
+    pub fn min_size(mut self, width: u32, height: u32) -> Self {
+        self.min_size = Some((width, height));
+        self
+    }
+
+    /// Set maximum window size in logical pixels
+    pub fn max_size(mut self, width: u32, height: u32) -> Self {
+        self.max_size = Some((width, height));
+        self
+    }
+
+    /// Set initial window position in logical pixels
+    pub fn position(mut self, x: i32, y: i32) -> Self {
+        self.position = Some((x, y));
+        self
+    }
+
+    /// Center the window on the screen at creation
+    pub fn center(mut self) -> Self {
+        self.center = true;
+        self
+    }
 }
 
 /// Window abstraction trait
@@ -131,6 +167,15 @@ pub trait Window: Send {
 
     /// Check if the window is visible
     fn is_visible(&self) -> bool;
+
+    /// Set window position in logical pixels
+    fn set_position(&self, _x: i32, _y: i32) {}
+
+    /// Center the window on its current monitor
+    fn center_on_screen(&self) {}
+
+    /// Set the window size in logical pixels
+    fn set_size(&self, _width: u32, _height: u32) {}
 }
 
 /// Cursor icons

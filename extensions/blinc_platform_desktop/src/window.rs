@@ -29,8 +29,28 @@ impl DesktopWindow {
         if config.fullscreen {
             attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
         }
+        if let Some((min_w, min_h)) = config.min_size {
+            attrs = attrs.with_min_inner_size(LogicalSize::new(min_w, min_h));
+        }
+        if let Some((max_w, max_h)) = config.max_size {
+            attrs = attrs.with_max_inner_size(LogicalSize::new(max_w, max_h));
+        }
+        if let Some((x, y)) = config.position {
+            attrs = attrs.with_position(winit::dpi::LogicalPosition::new(x, y));
+        }
 
         let window = event_loop.create_window(attrs)?;
+
+        // Center window on screen if requested
+        if config.center {
+            if let Some(monitor) = window.current_monitor() {
+                let screen = monitor.size();
+                let win_size = window.outer_size();
+                let x = (screen.width.saturating_sub(win_size.width)) / 2;
+                let y = (screen.height.saturating_sub(win_size.height)) / 2;
+                window.set_outer_position(winit::dpi::PhysicalPosition::new(x as i32, y as i32));
+            }
+        }
 
         Ok(Self {
             window: Arc::new(window),
@@ -121,6 +141,28 @@ impl Window for DesktopWindow {
 
     fn is_visible(&self) -> bool {
         self.window.is_visible().unwrap_or(true)
+    }
+
+    fn set_position(&self, x: i32, y: i32) {
+        self.window
+            .set_outer_position(winit::dpi::LogicalPosition::new(x, y));
+    }
+
+    fn center_on_screen(&self) {
+        if let Some(monitor) = self.window.current_monitor() {
+            let screen = monitor.size();
+            let win_size = self.window.outer_size();
+            let x = (screen.width.saturating_sub(win_size.width)) / 2;
+            let y = (screen.height.saturating_sub(win_size.height)) / 2;
+            self.window
+                .set_outer_position(winit::dpi::PhysicalPosition::new(x as i32, y as i32));
+        }
+    }
+
+    fn set_size(&self, width: u32, height: u32) {
+        let _ = self
+            .window
+            .request_inner_size(LogicalSize::new(width, height));
     }
 }
 
