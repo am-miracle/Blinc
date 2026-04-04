@@ -101,9 +101,6 @@ fn build_primary_ui(ctx: &WindowedContext) -> impl ElementBuilder {
     root = root.child(button_row);
 
     // Modal and frameless buttons row
-    let wc_modal = window_count.clone();
-    let wc_frameless = window_count.clone();
-
     root = root.child(
         div()
             .flex_row()
@@ -119,9 +116,6 @@ fn build_primary_ui(ctx: &WindowedContext) -> impl ElementBuilder {
                     .justify_center()
                     .child(text("Open Modal").size(12.0).color(Color::WHITE).bold())
                     .on_click(move |_ctx| {
-                        let count = wc_modal.get() + 1;
-                        wc_modal.set(count);
-
                         let config = WindowConfig::new("Confirm Action")
                             .size(360, 200)
                             .center()
@@ -147,9 +141,6 @@ fn build_primary_ui(ctx: &WindowedContext) -> impl ElementBuilder {
                             .bold(),
                     )
                     .on_click(move |_ctx| {
-                        let count = wc_frameless.get() + 1;
-                        wc_frameless.set(count);
-
                         let config = WindowConfig::new("")
                             .size(400, 280)
                             .center()

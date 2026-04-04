@@ -2052,6 +2052,92 @@ impl WindowedApp {
                             secondary_windows.remove(&wid);
                             tracing::info!("Secondary window closed (wid={:?})", wid);
                         }
+                        Event::Window(_, WindowEvent::Focused(focused)) => {
+                            if focused {
+                                // Update window actions to target this secondary window
+                                WindowedApp::register_window_actions_static(
+                                    window.winit_window_arc(),
+                                );
+                            }
+                        }
+                        Event::Input(_, ref input_event) => {
+                            if let Some(sws) = secondary_windows.get_mut(&wid) {
+                                if let (Some(ref mut ctx), Some(ref mut tree)) =
+                                    (&mut sws.ctx, &mut sws.render_tree)
+                                {
+                                    let sf = ctx.scale_factor as f32;
+
+                                    // Collect events from the router
+                                    let mut pending: Vec<(blinc_layout::tree::LayoutNodeId, u32)> =
+                                        Vec::new();
+                                    ctx.event_router.set_event_callback({
+                                        let events =
+                                            &mut pending as *mut Vec<(blinc_layout::tree::LayoutNodeId, u32)>;
+                                        move |node, event_type| unsafe {
+                                            (*events).push((node, event_type));
+                                        }
+                                    });
+
+                                    let convert_button =
+                                        |b: &blinc_platform::MouseButton| match b {
+                                            blinc_platform::MouseButton::Left => {
+                                                blinc_layout::prelude::MouseButton::Left
+                                            }
+                                            blinc_platform::MouseButton::Right => {
+                                                blinc_layout::prelude::MouseButton::Right
+                                            }
+                                            blinc_platform::MouseButton::Middle => {
+                                                blinc_layout::prelude::MouseButton::Middle
+                                            }
+                                            _ => blinc_layout::prelude::MouseButton::Left,
+                                        };
+
+                                    match input_event {
+                                        InputEvent::Mouse(MouseEvent::Moved { x, y }) => {
+                                            ctx.event_router
+                                                .on_mouse_move(tree, *x / sf, *y / sf);
+                                        }
+                                        InputEvent::Mouse(MouseEvent::ButtonPressed {
+                                            button,
+                                            x,
+                                            y,
+                                        }) => {
+                                            ctx.event_router.on_mouse_down(
+                                                tree,
+                                                *x / sf,
+                                                *y / sf,
+                                                convert_button(button),
+                                            );
+                                        }
+                                        InputEvent::Mouse(MouseEvent::ButtonReleased {
+                                            button,
+                                            x,
+                                            y,
+                                        }) => {
+                                            ctx.event_router.on_mouse_up(
+                                                tree,
+                                                *x / sf,
+                                                *y / sf,
+                                                convert_button(button),
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+
+                                    ctx.event_router.clear_event_callback();
+
+                                    // Dispatch collected events through render tree handlers
+                                    for (node_id, event_type) in &pending {
+                                        tree.dispatch_event(
+                                            *node_id,
+                                            *event_type,
+                                            ctx.event_router.mouse_position().0,
+                                            ctx.event_router.mouse_position().1,
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         Event::Frame(_) => {
                             if let Some(sws) = secondary_windows.get_mut(&wid) {
                                 if let (Some(ref mut blinc_app), Some(ref surf), Some(ref config)) =
