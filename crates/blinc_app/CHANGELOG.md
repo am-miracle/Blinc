@@ -6,6 +6,14 @@ All notable changes to `blinc_app` will be documented in this file.
 
 ### Added
 
+- Multi-window support (desktop):
+  - `ctx.open_window(config)` API for creating additional windows
+  - `WindowId` type for platform-agnostic window identification
+  - `WindowState` struct bundles all per-window state
+  - `AppCommand` enum for cross-thread window creation via `EventLoopProxy`
+  - `GpuRenderer::create_surface()` for shared-device surface creation
+  - `DesktopApp` manages `HashMap<WinitWindowId, DesktopWindow>`
+  - Events tagged with `WindowId` for per-window routing
 - Native file dialogs: `open_file()`, `save_file()`, `pick_folder()` with builder API
   - File type filters via `FileFilter::new("Images").ext("png").ext("jpg")`
   - Multi-file selection via `pick_many()`

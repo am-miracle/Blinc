@@ -27,7 +27,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Multi-window support | Planned | Window manager in blinc_app |
+| Multi-window support | **Done** | `ctx.open_window(config)`, `WindowState`, `AppCommand` event loop |
 | Window min/max size constraints | Planned | Extend WindowConfig |
 | Programmatic window positioning | Planned | set_position(), center() |
 | Window state persistence | Planned | Save/restore size, position, maximized |
