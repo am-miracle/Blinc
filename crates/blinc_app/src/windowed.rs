@@ -1822,6 +1822,24 @@ impl WindowedApp {
         Self::run_desktop(config, ui_builder)
     }
 
+    /// Register window action callbacks (drag, minimize, maximize, close) for a window.
+    /// Called for both primary and secondary windows, and on focus changes.
+    #[cfg(all(feature = "windowed", not(target_os = "android")))]
+    fn register_window_actions_static(win: std::sync::Arc<winit::window::Window>) {
+        let d = win.clone();
+        let mi = win.clone();
+        let ma = win.clone();
+        let cl = win;
+        blinc_layout::window_actions::set_active_window_actions(
+            move || {
+                let _ = d.drag_window();
+            },
+            move || mi.set_minimized(true),
+            move || ma.set_maximized(!ma.is_maximized()),
+            move || cl.set_visible(false),
+        );
+    }
+
     #[cfg(all(feature = "windowed", not(target_os = "android")))]
     fn run_desktop<F, E>(config: WindowConfig, mut ui_builder: F) -> Result<()>
     where
@@ -2186,24 +2204,7 @@ impl WindowedApp {
                                     let _ = OPEN_WINDOW_FN.set(open_fn);
 
                                     // Register window action callbacks for custom title bars
-                                    {
-                                        let win_drag = window.winit_window_arc();
-                                        blinc_layout::window_actions::set_drag_window_callback(
-                                            move || { let _ = win_drag.drag_window(); },
-                                        );
-                                        let win_min = window.winit_window_arc();
-                                        blinc_layout::window_actions::set_minimize_callback(
-                                            move || win_min.set_minimized(true),
-                                        );
-                                        let win_max = window.winit_window_arc();
-                                        blinc_layout::window_actions::set_maximize_callback(
-                                            move || win_max.set_maximized(!win_max.is_maximized()),
-                                        );
-                                        let win_close = window.winit_window_arc();
-                                        blinc_layout::window_actions::set_close_callback(
-                                            move || win_close.set_visible(false),
-                                        );
-                                    }
+                                    Self::register_window_actions_static(window.winit_window_arc());
 
                                     // Set initial viewport size in BlincContextState
                                     if let Some(ref windowed_ctx) = ws.ctx {
@@ -2297,6 +2298,11 @@ impl WindowedApp {
                                                 }
                                             }
 
+                                            // Register window actions for this window
+                                            WindowedApp::register_window_actions_static(
+                                                window.winit_window_arc(),
+                                            );
+
                                             secondary_windows.insert(wid, sws);
                                             tracing::info!(
                                                 "Secondary window initialized (wid={:?})",
@@ -2362,13 +2368,17 @@ impl WindowedApp {
                         // Update context focus state
                         if let Some(ref mut windowed_ctx) = ws.ctx {
                             windowed_ctx.focused = focused;
-
-                            // Dispatch WINDOW_FOCUS or WINDOW_BLUR to the focused element
                             windowed_ctx.event_router.on_window_focus(focused);
 
-                            // When window loses focus, blur all text inputs/areas
                             if !focused {
                                 blinc_layout::widgets::blur_all_text_inputs();
+                            }
+
+                            // Re-register window actions for primary on focus
+                            if focused {
+                                WindowedApp::register_window_actions_static(
+                                    window.winit_window_arc(),
+                                );
                             }
                         }
                     }

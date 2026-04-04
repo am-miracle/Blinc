@@ -2,60 +2,80 @@
 //!
 //! These are registered by the platform runner and callable from element
 //! event handlers (e.g., `.drag_region()` on Div for custom title bars).
+//!
+//! The callbacks target the **currently focused** window. When focus changes
+//! between windows, the platform runner updates the active callbacks.
 
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 type ActionCallback = Box<dyn Fn() + Send + Sync>;
 
-static DRAG_WINDOW: OnceLock<ActionCallback> = OnceLock::new();
-static MINIMIZE_WINDOW: OnceLock<ActionCallback> = OnceLock::new();
-static MAXIMIZE_WINDOW: OnceLock<ActionCallback> = OnceLock::new();
-static CLOSE_WINDOW: OnceLock<ActionCallback> = OnceLock::new();
-
-/// Register the drag_window callback (called by the platform runner at init)
-pub fn set_drag_window_callback(f: impl Fn() + Send + Sync + 'static) {
-    let _ = DRAG_WINDOW.set(Box::new(f));
+struct WindowActions {
+    drag: Option<ActionCallback>,
+    minimize: Option<ActionCallback>,
+    maximize: Option<ActionCallback>,
+    close: Option<ActionCallback>,
 }
 
-/// Register the minimize callback
-pub fn set_minimize_callback(f: impl Fn() + Send + Sync + 'static) {
-    let _ = MINIMIZE_WINDOW.set(Box::new(f));
-}
+static ACTIONS: Mutex<WindowActions> = Mutex::new(WindowActions {
+    drag: None,
+    minimize: None,
+    maximize: None,
+    close: None,
+});
 
-/// Register the maximize callback
-pub fn set_maximize_callback(f: impl Fn() + Send + Sync + 'static) {
-    let _ = MAXIMIZE_WINDOW.set(Box::new(f));
-}
-
-/// Register the close callback
-pub fn set_close_callback(f: impl Fn() + Send + Sync + 'static) {
-    let _ = CLOSE_WINDOW.set(Box::new(f));
+/// Set all window action callbacks for the currently focused window.
+///
+/// Called by the platform runner when:
+/// - The primary window initializes
+/// - Focus changes to a different window
+/// - A new secondary window is created
+pub fn set_active_window_actions(
+    drag: impl Fn() + Send + Sync + 'static,
+    minimize: impl Fn() + Send + Sync + 'static,
+    maximize: impl Fn() + Send + Sync + 'static,
+    close: impl Fn() + Send + Sync + 'static,
+) {
+    if let Ok(mut actions) = ACTIONS.lock() {
+        actions.drag = Some(Box::new(drag));
+        actions.minimize = Some(Box::new(minimize));
+        actions.maximize = Some(Box::new(maximize));
+        actions.close = Some(Box::new(close));
+    }
 }
 
 /// Start a window drag operation (for custom title bars)
 pub fn drag_window() {
-    if let Some(f) = DRAG_WINDOW.get() {
-        f();
+    if let Ok(actions) = ACTIONS.lock() {
+        if let Some(ref f) = actions.drag {
+            f();
+        }
     }
 }
 
 /// Minimize the window
 pub fn minimize_window() {
-    if let Some(f) = MINIMIZE_WINDOW.get() {
-        f();
+    if let Ok(actions) = ACTIONS.lock() {
+        if let Some(ref f) = actions.minimize {
+            f();
+        }
     }
 }
 
 /// Maximize/restore the window
 pub fn maximize_window() {
-    if let Some(f) = MAXIMIZE_WINDOW.get() {
-        f();
+    if let Ok(actions) = ACTIONS.lock() {
+        if let Some(ref f) = actions.maximize {
+            f();
+        }
     }
 }
 
 /// Close the window
 pub fn close_window() {
-    if let Some(f) = CLOSE_WINDOW.get() {
-        f();
+    if let Ok(actions) = ACTIONS.lock() {
+        if let Some(ref f) = actions.close {
+            f();
+        }
     }
 }
