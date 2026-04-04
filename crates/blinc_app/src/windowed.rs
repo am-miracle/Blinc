@@ -1825,7 +1825,10 @@ impl WindowedApp {
     /// Register window action callbacks (drag, minimize, maximize, close) for a window.
     /// Called for both primary and secondary windows, and on focus changes.
     #[cfg(all(feature = "windowed", not(target_os = "android")))]
-    fn register_window_actions_static(win: std::sync::Arc<winit::window::Window>) {
+    fn register_window_actions_static(
+        win: std::sync::Arc<winit::window::Window>,
+        wake: blinc_platform_desktop::WakeProxy,
+    ) {
         let d = win.clone();
         let mi = win.clone();
         let ma = win.clone();
@@ -1836,7 +1839,12 @@ impl WindowedApp {
             },
             move || mi.set_minimized(true),
             move || ma.set_maximized(!ma.is_maximized()),
-            move || cl.set_visible(false),
+            move || {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                cl.id().hash(&mut hasher);
+                wake.close_window(blinc_platform::WindowId(hasher.finish()));
+            },
         );
     }
 
@@ -2057,6 +2065,7 @@ impl WindowedApp {
                                 // Update window actions to target this secondary window
                                 WindowedApp::register_window_actions_static(
                                     window.winit_window_arc(),
+                                    wake_proxy_for_windows.clone(),
                                 );
                             }
                         }
@@ -2290,7 +2299,7 @@ impl WindowedApp {
                                     let _ = OPEN_WINDOW_FN.set(open_fn);
 
                                     // Register window action callbacks for custom title bars
-                                    Self::register_window_actions_static(window.winit_window_arc());
+                                    Self::register_window_actions_static(window.winit_window_arc(), wake_proxy_for_windows.clone());
 
                                     // Set initial viewport size in BlincContextState
                                     if let Some(ref windowed_ctx) = ws.ctx {
@@ -2387,6 +2396,7 @@ impl WindowedApp {
                                             // Register window actions for this window
                                             WindowedApp::register_window_actions_static(
                                                 window.winit_window_arc(),
+                                                wake_proxy_for_windows.clone(),
                                             );
 
                                             secondary_windows.insert(wid, sws);
@@ -2464,6 +2474,7 @@ impl WindowedApp {
                             if focused {
                                 WindowedApp::register_window_actions_static(
                                     window.winit_window_arc(),
+                                    wake_proxy_for_windows.clone(),
                                 );
                             }
                         }
