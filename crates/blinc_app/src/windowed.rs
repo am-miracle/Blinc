@@ -68,22 +68,81 @@ pub type ReadyCallback = Box<dyn FnOnce() + Send + Sync>;
 /// Shared storage for ready callbacks
 pub type SharedReadyCallbacks = Arc<Mutex<Vec<ReadyCallback>>>;
 
-/// Global callback for opening new windows.
-/// Set by the desktop runner, callable from anywhere in the app.
+/// UI builder function for a window. Called each frame to produce the UI tree.
+/// Returns a `Div` (the root element type for all Blinc UIs).
+pub type WindowBuilder = Box<dyn FnMut(&mut WindowedContext) -> Div + Send>;
+
+/// Pending window request: config + optional UI builder
+struct PendingWindowRequest {
+    config: WindowConfig,
+    builder: Option<WindowBuilder>,
+}
+
+/// Queue of pending window requests (builder closures waiting to be picked up
+/// by the event loop after AppCommand::CreateWindow fires).
+static PENDING_WINDOW_BUILDERS: std::sync::OnceLock<Mutex<Vec<PendingWindowRequest>>> =
+    std::sync::OnceLock::new();
+
+fn pending_builders() -> &'static Mutex<Vec<PendingWindowRequest>> {
+    PENDING_WINDOW_BUILDERS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Global callback for sending CreateWindow command to the event loop.
 static OPEN_WINDOW_FN: std::sync::OnceLock<Arc<dyn Fn(WindowConfig) + Send + Sync>> =
     std::sync::OnceLock::new();
 
-/// Open a new window from anywhere in the application.
+/// Open a new window with a UI builder from anywhere in the application.
 ///
-/// This is a global convenience function. Only works on desktop after
-/// the windowed app has initialized.
+/// The builder closure is called each frame to produce the window's UI.
 ///
 /// # Example
 /// ```ignore
-/// use blinc_app::windowed::open_window;
-/// open_window(WindowConfig::new("Settings").size(400, 300));
+/// use blinc_app::windowed::open_window_with;
+///
+/// open_window_with(
+///     WindowConfig::new("Settings").size(400, 300),
+///     |ctx| {
+///         Box::new(div()
+///             .w(ctx.width).h(ctx.height)
+///             .bg(Color::rgb(0.1, 0.1, 0.15))
+///             .child(text("Settings Window").size(24.0).color(Color::WHITE)))
+///     },
+/// );
 /// ```
+pub fn open_window_with<F>(config: WindowConfig, builder: F)
+where
+    F: FnMut(&mut WindowedContext) -> Div + Send + 'static,
+{
+    // Queue the builder so the event loop can pick it up
+    pending_builders()
+        .lock()
+        .unwrap()
+        .push(PendingWindowRequest {
+            config: config.clone(),
+            builder: Some(Box::new(builder)),
+        });
+
+    // Send the CreateWindow command to the event loop
+    if let Some(f) = OPEN_WINDOW_FN.get() {
+        f(config);
+    } else {
+        tracing::warn!("open_window_with() called before app initialization");
+    }
+}
+
+/// Open a new window with a default blank UI.
+///
+/// For windows with custom UI, use `open_window_with()` instead.
 pub fn open_window(config: WindowConfig) {
+    // Queue without builder (uses default UI)
+    pending_builders()
+        .lock()
+        .unwrap()
+        .push(PendingWindowRequest {
+            config: config.clone(),
+            builder: None,
+        });
+
     if let Some(f) = OPEN_WINDOW_FN.get() {
         f(config);
     } else {
@@ -122,6 +181,8 @@ pub(crate) struct WindowState {
     pub last_frame_time_ms: u64,
     /// Active touch point IDs
     pub active_touch_ids: std::collections::HashSet<u64>,
+    /// UI builder for this window (None = default static UI)
+    pub ui_builder: Option<WindowBuilder>,
 }
 
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
@@ -146,6 +207,7 @@ impl WindowState {
             needs_relayout: false,
             last_frame_time_ms: 0,
             active_touch_ids: std::collections::HashSet::new(),
+            ui_builder: None,
         }
     }
 }
@@ -1965,36 +2027,48 @@ impl WindowedApp {
                                 {
                                     // Build render tree on first frame or after resize
                                     if sws.render_tree.is_none() || sws.needs_rebuild {
-                                        if let Some(ref sctx) = sws.ctx {
-                                            let w = sctx.width;
-                                            let h = sctx.height;
-                                            let title = window.winit_window().title();
-                                            let ui = div()
-                                                .w(w)
-                                                .h(h)
-                                                .bg(blinc_core::Color::rgba(0.06, 0.06, 0.09, 1.0))
-                                                .flex_col()
-                                                .justify_center()
-                                                .items_center()
-                                                .gap_px(12.0)
-                                                .child(
-                                                    text(&title)
-                                                        .size(24.0)
-                                                        .color(blinc_core::Color::WHITE)
-                                                        .bold(),
-                                                )
-                                                .child(
-                                                    text(format!("{:.0} x {:.0}", w, h))
-                                                        .size(14.0)
-                                                        .color(blinc_core::Color::rgba(
-                                                            0.5, 0.5, 0.6, 1.0,
-                                                        )),
-                                                );
-                                            let mut tree = RenderTree::from_element(&ui);
-                                            tree.compute_layout(w, h);
-                                            sws.render_tree = Some(tree);
-                                            sws.needs_rebuild = false;
-                                        }
+                                        let (w, h) = sws.ctx.as_ref()
+                                            .map(|c| (c.width, c.height))
+                                            .unwrap_or((400.0, 300.0));
+
+                                        let ui: Div =
+                                            if let Some(ref mut builder) = sws.ui_builder {
+                                                if let Some(ref mut sctx) = sws.ctx {
+                                                    builder(sctx)
+                                                } else {
+                                                    div().w(w).h(h)
+                                                }
+                                            } else {
+                                                let title = window.winit_window().title();
+                                                div()
+                                                    .w(w)
+                                                    .h(h)
+                                                    .bg(blinc_core::Color::rgba(
+                                                        0.06, 0.06, 0.09, 1.0,
+                                                    ))
+                                                    .flex_col()
+                                                    .justify_center()
+                                                    .items_center()
+                                                    .gap_px(12.0)
+                                                    .child(
+                                                        text(&title)
+                                                            .size(24.0)
+                                                            .color(blinc_core::Color::WHITE)
+                                                            .bold(),
+                                                    )
+                                                    .child(
+                                                        text(format!("{:.0} x {:.0}", w, h))
+                                                            .size(14.0)
+                                                            .color(blinc_core::Color::rgba(
+                                                                0.5, 0.5, 0.6, 1.0,
+                                                            )),
+                                                    )
+                                            };
+
+                                        let mut tree = RenderTree::from_element(&ui);
+                                        tree.compute_layout(w, h);
+                                        sws.render_tree = Some(tree);
+                                        sws.needs_rebuild = false;
                                     }
 
                                     // Render the tree
@@ -2167,6 +2241,21 @@ impl WindowedApp {
                                                 Arc::clone(&shared_motion_states),
                                             );
                                             sws.render_state = Some(rs);
+
+                                            // Pop the UI builder from the pending queue
+                                            if let Ok(mut pending) =
+                                                pending_builders().lock()
+                                            {
+                                                // Find matching request by config title
+                                                let title =
+                                                    window.winit_window().title();
+                                                if let Some(idx) = pending.iter().position(|r| {
+                                                    r.config.title == title
+                                                }) {
+                                                    let req = pending.remove(idx);
+                                                    sws.ui_builder = req.builder;
+                                                }
+                                            }
 
                                             secondary_windows.insert(wid, sws);
                                             tracing::info!(

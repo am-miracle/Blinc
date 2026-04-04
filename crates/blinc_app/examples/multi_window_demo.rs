@@ -85,14 +85,42 @@ fn build_primary_ui(ctx: &WindowedContext) -> impl ElementBuilder {
                     let count = wc.get() + 1;
                     wc.set(count);
 
+                    let win_color = color;
+                    let win_name = click_name.clone();
                     let config = WindowConfig {
-                        title: format!("{} Window #{}", click_name, count),
+                        title: format!("{} Window #{}", win_name, count),
                         width: 400,
                         height: 300,
                         resizable: true,
                         ..Default::default()
                     };
-                    blinc_app::windowed::open_window(config);
+                    blinc_app::windowed::open_window_with(config, move |ctx| {
+                        div()
+                            .w(ctx.width)
+                            .h(ctx.height)
+                            .bg(Color::rgba(0.06, 0.06, 0.09, 1.0))
+                            .flex_col()
+                            .justify_center()
+                            .items_center()
+                            .gap_px(16.0)
+                            .child(
+                                text(format!("{} Window", win_name))
+                                    .size(28.0)
+                                    .color(win_color)
+                                    .bold(),
+                            )
+                            .child(div().w(200.0).h(4.0).bg(win_color).rounded(2.0))
+                            .child(
+                                text(format!("{:.0} x {:.0}", ctx.width, ctx.height))
+                                    .size(14.0)
+                                    .color(Color::rgba(0.6, 0.6, 0.7, 1.0)),
+                            )
+                            .child(
+                                text("This window has its own UI builder!")
+                                    .size(12.0)
+                                    .color(Color::rgba(0.5, 0.5, 0.5, 1.0)),
+                            )
+                    });
                 }),
         );
     }
