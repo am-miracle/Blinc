@@ -176,6 +176,8 @@ pub struct WindowedContext {
     css_sources: Vec<String>,
     /// Continuous pointer query state (per-element pointer tracking)
     pub pointer_query: blinc_layout::pointer_query::PointerQueryState,
+    /// Callback to request opening a new window (set by desktop runner)
+    open_window_fn: Option<Arc<dyn Fn(WindowConfig) + Send + Sync>>,
 }
 
 impl WindowedContext {
@@ -221,6 +223,7 @@ impl WindowedContext {
             stylesheet: None,
             css_sources: Vec::new(),
             pointer_query: blinc_layout::pointer_query::PointerQueryState::new(),
+            open_window_fn: None,
         }
     }
 
@@ -263,6 +266,7 @@ impl WindowedContext {
             stylesheet: None,
             css_sources: Vec::new(),
             pointer_query: blinc_layout::pointer_query::PointerQueryState::new(),
+            open_window_fn: None,
         }
     }
 
@@ -305,6 +309,7 @@ impl WindowedContext {
             stylesheet: None,
             css_sources: Vec::new(),
             pointer_query: blinc_layout::pointer_query::PointerQueryState::new(),
+            open_window_fn: None,
         }
     }
 
@@ -347,6 +352,7 @@ impl WindowedContext {
             stylesheet: None,
             css_sources: Vec::new(),
             pointer_query: blinc_layout::pointer_query::PointerQueryState::new(),
+            open_window_fn: None,
         }
     }
 
@@ -404,6 +410,31 @@ impl WindowedContext {
     /// ```
     pub fn is_ready(&self) -> bool {
         self.rebuild_count > 0
+    }
+
+    /// Open a new window with the given configuration.
+    ///
+    /// The window is created asynchronously on the next event loop tick.
+    /// Only available on desktop platforms.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.open_window(WindowConfig::new("Settings").size(400, 300));
+    /// ```
+    pub fn open_window(&self, config: WindowConfig) {
+        if let Some(ref open_fn) = self.open_window_fn {
+            open_fn(config);
+        } else {
+            tracing::warn!(
+                "open_window() called but no window creation callback is set (not on desktop?)"
+            );
+        }
+    }
+
+    /// Set the callback for opening new windows (called by the desktop runner)
+    pub(crate) fn set_open_window_fn(&mut self, f: Arc<dyn Fn(WindowConfig) + Send + Sync>) {
+        self.open_window_fn = Some(f);
     }
 
     /// Register a callback to run once after the UI is ready
@@ -1714,6 +1745,8 @@ impl WindowedApp {
 
         // Get a wake proxy to allow the animation thread to wake up the event loop
         let wake_proxy = event_loop.wake_proxy();
+        // Clone for the open_window callback
+        let wake_proxy_for_windows = event_loop.wake_proxy();
 
         // Shared dirty flag for element refs
         let ref_dirty_flag: RefDirtyFlag = Arc::new(AtomicBool::new(false));
@@ -1897,6 +1930,14 @@ impl WindowedApp {
                                         Arc::clone(&element_registry),
                                         Arc::clone(&ready_callbacks),
                                     ));
+
+                                    // Wire open_window callback using the event loop's wake proxy
+                                    if let Some(ref mut windowed_ctx) = ws.ctx {
+                                        let wp = wake_proxy_for_windows.clone();
+                                        windowed_ctx.set_open_window_fn(Arc::new(move |config| {
+                                            wp.create_window(config);
+                                        }));
+                                    }
 
                                     // Set initial viewport size in BlincContextState
                                     if let Some(ref windowed_ctx) = ws.ctx {
