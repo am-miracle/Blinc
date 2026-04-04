@@ -422,6 +422,12 @@ where
                         Event::Window(wid, WindowEvent::CloseRequested),
                     );
                     self.windows.remove(&winit_id);
+
+                    // Clear modal if the closed window was the modal
+                    if self.modal_window == Some(winit_id) {
+                        self.modal_window = None;
+                    }
+
                     if self.windows.is_empty() {
                         self.should_exit = true;
                         event_loop.exit();
