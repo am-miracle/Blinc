@@ -46,6 +46,7 @@ pub mod table;
 pub mod text_area;
 pub mod text_edit;
 pub mod text_input;
+pub mod virtual_list;
 
 // Re-export button widget
 pub use button::{button, button_with, Button, ButtonConfig, ButtonVisualState};
