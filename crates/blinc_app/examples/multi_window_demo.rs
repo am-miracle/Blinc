@@ -1,7 +1,7 @@
 //! Multi-Window Demo
 //!
-//! Demonstrates opening additional windows via ctx.open_window().
-//! Click the button in the primary window to open a new window.
+//! Demonstrates opening additional windows via open_window().
+//! Each secondary window renders with its own title and dimensions.
 //!
 //! Run with: cargo run -p blinc_app --example multi_window_demo
 
@@ -28,7 +28,16 @@ fn main() -> Result<()> {
 fn build_primary_ui(ctx: &WindowedContext) -> impl ElementBuilder {
     let window_count = ctx.use_state_keyed("win_count", || 1u32);
 
-    div()
+    // Color palette for windows
+    let colors = [
+        ("Coral", Color::rgba(1.0, 0.4, 0.4, 1.0)),
+        ("Teal", Color::rgba(0.2, 0.8, 0.7, 1.0)),
+        ("Violet", Color::rgba(0.6, 0.4, 1.0, 1.0)),
+        ("Gold", Color::rgba(1.0, 0.8, 0.2, 1.0)),
+        ("Sky", Color::rgba(0.3, 0.7, 1.0, 1.0)),
+    ];
+
+    let mut root = div()
         .w(ctx.width)
         .h(ctx.height)
         .bg(Color::rgba(0.08, 0.08, 0.12, 1.0))
@@ -43,7 +52,7 @@ fn build_primary_ui(ctx: &WindowedContext) -> impl ElementBuilder {
                 .bold(),
         )
         .child(
-            text("Click the button to open a new window")
+            text("Click buttons to open themed windows")
                 .size(16.0)
                 .color(Color::rgba(0.6, 0.6, 0.7, 1.0)),
         )
@@ -51,29 +60,33 @@ fn build_primary_ui(ctx: &WindowedContext) -> impl ElementBuilder {
             text(format!("Windows opened: {}", window_count.get()))
                 .size(14.0)
                 .color(Color::rgba(0.5, 0.8, 1.0, 1.0)),
-        )
-        .child(
+        );
+
+    // Create a row of colored buttons
+    let mut button_row = div().flex_row().gap_px(12.0);
+
+    for (name, color) in &colors {
+        let label = name.to_string();
+        let click_name = name.to_string();
+        let color = *color;
+        let wc = window_count.clone();
+
+        button_row = button_row.child(
             div()
-                .w(200.0)
-                .h(44.0)
-                .bg(Color::rgba(0.3, 0.5, 1.0, 1.0))
+                .w(100.0)
+                .h(40.0)
+                .bg(color)
                 .rounded(8.0)
                 .cursor_pointer()
                 .items_center()
                 .justify_center()
-                .child(
-                    text("Open New Window")
-                        .size(14.0)
-                        .color(Color::WHITE)
-                        .bold(),
-                )
+                .child(text(&label).size(13.0).color(Color::WHITE).bold())
                 .on_click(move |_ctx| {
-                    let count = window_count.get() + 1;
-                    window_count.set(count);
+                    let count = wc.get() + 1;
+                    wc.set(count);
 
-                    // Open a new window via the global function
                     let config = WindowConfig {
-                        title: format!("Window #{}", count),
+                        title: format!("{} Window #{}", click_name, count),
                         width: 400,
                         height: 300,
                         resizable: true,
@@ -81,5 +94,9 @@ fn build_primary_ui(ctx: &WindowedContext) -> impl ElementBuilder {
                     };
                     blinc_app::windowed::open_window(config);
                 }),
-        )
+        );
+    }
+
+    root = root.child(button_row);
+    root
 }

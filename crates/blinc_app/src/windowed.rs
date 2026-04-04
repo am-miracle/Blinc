@@ -1960,46 +1960,68 @@ impl WindowedApp {
                         }
                         Event::Frame(_) => {
                             if let Some(sws) = secondary_windows.get_mut(&wid) {
-                                // Render secondary window with blank or cached content
-                                if let (Some(ref blinc_app), Some(ref surf), Some(ref config)) =
-                                    (&ws.app, &sws.surface, &sws.surface_config)
+                                if let (Some(ref mut blinc_app), Some(ref surf), Some(ref config)) =
+                                    (&mut ws.app, &sws.surface, &sws.surface_config)
                                 {
-                                    if let Ok(frame) = surf.get_current_texture() {
-                                        let view = frame.texture.create_view(
-                                            &wgpu::TextureViewDescriptor::default(),
-                                        );
-                                        let mut encoder = blinc_app.device().create_command_encoder(
-                                            &wgpu::CommandEncoderDescriptor { label: Some("secondary_window") },
-                                        );
-                                        // Clear to dark background
-                                        {
-                                            let _pass = encoder.begin_render_pass(
-                                                &wgpu::RenderPassDescriptor {
-                                                    label: Some("secondary_clear"),
-                                                    color_attachments: &[Some(
-                                                        wgpu::RenderPassColorAttachment {
-                                                            view: &view,
-                                                            resolve_target: None,
-                                                            ops: wgpu::Operations {
-                                                                load: wgpu::LoadOp::Clear(
-                                                                    wgpu::Color {
-                                                                        r: 0.08,
-                                                                        g: 0.08,
-                                                                        b: 0.1,
-                                                                        a: 1.0,
-                                                                    },
-                                                                ),
-                                                                store: wgpu::StoreOp::Store,
-                                                            },
-                                                        },
-                                                    )],
-                                                    depth_stencil_attachment: None,
-                                                    ..Default::default()
-                                                },
-                                            );
+                                    // Build render tree on first frame or after resize
+                                    if sws.render_tree.is_none() || sws.needs_rebuild {
+                                        if let Some(ref sctx) = sws.ctx {
+                                            let w = sctx.width;
+                                            let h = sctx.height;
+                                            let title = window.winit_window().title();
+                                            let ui = div()
+                                                .w(w)
+                                                .h(h)
+                                                .bg(blinc_core::Color::rgba(0.06, 0.06, 0.09, 1.0))
+                                                .flex_col()
+                                                .justify_center()
+                                                .items_center()
+                                                .gap_px(12.0)
+                                                .child(
+                                                    text(&title)
+                                                        .size(24.0)
+                                                        .color(blinc_core::Color::WHITE)
+                                                        .bold(),
+                                                )
+                                                .child(
+                                                    text(format!("{:.0} x {:.0}", w, h))
+                                                        .size(14.0)
+                                                        .color(blinc_core::Color::rgba(
+                                                            0.5, 0.5, 0.6, 1.0,
+                                                        )),
+                                                );
+                                            let mut tree = RenderTree::from_element(&ui);
+                                            tree.compute_layout(w, h);
+                                            sws.render_tree = Some(tree);
+                                            sws.needs_rebuild = false;
                                         }
-                                        blinc_app.queue().submit(std::iter::once(encoder.finish()));
-                                        frame.present();
+                                    }
+
+                                    // Render the tree
+                                    if let (Some(ref tree), Some(ref rs)) =
+                                        (&sws.render_tree, &sws.render_state)
+                                    {
+                                        match surf.get_current_texture() {
+                                            Ok(frame) => {
+                                                let view = frame.texture.create_view(
+                                                    &wgpu::TextureViewDescriptor::default(),
+                                                );
+                                                let _ = blinc_app.render_tree_with_motion(
+                                                    tree,
+                                                    rs,
+                                                    &view,
+                                                    config.width,
+                                                    config.height,
+                                                );
+                                                frame.present();
+                                            }
+                                            Err(wgpu::SurfaceError::Lost) => {
+                                                surf.configure(blinc_app.device(), config);
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Secondary window surface error: {}", e);
+                                            }
+                                        }
                                     }
                                 }
                             }
