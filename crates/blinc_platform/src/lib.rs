@@ -57,7 +57,7 @@ pub use input::{
     TouchEvent,
 };
 pub use platform::Platform;
-pub use window::{Cursor, Window, WindowConfig};
+pub use window::{Cursor, Window, WindowConfig, WindowId};
 
 // Re-export commonly used asset types
 pub use assets::{AssetLoader, AssetPath, FilesystemAssetLoader};
@@ -74,5 +74,5 @@ pub mod prelude {
         TouchEvent,
     };
     pub use crate::platform::Platform;
-    pub use crate::window::{Cursor, Window, WindowConfig};
+    pub use crate::window::{Cursor, Window, WindowConfig, WindowId};
 }

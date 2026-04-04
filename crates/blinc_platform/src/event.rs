@@ -32,21 +32,23 @@ pub enum ControlFlow {
     Exit,
 }
 
+use crate::window::WindowId;
+
 /// Platform events
 #[derive(Clone, Debug)]
 pub enum Event {
-    /// Window-related event
-    Window(WindowEvent),
-    /// Input event (mouse, keyboard, touch)
-    Input(InputEvent),
-    /// Application lifecycle event
+    /// Window-related event (tagged with the target window)
+    Window(WindowId, WindowEvent),
+    /// Input event (tagged with the target window)
+    Input(WindowId, InputEvent),
+    /// Application lifecycle event (global, not per-window)
     Lifecycle(LifecycleEvent),
-    /// Frame tick - time to render
+    /// Frame tick for a specific window
     ///
     /// This event is sent when the application should render a frame.
     /// On desktop, this typically happens after vsync or at 60fps.
     /// On mobile, this happens when the app is focused and ready.
-    Frame,
+    Frame(WindowId),
 }
 
 /// Window events

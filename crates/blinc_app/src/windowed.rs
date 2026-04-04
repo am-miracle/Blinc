@@ -1873,7 +1873,7 @@ impl WindowedApp {
                         }
                     }
 
-                    Event::Window(WindowEvent::Resized { width, height }) => {
+                    Event::Window(_, WindowEvent::Resized { width, height }) => {
                         if let (Some(ref blinc_app), Some(ref surf), Some(ref mut config)) =
                             (&app, &surface, &mut surface_config)
                         {
@@ -1916,7 +1916,7 @@ impl WindowedApp {
                         }
                     }
 
-                    Event::Window(WindowEvent::Focused(focused)) => {
+                    Event::Window(_, WindowEvent::Focused(focused)) => {
                         // Update context focus state
                         if let Some(ref mut windowed_ctx) = ctx {
                             windowed_ctx.focused = focused;
@@ -1931,12 +1931,12 @@ impl WindowedApp {
                         }
                     }
 
-                    Event::Window(WindowEvent::CloseRequested) => {
+                    Event::Window(_, WindowEvent::CloseRequested) => {
                         return ControlFlow::Exit;
                     }
 
                     // Handle input events
-                    Event::Input(input_event) => {
+                    Event::Input(_, input_event) => {
                         // Pending event structure for deferred dispatch
                         #[derive(Clone)]
                         struct PendingEvent {
@@ -2591,7 +2591,7 @@ impl WindowedApp {
                         }
                     }
 
-                    Event::Frame => {
+                    Event::Frame(_) => {
                         if let (
                             Some(ref mut blinc_app),
                             Some(ref surf),

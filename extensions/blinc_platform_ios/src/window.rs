@@ -68,6 +68,10 @@ impl IOSWindow {
 
 #[cfg(target_os = "ios")]
 impl Window for IOSWindow {
+    fn id(&self) -> blinc_platform::WindowId {
+        blinc_platform::WindowId::PRIMARY
+    }
+
     fn size(&self) -> (u32, u32) {
         (self.width.get(), self.height.get())
     }
@@ -127,6 +131,10 @@ impl IOSWindow {
 
 #[cfg(not(target_os = "ios"))]
 impl Window for IOSWindow {
+    fn id(&self) -> blinc_platform::WindowId {
+        blinc_platform::WindowId::PRIMARY
+    }
+
     fn size(&self) -> (u32, u32) {
         (0, 0)
     }

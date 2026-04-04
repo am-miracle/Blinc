@@ -3,13 +3,14 @@
 use crate::input;
 use crate::window::DesktopWindow;
 use blinc_platform::{
-    ControlFlow, Event, EventLoop, LifecycleEvent, PlatformError, Window, WindowConfig, WindowEvent,
+    ControlFlow, Event, EventLoop, LifecycleEvent, PlatformError, Window, WindowConfig,
+    WindowEvent, WindowId,
 };
 use winit::application::ApplicationHandler;
 use winit::event::{StartCause, WindowEvent as WinitWindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop as WinitEventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
-use winit::window::WindowId;
+use winit::window::WindowId as WinitWindowId;
 
 /// Proxy for waking up the event loop from another thread
 ///
@@ -148,43 +149,56 @@ where
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        _window_id: WinitWindowId,
         event: WinitWindowEvent,
     ) {
         match event {
             WinitWindowEvent::CloseRequested => {
-                self.handle_event(Event::Window(WindowEvent::CloseRequested));
+                self.handle_event(Event::Window(
+                    WindowId::PRIMARY,
+                    WindowEvent::CloseRequested,
+                ));
                 if self.should_exit {
                     event_loop.exit();
                 }
             }
 
             WinitWindowEvent::Resized(size) => {
-                self.handle_event(Event::Window(WindowEvent::Resized {
-                    width: size.width,
-                    height: size.height,
-                }));
+                self.handle_event(Event::Window(
+                    WindowId::PRIMARY,
+                    WindowEvent::Resized {
+                        width: size.width,
+                        height: size.height,
+                    },
+                ));
             }
 
             WinitWindowEvent::Moved(pos) => {
-                self.handle_event(Event::Window(WindowEvent::Moved { x: pos.x, y: pos.y }));
+                self.handle_event(Event::Window(
+                    WindowId::PRIMARY,
+                    WindowEvent::Moved { x: pos.x, y: pos.y },
+                ));
             }
 
             WinitWindowEvent::Focused(focused) => {
                 if let Some(ref window) = self.window {
                     window.set_focused(focused);
                 }
-                self.handle_event(Event::Window(WindowEvent::Focused(focused)));
+                self.handle_event(Event::Window(
+                    WindowId::PRIMARY,
+                    WindowEvent::Focused(focused),
+                ));
             }
 
             WinitWindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.handle_event(Event::Window(WindowEvent::ScaleFactorChanged {
-                    scale_factor,
-                }));
+                self.handle_event(Event::Window(
+                    WindowId::PRIMARY,
+                    WindowEvent::ScaleFactorChanged { scale_factor },
+                ));
             }
 
             WinitWindowEvent::RedrawRequested => {
-                self.handle_event(Event::Frame);
+                self.handle_event(Event::Frame(WindowId::PRIMARY));
                 if self.should_exit {
                     event_loop.exit();
                 }
@@ -197,7 +211,7 @@ where
             WinitWindowEvent::KeyboardInput { event, .. } => {
                 let input_event =
                     input::convert_keyboard_event(&event.logical_key, event.state, self.modifiers);
-                self.handle_event(Event::Input(input_event));
+                self.handle_event(Event::Input(WindowId::PRIMARY, input_event));
                 // Request immediate redraw so text input changes render instantly
                 if let Some(ref window) = self.window {
                     window.request_redraw();
@@ -207,7 +221,7 @@ where
             WinitWindowEvent::CursorMoved { position, .. } => {
                 self.mouse_position = (position.x as f32, position.y as f32);
                 let input_event = input::mouse_moved(self.mouse_position.0, self.mouse_position.1);
-                self.handle_event(Event::Input(input_event));
+                self.handle_event(Event::Input(WindowId::PRIMARY, input_event));
             }
 
             WinitWindowEvent::MouseInput { state, button, .. } => {
@@ -216,7 +230,7 @@ where
                     winit::event::ElementState::Pressed => input::mouse_pressed(button, x, y),
                     winit::event::ElementState::Released => input::mouse_released(button, x, y),
                 };
-                self.handle_event(Event::Input(input_event));
+                self.handle_event(Event::Input(WindowId::PRIMARY, input_event));
             }
 
             WinitWindowEvent::MouseWheel { delta, phase, .. } => {
@@ -227,32 +241,34 @@ where
                     }
                 };
                 let input_event = input::scroll_event(dx, dy, phase);
-                self.handle_event(Event::Input(input_event));
+                self.handle_event(Event::Input(WindowId::PRIMARY, input_event));
 
                 // If scroll gesture ended or momentum ended, send a scroll end event
                 if matches!(
                     phase,
                     winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled
                 ) {
-                    self.handle_event(Event::Input(input::scroll_end_event()));
+                    self.handle_event(Event::Input(WindowId::PRIMARY, input::scroll_end_event()));
                 }
             }
 
             WinitWindowEvent::Touch(touch) => {
                 let input_event = input::convert_touch_event(&touch);
-                self.handle_event(Event::Input(input_event));
+                self.handle_event(Event::Input(WindowId::PRIMARY, input_event));
             }
 
             WinitWindowEvent::CursorEntered { .. } => {
-                self.handle_event(Event::Input(blinc_platform::InputEvent::Mouse(
-                    blinc_platform::MouseEvent::Entered,
-                )));
+                self.handle_event(Event::Input(
+                    WindowId::PRIMARY,
+                    blinc_platform::InputEvent::Mouse(blinc_platform::MouseEvent::Entered),
+                ));
             }
 
             WinitWindowEvent::CursorLeft { .. } => {
-                self.handle_event(Event::Input(blinc_platform::InputEvent::Mouse(
-                    blinc_platform::MouseEvent::Left,
-                )));
+                self.handle_event(Event::Input(
+                    WindowId::PRIMARY,
+                    blinc_platform::InputEvent::Mouse(blinc_platform::MouseEvent::Left),
+                ));
             }
 
             _ => {}

@@ -1,5 +1,17 @@
 //! Window abstraction and configuration
 
+/// Platform-agnostic window identifier.
+///
+/// Wraps a `u64` to avoid leaking platform-specific types (e.g., winit's WindowId).
+/// Each window gets a unique ID at creation time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WindowId(pub u64);
+
+impl WindowId {
+    /// The default/primary window ID (used for single-window apps and mobile).
+    pub const PRIMARY: WindowId = WindowId(0);
+}
+
 /// Window configuration
 #[derive(Clone, Debug)]
 pub struct WindowConfig {
@@ -93,6 +105,9 @@ impl WindowConfig {
 ///
 /// Implemented by platform-specific window types.
 pub trait Window: Send {
+    /// Get the platform-agnostic window ID
+    fn id(&self) -> WindowId;
+
     /// Get window size in physical pixels
     fn size(&self) -> (u32, u32);
 

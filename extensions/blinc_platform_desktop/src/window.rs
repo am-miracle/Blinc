@@ -55,6 +55,14 @@ impl DesktopWindow {
 }
 
 impl Window for DesktopWindow {
+    fn id(&self) -> blinc_platform::WindowId {
+        // Use winit's WindowId hash as our platform-agnostic ID
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.window.id().hash(&mut hasher);
+        blinc_platform::WindowId(hasher.finish())
+    }
+
     fn size(&self) -> (u32, u32) {
         let size = self.window.inner_size();
         (size.width, size.height)

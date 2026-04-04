@@ -60,6 +60,10 @@ unsafe impl Send for HarmonyWindow {}
 unsafe impl Sync for HarmonyWindow {}
 
 impl Window for HarmonyWindow {
+    fn id(&self) -> blinc_platform::WindowId {
+        blinc_platform::WindowId::PRIMARY
+    }
+
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
