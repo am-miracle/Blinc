@@ -186,6 +186,7 @@ fn themed_window_ui(ctx: &mut WindowedContext, name: &str, color: Color) -> Div 
 fn modal_ui(ctx: &mut WindowedContext) -> Div {
     let bg = Color::rgba(0.12, 0.12, 0.16, 1.0);
     let danger = Color::rgba(0.9, 0.3, 0.3, 1.0);
+    let close_cb = ctx.close_callback();
 
     div()
         .w(ctx.width)
@@ -218,8 +219,9 @@ fn modal_ui(ctx: &mut WindowedContext) -> Div {
                         .items_center()
                         .justify_center()
                         .child(text("Cancel").size(13.0).color(Color::WHITE))
-                        .on_click(|_| {
-                            blinc_layout::window_actions::close_window();
+                        .on_click({
+                            let close = close_cb.clone();
+                            move |_| close()
                         }),
                 )
                 .child(
@@ -232,9 +234,12 @@ fn modal_ui(ctx: &mut WindowedContext) -> Div {
                         .items_center()
                         .justify_center()
                         .child(text("Delete").size(13.0).color(Color::WHITE).bold())
-                        .on_click(|_| {
-                            tracing::info!("Confirmed! (modal action taken)");
-                            blinc_layout::window_actions::close_window();
+                        .on_click({
+                            let close = close_cb.clone();
+                            move |_| {
+                                tracing::info!("Confirmed! (modal action taken)");
+                                close();
+                            }
                         }),
                 ),
         )
@@ -250,6 +255,10 @@ fn modal_ui(ctx: &mut WindowedContext) -> Div {
 fn frameless_window_ui(ctx: &mut WindowedContext) -> Div {
     let title_bar_color = Color::rgba(0.12, 0.12, 0.15, 1.0);
     let accent = Color::rgba(0.4, 0.7, 1.0, 1.0);
+    let minimize_cb = ctx.minimize_callback();
+    let maximize_cb = ctx.maximize_callback();
+    let close_cb = ctx.close_callback();
+    let drag_cb = ctx.drag_callback();
 
     div()
         .w(ctx.width)
@@ -266,7 +275,10 @@ fn frameless_window_ui(ctx: &mut WindowedContext) -> Div {
                 .flex_row()
                 .items_center()
                 .padding_x_px(12.0)
-                .drag_region()
+                .on_mouse_down({
+                    let drag = drag_cb;
+                    move |_| drag()
+                })
                 // Title
                 .child(
                     text("Frameless Window")
@@ -287,8 +299,9 @@ fn frameless_window_ui(ctx: &mut WindowedContext) -> Div {
                                 .bg(Color::rgba(1.0, 0.8, 0.0, 0.8))
                                 .rounded(7.0)
                                 .cursor_pointer()
-                                .on_click(|_| {
-                                    blinc_layout::window_actions::minimize_window();
+                                .on_click({
+                                    let cb = minimize_cb;
+                                    move |_| cb()
                                 }),
                         )
                         // Maximize
@@ -299,8 +312,9 @@ fn frameless_window_ui(ctx: &mut WindowedContext) -> Div {
                                 .bg(Color::rgba(0.2, 0.8, 0.2, 0.8))
                                 .rounded(7.0)
                                 .cursor_pointer()
-                                .on_click(|_| {
-                                    blinc_layout::window_actions::maximize_window();
+                                .on_click({
+                                    let cb = maximize_cb;
+                                    move |_| cb()
                                 }),
                         )
                         // Close
@@ -311,8 +325,9 @@ fn frameless_window_ui(ctx: &mut WindowedContext) -> Div {
                                 .bg(Color::rgba(1.0, 0.3, 0.3, 0.8))
                                 .rounded(7.0)
                                 .cursor_pointer()
-                                .on_click(|_| {
-                                    blinc_layout::window_actions::close_window();
+                                .on_click({
+                                    let cb = close_cb;
+                                    move |_| cb()
                                 }),
                         ),
                 ),

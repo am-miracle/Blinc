@@ -277,6 +277,14 @@ pub struct WindowedContext {
     pub pointer_query: blinc_layout::pointer_query::PointerQueryState,
     /// Callback to request opening a new window (set by desktop runner)
     open_window_fn: Option<Arc<dyn Fn(WindowConfig) + Send + Sync>>,
+    /// Per-window close callback (sends CloseWindow command for THIS window)
+    close_fn: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Per-window drag callback (starts OS drag for THIS window)
+    drag_fn: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Per-window minimize callback
+    minimize_fn: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Per-window maximize callback
+    maximize_fn: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl WindowedContext {
@@ -323,6 +331,10 @@ impl WindowedContext {
             css_sources: Vec::new(),
             pointer_query: blinc_layout::pointer_query::PointerQueryState::new(),
             open_window_fn: None,
+            close_fn: None,
+            drag_fn: None,
+            minimize_fn: None,
+            maximize_fn: None,
         }
     }
 
@@ -366,6 +378,10 @@ impl WindowedContext {
             css_sources: Vec::new(),
             pointer_query: blinc_layout::pointer_query::PointerQueryState::new(),
             open_window_fn: None,
+            close_fn: None,
+            drag_fn: None,
+            minimize_fn: None,
+            maximize_fn: None,
         }
     }
 
@@ -409,6 +425,10 @@ impl WindowedContext {
             css_sources: Vec::new(),
             pointer_query: blinc_layout::pointer_query::PointerQueryState::new(),
             open_window_fn: None,
+            close_fn: None,
+            drag_fn: None,
+            minimize_fn: None,
+            maximize_fn: None,
         }
     }
 
@@ -452,6 +472,10 @@ impl WindowedContext {
             css_sources: Vec::new(),
             pointer_query: blinc_layout::pointer_query::PointerQueryState::new(),
             open_window_fn: None,
+            close_fn: None,
+            drag_fn: None,
+            minimize_fn: None,
+            maximize_fn: None,
         }
     }
 
@@ -534,6 +558,69 @@ impl WindowedContext {
     /// Set the callback for opening new windows (called by the desktop runner)
     pub(crate) fn set_open_window_fn(&mut self, f: Arc<dyn Fn(WindowConfig) + Send + Sync>) {
         self.open_window_fn = Some(f);
+    }
+
+    /// Set per-window action callbacks (called by the desktop runner)
+    pub(crate) fn set_window_actions(
+        &mut self,
+        close: Arc<dyn Fn() + Send + Sync>,
+        drag: Arc<dyn Fn() + Send + Sync>,
+        minimize: Arc<dyn Fn() + Send + Sync>,
+        maximize: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        self.close_fn = Some(close);
+        self.drag_fn = Some(drag);
+        self.minimize_fn = Some(minimize);
+        self.maximize_fn = Some(maximize);
+    }
+
+    /// Close THIS window. Safe to call from any click handler.
+    pub fn close(&self) {
+        if let Some(ref f) = self.close_fn {
+            f();
+        }
+    }
+
+    /// Start dragging THIS window (for custom title bars).
+    pub fn drag(&self) {
+        if let Some(ref f) = self.drag_fn {
+            f();
+        }
+    }
+
+    /// Minimize THIS window.
+    pub fn minimize(&self) {
+        if let Some(ref f) = self.minimize_fn {
+            f();
+        }
+    }
+
+    /// Maximize/restore THIS window.
+    pub fn maximize(&self) {
+        if let Some(ref f) = self.maximize_fn {
+            f();
+        }
+    }
+
+    /// Get a cloneable close callback for THIS window.
+    /// Use this to capture the close action in event handler closures.
+    pub fn close_callback(&self) -> Arc<dyn Fn() + Send + Sync> {
+        self.close_fn.clone().unwrap_or_else(|| Arc::new(|| {}))
+    }
+
+    /// Get a cloneable drag callback for THIS window.
+    pub fn drag_callback(&self) -> Arc<dyn Fn() + Send + Sync> {
+        self.drag_fn.clone().unwrap_or_else(|| Arc::new(|| {}))
+    }
+
+    /// Get a cloneable minimize callback for THIS window.
+    pub fn minimize_callback(&self) -> Arc<dyn Fn() + Send + Sync> {
+        self.minimize_fn.clone().unwrap_or_else(|| Arc::new(|| {}))
+    }
+
+    /// Get a cloneable maximize callback for THIS window.
+    pub fn maximize_callback(&self) -> Arc<dyn Fn() + Send + Sync> {
+        self.maximize_fn.clone().unwrap_or_else(|| Arc::new(|| {}))
     }
 
     /// Register a callback to run once after the UI is ready
@@ -1822,7 +1909,39 @@ impl WindowedApp {
         Self::run_desktop(config, ui_builder)
     }
 
-    /// Register window action callbacks (drag, minimize, maximize, close) for a window.
+    /// Create per-window action closures (close, drag, minimize, maximize).
+    /// Returns (close, drag, minimize, maximize) Arcs.
+    #[cfg(all(feature = "windowed", not(target_os = "android")))]
+    #[allow(clippy::type_complexity)]
+    fn make_window_actions(
+        win: std::sync::Arc<winit::window::Window>,
+        wake: blinc_platform_desktop::WakeProxy,
+    ) -> (
+        Arc<dyn Fn() + Send + Sync>,
+        Arc<dyn Fn() + Send + Sync>,
+        Arc<dyn Fn() + Send + Sync>,
+        Arc<dyn Fn() + Send + Sync>,
+    ) {
+        let d = win.clone();
+        let mi = win.clone();
+        let ma = win.clone();
+        let cl = win;
+        (
+            Arc::new(move || {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                cl.id().hash(&mut hasher);
+                wake.close_window(blinc_platform::WindowId(hasher.finish()));
+            }),
+            Arc::new(move || {
+                let _ = d.drag_window();
+            }),
+            Arc::new(move || mi.set_minimized(true)),
+            Arc::new(move || ma.set_maximized(!ma.is_maximized())),
+        )
+    }
+
+    /// Register global window action callbacks (for drag_region() on Div).
     /// Called for both primary and secondary windows, and on focus changes.
     #[cfg(all(feature = "windowed", not(target_os = "android")))]
     fn register_window_actions_static(
@@ -2309,11 +2428,22 @@ impl WindowedApp {
                                         });
                                     if let Some(ref mut windowed_ctx) = ws.ctx {
                                         windowed_ctx.set_open_window_fn(Arc::clone(&open_fn));
+                                        // Per-window action callbacks
+                                        let win_actions = Self::make_window_actions(
+                                            window.winit_window_arc(),
+                                            wake_proxy_for_windows.clone(),
+                                        );
+                                        windowed_ctx.set_window_actions(
+                                            win_actions.0,
+                                            win_actions.1,
+                                            win_actions.2,
+                                            win_actions.3,
+                                        );
                                     }
                                     // Register globally so open_window() works from anywhere
                                     let _ = OPEN_WINDOW_FN.set(open_fn);
 
-                                    // Register window action callbacks for custom title bars
+                                    // Register global window action callbacks (for drag_region() on Div)
                                     Self::register_window_actions_static(window.winit_window_arc(), wake_proxy_for_windows.clone());
 
                                     // Set initial viewport size in BlincContextState
@@ -2383,6 +2513,17 @@ impl WindowedApp {
                                                 ctx.set_open_window_fn(Arc::new(move |c| {
                                                     wp.create_window(c);
                                                 }));
+                                                // Per-window actions
+                                                let win_actions = Self::make_window_actions(
+                                                    window.winit_window_arc(),
+                                                    wake_proxy_for_windows.clone(),
+                                                );
+                                                ctx.set_window_actions(
+                                                    win_actions.0,
+                                                    win_actions.1,
+                                                    win_actions.2,
+                                                    win_actions.3,
+                                                );
                                             }
 
                                             let mut rs = blinc_layout::RenderState::new(
