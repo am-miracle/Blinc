@@ -1,190 +1,75 @@
 //! Cross-platform routing for Blinc
 //!
 //! Declarative routing with path matching, navigation history,
-//! guards, and page stack management.
+//! and guards. Routers are scoped — not global singletons.
 //!
 //! # Example
 //!
 //! ```ignore
-//! use blinc_router::{Router, Route};
+//! use blinc_router::{RouterBuilder, Route};
 //!
-//! let router = Router::new()
+//! // Build the router (returns a clonable handle)
+//! let router = RouterBuilder::new()
 //!     .route(Route::new("/").name("home").view(home_page))
-//!     .route(Route::new("/users").name("users").view(users_page)
-//!         .child(Route::new("/:id").view(user_detail)))
+//!     .route(Route::new("/users/:id").view(user_detail))
 //!     .not_found(not_found_page)
 //!     .build();
 //!
-//! // In your UI:
-//! let router = use_router();
+//! // Navigate
 //! router.push("/users/42");
 //! router.back();
+//!
+//! // Build current route's view
+//! let page = router.outlet(); // returns Div
 //! ```
 
 pub mod history;
 pub mod route;
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
-use blinc_core::context_state::BlincContextState;
-use blinc_core::reactive::State;
-use history::{HistoryEntry, RouterHistory};
-use route::{MatchedRoute, QueryParams, Route, RouteContext, RouteParams, RouteTrie};
+use history::RouterHistory;
+use route::RouteTrie;
 
 /// Route view function: receives context, returns a Div
 pub type RouteView = fn(RouteContext) -> blinc_layout::div::Div;
 
-/// Navigation guard: receives (from, to) and returns whether to allow
+/// Navigation guard
 pub type NavigationGuard = Arc<dyn Fn(&HistoryEntry, &MatchedRoute) -> GuardResult + Send + Sync>;
 
 /// Result of a navigation guard check
 pub enum GuardResult {
-    /// Allow the navigation
     Allow,
-    /// Redirect to a different path
     Redirect(String),
-    /// Block the navigation with a reason
     Reject(String),
 }
 
-/// Shared router state
-struct RouterState {
+/// Internal router state
+struct RouterInner {
     trie: RouteTrie,
     views: Vec<RouteView>,
     guards: Vec<NavigationGuard>,
     history: RouterHistory,
-    /// Current matched route (drives UI updates via signal)
     current_match: Option<MatchedRoute>,
+    /// Route names → path templates for reverse lookup
+    named_routes: rustc_hash::FxHashMap<String, String>,
 }
 
-/// Global router singleton
-static ROUTER: OnceLock<Arc<Mutex<RouterState>>> = OnceLock::new();
-
-/// Signal that fires when the route changes
-static ROUTE_SIGNAL: OnceLock<State<String>> = OnceLock::new();
-
-/// Router builder
+/// A router instance. Clone to share across closures.
+///
+/// Not a global singleton — create one per navigation scope.
+/// Pass it through your UI builder or store it in context state.
+#[derive(Clone)]
 pub struct Router {
-    routes: Vec<Route>,
-    not_found: Option<RouteView>,
-    guards: Vec<NavigationGuard>,
-    initial_path: String,
+    inner: Arc<Mutex<RouterInner>>,
 }
 
 impl Router {
-    pub fn new() -> Self {
-        Self {
-            routes: Vec::new(),
-            not_found: None,
-            guards: Vec::new(),
-            initial_path: "/".to_string(),
-        }
-    }
-
-    /// Add a route
-    pub fn route(mut self, route: Route) -> Self {
-        self.routes.push(route);
-        self
-    }
-
-    /// Set the not-found page
-    pub fn not_found(mut self, view: RouteView) -> Self {
-        self.not_found = Some(view);
-        self
-    }
-
-    /// Add a global navigation guard
-    pub fn guard(mut self, guard: NavigationGuard) -> Self {
-        self.guards.push(guard);
-        self
-    }
-
-    /// Set initial path (default: "/")
-    pub fn initial(mut self, path: impl Into<String>) -> Self {
-        self.initial_path = path.into();
-        self
-    }
-
-    /// Build the router and install it globally
-    pub fn build(self) -> RouterHandle {
-        let mut trie = RouteTrie::new();
-        let mut views: Vec<RouteView> = Vec::new();
-
-        // Register routes recursively
-        fn register_routes(
-            trie: &mut RouteTrie,
-            views: &mut Vec<RouteView>,
-            routes: &[Route],
-            prefix: &str,
-        ) {
-            for route in routes {
-                let full_path = if prefix == "/" {
-                    route.path.clone()
-                } else {
-                    format!("{}{}", prefix, route.path)
-                };
-
-                if let Some(view) = route.view {
-                    let idx = views.len();
-                    views.push(view);
-                    trie.add(&full_path, idx, route.name.as_deref());
-                }
-
-                if !route.children.is_empty() {
-                    register_routes(trie, views, &route.children, &full_path);
-                }
-            }
-        }
-
-        register_routes(&mut trie, &mut views, &self.routes, "/");
-
-        if let Some(nf_view) = self.not_found {
-            let idx = views.len();
-            views.push(nf_view);
-            trie.set_not_found(idx);
-        }
-
-        // Match initial path
-        let initial_match = trie.match_path(&self.initial_path);
-
-        let state = Arc::new(Mutex::new(RouterState {
-            trie,
-            views,
-            guards: self.guards,
-            history: RouterHistory::new(&self.initial_path),
-            current_match: initial_match,
-        }));
-
-        let _ = ROUTER.set(Arc::clone(&state));
-
-        // Create route signal for reactive updates
-        let ctx = BlincContextState::get();
-        let signal = ctx.use_state_keyed("__blinc_router_path", || self.initial_path.clone());
-        let _ = ROUTE_SIGNAL.set(signal);
-
-        RouterHandle { state }
-    }
-}
-
-impl Default for Router {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Handle for programmatic navigation
-#[derive(Clone)]
-pub struct RouterHandle {
-    state: Arc<Mutex<RouterState>>,
-}
-
-impl RouterHandle {
     /// Navigate to a path
     pub fn push(&self, path: impl Into<String>) {
         let path = path.into();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.inner.lock().unwrap();
 
-        // Match the route
         let matched = state.trie.match_path(&path);
 
         // Run guards
@@ -205,7 +90,6 @@ impl RouterHandle {
             }
         }
 
-        // Update history
         let entry = HistoryEntry {
             path: path.clone(),
             params: matched
@@ -220,17 +104,12 @@ impl RouterHandle {
         };
         state.history.push(entry);
         state.current_match = matched;
-
-        // Fire route signal
-        if let Some(signal) = ROUTE_SIGNAL.get() {
-            signal.set(path);
-        }
     }
 
     /// Replace current route (no history entry)
     pub fn replace(&self, path: impl Into<String>) {
         let path = path.into();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.inner.lock().unwrap();
         let matched = state.trie.match_path(&path);
 
         let entry = HistoryEntry {
@@ -247,112 +126,199 @@ impl RouterHandle {
         };
         state.history.replace(entry);
         state.current_match = matched;
-
-        if let Some(signal) = ROUTE_SIGNAL.get() {
-            signal.set(path);
-        }
     }
 
     /// Go back
     pub fn back(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.inner.lock().unwrap();
         if let Some(entry) = state.history.back() {
             let path = entry.path.clone();
             state.current_match = state.trie.match_path(&path);
-            if let Some(signal) = ROUTE_SIGNAL.get() {
-                signal.set(path);
-            }
         }
     }
 
     /// Go forward
     pub fn forward(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.inner.lock().unwrap();
         if let Some(entry) = state.history.forward() {
             let path = entry.path.clone();
             state.current_match = state.trie.match_path(&path);
-            if let Some(signal) = ROUTE_SIGNAL.get() {
-                signal.set(path);
-            }
         }
     }
 
     pub fn can_go_back(&self) -> bool {
-        self.state.lock().unwrap().history.can_go_back()
+        self.inner.lock().unwrap().history.can_go_back()
     }
 
     pub fn can_go_forward(&self) -> bool {
-        self.state.lock().unwrap().history.can_go_forward()
+        self.inner.lock().unwrap().history.can_go_forward()
     }
 
     /// Get the current path
     pub fn current_path(&self) -> String {
-        self.state.lock().unwrap().history.current.path.clone()
+        self.inner.lock().unwrap().history.current.path.clone()
     }
 
     /// Get the current matched route
     pub fn current_route(&self) -> Option<MatchedRoute> {
-        self.state.lock().unwrap().current_match.clone()
+        self.inner.lock().unwrap().current_match.clone()
     }
 
-    /// Build the current route's view
-    pub fn build_current_view(&self) -> Option<blinc_layout::div::Div> {
-        let state = self.state.lock().unwrap();
-        if let Some(ref matched) = state.current_match {
-            let view = state.views.get(matched.view_index)?;
-            let ctx = RouteContext {
-                params: matched.params.clone(),
-                query: matched.query.clone(),
-                path: matched.path.clone(),
-                router: self.clone(),
-            };
-            Some(view(ctx))
+    /// Get current route parameters
+    pub fn params(&self) -> RouteParams {
+        self.current_route().map(|r| r.params).unwrap_or_default()
+    }
+
+    /// Get current query parameters
+    pub fn query(&self) -> QueryParams {
+        self.current_route().map(|r| r.query).unwrap_or_default()
+    }
+
+    /// Check if a path matches any registered route
+    pub fn has_route(&self, path: &str) -> bool {
+        let state = self.inner.lock().unwrap();
+        state.trie.match_path(path).is_some()
+    }
+
+    /// Get the path template for a named route
+    pub fn path_for(&self, name: &str) -> Option<String> {
+        self.inner.lock().unwrap().named_routes.get(name).cloned()
+    }
+
+    /// Navigate to a named route with parameters
+    pub fn push_named(&self, name: &str, params: &[(&str, &str)]) {
+        if let Some(template) = self.path_for(name) {
+            let mut path = template;
+            for (key, value) in params {
+                path = path.replace(&format!(":{}", key), value);
+            }
+            self.push(path);
         } else {
-            None
+            tracing::warn!("Named route '{}' not found", name);
+        }
+    }
+
+    /// Build the current route's view as a Div
+    pub fn outlet(&self) -> blinc_layout::div::Div {
+        let state = self.inner.lock().unwrap();
+        if let Some(ref matched) = state.current_match {
+            if let Some(view) = state.views.get(matched.view_index) {
+                let ctx = RouteContext {
+                    params: matched.params.clone(),
+                    query: matched.query.clone(),
+                    path: matched.path.clone(),
+                    router: self.clone(),
+                };
+                return view(ctx);
+            }
+        }
+        blinc_layout::div::div()
+    }
+}
+
+/// Router builder
+pub struct RouterBuilder {
+    routes: Vec<Route>,
+    not_found: Option<RouteView>,
+    guards: Vec<NavigationGuard>,
+    initial_path: String,
+}
+
+impl RouterBuilder {
+    pub fn new() -> Self {
+        Self {
+            routes: Vec::new(),
+            not_found: None,
+            guards: Vec::new(),
+            initial_path: "/".to_string(),
+        }
+    }
+
+    pub fn route(mut self, route: Route) -> Self {
+        self.routes.push(route);
+        self
+    }
+
+    pub fn not_found(mut self, view: RouteView) -> Self {
+        self.not_found = Some(view);
+        self
+    }
+
+    pub fn guard(mut self, guard: NavigationGuard) -> Self {
+        self.guards.push(guard);
+        self
+    }
+
+    pub fn initial(mut self, path: impl Into<String>) -> Self {
+        self.initial_path = path.into();
+        self
+    }
+
+    /// Build the router. Returns a clonable Router handle.
+    pub fn build(self) -> Router {
+        let mut trie = RouteTrie::new();
+        let mut views: Vec<RouteView> = Vec::new();
+        let mut named_routes = rustc_hash::FxHashMap::default();
+
+        fn register_routes(
+            trie: &mut RouteTrie,
+            views: &mut Vec<RouteView>,
+            named: &mut rustc_hash::FxHashMap<String, String>,
+            routes: &[Route],
+            prefix: &str,
+        ) {
+            for route in routes {
+                let full_path = if prefix == "/" {
+                    route.path.clone()
+                } else {
+                    format!("{}{}", prefix, route.path)
+                };
+
+                if let Some(view) = route.view {
+                    let idx = views.len();
+                    views.push(view);
+                    trie.add(&full_path, idx, route.name.as_deref());
+
+                    if let Some(ref name) = route.name {
+                        named.insert(name.clone(), full_path.clone());
+                    }
+                }
+
+                if !route.children.is_empty() {
+                    register_routes(trie, views, named, &route.children, &full_path);
+                }
+            }
+        }
+
+        register_routes(&mut trie, &mut views, &mut named_routes, &self.routes, "/");
+
+        if let Some(nf_view) = self.not_found {
+            let idx = views.len();
+            views.push(nf_view);
+            trie.set_not_found(idx);
+        }
+
+        let initial_match = trie.match_path(&self.initial_path);
+
+        Router {
+            inner: Arc::new(Mutex::new(RouterInner {
+                trie,
+                views,
+                guards: self.guards,
+                history: RouterHistory::new(&self.initial_path),
+                current_match: initial_match,
+                named_routes,
+            })),
         }
     }
 }
 
-/// Get the global router handle (panics if router not initialized)
-pub fn use_router() -> RouterHandle {
-    RouterHandle {
-        state: Arc::clone(
-            ROUTER
-                .get()
-                .expect("Router not initialized. Call Router::new().build() first."),
-        ),
+impl Default for RouterBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-/// Get the current route's parameters
-pub fn use_params() -> RouteParams {
-    use_router()
-        .current_route()
-        .map(|r| r.params)
-        .unwrap_or_default()
-}
-
-/// Get the current route's query parameters
-pub fn use_query() -> QueryParams {
-    use_router()
-        .current_route()
-        .map(|r| r.query)
-        .unwrap_or_default()
-}
-
-/// Get the route signal for reactive dependency tracking.
-/// Use with `Stateful::deps()` to rebuild when route changes.
-pub fn route_signal_id() -> Option<blinc_core::reactive::SignalId> {
-    ROUTE_SIGNAL.get().map(|s| s.signal_id())
-}
-
-/// Build a route outlet — renders the current route's view.
-///
-/// Place this in your layout where route content should appear.
-/// It rebuilds when the route signal changes.
-pub fn route_outlet() -> blinc_layout::div::Div {
-    let router = use_router();
-    router
-        .build_current_view()
-        .unwrap_or_else(blinc_layout::div::div)
-}
+// Re-export key types
+pub use history::HistoryEntry;
+pub use route::{MatchedRoute, QueryParams, Route, RouteContext, RouteParams};

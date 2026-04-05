@@ -59,7 +59,7 @@ pub struct RouteContext {
     pub params: RouteParams,
     pub query: QueryParams,
     pub path: String,
-    pub router: crate::RouterHandle,
+    pub router: crate::Router,
 }
 
 /// A route definition
