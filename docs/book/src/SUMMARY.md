@@ -52,13 +52,17 @@
 
 - [Buttons & Inputs](./widgets/inputs.md)
 - [Text & Rich Text](./widgets/text.md)
+- [Code Editor](./widgets/code-editor.md)
 - [Scroll Containers](./widgets/scroll.md)
+- [Virtualized List](./widgets/virtual-list.md)
 - [Canvas Drawing](./widgets/canvas.md)
 - [Images & SVG](./widgets/media.md)
 - [Markdown Rendering](./widgets/markdown.md)
 
 # Advanced
 
+- [Multi-Window](./advanced/multi-window.md)
+- [System Integration](./advanced/system-integration.md)
 - [Element Query API](./advanced/element-query.md)
 - [Overlay System](./advanced/overlays.md)
 - [Custom State Machines](./advanced/state-machines.md)
