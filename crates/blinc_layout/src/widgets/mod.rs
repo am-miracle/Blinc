@@ -41,7 +41,6 @@ pub mod hr;
 pub mod link;
 pub mod list;
 pub mod overlay;
-pub mod pull_to_refresh;
 pub mod radio;
 pub mod scroll;
 pub mod table;
