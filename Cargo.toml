@@ -19,6 +19,7 @@ members = [
     "crates/blinc_icons",
     "crates/blinc_tabler_icons",
     "crates/blinc_debugger",
+    "crates/blinc_router",
     "crates/blinc_runtime",
     "crates/blinc_canvas_kit",
     "crates/blinc_test_suite",
