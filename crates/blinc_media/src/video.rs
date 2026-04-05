@@ -264,3 +264,33 @@ impl Default for VideoPlayer {
         Self::new()
     }
 }
+
+impl crate::player::Player for VideoPlayer {
+    fn play(&self) {
+        VideoPlayer::play(self);
+    }
+    fn pause(&self) {
+        VideoPlayer::pause(self);
+    }
+    fn stop(&self) {
+        VideoPlayer::stop(self);
+    }
+    fn seek(&self, position_ms: u64) {
+        VideoPlayer::seek(self, position_ms);
+    }
+    fn position_ms(&self) -> u64 {
+        VideoPlayer::position_ms(self)
+    }
+    fn duration_ms(&self) -> u64 {
+        VideoPlayer::duration_ms(self)
+    }
+    fn volume(&self) -> f32 {
+        VideoPlayer::volume(self)
+    }
+    fn set_volume(&self, volume: f32) {
+        VideoPlayer::set_volume(self, volume);
+    }
+    fn is_playing(&self) -> bool {
+        VideoPlayer::is_playing(self)
+    }
+}

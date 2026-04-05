@@ -26,10 +26,12 @@
 
 pub mod audio;
 pub mod frame;
+pub mod player;
 pub mod rtc;
 pub mod video;
 
 pub use audio::{AudioPlayer, AudioSource, PlaybackState};
 pub use frame::{AudioSamples, Frame, PixelFormat, SampleFormat};
+pub use player::Player;
 pub use rtc::{AudioRecorder, AudioRecorderConfig, CameraConfig, CameraFacing, CameraStream};
 pub use video::{VideoDecoder, VideoFrame, VideoPlayer, VideoState};

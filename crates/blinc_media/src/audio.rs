@@ -62,6 +62,10 @@ struct AudioPlayerInner {
     volume: f32,
     #[allow(dead_code)]
     looping: bool,
+    /// Time when playback started (for position tracking)
+    play_start: Option<std::time::Instant>,
+    /// Position offset (from seek or pause)
+    position_offset_ms: u64,
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     sink: Option<rodio::Sink>,
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -84,6 +88,8 @@ impl AudioPlayer {
                     state: PlaybackState::Stopped,
                     volume: 1.0,
                     looping: false,
+                    play_start: None,
+                    position_offset_ms: 0,
                     sink: None,
                     _stream: stream,
                     stream_handle: handle,
@@ -98,6 +104,8 @@ impl AudioPlayer {
                     state: PlaybackState::Stopped,
                     volume: 1.0,
                     looping: false,
+                    play_start: None,
+                    position_offset_ms: 0,
                 })),
             }
         }
@@ -161,6 +169,7 @@ impl AudioPlayer {
         }
 
         inner.state = PlaybackState::Playing;
+        inner.play_start = Some(std::time::Instant::now());
     }
 
     /// Pause playback
@@ -173,6 +182,10 @@ impl AudioPlayer {
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("audio", "pause", ());
+        }
+        // Track elapsed position
+        if let Some(start) = inner.play_start.take() {
+            inner.position_offset_ms += start.elapsed().as_millis() as u64;
         }
         inner.state = PlaybackState::Paused;
     }
@@ -189,6 +202,7 @@ impl AudioPlayer {
             let _ = blinc_core::native_bridge::native_call::<(), _>("audio", "resume", ());
         }
         inner.state = PlaybackState::Playing;
+        inner.play_start = Some(std::time::Instant::now());
     }
 
     /// Stop playback
@@ -203,6 +217,43 @@ impl AudioPlayer {
             let _ = blinc_core::native_bridge::native_call::<(), _>("audio", "stop", ());
         }
         inner.state = PlaybackState::Stopped;
+        inner.play_start = None;
+        inner.position_offset_ms = 0;
+    }
+
+    /// Get current playback position in milliseconds
+    pub fn position_ms(&self) -> u64 {
+        let inner = self.inner.borrow();
+        let elapsed = inner
+            .play_start
+            .map(|s| s.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        inner.position_offset_ms + elapsed
+    }
+
+    /// Seek to a position in milliseconds
+    ///
+    /// Note: seeking restarts playback from the new position on desktop.
+    /// On mobile, the platform player handles seeking natively.
+    pub fn seek(&self, _position_ms: u64) {
+        let mut inner = self.inner.borrow_mut();
+        inner.position_offset_ms = _position_ms;
+        inner.play_start = if inner.state == PlaybackState::Playing {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let _ = blinc_core::native_bridge::native_call::<(), _>(
+                "audio",
+                "seek",
+                vec![blinc_core::native_bridge::NativeValue::Int64(
+                    _position_ms as i64,
+                )],
+            );
+        }
     }
 
     /// Set volume (0.0 = silent, 1.0 = full)
@@ -259,5 +310,35 @@ impl AudioPlayer {
 impl Default for AudioPlayer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::player::Player for AudioPlayer {
+    fn play(&self) {
+        self.resume();
+    }
+    fn pause(&self) {
+        AudioPlayer::pause(self);
+    }
+    fn stop(&self) {
+        AudioPlayer::stop(self);
+    }
+    fn seek(&self, position_ms: u64) {
+        AudioPlayer::seek(self, position_ms);
+    }
+    fn position_ms(&self) -> u64 {
+        AudioPlayer::position_ms(self)
+    }
+    fn duration_ms(&self) -> u64 {
+        0
+    } // Duration requires decoder introspection
+    fn volume(&self) -> f32 {
+        AudioPlayer::volume(self)
+    }
+    fn set_volume(&self, volume: f32) {
+        AudioPlayer::set_volume(self, volume);
+    }
+    fn is_playing(&self) -> bool {
+        AudioPlayer::is_playing(self)
     }
 }
