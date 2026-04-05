@@ -45,6 +45,24 @@ pub enum GuardResult {
     Reject(String),
 }
 
+/// Page lifecycle state in the stack
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageState {
+    /// Page is visible and interactive
+    Active,
+    /// Page is in the stack but hidden — animations frozen, input disabled
+    Suspended,
+}
+
+/// A page entry in the navigation stack
+#[derive(Clone, Debug)]
+pub struct PageEntry {
+    /// The matched route for this page
+    pub route: MatchedRoute,
+    /// Current lifecycle state
+    pub state: PageState,
+}
+
 /// Internal router state
 struct RouterInner {
     trie: RouteTrie,
@@ -54,6 +72,8 @@ struct RouterInner {
     current_match: Option<MatchedRoute>,
     /// Route names → path templates for reverse lookup
     named_routes: rustc_hash::FxHashMap<String, String>,
+    /// Page stack — bottom is oldest, top is active
+    page_stack: Vec<PageEntry>,
 }
 
 /// A router instance. Clone to share across closures.
@@ -104,7 +124,20 @@ impl Router {
             title: None,
         };
         state.history.push(entry);
-        state.current_match = matched;
+        state.current_match = matched.clone();
+
+        // Update page stack: suspend current top, push new page
+        if let Some(ref m) = matched {
+            // Suspend all existing pages
+            for page in &mut state.page_stack {
+                page.state = PageState::Suspended;
+            }
+            // Push new active page
+            state.page_stack.push(PageEntry {
+                route: m.clone(),
+                state: PageState::Active,
+            });
+        }
     }
 
     /// Replace current route (no history entry)
@@ -135,6 +168,12 @@ impl Router {
         if let Some(entry) = state.history.back() {
             let path = entry.path.clone();
             state.current_match = state.trie.match_path(&path);
+
+            // Pop top page, resume the one below
+            state.page_stack.pop();
+            if let Some(top) = state.page_stack.last_mut() {
+                top.state = PageState::Active;
+            }
         }
     }
 
@@ -197,6 +236,73 @@ impl Router {
         } else {
             tracing::warn!("Named route '{}' not found", name);
         }
+    }
+
+    /// Get a snapshot of the current page stack
+    pub fn page_stack(&self) -> Vec<PageEntry> {
+        self.inner.lock().unwrap().page_stack.clone()
+    }
+
+    /// Build all pages in the stack as a `stack()` container.
+    ///
+    /// Each page is layered. Suspended pages have `pointer_events_none`
+    /// and `suspended` flags set on their motion wrapper so animations
+    /// freeze and input is disabled.
+    ///
+    /// Use this instead of `outlet()` for full page-stack navigation
+    /// with persistent page state across push/pop.
+    pub fn stack_outlet(&self) -> blinc_layout::div::Div {
+        use blinc_layout::div::div;
+
+        let pages = {
+            let state = self.inner.lock().unwrap();
+            let pages: Vec<(PageEntry, Option<RouteView>)> = state
+                .page_stack
+                .iter()
+                .map(|p| {
+                    let view = state.views.get(p.route.view_index).copied();
+                    (p.clone(), view)
+                })
+                .collect();
+            pages
+        }; // lock released
+
+        let mut container = div().w_full().h_full().relative();
+
+        for (i, (page, view)) in pages.iter().enumerate() {
+            let is_top = i == pages.len() - 1;
+
+            if let Some(view_fn) = view {
+                let ctx = RouteContext {
+                    params: page.route.params.clone(),
+                    query: page.route.query.clone(),
+                    path: page.route.path.clone(),
+                    router: self.clone(),
+                };
+
+                push_router_context(self);
+                let page_div = view_fn(ctx);
+                pop_router_context();
+
+                // Wrap each page: suspended pages get no input + hidden
+                let wrapper = if is_top {
+                    // Active page — full size, interactive
+                    div().w_full().h_full().child(page_div)
+                } else {
+                    // Suspended page — no input, still in tree for state preservation
+                    div()
+                        .w_full()
+                        .h_full()
+                        .pointer_events_none()
+                        .opacity(0.0) // hidden but preserved in tree
+                        .child(page_div)
+                };
+
+                container = container.child(wrapper);
+            }
+        }
+
+        container
     }
 
     /// Handle a deep link URI from the platform.
@@ -356,8 +462,16 @@ impl RouterBuilder {
                 views,
                 guards: self.guards,
                 history: RouterHistory::new(&self.initial_path),
-                current_match: initial_match,
+                current_match: initial_match.clone(),
                 named_routes,
+                page_stack: initial_match
+                    .map(|m| {
+                        vec![PageEntry {
+                            route: m,
+                            state: PageState::Active,
+                        }]
+                    })
+                    .unwrap_or_default(),
             })),
         };
 

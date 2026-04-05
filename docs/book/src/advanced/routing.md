@@ -251,24 +251,51 @@ fn app_shell(router: &Router) -> Div {
 
 Each tab click calls `router.push()` which updates the outlet. The tab state stays in sync with the route.
 
-## Stack Navigator
+## Stack Navigator (Page Stack)
 
-Use `stack()` from `blinc_layout` to layer pages with the router:
+The router maintains a **page stack** — pages persist in the tree when
+new pages are pushed on top. Suspended pages have input disabled and
+are hidden, but their state (scroll position, form values, etc.) is preserved.
+
+### Simple outlet (single page)
 
 ```rust
-use blinc_layout::prelude::*;
+// Renders only the current route's view (previous pages are discarded)
+router.outlet()
+```
 
-fn route_stack(router: &Router) -> Div {
-    // The router's outlet already renders the current route's view.
-    // For animated page stacking, wrap the outlet in a stack:
-    stack()
-        .w_full()
-        .h_full()
-        .child(router.outlet())
+### Stack outlet (persistent pages)
+
+```rust
+// Renders ALL pages in the stack — suspended pages are hidden but preserved
+router.stack_outlet()
+```
+
+When you `router.push("/details")`:
+1. The current page becomes **Suspended** (opacity 0, pointer_events_none)
+2. The new page is pushed as **Active** on top
+
+When you `router.back()`:
+1. The top page is **removed** from the stack
+2. The page below becomes **Active** again (with preserved state)
+
+### Page state
+
+```rust
+use blinc_router::PageState;
+
+let pages = router.page_stack();
+for page in &pages {
+    match page.state {
+        PageState::Active => println!("Visible: {}", page.route.path),
+        PageState::Suspended => println!("Hidden: {}", page.route.path),
+    }
 }
 ```
 
-For push/pop animations, use `motion()` containers inside your route views:
+### Entry/exit animations
+
+Use `motion()` containers inside route views for animated transitions:
 
 ```rust
 fn user_detail(ctx: RouteContext) -> Div {
@@ -285,6 +312,27 @@ fn user_detail(ctx: RouteContext) -> Div {
                     .child(text("Back"))
                 )
         )
+}
+```
+
+## Nested Route Stacks
+
+Layout routes can contain their own scoped router for sub-navigation.
+`use_router()` automatically returns the innermost router:
+
+```rust
+fn dashboard_layout(ctx: RouteContext) -> Div {
+    // Create a sub-router for dashboard tabs
+    let sub_router = RouterBuilder::new()
+        .route(Route::new("/").view(dashboard_overview))
+        .route(Route::new("/analytics").view(analytics))
+        .route(Route::new("/settings").view(settings))
+        .initial(&ctx.path) // Start at current sub-path
+        .build();
+
+    div().flex_row().w_full().h_full()
+        .child(dashboard_sidebar(&sub_router))
+        .child(sub_router.outlet()) // Nested outlet — use_router() returns sub_router here
 }
 ```
 
