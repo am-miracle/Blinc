@@ -57,6 +57,7 @@
 - [Virtualized List](./widgets/virtual-list.md)
 - [Canvas Drawing](./widgets/canvas.md)
 - [Images & SVG](./widgets/media.md)
+- [Audio & Video](./widgets/audio-video.md)
 - [Markdown Rendering](./widgets/markdown.md)
 
 # Advanced
