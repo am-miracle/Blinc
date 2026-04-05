@@ -267,6 +267,12 @@ pub enum Key {
     // Character input (for text input)
     Char(char),
 
+    // System keys
+    /// System back button (Android back, browser back)
+    Back,
+    /// Menu key
+    Menu,
+
     // Unknown key
     Unknown,
 }

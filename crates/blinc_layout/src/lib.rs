@@ -89,6 +89,7 @@ pub mod calc;
 pub mod css_parser;
 
 // Stable unique key generation for components
+pub mod back_handler;
 pub mod key;
 pub mod window_actions;
 
