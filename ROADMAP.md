@@ -246,9 +246,9 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Mesh loading (glTF/OBJ) | Planned | `draw_mesh()` is currently stubbed |
-| Instanced mesh rendering | Planned | `draw_mesh_instanced()` stubbed |
-| PBR materials | Planned | Metallic-roughness workflow |
+| Generic mesh data | **Done** | `MeshData` + `Vertex` + `Material` — users convert from glTF/OBJ/FBX |
+| draw_mesh_data | **Done** | `DrawContext::draw_mesh_data(mesh, transform)` — direct render, no registration |
+| PBR materials | **Done** | `Material`: base_color, metallic, roughness, emissive, texture, alpha_mode |
 | Shadow mapping | Planned | Depth pass + shadow map sampling |
 | Normal / displacement maps | Planned | Texture-based surface detail |
 | Skeletal animation | Planned | Bone transforms + skinning |

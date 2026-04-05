@@ -662,11 +662,11 @@ impl ImageOptions {
 // 3D Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Handle to a loaded mesh
+/// Handle to a loaded mesh (for cached/registered meshes)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MeshId(pub u64);
 
-/// Handle to a material
+/// Handle to a material (for cached/registered materials)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MaterialId(pub u64);
 
@@ -675,6 +675,121 @@ pub struct MaterialId(pub u64);
 pub struct MeshInstance {
     pub transform: Mat4,
     pub material: Option<MaterialId>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Generic Mesh Data — users convert from glTF/OBJ/FBX/custom formats
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single vertex with position, normal, UV, and color
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct Vertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub uv: [f32; 2],
+    pub color: [f32; 4],
+}
+
+impl Vertex {
+    pub fn new(pos: [f32; 3]) -> Self {
+        Self {
+            position: pos,
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.0, 0.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+        }
+    }
+
+    pub fn with_normal(mut self, n: [f32; 3]) -> Self {
+        self.normal = n;
+        self
+    }
+    pub fn with_uv(mut self, uv: [f32; 2]) -> Self {
+        self.uv = uv;
+        self
+    }
+    pub fn with_color(mut self, c: [f32; 4]) -> Self {
+        self.color = c;
+        self
+    }
+}
+
+/// Generic mesh data — the interchange format for 3D geometry.
+///
+/// Users convert from any source format (glTF, OBJ, FBX, procedural)
+/// into this struct, then pass it to `DrawContext::draw_mesh_data()`.
+///
+/// # Example
+///
+/// ```ignore
+/// // Triangle
+/// let mesh = MeshData {
+///     vertices: vec![
+///         Vertex::new([-0.5, -0.5, 0.0]).with_color([1.0, 0.0, 0.0, 1.0]),
+///         Vertex::new([ 0.5, -0.5, 0.0]).with_color([0.0, 1.0, 0.0, 1.0]),
+///         Vertex::new([ 0.0,  0.5, 0.0]).with_color([0.0, 0.0, 1.0, 1.0]),
+///     ],
+///     indices: vec![0, 1, 2],
+///     material: Material::default(),
+/// };
+/// ctx.draw_mesh_data(&mesh, Mat4::IDENTITY);
+/// ```
+#[derive(Clone, Debug)]
+pub struct MeshData {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u32>,
+    pub material: Material,
+}
+
+/// PBR-like material for mesh rendering
+#[derive(Clone, Debug)]
+pub struct Material {
+    /// Base color (RGBA)
+    pub base_color: [f32; 4],
+    /// Metallic factor (0.0 = dielectric, 1.0 = metal)
+    pub metallic: f32,
+    /// Roughness factor (0.0 = mirror, 1.0 = diffuse)
+    pub roughness: f32,
+    /// Emissive color (RGB, intensity via magnitude)
+    pub emissive: [f32; 3],
+    /// Base color texture (RGBA pixels, None = use base_color)
+    pub base_color_texture: Option<TextureData>,
+    /// Whether the material is unlit (ignore lighting)
+    pub unlit: bool,
+    /// Alpha mode
+    pub alpha_mode: AlphaMode,
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Self {
+            base_color: [1.0, 1.0, 1.0, 1.0],
+            metallic: 0.0,
+            roughness: 0.5,
+            emissive: [0.0, 0.0, 0.0],
+            base_color_texture: None,
+            unlit: false,
+            alpha_mode: AlphaMode::Opaque,
+        }
+    }
+}
+
+/// Texture data for materials
+#[derive(Clone, Debug)]
+pub struct TextureData {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Alpha blending mode
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AlphaMode {
+    #[default]
+    Opaque,
+    Blend,
+    Mask,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1329,11 +1444,29 @@ pub trait DrawContext {
     /// Set the camera for 3D rendering
     fn set_camera(&mut self, camera: &Camera);
 
-    /// Draw a mesh with a material
+    /// Draw a mesh with a material (using cached mesh/material handles)
     fn draw_mesh(&mut self, mesh: MeshId, material: MaterialId, transform: Mat4);
 
-    /// Draw instanced meshes
+    /// Draw instanced meshes (using cached mesh handle)
     fn draw_mesh_instanced(&mut self, mesh: MeshId, instances: &[MeshInstance]);
+
+    /// Draw mesh data directly (no registration needed).
+    ///
+    /// Users convert from any format (glTF, OBJ, FBX, procedural) into
+    /// `MeshData`, then pass it here. The GPU implementation handles
+    /// vertex/index buffer upload and rendering.
+    ///
+    /// ```ignore
+    /// let mesh = MeshData {
+    ///     vertices: vec![Vertex::new([-0.5, -0.5, 0.0]), ...],
+    ///     indices: vec![0, 1, 2],
+    ///     material: Material::default(),
+    /// };
+    /// ctx.draw_mesh_data(&mesh, Mat4::IDENTITY);
+    /// ```
+    fn draw_mesh_data(&mut self, _mesh: &MeshData, _transform: Mat4) {
+        // Default no-op — GPU implementations override
+    }
 
     /// Add a light to the scene
     fn add_light(&mut self, light: Light);
