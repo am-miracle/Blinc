@@ -751,6 +751,24 @@ impl SchedulerHandle {
         }
     }
 
+    /// Pause a spring — freezes at current position
+    pub fn pause_spring(&self, id: SpringId) {
+        if let Some(inner) = self.inner.upgrade() {
+            if let Some(spring) = inner.lock().unwrap().springs.get_mut(id) {
+                spring.pause();
+            }
+        }
+    }
+
+    /// Resume a paused spring
+    pub fn resume_spring(&self, id: SpringId) {
+        if let Some(inner) = self.inner.upgrade() {
+            if let Some(spring) = inner.lock().unwrap().springs.get_mut(id) {
+                spring.resume();
+            }
+        }
+    }
+
     // =========================================================================
     // Keyframe Operations
     // =========================================================================
@@ -1060,11 +1078,21 @@ impl AnimatedValue {
         self.target = value;
     }
 
+    /// Pause the spring — freezes at current position, step() is no-op
+    pub fn pause(&mut self) {
+        if let Some(id) = self.spring_id {
+            self.handle.pause_spring(id);
+        }
+    }
+
+    /// Resume from paused state
+    pub fn resume(&mut self) {
+        if let Some(id) = self.spring_id {
+            self.handle.resume_spring(id);
+        }
+    }
+
     /// Check if currently animating
-    ///
-    /// Returns `true` only while the spring is actively moving toward its target.
-    /// Once the spring has settled (reached target with near-zero velocity), this
-    /// returns `false`.
     pub fn is_animating(&self) -> bool {
         if let Some(id) = self.spring_id {
             // Check actual settled state, not just existence
