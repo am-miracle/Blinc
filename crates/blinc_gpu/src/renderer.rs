@@ -3081,6 +3081,69 @@ impl GpuRenderer {
     }
 
     /// Simple render with clear (no layer effect processing)
+    /// Test whether a primitive's expanded bounds intersect the viewport.
+    ///
+    /// Returns `true` if the primitive might be visible and should be rendered.
+    /// Conservative: accounts for shadow, border, and rotation expansion.
+    /// Primitives with 3D perspective are always considered visible.
+    #[inline]
+    fn is_primitive_visible(&self, prim: &GpuPrimitive) -> bool {
+        let vp_w = self.viewport_size.0 as f32;
+        let vp_h = self.viewport_size.1 as f32;
+
+        let px = prim.bounds[0];
+        let py = prim.bounds[1];
+        let pw = prim.bounds[2];
+        let ph = prim.bounds[3];
+
+        // Primitives with 3D perspective may project anywhere
+        if prim.perspective[2] > 0.0 {
+            return true;
+        }
+
+        // Account for shadow expansion (matches shader bounds computation)
+        let shadow_blur = prim.shadow[2];
+        let shadow_ox = prim.shadow[0].abs();
+        let shadow_oy = prim.shadow[1].abs();
+        let mut expand = shadow_blur * 3.0 + shadow_ox + shadow_oy;
+
+        // Account for border (stroke) expansion
+        expand += prim.border[0];
+
+        // Account for rotation — rotated rects have larger AABB
+        // rotation = [sin_rz, cos_rz, sin_ry, cos_ry], identity = [0, 1, 0, 1]
+        let has_rotation = prim.rotation[0] != 0.0 || prim.rotation[2] != 0.0;
+        if has_rotation {
+            // Worst case AABB expansion for rotated rect: half-diagonal
+            let half_diag = (pw * pw + ph * ph).sqrt() * 0.5;
+            expand += half_diag;
+        }
+
+        // Non-identity local affine — be generous with expansion
+        let has_affine = prim.local_affine[1] != 0.0 || prim.local_affine[2] != 0.0;
+        if has_affine {
+            let half_diag = (pw * pw + ph * ph).sqrt() * 0.5;
+            expand += half_diag;
+        }
+
+        // AABB intersection with viewport [0, 0, vp_w, vp_h]
+        let left = px - expand;
+        let top = py - expand;
+        let right = px + pw + expand;
+        let bottom = py + ph + expand;
+
+        right > 0.0 && bottom > 0.0 && left < vp_w && top < vp_h
+    }
+
+    /// Cull a slice of primitives, returning only those visible in the viewport.
+    fn cull_primitives(&self, prims: &[GpuPrimitive]) -> Vec<GpuPrimitive> {
+        prims
+            .iter()
+            .filter(|p| self.is_primitive_visible(p))
+            .copied()
+            .collect()
+    }
+
     fn render_with_clear_simple(
         &mut self,
         target: &wgpu::TextureView,
@@ -3095,18 +3158,21 @@ impl GpuRenderer {
         self.queue
             .write_buffer(&self.buffers.uniforms, 0, bytemuck::bytes_of(&uniforms));
 
+        // Cull off-screen primitives before GPU upload
+        let visible_primitives = self.cull_primitives(&batch.primitives);
+
         // Update primitives buffer (with safety limit to prevent buffer overflow)
-        if !batch.primitives.is_empty() {
+        if !visible_primitives.is_empty() {
             let max_primitives = self.config.max_primitives;
-            let primitives_to_write = if batch.primitives.len() > max_primitives {
+            let primitives_to_write = if visible_primitives.len() > max_primitives {
                 tracing::warn!(
                     "Primitive count {} exceeds buffer capacity {}, truncating",
-                    batch.primitives.len(),
+                    visible_primitives.len(),
                     max_primitives
                 );
-                &batch.primitives[..max_primitives]
+                &visible_primitives[..max_primitives]
             } else {
-                &batch.primitives
+                &visible_primitives[..]
             };
             self.queue.write_buffer(
                 &self.buffers.primitives,
@@ -3155,12 +3221,12 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            // Render SDF primitives
-            if !batch.primitives.is_empty() {
+            // Render SDF primitives (only visible ones)
+            if !visible_primitives.is_empty() {
                 render_pass.set_pipeline(&self.pipelines.sdf);
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                // 6 vertices per quad (2 triangles), one instance per primitive
-                render_pass.draw(0..6, 0..batch.primitives.len() as u32);
+                let count = visible_primitives.len().min(self.config.max_primitives) as u32;
+                render_pass.draw(0..6, 0..count);
             }
 
             // Render paths
@@ -3386,12 +3452,12 @@ impl GpuRenderer {
             return;
         }
 
-        // Build list of primitives to render (excluding those in effect layers)
+        // Build list of primitives to render (excluding effect layers + off-screen)
         let included_primitives: Vec<GpuPrimitive> = batch
             .primitives
             .iter()
             .enumerate()
-            .filter(|(i, _)| !exclude.contains(i))
+            .filter(|(i, p)| !exclude.contains(i) && self.is_primitive_visible(p))
             .map(|(_, p)| *p)
             .collect();
 
