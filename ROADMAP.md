@@ -77,7 +77,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Push notifications | Planned | FCM (Android), APNs (iOS) |
-| Deep linking / URL schemes | Planned | Intent filters / URL types |
+| Deep linking / URL schemes | **Done** | `blinc_router::handle_deep_link()` + platform `DeepLink` parser |
 | Camera access | Planned | Native bridge + texture streaming |
 | Location services | Planned | GPS via native bridge |
 | Biometric auth | Planned | Fingerprint / Face ID |
@@ -91,7 +91,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | Stack navigator | Planned | Via `blinc_router` — page stack with entry/exit animations |
 | Tab navigator | Partial | Tabs component exists, needs routing |
 | Bottom sheet | Partial | Sheet component, needs gesture dismiss |
-| Back button handling (Android) | Planned | System back integration |
+| Back button handling (Android) | **Done** | `router.register_back_handler()` + `Key::Back` dispatch |
 
 ### 2.4 Router (`blinc_router` crate) (P0)
 
@@ -99,12 +99,15 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Route definition & trie matching | Planned | `/users/:id`, wildcards, nested routes |
+| Route definition & trie matching | **Done** | `/users/:id`, wildcards, nested routes, O(depth) trie |
+| Scoped `use_router()` hook | **Done** | Thread-local router stack, nested router support |
+| History management | **Done** | `RouterHistory` with push/replace/back/forward |
+| Page transitions | **Done** | `PageTransition` using `AnimationPreset` + `SpringConfig` |
+| Navigation guards | **Done** | Auth guards with redirect/reject |
+| Deep linking | **Done** | URI parsing, `handle_deep_link()`, `cli_deep_link()` |
+| System back button | **Done** | `register_back_handler()`, `Key::Back` dispatch |
+| Named routing | **Done** | `push_named("user", &[("id", "42")])` reverse lookup |
 | Page stack (`route_stack()`) | Planned | `stack()` container, pages persist in stack |
-| History management | Planned | `Store<RouterHistory>`, push/replace/back/forward |
-| Page transitions | Planned | Slide, fade, modal, spring-animated entry/exit |
-| Navigation guards | Planned | Auth guards, redirect, reject |
-| Deep linking | Planned | URI parsing, platform handlers (Android/iOS/desktop) |
 | Page suspension | Planned | Freeze animations + buffer signals on non-top pages |
 | Nested route stacks | Planned | Layout routes with scoped sub-stacks |
 

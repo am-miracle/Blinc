@@ -12,5 +12,6 @@ rust-version.workspace = true
 blinc_core = { path = "../blinc_core", version = "0.1.14" }
 blinc_animation = { path = "../blinc_animation", version = "0.1.14" }
 blinc_layout = { path = "../blinc_layout", version = "0.1.14" }
+blinc_platform = { path = "../blinc_platform", version = "0.1.14" }
 tracing.workspace = true
 rustc-hash.workspace = true

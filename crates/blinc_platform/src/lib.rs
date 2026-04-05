@@ -43,6 +43,7 @@
 //! ```
 
 pub mod assets;
+pub mod deep_link;
 mod error;
 mod event;
 mod input;

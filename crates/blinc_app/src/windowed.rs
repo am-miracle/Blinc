@@ -3012,6 +3012,14 @@ impl WindowedApp {
                                         Key::S => 83, Key::T => 84, Key::U => 85,
                                         Key::V => 86, Key::W => 87, Key::X => 88,
                                         Key::Y => 89, Key::Z => 90,
+                                        Key::Back => {
+                                            // System back button — dispatch through back handler
+                                            if blinc_layout::back_handler::dispatch_back() {
+                                                return ControlFlow::Continue;
+                                            }
+                                            // Not consumed — let default handling proceed
+                                            0
+                                        }
                                         _ => 0,
                                     };
 

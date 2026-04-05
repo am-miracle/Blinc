@@ -61,6 +61,7 @@
 
 # Advanced
 
+- [Routing & Navigation](./advanced/routing.md)
 - [Multi-Window](./advanced/multi-window.md)
 - [System Integration](./advanced/system-integration.md)
 - [Element Query API](./advanced/element-query.md)

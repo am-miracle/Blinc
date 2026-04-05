@@ -1160,3 +1160,32 @@ impl AndroidApp {
         Ok((app, surface))
     }
 }
+
+// ============================================================================
+// Deep link handling
+// ============================================================================
+
+/// Global deep link callback — set by the app to route deep links to the router
+static DEEP_LINK_CALLBACK: std::sync::Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>> =
+    std::sync::Mutex::new(None);
+
+/// Register a callback for incoming deep links (called by the app at startup)
+///
+/// ```ignore
+/// blinc_app::android::set_deep_link_handler(move |uri| {
+///     router.handle_deep_link(uri);
+/// });
+/// ```
+pub fn set_deep_link_handler<F: Fn(&str) + Send + Sync + 'static>(handler: F) {
+    *DEEP_LINK_CALLBACK.lock().unwrap() = Some(Box::new(handler));
+}
+
+/// Dispatch a deep link URI (called from JNI when intent data arrives)
+pub fn dispatch_deep_link(uri: &str) {
+    tracing::info!("Android deep link received: {}", uri);
+    if let Ok(guard) = DEEP_LINK_CALLBACK.lock() {
+        if let Some(ref handler) = *guard {
+            handler(uri);
+        }
+    }
+}

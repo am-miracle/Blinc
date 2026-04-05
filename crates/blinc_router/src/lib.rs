@@ -199,6 +199,37 @@ impl Router {
         }
     }
 
+    /// Handle a deep link URI from the platform.
+    ///
+    /// Parses the URI and navigates to the extracted path.
+    /// Call this from the platform runner when receiving a deep link.
+    pub fn handle_deep_link(&self, uri: &str) {
+        use blinc_platform::deep_link::{DeepLink, DeepLinkSource};
+        if let Some(dl) = DeepLink::parse(uri, DeepLinkSource::System) {
+            let path = dl.route_path();
+            tracing::info!("Deep link: {} → {}", uri, path);
+            self.push(path);
+        } else {
+            tracing::warn!("Failed to parse deep link URI: {}", uri);
+        }
+    }
+
+    /// Register this router as the handler for the system back button.
+    ///
+    /// When back is pressed and the router can go back, it navigates back
+    /// and consumes the event. Otherwise, the event propagates (app exit).
+    pub fn register_back_handler(&self) -> blinc_layout::back_handler::BackHandlerHandle {
+        let router = self.clone();
+        blinc_layout::back_handler::push_back_handler(move || {
+            if router.can_go_back() {
+                router.back();
+                true // consumed
+            } else {
+                false // let app handle (exit)
+            }
+        })
+    }
+
     /// Build the current route's view as a Div.
     ///
     /// Pushes this router onto the context stack so `use_router()`
@@ -341,6 +372,20 @@ impl Default for RouterBuilder {
 // Re-export key types
 pub use history::HistoryEntry;
 pub use route::{MatchedRoute, QueryParams, Route, RouteContext, RouteParams};
+pub use transition::PageTransition;
+
+/// Check CLI arguments for a `--deep-link=URI` flag and return the URI.
+///
+/// Call this at app startup to handle deep links passed via command line:
+/// ```ignore
+/// let router = RouterBuilder::new().route(...).build();
+/// if let Some(uri) = blinc_router::cli_deep_link() {
+///     router.handle_deep_link(&uri);
+/// }
+/// ```
+pub fn cli_deep_link() -> Option<String> {
+    std::env::args().find_map(|arg| arg.strip_prefix("--deep-link=").map(|s| s.to_string()))
+}
 
 // ============================================================================
 // Scoped router context
