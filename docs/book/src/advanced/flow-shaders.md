@@ -1,6 +1,6 @@
 # Flow Shaders
 
-Flow shaders let you write GPU fragment shaders using a high-level DAG (directed acyclic graph) that compiles to WGSL. They can be defined in CSS stylesheets or directly in Rust using the `flow!` macro.
+Flow shaders are a DAG-based (directed acyclic graph) real-time shader compute system that compiles to WGSL. They support fragment, compute, vertex, and material targets — powering 2D effects, GPU simulation, and 3D mesh rendering from a single declarative language. Flows can be defined in CSS stylesheets or directly in Rust using the `flow!` macro.
 
 ## Quick Start
 
@@ -24,24 +24,35 @@ The `flow!` macro produces a `FlowGraph` using Rust identifiers and primitives. 
 
 ## Anatomy of a Flow Shader
 
-Every flow shader has a **name**, a **target** (always `fragment` for visual effects), and a body of declarations:
+Every flow shader has a **name**, a **target**, and a body of declarations:
 
 ```
 @flow <name> {
-    target: fragment;
+    target: fragment | compute | vertex | material;
 
     input <name>: builtin(<variable>);    // Input declarations
     step <name>: <step-type> { ... };     // Semantic steps (high-level)
     node <name> = <expression>;           // Raw computation nodes
     chain <name>: <step> | <step> | ...;  // Piped step chains
     use <flow-name>;                      // Compose other flows
-    output color = <expression>;          // Output declarations
+    output <target> = <expression>;       // Output declarations
 }
 ```
 
 Declarations can appear in any order, but each node can only reference inputs and earlier nodes (the graph must be acyclic).
 
+### Targets
+
+| Target | Use Case | Output |
+|--------|----------|--------|
+| `fragment` | 2D visual effects on UI elements | `color` (vec4) |
+| `compute` | GPU simulation, data processing | Named buffer writes |
+| `vertex` | 3D mesh vertex transformation | `position` (vec4 clip-space) |
+| `material` | 3D mesh surface/PBR shading | `albedo`, `metallic`, `roughness`, etc. |
+
 ## Builtin Variables
+
+### Fragment / Compute Builtins
 
 | Variable | Type | Description |
 |----------|------|-------------|
@@ -51,6 +62,34 @@ Declarations can appear in any order, but each node can only reference inputs an
 | `pointer` | `vec2` | Cursor position relative to element (0-1 range) |
 | `sdf` | `float` | Signed distance field value at the current fragment |
 | `frame_index` | `float` | Current frame number |
+
+### Vertex Target Builtins
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `vertex_position` / `position` | `vec3` | Vertex position in model space |
+| `vertex_normal` / `normal` | `vec3` | Vertex normal in model space |
+| `vertex_tangent` / `tangent` | `vec4` | Tangent (xyz = dir, w = handedness) |
+| `vertex_color` | `vec4` | Per-vertex color |
+| `joints` | `vec4<u32>` | Joint indices for skeletal animation |
+| `weights` | `vec4` | Joint weights |
+| `vertex_index` | `float` | Vertex/instance index |
+| `model_matrix` / `model` | `mat4` | Model-to-world transform |
+| `view_proj` / `view_projection` | `mat4` | View-projection matrix |
+
+### Material Target Builtins
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `world_position` / `world_pos` | `vec3` | Interpolated world-space position |
+| `world_normal` | `vec3` | Interpolated world-space normal |
+| `world_tangent` | `vec3` | Interpolated world-space tangent |
+| `tangent_handedness` | `float` | Tangent handedness (±1) |
+| `camera_position` / `camera_pos` | `vec3` | Camera position in world space |
+| `light_direction` / `light_dir` | `vec3` | Directional light direction |
+| `light_intensity` | `float` | Light intensity |
+| `uv` | `vec2` | Texture coordinates (also available in material) |
+| `time` | `float` | Frame time (also available in material) |
 
 ## Expressions
 
@@ -136,6 +175,22 @@ node d = c.rgb;
 |----------|-------------|
 | `phong(normal, light_dir, view_dir, shininess)` | Phong shading |
 | `blinn_phong(normal, light_dir, view_dir, shininess)` | Blinn-Phong shading |
+
+**Matrix (for vertex/material targets)**
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `mat4_mul_vec4(m, v)` | `(mat4, vec4) -> vec4` | Matrix-vector multiply |
+| `mat4_mul(a, b)` | `(mat4, mat4) -> mat4` | Matrix-matrix multiply |
+| `mat4_inverse(m)` / `inverse(m)` | `mat4 -> mat4` | Matrix inverse |
+| `mat4_transpose(m)` / `transpose(m)` | `mat4 -> mat4` | Matrix transpose |
+| `transform_normal(model, n)` | `(mat4, vec3) -> vec3` | Transform normal by model matrix (3x3 extract) |
+| `translation_matrix(v)` | `vec3 -> mat4` | Translation matrix from offset |
+| `rotation_matrix(axis, angle)` | `(vec3, float) -> mat4` | Rotation from axis + angle |
+| `scale_matrix(v)` | `vec3 -> mat4` | Scale matrix from factors |
+| `perspective(fov, aspect, near, far)` | `(f, f, f, f) -> mat4` | Perspective projection |
+| `look_at(eye, target, up)` | `(vec3, vec3, vec3) -> mat4` | View matrix |
+| `sample_texture(id, uv)` | `(float, vec2) -> vec4` | Sample a bound texture at UV |
 
 **Scene**
 
@@ -399,6 +454,150 @@ let wetglass = flow!(wetglass, fragment, {
 
 div().flow(wetglass).w(800.0).h(600.0)
 ```
+
+## Output Targets
+
+Each flow target has specific output variables:
+
+### Fragment Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `color` | `vec4` | Fragment color (required) |
+| `alpha` | `float` | Override alpha channel |
+| `displacement` | `float` | SDF displacement |
+
+### Compute Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `<buffer>[idx]` | varies | Write to named storage buffer |
+
+### Vertex Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `position` | `vec4` | Clip-space position (**required**) |
+| `world_normal` | `vec3` | World-space normal to pass to material |
+| `world_position` | `vec3` | World-space position to pass to material |
+
+### Material Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `albedo` / `base_color` | `vec4` | Base color RGBA (**required**) |
+| `metallic` | `float` | Metallic factor (0–1) |
+| `roughness` | `float` | Roughness factor (0–1) |
+| `emissive` | `vec3` | Emissive color |
+| `surface_normal` | `vec3` | Overridden surface normal |
+| `alpha_out` | `float` | Alpha override |
+
+## 3D Flow Shaders
+
+Flow shaders can drive 3D mesh rendering through `vertex` and `material` targets. These compile to vertex and fragment shaders that receive mesh geometry data and produce PBR-lit output.
+
+### Vertex Shader Flow
+
+Transform vertex positions, apply skeletal animation, or create procedural geometry:
+
+```rust
+let vertex_flow = flow!(custom_vertex, vertex, {
+    input pos: builtin(vertex_position);
+    input normal: builtin(vertex_normal);
+    input model: builtin(model_matrix);
+    input vp: builtin(view_proj);
+    input time: builtin(time);
+
+    // Wave deformation
+    node wave = sin(pos.x * 4.0 + time * 2.0) * 0.1;
+    node deformed = vec3(pos.x, pos.y + wave, pos.z);
+
+    // Standard MVP transform
+    node world = mat4_mul_vec4(model, vec4(deformed.x, deformed.y, deformed.z, 1.0));
+    node clip = mat4_mul_vec4(vp, world);
+    node w_normal = transform_normal(model, normal);
+
+    output position = clip;
+    output world_normal = w_normal;
+    output world_position = world.xyz;
+});
+```
+
+### Material Shader Flow
+
+Define surface properties using the DAG — the PBR evaluation is done automatically:
+
+```rust
+let material_flow = flow!(pbr_material, material, {
+    input uv: builtin(uv);
+    input world_pos: builtin(world_position);
+    input normal: builtin(world_normal);
+    input time: builtin(time);
+
+    // Procedural texture
+    node noise = fbm(uv * 8.0, 4);
+    node base = vec4(0.8 * noise, 0.3, 0.1, 1.0);
+
+    // Metallic varies with noise
+    node metal = smoothstep(0.4, 0.6, noise);
+
+    output albedo = base;
+    output metallic = metal;
+    output roughness = 0.3;
+    output emissive = vec3(0.0, 0.0, 0.0);
+});
+```
+
+### CSS-Defined 3D Flows
+
+3D flows work identically in CSS stylesheets:
+
+```css
+@flow terrain_vertex {
+    target: vertex;
+    input pos: builtin(vertex_position);
+    input normal: builtin(vertex_normal);
+    input model: builtin(model_matrix);
+    input vp: builtin(view_proj);
+
+    node world = mat4_mul_vec4(model, vec4(pos.x, pos.y, pos.z, 1.0));
+
+    output position = mat4_mul_vec4(vp, world);
+    output world_normal = transform_normal(model, normal);
+    output world_position = world.xyz;
+}
+
+@flow terrain_material {
+    target: material;
+    input uv: builtin(uv);
+    input normal: builtin(world_normal);
+
+    node height = fbm(uv * 10.0, 6);
+    node grass = vec4(0.2, 0.6, 0.1, 1.0);
+    node rock = vec4(0.5, 0.45, 0.4, 1.0);
+    node surface = mix(rock, grass, smoothstep(0.3, 0.6, height));
+
+    output albedo = surface;
+    output roughness = mix(0.8, 0.4, height);
+}
+```
+
+### Compute → 3D Pipeline
+
+Use `compute` flows to simulate particle systems, physics, or procedural geometry, then feed the storage buffer data into `MeshData`:
+
+```rust
+// Compute flow updates particle positions
+let sim = flow!(particle_sim, compute, {
+    input time: builtin(time);
+    buffer positions: vec4 [read_write];
+    node p = positions[idx];
+    node new_y = p.y + sin(time + f32(idx) * 0.1) * 0.01;
+    output positions[idx] = vec4(p.x, new_y, p.z, 1.0);
+});
+```
+
+The compute output can be read back and used to construct `MeshData` vertices, or joint matrices for skeletal animation.
 
 ## Performance Tips
 

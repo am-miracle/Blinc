@@ -395,6 +395,76 @@ The chain automatically:
 - Manages texture lifetimes and resizing
 - Skips disabled effects
 
+## Flow Shader Integration
+
+The [flow shader system](./flow-shaders.md) extends beyond 2D effects — it is a general-purpose DAG compute system that compiles to WGSL for any target. For 3D rendering, use `vertex` and `material` flow targets.
+
+### Declarative Vertex Shader
+
+Instead of writing raw WGSL, define vertex transforms as a flow DAG:
+
+```rust
+use blinc_layout::flow;
+
+let wave_vertex = flow!(wave_vertex, vertex, {
+    input pos: builtin(vertex_position);
+    input normal: builtin(vertex_normal);
+    input model: builtin(model_matrix);
+    input vp: builtin(view_proj);
+    input time: builtin(time);
+
+    node wave = sin(pos.x * 4.0 + time * 2.0) * 0.1;
+    node deformed = vec3(pos.x, pos.y + wave, pos.z);
+    node world = mat4_mul_vec4(model, vec4(deformed.x, deformed.y, deformed.z, 1.0));
+
+    output position = mat4_mul_vec4(vp, world);
+    output world_normal = transform_normal(model, normal);
+    output world_position = world.xyz;
+});
+```
+
+### Declarative Material Shader
+
+Define PBR surface properties — the flow compiler injects Blinn-Phong + Fresnel evaluation automatically:
+
+```rust
+let terrain_mat = flow!(terrain_mat, material, {
+    input uv: builtin(uv);
+    input normal: builtin(world_normal);
+
+    node height = fbm(uv * 10.0, 6);
+    node grass = vec4(0.2, 0.6, 0.1, 1.0);
+    node rock = vec4(0.5, 0.45, 0.4, 1.0);
+
+    output albedo = mix(rock, grass, smoothstep(0.3, 0.6, height));
+    output roughness = mix(0.8, 0.4, height);
+    output metallic = 0.0;
+});
+```
+
+### CSS-Defined 3D Shaders
+
+Flow shaders for 3D work in CSS stylesheets too:
+
+```css
+@flow ocean_vertex {
+    target: vertex;
+    input pos: builtin(position);
+    input model: builtin(model);
+    input vp: builtin(view_proj);
+    input time: builtin(time);
+
+    node wave = sin(pos.x * 3.0 + time) * 0.2 + sin(pos.z * 2.0 + time * 1.3) * 0.15;
+    node displaced = vec3(pos.x, pos.y + wave, pos.z);
+    node world = mat4_mul_vec4(model, vec4(displaced.x, displaced.y, displaced.z, 1.0));
+
+    output position = mat4_mul_vec4(vp, world);
+    output world_position = world.xyz;
+}
+```
+
+> **Tip:** See the [Flow Shaders](./flow-shaders.md) chapter for the complete function reference, semantic steps, chains, and composition with `use`.
+
 ## Raw Pixel Drawing
 
 For video frames, camera previews, or procedural textures, use `draw_rgba_pixels`:
