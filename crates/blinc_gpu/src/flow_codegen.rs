@@ -84,6 +84,7 @@ fn flow_type_to_wgsl(ty: FlowType) -> &'static str {
         FlowType::Vec2 => "vec2<f32>",
         FlowType::Vec3 => "vec3<f32>",
         FlowType::Vec4 => "vec4<f32>",
+        FlowType::Mat4 => "mat4x4<f32>",
     }
 }
 
@@ -284,6 +285,8 @@ impl<'a> CodegenContext<'a> {
         match self.graph.target {
             FlowTarget::Fragment => self.emit_fragment_shader(&mut out)?,
             FlowTarget::Compute => self.emit_compute_shader(&mut out)?,
+            FlowTarget::Vertex => self.emit_vertex_3d_shader(&mut out)?,
+            FlowTarget::Material => self.emit_material_shader(&mut out)?,
         }
 
         Ok(out)
@@ -809,6 +812,204 @@ impl<'a> CodegenContext<'a> {
     }
 
     // ======================================================================
+    // 3D Vertex Shader
+    // ======================================================================
+
+    fn emit_vertex_3d_shader(&self, out: &mut String) -> Result<(), FlowError> {
+        // Vertex input struct (matches blinc_core::Vertex layout)
+        let _ = writeln!(out, "struct VertexInput3D {{");
+        let _ = writeln!(out, "    @location(0) position: vec3<f32>,");
+        let _ = writeln!(out, "    @location(1) normal: vec3<f32>,");
+        let _ = writeln!(out, "    @location(2) uv: vec2<f32>,");
+        let _ = writeln!(out, "    @location(3) color: vec4<f32>,");
+        let _ = writeln!(out, "    @location(4) tangent: vec4<f32>,");
+        let _ = writeln!(out, "    @location(5) joints: vec4<u32>,");
+        let _ = writeln!(out, "    @location(6) weights: vec4<f32>,");
+        let _ = writeln!(out, "}}");
+        let _ = writeln!(out);
+
+        // Vertex output struct
+        let _ = writeln!(out, "struct VertexOutput3D {{");
+        let _ = writeln!(out, "    @builtin(position) clip_position: vec4<f32>,");
+        let _ = writeln!(out, "    @location(0) world_normal: vec3<f32>,");
+        let _ = writeln!(out, "    @location(1) world_pos: vec3<f32>,");
+        let _ = writeln!(out, "    @location(2) uv: vec2<f32>,");
+        let _ = writeln!(out, "    @location(3) vertex_color: vec4<f32>,");
+        let _ = writeln!(out, "    @location(4) world_tangent: vec3<f32>,");
+        let _ = writeln!(out, "    @location(5) tangent_handedness: f32,");
+        let _ = writeln!(out, "}}");
+        let _ = writeln!(out);
+
+        // Entry point
+        let _ = writeln!(out, "@vertex");
+        let _ = writeln!(
+            out,
+            "fn vs_main(in_vert: VertexInput3D) -> VertexOutput3D {{"
+        );
+
+        // Bind builtins
+        self.emit_input_bindings(out, "    ");
+
+        // Node computations
+        self.emit_node_computations(out, "    ")?;
+
+        // Build output
+        let _ = writeln!(out, "    var out: VertexOutput3D;");
+
+        // Position output is required
+        for output in &self.graph.outputs {
+            let expr_str = if let Some(ref e) = output.expr {
+                expr_to_wgsl(e)?
+            } else {
+                output.name.clone()
+            };
+            match &output.target {
+                FlowOutputTarget::Position => {
+                    let _ = writeln!(out, "    out.clip_position = {};", expr_str);
+                }
+                FlowOutputTarget::WorldNormalOut => {
+                    let _ = writeln!(out, "    out.world_normal = {};", expr_str);
+                }
+                FlowOutputTarget::WorldPositionOut => {
+                    let _ = writeln!(out, "    out.world_pos = {};", expr_str);
+                }
+                _ => {}
+            }
+        }
+
+        // Defaults for non-specified outputs
+        let _ = writeln!(out, "    out.uv = in_vert.uv;");
+        let _ = writeln!(out, "    out.vertex_color = in_vert.color;");
+        let _ = writeln!(
+            out,
+            "    out.world_tangent = normalize(mat3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz) * in_vert.tangent.xyz);"
+        );
+        let _ = writeln!(out, "    out.tangent_handedness = in_vert.tangent.w;");
+
+        let _ = writeln!(out, "    return out;");
+        let _ = writeln!(out, "}}");
+
+        Ok(())
+    }
+
+    // ======================================================================
+    // 3D Material Shader
+    // ======================================================================
+
+    fn emit_material_shader(&self, out: &mut String) -> Result<(), FlowError> {
+        // Fragment input (matches VertexOutput3D)
+        let _ = writeln!(out, "struct FragmentInput3D {{");
+        let _ = writeln!(out, "    @builtin(position) frag_coord: vec4<f32>,");
+        let _ = writeln!(out, "    @location(0) world_normal: vec3<f32>,");
+        let _ = writeln!(out, "    @location(1) world_pos: vec3<f32>,");
+        let _ = writeln!(out, "    @location(2) uv: vec2<f32>,");
+        let _ = writeln!(out, "    @location(3) vertex_color: vec4<f32>,");
+        let _ = writeln!(out, "    @location(4) world_tangent: vec3<f32>,");
+        let _ = writeln!(out, "    @location(5) tangent_handedness: f32,");
+        let _ = writeln!(out, "}}");
+        let _ = writeln!(out);
+
+        // Material output struct
+        let _ = writeln!(out, "struct MaterialOutput {{");
+        let _ = writeln!(out, "    albedo: vec4<f32>,");
+        let _ = writeln!(out, "    metallic: f32,");
+        let _ = writeln!(out, "    roughness: f32,");
+        let _ = writeln!(out, "    emissive: vec3<f32>,");
+        let _ = writeln!(out, "    normal: vec3<f32>,");
+        let _ = writeln!(out, "}}");
+        let _ = writeln!(out);
+
+        // Entry point — outputs final color after PBR evaluation
+        let _ = writeln!(out, "@fragment");
+        let _ = writeln!(
+            out,
+            "fn fs_main(in_frag: FragmentInput3D) -> @location(0) vec4<f32> {{"
+        );
+
+        // Bind builtins
+        self.emit_input_bindings(out, "    ");
+
+        // Node computations
+        self.emit_node_computations(out, "    ")?;
+
+        // Collect material outputs
+        let _ = writeln!(out, "    var mat_out: MaterialOutput;");
+        let _ = writeln!(out, "    mat_out.albedo = in_frag.vertex_color;");
+        let _ = writeln!(out, "    mat_out.metallic = 0.0;");
+        let _ = writeln!(out, "    mat_out.roughness = 0.5;");
+        let _ = writeln!(out, "    mat_out.emissive = vec3<f32>(0.0);");
+        let _ = writeln!(out, "    mat_out.normal = normalize(in_frag.world_normal);");
+
+        for output in &self.graph.outputs {
+            let expr_str = if let Some(ref e) = output.expr {
+                expr_to_wgsl(e)?
+            } else {
+                output.name.clone()
+            };
+            match &output.target {
+                FlowOutputTarget::Albedo => {
+                    let _ = writeln!(out, "    mat_out.albedo = {};", expr_str);
+                }
+                FlowOutputTarget::Metallic => {
+                    let _ = writeln!(out, "    mat_out.metallic = {};", expr_str);
+                }
+                FlowOutputTarget::Roughness => {
+                    let _ = writeln!(out, "    mat_out.roughness = {};", expr_str);
+                }
+                FlowOutputTarget::Emissive => {
+                    let _ = writeln!(out, "    mat_out.emissive = {};", expr_str);
+                }
+                FlowOutputTarget::SurfaceNormal => {
+                    let _ = writeln!(out, "    mat_out.normal = {};", expr_str);
+                }
+                _ => {}
+            }
+        }
+
+        // Inline PBR evaluation using the material outputs
+        let _ = writeln!(out, "    // PBR shading");
+        let _ = writeln!(out, "    let N = mat_out.normal;");
+        let _ = writeln!(out, "    let L = normalize(-u.light_dir);");
+        let _ = writeln!(
+            out,
+            "    let V = normalize(u.camera_pos - in_frag.world_pos);"
+        );
+        let _ = writeln!(out, "    let H = normalize(L + V);");
+        let _ = writeln!(out, "    let NdotL = max(dot(N, L), 0.0);");
+        let _ = writeln!(
+            out,
+            "    let diffuse = mat_out.albedo.rgb * NdotL * u.light_intensity;"
+        );
+        let _ = writeln!(out, "    let NdotH = max(dot(N, H), 0.0);");
+        let _ = writeln!(
+            out,
+            "    let spec_power = (1.0 - max(mat_out.roughness, 0.04)) * 128.0;"
+        );
+        let _ = writeln!(
+            out,
+            "    let specular = pow(NdotH, spec_power) * u.light_intensity * mat_out.metallic;"
+        );
+        let _ = writeln!(
+            out,
+            "    let F0 = mix(vec3<f32>(0.04), mat_out.albedo.rgb, mat_out.metallic);"
+        );
+        let _ = writeln!(out, "    let VdotH = max(dot(V, H), 0.0);");
+        let _ = writeln!(
+            out,
+            "    let fresnel = F0 + (vec3<f32>(1.0) - F0) * pow(1.0 - VdotH, 5.0);"
+        );
+        let _ = writeln!(out, "    let ambient = mat_out.albedo.rgb * 0.15;");
+        let _ = writeln!(
+            out,
+            "    let final_color = ambient + diffuse + fresnel * specular + mat_out.emissive;"
+        );
+        let _ = writeln!(out, "    return vec4(final_color, mat_out.albedo.a);");
+        let _ = writeln!(out, "}}");
+
+        Ok(())
+    }
+
+    // ======================================================================
     // Input Bindings
     // ======================================================================
 
@@ -830,6 +1031,25 @@ impl<'a> CodegenContext<'a> {
                         }
                         blinc_core::BuiltinVar::FrameIndex => "u.frame_index".to_string(),
                         blinc_core::BuiltinVar::Pointer => "u.pointer".to_string(),
+                        // 3D vertex builtins
+                        blinc_core::BuiltinVar::VertexPosition => "in_vert.position".to_string(),
+                        blinc_core::BuiltinVar::VertexNormal => "in_vert.normal".to_string(),
+                        blinc_core::BuiltinVar::VertexTangent => "in_vert.tangent".to_string(),
+                        blinc_core::BuiltinVar::VertexColor => "in_vert.color".to_string(),
+                        blinc_core::BuiltinVar::VertexJoints => "in_vert.joints".to_string(),
+                        blinc_core::BuiltinVar::VertexWeights => "in_vert.weights".to_string(),
+                        blinc_core::BuiltinVar::VertexIndex => "f32(vertex_index)".to_string(),
+                        // 3D material/fragment builtins
+                        blinc_core::BuiltinVar::WorldPosition => "in_frag.world_pos".to_string(),
+                        blinc_core::BuiltinVar::WorldNormal => "in_frag.world_normal".to_string(),
+                        blinc_core::BuiltinVar::WorldTangent => "in_frag.world_tangent".to_string(),
+                        blinc_core::BuiltinVar::TangentHandedness => "in_frag.tangent_handedness".to_string(),
+                        blinc_core::BuiltinVar::CameraPosition => "u.camera_pos".to_string(),
+                        blinc_core::BuiltinVar::LightDirection => "u.light_dir".to_string(),
+                        blinc_core::BuiltinVar::LightIntensity => "u.light_intensity".to_string(),
+                        // Matrices
+                        blinc_core::BuiltinVar::ModelMatrix => "u.model".to_string(),
+                        blinc_core::BuiltinVar::ViewProjectionMatrix => "u.view_proj".to_string(),
                     };
                     let _ = writeln!(out, "{}let {}: {} = {};", indent, name, wgsl_ty, value);
                 }
@@ -858,12 +1078,13 @@ impl<'a> CodegenContext<'a> {
                     let _ = writeln!(out, "{}let {}: {} = u.env_{};", indent, name, wgsl_ty, safe);
                 }
                 FlowInputSource::Auto => {
-                    // Auto-resolved: default to 0
+                    // Auto-resolved: default to 0/identity
                     let zero = match ty {
                         FlowType::Float => "0.0",
                         FlowType::Vec2 => "vec2<f32>(0.0)",
                         FlowType::Vec3 => "vec3<f32>(0.0)",
                         FlowType::Vec4 => "vec4<f32>(0.0)",
+                        FlowType::Mat4 => "mat4x4<f32>(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)",
                     };
                     let _ = writeln!(out, "{}let {}: {} = {};", indent, name, wgsl_ty, zero);
                 }
@@ -1231,6 +1452,40 @@ fn func_to_wgsl(func: FlowFunc, args: &[String]) -> Result<String, FlowError> {
                 "textureSample(scene_tex, scene_sampler, (u.element_bounds.xy + ({}) * u.element_bounds.zw) / u.viewport_size)",
                 args[0]
             )
+        }
+
+        // Matrix operations
+        FlowFunc::Mat4MulVec4 => format!("({} * {})", args[0], args[1]),
+        FlowFunc::Mat4Mul => format!("({} * {})", args[0], args[1]),
+        FlowFunc::Mat4Inverse => {
+            // WGSL doesn't have built-in mat4 inverse; emit a helper
+            format!("flow_mat4_inverse({})", args[0])
+        }
+        FlowFunc::Mat4Transpose => format!("transpose({})", args[0]),
+        FlowFunc::TransformNormal => {
+            format!("normalize(mat3x3({}[0].xyz, {}[1].xyz, {}[2].xyz) * {})",
+                args[0], args[0], args[0], args[1])
+        }
+        FlowFunc::TranslationMatrix => {
+            format!("mat4x4<f32>(1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, ({}).x,({}).y,({}).z,1.0)",
+                args[0], args[0], args[0])
+        }
+        FlowFunc::RotationMatrix => {
+            // axis (vec3), angle (float) — use Rodrigues' rotation
+            format!("flow_rotation_matrix({}, {})", args[0], args[1])
+        }
+        FlowFunc::ScaleMatrix => {
+            format!("mat4x4<f32>(({}).x,0.0,0.0,0.0, 0.0,({}).y,0.0,0.0, 0.0,0.0,({}).z,0.0, 0.0,0.0,0.0,1.0)",
+                args[0], args[0], args[0])
+        }
+        FlowFunc::PerspectiveMatrix => {
+            format!("flow_perspective({}, {}, {}, {})", args[0], args[1], args[2], args[3])
+        }
+        FlowFunc::LookAtMatrix => {
+            format!("flow_look_at({}, {}, {})", args[0], args[1], args[2])
+        }
+        FlowFunc::SampleTexture => {
+            format!("textureSample(base_texture, base_sampler, {})", args[1])
         }
     })
 }

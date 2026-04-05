@@ -57,6 +57,13 @@ pub enum FlowTarget {
     Fragment,
     /// Generates compute shader code for simulation
     Compute,
+    /// Vertex shader for 3D mesh rendering — transforms positions/normals.
+    /// Receives per-vertex attributes (position, normal, uv) as builtins.
+    Vertex,
+    /// Material/surface shader for 3D mesh rendering — computes PBR outputs.
+    /// Receives interpolated vertex outputs (world_pos, normal, uv) and
+    /// produces albedo, metallic, roughness, emissive, normal as outputs.
+    Material,
 }
 
 impl FlowGraph {
@@ -145,6 +152,43 @@ pub enum BuiltinVar {
     FrameIndex,
     /// Pointer position (`vec2`, from pointer query system)
     Pointer,
+
+    // ── 3D builtins (available in Vertex and Material targets) ──
+
+    /// Vertex position in model space (vec3) — Vertex target
+    VertexPosition,
+    /// Vertex normal in model space (vec3) — Vertex target
+    VertexNormal,
+    /// Vertex tangent (vec4: xyz = direction, w = handedness) — Vertex target
+    VertexTangent,
+    /// Vertex color (vec4) — Vertex target
+    VertexColor,
+    /// Joint indices (vec4<u32>) — Vertex target (skeletal)
+    VertexJoints,
+    /// Joint weights (vec4) — Vertex target (skeletal)
+    VertexWeights,
+    /// Instance/vertex index (float from u32) — Vertex/Compute target
+    VertexIndex,
+
+    /// World-space position (vec3) — Material target (interpolated from vertex)
+    WorldPosition,
+    /// World-space normal (vec3) — Material target (interpolated)
+    WorldNormal,
+    /// World-space tangent (vec3) — Material target (interpolated)
+    WorldTangent,
+    /// Tangent handedness (float) — Material target
+    TangentHandedness,
+    /// Camera position in world space (vec3) — Material target
+    CameraPosition,
+    /// Light direction (vec3) — Material target
+    LightDirection,
+    /// Light intensity (float) — Material target
+    LightIntensity,
+
+    /// Model matrix (mat4) — Vertex target
+    ModelMatrix,
+    /// View-projection matrix (mat4) — Vertex target
+    ViewProjectionMatrix,
 }
 
 impl BuiltinVar {
@@ -157,6 +201,25 @@ impl BuiltinVar {
             "sdf" => Some(Self::Sdf),
             "frame-index" | "frame_index" => Some(Self::FrameIndex),
             "pointer" => Some(Self::Pointer),
+            // 3D vertex builtins
+            "vertex_position" | "position" => Some(Self::VertexPosition),
+            "vertex_normal" | "normal" => Some(Self::VertexNormal),
+            "vertex_tangent" | "tangent" => Some(Self::VertexTangent),
+            "vertex_color" => Some(Self::VertexColor),
+            "vertex_joints" | "joints" => Some(Self::VertexJoints),
+            "vertex_weights" | "weights" => Some(Self::VertexWeights),
+            "vertex_index" => Some(Self::VertexIndex),
+            // 3D material builtins
+            "world_position" | "world_pos" => Some(Self::WorldPosition),
+            "world_normal" => Some(Self::WorldNormal),
+            "world_tangent" => Some(Self::WorldTangent),
+            "tangent_handedness" => Some(Self::TangentHandedness),
+            "camera_position" | "camera_pos" => Some(Self::CameraPosition),
+            "light_direction" | "light_dir" => Some(Self::LightDirection),
+            "light_intensity" => Some(Self::LightIntensity),
+            // Matrices
+            "model_matrix" | "model" => Some(Self::ModelMatrix),
+            "view_proj" | "view_projection" => Some(Self::ViewProjectionMatrix),
             _ => None,
         }
     }
@@ -165,7 +228,14 @@ impl BuiltinVar {
     pub fn output_type(&self) -> FlowType {
         match self {
             Self::Uv | Self::Resolution | Self::Pointer => FlowType::Vec2,
-            Self::Time | Self::Sdf | Self::FrameIndex => FlowType::Float,
+            Self::Time | Self::Sdf | Self::FrameIndex | Self::VertexIndex
+            | Self::TangentHandedness | Self::LightIntensity => FlowType::Float,
+            Self::VertexPosition | Self::VertexNormal | Self::WorldPosition
+            | Self::WorldNormal | Self::WorldTangent | Self::CameraPosition
+            | Self::LightDirection => FlowType::Vec3,
+            Self::VertexTangent | Self::VertexColor | Self::VertexJoints
+            | Self::VertexWeights => FlowType::Vec4,
+            Self::ModelMatrix | Self::ViewProjectionMatrix => FlowType::Mat4,
         }
     }
 }
@@ -355,6 +425,32 @@ pub enum FlowFunc {
     /// Sample the background/scene texture at given UV coordinates.
     /// Returns vec4 (RGBA). Enables refraction effects in flow shaders.
     SampleScene,
+
+    // ── Matrix operations (for Vertex/Material targets) ──
+    /// Matrix × vector multiply: mat4 * vec4 → vec4
+    Mat4MulVec4,
+    /// Matrix × matrix multiply: mat4 * mat4 → mat4
+    Mat4Mul,
+    /// Inverse of a mat4 → mat4
+    Mat4Inverse,
+    /// Transpose of a mat4 → mat4
+    Mat4Transpose,
+    /// Extract 3x3 normal matrix from model mat4, transform a vec3 normal
+    TransformNormal,
+    /// Construct a translation matrix from vec3
+    TranslationMatrix,
+    /// Construct a rotation matrix from axis (vec3) and angle (float)
+    RotationMatrix,
+    /// Construct a scale matrix from vec3
+    ScaleMatrix,
+    /// Construct a perspective projection: fov, aspect, near, far → mat4
+    PerspectiveMatrix,
+    /// Construct a lookAt view matrix: eye, target, up → mat4
+    LookAtMatrix,
+
+    // ── 3D texture sampling ──
+    /// Sample a texture at UV coordinates: texture_id, uv → vec4
+    SampleTexture,
 }
 
 impl FlowFunc {
@@ -421,6 +517,21 @@ impl FlowFunc {
             "fluid_step" | "fluid-step" => Some(Self::FluidStep),
 
             "sample_scene" | "sample-scene" => Some(Self::SampleScene),
+
+            // Matrix operations
+            "mat4_mul_vec4" | "mat4-mul-vec4" => Some(Self::Mat4MulVec4),
+            "mat4_mul" | "mat4-mul" => Some(Self::Mat4Mul),
+            "mat4_inverse" | "mat4-inverse" | "inverse" => Some(Self::Mat4Inverse),
+            "mat4_transpose" | "mat4-transpose" | "transpose" => Some(Self::Mat4Transpose),
+            "transform_normal" | "transform-normal" => Some(Self::TransformNormal),
+            "translation_matrix" | "translation-matrix" => Some(Self::TranslationMatrix),
+            "rotation_matrix" | "rotation-matrix" => Some(Self::RotationMatrix),
+            "scale_matrix" | "scale-matrix" => Some(Self::ScaleMatrix),
+            "perspective" | "perspective_matrix" | "perspective-matrix" => {
+                Some(Self::PerspectiveMatrix)
+            }
+            "look_at" | "look-at" | "lookat" => Some(Self::LookAtMatrix),
+            "sample_texture" | "sample-texture" => Some(Self::SampleTexture),
 
             _ => None,
         }
@@ -495,6 +606,15 @@ impl FlowFunc {
             // Variable-arg functions
             Self::BufferRead => (1, 3),
             Self::SpringEval | Self::WaveStep | Self::FluidStep => (2, 5),
+
+            // Matrix operations
+            Self::Mat4MulVec4 | Self::Mat4Mul | Self::TransformNormal => (2, 2),
+            Self::Mat4Inverse | Self::Mat4Transpose => (1, 1),
+            Self::TranslationMatrix | Self::ScaleMatrix => (1, 1),
+            Self::RotationMatrix => (2, 2), // axis, angle
+            Self::PerspectiveMatrix => (4, 4), // fov, aspect, near, far
+            Self::LookAtMatrix => (3, 3), // eye, target, up
+            Self::SampleTexture => (2, 2), // texture_id, uv
         }
     }
 
@@ -566,7 +686,19 @@ impl FlowFunc {
                 arg_types.first().cloned().or(Some(FlowType::Float))
             }
 
-            Self::BufferRead | Self::SampleScene => Some(FlowType::Vec4),
+            Self::BufferRead | Self::SampleScene | Self::SampleTexture => Some(FlowType::Vec4),
+
+            // Matrix operations
+            Self::Mat4MulVec4 => Some(FlowType::Vec4),
+            Self::Mat4Mul
+            | Self::Mat4Inverse
+            | Self::Mat4Transpose
+            | Self::TranslationMatrix
+            | Self::RotationMatrix
+            | Self::ScaleMatrix
+            | Self::PerspectiveMatrix
+            | Self::LookAtMatrix => Some(FlowType::Mat4),
+            Self::TransformNormal => Some(FlowType::Vec3),
         }
     }
 }
@@ -917,6 +1049,8 @@ pub enum FlowType {
     Vec2,
     Vec3,
     Vec4,
+    /// 4x4 matrix (for transforms, projections)
+    Mat4,
 }
 
 impl FlowType {
@@ -927,6 +1061,7 @@ impl FlowType {
             Self::Vec2 => 2,
             Self::Vec3 => 3,
             Self::Vec4 => 4,
+            Self::Mat4 => 16,
         }
     }
 
@@ -951,6 +1086,7 @@ impl fmt::Display for FlowType {
             Self::Vec2 => write!(f, "vec2"),
             Self::Vec3 => write!(f, "vec3"),
             Self::Vec4 => write!(f, "vec4"),
+            Self::Mat4 => write!(f, "mat4x4<f32>"),
         }
     }
 }
@@ -983,6 +1119,30 @@ pub enum FlowOutputTarget {
     Buffer { name: String },
     /// Expose as a CSS variable (GPU → CPU readback)
     CssVar(String),
+
+    // ── 3D vertex outputs ──
+
+    /// Clip-space position (vec4) — Vertex target, required
+    Position,
+    /// World-space normal to pass to fragment/material (vec3) — Vertex target
+    WorldNormalOut,
+    /// World-space position to pass to fragment/material (vec3) — Vertex target
+    WorldPositionOut,
+
+    // ── 3D material outputs ──
+
+    /// Base color / albedo (vec4 RGBA) — Material target
+    Albedo,
+    /// Metallic factor (float 0–1) — Material target
+    Metallic,
+    /// Roughness factor (float 0–1) — Material target
+    Roughness,
+    /// Emissive color (vec3 RGB) — Material target
+    Emissive,
+    /// Surface normal override (vec3 world-space) — Material target
+    SurfaceNormal,
+    /// Alpha override (float) — Material target
+    AlphaOut,
 }
 
 // ===========================================================================
@@ -3200,6 +3360,31 @@ impl FlowGraph {
                 if !has_buffer && self.outputs.is_empty() {
                     errors.push(FlowError::MissingOutput {
                         message: "compute flow needs at least one buffer output".to_string(),
+                    });
+                }
+            }
+            FlowTarget::Vertex => {
+                // Vertex flows must produce a position output
+                let has_position = self
+                    .outputs
+                    .iter()
+                    .any(|o| o.target == FlowOutputTarget::Position);
+                if !has_position {
+                    errors.push(FlowError::MissingOutput {
+                        message: "vertex flow needs 'output position' (vec4 clip-space)".to_string(),
+                    });
+                }
+            }
+            FlowTarget::Material => {
+                // Material flows should produce at least an albedo output
+                let has_albedo = self
+                    .outputs
+                    .iter()
+                    .any(|o| o.target == FlowOutputTarget::Albedo);
+                if !has_albedo && self.outputs.is_empty() {
+                    errors.push(FlowError::MissingOutput {
+                        message: "material flow needs at least 'output albedo' (vec4 base color)"
+                            .to_string(),
                     });
                 }
             }

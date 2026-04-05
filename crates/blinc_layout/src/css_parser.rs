@@ -2968,6 +2968,8 @@ fn parse_flow_target<'a>(input: &'a str, graph: &mut FlowGraph) -> Option<&'a st
     match value {
         "fragment" => graph.target = FlowTarget::Fragment,
         "compute" => graph.target = FlowTarget::Compute,
+        "vertex" => graph.target = FlowTarget::Vertex,
+        "material" => graph.target = FlowTarget::Material,
         _ => return None,
     }
     Some(&rest[semi + 1..])
@@ -3116,6 +3118,26 @@ fn parse_flow_node<'a>(
     Some(&expr_start[semi_pos + 1..])
 }
 
+fn parse_output_target(name: &str) -> FlowOutputTarget {
+    match name {
+        "color" => FlowOutputTarget::Color,
+        "alpha" => FlowOutputTarget::Alpha,
+        "displacement" => FlowOutputTarget::Displacement,
+        // 3D vertex outputs
+        "position" => FlowOutputTarget::Position,
+        "world_normal_out" | "world_normal" => FlowOutputTarget::WorldNormalOut,
+        "world_position_out" | "world_position" => FlowOutputTarget::WorldPositionOut,
+        // 3D material outputs
+        "albedo" | "base_color" => FlowOutputTarget::Albedo,
+        "metallic" => FlowOutputTarget::Metallic,
+        "roughness" => FlowOutputTarget::Roughness,
+        "emissive" => FlowOutputTarget::Emissive,
+        "surface_normal" => FlowOutputTarget::SurfaceNormal,
+        "alpha_out" => FlowOutputTarget::AlphaOut,
+        _ => FlowOutputTarget::Color,
+    }
+}
+
 fn parse_flow_output<'a>(
     input: &'a str,
     graph: &mut FlowGraph,
@@ -3143,22 +3165,12 @@ fn parse_flow_output<'a>(
         // output <name> = <expr>;
         let name = decl[..eq_pos].trim();
         let expr_s = decl[eq_pos + 1..].trim();
-        let target = match name {
-            "color" => FlowOutputTarget::Color,
-            "alpha" => FlowOutputTarget::Alpha,
-            "displacement" => FlowOutputTarget::Displacement,
-            _ => FlowOutputTarget::Color,
-        };
+        let target = parse_output_target(name);
         (target, name.to_string(), Some(expr_s))
     } else {
         // Bare output: output color;
         let name = decl.trim();
-        let target = match name {
-            "color" => FlowOutputTarget::Color,
-            "alpha" => FlowOutputTarget::Alpha,
-            "displacement" => FlowOutputTarget::Displacement,
-            _ => FlowOutputTarget::Color,
-        };
+        let target = parse_output_target(name);
         (target, name.to_string(), None)
     };
 

@@ -266,6 +266,7 @@ impl FlowPipelineCache {
                         FlowType::Vec2 => 8,
                         FlowType::Vec3 => 12,
                         FlowType::Vec4 => 16,
+                        FlowType::Mat4 => 64,
                     };
                     let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some(&format!("Flow Buffer: {}", name)),
@@ -310,7 +311,7 @@ impl FlowPipelineCache {
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: match graph.target {
-                    FlowTarget::Fragment => {
+                    FlowTarget::Fragment | FlowTarget::Vertex | FlowTarget::Material => {
                         wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT
                     }
                     FlowTarget::Compute => wgpu::ShaderStages::COMPUTE,
@@ -329,7 +330,8 @@ impl FlowPipelineCache {
             layout_entries.push(wgpu::BindGroupLayoutEntry {
                 binding: *binding,
                 visibility: match graph.target {
-                    FlowTarget::Fragment => wgpu::ShaderStages::FRAGMENT,
+                    FlowTarget::Fragment | FlowTarget::Material => wgpu::ShaderStages::FRAGMENT,
+                    FlowTarget::Vertex => wgpu::ShaderStages::VERTEX,
                     FlowTarget::Compute => wgpu::ShaderStages::COMPUTE,
                 },
                 ty: wgpu::BindingType::Buffer {
@@ -452,6 +454,57 @@ impl FlowPipelineCache {
                     });
 
                 compute_pipeline = Some(cp);
+            }
+            FlowTarget::Vertex | FlowTarget::Material => {
+                // 3D mesh vertex layout (matches blinc_core::Vertex)
+                let vertex_stride = std::mem::size_of::<blinc_core::draw::Vertex>() as u64;
+                let vertex_layout = wgpu::VertexBufferLayout {
+                    array_stride: vertex_stride,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },   // position
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 },  // normal
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 24, shader_location: 2 },  // uv
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 3 },  // color
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 4 },  // tangent
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32x4, offset: 64, shader_location: 5 },   // joints
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 80, shader_location: 6 },  // weights
+                    ],
+                };
+
+                let rp = self
+                    .device
+                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some(&format!("Flow 3D Pipeline: {}", graph.name)),
+                        layout: Some(&pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            module: &shader,
+                            entry_point: Some("vs_main"),
+                            buffers: &[vertex_layout],
+                            compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &shader,
+                            entry_point: Some("fs_main"),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: self.texture_format,
+                                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                            compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleList,
+                            cull_mode: Some(wgpu::Face::Back),
+                            ..Default::default()
+                        },
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview: None,
+                        cache: None,
+                    });
+
+                render_pipeline = Some(rp);
             }
         }
 
