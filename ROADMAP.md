@@ -87,6 +87,19 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 >
 > Blinc provides the bridge transport. Platform features ship as reference implementations users can copy and adapt.
 
+### 2.3 Media (P1)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Audio playback | Planned | Mobile: platform codecs (MediaPlayer/AVAudioPlayer), Desktop: open formats (Vorbis/Opus via `rodio`) |
+| Video playback | Planned | Mobile: platform decoders (MediaCodec/AVPlayer), Desktop: open formats (VP9/AV1 via `ffmpeg` or pure-Rust decoders) |
+| Audio recording | Planned | Mobile: platform APIs, Desktop: `cpal` for cross-platform capture |
+| Video widget | Planned | Texture streaming from decoder → GPU surface, frame-synced rendering |
+| Audio context | Planned | Volume, playback state, seek — reactive via signals |
+
+> **Licensing**: Desktop uses Apache-2.0 compatible codecs only (Vorbis, Opus, VP9, AV1).
+> Mobile uses platform-provided codecs (no licensing concern — OS handles it).
+
 | Example Extension | Status | Notes |
 |-------------------|--------|-------|
 | Push notifications | Planned | FCM/APNs example with bridge handlers |
