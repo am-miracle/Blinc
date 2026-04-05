@@ -4,7 +4,7 @@
 
 use crate::window::AndroidWindow;
 use blinc_platform::{
-    ControlFlow, Event, EventLoop, LifecycleEvent, PlatformError, Window, WindowEvent,
+    ControlFlow, Event, EventLoop, LifecycleEvent, PlatformError, Window, WindowEvent, WindowId,
 };
 
 #[cfg(target_os = "android")]
@@ -145,7 +145,10 @@ impl EventLoop for AndroidEventLoop {
                                 let (width, height) = win.size();
                                 info!("Android: Window resized to {}x{}", width, height);
                                 let flow = handler(
-                                    Event::Window(WindowEvent::Resized { width, height }),
+                                    Event::Window(
+                                        WindowId::PRIMARY,
+                                        WindowEvent::Resized { width, height },
+                                    ),
                                     win,
                                 );
                                 if flow == ControlFlow::Exit {
@@ -158,7 +161,10 @@ impl EventLoop for AndroidEventLoop {
                             debug!("Android: Gained focus");
                             if let Some(ref win) = window {
                                 win.set_focused(true);
-                                let flow = handler(Event::Window(WindowEvent::Focused(true)), win);
+                                let flow = handler(
+                                    Event::Window(WindowId::PRIMARY, WindowEvent::Focused(true)),
+                                    win,
+                                );
                                 if flow == ControlFlow::Exit {
                                     should_exit = true;
                                 }
@@ -169,7 +175,10 @@ impl EventLoop for AndroidEventLoop {
                             debug!("Android: Lost focus");
                             if let Some(ref win) = window {
                                 win.set_focused(false);
-                                let flow = handler(Event::Window(WindowEvent::Focused(false)), win);
+                                let flow = handler(
+                                    Event::Window(WindowId::PRIMARY, WindowEvent::Focused(false)),
+                                    win,
+                                );
                                 if flow == ControlFlow::Exit {
                                     should_exit = true;
                                 }
@@ -201,7 +210,10 @@ impl EventLoop for AndroidEventLoop {
                             info!("Android: Destroyed");
                             if let Some(ref win) = window {
                                 win.set_running(false);
-                                let flow = handler(Event::Window(WindowEvent::CloseRequested), win);
+                                let flow = handler(
+                                    Event::Window(WindowId::PRIMARY, WindowEvent::CloseRequested),
+                                    win,
+                                );
                                 if flow == ControlFlow::Exit {
                                     should_exit = true;
                                 }
@@ -235,7 +247,7 @@ impl EventLoop for AndroidEventLoop {
             // Frame tick when we have a focused window or a wake was requested
             if let Some(ref win) = window {
                 if win.is_focused() || wake_requested {
-                    let flow = handler(Event::Frame, win);
+                    let flow = handler(Event::Frame(WindowId::PRIMARY), win);
                     if flow == ControlFlow::Exit {
                         should_exit = true;
                     }

@@ -37,7 +37,8 @@ jobs:
             libgl1-mesa-dev \
             libegl1-mesa-dev \
             libvulkan-dev \
-            libfontconfig1-dev
+            libfontconfig1-dev \
+            libglib2.0-dev
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -113,6 +114,7 @@ jobs:
             libvulkan-dev \
             mesa-vulkan-drivers \
             libfontconfig1-dev \
+            libglib2.0-dev \
             fonts-dejavu-core \
             xvfb
 
@@ -193,7 +195,8 @@ jobs:
             libgl1-mesa-dev \
             libegl1-mesa-dev \
             libvulkan-dev \
-            libfontconfig1-dev
+            libfontconfig1-dev \
+            libglib2.0-dev
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -230,7 +233,8 @@ jobs:
             libgl1-mesa-dev \
             libegl1-mesa-dev \
             libvulkan-dev \
-            libfontconfig1-dev
+            libfontconfig1-dev \
+            libglib2.0-dev
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -283,7 +287,8 @@ jobs:
             libgl1-mesa-dev \
             libegl1-mesa-dev \
             libvulkan-dev \
-            libfontconfig1-dev
+            libfontconfig1-dev \
+            libglib2.0-dev
 
       - name: Cache cargo registry
         uses: actions/cache@v4
