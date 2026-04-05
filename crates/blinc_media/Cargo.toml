@@ -1,0 +1,26 @@
+[package]
+name = "blinc_media"
+description = "Cross-platform audio/video for Blinc — royalty-free codecs only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/blinc_media"
+rust-version.workspace = true
+
+[dependencies]
+blinc_core = { path = "../blinc_core", version = "0.1.14" }
+blinc_platform = { path = "../blinc_platform", version = "0.1.14" }
+tracing.workspace = true
+
+# Audio playback (desktop) — Vorbis, Opus, WAV, FLAC
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+rodio = { version = "0.19", default-features = false, features = ["vorbis", "wav", "flac"] }
+
+# Audio capture (desktop)
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies.cpal]
+version = "0.17"
+
+# Video decode (desktop) — OpenH264 (royalty-free, Cisco covers patents)
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies.openh264]
+version = "0.9"

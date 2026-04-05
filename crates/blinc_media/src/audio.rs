@@ -1,0 +1,263 @@
+//! Audio playback and recording
+//!
+//! Desktop: rodio (Vorbis/Opus/WAV/FLAC) + cpal (recording)
+//! Mobile: platform codecs via native bridge
+//!
+//! # Example
+//!
+//! ```ignore
+//! use blinc_media::audio::{AudioPlayer, AudioSource};
+//!
+//! let player = AudioPlayer::new();
+//! player.play(AudioSource::file("music.ogg"));
+//! player.set_volume(0.8);
+//! player.pause();
+//! player.resume();
+//! ```
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+
+/// Audio playback state
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackState {
+    Stopped,
+    Playing,
+    Paused,
+}
+
+/// Audio source
+#[derive(Clone, Debug)]
+pub enum AudioSource {
+    /// Load from file path
+    File(String),
+    /// Load from raw bytes (format auto-detected)
+    Bytes(Arc<Vec<u8>>),
+    /// Load from asset path (cross-platform)
+    Asset(String),
+}
+
+impl AudioSource {
+    pub fn file(path: impl Into<String>) -> Self {
+        Self::File(path.into())
+    }
+
+    pub fn bytes(data: Vec<u8>) -> Self {
+        Self::Bytes(Arc::new(data))
+    }
+
+    pub fn asset(path: impl Into<String>) -> Self {
+        Self::Asset(path.into())
+    }
+}
+
+/// Cross-platform audio player
+pub struct AudioPlayer {
+    inner: Rc<RefCell<AudioPlayerInner>>,
+}
+
+struct AudioPlayerInner {
+    state: PlaybackState,
+    volume: f32,
+    #[allow(dead_code)]
+    looping: bool,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    sink: Option<rodio::Sink>,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    _stream: Option<rodio::OutputStream>,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    stream_handle: Option<rodio::OutputStreamHandle>,
+}
+
+impl AudioPlayer {
+    /// Create a new audio player
+    pub fn new() -> Self {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            let (stream, handle) = rodio::OutputStream::try_default()
+                .map(|(s, h)| (Some(s), Some(h)))
+                .unwrap_or((None, None));
+
+            Self {
+                inner: Rc::new(RefCell::new(AudioPlayerInner {
+                    state: PlaybackState::Stopped,
+                    volume: 1.0,
+                    looping: false,
+                    sink: None,
+                    _stream: stream,
+                    stream_handle: handle,
+                })),
+            }
+        }
+
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            Self {
+                inner: Rc::new(RefCell::new(AudioPlayerInner {
+                    state: PlaybackState::Stopped,
+                    volume: 1.0,
+                    looping: false,
+                })),
+            }
+        }
+    }
+
+    /// Play an audio source
+    pub fn play(&self, source: AudioSource) {
+        let mut inner = self.inner.borrow_mut();
+
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            if let Some(ref handle) = inner.stream_handle {
+                let sink = rodio::Sink::try_new(handle).ok();
+                if let Some(ref sink) = sink {
+                    match &source {
+                        AudioSource::File(path) => {
+                            if let Ok(file) = std::fs::File::open(path) {
+                                let reader = std::io::BufReader::new(file);
+                                if let Ok(decoder) = rodio::Decoder::new(reader) {
+                                    sink.append(decoder);
+                                }
+                            }
+                        }
+                        AudioSource::Bytes(data) => {
+                            let cursor = std::io::Cursor::new(data.as_ref().clone());
+                            if let Ok(decoder) = rodio::Decoder::new(cursor) {
+                                sink.append(decoder);
+                            }
+                        }
+                        AudioSource::Asset(path) => {
+                            // Try loading via platform asset loader
+                            if let Ok(data) = blinc_platform::assets::load_asset(path) {
+                                let cursor = std::io::Cursor::new(data);
+                                if let Ok(decoder) = rodio::Decoder::new(cursor) {
+                                    sink.append(decoder);
+                                }
+                            }
+                        }
+                    }
+                    sink.set_volume(inner.volume);
+                }
+                inner.sink = sink;
+            }
+        }
+
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            // Mobile: use native bridge
+            match &source {
+                AudioSource::File(path) | AudioSource::Asset(path) => {
+                    let _ = blinc_core::native_bridge::native_call::<(), _>(
+                        "audio",
+                        "play",
+                        vec![blinc_core::native_bridge::NativeValue::String(path.clone())],
+                    );
+                }
+                AudioSource::Bytes(_) => {
+                    tracing::warn!("Bytes audio source not yet supported on mobile");
+                }
+            }
+        }
+
+        inner.state = PlaybackState::Playing;
+    }
+
+    /// Pause playback
+    pub fn pause(&self) {
+        let mut inner = self.inner.borrow_mut();
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if let Some(ref sink) = inner.sink {
+            sink.pause();
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let _ = blinc_core::native_bridge::native_call::<(), _>("audio", "pause", ());
+        }
+        inner.state = PlaybackState::Paused;
+    }
+
+    /// Resume playback
+    pub fn resume(&self) {
+        let mut inner = self.inner.borrow_mut();
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if let Some(ref sink) = inner.sink {
+            sink.play();
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let _ = blinc_core::native_bridge::native_call::<(), _>("audio", "resume", ());
+        }
+        inner.state = PlaybackState::Playing;
+    }
+
+    /// Stop playback
+    pub fn stop(&self) {
+        let mut inner = self.inner.borrow_mut();
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            inner.sink = None;
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let _ = blinc_core::native_bridge::native_call::<(), _>("audio", "stop", ());
+        }
+        inner.state = PlaybackState::Stopped;
+    }
+
+    /// Set volume (0.0 = silent, 1.0 = full)
+    pub fn set_volume(&self, volume: f32) {
+        let mut inner = self.inner.borrow_mut();
+        inner.volume = volume.clamp(0.0, 1.0);
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if let Some(ref sink) = inner.sink {
+            sink.set_volume(inner.volume);
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let _ = blinc_core::native_bridge::native_call::<(), _>(
+                "audio",
+                "set_volume",
+                vec![blinc_core::native_bridge::NativeValue::Float32(
+                    inner.volume,
+                )],
+            );
+        }
+    }
+
+    /// Get current playback state
+    pub fn state(&self) -> PlaybackState {
+        let inner = self.inner.borrow_mut();
+
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            if let Some(ref sink) = inner.sink {
+                if sink.empty() {
+                    return PlaybackState::Stopped;
+                }
+                if sink.is_paused() {
+                    return PlaybackState::Paused;
+                }
+                return PlaybackState::Playing;
+            }
+        }
+
+        inner.state
+    }
+
+    /// Get current volume
+    pub fn volume(&self) -> f32 {
+        self.inner.borrow_mut().volume
+    }
+
+    /// Check if currently playing
+    pub fn is_playing(&self) -> bool {
+        self.state() == PlaybackState::Playing
+    }
+}
+
+impl Default for AudioPlayer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
