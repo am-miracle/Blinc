@@ -426,6 +426,44 @@ where
                 }
             }
 
+            WinitWindowEvent::PinchGesture { delta, phase, .. } => {
+                let scroll_phase = match phase {
+                    winit::event::TouchPhase::Started => blinc_platform::ScrollPhase::Started,
+                    winit::event::TouchPhase::Moved => blinc_platform::ScrollPhase::Moved,
+                    winit::event::TouchPhase::Ended => blinc_platform::ScrollPhase::Ended,
+                    winit::event::TouchPhase::Cancelled => blinc_platform::ScrollPhase::Ended,
+                };
+                self.handle_event_for(
+                    winit_id,
+                    Event::Input(
+                        wid,
+                        blinc_platform::InputEvent::Pinch {
+                            scale: 1.0 + delta as f32,
+                            phase: scroll_phase,
+                        },
+                    ),
+                );
+            }
+
+            WinitWindowEvent::RotationGesture { delta, phase, .. } => {
+                let scroll_phase = match phase {
+                    winit::event::TouchPhase::Started => blinc_platform::ScrollPhase::Started,
+                    winit::event::TouchPhase::Moved => blinc_platform::ScrollPhase::Moved,
+                    winit::event::TouchPhase::Ended => blinc_platform::ScrollPhase::Ended,
+                    winit::event::TouchPhase::Cancelled => blinc_platform::ScrollPhase::Ended,
+                };
+                self.handle_event_for(
+                    winit_id,
+                    Event::Input(
+                        wid,
+                        blinc_platform::InputEvent::Rotation {
+                            angle: delta.to_radians(),
+                            phase: scroll_phase,
+                        },
+                    ),
+                );
+            }
+
             _ => {}
         }
 

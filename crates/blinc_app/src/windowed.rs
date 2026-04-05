@@ -2665,6 +2665,8 @@ impl WindowedApp {
                             ctrl: bool,
                             alt: bool,
                             meta: bool,
+                            /// Pinch scale or rotation delta
+                            pinch_scale: f32,
                         }
 
                         impl Default for PendingEvent {
@@ -2690,6 +2692,7 @@ impl WindowedApp {
                                     ctrl: false,
                                     alt: false,
                                     meta: false,
+                                    pinch_scale: 1.0,
                                 }
                             }
                         }
@@ -3130,6 +3133,26 @@ impl WindowedApp {
                                     // Scroll momentum ended - full stop
                                     scroll_ended = true;
                                 }
+                                InputEvent::Pinch { scale, .. } => {
+                                    let (mx, my) = router.mouse_position();
+                                    pending_events.push(PendingEvent {
+                                        event_type: blinc_core::events::event_types::PINCH,
+                                        mouse_x: mx,
+                                        mouse_y: my,
+                                        pinch_scale: scale,
+                                        ..Default::default()
+                                    });
+                                }
+                                InputEvent::Rotation { angle, .. } => {
+                                    let (mx, my) = router.mouse_position();
+                                    pending_events.push(PendingEvent {
+                                        event_type: blinc_core::events::event_types::ROTATE,
+                                        mouse_x: mx,
+                                        mouse_y: my,
+                                        pinch_scale: angle,
+                                        ..Default::default()
+                                    });
+                                }
                             }
 
                             router.clear_event_callback();
@@ -3215,10 +3238,31 @@ impl WindowedApp {
                             // Dispatch mouse/touch events (scroll is handled above with nested support)
                             if let Some(ref mut windowed_ctx) = ws.ctx {
                                 let router = &windowed_ctx.event_router;
-                                for event in pending_events {
+                                for mut event in pending_events {
                                     // Skip scroll events - already handled with nested scroll support
                                     if event.event_type == blinc_core::events::event_types::SCROLL {
                                         continue;
+                                    }
+                                    // Gesture events (PINCH/ROTATE) need hit testing since
+                                    // they were collected without a node target
+                                    if (event.event_type == blinc_core::events::event_types::PINCH
+                                        || event.event_type
+                                            == blinc_core::events::event_types::ROTATE)
+                                        && event.node_id == LayoutNodeId::default()
+                                    {
+                                        if let Some(hit) =
+                                            router.hit_test(tree, event.mouse_x, event.mouse_y)
+                                        {
+                                            event.node_id = hit.node;
+                                            event.local_x = hit.local_x;
+                                            event.local_y = hit.local_y;
+                                            event.bounds_x = hit.bounds_x;
+                                            event.bounds_y = hit.bounds_y;
+                                            event.bounds_width = hit.bounds_width;
+                                            event.bounds_height = hit.bounds_height;
+                                        } else {
+                                            continue; // No element under cursor
+                                        }
                                     }
                                     // Look up the correct bounds for this specific node.
                                     // When events bubble from a child to a parent handler,
@@ -3245,7 +3289,7 @@ impl WindowedApp {
                                         bounds_height,
                                         event.drag_delta_x,
                                         event.drag_delta_y,
-                                        1.0,
+                                        event.pinch_scale,
                                     );
                                 }
                             }

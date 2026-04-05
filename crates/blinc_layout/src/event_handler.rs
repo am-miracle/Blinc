@@ -93,6 +93,8 @@ pub struct EventContext {
     pub pinch_center_y: f32,
     /// Pinch scale ratio delta per update (1.0 = no change)
     pub pinch_scale: f32,
+    /// Rotation angle delta in radians (for ROTATE events)
+    pub rotation_delta: f32,
     /// Character for TEXT_INPUT events
     pub key_char: Option<char>,
     /// Key code for KEY_DOWN/KEY_UP events (platform-specific)
@@ -131,6 +133,7 @@ impl EventContext {
             pinch_center_x: 0.0,
             pinch_center_y: 0.0,
             pinch_scale: 1.0,
+            rotation_delta: 0.0,
             key_char: None,
             key_code: 0,
             shift: false,

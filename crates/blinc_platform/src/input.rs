@@ -34,6 +34,20 @@ pub enum InputEvent {
     },
     /// Scroll gesture ended (touchpad momentum finished)
     ScrollEnd,
+    /// Pinch zoom gesture (trackpad two-finger pinch)
+    Pinch {
+        /// Scale delta (1.0 = no change, >1 = zoom in, <1 = zoom out)
+        scale: f32,
+        /// Whether this is the start/end of the gesture
+        phase: ScrollPhase,
+    },
+    /// Rotation gesture (trackpad two-finger rotate)
+    Rotation {
+        /// Angle delta in radians
+        angle: f32,
+        /// Whether this is the start/end of the gesture
+        phase: ScrollPhase,
+    },
 }
 
 // ============================================================================

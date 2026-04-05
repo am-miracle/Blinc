@@ -40,7 +40,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 |---------|--------|-------|
 | IME / compose input | **Done** | Winit Ime::Commit routed as Key::Char events, `set_ime_allowed(true)` |
 | Context menu wiring | **Done** | `.on_right_click()` / `.on_context_menu()` on Div |
-| Trackpad gestures (pinch/rotate) | Planned | Multi-touch event handling |
+| Trackpad gestures (pinch/rotate) | **Done** | `.on_pinch()` / `.on_rotate()` on Div, winit gesture events |
 
 ### 1.4 Missing Widgets (P1)
 
@@ -88,10 +88,25 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Stack navigator | Planned | Push/pop with transitions |
+| Stack navigator | Planned | Via `blinc_router` — page stack with entry/exit animations |
 | Tab navigator | Partial | Tabs component exists, needs routing |
 | Bottom sheet | Partial | Sheet component, needs gesture dismiss |
 | Back button handling (Android) | Planned | System back integration |
+
+### 2.4 Router (`blinc_router` crate) (P0)
+
+> See [docs/plans/blinc_router.md](docs/plans/blinc_router.md) for full design.
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Route definition & trie matching | Planned | `/users/:id`, wildcards, nested routes |
+| Page stack (`route_stack()`) | Planned | `stack()` container, pages persist in stack |
+| History management | Planned | `Store<RouterHistory>`, push/replace/back/forward |
+| Page transitions | Planned | Slide, fade, modal, spring-animated entry/exit |
+| Navigation guards | Planned | Auth guards, redirect, reject |
+| Deep linking | Planned | URI parsing, platform handlers (Android/iOS/desktop) |
+| Page suspension | Planned | Freeze animations + buffer signals on non-top pages |
+| Nested route stacks | Planned | Layout routes with scoped sub-stacks |
 
 ---
 

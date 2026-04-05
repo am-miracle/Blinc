@@ -3442,6 +3442,28 @@ impl Div {
         self
     }
 
+    /// Register a pinch zoom gesture handler.
+    /// `ctx.pinch_scale` contains the scale delta (1.0 = no change).
+    pub fn on_pinch<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&crate::event_handler::EventContext) + 'static,
+    {
+        self.event_handlers
+            .on(blinc_core::events::event_types::PINCH, handler);
+        self
+    }
+
+    /// Register a rotation gesture handler.
+    /// `ctx.rotation_delta` contains the angle delta in radians.
+    pub fn on_rotate<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&crate::event_handler::EventContext) + 'static,
+    {
+        self.event_handlers
+            .on(blinc_core::events::event_types::ROTATE, handler);
+        self
+    }
+
     /// Register a text input handler (receives character input when focused)
     pub fn on_text_input<F>(mut self, handler: F) -> Self
     where

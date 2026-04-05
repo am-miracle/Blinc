@@ -31,6 +31,10 @@ pub mod event_types {
     pub const SCROLL_END: EventType = 31;
     /// Pinch zoom gesture update
     pub const PINCH: EventType = 32;
+    /// Rotation gesture update (two-finger rotate on trackpad)
+    pub const ROTATE: EventType = 33;
+    /// Double-tap gesture (two-finger double tap on trackpad)
+    pub const DOUBLE_TAP: EventType = 34;
     pub const RESIZE: EventType = 40;
 
     // File drop events
