@@ -584,6 +584,16 @@ impl RenderContext {
             // Step 5: Render glass/foreground-layer images (on top of glass, NOT blurred)
             self.render_images_ref(target, &fg_images);
 
+            // Step 5b: Render dynamic RGBA images (video frames, camera preview)
+            if !bg_batch.dynamic_images.is_empty() {
+                self.renderer
+                    .render_dynamic_images(target, &bg_batch.dynamic_images);
+            }
+            if !fg_batch.dynamic_images.is_empty() {
+                self.renderer
+                    .render_dynamic_images(target, &fg_batch.dynamic_images);
+            }
+
             // Step 6: Render foreground and text
             // Use batch-based rendering when layer effects are present
             let has_layer_effects = fg_batch.has_layer_effects();

@@ -1312,6 +1312,26 @@ pub struct PrimitiveBatch {
     /// Auxiliary data buffer (`vec4<f32>` array) for variable-length per-primitive data.
     /// Used for 3D group shape descriptors and polygon clip vertices.
     pub aux_data: Vec<[f32; 4]>,
+    /// Dynamic RGBA images to upload and render this frame
+    /// (video frames, camera preview, procedural textures)
+    pub dynamic_images: Vec<DynamicImage>,
+}
+
+/// An RGBA image to upload to the GPU and render in a single frame
+#[derive(Clone)]
+pub struct DynamicImage {
+    /// RGBA pixel data (4 bytes per pixel)
+    pub data: Vec<u8>,
+    /// Image width in pixels
+    pub width: u32,
+    /// Image height in pixels
+    pub height: u32,
+    /// Destination rectangle (layout coordinates)
+    pub dest: blinc_core::Rect,
+    /// Opacity
+    pub opacity: f32,
+    /// Corner radius
+    pub corner_radius: f32,
 }
 
 impl PrimitiveBatch {
@@ -1328,6 +1348,7 @@ impl PrimitiveBatch {
             viewports_3d: Vec::new(),
             particle_viewports: Vec::new(),
             aux_data: Vec::new(),
+            dynamic_images: Vec::new(),
         }
     }
 
@@ -1343,6 +1364,7 @@ impl PrimitiveBatch {
         self.viewports_3d.clear();
         self.particle_viewports.clear();
         self.aux_data.clear();
+        self.dynamic_images.clear();
     }
 
     /// Push a 3D viewport for SDF raymarching

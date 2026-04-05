@@ -181,15 +181,12 @@ impl VideoPlayerWidget {
         let player_for_canvas = Rc::clone(&player);
         let surface = crate::canvas::canvas(
             move |ctx: &mut dyn blinc_core::DrawContext, bounds: crate::canvas::CanvasBounds| {
-                let frame = player_for_canvas.current_frame();
-                if frame.is_some() {
-                    // Frame available — dark surface (real rendering needs DrawContext RGBA upload)
-                    ctx.fill_rect(
-                        blinc_core::Rect::new(0.0, 0.0, bounds.width, bounds.height),
-                        blinc_core::CornerRadius::default(),
-                        blinc_core::Brush::Solid(Color::rgba(0.08, 0.08, 0.1, 1.0)),
-                    );
+                if let Some(frame) = player_for_canvas.current_frame() {
+                    let rgba = frame.as_rgba();
+                    let dest = blinc_core::Rect::new(0.0, 0.0, bounds.width, bounds.height);
+                    ctx.draw_rgba_pixels(&rgba, frame.width, frame.height, dest);
                 } else {
+                    // No frame — dark placeholder
                     ctx.fill_rect(
                         blinc_core::Rect::new(0.0, 0.0, bounds.width, bounds.height),
                         blinc_core::CornerRadius::default(),

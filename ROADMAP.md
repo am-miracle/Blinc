@@ -266,6 +266,8 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 
 | Feature | Status | Notes |
 |---------|--------|-------|
+| draw_rgba_pixels | **Done** | `DrawContext::draw_rgba_pixels()` — GPU texture upload + render per frame |
+| Dynamic image rendering | **Done** | `DynamicImage` in PrimitiveBatch, renderer uploads + draws via image pipeline |
 | Virtualized list rendering | Planned | Only render visible items |
 | Texture atlas improvements | Done | SVG atlas, glyph atlas |
 | Lazy image loading | Partial | LoadingStrategy exists, needs completion |

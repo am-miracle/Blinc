@@ -6308,6 +6308,45 @@ impl GpuRenderer {
     // Layer Texture Cache Accessors
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// Render dynamic RGBA images (video frames, camera preview, etc.)
+    ///
+    /// Uploads each image as a temporary GPU texture and renders it
+    /// to the destination rect using the image pipeline.
+    pub fn render_dynamic_images(
+        &mut self,
+        target: &wgpu::TextureView,
+        images: &[crate::primitives::DynamicImage],
+    ) {
+        for img in images {
+            if img.data.len() != (img.width * img.height * 4) as usize {
+                continue; // Invalid RGBA data
+            }
+
+            // Create temporary GPU texture from RGBA data
+            let gpu_image = crate::image::GpuImage::from_rgba(
+                &self.device,
+                &self.queue,
+                &img.data,
+                img.width,
+                img.height,
+                Some("dynamic_image"),
+            );
+
+            // Create an instance for the image pipeline
+            let instance = GpuImageInstance::new(
+                img.dest.x(),
+                img.dest.y(),
+                img.dest.width(),
+                img.dest.height(),
+            )
+            .with_opacity(img.opacity)
+            .with_border_radius(img.corner_radius);
+
+            // Render using the existing image pipeline
+            self.render_images(target, gpu_image.view(), &[instance]);
+        }
+    }
+
     /// Get a reference to the layer texture cache
     pub fn layer_texture_cache(&self) -> &LayerTextureCache {
         &self.layer_texture_cache

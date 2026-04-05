@@ -2178,6 +2178,21 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         // This is a placeholder for now
     }
 
+    fn draw_rgba_pixels(&mut self, data: &[u8], width: u32, height: u32, dest: Rect) {
+        let transformed = self.transform_rect(dest);
+        let opacity = self.current_opacity();
+        self.batch
+            .dynamic_images
+            .push(crate::primitives::DynamicImage {
+                data: data.to_vec(),
+                width,
+                height,
+                dest: transformed,
+                opacity,
+                corner_radius: 0.0,
+            });
+    }
+
     fn draw_shadow(&mut self, rect: Rect, corner_radius: CornerRadius, shadow: Shadow) {
         let transformed = self.transform_rect(rect);
         let scaled_radius = self.scale_corner_radius(corner_radius);

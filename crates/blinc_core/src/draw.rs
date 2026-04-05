@@ -1283,6 +1283,21 @@ pub trait DrawContext {
     /// Draw an image
     fn draw_image(&mut self, image: ImageId, rect: Rect, options: &ImageOptions);
 
+    /// Draw raw RGBA pixel data directly to the target.
+    ///
+    /// Uploads the pixel data as a GPU texture and renders it to the
+    /// destination rect. Use for video frames, camera preview, or
+    /// any dynamically-generated image data.
+    ///
+    /// # Arguments
+    /// * `data` — RGBA pixel data (4 bytes per pixel)
+    /// * `width` — Image width in pixels
+    /// * `height` — Image height in pixels
+    /// * `dest` — Destination rectangle in layout coordinates
+    fn draw_rgba_pixels(&mut self, _data: &[u8], _width: u32, _height: u32, _dest: Rect) {
+        // Default no-op — GPU implementations override
+    }
+
     /// Draw a drop shadow (renders outside the shape)
     fn draw_shadow(&mut self, rect: Rect, corner_radius: CornerRadius, shadow: Shadow);
 
