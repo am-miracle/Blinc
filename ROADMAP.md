@@ -336,7 +336,6 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | Linux | Stable | wgpu (Vulkan) |
 | Android | Stable | wgpu (Vulkan) |
 | iOS | Stable | wgpu (Metal) |
-| Fuchsia | In progress | wgpu (Vulkan/Scenic) |
 | HarmonyOS | In progress | wgpu (Vulkan/OpenGL ES) |
 | Web (WASM) | Future | wgpu WebGPU backend |
 | Embedded (RPi) | Future | Framebuffer or Vulkan |
@@ -345,13 +344,17 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 
 ## Release Milestones
 
-| Version | Target | Focus |
-|---------|--------|-------|
-| 0.2.0 | Q2 2026 | Desktop production readiness (file dialogs, multi-window, IME) |
-| 0.3.0 | Q3 2026 | Mobile production readiness (gestures, navigation, platform APIs) |
-| 0.4.0 | Q4 2026 | Zyntax DSL v1 (compiler, hot reload, basic tooling) |
-| 0.5.0 | Q1 2027 | 3D mesh rendering, custom shader API, accessibility v1 |
-| 1.0.0 | Q2 2027 | Stable API, full documentation, production certification |
+| Version | Target | Focus | Status |
+|---------|--------|-------|--------|
+| 0.2.0 | Q2 2026 | Desktop production readiness — system integration, multi-window, IME, clipboard, DnD, tray, hotkeys, code editor, virtual list | **Complete** |
+| 0.3.0 | Q3 2026 | Mobile production readiness — gestures, safe area, haptics, navigation/router, deep linking, media (audio/video/camera), native bridge | **Complete** |
+| 0.4.0 | Q3 2026 | GPU & rendering — 3D mesh pipeline (PBR, shadows, normal maps, skeletal animation), custom shaders (bind groups, compute, post-processing), render culling, memory budget | **Complete** (pulled forward from 0.5.0) |
+| 0.5.0 | Q4 2026 | Missing widgets (date/time/color picker, range slider, number input, data grid, rich text editor), lazy image loading, virtualized list rendering | In progress |
+| 0.6.0 | Q4 2026 | Zyntax DSL v1 — lexer, parser, type checker, Rust codegen, build.rs integration | Planned |
+| 0.7.0 | Q1 2027 | Developer experience — hot reload, visual inspector, layout/animation debugger, performance profiler | Planned |
+| 0.8.0 | Q1 2027 | Accessibility v1 — semantic roles, screen reader, keyboard navigation, ARIA-like attributes, high contrast, reduced motion | Planned |
+| 0.9.0 | Q2 2027 | Platform expansion — HarmonyOS stable, Web (WASM) preview | Planned |
+| 1.0.0 | Q3 2027 | Stable API, full documentation, Zyntax hot reload + LSP, production certification | Planned |
 
 ---
 
@@ -359,8 +362,8 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 
 See individual crate READMEs for architecture details. The most impactful areas to contribute:
 
-1. **System integration** (Phase 1.1) — file dialogs, tray, DnD
-2. **Missing widgets** (Phase 1.4) — date picker, virtualized list
-3. **Zyntax DSL** (Phase 3) — parser, codegen
-4. **Accessibility** (Phase 6) — screen reader, keyboard nav
-5. **Documentation** — API docs, tutorials, examples
+1. **Missing widgets** (Phase 1.4) — date picker, color picker, data grid, rich text editor
+2. **Zyntax DSL** (Phase 3) — lexer, parser, codegen
+3. **Accessibility** (Phase 6) — screen reader, keyboard nav, ARIA
+4. **Developer tooling** (Phase 5) — hot reload, visual inspector, debugger
+5. **Documentation** — API docs, tutorials, interactive examples
