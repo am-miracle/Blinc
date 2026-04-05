@@ -69,6 +69,7 @@ pub struct Route {
     pub view: Option<RouteView>,
     pub children: Vec<Route>,
     pub guards: Vec<crate::NavigationGuard>,
+    pub transition: Option<crate::transition::PageTransition>,
 }
 
 impl Route {
@@ -79,6 +80,7 @@ impl Route {
             view: None,
             children: Vec::new(),
             guards: Vec::new(),
+            transition: None,
         }
     }
 
@@ -97,6 +99,11 @@ impl Route {
         self
     }
 
+    pub fn transition(mut self, transition: crate::transition::PageTransition) -> Self {
+        self.transition = Some(transition);
+        self
+    }
+
     pub fn guard(mut self, guard: crate::NavigationGuard) -> Self {
         self.guards.push(guard);
         self
@@ -110,7 +117,8 @@ pub struct MatchedRoute {
     pub name: Option<String>,
     pub params: RouteParams,
     pub query: QueryParams,
-    pub view_index: usize, // Index into the router's view registry
+    pub view_index: usize,
+    pub transition: Option<crate::transition::PageTransition>,
 }
 
 /// Segment type in the route trie
@@ -125,9 +133,9 @@ enum SegmentType {
 struct TrieNode {
     segment: SegmentType,
     children: Vec<TrieNode>,
-    /// Index into the router's route config if this node terminates a route
     route_index: Option<usize>,
     route_name: Option<String>,
+    route_transition: Option<crate::transition::PageTransition>,
 }
 
 /// Route trie for O(depth) path matching
@@ -151,10 +159,15 @@ impl RouteTrie {
     }
 
     /// Add a route to the trie
-    pub fn add(&mut self, path: &str, route_index: usize, name: Option<&str>) {
-        // Handle root "/" separately
+    pub fn add(
+        &mut self,
+        path: &str,
+        route_index: usize,
+        name: Option<&str>,
+        transition: Option<crate::transition::PageTransition>,
+    ) {
         if path == "/" {
-            self.add_root(route_index, name);
+            self.add_root(route_index, name, transition);
             return;
         }
         let segments = parse_segments(path);
@@ -173,6 +186,7 @@ impl RouteTrie {
                     children: Vec::new(),
                     route_index: None,
                     route_name: None,
+                    route_transition: None,
                 };
                 current_children.push(node);
                 let last = current_children.len() - 1;
@@ -186,6 +200,7 @@ impl RouteTrie {
         if let Some(node) = terminal {
             node.route_index = Some(route_index);
             node.route_name = name.map(|s| s.to_string());
+            node.route_transition = transition;
         }
     }
 
@@ -194,15 +209,18 @@ impl RouteTrie {
         self.not_found_index = Some(index);
     }
 
-    /// Register the root "/" route
-    pub fn add_root(&mut self, route_index: usize, name: Option<&str>) {
-        // Store root route separately since "/" has no segments
-        // We represent it as a special node
+    fn add_root(
+        &mut self,
+        route_index: usize,
+        name: Option<&str>,
+        transition: Option<crate::transition::PageTransition>,
+    ) {
         let node = TrieNode {
             segment: SegmentType::Static(String::new()),
             children: Vec::new(),
             route_index: Some(route_index),
             route_name: name.map(|s| s.to_string()),
+            route_transition: transition,
         };
         self.roots.push(node);
     }
@@ -224,6 +242,7 @@ impl RouteTrie {
                             params: RouteParams::new(),
                             query,
                             view_index: node.route_index.unwrap(),
+                            transition: node.route_transition.clone(),
                         });
                     }
                 }
@@ -238,6 +257,7 @@ impl RouteTrie {
                 params,
                 query,
                 view_index: matched.0,
+                transition: matched.2,
             })
         } else {
             self.not_found_index.map(|nf_idx| MatchedRoute {
@@ -246,6 +266,7 @@ impl RouteTrie {
                 params: RouteParams::new(),
                 query,
                 view_index: nf_idx,
+                transition: None,
             })
         }
     }
@@ -304,7 +325,11 @@ fn match_recursive(
     segments: &[&str],
     depth: usize,
     params: &mut RouteParams,
-) -> Option<(usize, Option<String>)> {
+) -> Option<(
+    usize,
+    Option<String>,
+    Option<crate::transition::PageTransition>,
+)> {
     if depth >= segments.len() {
         return None;
     }
@@ -317,7 +342,11 @@ fn match_recursive(
         if let SegmentType::Static(ref s) = node.segment {
             if s == segment {
                 if depth + 1 == segments.len() && node.route_index.is_some() {
-                    return Some((node.route_index.unwrap(), node.route_name.clone()));
+                    return Some((
+                        node.route_index.unwrap(),
+                        node.route_name.clone(),
+                        node.route_transition.clone(),
+                    ));
                 }
                 if let Some(result) = match_recursive(&node.children, segments, depth + 1, params) {
                     return Some(result);
@@ -331,7 +360,11 @@ fn match_recursive(
         if let SegmentType::Param(ref name) = node.segment {
             params.insert(name.clone(), segment.to_string());
             if depth + 1 == segments.len() && node.route_index.is_some() {
-                return Some((node.route_index.unwrap(), node.route_name.clone()));
+                return Some((
+                    node.route_index.unwrap(),
+                    node.route_name.clone(),
+                    node.route_transition.clone(),
+                ));
             }
             if let Some(result) = match_recursive(&node.children, segments, depth + 1, params) {
                 return Some(result);
@@ -347,7 +380,11 @@ fn match_recursive(
             let rest = segments[depth..].join("/");
             params.insert(name.clone(), rest);
             if node.route_index.is_some() {
-                return Some((node.route_index.unwrap(), node.route_name.clone()));
+                return Some((
+                    node.route_index.unwrap(),
+                    node.route_name.clone(),
+                    node.route_transition.clone(),
+                ));
             }
         }
     }
@@ -362,8 +399,8 @@ mod tests {
     #[test]
     fn test_static_route() {
         let mut trie = RouteTrie::new();
-        trie.add("/about", 0, Some("about"));
-        trie.add("/users", 1, Some("users"));
+        trie.add("/about", 0, Some("about"), None);
+        trie.add("/users", 1, Some("users"), None);
 
         let m = trie.match_path("/about").unwrap();
         assert_eq!(m.view_index, 0);
@@ -378,7 +415,7 @@ mod tests {
     #[test]
     fn test_param_route() {
         let mut trie = RouteTrie::new();
-        trie.add("/users/:id", 0, None);
+        trie.add("/users/:id", 0, None, None);
 
         let m = trie.match_path("/users/42").unwrap();
         assert_eq!(m.view_index, 0);
@@ -388,7 +425,7 @@ mod tests {
     #[test]
     fn test_nested_route() {
         let mut trie = RouteTrie::new();
-        trie.add("/users/:id/posts", 0, None);
+        trie.add("/users/:id/posts", 0, None, None);
 
         let m = trie.match_path("/users/42/posts").unwrap();
         assert_eq!(m.view_index, 0);
@@ -398,7 +435,7 @@ mod tests {
     #[test]
     fn test_query_params() {
         let mut trie = RouteTrie::new();
-        trie.add("/search", 0, None);
+        trie.add("/search", 0, None, None);
 
         let m = trie.match_path("/search?q=hello&page=2").unwrap();
         assert_eq!(m.view_index, 0);
@@ -409,7 +446,7 @@ mod tests {
     #[test]
     fn test_not_found() {
         let mut trie = RouteTrie::new();
-        trie.add("/home", 0, None);
+        trie.add("/home", 0, None, None);
         trie.set_not_found(99);
 
         let m = trie.match_path("/missing").unwrap();

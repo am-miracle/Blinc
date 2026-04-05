@@ -25,6 +25,7 @@
 
 pub mod history;
 pub mod route;
+pub mod transition;
 
 use std::sync::{Arc, Mutex};
 
@@ -290,7 +291,12 @@ impl RouterBuilder {
                 if let Some(view) = route.view {
                     let idx = views.len();
                     views.push(view);
-                    trie.add(&full_path, idx, route.name.as_deref());
+                    trie.add(
+                        &full_path,
+                        idx,
+                        route.name.as_deref(),
+                        route.transition.clone(),
+                    );
 
                     if let Some(ref name) = route.name {
                         named.insert(name.clone(), full_path.clone());
