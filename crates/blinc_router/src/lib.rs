@@ -198,21 +198,34 @@ impl Router {
         }
     }
 
-    /// Build the current route's view as a Div
+    /// Build the current route's view as a Div.
+    ///
+    /// Pushes this router onto the context stack so `use_router()`
+    /// returns this router inside the view and its child components.
     pub fn outlet(&self) -> blinc_layout::div::Div {
-        let state = self.inner.lock().unwrap();
-        if let Some(ref matched) = state.current_match {
-            if let Some(view) = state.views.get(matched.view_index) {
-                let ctx = RouteContext {
-                    params: matched.params.clone(),
-                    query: matched.query.clone(),
-                    path: matched.path.clone(),
-                    router: self.clone(),
-                };
-                return view(ctx);
-            }
+        let view_and_ctx = {
+            let state = self.inner.lock().unwrap();
+            state.current_match.as_ref().and_then(|matched| {
+                state.views.get(matched.view_index).map(|view| {
+                    let ctx = RouteContext {
+                        params: matched.params.clone(),
+                        query: matched.query.clone(),
+                        path: matched.path.clone(),
+                        router: self.clone(),
+                    };
+                    (*view, ctx)
+                })
+            })
+        }; // lock released
+
+        if let Some((view, ctx)) = view_and_ctx {
+            push_router_context(self);
+            let result = view(ctx);
+            pop_router_context();
+            result
+        } else {
+            blinc_layout::div::div()
         }
-        blinc_layout::div::div()
     }
 }
 
@@ -322,3 +335,69 @@ impl Default for RouterBuilder {
 // Re-export key types
 pub use history::HistoryEntry;
 pub use route::{MatchedRoute, QueryParams, Route, RouteContext, RouteParams};
+
+// ============================================================================
+// Scoped router context
+// ============================================================================
+
+use std::cell::RefCell;
+
+thread_local! {
+    /// Stack of active routers. The top is the "current" router for use_router().
+    /// Pushed when route_outlet() builds a view, popped when done.
+    static ROUTER_STACK: RefCell<Vec<Router>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Push a router onto the context stack (called by outlet before building views)
+pub(crate) fn push_router_context(router: &Router) {
+    ROUTER_STACK.with(|stack| {
+        stack.borrow_mut().push(router.clone());
+    });
+}
+
+/// Pop a router from the context stack (called by outlet after building views)
+pub(crate) fn pop_router_context() {
+    ROUTER_STACK.with(|stack| {
+        stack.borrow_mut().pop();
+    });
+}
+
+/// Get the currently active router.
+///
+/// Returns the router whose `outlet()` is currently being built.
+/// For nested routers, returns the innermost one.
+///
+/// Panics if no router is in scope (i.e., not called during an outlet build).
+///
+/// # Example
+///
+/// ```ignore
+/// fn my_page(ctx: RouteContext) -> Div {
+///     let router = use_router(); // same as ctx.router, but works in child components
+///     div()
+///         .child(text(&format!("Path: {}", router.current_path())))
+///         .child(
+///             div().on_click(move |_| router.push("/other"))
+///                 .child(text("Navigate"))
+///         )
+/// }
+/// ```
+pub fn use_router() -> Router {
+    ROUTER_STACK.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .cloned()
+            .expect("use_router() called outside of a route outlet. Ensure the component is rendered inside a Router.outlet().")
+    })
+}
+
+/// Get the current route's parameters (convenience for `use_router().params()`)
+pub fn use_params() -> RouteParams {
+    use_router().params()
+}
+
+/// Get the current route's query parameters
+pub fn use_query() -> QueryParams {
+    use_router().query()
+}
