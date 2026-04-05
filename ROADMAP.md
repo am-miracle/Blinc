@@ -84,30 +84,28 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | App lifecycle | Partial | Basic resume/pause, needs full handling |
 | Status bar theming | Planned | Light/dark status bar |
 
-### 2.3 Navigation (P1)
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Stack navigator | Planned | Via `blinc_router` — page stack with entry/exit animations |
-| Tab navigator | Partial | Tabs component exists, needs routing |
-| Bottom sheet | Partial | Sheet component, needs gesture dismiss |
-| Back button handling (Android) | **Done** | `router.register_back_handler()` + `Key::Back` dispatch |
-
-### 2.4 Router (`blinc_router` crate) (P0)
+### 2.3 Navigation & Router (`blinc_router` crate)
 
 > See [docs/plans/blinc_router.md](docs/plans/blinc_router.md) for full design.
+> See [docs/book/src/advanced/routing.md](docs/book/src/advanced/routing.md) for usage guide.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Route definition & trie matching | **Done** | `/users/:id`, wildcards, nested routes, O(depth) trie |
+| Route definition & trie matching | **Done** | `/users/:id`, `*wildcard`, nested routes, O(depth) trie |
 | Scoped `use_router()` hook | **Done** | Thread-local router stack, nested router support |
 | History management | **Done** | `RouterHistory` with push/replace/back/forward |
 | Page transitions | **Done** | `PageTransition` using `AnimationPreset` + `SpringConfig` |
 | Navigation guards | **Done** | Auth guards with redirect/reject |
-| Deep linking | **Done** | URI parsing, `handle_deep_link()`, `cli_deep_link()` |
-| System back button | **Done** | `register_back_handler()`, `Key::Back` dispatch |
+| Deep linking | **Done** | Auto-registered, zero-config: URI parsing + platform dispatch |
+| Desktop deep links | **Done** | CLI `--deep-link=`, macOS/Windows/Linux URL scheme registration |
+| iOS deep links | **Done** | `blinc_ios_handle_deep_link()` C FFI, auto-dispatched |
+| Android deep links | **Done** | `dispatch_deep_link()` from JNI intent, auto-dispatched |
+| System back button | **Done** | Auto-registered by `RouterBuilder::build()`, `Key::Back` dispatch |
 | Named routing | **Done** | `push_named("user", &[("id", "42")])` reverse lookup |
-| Page stack (`route_stack()`) | Planned | `stack()` container, pages persist in stack |
+| Route outlet | **Done** | `router.outlet()` builds current view with scoped context |
+| Stack navigator | Planned | `stack()` page container, pages persist across navigation |
+| Tab navigator | Partial | Tabs component exists, needs routing integration |
+| Bottom sheet | Partial | Sheet component, needs gesture dismiss |
 | Page suspension | Planned | Freeze animations + buffer signals on non-top pages |
 | Nested route stacks | Planned | Layout routes with scoped sub-stacks |
 
