@@ -106,8 +106,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | Stack navigator | **Done** | `stack()` + `motion()` — documented integration pattern |
 | Tab navigator | **Done** | `blinc_cn::tabs()` + `router.push()` — documented pattern |
 | Bottom sheet navigation | **Done** | `blinc_cn::sheet()` + `router.outlet()` — documented pattern |
-| Page suspension (visual) | **Done** | `stack_outlet()` — hidden + input disabled, state preserved in tree |
-| Page suspension (deep) | **Done** | `Spring::pause/resume`, `AnimatedValue::pause/resume`, `SchedulerHandle::pause/resume_spring` |
+| Animation suspension | **Done** | `AnimatedValue::pause/resume`, `Spring::pause/resume` — old views auto-clean via Drop |
 | Nested route stacks | **Done** | Sub-routers via `RouterBuilder`, `use_router()` returns innermost |
 
 ---
