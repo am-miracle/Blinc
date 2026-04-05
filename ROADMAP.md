@@ -66,7 +66,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Soft keyboard show/hide | **Done** | Atomic flags polled in frame loop |
-| IME / compose input (mobile) | Planned | Android InputConnection, iOS UITextInput |
+| IME / compose input (mobile) | Partial | Basic text input works, full compose candidates need InputConnection/UITextInput |
 | Gesture recognizers | **Done** | `GestureExt` trait: `.on_tap()`, `.on_long_press()`, `.on_swipe()` + pinch/rotate |
 | Pull-to-refresh | **Done** | `pull_to_refresh(callback)` widget with threshold, max pull, indicator |
 | Safe area insets | **Done** | `ctx.safe_area`, `safe_top/right/bottom/left()`, `safe_width/height()` |
@@ -77,8 +77,9 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Deep linking / URL schemes | **Done** | `blinc_router::handle_deep_link()` + platform `DeepLink` parser |
-| App lifecycle | Partial | Basic resume/pause, needs full handling |
-| Native bridge API (Rust side) | Planned | Cross-platform `native_call("namespace", "fn", args)` from Rust |
+| App lifecycle | **Done** | Resumed/Suspended/LowMemory events, Android full lifecycle mapping |
+| Native bridge API (Rust side) | **Done** | `native_call()`, `native_register()`, `PlatformAdapter` trait in blinc_core |
+| Native bridge streams | **Done** | `native_stream()` — bidirectional data (camera, audio, sensors) with auto-cleanup |
 
 > **Push notifications, camera, location, biometrics, status bar theming** are implemented as **example native bridge extensions** — not in the framework core, but as documented templates that demonstrate the bridge API:
 > - **Android**: `BlincNativeBridge.register("camera", "capture", handler)` in Kotlin

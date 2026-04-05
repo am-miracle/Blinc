@@ -732,6 +732,106 @@ fn extract_json_string<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 }
 
 // ============================================================================
+// Bidirectional Data Streams
+// ============================================================================
+
+/// Stream handle for bidirectional data between Rust and platform
+///
+/// Used for continuous data flows: camera frames, audio buffers,
+/// sensor events, real-time communication.
+///
+/// # Example
+///
+/// ```ignore
+/// use blinc_core::native_bridge::{native_stream, NativeValue};
+///
+/// // Open a stream from the camera
+/// let stream = native_stream("camera", "preview", vec![
+///     NativeValue::Int32(640),  // width
+///     NativeValue::Int32(480),  // height
+/// ], |data| {
+///     // Called on each frame with RGBA bytes
+///     let rgba = data.as_bytes().unwrap();
+///     render_camera_frame(rgba);
+/// });
+///
+/// // Stream is active until dropped
+/// drop(stream);
+/// ```
+pub struct NativeStream {
+    namespace: String,
+    name: String,
+    _callback_id: u64,
+}
+
+impl Drop for NativeStream {
+    fn drop(&mut self) {
+        remove_stream_callback(self._callback_id);
+        let _ = native_call::<(), _>(&self.namespace, &format!("{}_stop", self.name), ());
+    }
+}
+
+/// Callback type for stream data
+pub type StreamCallback = Arc<dyn Fn(NativeValue) + Send + Sync>;
+
+/// Global stream callback registry
+static STREAM_CALLBACKS: std::sync::Mutex<Option<HashMap<u64, StreamCallback>>> =
+    std::sync::Mutex::new(None);
+static NEXT_STREAM_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Open a bidirectional data stream with the platform.
+///
+/// The callback fires on each data event from the platform side.
+/// The stream stays active until the returned `NativeStream` is dropped.
+pub fn native_stream<F>(
+    namespace: &str,
+    name: &str,
+    args: Vec<NativeValue>,
+    callback: F,
+) -> NativeStream
+where
+    F: Fn(NativeValue) + Send + Sync + 'static,
+{
+    let id = NEXT_STREAM_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    {
+        let mut guard = STREAM_CALLBACKS.lock().unwrap();
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.insert(id, Arc::new(callback));
+    }
+
+    let mut start_args = args;
+    start_args.push(NativeValue::Int64(id as i64));
+    let _ = native_call::<(), _>(namespace, &format!("{}_start", name), start_args);
+
+    NativeStream {
+        namespace: namespace.to_string(),
+        name: name.to_string(),
+        _callback_id: id,
+    }
+}
+
+/// Dispatch stream data from the platform to the registered callback.
+///
+/// Called by platform FFI when stream data arrives.
+pub fn dispatch_stream_data(stream_id: u64, data: NativeValue) {
+    let callback = {
+        let guard = STREAM_CALLBACKS.lock().unwrap();
+        guard.as_ref().and_then(|map| map.get(&stream_id).cloned())
+    };
+    if let Some(cb) = callback {
+        cb(data);
+    }
+}
+
+fn remove_stream_callback(id: u64) {
+    let mut guard = STREAM_CALLBACKS.lock().unwrap();
+    if let Some(map) = guard.as_mut() {
+        map.remove(&id);
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
