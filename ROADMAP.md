@@ -80,12 +80,20 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | App lifecycle | Partial | Basic resume/pause, needs full handling |
 | Native bridge API (Rust side) | Planned | Cross-platform `native_call("namespace", "fn", args)` from Rust |
 
-> **Push notifications, camera, location, biometrics, status bar theming** — these are NOT framework responsibilities. Users implement them via the extensible native bridge:
+> **Push notifications, camera, location, biometrics, status bar theming** are implemented as **example native bridge extensions** — not in the framework core, but as documented templates that demonstrate the bridge API:
 > - **Android**: `BlincNativeBridge.register("camera", "capture", handler)` in Kotlin
 > - **iOS**: `BlincNativeBridge.shared.register(namespace:name:handler:)` in Swift
 > - **Rust**: `native_call("camera", "capture", args)` (planned API)
 >
-> Blinc provides the bridge transport. Platform-specific features are user extensions.
+> Blinc provides the bridge transport. Platform features ship as reference implementations users can copy and adapt.
+
+| Example Extension | Status | Notes |
+|-------------------|--------|-------|
+| Push notifications | Planned | FCM/APNs example with bridge handlers |
+| Camera capture | Planned | Native bridge + texture streaming example |
+| Location services | Planned | GPS via bridge example |
+| Biometric auth | Planned | Fingerprint/Face ID bridge example |
+| Status bar theming | Planned | Light/dark status bar bridge example |
 
 ### 2.3 Navigation & Router (`blinc_router` crate)
 
