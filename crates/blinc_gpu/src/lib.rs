@@ -43,7 +43,11 @@ pub use primitives::{
     LayerCommand, LayerCommandEntry, LayerCompositeUniforms, ParticleViewport3D, PathBatch,
     PathUniforms, PrimitiveBatch, PrimitiveType, Uniforms,
 };
-pub use custom_pass::{CustomRenderPass, RenderPassContext, RenderStage};
+pub use custom_pass::{
+    BindGroupBuilder, ComputeDispatch, CustomRenderPass, PostProcessChain, PostProcessEffect,
+    RenderPassContext, RenderStage, create_buffer, create_compute_pipeline,
+    create_fullscreen_pipeline,
+};
 pub use renderer::{
     GpuMemoryBudget, GpuRenderer, LayerTexture, LayerTextureCache, RendererConfig, RendererError,
     TextureCacheStats,
