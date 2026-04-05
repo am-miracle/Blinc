@@ -245,8 +245,10 @@ impl<'a> BindGroupBuilder<'a> {
         resource: wgpu::BindingResource<'a>,
         read_only: bool,
     ) -> &mut Self {
-        self.entries
-            .push(BindGroupEntry::StorageBuffer { resource, read_only });
+        self.entries.push(BindGroupEntry::StorageBuffer {
+            resource,
+            read_only,
+        });
         self
     }
 
@@ -263,8 +265,11 @@ impl<'a> BindGroupBuilder<'a> {
         format: wgpu::TextureFormat,
         access: wgpu::StorageTextureAccess,
     ) -> &mut Self {
-        self.entries
-            .push(BindGroupEntry::StorageTexture { view, format, access });
+        self.entries.push(BindGroupEntry::StorageTexture {
+            view,
+            format,
+            access,
+        });
         self
     }
 
@@ -296,15 +301,13 @@ impl<'a> BindGroupBuilder<'a> {
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
-                    BindGroupEntry::StorageBuffer { read_only, .. } => {
-                        wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage {
-                                read_only: *read_only,
-                            },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        }
-                    }
+                    BindGroupEntry::StorageBuffer { read_only, .. } => wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage {
+                            read_only: *read_only,
+                        },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     BindGroupEntry::Texture(_) => wgpu::BindingType::Texture {
                         multisampled: false,
                         view_dimension: wgpu::TextureViewDimension::D2,
@@ -619,28 +622,27 @@ impl PostProcessChain {
             source: wgpu::ShaderSource::Wgsl(shader_src.into()),
         });
 
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("PostProcess Copy Layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("PostProcess Copy Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("PostProcess Copy Pipeline Layout"),

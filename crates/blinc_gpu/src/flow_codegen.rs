@@ -1043,7 +1043,9 @@ impl<'a> CodegenContext<'a> {
                         blinc_core::BuiltinVar::WorldPosition => "in_frag.world_pos".to_string(),
                         blinc_core::BuiltinVar::WorldNormal => "in_frag.world_normal".to_string(),
                         blinc_core::BuiltinVar::WorldTangent => "in_frag.world_tangent".to_string(),
-                        blinc_core::BuiltinVar::TangentHandedness => "in_frag.tangent_handedness".to_string(),
+                        blinc_core::BuiltinVar::TangentHandedness => {
+                            "in_frag.tangent_handedness".to_string()
+                        }
                         blinc_core::BuiltinVar::CameraPosition => "u.camera_pos".to_string(),
                         blinc_core::BuiltinVar::LightDirection => "u.light_dir".to_string(),
                         blinc_core::BuiltinVar::LightIntensity => "u.light_intensity".to_string(),
@@ -1463,8 +1465,10 @@ fn func_to_wgsl(func: FlowFunc, args: &[String]) -> Result<String, FlowError> {
         }
         FlowFunc::Mat4Transpose => format!("transpose({})", args[0]),
         FlowFunc::TransformNormal => {
-            format!("normalize(mat3x3({}[0].xyz, {}[1].xyz, {}[2].xyz) * {})",
-                args[0], args[0], args[0], args[1])
+            format!(
+                "normalize(mat3x3({}[0].xyz, {}[1].xyz, {}[2].xyz) * {})",
+                args[0], args[0], args[0], args[1]
+            )
         }
         FlowFunc::TranslationMatrix => {
             format!("mat4x4<f32>(1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, ({}).x,({}).y,({}).z,1.0)",
@@ -1479,7 +1483,10 @@ fn func_to_wgsl(func: FlowFunc, args: &[String]) -> Result<String, FlowError> {
                 args[0], args[0], args[0])
         }
         FlowFunc::PerspectiveMatrix => {
-            format!("flow_perspective({}, {}, {}, {})", args[0], args[1], args[2], args[3])
+            format!(
+                "flow_perspective({}, {}, {}, {})",
+                args[0], args[1], args[2], args[3]
+            )
         }
         FlowFunc::LookAtMatrix => {
             format!("flow_look_at({}, {}, {})", args[0], args[1], args[2])

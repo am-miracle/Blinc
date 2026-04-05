@@ -7032,15 +7032,14 @@ impl GpuRenderer {
                 bytemuck::bytes_of(&shadow_uniforms),
             );
 
-            let shadow_bind_group =
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Shadow Bind Group"),
-                    layout: &mp.shadow_bind_group_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: mp.shadow_uniform_buffer.as_entire_binding(),
-                    }],
-                });
+            let shadow_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Shadow Bind Group"),
+                layout: &mp.shadow_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: mp.shadow_uniform_buffer.as_entire_binding(),
+                }],
+            });
 
             let mut encoder = self
                 .device
@@ -7298,7 +7297,10 @@ impl GpuRenderer {
     ///
     /// The pass will be initialized immediately and executed each frame
     /// at the stage returned by `pass.stage()`.
-    pub fn register_custom_pass(&mut self, mut pass: Box<dyn crate::custom_pass::CustomRenderPass>) {
+    pub fn register_custom_pass(
+        &mut self,
+        mut pass: Box<dyn crate::custom_pass::CustomRenderPass>,
+    ) {
         pass.initialize(&self.device, &self.queue, self.texture_format);
         self.custom_passes.register(pass);
     }
@@ -7370,9 +7372,10 @@ impl GpuRenderer {
             // Remove one entry at a time until under budget
             let keys: Vec<String> = self.mask_image_cache.keys().cloned().collect();
             for key in keys {
-                if !self.memory_budget.is_over_budget(
-                    self.layer_texture_cache.stats().total_memory_bytes(),
-                ) {
+                if !self
+                    .memory_budget
+                    .is_over_budget(self.layer_texture_cache.stats().total_memory_bytes())
+                {
                     break;
                 }
                 if let Some(img) = self.mask_image_cache.remove(&key) {
