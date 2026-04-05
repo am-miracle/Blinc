@@ -258,9 +258,9 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Custom render pass API | **Done** | `CustomRenderPass` trait, PreRender/PostProcess stages, label-based removal |
-| Custom bind groups | Planned | User-defined GPU resources |
-| Compute shader access | Partial | `@flow` DAG exists, general compute planned |
-| Post-processing pipeline | Planned | User-defined screen-space effects |
+| Custom bind groups | **Done** | `BindGroupBuilder` — declarative layout+bind creation for all binding types |
+| Compute shader access | **Done** | `ComputeDispatch` + `create_compute_pipeline()` + `@flow` DAG |
+| Post-processing pipeline | **Done** | `PostProcessChain` — ping-pong effect chain, auto texture management |
 
 ### 4.3 Performance (P1)
 

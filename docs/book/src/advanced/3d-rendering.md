@@ -1,0 +1,456 @@
+# 3D Rendering
+
+Blinc provides a GPU-accelerated 3D mesh rendering pipeline alongside its 2D UI. You can render PBR-lit meshes with shadow mapping, normal maps, skeletal animation, and custom shader passes — all within the same frame as your UI elements.
+
+## Mesh Data
+
+The interchange format for 3D geometry is `MeshData`. Users convert from any source format (glTF, OBJ, FBX, procedural) into this struct.
+
+```rust
+use blinc_core::{MeshData, Vertex, Material, Mat4};
+
+let mesh = MeshData {
+    vertices: vec![
+        Vertex::new([-0.5, -0.5, 0.0])
+            .with_normal([0.0, 0.0, 1.0])
+            .with_uv([0.0, 0.0])
+            .with_color([1.0, 0.0, 0.0, 1.0]),
+        Vertex::new([0.5, -0.5, 0.0])
+            .with_normal([0.0, 0.0, 1.0])
+            .with_uv([1.0, 0.0])
+            .with_color([0.0, 1.0, 0.0, 1.0]),
+        Vertex::new([0.0, 0.5, 0.0])
+            .with_normal([0.0, 0.0, 1.0])
+            .with_uv([0.5, 1.0])
+            .with_color([0.0, 0.0, 1.0, 1.0]),
+    ],
+    indices: vec![0, 1, 2],
+    material: Material::default(),
+    skin: None,
+};
+```
+
+### Vertex Format
+
+Each vertex contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `position` | `[f32; 3]` | XYZ world position |
+| `normal` | `[f32; 3]` | Surface normal (for lighting) |
+| `uv` | `[f32; 2]` | Texture coordinates |
+| `color` | `[f32; 4]` | Per-vertex RGBA color |
+| `tangent` | `[f32; 4]` | Tangent vector for normal mapping (xyz + handedness) |
+| `joints` | `[u32; 4]` | Bone indices for skeletal animation |
+| `weights` | `[f32; 4]` | Bone weights (should sum to 1.0) |
+
+Builder methods chain naturally:
+
+```rust
+Vertex::new([0.0, 1.0, 0.0])
+    .with_normal([0.0, 1.0, 0.0])
+    .with_uv([0.5, 0.5])
+    .with_tangent([1.0, 0.0, 0.0, 1.0])
+    .with_joints([0, 1, 0, 0], [0.7, 0.3, 0.0, 0.0])
+```
+
+## Materials
+
+The `Material` struct controls PBR shading:
+
+```rust
+use blinc_core::{Material, TextureData, AlphaMode};
+
+let material = Material {
+    base_color: [0.8, 0.2, 0.1, 1.0],  // Red-ish
+    metallic: 0.0,                        // Dielectric
+    roughness: 0.5,                       // Medium roughness
+    emissive: [0.0, 0.0, 0.0],          // No emission
+    base_color_texture: None,             // Or Some(TextureData { rgba, width, height })
+    normal_map: None,                     // Tangent-space normal map
+    normal_scale: 1.0,                    // Normal map strength
+    displacement_map: None,               // Height map for parallax
+    displacement_scale: 0.05,             // Displacement depth
+    unlit: false,                         // true = skip lighting
+    alpha_mode: AlphaMode::Opaque,
+    receives_shadows: true,
+    casts_shadows: true,
+};
+```
+
+### Textures
+
+Provide texture data as raw RGBA pixels:
+
+```rust
+let texture = TextureData {
+    rgba: my_image_bytes,  // Vec<u8>, 4 bytes per pixel
+    width: 512,
+    height: 512,
+};
+
+let material = Material {
+    base_color_texture: Some(texture),
+    ..Material::default()
+};
+```
+
+### Normal Mapping
+
+Normal maps add surface detail without extra geometry. The shader uses the vertex tangent and bitangent to transform tangent-space normals to world space.
+
+```rust
+let material = Material {
+    normal_map: Some(TextureData {
+        rgba: normal_map_pixels,
+        width: 1024,
+        height: 1024,
+    }),
+    normal_scale: 1.5,  // Exaggerate the effect
+    ..Material::default()
+};
+```
+
+### Parallax Displacement
+
+Height maps create the illusion of depth through parallax occlusion mapping (16-layer raymarching in the fragment shader):
+
+```rust
+let material = Material {
+    displacement_map: Some(TextureData {
+        rgba: height_map_pixels,  // Grayscale encoded as RGBA
+        width: 512,
+        height: 512,
+    }),
+    displacement_scale: 0.1,  // World-space depth
+    ..Material::default()
+};
+```
+
+## Drawing in Canvas
+
+Use `draw_mesh_data` on the `DrawContext` inside a canvas element:
+
+```rust
+canvas(|ctx: &mut dyn DrawContext, bounds| {
+    ctx.draw_mesh_data(&mesh, Mat4::IDENTITY);
+})
+.w(800.0)
+.h(600.0)
+```
+
+The `Mat4` transform positions the mesh in the scene. The renderer handles vertex/index buffer upload and PBR shading automatically.
+
+## Shadow Mapping
+
+The mesh pipeline includes a shadow depth pass. When rendering via `GpuRenderer::render_mesh_data()`, pass a `light_view_proj` matrix to enable shadows:
+
+```rust
+// Orthographic light projection for directional shadows
+let light_view_proj: [f32; 16] = compute_light_matrix(light_dir, scene_bounds);
+
+renderer.render_mesh_data(
+    &target_view,
+    &mesh,
+    &model_matrix,
+    &view_proj,
+    camera_pos,
+    light_dir,
+    1.0,                          // light intensity
+    Some(&light_view_proj),       // enables shadow pass
+);
+```
+
+The shadow system uses:
+
+- **2048x2048 depth texture** (Depth32Float)
+- **Front-face culling** in shadow pass (reduces shadow acne)
+- **Depth bias** (constant=2, slope_scale=2.0) for further acne reduction
+- **4-tap PCF** sampling for soft shadow edges
+
+Materials control shadow behavior per-mesh:
+
+```rust
+let floor = Material {
+    receives_shadows: true,   // Shadows appear on this surface
+    casts_shadows: false,     // This mesh doesn't cast shadows
+    ..Material::default()
+};
+```
+
+## Skeletal Animation
+
+Animate meshes with bone transforms. The GPU applies per-vertex skinning using up to 4 joint influences.
+
+### Skeleton Definition
+
+```rust
+use blinc_core::{Bone, Skeleton, SkinningData};
+
+let skeleton = Skeleton {
+    bones: vec![
+        Bone {
+            name: "Root".into(),
+            parent: None,
+            inverse_bind_matrix: identity_matrix(),
+        },
+        Bone {
+            name: "UpperArm".into(),
+            parent: Some(0),
+            inverse_bind_matrix: upper_arm_ibm,
+        },
+        Bone {
+            name: "LowerArm".into(),
+            parent: Some(1),
+            inverse_bind_matrix: lower_arm_ibm,
+        },
+    ],
+};
+```
+
+### Per-Frame Skinning
+
+Each frame, compute the joint matrices and attach them to the mesh:
+
+```rust
+// joint_matrix[i] = current_world_transform[i] * inverse_bind_matrix[i]
+let joint_matrices: Vec<[f32; 16]> = skeleton.bones.iter()
+    .enumerate()
+    .map(|(i, bone)| {
+        multiply_mat4(&animated_world_transforms[i], &bone.inverse_bind_matrix)
+    })
+    .collect();
+
+let mesh = MeshData {
+    vertices: skinned_vertices,  // vertices with .joints and .weights set
+    indices: indices,
+    material: Material::default(),
+    skin: Some(SkinningData { joint_matrices }),
+};
+```
+
+### Vertex Skinning
+
+Vertices reference bones by index:
+
+```rust
+Vertex::new([0.0, 1.0, 0.0])
+    .with_joints(
+        [0, 1, 0, 0],       // bone indices
+        [0.6, 0.4, 0.0, 0.0] // weights (sum to 1.0)
+    )
+```
+
+The GPU vertex shader computes:
+
+```
+skin_matrix = joint[0] * w0 + joint[1] * w1 + joint[2] * w2 + joint[3] * w3
+position = skin_matrix * vertex_position
+normal = skin_matrix * vertex_normal
+```
+
+Maximum **256 joints** per mesh, stored in a GPU storage buffer.
+
+## Custom Render Passes
+
+Inject your own GPU render passes into the pipeline. Passes execute at specific stages — before UI rendering (`PreRender`) or after (`PostProcess`).
+
+### Basic Custom Pass
+
+```rust
+use blinc_gpu::{CustomRenderPass, RenderPassContext, RenderStage};
+
+struct SkyboxPass {
+    pipeline: Option<wgpu::RenderPipeline>,
+}
+
+impl CustomRenderPass for SkyboxPass {
+    fn label(&self) -> &str { "skybox" }
+    fn stage(&self) -> RenderStage { RenderStage::PreRender }
+
+    fn initialize(&mut self, device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) {
+        // Create your render pipeline, bind groups, etc.
+    }
+
+    fn render(&mut self, ctx: &RenderPassContext) {
+        let mut encoder = ctx.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Skybox"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: ctx.target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            // Draw skybox...
+        }
+        ctx.queue.submit(std::iter::once(encoder.finish()));
+    }
+}
+
+// Register with the renderer
+renderer.register_custom_pass(Box::new(SkyboxPass { pipeline: None }));
+```
+
+### Render Stages
+
+| Stage | When | Use Cases |
+|-------|------|-----------|
+| `PreRender` | Before UI primitives | Skyboxes, 3D scene backgrounds, grid overlays |
+| `PostProcess` | After all UI rendering | Bloom, tone mapping, FXAA, vignette, debug overlays |
+
+## Custom Bind Groups
+
+The `BindGroupBuilder` creates matched layout + bind group pairs:
+
+```rust
+use blinc_gpu::BindGroupBuilder;
+
+let mut builder = BindGroupBuilder::new("my_effect");
+builder.add_uniform_buffer(uniforms_buffer.as_entire_binding());
+builder.add_texture(&my_texture_view);
+builder.add_sampler(&my_sampler);
+builder.add_storage_buffer(data_buffer.as_entire_binding(), true); // read-only
+
+let (layout, bind_group) = builder.build(device);
+```
+
+Supported binding types:
+
+| Method | Shader Type | Notes |
+|--------|-------------|-------|
+| `add_uniform_buffer()` | `var<uniform>` | Per-frame data (transforms, time, etc.) |
+| `add_storage_buffer(_, read_only)` | `var<storage>` | Large data arrays, particle buffers |
+| `add_texture()` | `texture_2d<f32>` | Sampled textures (filterable) |
+| `add_storage_texture()` | `texture_storage_2d` | Compute write targets |
+| `add_sampler()` | `sampler` | Filtering sampler |
+| `add_comparison_sampler()` | `sampler_comparison` | Shadow map sampling |
+
+## Compute Shaders
+
+Execute compute shaders for simulation, particle updates, or data processing:
+
+```rust
+use blinc_gpu::{create_compute_pipeline, ComputeDispatch, BindGroupBuilder};
+
+// Create pipeline from WGSL
+let pipeline = create_compute_pipeline(
+    device,
+    "particle_sim",
+    include_str!("shaders/particle_sim.wgsl"),
+    "cs_main",
+    &bind_group_layout,
+);
+
+// Dispatch
+let dispatch = ComputeDispatch {
+    pipeline: &pipeline,
+    bind_group: &bind_group,
+    workgroups: (particle_count / 64, 1, 1),
+    label: "particle_sim",
+};
+dispatch.execute(device, queue);
+```
+
+## Post-Processing Chain
+
+Chain multiple screen-space effects with automatic ping-pong texture management:
+
+```rust
+use blinc_gpu::{PostProcessChain, PostProcessEffect};
+
+struct BloomEffect { /* ... */ }
+
+impl PostProcessEffect for BloomEffect {
+    fn label(&self) -> &str { "bloom" }
+
+    fn initialize(&mut self, device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) {
+        // Create bloom pipeline, intermediate textures, etc.
+    }
+
+    fn apply(&mut self, device: &wgpu::Device, queue: &wgpu::Queue,
+             input: &wgpu::TextureView, output: &wgpu::TextureView,
+             width: u32, height: u32) {
+        // Read from input, write bloom result to output
+    }
+}
+
+// Build a chain
+let mut chain = PostProcessChain::new("my_effects");
+chain.add_effect(Box::new(BloomEffect::new()));
+chain.add_effect(Box::new(ToneMappingEffect::new()));
+
+// Register as a custom pass (runs at PostProcess stage)
+renderer.register_custom_pass(Box::new(chain));
+```
+
+The chain automatically:
+- Copies the framebuffer to a ping texture
+- Chains effects: ping → pong → ping → ... → framebuffer
+- Manages texture lifetimes and resizing
+- Skips disabled effects
+
+## Raw Pixel Drawing
+
+For video frames, camera previews, or procedural textures, use `draw_rgba_pixels`:
+
+```rust
+canvas(|ctx: &mut dyn DrawContext, bounds| {
+    // Upload and render RGBA pixel data in one call
+    ctx.draw_rgba_pixels(
+        &rgba_data,     // &[u8], 4 bytes per pixel
+        width,          // u32
+        height,         // u32
+        Rect::new(0.0, 0.0, bounds.width, bounds.height),
+    );
+})
+.w(640.0)
+.h(480.0)
+```
+
+This creates a GPU texture each frame — ideal for dynamic content like video playback or camera streams.
+
+## GPU Memory Budget
+
+The renderer tracks GPU texture memory and enforces a configurable budget:
+
+```rust
+// Default: 128 MB, override with BLINC_GPU_MEMORY_BUDGET_MB env var
+let config = RendererConfig {
+    gpu_memory_budget: 256 * 1024 * 1024,  // 256 MB
+    ..RendererConfig::default()
+};
+```
+
+Call `renderer.enforce_memory_budget()` once per frame to evict cached textures when over budget. Eviction is largest-first (XLarge pool textures → mask image cache).
+
+## Architecture
+
+The 3D rendering pipeline sits alongside the 2D SDF pipeline:
+
+```
+Frame
+ ├── PreRender custom passes (skybox, 3D scene)
+ ├── UI Rendering
+ │   ├── SDF primitives (2D shapes)
+ │   ├── Glass / vibrancy effects
+ │   ├── Text glyphs
+ │   ├── Canvas callbacks → draw_mesh_data / draw_rgba_pixels
+ │   └── Layer effects (blur, shadow, glow)
+ ├── PostProcess custom passes (bloom, tone mapping)
+ └── Memory budget enforcement
+```
+
+The mesh pipeline (`MeshPipeline`) is lazily created on first use and includes:
+- Main PBR render pipeline with normal/displacement/shadow support
+- Shadow depth pass pipeline (Depth32Float, front-face culling)
+- Default textures (white, flat normal, black displacement)
+- Joint matrix storage buffer (for skeletal animation)
+- Comparison sampler (for PCF shadow sampling)
+
+> **Tip:** For static 3D scenes, render to an offscreen texture once, then display it as an image. Only re-render when the camera or scene changes.

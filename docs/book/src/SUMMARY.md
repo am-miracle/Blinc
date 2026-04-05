@@ -71,6 +71,7 @@
 - [Pointer Query](./advanced/pointer-query.md)
 - [Performance Tips](./advanced/performance.md)
 - [Flow Shaders](./advanced/flow-shaders.md)
+- [3D Rendering](./advanced/3d-rendering.md)
 
 # Architecture
 
