@@ -824,6 +824,8 @@ pub struct GpuRenderer {
     image_pipeline: Option<ImagePipeline>,
     /// Lazily-created mesh rendering pipeline
     mesh_pipeline: Option<MeshPipeline>,
+    /// User-registered custom render passes
+    custom_passes: crate::custom_pass::CustomPassManager,
     /// Cached MSAA textures for overlay rendering (avoids per-frame allocation)
     cached_msaa: Option<CachedMsaaTextures>,
     /// Cached glass resources (avoids per-frame allocation)
@@ -1437,6 +1439,7 @@ impl GpuRenderer {
             texture_format,
             image_pipeline: None,
             mesh_pipeline: None,
+            custom_passes: crate::custom_pass::CustomPassManager::new(),
             cached_msaa: None,
             cached_glass: None,
             cached_text: None,
@@ -7109,6 +7112,49 @@ impl GpuRenderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    // ─── Custom Render Pass API ────────────────────────────────────────────
+
+    /// Register a custom render pass.
+    ///
+    /// The pass will be initialized immediately and executed each frame
+    /// at the stage returned by `pass.stage()`.
+    pub fn register_custom_pass(&mut self, mut pass: Box<dyn crate::custom_pass::CustomRenderPass>) {
+        pass.initialize(&self.device, &self.queue, self.texture_format);
+        self.custom_passes.register(pass);
+    }
+
+    /// Remove a custom render pass by label.
+    pub fn remove_custom_pass(&mut self, label: &str) -> bool {
+        self.custom_passes.remove(label)
+    }
+
+    /// Execute all custom passes for a given stage.
+    pub fn execute_custom_passes(
+        &mut self,
+        stage: crate::custom_pass::RenderStage,
+        target: &wgpu::TextureView,
+        scale_factor: f64,
+    ) {
+        if !self.custom_passes.has_passes(stage) {
+            return;
+        }
+        let ctx = crate::custom_pass::RenderPassContext {
+            device: &self.device,
+            queue: &self.queue,
+            target,
+            viewport_width: self.viewport_size.0,
+            viewport_height: self.viewport_size.1,
+            texture_format: self.texture_format,
+            scale_factor,
+        };
+        self.custom_passes.execute_stage(stage, &ctx);
+    }
+
+    /// Notify custom passes of a viewport resize.
+    pub fn resize_custom_passes(&mut self, width: u32, height: u32) {
+        self.custom_passes.resize(&self.device, width, height);
     }
 
     /// Get a reference to the layer texture cache

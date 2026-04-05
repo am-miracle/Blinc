@@ -16,6 +16,7 @@
 //! - **Path Rendering**: Vector path tessellation via lyon
 
 pub mod backbuffer;
+pub mod custom_pass;
 pub mod flow_codegen;
 pub mod flow_pipeline;
 pub mod gradient_texture;
@@ -42,6 +43,7 @@ pub use primitives::{
     LayerCommand, LayerCommandEntry, LayerCompositeUniforms, ParticleViewport3D, PathBatch,
     PathUniforms, PrimitiveBatch, PrimitiveType, Uniforms,
 };
+pub use custom_pass::{CustomRenderPass, RenderPassContext, RenderStage};
 pub use renderer::{GpuRenderer, LayerTexture, LayerTextureCache, RendererConfig, RendererError};
 pub use shaders::{
     BLUR_SHADER, COLOR_MATRIX_SHADER, COMPOSITE_SHADER, DROP_SHADOW_SHADER, GLASS_SHADER,
