@@ -238,6 +238,10 @@ pub struct WindowedContext {
     pub height: f32,
     /// Current scale factor (physical / logical)
     pub scale_factor: f64,
+    /// Safe area insets (top, right, bottom, left) in logical pixels.
+    /// On mobile: notch, status bar, home indicator.
+    /// On desktop: all zeros.
+    pub safe_area: (f32, f32, f32, f32),
     /// Physical window width (for internal use)
     pub(crate) physical_width: f32,
     /// Physical window height (for internal use)
@@ -314,6 +318,7 @@ impl WindowedContext {
             width: logical_width,
             height: logical_height,
             scale_factor,
+            safe_area: window.safe_area_insets(),
             physical_width: physical_width as f32,
             physical_height: physical_height as f32,
             focused: window.is_focused(),
@@ -361,6 +366,7 @@ impl WindowedContext {
             width: logical_width,
             height: logical_height,
             scale_factor,
+            safe_area: (0.0, 0.0, 0.0, 0.0),
             physical_width,
             physical_height,
             focused,
@@ -408,6 +414,7 @@ impl WindowedContext {
             width: logical_width,
             height: logical_height,
             scale_factor,
+            safe_area: (0.0, 0.0, 0.0, 0.0),
             physical_width,
             physical_height,
             focused,
@@ -455,6 +462,7 @@ impl WindowedContext {
             width: logical_width,
             height: logical_height,
             scale_factor,
+            safe_area: (0.0, 0.0, 0.0, 0.0),
             physical_width,
             physical_height,
             focused,
@@ -533,6 +541,36 @@ impl WindowedContext {
     /// ```
     pub fn is_ready(&self) -> bool {
         self.rebuild_count > 0
+    }
+
+    /// Safe area inset from the top (status bar, notch)
+    pub fn safe_top(&self) -> f32 {
+        self.safe_area.0
+    }
+
+    /// Safe area inset from the right
+    pub fn safe_right(&self) -> f32 {
+        self.safe_area.1
+    }
+
+    /// Safe area inset from the bottom (home indicator)
+    pub fn safe_bottom(&self) -> f32 {
+        self.safe_area.2
+    }
+
+    /// Safe area inset from the left
+    pub fn safe_left(&self) -> f32 {
+        self.safe_area.3
+    }
+
+    /// Content width excluding safe area insets
+    pub fn safe_width(&self) -> f32 {
+        self.width - self.safe_area.1 - self.safe_area.3
+    }
+
+    /// Content height excluding safe area insets
+    pub fn safe_height(&self) -> f32 {
+        self.height - self.safe_area.0 - self.safe_area.2
     }
 
     /// Open a new window with the given configuration.

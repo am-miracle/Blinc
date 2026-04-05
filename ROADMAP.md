@@ -69,7 +69,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | IME / compose input (mobile) | Planned | Android InputConnection, iOS UITextInput |
 | Gesture recognizers | **Done** | `GestureExt` trait: `.on_tap()`, `.on_long_press()`, `.on_swipe()` + pinch/rotate |
 | Pull-to-refresh | **Done** | `pull_to_refresh(callback)` widget with threshold, max pull, indicator |
-| Safe area insets | Partial | Notch detection exists, layout integration needed |
+| Safe area insets | **Done** | `ctx.safe_area`, `safe_top/right/bottom/left()`, `safe_width/height()` |
 | Haptic feedback | Done | Native bridge handlers on both platforms |
 
 ### 2.2 Platform Integration (P1)

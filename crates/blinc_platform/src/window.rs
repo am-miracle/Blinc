@@ -209,6 +209,14 @@ pub trait Window: Send {
 
     /// Close the window
     fn close(&self) {}
+
+    /// Get safe area insets (top, right, bottom, left) in logical pixels.
+    ///
+    /// On mobile: accounts for notch, status bar, home indicator.
+    /// On desktop: returns zeros (no safe area constraints).
+    fn safe_area_insets(&self) -> (f32, f32, f32, f32) {
+        (0.0, 0.0, 0.0, 0.0)
+    }
 }
 
 /// Cursor icons
