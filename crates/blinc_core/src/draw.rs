@@ -689,6 +689,8 @@ pub struct Vertex {
     pub normal: [f32; 3],
     pub uv: [f32; 2],
     pub color: [f32; 4],
+    /// Tangent vector for normal mapping (xyz = direction, w = handedness ±1)
+    pub tangent: [f32; 4],
 }
 
 impl Vertex {
@@ -698,6 +700,7 @@ impl Vertex {
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 0.0],
             color: [1.0, 1.0, 1.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         }
     }
 
@@ -711,6 +714,10 @@ impl Vertex {
     }
     pub fn with_color(mut self, c: [f32; 4]) -> Self {
         self.color = c;
+        self
+    }
+    pub fn with_tangent(mut self, t: [f32; 4]) -> Self {
+        self.tangent = t;
         self
     }
 }
@@ -755,10 +762,22 @@ pub struct Material {
     pub emissive: [f32; 3],
     /// Base color texture (RGBA pixels, None = use base_color)
     pub base_color_texture: Option<TextureData>,
+    /// Normal map texture (tangent-space normals encoded as RGB)
+    pub normal_map: Option<TextureData>,
+    /// Normal map strength (0.0 = flat, 1.0 = full effect)
+    pub normal_scale: f32,
+    /// Displacement / height map texture (grayscale)
+    pub displacement_map: Option<TextureData>,
+    /// Displacement scale in world units
+    pub displacement_scale: f32,
     /// Whether the material is unlit (ignore lighting)
     pub unlit: bool,
     /// Alpha mode
     pub alpha_mode: AlphaMode,
+    /// Whether this mesh receives shadows from other meshes
+    pub receives_shadows: bool,
+    /// Whether this mesh casts shadows onto other meshes
+    pub casts_shadows: bool,
 }
 
 impl Default for Material {
@@ -769,8 +788,14 @@ impl Default for Material {
             roughness: 0.5,
             emissive: [0.0, 0.0, 0.0],
             base_color_texture: None,
+            normal_map: None,
+            normal_scale: 1.0,
+            displacement_map: None,
+            displacement_scale: 0.05,
             unlit: false,
             alpha_mode: AlphaMode::Opaque,
+            receives_shadows: true,
+            casts_shadows: true,
         }
     }
 }
