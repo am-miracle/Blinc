@@ -150,6 +150,15 @@ pub mod window_state;
 /// System tray icon support (desktop only).
 pub mod tray;
 
+/// Native OS desktop notifications.
+pub mod notify;
+
+/// Global keyboard shortcuts.
+pub mod hotkey;
+
+/// Drag and drop support.
+pub mod dnd;
+
 #[cfg(all(feature = "android", target_os = "android"))]
 pub mod android;
 #[cfg(all(feature = "android", target_os = "android"))]

@@ -77,6 +77,18 @@ pub enum WindowEvent {
         /// New scale factor
         scale_factor: f64,
     },
+    /// Files are being dragged over the window
+    DroppedFileHovered {
+        /// File paths being dragged
+        paths: Vec<std::path::PathBuf>,
+    },
+    /// Files were dropped onto the window
+    DroppedFile {
+        /// Dropped file paths
+        paths: Vec<std::path::PathBuf>,
+    },
+    /// File drag was cancelled (dragged away from window)
+    DroppedFileCancelled,
 }
 
 /// Application lifecycle events

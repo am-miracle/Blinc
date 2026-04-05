@@ -373,6 +373,27 @@ where
                 );
             }
 
+            WinitWindowEvent::DroppedFile(path) => {
+                self.handle_event_for(
+                    winit_id,
+                    Event::Window(wid, WindowEvent::DroppedFile { paths: vec![path] }),
+                );
+            }
+
+            WinitWindowEvent::HoveredFile(path) => {
+                self.handle_event_for(
+                    winit_id,
+                    Event::Window(wid, WindowEvent::DroppedFileHovered { paths: vec![path] }),
+                );
+            }
+
+            WinitWindowEvent::HoveredFileCancelled => {
+                self.handle_event_for(
+                    winit_id,
+                    Event::Window(wid, WindowEvent::DroppedFileCancelled),
+                );
+            }
+
             WinitWindowEvent::Ime(ime_event) => {
                 match ime_event {
                     winit::event::Ime::Commit(text) => {

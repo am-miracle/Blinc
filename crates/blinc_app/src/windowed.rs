@@ -2625,6 +2625,17 @@ impl WindowedApp {
                         return ControlFlow::Exit;
                     }
 
+                    // File drop events — dispatch to drop handler and render tree
+                    Event::Window(_, WindowEvent::DroppedFile { paths }) => {
+                        crate::dnd::dispatch_drop_event(crate::dnd::DropEvent::Dropped(paths));
+                    }
+                    Event::Window(_, WindowEvent::DroppedFileHovered { paths }) => {
+                        crate::dnd::dispatch_drop_event(crate::dnd::DropEvent::Hovered(paths));
+                    }
+                    Event::Window(_, WindowEvent::DroppedFileCancelled) => {
+                        crate::dnd::dispatch_drop_event(crate::dnd::DropEvent::Cancelled);
+                    }
+
                     // Handle input events
                     Event::Input(_, input_event) => {
                         // Pending event structure for deferred dispatch

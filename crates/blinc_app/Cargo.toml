@@ -59,6 +59,12 @@ rfd = { version = "0.15", optional = true }
 tray-icon = { version = "0.22", optional = true }
 muda = { version = "0.17", optional = true }
 
+# Desktop notifications
+notify-rust = { version = "4", optional = true }
+
+# Global keyboard shortcuts
+global-hotkey = { version = "0.7", optional = true }
+
 # Desktop platform - exclude mobile/embedded targets
 [target.'cfg(not(any(target_os = "android", target_os = "ios", target_os = "fuchsia")))'.dependencies]
 blinc_platform_desktop = { path = "../../extensions/blinc_platform_desktop", version = "0.1.14", optional = true }
@@ -91,7 +97,7 @@ blinc_canvas_kit = { path = "../blinc_canvas_kit", version = "0.1.14" }
 
 [features]
 default = ["windowed"]
-windowed = ["winit", "blinc_platform_desktop", "blinc_gpu/desktop", "rfd", "tray-icon", "muda"]
+windowed = ["winit", "blinc_platform_desktop", "blinc_gpu/desktop", "rfd", "tray-icon", "muda", "notify-rust", "global-hotkey"]
 android = ["blinc_platform_android", "android-activity", "ndk", "jni", "android_logger", "log", "tracing-android", "tracing-subscriber", "blinc_gpu/android"]
 ios = ["blinc_platform_ios", "blinc_gpu/ios"]
 harmony = ["blinc_gpu/harmony"]  # blinc_platform_harmony when target is available

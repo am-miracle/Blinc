@@ -3412,6 +3412,36 @@ impl Div {
         self
     }
 
+    /// Register a file drop handler (fires when files are dropped onto this element)
+    pub fn on_file_drop<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&crate::event_handler::EventContext) + 'static,
+    {
+        self.event_handlers
+            .on(blinc_core::events::event_types::FILE_DROP, handler);
+        self
+    }
+
+    /// Register a file drag-over handler (fires when files hover over this element)
+    pub fn on_file_drag_over<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&crate::event_handler::EventContext) + 'static,
+    {
+        self.event_handlers
+            .on(blinc_core::events::event_types::FILE_DRAG_OVER, handler);
+        self
+    }
+
+    /// Register a file drag-leave handler (fires when file drag exits this element)
+    pub fn on_file_drag_leave<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&crate::event_handler::EventContext) + 'static,
+    {
+        self.event_handlers
+            .on(blinc_core::events::event_types::FILE_DRAG_LEAVE, handler);
+        self
+    }
+
     /// Register a text input handler (receives character input when focused)
     pub fn on_text_input<F>(mut self, handler: F) -> Self
     where

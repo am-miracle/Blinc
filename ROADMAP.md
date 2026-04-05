@@ -18,10 +18,10 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 |---------|--------|-------|
 | File dialogs (open/save/folder) | **Done** | Via `rfd` crate, `blinc_app::dialog` module |
 | System tray / status bar icon | **Done** | `blinc_app::tray::TrayIconBuilder` via `tray-icon` + `muda` |
-| Native OS notifications | Planned | Via `notify-rust` / platform APIs |
-| Drag and drop | Planned | Winit DnD events + drop zone API |
+| Native OS notifications | **Done** | `blinc_app::notify::Notification` via `notify-rust` |
+| Drag and drop | **Done** | Window-level `on_file_drop()` + element-level `.on_file_drop()` on Div |
 | Clipboard (rich content) | Planned | Text works; images/HTML needed |
-| Global keyboard shortcuts | Planned | Registration API + conflict detection |
+| Global keyboard shortcuts | **Done** | `blinc_app::hotkey::GlobalHotkey` via `global-hotkey` |
 
 ### 1.2 Window Management (P0)
 
