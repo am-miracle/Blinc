@@ -162,7 +162,7 @@ pub enum BuiltinVar {
     VertexTangent,
     /// Vertex color (vec4) — Vertex target
     VertexColor,
-    /// Joint indices (vec4<u32>) — Vertex target (skeletal)
+    /// Joint indices (`vec4<u32>`) — Vertex target (skeletal)
     VertexJoints,
     /// Joint weights (vec4) — Vertex target (skeletal)
     VertexWeights,
