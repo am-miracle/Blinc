@@ -1356,6 +1356,7 @@ pub extern "C" fn blinc_init_gpu(
         sample_count: 1,
         texture_format: None,
         unified_text_rendering: true,
+        ..RendererConfig::default()
     };
 
     // Create wgpu instance with Metal backend

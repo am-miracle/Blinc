@@ -83,6 +83,7 @@ impl BlincApp {
             sample_count: 1, // SDF pipelines always use single-sampled textures
             texture_format: None,
             unified_text_rendering: true,
+            ..RendererConfig::default()
         };
 
         let renderer = pollster::block_on(GpuRenderer::new(renderer_config))
@@ -370,6 +371,7 @@ impl BlincApp {
             sample_count: 1,
             texture_format: None,
             unified_text_rendering: true,
+            ..RendererConfig::default()
         };
 
         let (renderer, surface) =

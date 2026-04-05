@@ -373,6 +373,7 @@ impl TestHarness {
             sample_count: config.sample_count,
             texture_format: Some(wgpu::TextureFormat::Rgba8Unorm),
             unified_text_rendering: true,
+            ..RendererConfig::default()
         };
 
         let renderer = pollster::block_on(GpuRenderer::new(renderer_config))

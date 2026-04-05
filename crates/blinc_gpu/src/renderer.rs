@@ -163,10 +163,22 @@ pub struct RendererConfig {
     ///
     /// Default: true (unified rendering for consistent animations)
     pub unified_text_rendering: bool,
+    /// GPU texture memory budget in bytes.
+    ///
+    /// When total tracked texture memory exceeds this budget, the renderer
+    /// evicts least-recently-used textures from caches. Set to 0 to disable.
+    ///
+    /// Default: 128 MB. Override with `BLINC_GPU_MEMORY_BUDGET_MB` env var.
+    pub gpu_memory_budget: u64,
 }
 
 impl Default for RendererConfig {
     fn default() -> Self {
+        let budget_mb: u64 = std::env::var("BLINC_GPU_MEMORY_BUDGET_MB")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(128);
+
         Self {
             // Conservative defaults for low memory footprint
             // Buffers are re-created if scenes exceed these limits, so no hard cap
@@ -176,7 +188,76 @@ impl Default for RendererConfig {
             sample_count: 1,
             texture_format: None,
             unified_text_rendering: true, // Enabled for consistent transforms during animations
+            gpu_memory_budget: budget_mb * 1024 * 1024,
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GPU Memory Budget & Eviction
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Tracks GPU texture memory usage across all caches and enforces a budget.
+pub struct GpuMemoryBudget {
+    /// Maximum allowed texture memory in bytes (0 = unlimited)
+    budget: u64,
+    /// Memory used by mask image cache
+    mask_image_bytes: u64,
+    /// Memory used by mesh textures (transient, per-frame)
+    mesh_texture_bytes: u64,
+    /// Number of eviction passes performed
+    eviction_count: u64,
+}
+
+impl GpuMemoryBudget {
+    pub fn new(budget: u64) -> Self {
+        Self {
+            budget,
+            mask_image_bytes: 0,
+            mesh_texture_bytes: 0,
+            eviction_count: 0,
+        }
+    }
+
+    /// Report current total tracked memory across all sources.
+    pub fn total_tracked_bytes(&self, layer_cache_bytes: u64) -> u64 {
+        layer_cache_bytes + self.mask_image_bytes + self.mesh_texture_bytes
+    }
+
+    /// Check if we're over budget.
+    pub fn is_over_budget(&self, layer_cache_bytes: u64) -> bool {
+        self.budget > 0 && self.total_tracked_bytes(layer_cache_bytes) > self.budget
+    }
+
+    /// Track a mask image being added to the cache.
+    pub fn track_mask_image(&mut self, width: u32, height: u32) {
+        self.mask_image_bytes += (width as u64) * (height as u64) * 4;
+    }
+
+    /// Track a mask image being removed from the cache.
+    pub fn untrack_mask_image(&mut self, width: u32, height: u32) {
+        let bytes = (width as u64) * (height as u64) * 4;
+        self.mask_image_bytes = self.mask_image_bytes.saturating_sub(bytes);
+    }
+
+    /// Reset per-frame transient tracking (mesh textures, etc.)
+    pub fn reset_transient(&mut self) {
+        self.mesh_texture_bytes = 0;
+    }
+
+    /// Get the memory budget in bytes.
+    pub fn budget(&self) -> u64 {
+        self.budget
+    }
+
+    /// Get number of eviction passes performed.
+    pub fn eviction_count(&self) -> u64 {
+        self.eviction_count
+    }
+
+    /// Increment eviction counter.
+    pub fn record_eviction(&mut self) {
+        self.eviction_count += 1;
     }
 }
 
@@ -706,6 +787,34 @@ impl LayerTextureCache {
         self.update_pool_stats();
     }
 
+    /// Evict pooled textures until memory usage drops below `target_bytes`.
+    ///
+    /// Evicts largest textures first (XLarge → Large → Medium → Small).
+    /// Returns the number of bytes freed.
+    pub fn evict_to_budget(&mut self, target_bytes: u64) -> u64 {
+        let mut freed = 0u64;
+        let pools = [
+            TextureSizeBucket::XLarge,
+            TextureSizeBucket::Large,
+            TextureSizeBucket::Medium,
+            TextureSizeBucket::Small,
+        ];
+
+        for bucket in pools {
+            while self.stats.pool_memory_bytes > target_bytes {
+                let pool = self.get_pool_mut(bucket);
+                if let Some(tex) = pool.pop() {
+                    let bytes = Self::estimate_texture_bytes(tex.size, tex.has_depth);
+                    freed += bytes;
+                    self.update_pool_stats();
+                } else {
+                    break;
+                }
+            }
+        }
+        freed
+    }
+
     /// Store a texture with a layer ID for later retrieval
     pub fn store(&mut self, id: blinc_core::LayerId, texture: LayerTexture) {
         self.named_textures.insert(id, texture);
@@ -826,6 +935,8 @@ pub struct GpuRenderer {
     mesh_pipeline: Option<MeshPipeline>,
     /// User-registered custom render passes
     custom_passes: crate::custom_pass::CustomPassManager,
+    /// GPU texture memory budget and tracking
+    memory_budget: GpuMemoryBudget,
     /// Cached MSAA textures for overlay rendering (avoids per-frame allocation)
     cached_msaa: Option<CachedMsaaTextures>,
     /// Cached glass resources (avoids per-frame allocation)
@@ -1434,6 +1545,7 @@ impl GpuRenderer {
             bind_group_layouts,
             viewport_size,
             saved_viewport_size: None,
+            memory_budget: GpuMemoryBudget::new(config.gpu_memory_budget),
             config,
             time: 0.0,
             texture_format,
@@ -7221,6 +7333,66 @@ impl GpuRenderer {
     /// Notify custom passes of a viewport resize.
     pub fn resize_custom_passes(&mut self, width: u32, height: u32) {
         self.custom_passes.resize(&self.device, width, height);
+    }
+
+    // ─── GPU Memory Budget ─────────────────────────────────────────────────
+
+    /// Enforce the GPU memory budget by evicting cached textures.
+    ///
+    /// Call once per frame (e.g., at frame start) to keep memory in check.
+    /// Evicts largest pooled textures first, then trims mask image cache
+    /// if still over budget.
+    pub fn enforce_memory_budget(&mut self) {
+        self.memory_budget.reset_transient();
+
+        if self.memory_budget.budget() == 0 {
+            return; // unlimited
+        }
+
+        let layer_bytes = self.layer_texture_cache.stats().total_memory_bytes();
+        if !self.memory_budget.is_over_budget(layer_bytes) {
+            return;
+        }
+
+        // Phase 1: evict pooled layer textures (largest first)
+        let target = self
+            .memory_budget
+            .budget()
+            .saturating_sub(self.memory_budget.mask_image_bytes);
+        let freed = self.layer_texture_cache.evict_to_budget(target);
+        if freed > 0 {
+            self.memory_budget.record_eviction();
+        }
+
+        // Phase 2: if still over, trim mask image cache (drop oldest entries)
+        let layer_bytes = self.layer_texture_cache.stats().total_memory_bytes();
+        if self.memory_budget.is_over_budget(layer_bytes) && !self.mask_image_cache.is_empty() {
+            // Remove one entry at a time until under budget
+            let keys: Vec<String> = self.mask_image_cache.keys().cloned().collect();
+            for key in keys {
+                if !self.memory_budget.is_over_budget(
+                    self.layer_texture_cache.stats().total_memory_bytes(),
+                ) {
+                    break;
+                }
+                if let Some(img) = self.mask_image_cache.remove(&key) {
+                    let (w, h) = img.dimensions();
+                    self.memory_budget.untrack_mask_image(w, h);
+                    self.memory_budget.record_eviction();
+                }
+            }
+        }
+    }
+
+    /// Get the current GPU memory budget tracker.
+    pub fn memory_budget(&self) -> &GpuMemoryBudget {
+        &self.memory_budget
+    }
+
+    /// Get estimated total GPU texture memory usage in bytes.
+    pub fn estimated_texture_memory(&self) -> u64 {
+        let layer_bytes = self.layer_texture_cache.stats().total_memory_bytes();
+        self.memory_budget.total_tracked_bytes(layer_bytes)
     }
 
     /// Get a reference to the layer texture cache

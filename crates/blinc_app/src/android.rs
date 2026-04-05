@@ -1071,6 +1071,7 @@ impl AndroidApp {
             sample_count: 1,
             texture_format: None,
             unified_text_rendering: true,
+            ..RendererConfig::default()
         };
 
         // Create instance with Vulkan backend
