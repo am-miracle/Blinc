@@ -103,9 +103,9 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | System back button | **Done** | Auto-registered by `RouterBuilder::build()`, `Key::Back` dispatch |
 | Named routing | **Done** | `push_named("user", &[("id", "42")])` reverse lookup |
 | Route outlet | **Done** | `router.outlet()` builds current view with scoped context |
-| Stack navigator | Planned | `stack()` page container, pages persist across navigation |
-| Tab navigator | Partial | Tabs component exists, needs routing integration |
-| Bottom sheet | Partial | Sheet component, needs gesture dismiss |
+| Stack navigator | **Done** | `stack()` + `motion()` — documented integration pattern |
+| Tab navigator | **Done** | `blinc_cn::tabs()` + `router.push()` — documented pattern |
+| Bottom sheet navigation | **Done** | `blinc_cn::sheet()` + `router.outlet()` — documented pattern |
 | Page suspension | Planned | Freeze animations + buffer signals on non-top pages |
 | Nested route stacks | Planned | Layout routes with scoped sub-stacks |
 

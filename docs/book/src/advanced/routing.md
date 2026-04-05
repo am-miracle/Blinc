@@ -215,3 +215,121 @@ router.push_named("user", &[("id", "42")]); // → /users/42
 // Check if a path matches
 router.has_route("/users/42"); // true
 ```
+
+## Tab Navigator
+
+Use the `tabs()` component from `blinc_cn` with the router's current path as the active tab:
+
+```rust
+use blinc_cn::tabs;
+
+fn app_shell(router: &Router) -> Div {
+    // Track active tab via router path
+    let active_tab = ctx.use_state_keyed("tab", || router.current_path());
+
+    div().flex_col().w_full().h_full()
+        // Content area — router outlet
+        .child(router.outlet().flex_grow())
+        // Bottom tab bar
+        .child(
+            tabs(&active_tab)
+                .tab("Home", "/", {
+                    let r = router.clone();
+                    move || r.push("/")
+                })
+                .tab("Search", "/search", {
+                    let r = router.clone();
+                    move || r.push("/search")
+                })
+                .tab("Profile", "/profile", {
+                    let r = router.clone();
+                    move || r.push("/profile")
+                })
+        )
+}
+```
+
+Each tab click calls `router.push()` which updates the outlet. The tab state stays in sync with the route.
+
+## Stack Navigator
+
+Use `stack()` from `blinc_layout` to layer pages with the router:
+
+```rust
+use blinc_layout::prelude::*;
+
+fn route_stack(router: &Router) -> Div {
+    // The router's outlet already renders the current route's view.
+    // For animated page stacking, wrap the outlet in a stack:
+    stack()
+        .w_full()
+        .h_full()
+        .child(router.outlet())
+}
+```
+
+For push/pop animations, use `motion()` containers inside your route views:
+
+```rust
+fn user_detail(ctx: RouteContext) -> Div {
+    motion()
+        .slide_in(SlideDirection::Right, 300)
+        .child(
+            div().w_full().h_full()
+                .child(text(&format!("User #{}", ctx.params.get("id").unwrap_or("?"))))
+                .child(
+                    div().on_click({
+                        let r = ctx.router.clone();
+                        move |_| r.back()
+                    })
+                    .child(text("Back"))
+                )
+        )
+}
+```
+
+## Bottom Sheet Navigation
+
+Use `sheet()` from `blinc_cn` for modal-like navigation that slides up from the bottom:
+
+```rust
+use blinc_cn::sheet;
+
+fn show_details(router: &Router, item_id: &str) {
+    // Navigate to detail route
+    router.push(&format!("/items/{}", item_id));
+
+    // Or show as a bottom sheet overlay
+    sheet()
+        .title("Item Details")
+        .content(move || {
+            let router = use_router();
+            router.outlet() // Render the matched route inside the sheet
+        })
+        .show();
+}
+```
+
+For gesture-dismissable sheets on mobile, the sheet component handles the swipe-down gesture automatically. On dismiss, call `router.back()`:
+
+```rust
+sheet()
+    .on_close({
+        let r = router.clone();
+        move || r.back()
+    })
+    .content(|| detail_view())
+    .show();
+```
+
+## Navigation Patterns Summary
+
+| Pattern | Widget | Router Integration |
+|---------|--------|-------------------|
+| **Page navigation** | `router.outlet()` | Direct — renders current route |
+| **Tab bar** | `blinc_cn::tabs()` | Tab clicks call `router.push()` |
+| **Stack with animations** | `stack()` + `motion()` | Wrap route views in motion containers |
+| **Bottom sheet** | `blinc_cn::sheet()` | Content renders `router.outlet()`, dismiss calls `router.back()` |
+| **Drawer / sidebar** | `blinc_cn::drawer()` | Navigation links call `router.push()` |
+| **Back button** | Auto-registered | `RouterBuilder::build()` wires it |
+| **Deep links** | Auto-registered | Platform dispatches to router automatically |
