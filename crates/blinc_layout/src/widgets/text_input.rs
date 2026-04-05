@@ -478,6 +478,10 @@ pub struct TextInputData {
     pub(crate) css_element_id: Option<String>,
     /// CSS class names for stylesheet matching (set via TextInput::class())
     pub(crate) css_classes: Vec<String>,
+    /// Last click timestamp for double-click detection
+    pub(crate) last_click_time: Option<std::time::Instant>,
+    /// Anchor position for drag-to-select
+    pub(crate) drag_select_anchor: Option<usize>,
 }
 
 impl std::fmt::Debug for TextInputData {
@@ -527,6 +531,8 @@ impl TextInputData {
             on_change_callback: None,
             css_element_id: None,
             css_classes: Vec::new(),
+            last_click_time: None,
+            drag_select_anchor: None,
         }
     }
 
@@ -1456,6 +1462,9 @@ impl TextInput {
         use blinc_core::events::event_types;
 
         let data_for_click = Arc::clone(&data);
+        let data_for_drag = Arc::clone(&data);
+        let config_for_drag = Arc::clone(&config);
+        let stateful_for_drag = Arc::clone(&stateful_state);
         let data_for_text = Arc::clone(&data);
         let data_for_key = Arc::clone(&data);
         let config_for_click = Arc::clone(&config);
@@ -1512,22 +1521,65 @@ impl TextInput {
                     }
 
                     // Calculate cursor position from click x position
-                    // local_x is relative to the hit element (text inside the wrapper).
-                    // Since the text element is positioned after padding/border via layout,
-                    // local_x is already in text-relative coordinates - use it directly.
-                    // cursor_position_from_x handles scroll offset internally.
                     let text_x = ctx.local_x.max(0.0);
                     let cursor_pos = d.cursor_position_from_x(text_x, font_size);
-                    d.cursor = cursor_pos;
-                    d.selection_start = None;
+
+                    // Double-click detection (select word)
+                    let now = std::time::Instant::now();
+                    let is_double_click = d
+                        .last_click_time
+                        .map(|t| now.duration_since(t).as_millis() < 400)
+                        .unwrap_or(false);
+                    d.last_click_time = Some(now);
+
+                    if is_double_click {
+                        // Select word at cursor
+                        let (start, end) =
+                            crate::widgets::text_edit::word_at_position(&d.value, cursor_pos);
+                        d.selection_start = Some(start);
+                        d.cursor = end;
+                    } else {
+                        // Single click: position cursor, start potential drag selection
+                        d.cursor = cursor_pos;
+                        d.selection_start = None;
+                        d.drag_select_anchor = Some(cursor_pos);
+                    }
                     d.reset_cursor_blink();
 
-                    true // needs refresh
-                }; // Lock released here
+                    true
+                };
 
-                // Trigger incremental refresh AFTER releasing the data lock
                 if needs_refresh {
                     refresh_stateful(&stateful_for_click);
+                }
+            })
+            // Mouse drag to extend selection
+            .on_drag({
+                move |ctx| {
+                    let needs_refresh = {
+                        let mut d = match data_for_drag.lock() {
+                            Ok(d) => d,
+                            Err(_) => return,
+                        };
+                        if !d.visual.is_focused() {
+                            return;
+                        }
+
+                        let font_size = config_for_drag.lock().unwrap().font_size;
+                        let text_x = ctx.local_x.max(0.0);
+                        let new_pos = d.cursor_position_from_x(text_x, font_size);
+
+                        if let Some(anchor) = d.drag_select_anchor {
+                            if new_pos != anchor {
+                                d.selection_start = Some(anchor);
+                                d.cursor = new_pos;
+                            }
+                        }
+                        true
+                    };
+                    if needs_refresh {
+                        refresh_stateful(&stateful_for_drag);
+                    }
                 }
             })
             // Handle text input
