@@ -1053,6 +1053,8 @@ impl AnimatedValue {
                 if let Some(id) = self.handle.register_spring(spring) {
                     self.spring_id = Some(id);
                     self.handle.set_spring_target(id, target);
+                    // Auto-register to current suspension scope
+                    crate::suspension::register_spring(id);
                 }
             }
         }
@@ -1118,8 +1120,8 @@ impl AnimatedValue {
 
 impl Drop for AnimatedValue {
     fn drop(&mut self) {
-        // Clean up spring when value is dropped
         if let Some(id) = self.spring_id {
+            crate::suspension::unregister_spring(id);
             self.handle.remove_spring(id);
         }
     }

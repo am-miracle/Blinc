@@ -20,6 +20,7 @@ pub mod morph;
 pub mod presets;
 pub mod scheduler;
 pub mod spring;
+pub mod suspension;
 pub mod timeline;
 pub mod values;
 

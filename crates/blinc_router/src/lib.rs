@@ -53,6 +53,10 @@ struct RouterInner {
     history: RouterHistory,
     current_match: Option<MatchedRoute>,
     named_routes: rustc_hash::FxHashMap<String, String>,
+    /// Animation suspension scopes keyed by route path
+    route_scopes: rustc_hash::FxHashMap<String, blinc_animation::suspension::ScopeId>,
+    /// The currently active route path (for suspension tracking)
+    active_route_path: Option<String>,
 }
 
 /// A router instance. Clone to share across closures.
@@ -255,9 +259,43 @@ impl Router {
         };
 
         if let Some((view, ctx)) = view_and_ctx {
+            let route_path = ctx.path.clone();
+
+            // Manage animation suspension scopes
+            {
+                let mut state = self.inner.lock().unwrap();
+                let handle = blinc_animation::get_scheduler();
+
+                // Suspend the old route's animations
+                if let Some(ref old_path) = state.active_route_path {
+                    if *old_path != route_path {
+                        if let Some(&scope) = state.route_scopes.get(old_path) {
+                            blinc_animation::suspension::suspend_scope(scope, &handle);
+                        }
+                    }
+                }
+
+                // Get or create scope for the new route
+                let scope = *state
+                    .route_scopes
+                    .entry(route_path.clone())
+                    .or_insert_with(blinc_animation::suspension::create_scope);
+
+                // Resume this route's animations (if previously suspended)
+                blinc_animation::suspension::resume_scope(scope, &handle);
+
+                // Enter the scope so new AnimatedValues register here
+                blinc_animation::suspension::enter_scope(scope);
+                state.active_route_path = Some(route_path);
+            }
+
             push_router_context(self);
             let result = view(ctx);
             pop_router_context();
+
+            // Exit the scope
+            blinc_animation::suspension::exit_scope();
+
             result
         } else {
             blinc_layout::div::div()
@@ -362,6 +400,8 @@ impl RouterBuilder {
                 history: RouterHistory::new(&self.initial_path),
                 current_match: initial_match,
                 named_routes,
+                route_scopes: rustc_hash::FxHashMap::default(),
+                active_route_path: None,
             })),
         };
 
