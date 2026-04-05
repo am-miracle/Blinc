@@ -720,6 +720,103 @@ impl TextInputData {
         })
     }
 
+    /// Move cursor to the previous word boundary
+    pub fn move_word_left(&mut self, shift: bool) {
+        if shift && self.selection_start.is_none() {
+            self.selection_start = Some(self.cursor);
+        } else if !shift {
+            self.selection_start = None;
+        }
+        self.cursor = crate::widgets::text_edit::word_boundary_left(&self.value, self.cursor);
+    }
+
+    /// Move cursor to the next word boundary
+    pub fn move_word_right(&mut self, shift: bool) {
+        if shift && self.selection_start.is_none() {
+            self.selection_start = Some(self.cursor);
+        } else if !shift {
+            self.selection_start = None;
+        }
+        self.cursor = crate::widgets::text_edit::word_boundary_right(&self.value, self.cursor);
+    }
+
+    /// Delete from cursor to the previous word boundary
+    pub fn delete_word_backward(&mut self) {
+        if self.selection_start.is_some() {
+            self.delete_selection();
+            return;
+        }
+        let target = crate::widgets::text_edit::word_boundary_left(&self.value, self.cursor);
+        if target < self.cursor {
+            let byte_start = self
+                .value
+                .char_indices()
+                .nth(target)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let byte_end = self
+                .value
+                .char_indices()
+                .nth(self.cursor)
+                .map(|(i, _)| i)
+                .unwrap_or(self.value.len());
+            self.value = format!("{}{}", &self.value[..byte_start], &self.value[byte_end..]);
+            self.cursor = target;
+        }
+    }
+
+    /// Delete from cursor to the next word boundary
+    pub fn delete_word_forward(&mut self) {
+        if self.selection_start.is_some() {
+            self.delete_selection();
+            return;
+        }
+        let target = crate::widgets::text_edit::word_boundary_right(&self.value, self.cursor);
+        if target > self.cursor {
+            let byte_start = self
+                .value
+                .char_indices()
+                .nth(self.cursor)
+                .map(|(i, _)| i)
+                .unwrap_or(self.value.len());
+            let byte_end = self
+                .value
+                .char_indices()
+                .nth(target)
+                .map(|(i, _)| i)
+                .unwrap_or(self.value.len());
+            self.value = format!("{}{}", &self.value[..byte_start], &self.value[byte_end..]);
+        }
+    }
+
+    /// Delete the current selection, returning true if text changed
+    pub fn delete_selection(&mut self) -> bool {
+        if let Some(start) = self.selection_start.take() {
+            let (from, to) = if start < self.cursor {
+                (start, self.cursor)
+            } else {
+                (self.cursor, start)
+            };
+            let byte_from = self
+                .value
+                .char_indices()
+                .nth(from)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let byte_to = self
+                .value
+                .char_indices()
+                .nth(to)
+                .map(|(i, _)| i)
+                .unwrap_or(self.value.len());
+            self.value = format!("{}{}", &self.value[..byte_from], &self.value[byte_to..]);
+            self.cursor = from;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn validate(&mut self) {
         self.is_valid = match self.input_type {
             InputType::Email => {
@@ -1484,25 +1581,86 @@ impl TextInput {
 
                     let mut changed = true;
                     let mut should_blur = false;
-                    let mut value_changed = false; // Track if text content actually changed
+                    let mut value_changed = false;
+                    let mod_key = ctx.meta || ctx.ctrl;
+
                     match ctx.key_code {
+                        8 if mod_key => {
+                            // Cmd+Backspace: delete word backward
+                            d.delete_word_backward();
+                            value_changed = true;
+                        }
                         8 => {
-                            d.delete_backward(); // Backspace
+                            // Backspace
+                            if d.selection_start.is_some() {
+                                d.delete_selection();
+                            } else {
+                                d.delete_backward();
+                            }
+                            value_changed = true;
+                        }
+                        127 if mod_key => {
+                            // Cmd+Delete: delete word forward
+                            d.delete_word_forward();
                             value_changed = true;
                         }
                         127 => {
-                            d.delete_forward(); // Delete
+                            // Delete
+                            if d.selection_start.is_some() {
+                                d.delete_selection();
+                            } else {
+                                d.delete_forward();
+                            }
                             value_changed = true;
                         }
-                        37 => d.move_left(ctx.shift),     // Left arrow
-                        39 => d.move_right(ctx.shift),    // Right arrow
-                        36 => d.move_to_start(ctx.shift), // Home
-                        35 => d.move_to_end(ctx.shift),   // End
-                        65 if ctx.meta || ctx.ctrl => d.select_all(), // Ctrl/Cmd+A
+                        37 if mod_key => d.move_word_left(ctx.shift), // Cmd+Left
+                        39 if mod_key => d.move_word_right(ctx.shift), // Cmd+Right
+                        37 => d.move_left(ctx.shift),                 // Left
+                        39 => d.move_right(ctx.shift),                // Right
+                        36 => d.move_to_start(ctx.shift),             // Home
+                        35 => d.move_to_end(ctx.shift),               // End
                         27 => {
-                            // Escape - blur the input
                             should_blur = true;
-                            changed = true;
+                        }
+                        _ if mod_key => {
+                            match ctx.key_code {
+                                // Cmd+A: select all
+                                65 => d.select_all(),
+                                // Cmd+C: copy
+                                67 => {
+                                    if let Some(text) = d.selected_text() {
+                                        crate::widgets::text_edit::clipboard_write(&text);
+                                    }
+                                    changed = true;
+                                }
+                                // Cmd+X: cut
+                                88 => {
+                                    if let Some(text) = d.selected_text() {
+                                        crate::widgets::text_edit::clipboard_write(&text);
+                                        d.delete_selection();
+                                        value_changed = true;
+                                    }
+                                }
+                                // Cmd+V: paste
+                                86 => {
+                                    if let Some(clip) = crate::widgets::text_edit::clipboard_read()
+                                    {
+                                        // Remove newlines for single-line input
+                                        let clean: String = clip
+                                            .chars()
+                                            .filter(|c| *c != '\n' && *c != '\r')
+                                            .collect();
+                                        if !clean.is_empty() {
+                                            if d.selection_start.is_some() {
+                                                d.delete_selection();
+                                            }
+                                            d.insert(&clean);
+                                            value_changed = true;
+                                        }
+                                    }
+                                }
+                                _ => changed = false,
+                            }
                         }
                         _ => changed = false,
                     }

@@ -938,6 +938,41 @@ impl TextAreaState {
         }
     }
 
+    /// Delete from cursor to the previous word boundary
+    pub fn delete_word_backward(&mut self) {
+        if self.selection_start.is_some() {
+            self.delete_selection();
+            return;
+        }
+        let saved = self.cursor;
+        self.move_word_left(false);
+        if self.cursor != saved {
+            self.selection_start = Some(saved);
+            self.delete_selection();
+        }
+    }
+
+    /// Delete from cursor to the next word boundary
+    pub fn delete_word_forward(&mut self) {
+        if self.selection_start.is_some() {
+            self.delete_selection();
+            return;
+        }
+        let saved = self.cursor;
+        self.move_word_right(false);
+        if self.cursor != saved {
+            self.selection_start = Some(saved);
+            self.cursor = saved;
+            // Swap: we want to delete forward, so select from cursor to word end
+            self.selection_start = Some(self.cursor);
+            self.move_word_right(false);
+            let end = self.cursor;
+            self.cursor = saved;
+            self.selection_start = Some(end);
+            self.delete_selection();
+        }
+    }
+
     /// Select all text
     pub fn select_all(&mut self) {
         self.selection_start = Some(TextPosition::new(0, 0));
@@ -1780,9 +1815,19 @@ impl TextArea {
                     let mod_key = ctx.meta || ctx.ctrl;
 
                     match ctx.key_code {
+                        8 if mod_key => {
+                            // Cmd+Backspace: delete word backward
+                            d.delete_word_backward();
+                            text_changed = true;
+                        }
                         8 => {
                             // Backspace
                             d.delete_backward();
+                            text_changed = true;
+                        }
+                        127 if mod_key => {
+                            // Cmd+Delete: delete word forward
+                            d.delete_word_forward();
                             text_changed = true;
                         }
                         127 => {
