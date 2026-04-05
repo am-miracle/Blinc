@@ -1674,3 +1674,26 @@ pub extern "C" fn blinc_ios_handle_deep_link(uri: *const std::ffi::c_char) {
         blinc_router::dispatch_deep_link(uri);
     }
 }
+
+/// C FFI: receive stream data from native side (camera frames, audio buffers).
+///
+/// Wire in Swift:
+/// ```swift
+/// @_cdecl("blinc_dispatch_stream_data")
+/// public func blinc_dispatch_stream_data(
+///     streamId: UInt64,
+///     dataPtr: UnsafePointer<UInt8>,
+///     dataLen: UInt64
+/// ) { ... }
+/// ```
+#[no_mangle]
+pub extern "C" fn blinc_dispatch_stream_data(stream_id: u64, data_ptr: *const u8, data_len: u64) {
+    if data_ptr.is_null() || data_len == 0 {
+        return;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
+    blinc_core::native_bridge::dispatch_stream_data(
+        stream_id,
+        blinc_core::native_bridge::NativeValue::Bytes(bytes.to_vec()),
+    );
+}

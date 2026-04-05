@@ -246,6 +246,42 @@ object BlincNativeBridge {
         }
 
         // =====================================================================
+        // Camera namespace
+        // =====================================================================
+
+        register("camera", "preview_start") { args ->
+            val width = args.optInt(0, 640)
+            val height = args.optInt(1, 480)
+            val fps = args.optInt(2, 30)
+            val facing = args.optInt(3, 0) // 0=front, 1=back
+            val streamId = args.optLong(4, 0)
+
+            startCameraPreview(ctx, width, height, fps, facing, streamId)
+            null
+        }
+
+        registerVoid("camera", "preview_stop") {
+            stopCameraPreview()
+        }
+
+        // =====================================================================
+        // Audio recording namespace
+        // =====================================================================
+
+        register("audio", "record_start") { args ->
+            val sampleRate = args.optInt(0, 44100)
+            val channels = args.optInt(1, 1)
+            val streamId = args.optLong(2, 0)
+
+            startAudioRecording(ctx, sampleRate, channels, streamId)
+            null
+        }
+
+        registerVoid("audio", "record_stop") {
+            stopAudioRecording()
+        }
+
+        // =====================================================================
         // App namespace
         // =====================================================================
 
@@ -362,4 +398,121 @@ object BlincNativeBridge {
             vibrate(context, durationMs)
         }
     }
+
+    // =========================================================================
+    // Camera preview
+    // =========================================================================
+
+    private var cameraStreamId: Long = 0
+    private var isCameraRunning = false
+
+    /**
+     * Start camera preview and stream RGBA frames to Rust via JNI.
+     *
+     * Uses Camera2 API. Each frame is converted to RGBA and sent via
+     * nativeDispatchStreamData(streamId, rgbaBytes).
+     */
+    private fun startCameraPreview(
+        context: Context,
+        width: Int, height: Int, fps: Int, facing: Int, streamId: Long
+    ) {
+        cameraStreamId = streamId
+        isCameraRunning = true
+
+        // Camera2 implementation requires android.hardware.camera2 imports
+        // and a background HandlerThread. This is a template — users should
+        // adapt to their specific camera requirements.
+        //
+        // The key integration point:
+        // 1. Open CameraDevice for the requested facing
+        // 2. Create ImageReader with ImageFormat.YUV_420_888
+        // 3. In OnImageAvailableListener, convert YUV → RGBA
+        // 4. Call: nativeDispatchStreamData(streamId, rgbaBytes)
+        //
+        // Example conversion (simplified):
+        // val image = reader.acquireLatestImage()
+        // val rgba = yuvToRgba(image)  // convert planes to RGBA
+        // nativeDispatchStreamData(cameraStreamId, rgba)
+        // image.close()
+
+        android.util.Log.i("BlincNativeBridge", "Camera preview started: ${width}x${height} @ ${fps}fps, stream=$streamId")
+    }
+
+    private fun stopCameraPreview() {
+        isCameraRunning = false
+        android.util.Log.i("BlincNativeBridge", "Camera preview stopped")
+    }
+
+    // =========================================================================
+    // Audio recording
+    // =========================================================================
+
+    private var audioStreamId: Long = 0
+    private var isAudioRecording = false
+    private var audioRecordThread: Thread? = null
+
+    /**
+     * Start audio recording and stream PCM samples to Rust.
+     *
+     * Uses AudioRecord API. PCM float samples are sent as raw bytes via
+     * nativeDispatchStreamData(streamId, pcmBytes).
+     */
+    private fun startAudioRecording(
+        context: Context,
+        sampleRate: Int, channels: Int, streamId: Long
+    ) {
+        audioStreamId = streamId
+        isAudioRecording = true
+
+        val channelConfig = if (channels == 1)
+            android.media.AudioFormat.CHANNEL_IN_MONO
+        else
+            android.media.AudioFormat.CHANNEL_IN_STEREO
+
+        val bufferSize = android.media.AudioRecord.getMinBufferSize(
+            sampleRate, channelConfig, android.media.AudioFormat.ENCODING_PCM_FLOAT
+        )
+
+        audioRecordThread = Thread {
+            try {
+                val recorder = android.media.AudioRecord(
+                    android.media.MediaRecorder.AudioSource.MIC,
+                    sampleRate, channelConfig,
+                    android.media.AudioFormat.ENCODING_PCM_FLOAT,
+                    bufferSize
+                )
+                recorder.startRecording()
+
+                val buffer = FloatArray(bufferSize / 4)
+                while (isAudioRecording) {
+                    val read = recorder.read(buffer, 0, buffer.size, android.media.AudioRecord.READ_BLOCKING)
+                    if (read > 0) {
+                        // Convert float array to byte array (little-endian)
+                        val bytes = ByteArray(read * 4)
+                        val bb = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                        for (i in 0 until read) {
+                            bb.putFloat(buffer[i])
+                        }
+                        nativeDispatchStreamData(audioStreamId, bytes)
+                    }
+                }
+
+                recorder.stop()
+                recorder.release()
+            } catch (e: Exception) {
+                android.util.Log.e("BlincNativeBridge", "Audio recording error: ${e.message}")
+            }
+        }
+        audioRecordThread?.start()
+    }
+
+    private fun stopAudioRecording() {
+        isAudioRecording = false
+        audioRecordThread?.join(1000)
+        audioRecordThread = null
+    }
+
+    // JNI bridge for stream data
+    @JvmStatic
+    external fun nativeDispatchStreamData(streamId: Long, data: ByteArray)
 }

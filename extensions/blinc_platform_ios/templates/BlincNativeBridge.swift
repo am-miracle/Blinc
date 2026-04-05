@@ -22,6 +22,7 @@
 import Foundation
 import UIKit
 import AudioToolbox
+import AVFoundation
 
 public final class BlincNativeBridge {
 
@@ -218,6 +219,49 @@ public final class BlincNativeBridge {
         }
 
         // =====================================================================
+        // Camera namespace
+        // =====================================================================
+
+        register(namespace: "camera", name: "preview_start") { args in
+            let width = args[safe: 0] as? Int ?? 640
+            let height = args[safe: 1] as? Int ?? 480
+            let fps = args[safe: 2] as? Int ?? 30
+            let facing = args[safe: 3] as? Int ?? 0  // 0=front, 1=back
+            let streamId = args[safe: 4] as? Int64 ?? 0
+
+            BlincCameraHelper.shared.startPreview(
+                width: width, height: height, fps: fps,
+                facing: facing == 0 ? .front : .back,
+                streamId: UInt64(streamId)
+            )
+            return nil
+        }
+
+        registerVoid(namespace: "camera", name: "preview_stop") {
+            BlincCameraHelper.shared.stopPreview()
+        }
+
+        // =====================================================================
+        // Audio recording namespace
+        // =====================================================================
+
+        register(namespace: "audio", name: "record_start") { args in
+            let sampleRate = args[safe: 0] as? Int ?? 44100
+            let channels = args[safe: 1] as? Int ?? 1
+            let streamId = args[safe: 2] as? Int64 ?? 0
+
+            BlincAudioRecorderHelper.shared.startRecording(
+                sampleRate: sampleRate, channels: channels,
+                streamId: UInt64(streamId)
+            )
+            return nil
+        }
+
+        registerVoid(namespace: "audio", name: "record_stop") {
+            BlincAudioRecorderHelper.shared.stopRecording()
+        }
+
+        // =====================================================================
         // Keyboard namespace
         // =====================================================================
 
@@ -331,6 +375,152 @@ public final class BlincNativeBridge {
             return json
         }
         return "{\"success\":false,\"errorType\":\"\(type)\",\"errorMessage\":\"\(message)\"}"
+    }
+}
+
+// MARK: - Safe Array Access
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+// MARK: - Camera Helper
+
+/// Captures camera frames and sends RGBA data to Rust.
+///
+/// Uses AVCaptureSession + AVCaptureVideoDataOutput.
+/// Each frame is converted to RGBA and sent via blinc_dispatch_stream_data.
+class BlincCameraHelper: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    static let shared = BlincCameraHelper()
+
+    private var session: AVCaptureSession?
+    private var streamId: UInt64 = 0
+    private let queue = DispatchQueue(label: "blinc.camera")
+
+    func startPreview(width: Int, height: Int, fps: Int, facing: AVCaptureDevice.Position, streamId: UInt64) {
+        self.streamId = streamId
+
+        let session = AVCaptureSession()
+        session.sessionPreset = .medium
+
+        guard let device = AVCaptureDevice.default(
+            .builtInWideAngleCamera, for: .video, position: facing
+        ) else { return }
+
+        guard let input = try? AVCaptureDeviceInput(device: device) else { return }
+        if session.canAddInput(input) { session.addInput(input) }
+
+        let output = AVCaptureVideoDataOutput()
+        output.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ]
+        output.setSampleBufferDelegate(self, queue: queue)
+        if session.canAddOutput(output) { session.addOutput(output) }
+
+        session.startRunning()
+        self.session = session
+    }
+
+    func stopPreview() {
+        session?.stopRunning()
+        session = nil
+    }
+
+    func captureOutput(_ output: AVCaptureOutput,
+                       didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
+        let ptr = baseAddress.assumingMemoryBound(to: UInt8.self)
+
+        // Convert BGRA → RGBA
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let srcIdx = y * bytesPerRow + x * 4
+                let dstIdx = (y * width + x) * 4
+                rgba[dstIdx + 0] = ptr[srcIdx + 2]  // R ← B
+                rgba[dstIdx + 1] = ptr[srcIdx + 1]  // G
+                rgba[dstIdx + 2] = ptr[srcIdx + 0]  // B ← R
+                rgba[dstIdx + 3] = ptr[srcIdx + 3]  // A
+            }
+        }
+
+        // Send to Rust
+        rgba.withUnsafeBufferPointer { buf in
+            blinc_dispatch_stream_data(streamId, buf.baseAddress!, UInt64(rgba.count))
+        }
+    }
+}
+
+// MARK: - Audio Recording Helper
+
+/// Records audio from the microphone and sends PCM float samples to Rust.
+class BlincAudioRecorderHelper {
+    static let shared = BlincAudioRecorderHelper()
+
+    private var audioEngine: AVAudioEngine?
+    private var streamId: UInt64 = 0
+
+    func startRecording(sampleRate: Int, channels: Int, streamId: UInt64) {
+        self.streamId = streamId
+
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: Double(sampleRate),
+            channels: AVAudioChannelCount(channels),
+            interleaved: true
+        )!
+
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            guard let self = self else { return }
+            guard let floatData = buffer.floatChannelData else { return }
+
+            let frameCount = Int(buffer.frameLength)
+            let channelCount = Int(buffer.format.channelCount)
+
+            // Convert float samples to bytes (little-endian)
+            var bytes = [UInt8](repeating: 0, count: frameCount * channelCount * 4)
+            for i in 0..<(frameCount * channelCount) {
+                let ch = i % channelCount
+                let frame = i / channelCount
+                let value = floatData[ch][frame]
+                let valueBytes = withUnsafeBytes(of: value.bitPattern.littleEndian) { Array($0) }
+                bytes[i * 4 + 0] = valueBytes[0]
+                bytes[i * 4 + 1] = valueBytes[1]
+                bytes[i * 4 + 2] = valueBytes[2]
+                bytes[i * 4 + 3] = valueBytes[3]
+            }
+
+            bytes.withUnsafeBufferPointer { buf in
+                blinc_dispatch_stream_data(self.streamId, buf.baseAddress!, UInt64(bytes.count))
+            }
+        }
+
+        do {
+            try engine.start()
+            self.audioEngine = engine
+        } catch {
+            print("BlincAudioRecorder: failed to start: \(error)")
+        }
+    }
+
+    func stopRecording() {
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        audioEngine = nil
     }
 }
 

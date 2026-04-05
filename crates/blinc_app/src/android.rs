@@ -1173,3 +1173,16 @@ pub fn dispatch_deep_link(uri: &str) {
     tracing::info!("Android deep link received: {}", uri);
     blinc_router::dispatch_deep_link(uri);
 }
+
+/// Receive stream data from JNI (camera frames, audio buffers).
+///
+/// Called from Kotlin via JNI:
+/// ```kotlin
+/// external fun nativeDispatchStreamData(streamId: Long, data: ByteArray)
+/// ```
+pub fn dispatch_stream_data(stream_id: u64, data: &[u8]) {
+    blinc_core::native_bridge::dispatch_stream_data(
+        stream_id,
+        blinc_core::native_bridge::NativeValue::Bytes(data.to_vec()),
+    );
+}
