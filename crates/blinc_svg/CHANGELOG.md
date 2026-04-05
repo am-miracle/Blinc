@@ -2,6 +2,11 @@
 
 All notable changes to `blinc_svg` will be documented in this file.
 
+## [0.4.0] - 2026-04-05
+
+### Changed
+- Version bump to align with workspace 0.4.0 release
+
 ## [0.1.13] - 2026-02-18
 
 ### Added

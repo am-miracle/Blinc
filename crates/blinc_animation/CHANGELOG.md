@@ -2,6 +2,13 @@
 
 All notable changes to `blinc_animation` will be documented in this file.
 
+## [0.4.0] - 2026-04-05
+
+### Added
+- Animation suspension scopes for router page transitions (`create_scope`, `enter_scope`, `exit_scope`)
+- `Spring::pause()` / `resume()` / `is_paused()` for animation lifecycle control
+- `AnimatedValue` auto-registers springs in active suspension scope
+
 ## [0.1.15] - 2026-03-22
 
 ### Fixed

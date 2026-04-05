@@ -2,6 +2,11 @@
 
 All notable changes to `blinc_cn` will be documented in this file.
 
+## [0.4.0] - 2026-04-05
+
+### Changed
+- Version bump to align with workspace 0.4.0 release
+
 ## [0.1.15] - 2026-03-22
 
 ### Fixed

@@ -2,6 +2,81 @@
 
 All notable changes to `blinc_gpu` will be documented in this file.
 
+## [0.4.0] - 2026-04-05
+
+### Added
+
+#### 3D Mesh Rendering Pipeline
+- `MeshPipeline` with lazy initialization and PBR WGSL shader (`mesh.wgsl`)
+- `render_mesh_data()` — vertex/index buffer upload, PBR shading, optional base color texture
+- Blinn-Phong specular + Schlick Fresnel + Lambertian diffuse lighting model
+
+#### Shadow Mapping
+- 2048x2048 Depth32Float shadow map texture
+- Shadow depth pass pipeline (`shadow.wgsl`) with front-face culling and depth bias
+- 4-tap PCF soft shadow sampling in main fragment shader
+- Per-material `receives_shadows` / `casts_shadows` control
+- `light_view_proj` parameter for directional shadow projection
+
+#### Normal Mapping & Parallax Displacement
+- Tangent-space normal mapping with configurable `normal_scale`
+- TBN matrix construction from vertex tangent + bitangent
+- Parallax occlusion mapping: 16-layer raymarching with interpolated relief
+- Per-material `displacement_scale` for height map depth
+
+#### Skeletal Animation (GPU Skinning)
+- Storage buffer (binding 8) for joint matrices (max 256 joints)
+- Vertex shader computes weighted skin matrix from 4 joint influences
+- Joints/weights vertex attributes (locations 5, 6)
+
+#### Custom Render Pass API
+- `CustomRenderPass` trait with `PreRender` / `PostProcess` stages
+- `RenderPassContext` provides device, queue, target, viewport, format, scale
+- `CustomPassManager` for registration, stage execution, resize notification, label-based removal
+- `GpuRenderer::register_custom_pass()`, `remove_custom_pass()`, `execute_custom_passes()`
+
+#### Custom Bind Groups
+- `BindGroupBuilder` — declarative bind group + layout creation
+- Supports uniform buffers, storage buffers (read/write), textures, storage textures, samplers, comparison samplers
+
+#### Compute Dispatch
+- `ComputeDispatch` struct for single-call compute execution
+- `create_compute_pipeline()` — WGSL source to ComputePipeline convenience
+- `create_buffer()` — initialized buffer creation helper
+
+#### Post-Processing Pipeline
+- `PostProcessEffect` trait: input → output texture effect interface
+- `PostProcessChain` — ping-pong effect chaining as `CustomRenderPass`
+- Auto-manages intermediate textures, fullscreen blit pipeline, resize
+- `create_fullscreen_pipeline()` — WGSL to fullscreen quad RenderPipeline
+
+#### Render Region Culling
+- AABB visibility test before GPU buffer upload
+- Conservative expansion for shadows, borders, rotation (half-diagonal), local affine
+- 3D perspective primitives always pass (complex projection)
+- Applied in both `render_with_clear_simple` and `render_primitives_excluding`
+
+#### GPU Memory Budget
+- `GpuMemoryBudget` tracks texture memory across layer cache and mask images
+- `RendererConfig.gpu_memory_budget` (default 128 MB, env var `BLINC_GPU_MEMORY_BUDGET_MB`)
+- `enforce_memory_budget()` evicts largest pooled textures first, then mask image cache
+- `LayerTextureCache::evict_to_budget()` — budget-aware pool eviction
+
+#### Flow Shader 3D Codegen
+- `emit_vertex_3d_shader()` — generates vertex shader with mesh vertex input struct
+- `emit_material_shader()` — generates fragment shader with inline PBR evaluation
+- 3D builtin bindings: vertex attributes, world-space interpolants, matrices, camera, light
+- Matrix function WGSL emission: multiply, inverse, transpose, transform_normal, translation/rotation/scale/perspective/lookAt
+- `FlowType::Mat4` support in `flow_type_to_wgsl()`
+- `FlowTarget::Vertex` / `Material` pipeline creation with mesh vertex buffer layout
+
+#### Dynamic Image Rendering
+- `render_dynamic_images()` — per-frame RGBA texture upload via `GpuImage::from_rgba`
+- `DynamicImage` in `PrimitiveBatch` for video frames, camera preview, procedural textures
+
+### Changed
+- `RendererConfig` uses `..RendererConfig::default()` in all construction sites for forward compatibility
+
 ## [0.1.13] - 2026-02-18
 
 ### Added

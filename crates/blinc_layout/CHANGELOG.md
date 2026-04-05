@@ -2,9 +2,14 @@
 
 All notable changes to `blinc_layout` will be documented in this file.
 
-## [Unreleased]
+## [0.4.0] - 2026-04-05
 
 ### Added
+
+#### Flow Shader 3D Targets
+- CSS parser: `target: vertex` and `target: material` in `@flow` blocks
+- Output target parsing for 3D: `position`, `world_normal`, `world_position`, `albedo`, `metallic`, `roughness`, `emissive`, `surface_normal`, `alpha_out`
+- `parse_output_target()` helper for unified output name resolution
 
 #### Code Editor Enhancements
 

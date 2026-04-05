@@ -2,6 +2,13 @@
 
 All notable changes to `blinc_platform_ios` will be documented in this file.
 
+## [0.4.0] - 2026-04-05
+
+### Added
+- Camera capture via AVCaptureSession with RGBA frame streaming to Rust (`blinc_dispatch_stream_data`)
+- Audio recording via AVAudioEngine with PCM float streaming to Rust
+- `BlincNativeBridge.swift` template: camera, audio, device, haptics, clipboard handlers
+
 ## [0.1.12] - 2025-01-19
 
 ### Changed

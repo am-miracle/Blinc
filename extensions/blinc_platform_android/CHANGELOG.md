@@ -2,6 +2,13 @@
 
 All notable changes to `blinc_platform_android` will be documented in this file.
 
+## [0.4.0] - 2026-04-05
+
+### Added
+- Camera preview via Camera2 API with RGBA frame streaming to Rust (`nativeDispatchStreamData`)
+- Audio recording via AudioRecord with PCM float streaming to Rust
+- `BlincNativeBridge` template: camera, audio, device, haptics, clipboard, keyboard handlers
+
 ## [0.1.12] - 2025-01-19
 
 ### Changed

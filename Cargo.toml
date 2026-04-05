@@ -35,7 +35,7 @@ members = [
 # Build for iOS: cargo build --target aarch64-apple-ios -p blinc_platform_ios
 
 [workspace.package]
-version = "0.1.15"
+version = "0.4.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/project-blinc/Blinc"
