@@ -249,15 +249,15 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | Generic mesh data | **Done** | `MeshData` + `Vertex` + `Material` — users convert from glTF/OBJ/FBX |
 | draw_mesh_data | **Done** | `DrawContext::draw_mesh_data(mesh, transform)` — direct render, no registration |
 | PBR materials | **Done** | `Material`: base_color, metallic, roughness, emissive, texture, alpha_mode |
-| Shadow mapping | Planned | Depth pass + shadow map sampling |
-| Normal / displacement maps | Planned | Texture-based surface detail |
-| Skeletal animation | Planned | Bone transforms + skinning |
+| Shadow mapping | **Done** | 2048² depth pass, 4-tap PCF, front-face culling, depth bias |
+| Normal / displacement maps | **Done** | Tangent-space normal maps + parallax occlusion mapping (16-layer) |
+| Skeletal animation | **Done** | `Bone`/`Skeleton`/`SkinningData`, GPU skinning via storage buffer (max 256 joints) |
 
 ### 4.2 Custom Shaders (P2)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Custom render pass API | Planned | Plugin architecture for user passes |
+| Custom render pass API | **Done** | `CustomRenderPass` trait, PreRender/PostProcess stages, label-based removal |
 | Custom bind groups | Planned | User-defined GPU resources |
 | Compute shader access | Partial | `@flow` DAG exists, general compute planned |
 | Post-processing pipeline | Planned | User-defined screen-space effects |
@@ -271,8 +271,8 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | Virtualized list rendering | Planned | Only render visible items |
 | Texture atlas improvements | Done | SVG atlas, glyph atlas |
 | Lazy image loading | Partial | LoadingStrategy exists, needs completion |
-| Render region culling | Planned | Skip off-screen elements |
-| GPU memory budget | Planned | Eviction policy for textures/buffers |
+| Render region culling | **Done** | AABB visibility test before GPU upload, shadow/rotation/affine-aware |
+| GPU memory budget | **Done** | `GpuMemoryBudget` with LRU eviction, 128 MB default, env var override |
 
 ---
 
