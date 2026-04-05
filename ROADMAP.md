@@ -109,7 +109,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | Example Extension | Status | Notes |
 |-------------------|--------|-------|
 | Push notifications | Planned | FCM/APNs example with bridge handlers |
-| Camera capture | Planned | RGBA data from platform → FFI → canvas/image texture render |
+| Camera capture | **Done** | `CameraStream` → native bridge → RGBA frames via `blinc_dispatch_stream_data` FFI |
 | Location services | Planned | GPS via bridge example |
 | Biometric auth | Planned | Fingerprint/Face ID bridge example |
 | Status bar theming | Planned | Light/dark status bar bridge example |
