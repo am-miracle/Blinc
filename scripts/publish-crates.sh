@@ -21,12 +21,12 @@ RETRY_WAIT=45   # seconds between retries (~6 min max wait per crate)
 # Note: blinc_core's dev-dep on blinc_animation has no version pin (path-only),
 # so it's stripped from the published crate, allowing core to go first.
 PHASE1=(blinc_macros blinc_platform blinc_icons blinc_core)
-PHASE2=(blinc_animation blinc_paint blinc_svg blinc_text)
-PHASE3=(blinc_theme blinc_image blinc_layout)
-PHASE4=(blinc_gpu blinc_cn blinc_tabler_icons blinc_canvas_kit)
+PHASE2=(blinc_animation blinc_paint blinc_svg blinc_text blinc_recorder)
+PHASE3=(blinc_theme blinc_image blinc_media blinc_layout)
+PHASE4=(blinc_gpu blinc_cn blinc_tabler_icons blinc_canvas_kit blinc_router blinc_runtime)
 PHASE5=(blinc_platform_desktop blinc_platform_android blinc_platform_ios)
-PHASE6=(blinc_app)
-PHASE7=(blinc_cli)
+PHASE6=(blinc_app blinc_test_suite)
+PHASE7=(blinc_debugger blinc_cli)
 
 publish_crate() {
     local crate=$1
@@ -113,7 +113,7 @@ publish_phase() {
 }
 
 echo "Starting Blinc crate publishing..."
-echo "This will take approximately $((($WAIT_TIME * 17) / 60)) minutes (17 crates x ${WAIT_TIME}s index wait)."
+echo "This will take approximately $((($WAIT_TIME * 24) / 60)) minutes (24 crates x ${WAIT_TIME}s index wait)."
 echo ""
 
 # Check if CARGO_REGISTRY_TOKEN is set
