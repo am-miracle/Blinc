@@ -891,6 +891,8 @@ struct MeshPipeline {
     /// Default black displacement map (no displacement)
     default_displacement: crate::image::GpuImage,
     sampler: wgpu::Sampler,
+    /// Storage buffer for joint matrices (skeletal animation, max 256 joints)
+    joint_buffer: wgpu::Buffer,
     /// Shadow depth pass pipeline
     shadow_pipeline: wgpu::RenderPipeline,
     shadow_bind_group_layout: wgpu::BindGroupLayout,
@@ -6477,6 +6479,17 @@ impl GpuRenderer {
                             },
                             count: None,
                         },
+                        // 8: Joint matrices storage buffer (skeletal animation)
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 8,
+                            visibility: wgpu::ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
                     ],
                 });
 
@@ -6522,6 +6535,18 @@ impl GpuRenderer {
                     format: wgpu::VertexFormat::Float32x4,
                     offset: 48,
                     shader_location: 4,
+                },
+                // joints: vec4<u32>
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32x4,
+                    offset: 64,
+                    shader_location: 5,
+                },
+                // weights: vec4<f32>
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 80,
+                    shader_location: 6,
                 },
             ],
         };
@@ -6609,6 +6634,19 @@ impl GpuRenderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+
+        // Joint matrices storage buffer — identity matrix as default (no skinning)
+        // Max 256 joints * 64 bytes per mat4x4 = 16384 bytes
+        let identity: [f32; 16] = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let joint_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Mesh Joint Matrices"),
+                contents: bytemuck::cast_slice(&identity),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
 
         // ── Shadow pipeline ──────────────────────────────────────────────
         let shadow_shader_src = include_str!("shaders/shadow.wgsl");
@@ -6730,6 +6768,7 @@ impl GpuRenderer {
             default_normal_map,
             default_displacement,
             sampler,
+            joint_buffer,
             shadow_pipeline,
             shadow_bind_group_layout,
             shadow_uniform_buffer,
@@ -6874,7 +6913,7 @@ impl GpuRenderer {
             shadow_enabled: f32,
             displacement_scale: f32,
             normal_scale: f32,
-            _pad3: f32,
+            has_skinning: f32,
         }
 
         let has_texture = if mesh.material.base_color_texture.is_some() {
@@ -6911,7 +6950,7 @@ impl GpuRenderer {
             },
             displacement_scale,
             normal_scale: mesh.material.normal_scale,
-            _pad3: 0.0,
+            has_skinning: if mesh.skin.is_some() { 1.0 } else { 0.0 },
         };
 
         let mp = self.mesh_pipeline.as_ref().unwrap();
@@ -6983,6 +7022,19 @@ impl GpuRenderer {
             .as_ref()
             .map_or_else(|| mp.default_displacement.view(), |t| t.view());
 
+        // ── Upload joint matrices (skeletal animation) ───────────────────
+        let skin_joint_buf = mesh.skin.as_ref().map(|skin| {
+            let count = skin.joint_matrices.len().min(256);
+            let data: &[u8] = bytemuck::cast_slice(&skin.joint_matrices[..count]);
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Mesh Joint Matrices"),
+                    contents: data,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                })
+        });
+        let joint_buffer_ref = skin_joint_buf.as_ref().unwrap_or(&mp.joint_buffer);
+
         // ── Create bind group ────────────────────────────────────────────
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Mesh Bind Group"),
@@ -7019,6 +7071,10 @@ impl GpuRenderer {
                 wgpu::BindGroupEntry {
                     binding: 7,
                     resource: wgpu::BindingResource::TextureView(displacement_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: joint_buffer_ref.as_entire_binding(),
                 },
             ],
         });

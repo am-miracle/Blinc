@@ -691,6 +691,10 @@ pub struct Vertex {
     pub color: [f32; 4],
     /// Tangent vector for normal mapping (xyz = direction, w = handedness ±1)
     pub tangent: [f32; 4],
+    /// Joint indices for skeletal animation (up to 4 influences per vertex)
+    pub joints: [u32; 4],
+    /// Joint weights for skeletal animation (should sum to 1.0)
+    pub weights: [f32; 4],
 }
 
 impl Vertex {
@@ -701,6 +705,8 @@ impl Vertex {
             uv: [0.0, 0.0],
             color: [1.0, 1.0, 1.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joints: [0; 4],
+            weights: [1.0, 0.0, 0.0, 0.0],
         }
     }
 
@@ -718,6 +724,11 @@ impl Vertex {
     }
     pub fn with_tangent(mut self, t: [f32; 4]) -> Self {
         self.tangent = t;
+        self
+    }
+    pub fn with_joints(mut self, joints: [u32; 4], weights: [f32; 4]) -> Self {
+        self.joints = joints;
+        self.weights = weights;
         self
     }
 }
@@ -747,6 +758,10 @@ pub struct MeshData {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub material: Material,
+    /// Optional skinning data for skeletal animation.
+    /// When provided, the GPU applies bone transforms to each vertex
+    /// based on joint indices and weights.
+    pub skin: Option<SkinningData>,
 }
 
 /// PBR-like material for mesh rendering
@@ -815,6 +830,47 @@ pub enum AlphaMode {
     Opaque,
     Blend,
     Mask,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Skeletal Animation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A bone in a skeletal hierarchy.
+///
+/// Users construct bones from glTF skins, FBX skeletons, etc.
+/// The `inverse_bind_matrix` transforms from mesh space to bone-local space.
+#[derive(Clone, Debug)]
+pub struct Bone {
+    /// Human-readable name (e.g., "LeftUpperArm")
+    pub name: String,
+    /// Index of parent bone, or None for the root
+    pub parent: Option<usize>,
+    /// Inverse bind matrix — transforms mesh-space positions into this bone's local space
+    pub inverse_bind_matrix: [f32; 16],
+}
+
+/// Skeletal hierarchy (bind pose).
+///
+/// The bone list defines the hierarchy and rest pose.
+/// Users animate by computing per-frame joint matrices and passing
+/// them via `SkinningData`.
+#[derive(Clone, Debug)]
+pub struct Skeleton {
+    pub bones: Vec<Bone>,
+}
+
+/// Per-frame skinning data sent to the GPU.
+///
+/// Each joint matrix is the product of the bone's current world transform
+/// and its inverse bind matrix: `joint_matrix[i] = world_transform[i] * inverse_bind[i]`.
+///
+/// Maximum 256 joints. Vertices reference these via `Vertex::joints` indices.
+#[derive(Clone, Debug)]
+pub struct SkinningData {
+    /// Joint matrices — one per bone, max 256.
+    /// Each is a column-major 4x4 matrix.
+    pub joint_matrices: Vec<[f32; 16]>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
-// PBR mesh shader — shadow mapping, normal mapping, parallax displacement
+// PBR mesh shader — shadow mapping, normal mapping, parallax displacement, skeletal skinning
 //
-// Vertex format: position[3], normal[3], uv[2], color[4], tangent[4]
+// Vertex format: position[3], normal[3], uv[2], color[4], tangent[4], joints[4], weights[4]
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -16,7 +16,7 @@ struct Uniforms {
     shadow_enabled: f32,
     displacement_scale: f32,
     normal_scale: f32,
-    _pad3: f32,
+    has_skinning: f32,
 }
 
 struct MaterialUniforms {
@@ -34,6 +34,7 @@ struct MaterialUniforms {
 @group(0) @binding(5) var shadow_map: texture_depth_2d;
 @group(0) @binding(6) var shadow_sampler: sampler_comparison;
 @group(0) @binding(7) var displacement_texture: texture_2d<f32>;
+@group(0) @binding(8) var<storage, read> joint_matrices: array<mat4x4<f32>>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -41,6 +42,8 @@ struct VertexInput {
     @location(2) uv: vec2<f32>,
     @location(3) color: vec4<f32>,
     @location(4) tangent: vec4<f32>,
+    @location(5) joints: vec4<u32>,
+    @location(6) weights: vec4<f32>,
 }
 
 struct VertexOutput {
@@ -54,10 +57,32 @@ struct VertexOutput {
     @location(6) shadow_pos: vec4<f32>,
 }
 
+// ─── Skinning ────────────────────────────────────────────────────────────
+
+fn compute_skin_matrix(joints: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
+    return joint_matrices[joints.x] * weights.x
+         + joint_matrices[joints.y] * weights.y
+         + joint_matrices[joints.z] * weights.z
+         + joint_matrices[joints.w] * weights.w;
+}
+
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    let world_pos = uniforms.model * vec4(input.position, 1.0);
+
+    // Apply skeletal skinning if enabled
+    var position = vec4(input.position, 1.0);
+    var normal = vec4(input.normal, 0.0);
+    var tangent_dir = vec4(input.tangent.xyz, 0.0);
+
+    if uniforms.has_skinning > 0.5 {
+        let skin = compute_skin_matrix(input.joints, input.weights);
+        position = skin * position;
+        normal = skin * normal;
+        tangent_dir = skin * tangent_dir;
+    }
+
+    let world_pos = uniforms.model * position;
     out.clip_position = uniforms.view_proj * world_pos;
     out.world_pos = world_pos.xyz;
 
@@ -66,8 +91,8 @@ fn vs_main(input: VertexInput) -> VertexOutput {
         uniforms.model[1].xyz,
         uniforms.model[2].xyz,
     );
-    out.world_normal = normalize(normal_mat * input.normal);
-    out.world_tangent = normalize(normal_mat * input.tangent.xyz);
+    out.world_normal = normalize(normal_mat * normal.xyz);
+    out.world_tangent = normalize(normal_mat * tangent_dir.xyz);
     out.tangent_handedness = input.tangent.w;
     out.uv = input.uv;
     out.vertex_color = input.color;
