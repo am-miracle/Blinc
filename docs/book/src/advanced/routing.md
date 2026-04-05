@@ -113,60 +113,81 @@ RouterBuilder::new()
 
 ## Deep Linking
 
-### Desktop (CLI)
+Deep linking is **automatic** — just build a router and it works on all platforms.
+`RouterBuilder::build()` auto-registers the deep link handler and back button.
 
 ```rust
-// Check for --deep-link=URI argument
-if let Some(uri) = blinc_router::cli_deep_link() {
-    router.handle_deep_link(&uri);
-}
+// That's it — no platform-specific setup needed in Rust
+let router = RouterBuilder::new()
+    .route(Route::new("/users/:id").view(user_page))
+    .build();
+// Deep links to myapp://host/users/42 automatically navigate
 ```
 
-### Android
+### Platform Configuration
 
-```rust
-// In your app setup
-blinc_app::android::set_deep_link_handler(move |uri| {
-    router.handle_deep_link(uri);
-});
+**Android** — add intent filters in `AndroidManifest.xml`:
+```xml
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <data android:scheme="myapp" />
+</intent-filter>
 ```
 
-Wire in Kotlin (BlincNativeBridge.kt):
-```kotlin
-// In onNewIntent or onCreate
-intent?.data?.toString()?.let { uri ->
-    // Call Rust via JNI
-    dispatch_deep_link(uri)
-}
+**iOS** — add URL types in `Info.plist`:
+```xml
+<key>CFBundleURLTypes</key>
+<array>
+    <dict>
+        <key>CFBundleURLSchemes</key>
+        <array><string>myapp</string></array>
+    </dict>
+</array>
 ```
 
-### iOS
+**Desktop** — register a custom URL scheme with the OS:
 
-```rust
-// In your app setup
-blinc_app::ios::set_deep_link_handler(move |uri| {
-    router.handle_deep_link(uri);
-});
+*macOS* (`Info.plist`):
+```xml
+<key>CFBundleURLTypes</key>
+<array>
+    <dict>
+        <key>CFBundleURLSchemes</key>
+        <array><string>myapp</string></array>
+    </dict>
+</array>
 ```
 
-Wire in Swift (AppDelegate):
-```swift
-func application(_ app: UIApplication, open url: URL, options: ...) -> Bool {
-    blinc_ios_handle_deep_link(url.absoluteString)
-    return true
-}
+*Windows* (registry, set up by installer):
 ```
+HKEY_CLASSES_ROOT\myapp\shell\open\command = "C:\path\to\myapp.exe" "--deep-link=%1"
+```
+
+*Linux* (`.desktop` file):
+```ini
+MimeType=x-scheme-handler/myapp
+Exec=myapp --deep-link=%u
+```
+
+CLI fallback:
+```bash
+myapp --deep-link=myapp://host/users/42
+```
+
+### How It Works
+
+1. `RouterBuilder::build()` registers a global deep link handler
+2. Platform runners auto-dispatch incoming URIs to the handler
+3. The router parses the URI and calls `push(path)`
+4. No user code needed beyond building the router
 
 ## System Back Button
 
-Register the router as the back button handler (Android):
+Also automatic — `RouterBuilder::build()` registers a back button handler.
 
-```rust
-let _back_handle = router.register_back_handler();
-// When back is pressed:
-// - If router can go back → navigates back, event consumed
-// - If at root → event propagates (app exits)
-```
+- **Android**: system back button navigates back if the router has history
+- **Desktop**: `Key::Back` dispatches through the back handler stack
+- If at the root route, the event propagates (app exits normally)
 
 ## Route Matching
 

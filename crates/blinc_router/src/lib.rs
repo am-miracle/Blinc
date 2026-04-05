@@ -350,7 +350,7 @@ impl RouterBuilder {
 
         let initial_match = trie.match_path(&self.initial_path);
 
-        Router {
+        let router = Router {
             inner: Arc::new(Mutex::new(RouterInner {
                 trie,
                 views,
@@ -359,7 +359,25 @@ impl RouterBuilder {
                 current_match: initial_match,
                 named_routes,
             })),
+        };
+
+        // Auto-register deep link handler so platforms dispatch to this router
+        {
+            let r = router.clone();
+            *DEEP_LINK_HANDLER.lock().unwrap() = Some(Box::new(move |uri| {
+                r.handle_deep_link(uri);
+            }));
         }
+
+        // Auto-register back button handler
+        router.register_back_handler();
+
+        // Handle CLI deep link if present (desktop)
+        if let Some(uri) = cli_deep_link() {
+            router.handle_deep_link(&uri);
+        }
+
+        router
     }
 }
 
@@ -373,6 +391,26 @@ impl Default for RouterBuilder {
 pub use history::HistoryEntry;
 pub use route::{MatchedRoute, QueryParams, Route, RouteContext, RouteParams};
 pub use transition::PageTransition;
+
+// ============================================================================
+// Global deep link dispatch
+// ============================================================================
+
+/// Global deep link callback — auto-registered by Router::build()
+type DeepLinkFn = Box<dyn Fn(&str) + Send + Sync>;
+static DEEP_LINK_HANDLER: std::sync::Mutex<Option<DeepLinkFn>> = std::sync::Mutex::new(None);
+
+/// Dispatch an incoming deep link URI to the registered router.
+///
+/// Called automatically by platform runners (Android/iOS/Desktop).
+/// Users don't need to call this directly.
+pub fn dispatch_deep_link(uri: &str) {
+    if let Ok(guard) = DEEP_LINK_HANDLER.lock() {
+        if let Some(ref handler) = *guard {
+            handler(uri);
+        }
+    }
+}
 
 /// Check CLI arguments for a `--deep-link=URI` flag and return the URI.
 ///

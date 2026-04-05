@@ -1651,28 +1651,16 @@ pub extern "C" fn blinc_load_bundled_font(
 // Deep link handling
 // ============================================================================
 
-/// Global deep link callback — set by the app to route deep links to the router
-static DEEP_LINK_CALLBACK: std::sync::Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>> =
-    std::sync::Mutex::new(None);
-
-/// Register a callback for incoming deep links (called by the app at startup)
+/// C FFI entry point: called by Swift when the app receives a deep link URL.
 ///
-/// ```ignore
-/// blinc_app::ios::set_deep_link_handler(move |uri| {
-///     router.handle_deep_link(uri);
-/// });
-/// ```
-pub fn set_deep_link_handler<F: Fn(&str) + Send + Sync + 'static>(handler: F) {
-    *DEEP_LINK_CALLBACK.lock().unwrap() = Some(Box::new(handler));
-}
-
-/// C FFI entry point: called by Swift when the app receives a deep link URL
+/// Auto-dispatches to the router registered via `RouterBuilder::build()`.
+/// No user setup required — just build a router and deep links work.
 ///
-/// Wire in Swift:
+/// Wire in Swift AppDelegate:
 /// ```swift
-/// @_cdecl("blinc_ios_handle_deep_link")
-/// public func blinc_ios_handle_deep_link(uri: UnsafePointer<CChar>) {
-///     // called from application(_:open:options:) or universal link handler
+/// func application(_ app: UIApplication, open url: URL, options: ...) -> Bool {
+///     blinc_ios_handle_deep_link(url.absoluteString)
+///     return true
 /// }
 /// ```
 #[no_mangle]
@@ -1683,10 +1671,6 @@ pub extern "C" fn blinc_ios_handle_deep_link(uri: *const std::ffi::c_char) {
     let uri_str = unsafe { std::ffi::CStr::from_ptr(uri) };
     if let Ok(uri) = uri_str.to_str() {
         tracing::info!("iOS deep link received: {}", uri);
-        if let Ok(guard) = DEEP_LINK_CALLBACK.lock() {
-            if let Some(ref handler) = *guard {
-                handler(uri);
-            }
-        }
+        blinc_router::dispatch_deep_link(uri);
     }
 }

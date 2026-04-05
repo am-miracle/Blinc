@@ -26,6 +26,7 @@ blinc_image = { path = "../blinc_image", version = "0.1.14" }
 blinc_platform = { path = "../blinc_platform", version = "0.1.14" }
 blinc_animation = { path = "../blinc_animation", version = "0.1.14" }
 blinc_macros = { path = "../blinc_macros", version = "0.1.14" }
+blinc_router = { path = "../blinc_router", version = "0.1.14" }
 blinc_theme = { path = "../blinc_theme", version = "0.1.14" }
 
 # GPU
