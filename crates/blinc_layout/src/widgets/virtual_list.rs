@@ -1,7 +1,8 @@
 //! Virtualized list widget
 //!
-//! Renders only the visible items in a scrollable list, enabling efficient
-//! display of 10K+ items without creating DOM nodes for every item.
+//! Renders only a window of items in a scrollable list, enabling efficient
+//! display of large datasets without creating elements for every item.
+//! Items can have variable heights — flexbox layout determines their size.
 //!
 //! # Example
 //!
@@ -11,12 +12,10 @@
 //!
 //! let items: Vec<String> = (0..10_000).map(|i| format!("Item {}", i)).collect();
 //!
-//! virtual_list(items.len(), 32.0, move |index| {
+//! virtual_list(items.len(), move |index| {
 //!     div()
-//!         .h(32.0)
 //!         .w_full()
-//!         .padding_x_px(12.0)
-//!         .items_center()
+//!         .p_px(8.0)
 //!         .child(text(&items[index]).size(14.0).color(Color::WHITE))
 //! })
 //! .w_full()
@@ -28,47 +27,71 @@ use std::sync::Arc;
 use crate::div::{div, Div};
 use crate::widgets::scroll::ScrollDirection;
 
-/// Builder function that creates a Div for a given item index
+/// Builder function that creates a Div for a given item index.
+/// Items can be any height — flexbox layout determines their size.
 pub type ItemBuilder = Arc<dyn Fn(usize) -> Div + Send + Sync>;
 
-/// A virtualized list that only renders visible items.
+/// A virtualized list that only renders a window of items.
 ///
-/// Use `virtual_list(count, item_height, builder)` to create one.
+/// Items can have variable heights. The list uses an estimated item
+/// height for scroll calculations and refines as items are rendered.
 pub struct VirtualList {
     /// Total number of items
     item_count: usize,
-    /// Height of each item in pixels (fixed)
-    item_height: f32,
     /// Function to build a Div for a given index
     item_builder: ItemBuilder,
     /// Inner div for layout props (width, height, bg, etc.)
     inner: Div,
-    /// Overscan: extra items to render above/below viewport
-    overscan: usize,
+    /// Estimated average item height (for scroll spacer calculation)
+    estimated_item_height: f32,
+    /// Number of items to render in the visible window
+    /// (more items = smoother scroll, more elements)
+    window_size: usize,
+    /// CSS class applied to each item wrapper
+    item_class: Option<String>,
+    /// CSS class applied to the scroll content container
+    content_class: Option<String>,
 }
 
-/// Create a virtualized list.
+/// Create a virtualized list with variable-height items.
 ///
 /// - `item_count`: total number of items
-/// - `item_height`: fixed height per item in pixels
 /// - `builder`: closure that creates a Div for each visible item index
-pub fn virtual_list<F>(item_count: usize, item_height: f32, builder: F) -> VirtualList
+///
+/// Items can be any height. The layout system handles sizing via flexbox.
+/// Use `.estimated_item_height()` to improve scroll spacer accuracy.
+pub fn virtual_list<F>(item_count: usize, builder: F) -> VirtualList
 where
     F: Fn(usize) -> Div + Send + Sync + 'static,
 {
     VirtualList {
         item_count,
-        item_height,
         item_builder: Arc::new(builder),
         inner: div().overflow_clip(),
-        overscan: 3,
+        estimated_item_height: 40.0,
+        window_size: 50,
+        item_class: None,
+        content_class: None,
     }
 }
 
 impl VirtualList {
-    /// Set number of extra items to render above/below the viewport (default: 3)
-    pub fn overscan(mut self, n: usize) -> Self {
-        self.overscan = n;
+    /// Set the estimated average item height (default: 40px).
+    ///
+    /// This is used to calculate the total scroll content height
+    /// for items that haven't been rendered yet. It doesn't constrain
+    /// actual item heights — items use flexbox sizing.
+    pub fn estimated_item_height(mut self, height: f32) -> Self {
+        self.estimated_item_height = height;
+        self
+    }
+
+    /// Set the number of items to render in the visible window (default: 50).
+    ///
+    /// Larger values = smoother scrolling but more elements.
+    /// Smaller values = better performance but may show blank areas during fast scroll.
+    pub fn window_size(mut self, n: usize) -> Self {
+        self.window_size = n;
         self
     }
 
@@ -105,6 +128,10 @@ impl VirtualList {
         self.inner = self.inner.p(v);
         self
     }
+    pub fn gap_px(mut self, v: f32) -> Self {
+        self.inner = self.inner.gap_px(v);
+        self
+    }
     pub fn id(mut self, id: &str) -> Self {
         self.inner = self.inner.id(id);
         self
@@ -113,16 +140,24 @@ impl VirtualList {
         self.inner = self.inner.class(class);
         self
     }
-}
 
-impl VirtualList {
-    /// Build the virtual list into a Div that can be used as a child element.
+    /// Set a CSS class applied to each item wrapper div
+    pub fn item_class(mut self, class: impl Into<String>) -> Self {
+        self.item_class = Some(class.into());
+        self
+    }
+
+    /// Set a CSS class applied to the scroll content container
+    pub fn content_class(mut self, class: impl Into<String>) -> Self {
+        self.content_class = Some(class.into());
+        self
+    }
+
+    /// Build the virtual list into a Div.
     ///
-    /// This constructs the scroll container with visible items and spacers.
+    /// Renders the initial window of items with spacers for
+    /// items above and below the visible range.
     pub fn into_div(self) -> Div {
-        let total_height = self.item_count as f32 * self.item_height;
-
-        // Get viewport height from the inner div's style (or default)
         let viewport_height = {
             use crate::div::ElementBuilder as _;
             self.inner
@@ -134,19 +169,27 @@ impl VirtualList {
                 .unwrap_or(400.0)
         };
 
-        // For the initial render, show items starting from index 0
-        let visible_count =
-            (viewport_height / self.item_height).ceil() as usize + self.overscan * 2;
-        let end_idx = visible_count.min(self.item_count);
+        // Render the first `window_size` items (or all if fewer)
+        let render_count = self.window_size.min(self.item_count);
 
-        // Build content: visible items + bottom spacer
+        // Build content column with flex layout (items size themselves)
         let mut content = div().flex_col().w_full();
-        for i in 0..end_idx {
-            content = content.child((self.item_builder)(i));
+        if let Some(ref cls) = self.content_class {
+            content = content.class(cls);
         }
-        if end_idx < self.item_count {
-            let bottom_space = (self.item_count - end_idx) as f32 * self.item_height;
-            content = content.child(div().h(bottom_space).w_full());
+        for i in 0..render_count {
+            let mut item = (self.item_builder)(i);
+            if let Some(ref cls) = self.item_class {
+                item = item.class(cls);
+            }
+            content = content.child(item);
+        }
+
+        // Estimated spacer for remaining items below the window
+        if render_count < self.item_count {
+            let remaining = self.item_count - render_count;
+            let spacer_height = remaining as f32 * self.estimated_item_height;
+            content = content.child(div().h(spacer_height).w_full());
         }
 
         // Wrap in scroll container
