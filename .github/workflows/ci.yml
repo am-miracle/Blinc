@@ -41,7 +41,8 @@ jobs:
             libglib2.0-dev \
             libatk1.0-dev \
             libgtk-3-dev \
-            libdbus-1-dev
+            libdbus-1-dev \
+            libxdo-dev
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -121,6 +122,7 @@ jobs:
             libatk1.0-dev \
             libgtk-3-dev \
             libdbus-1-dev \
+            libxdo-dev \
             fonts-dejavu-core \
             xvfb
 
@@ -205,7 +207,8 @@ jobs:
             libglib2.0-dev \
             libatk1.0-dev \
             libgtk-3-dev \
-            libdbus-1-dev
+            libdbus-1-dev \
+            libxdo-dev
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -246,7 +249,8 @@ jobs:
             libglib2.0-dev \
             libatk1.0-dev \
             libgtk-3-dev \
-            libdbus-1-dev
+            libdbus-1-dev \
+            libxdo-dev
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -303,7 +307,8 @@ jobs:
             libglib2.0-dev \
             libatk1.0-dev \
             libgtk-3-dev \
-            libdbus-1-dev
+            libdbus-1-dev \
+            libxdo-dev
 
       - name: Cache cargo registry
         uses: actions/cache@v4
