@@ -52,7 +52,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | Range slider (dual thumb) | Planned | Extend existing slider |
 | Number input (stepper) | Planned | text_input + increment/decrement |
 | Data grid | Planned | Sortable, filterable table |
-| Virtualized list | **Done** | `virtual_list(count, height, builder)` with scroll + spacers |
+| Virtualized list | **Done** | `virtual_list(count, builder)` — variable-height items, CSS classes, flexbox layout |
 | Rich text editor | Planned | Beyond code editor, styled content |
 
 ---
