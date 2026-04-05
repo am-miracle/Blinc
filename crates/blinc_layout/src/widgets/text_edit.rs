@@ -143,95 +143,43 @@ pub fn word_at_position(text: &str, char_pos: usize) -> (usize, usize) {
     }
 }
 
-/// Read text from the system clipboard (macOS).
-/// Returns None if clipboard is empty or unavailable.
+/// Read text from the system clipboard.
+/// Cross-platform via arboard (macOS, Windows, Linux).
 pub fn clipboard_read() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = std::process::Command::new("pbpaste").output().ok()?;
-        if output.status.success() {
-            let text = String::from_utf8(output.stdout).ok()?;
-            if text.is_empty() {
-                None
-            } else {
-                Some(text)
-            }
-        } else {
-            None
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let output = std::process::Command::new("xclip")
-            .args(["-selection", "clipboard", "-o"])
-            .output()
-            .ok()?;
-        if output.status.success() {
-            let text = String::from_utf8(output.stdout).ok()?;
-            if text.is_empty() {
-                None
-            } else {
-                Some(text)
-            }
-        } else {
-            None
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // Windows clipboard requires win32 API; skip for now
-        None
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        None
-    }
+    arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut cb| cb.get_text().ok())
+        .filter(|t| !t.is_empty())
 }
 
-/// Write text to the system clipboard (macOS).
-/// Returns true on success.
+/// Write text to the system clipboard.
+/// Cross-platform via arboard (macOS, Windows, Linux).
 pub fn clipboard_write(text: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        use std::io::Write;
-        let mut child = match std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        if let Some(ref mut stdin) = child.stdin {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        child.wait().map(|s| s.success()).unwrap_or(false)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::io::Write;
-        let mut child = match std::process::Command::new("xclip")
-            .args(["-selection", "clipboard"])
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        if let Some(ref mut stdin) = child.stdin {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        child.wait().map(|s| s.success()).unwrap_or(false)
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = text;
-        false
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        let _ = text;
-        false
-    }
+    arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut cb| cb.set_text(text.to_string()).ok())
+        .is_some()
+}
+
+/// Read image from the system clipboard as RGBA pixels.
+/// Returns (rgba_data, width, height) or None.
+pub fn clipboard_read_image() -> Option<(Vec<u8>, u32, u32)> {
+    let mut cb = arboard::Clipboard::new().ok()?;
+    let img = cb.get_image().ok()?;
+    Some((img.bytes.into_owned(), img.width as u32, img.height as u32))
+}
+
+/// Write image to the system clipboard from RGBA pixels.
+pub fn clipboard_write_image(rgba: &[u8], width: u32, height: u32) -> bool {
+    let img = arboard::ImageData {
+        width: width as usize,
+        height: height as usize,
+        bytes: std::borrow::Cow::Borrowed(rgba),
+    };
+    arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut cb| cb.set_image(img).ok())
+        .is_some()
 }
 
 #[cfg(test)]
