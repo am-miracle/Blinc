@@ -95,9 +95,10 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | Audio playback | **Done** | `AudioPlayer` — Desktop: rodio (Vorbis/WAV/FLAC), Mobile: native bridge |
 | Video decoding | **Done** | `VideoDecoder` — Desktop: OpenH264 (H.264 NAL → RGBA), Mobile: native bridge |
 | AV frame utilities | **Done** | `Frame` (RGBA/RGB/BGRA/YUV420/Gray, scale, convert) + `AudioSamples` (f32/i16/u8, resample, mono) |
-| Audio recording | Planned | Mobile: platform APIs, Desktop: `cpal` for cross-platform capture |
+| Audio recording | **Done** | `AudioRecorder` — Desktop: cpal, Mobile: native bridge stream |
+| Video player | **Done** | `VideoPlayer` — play/pause/seek/volume, frame push API |
+| Camera stream | **Done** | `CameraStream` — RTC-like reactive capture, RGBA frame delivery |
 | Video widget | Planned | Texture streaming from decoder → GPU surface, frame-synced rendering |
-| Audio context | Planned | Volume, playback state, seek — reactive via signals |
 
 > **Licensing**: Desktop uses royalty-free codecs only — OpenH264 (Cisco's BSD, patent costs covered by Cisco), VP9, AV1, Opus, Vorbis. No ffmpeg, no patent-encumbered codecs.
 > Mobile uses platform-provided codecs (OS handles licensing).

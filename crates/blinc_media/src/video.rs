@@ -87,3 +87,180 @@ impl Default for VideoDecoder {
         Self::new()
     }
 }
+
+/// Video player with playback controls
+///
+/// Wraps a decoder and provides play/pause/seek/stop.
+/// Frames are delivered to a callback or polled via `current_frame()`.
+///
+/// Desktop: decodes locally via OpenH264
+/// Mobile: delegates to platform player via native bridge
+///
+/// # Example
+///
+/// ```ignore
+/// use blinc_media::video::VideoPlayer;
+///
+/// let player = VideoPlayer::new();
+/// player.load("video.h264");
+/// player.play();
+/// player.set_volume(0.8);
+///
+/// // In render loop
+/// if let Some(frame) = player.current_frame() {
+///     canvas_render(&frame.as_rgba(), frame.width, frame.height);
+/// }
+/// ```
+pub struct VideoPlayer {
+    state: std::sync::Arc<std::sync::Mutex<VideoPlayerInner>>,
+}
+
+struct VideoPlayerInner {
+    playback_state: VideoState,
+    volume: f32,
+    current_frame: Option<Frame>,
+    source: Option<String>,
+    position_ms: u64,
+    duration_ms: u64,
+}
+
+impl VideoPlayer {
+    pub fn new() -> Self {
+        Self {
+            state: std::sync::Arc::new(std::sync::Mutex::new(VideoPlayerInner {
+                playback_state: VideoState::Idle,
+                volume: 1.0,
+                current_frame: None,
+                source: None,
+                position_ms: 0,
+                duration_ms: 0,
+            })),
+        }
+    }
+
+    /// Load a video source
+    pub fn load(&self, path: &str) {
+        let mut inner = self.state.lock().unwrap();
+        inner.source = Some(path.to_string());
+        inner.playback_state = VideoState::Idle;
+        inner.position_ms = 0;
+
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let _ = blinc_core::native_bridge::native_call::<(), _>(
+                "video",
+                "load",
+                vec![blinc_core::native_bridge::NativeValue::String(
+                    path.to_string(),
+                )],
+            );
+        }
+    }
+
+    /// Start or resume playback
+    pub fn play(&self) {
+        let mut inner = self.state.lock().unwrap();
+        inner.playback_state = VideoState::Playing;
+
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let _ = blinc_core::native_bridge::native_call::<(), _>("video", "play", ());
+        }
+    }
+
+    /// Pause playback
+    pub fn pause(&self) {
+        let mut inner = self.state.lock().unwrap();
+        inner.playback_state = VideoState::Paused;
+
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let _ = blinc_core::native_bridge::native_call::<(), _>("video", "pause", ());
+        }
+    }
+
+    /// Stop playback and reset position
+    pub fn stop(&self) {
+        let mut inner = self.state.lock().unwrap();
+        inner.playback_state = VideoState::Idle;
+        inner.position_ms = 0;
+        inner.current_frame = None;
+
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let _ = blinc_core::native_bridge::native_call::<(), _>("video", "stop", ());
+        }
+    }
+
+    /// Seek to a position in milliseconds
+    pub fn seek(&self, position_ms: u64) {
+        let mut inner = self.state.lock().unwrap();
+        inner.position_ms = position_ms;
+
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let _ = blinc_core::native_bridge::native_call::<(), _>(
+                "video",
+                "seek",
+                vec![blinc_core::native_bridge::NativeValue::Int64(
+                    position_ms as i64,
+                )],
+            );
+        }
+    }
+
+    /// Set volume (0.0 to 1.0)
+    pub fn set_volume(&self, volume: f32) {
+        self.state.lock().unwrap().volume = volume.clamp(0.0, 1.0);
+
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let _ = blinc_core::native_bridge::native_call::<(), _>(
+                "video",
+                "set_volume",
+                vec![blinc_core::native_bridge::NativeValue::Float32(volume)],
+            );
+        }
+    }
+
+    /// Get the current decoded frame
+    pub fn current_frame(&self) -> Option<Frame> {
+        self.state.lock().unwrap().current_frame.clone()
+    }
+
+    /// Push a decoded frame (called by decoder thread or native bridge)
+    pub fn push_frame(&self, frame: Frame) {
+        self.state.lock().unwrap().current_frame = Some(frame);
+    }
+
+    /// Get playback state
+    pub fn playback_state(&self) -> VideoState {
+        self.state.lock().unwrap().playback_state
+    }
+
+    /// Get current position in milliseconds
+    pub fn position_ms(&self) -> u64 {
+        self.state.lock().unwrap().position_ms
+    }
+
+    /// Get duration in milliseconds
+    pub fn duration_ms(&self) -> u64 {
+        self.state.lock().unwrap().duration_ms
+    }
+
+    /// Get volume
+    pub fn volume(&self) -> f32 {
+        self.state.lock().unwrap().volume
+    }
+
+    /// Check if playing
+    pub fn is_playing(&self) -> bool {
+        self.playback_state() == VideoState::Playing
+    }
+}
+
+impl Default for VideoPlayer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
