@@ -303,7 +303,7 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Blinc Book | Partial | Core concepts covered |
+| Blinc Book | Partial | Core concepts, 3D rendering, flow shaders (vertex/material), routing, media |
 | API reference (rustdoc) | Partial | Many crates need doc improvements |
 | Interactive examples | Planned | WASM playground |
 | Video tutorials | Planned | Getting started, advanced topics |
