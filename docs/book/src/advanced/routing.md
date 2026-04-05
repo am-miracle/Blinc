@@ -257,18 +257,9 @@ The router maintains a **page stack** — pages persist in the tree when
 new pages are pushed on top. Suspended pages have input disabled and
 are hidden, but their state (scroll position, form values, etc.) is preserved.
 
-### Simple outlet (single page)
-
 ```rust
-// Renders only the current route's view (previous pages are discarded)
+// Renders the page stack — active page visible, suspended pages preserved
 router.outlet()
-```
-
-### Stack outlet (persistent pages)
-
-```rust
-// Renders ALL pages in the stack — suspended pages are hidden but preserved
-router.stack_outlet()
 ```
 
 When you `router.push("/details")`:

@@ -243,68 +243,6 @@ impl Router {
         self.inner.lock().unwrap().page_stack.clone()
     }
 
-    /// Build all pages in the stack as a `stack()` container.
-    ///
-    /// Each page is layered. Suspended pages have `pointer_events_none`
-    /// and `suspended` flags set on their motion wrapper so animations
-    /// freeze and input is disabled.
-    ///
-    /// Use this instead of `outlet()` for full page-stack navigation
-    /// with persistent page state across push/pop.
-    pub fn stack_outlet(&self) -> blinc_layout::div::Div {
-        use blinc_layout::div::div;
-
-        let pages = {
-            let state = self.inner.lock().unwrap();
-            let pages: Vec<(PageEntry, Option<RouteView>)> = state
-                .page_stack
-                .iter()
-                .map(|p| {
-                    let view = state.views.get(p.route.view_index).copied();
-                    (p.clone(), view)
-                })
-                .collect();
-            pages
-        }; // lock released
-
-        let mut container = div().w_full().h_full().relative();
-
-        for (i, (page, view)) in pages.iter().enumerate() {
-            let is_top = i == pages.len() - 1;
-
-            if let Some(view_fn) = view {
-                let ctx = RouteContext {
-                    params: page.route.params.clone(),
-                    query: page.route.query.clone(),
-                    path: page.route.path.clone(),
-                    router: self.clone(),
-                };
-
-                push_router_context(self);
-                let page_div = view_fn(ctx);
-                pop_router_context();
-
-                // Wrap each page: suspended pages get no input + hidden
-                let wrapper = if is_top {
-                    // Active page — full size, interactive
-                    div().w_full().h_full().child(page_div)
-                } else {
-                    // Suspended page — no input, still in tree for state preservation
-                    div()
-                        .w_full()
-                        .h_full()
-                        .pointer_events_none()
-                        .opacity(0.0) // hidden but preserved in tree
-                        .child(page_div)
-                };
-
-                container = container.child(wrapper);
-            }
-        }
-
-        container
-    }
-
     /// Handle a deep link URI from the platform.
     ///
     /// Parses the URI and navigates to the extracted path.
@@ -336,34 +274,85 @@ impl Router {
         })
     }
 
-    /// Build the current route's view as a Div.
+    /// Build the route outlet — renders the page stack.
+    ///
+    /// All pages in the stack are rendered. The active (top) page is
+    /// visible and interactive. Suspended pages below are hidden with
+    /// `pointer_events_none` and `opacity(0)` but remain in the tree
+    /// so their state (scroll, form values, etc.) is preserved.
     ///
     /// Pushes this router onto the context stack so `use_router()`
-    /// returns this router inside the view and its child components.
+    /// returns this router inside views and child components.
     pub fn outlet(&self) -> blinc_layout::div::Div {
-        let view_and_ctx = {
-            let state = self.inner.lock().unwrap();
-            state.current_match.as_ref().and_then(|matched| {
-                state.views.get(matched.view_index).map(|view| {
-                    let ctx = RouteContext {
-                        params: matched.params.clone(),
-                        query: matched.query.clone(),
-                        path: matched.path.clone(),
-                        router: self.clone(),
-                    };
-                    (*view, ctx)
-                })
-            })
-        }; // lock released
+        use blinc_layout::div::div;
 
-        if let Some((view, ctx)) = view_and_ctx {
-            push_router_context(self);
-            let result = view(ctx);
-            pop_router_context();
-            result
-        } else {
-            blinc_layout::div::div()
+        let pages = {
+            let state = self.inner.lock().unwrap();
+            state
+                .page_stack
+                .iter()
+                .map(|p| {
+                    let view = state.views.get(p.route.view_index).copied();
+                    (p.clone(), view)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if pages.is_empty() {
+            return div();
         }
+
+        // Single page — no stack wrapper needed
+        if pages.len() == 1 {
+            if let Some((page, Some(view_fn))) = pages.into_iter().next() {
+                let ctx = RouteContext {
+                    params: page.route.params,
+                    query: page.route.query,
+                    path: page.route.path,
+                    router: self.clone(),
+                };
+                push_router_context(self);
+                let result = view_fn(ctx);
+                pop_router_context();
+                return result;
+            }
+            return div();
+        }
+
+        // Multiple pages — stack them
+        let mut container = div().w_full().h_full().relative();
+
+        for (i, (page, view)) in pages.iter().enumerate() {
+            let is_top = i == pages.len() - 1;
+
+            if let Some(view_fn) = view {
+                let ctx = RouteContext {
+                    params: page.route.params.clone(),
+                    query: page.route.query.clone(),
+                    path: page.route.path.clone(),
+                    router: self.clone(),
+                };
+
+                push_router_context(self);
+                let page_div = view_fn(ctx);
+                pop_router_context();
+
+                let wrapper = if is_top {
+                    div().w_full().h_full().child(page_div)
+                } else {
+                    div()
+                        .w_full()
+                        .h_full()
+                        .pointer_events_none()
+                        .opacity(0.0)
+                        .child(page_div)
+                };
+
+                container = container.child(wrapper);
+            }
+        }
+
+        container
     }
 }
 
