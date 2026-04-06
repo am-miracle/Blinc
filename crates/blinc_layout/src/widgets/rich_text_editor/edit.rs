@@ -460,7 +460,7 @@ fn rewrite_spans_after_delete(line: &mut StyledLine, byte: usize, removed_bytes:
 /// Split a span list at byte `at`. Spans crossing `at` are sliced into
 /// two; spans entirely before stay in the left list; spans entirely
 /// after move to the right list with their byte offsets rebased.
-fn split_spans(spans: &[TextSpan], at: usize) -> (Vec<TextSpan>, Vec<TextSpan>) {
+pub(super) fn split_spans(spans: &[TextSpan], at: usize) -> (Vec<TextSpan>, Vec<TextSpan>) {
     let mut left = Vec::new();
     let mut right = Vec::new();
     for span in spans {

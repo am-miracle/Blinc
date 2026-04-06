@@ -36,7 +36,8 @@ pub mod toolbar;
 pub mod wrap;
 
 pub use block_ops::{
-    indent_blocks, insert_divider_after, outdent_blocks, set_block_kind, toggle_block_kind,
+    convert_selection_to_block, indent_blocks, insert_divider_after, outdent_blocks,
+    set_block_kind, toggle_block_kind,
 };
 pub use cursor::{ActiveFormat, DocPosition, Selection};
 pub use document::{Block, BlockKind, RichDocument};

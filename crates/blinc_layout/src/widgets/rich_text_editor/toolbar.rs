@@ -213,52 +213,20 @@ fn mark_row(state: &RichTextState, version: &State<u32>, theme: &RichTextTheme) 
         }))
 }
 
-/// Single accent color used by the color swatch button. Toggles on/off
-/// for the current selection (or active format when no selection).
-const ACCENT_COLOR: Color = Color {
-    r: 0.40,
-    g: 0.78,
-    b: 1.00,
-    a: 1.0,
-};
-
-/// "Color toggle" handler: if the selection already carries the accent
-/// color, revert to the default text color; otherwise apply accent.
-/// Without a selection, flips the active format's color.
-fn toggle_accent_color(d: &mut super::state::RichTextData) {
-    let default_color = Color::WHITE;
-    let target = if matches!(d.active_format.color, Some(c) if color_close(c, ACCENT_COLOR)) {
-        default_color
-    } else {
-        ACCENT_COLOR
-    };
-    if let Some(sel) = d.selection {
-        if !sel.is_empty() {
-            d.push_undo();
-            apply_mark_to_selection(&mut d.document, sel, Mark::Color(target));
-            d.active_format.color = Some(target);
-            d.reset_cursor_blink();
-            return;
-        }
-    }
-    d.active_format.color = Some(target);
-    d.reset_cursor_blink();
-}
-
-fn color_close(a: Color, b: Color) -> bool {
-    (a.r - b.r).abs() < 1e-3
-        && (a.g - b.g).abs() < 1e-3
-        && (a.b - b.b).abs() < 1e-3
-        && (a.a - b.a).abs() < 1e-3
-}
-
 /// Color swatch button — same footprint as a mark button, but the
 /// content is a colored circle so users immediately recognise it as
-/// a color toggle. Click suppresses the editor's outer mouse_down so
-/// the selection isn't collapsed.
+/// a color picker trigger. Clicking opens (or closes) the inline
+/// color picker row beneath the toolbar. The swatch shows the
+/// currently active color (defaults to white), so you can tell at a
+/// glance what the next typed character will look like.
 fn color_swatch_button(state: &RichTextState, version: &State<u32>) -> Div {
     let state_for_click = Arc::clone(state);
     let version_for_click = version.clone();
+    let current_color = state
+        .lock()
+        .ok()
+        .and_then(|d| d.active_format.color)
+        .unwrap_or(Color::WHITE);
     div()
         .w(28.0)
         .h(24.0)
@@ -271,13 +239,17 @@ fn color_swatch_button(state: &RichTextState, version: &State<u32>) -> Div {
                 .w(14.0)
                 .h(14.0)
                 .rounded(7.0)
-                .bg(ACCENT_COLOR)
-                .border(1.0, Color::rgba(1.0, 1.0, 1.0, 0.18)),
+                .bg(current_color)
+                .border(1.0, Color::rgba(1.0, 1.0, 1.0, 0.32)),
         )
         .on_mouse_down(move |_| {
             if let Ok(mut data) = state_for_click.lock() {
                 data.suppress_next_outer_click = true;
-                toggle_accent_color(&mut data);
+                data.picker = if matches!(data.picker, PickerState::Color) {
+                    PickerState::None
+                } else {
+                    PickerState::Color
+                };
                 drop(data);
                 version_for_click.set(version_for_click.get().wrapping_add(1));
             }
@@ -334,11 +306,18 @@ fn heading_picker_row(state: &RichTextState, version: &State<u32>) -> Div {
     row
 }
 
-/// Apply a heading level to the current block (or selected blocks).
-/// `None` reverts to plain paragraph. Pushes undo if anything changes.
+/// Apply a heading level to the current selection. If the selection
+/// is partial-within-a-line, the containing block is split into up to
+/// three blocks (prefix paragraph, middle heading, suffix paragraph)
+/// so that only the *selected* run becomes the heading. With a
+/// collapsed cursor, a full-line selection, or a multi-block
+/// selection, every block in the range is converted in place.
+///
+/// `None` reverts to plain paragraph.
 fn apply_heading_level(data: &mut super::state::RichTextData, level: Option<u8>) {
-    use super::block_ops::set_block_kind;
+    use super::block_ops::convert_selection_to_block;
     use super::document::BlockKind;
+
     let range = data.selection.unwrap_or(super::cursor::Selection {
         anchor: data.cursor,
         head: data.cursor,
@@ -347,14 +326,38 @@ fn apply_heading_level(data: &mut super::state::RichTextData, level: Option<u8>)
         Some(n) => BlockKind::Heading(n),
         None => BlockKind::Paragraph,
     };
+
+    let before = data.document.clone();
     data.push_undo();
-    let changed = set_block_kind(&mut data.document, range, kind);
-    if !changed {
+    let middle_block_idx = convert_selection_to_block(&mut data.document, range, kind);
+    if data.document == before {
+        // Nothing actually changed — drop the undo entry we just pushed.
         data.undo_stack.pop();
         return;
     }
-    let cursor = data.cursor;
-    data.set_cursor(cursor);
+
+    // Re-anchor the cursor and selection inside the converted block.
+    // When the block was split, `middle_block_idx` is the index of the
+    // new heading block; otherwise the cursor's existing block is fine
+    // (its index is unchanged for in-place conversions).
+    if let Some(idx) = middle_block_idx {
+        let middle_chars = data
+            .document
+            .blocks
+            .get(idx)
+            .map(|b| b.char_len())
+            .unwrap_or(0);
+        let new_start = super::cursor::DocPosition::new(idx, 0, 0);
+        let new_end = super::cursor::DocPosition::new(idx, 0, middle_chars);
+        data.selection = Some(super::cursor::Selection {
+            anchor: new_start,
+            head: new_end,
+        });
+        data.set_cursor(new_end);
+    } else {
+        let cursor = data.cursor;
+        data.set_cursor(cursor);
+    }
     data.reset_cursor_blink();
 }
 

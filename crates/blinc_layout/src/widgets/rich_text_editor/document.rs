@@ -18,6 +18,8 @@
 use crate::styled_text::{StyledLine, TextSpan};
 use blinc_core::Color;
 
+use super::cursor::DocPosition;
+
 /// A block-level element of a rich document.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BlockKind {
@@ -192,6 +194,70 @@ impl RichDocument {
             .join("\n")
     }
 
+    /// Extract the plain text covered by `start..end` from the document.
+    ///
+    /// Block boundaries inside the range are joined with `\n`, soft line
+    /// breaks (multiple `StyledLine`s within one block) are joined with
+    /// `\n` as well. Inline marks (bold, italic, color, links, …) are
+    /// dropped — this is the canonical "what to put on the system
+    /// clipboard" representation.
+    ///
+    /// Returns an empty string when the range is collapsed or fully
+    /// out-of-bounds.
+    pub fn plain_text_range(&self, start: DocPosition, end: DocPosition) -> String {
+        if start >= end {
+            return String::new();
+        }
+        if self.blocks.is_empty() {
+            return String::new();
+        }
+        let last_block = self.blocks.len() - 1;
+        let s_block = start.block.min(last_block);
+        let e_block = end.block.min(last_block);
+
+        let mut out = String::new();
+        for block_idx in s_block..=e_block {
+            let block = &self.blocks[block_idx];
+            if block_idx > s_block {
+                out.push('\n');
+            }
+            let last_line = block.lines.len().saturating_sub(1);
+            let s_line = if block_idx == s_block {
+                start.line.min(last_line)
+            } else {
+                0
+            };
+            let e_line = if block_idx == e_block {
+                end.line.min(last_line)
+            } else {
+                last_line
+            };
+            for line_idx in s_line..=e_line {
+                let line = &block.lines[line_idx];
+                if line_idx > s_line {
+                    out.push('\n');
+                }
+                let line_chars = line.text.chars().count();
+                let from_col = if block_idx == s_block && line_idx == s_line {
+                    start.col.min(line_chars)
+                } else {
+                    0
+                };
+                let to_col = if block_idx == e_block && line_idx == e_line {
+                    end.col.min(line_chars)
+                } else {
+                    line_chars
+                };
+                if to_col > from_col {
+                    let from_byte = char_to_byte(&line.text, from_col);
+                    let to_byte = char_to_byte(&line.text, to_col);
+                    out.push_str(&line.text[from_byte..to_byte]);
+                }
+            }
+        }
+        out
+    }
+
     /// Compute the ordinal (1-based) for a NumberedItem at `block_index`.
     ///
     /// Returns `None` if the block at `block_index` is not a `NumberedItem`.
@@ -357,5 +423,48 @@ mod tests {
     fn char_to_byte_saturates_past_end() {
         let s = "abc";
         assert_eq!(char_to_byte(s, 100), 3);
+    }
+
+    #[test]
+    fn plain_text_range_within_single_line() {
+        let doc = RichDocument::from_blocks(vec![Block::paragraph("Hello world", Color::WHITE)]);
+        let s = DocPosition::new(0, 0, 6);
+        let e = DocPosition::new(0, 0, 11);
+        assert_eq!(doc.plain_text_range(s, e), "world");
+    }
+
+    #[test]
+    fn plain_text_range_across_blocks_uses_newlines() {
+        let doc = RichDocument::from_blocks(vec![
+            Block::paragraph("first", Color::WHITE),
+            Block::paragraph("second", Color::WHITE),
+            Block::paragraph("third", Color::WHITE),
+        ]);
+        let s = DocPosition::new(0, 0, 2);
+        let e = DocPosition::new(2, 0, 3);
+        assert_eq!(doc.plain_text_range(s, e), "rst\nsecond\nthi");
+    }
+
+    #[test]
+    fn plain_text_range_collapsed_returns_empty() {
+        let doc = RichDocument::from_blocks(vec![Block::paragraph("hello", Color::WHITE)]);
+        let p = DocPosition::new(0, 0, 2);
+        assert!(doc.plain_text_range(p, p).is_empty());
+    }
+
+    #[test]
+    fn plain_text_range_across_soft_breaks_uses_newlines() {
+        // Build a single block with two soft-broken lines.
+        let doc = RichDocument::from_blocks(vec![Block {
+            kind: BlockKind::Paragraph,
+            lines: vec![
+                StyledLine::plain("first line", Color::WHITE),
+                StyledLine::plain("second line", Color::WHITE),
+            ],
+            indent: 0,
+        }]);
+        let s = DocPosition::new(0, 0, 6);
+        let e = DocPosition::new(0, 1, 6);
+        assert_eq!(doc.plain_text_range(s, e), "line\nsecond");
     }
 }

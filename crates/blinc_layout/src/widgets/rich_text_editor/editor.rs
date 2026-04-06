@@ -386,6 +386,56 @@ pub fn rich_text_editor(
                             changed = true;
                         }
                     }
+                    // Cmd+C — copy selected text to system clipboard
+                    67 => {
+                        if let Some(sel) = data.selection {
+                            if !sel.is_empty() {
+                                let (s, e) = sel.ordered();
+                                let plain = data.document.plain_text_range(s, e);
+                                if !plain.is_empty() {
+                                    crate::widgets::text_edit::clipboard_write(&plain);
+                                }
+                            }
+                        }
+                        // Copy never mutates the document, so we don't
+                        // bump the rebuild signal.
+                    }
+                    // Cmd+X — cut: copy then delete
+                    88 if !ctx.shift => {
+                        if let Some(sel) = data.selection {
+                            if !sel.is_empty() {
+                                let (s, e) = sel.ordered();
+                                let plain = data.document.plain_text_range(s, e);
+                                if !plain.is_empty() {
+                                    crate::widgets::text_edit::clipboard_write(&plain);
+                                }
+                                data.push_undo();
+                                data.selection = None;
+                                let new_pos = delete_selection(&mut data.document, sel);
+                                data.set_cursor(new_pos);
+                                changed = true;
+                            }
+                        }
+                    }
+                    // Cmd+V — paste: replace selection (if any) with
+                    // clipboard text. Newlines in the clipboard become
+                    // soft breaks via `insert_text`.
+                    86 => {
+                        if let Some(text) = crate::widgets::text_edit::clipboard_read() {
+                            if !text.is_empty() {
+                                data.push_undo();
+                                let mut pos = data.cursor;
+                                if let Some(sel) = data.selection.take() {
+                                    pos = delete_selection(&mut data.document, sel);
+                                }
+                                let fmt = data.active_format.clone();
+                                let new_pos =
+                                    insert_text(&mut data.document, pos, &text, &fmt);
+                                data.set_cursor(new_pos);
+                                changed = true;
+                            }
+                        }
+                    }
                     // Cmd+Alt+0 — paragraph
                     48 if ctx.alt => {
                         if apply_block_kind(&mut data, BlockKind::Paragraph) {
