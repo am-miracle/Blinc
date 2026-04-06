@@ -24,8 +24,13 @@ use std::sync::{Arc, Mutex};
 use crate::error::Result;
 use crate::svg_atlas::SvgAtlas;
 
-/// Maximum number of images to keep in cache (prevents unbounded memory growth)
-const IMAGE_CACHE_CAPACITY: usize = 32;
+/// Maximum number of images to keep in cache (prevents unbounded memory growth).
+///
+/// Sized to comfortably hold the simultaneously-visible image set of typical
+/// content-heavy views (galleries, emoji grids, chat backlogs). Going below
+/// the visible-set size causes scroll-driven thrashing where currently-visible
+/// images are evicted to make room for newly-loaded ones.
+const IMAGE_CACHE_CAPACITY: usize = 256;
 
 /// Maximum number of parsed SVG documents to cache
 const SVG_CACHE_CAPACITY: usize = 128;
@@ -1065,11 +1070,13 @@ impl RenderContext {
         const VISIBILITY_BUFFER: f32 = 100.0;
 
         // Eagerly load placeholder images for any lazy element with placeholder_type == 2
-        // (so the placeholder is already in cache when we go to render it)
+        // (so the placeholder is already in cache when we go to render it).
+        // Use get() instead of contains() so cached placeholders are promoted to
+        // MRU and survive eviction pressure from the main image puts below.
         for image in images {
             if image.placeholder_type == 2 {
                 if let Some(ref placeholder_src) = image.placeholder_image {
-                    if !self.image_cache.contains(placeholder_src) {
+                    if self.image_cache.get(placeholder_src).is_none() {
                         let source = blinc_image::ImageSource::from_uri(placeholder_src);
                         if let Ok(data) = blinc_image::ImageData::load(source) {
                             let gpu_image = self.image_ctx.create_image_labeled(
@@ -1086,8 +1093,13 @@ impl RenderContext {
         }
 
         for image in images {
-            // LruCache::contains also promotes to most-recently-used
-            if self.image_cache.contains(&image.source) {
+            // Use get() (not contains()) so the cache hit promotes the entry
+            // to MRU. Without this, the LRU order is set entirely by insertion
+            // order, and any new put() during scroll evicts the oldest visible
+            // image first — which is exactly the row at the top of the viewport.
+            // Promoting on hit during preload guarantees the eviction victims
+            // are non-visible entries at the back of the cache.
+            if self.image_cache.get(&image.source).is_some() {
                 continue;
             }
 
