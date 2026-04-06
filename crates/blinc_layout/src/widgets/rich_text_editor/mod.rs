@@ -25,6 +25,7 @@
 
 pub mod cursor;
 pub mod document;
+pub mod edit;
 pub mod editor;
 pub mod render;
 pub mod state;
@@ -32,7 +33,11 @@ pub mod wrap;
 
 pub use cursor::{ActiveFormat, DocPosition, Selection};
 pub use document::{Block, BlockKind, RichDocument};
+pub use edit::{
+    delete_backward, delete_forward, delete_selection, insert_char, insert_text, soft_break,
+    split_block,
+};
 pub use editor::rich_text_editor;
 pub use render::{compute_line_geometry, render_document, RichTextTheme};
-pub use state::{rich_text_state, LineGeometry, RichTextData, RichTextState};
+pub use state::{rich_text_state, LineGeometry, RichTextData, RichTextState, UndoEntry};
 pub use wrap::{wrap_styled_line, WrappedLine};

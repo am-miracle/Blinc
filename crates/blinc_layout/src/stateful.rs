@@ -3508,6 +3508,22 @@ impl<S: StateTransitions> Stateful<S> {
         self
     }
 
+    /// Register a text-input (printable character) handler.
+    ///
+    /// Fires after IME composition completes — the EventContext's
+    /// `key_char` carries the resolved character. Use this for typing
+    /// behaviour; use `on_key_down` for control keys (Backspace, arrows,
+    /// shortcuts).
+    pub fn on_text_input<F>(self, handler: F) -> Self
+    where
+        F: Fn(&crate::event_handler::EventContext) + Send + Sync + 'static,
+    {
+        self.event_handlers_cache
+            .borrow_mut()
+            .on_text_input(handler);
+        self
+    }
+
     /// Register a scroll handler (builder pattern)
     pub fn on_scroll<F>(self, handler: F) -> Self
     where

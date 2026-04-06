@@ -1,25 +1,35 @@
 //! `rich_text_editor(state, theme, content_width)` — interactive editor.
 //!
-//! Phase 3: focus, click-to-place cursor, arrow-key navigation (with shift
-//! to extend selection), blinking visual cursor. **No editing yet** — keys
-//! that produce characters are ignored. Phase 4 wires those up.
+//! Phases 3 + 3.5 + 4 in this file:
 //!
-//! The factory wraps the read-only renderer in a `Stateful` whose rebuild
-//! is triggered by a private `version: State<u32>` signal that the click
-//! and key handlers bump. Each rebuild also recomputes the line geometry
-//! index so cursor positioning is always against the current document.
+//! - Click to place cursor, drag to select, arrow / Home / End nav.
+//! - Canvas-based blinking visual cursor (no rebuilds for the blink).
+//! - Typing inserts characters at the cursor with the current
+//!   `ActiveFormat`; Backspace / Delete / Enter / Shift+Enter all work
+//!   as expected. Undo / redo are wired to Cmd-Z / Cmd-Shift-Z and use
+//!   a snapshot stack capped at 200 entries.
+//!
+//! The factory wraps the renderer in a `Stateful` whose rebuild is
+//! triggered by a private `version: State<u32>` signal that the click
+//! and key handlers bump after every mutation. The Stateful's `on_state`
+//! callback re-walks the line geometry index against the current
+//! document and emits the cursor / selection overlay.
 
 use std::sync::Arc;
 
 use blinc_core::context_state::BlincContextState;
-use blinc_core::events::event_types;
-use blinc_core::Color;
-use blinc_core::State;
+use blinc_core::{Brush, Color, CornerRadius, DrawContext, Rect, State};
 
+use crate::canvas::{canvas, Canvas, CanvasBounds};
 use crate::div::{div, Div, ElementBuilder};
 use crate::stateful::{stateful_with_key, NoState};
+use crate::widgets::cursor::SharedCursorState;
 
 use super::cursor::{step_backward, step_forward, DocPosition};
+use super::edit::{
+    delete_backward, delete_forward, delete_selection, insert_char, insert_text, soft_break,
+    split_block,
+};
 use super::render::{compute_line_geometry, render_document, RichTextTheme};
 use super::state::RichTextState;
 
@@ -60,10 +70,12 @@ pub fn rich_text_editor(
     let state_for_click = Arc::clone(state);
     let state_for_drag = Arc::clone(state);
     let state_for_key = Arc::clone(state);
+    let state_for_text = Arc::clone(state);
     let theme_for_render = theme.clone();
     let version_for_click = version.clone();
     let version_for_drag = version.clone();
     let version_for_key = version.clone();
+    let version_for_text = version.clone();
 
     stateful_with_key::<NoState>(&stateful_key)
         .deps([version.signal_id()])
@@ -73,19 +85,20 @@ pub fn rich_text_editor(
             let geometry = compute_line_geometry(&data.document, &theme_for_render, content_width);
             data.set_line_index(geometry);
 
+            // Sync cursor blink state's visibility with focus.
+            data.set_cursor_visible(data.focused);
+
             let doc_tree = render_document(&data.document, &theme_for_render, content_width);
 
-            // Cursor + selection overlay (only when focused).
+            // Selection rectangles (one per visual line). The cursor
+            // canvas overlays the entire content rect and is responsible
+            // for its own blink animation.
             let mut overlay_children: Vec<Div> = Vec::new();
             if data.focused {
-                if let Some((cx, cy, ch)) = data.cursor_geometry() {
-                    overlay_children.push(cursor_div(cx, cy, ch, theme_for_render.text));
-                }
-                // Selection rectangles — one per visual line in the
-                // selected range. Phase 3 ships this; Phase 4 will reuse
-                // it for actual edit operations.
                 if let Some(sel) = data.selection {
-                    overlay_children.extend(selection_rects(&data, sel, &theme_for_render));
+                    if !sel.is_empty() {
+                        overlay_children.extend(selection_rects(&data, sel, &theme_for_render));
+                    }
                 }
             }
 
@@ -96,12 +109,20 @@ pub fn rich_text_editor(
             for child in overlay_children {
                 root = root.child(child);
             }
+            // Cursor canvas spans the entire content rect and reads its
+            // (x, y) position from the state on each redraw.
+            root = root.child(cursor_overlay_canvas(
+                Arc::clone(&state_for_render),
+                data.cursor_state.clone(),
+                theme_for_render.text,
+            ));
             root
         })
         .w_full()
         .on_mouse_down(move |ctx| {
             let mut data = state_for_click.lock().unwrap();
             data.focused = true;
+            data.set_cursor_visible(true);
             if let Some(pos) = data.position_from_click(ctx.local_x, ctx.local_y) {
                 let extend = ctx.shift;
                 data.move_cursor(pos, extend);
@@ -121,75 +142,238 @@ pub fn rich_text_editor(
             drop(data);
             version_for_drag.set(version_for_drag.get().wrapping_add(1));
         })
+        .on_text_input(move |ctx| {
+            // Printable characters arrive here (post-IME). The
+            // on_key_down handler intentionally doesn't insert anything
+            // for typed characters; it only handles editing keys and
+            // Cmd-shortcuts.
+            let ch: char = match ctx.key_char {
+                Some(c) => c,
+                None => return,
+            };
+            // Skip control chars — those come via on_key_down.
+            if ch.is_control() {
+                return;
+            }
+            let mut data = state_for_text.lock().unwrap();
+            if !data.focused {
+                return;
+            }
+            // If there's a selection, replace it first.
+            let mut pos = data.cursor;
+            if let Some(sel) = data.selection.take() {
+                pos = delete_selection(&mut data.document, sel);
+            }
+            data.push_undo();
+            let fmt = data.active_format.clone();
+            let new_pos = insert_char(&mut data.document, pos, ch, &fmt);
+            data.set_cursor(new_pos);
+            drop(data);
+            version_for_text.set(version_for_text.get().wrapping_add(1));
+        })
         .on_key_down(move |ctx| {
             let mut data = state_for_key.lock().unwrap();
             if !data.focused {
                 return;
             }
 
+            let mod_key = ctx.meta || ctx.ctrl;
             let extend = ctx.shift;
-            let mut moved = false;
+            let mut changed = false;
+
+            // Modifier shortcuts first
+            if mod_key {
+                match ctx.key_code {
+                    // Cmd+Z — undo
+                    90 if !ctx.shift => {
+                        if data.undo() {
+                            changed = true;
+                        }
+                    }
+                    // Cmd+Shift+Z — redo
+                    90 if ctx.shift => {
+                        if data.redo() {
+                            changed = true;
+                        }
+                    }
+                    // Cmd+A — select all
+                    65 => {
+                        let last_block = data.document.blocks.len().saturating_sub(1);
+                        let last_line = data.document.blocks[last_block]
+                            .lines
+                            .len()
+                            .saturating_sub(1);
+                        let last_col = data.document.blocks[last_block].lines[last_line]
+                            .text
+                            .chars()
+                            .count();
+                        data.selection = Some(super::cursor::Selection {
+                            anchor: DocPosition::ZERO,
+                            head: DocPosition::new(last_block, last_line, last_col),
+                        });
+                        data.cursor = DocPosition::new(last_block, last_line, last_col);
+                        data.reset_cursor_blink();
+                        changed = true;
+                    }
+                    _ => {}
+                }
+                if changed {
+                    drop(data);
+                    version_for_key.set(version_for_key.get().wrapping_add(1));
+                    return;
+                }
+            }
+
             match ctx.key_code {
                 // Left
                 37 => {
-                    if let Some(pos) = step_backward(&data.document, data.cursor) {
+                    if mod_key {
+                        // Cmd+Left jumps to start of line
+                        let pos = home_of(&data);
                         data.move_cursor(pos, extend);
-                        moved = true;
+                        changed = true;
+                    } else if let Some(pos) = step_backward(&data.document, data.cursor) {
+                        data.move_cursor(pos, extend);
+                        changed = true;
                     }
                 }
                 // Right
                 39 => {
-                    if let Some(pos) = step_forward(&data.document, data.cursor) {
+                    if mod_key {
+                        let pos = end_of(&data);
                         data.move_cursor(pos, extend);
-                        moved = true;
+                        changed = true;
+                    } else if let Some(pos) = step_forward(&data.document, data.cursor) {
+                        data.move_cursor(pos, extend);
+                        changed = true;
                     }
                 }
                 // Up
                 38 => {
                     if let Some(pos) = move_vertical(&data, -1) {
                         data.move_cursor(pos, extend);
-                        moved = true;
+                        changed = true;
                     }
                 }
                 // Down
                 40 => {
                     if let Some(pos) = move_vertical(&data, 1) {
                         data.move_cursor(pos, extend);
-                        moved = true;
+                        changed = true;
                     }
                 }
-                // Home — start of current line
+                // Home
                 36 => {
                     let pos = home_of(&data);
                     data.move_cursor(pos, extend);
-                    moved = true;
+                    changed = true;
                 }
-                // End — end of current line
+                // End
                 35 => {
                     let pos = end_of(&data);
                     data.move_cursor(pos, extend);
-                    moved = true;
+                    changed = true;
+                }
+                // Backspace
+                8 => {
+                    let pos = data.cursor;
+                    let sel = data.selection.take();
+                    data.push_undo();
+                    let new_pos = if let Some(s) = sel {
+                        delete_selection(&mut data.document, s)
+                    } else {
+                        delete_backward(&mut data.document, pos)
+                    };
+                    data.set_cursor(new_pos);
+                    changed = true;
+                }
+                // Delete (forward)
+                127 => {
+                    let pos = data.cursor;
+                    let sel = data.selection.take();
+                    data.push_undo();
+                    let new_pos = if let Some(s) = sel {
+                        delete_selection(&mut data.document, s)
+                    } else {
+                        delete_forward(&mut data.document, pos)
+                    };
+                    data.set_cursor(new_pos);
+                    changed = true;
+                }
+                // Enter — Shift+Enter is a soft break, plain Enter splits the block
+                13 => {
+                    // Replace selection first
+                    let mut pos = data.cursor;
+                    if let Some(s) = data.selection.take() {
+                        pos = delete_selection(&mut data.document, s);
+                    }
+                    data.push_undo();
+                    let new_pos = if ctx.shift {
+                        soft_break(&mut data.document, pos)
+                    } else {
+                        split_block(&mut data.document, pos)
+                    };
+                    data.set_cursor(new_pos);
+                    changed = true;
                 }
                 // Escape — blur
                 27 => {
                     data.focused = false;
-                    moved = true;
+                    data.set_cursor_visible(false);
+                    changed = true;
                 }
                 _ => {}
             }
-            // Trigger rebuild if anything moved.
-            // FOCUS event ensures the stateful FSM stays focused too.
-            let _ = event_types::FOCUS;
+
             drop(data);
-            if moved {
+            if changed {
                 version_for_key.set(version_for_key.get().wrapping_add(1));
             }
         })
 }
 
-/// Build the absolute-positioned cursor div at `(x, y)` with height `h`.
-fn cursor_div(x: f32, y: f32, h: f32, color: Color) -> Div {
-    div().absolute().left(x).top(y).w(2.0).h(h).bg(color)
+/// Canvas overlay that draws a blinking cursor at the current document
+/// position. The closure reads the cursor geometry from `state` on each
+/// frame, so when the editor's content rect is animating (or the cursor
+/// blink advances) we don't need a tree rebuild — the canvas redraws
+/// itself in place.
+fn cursor_overlay_canvas(
+    state: RichTextState,
+    cursor_state: SharedCursorState,
+    color: Color,
+) -> Canvas {
+    canvas(move |ctx: &mut dyn DrawContext, _bounds: CanvasBounds| {
+        // Compute opacity from blink state.
+        let (opacity, visible) = match cursor_state.lock() {
+            Ok(s) => (s.current_opacity(), s.visible),
+            Err(_) => (1.0, false),
+        };
+        if !visible || opacity < 0.01 {
+            return;
+        }
+
+        let Ok(data) = state.lock() else {
+            return;
+        };
+        if !data.focused {
+            return;
+        }
+        let Some((x, y, h)) = data.cursor_geometry() else {
+            return;
+        };
+
+        let c = Color::rgba(color.r, color.g, color.b, color.a * opacity);
+        ctx.fill_rect(
+            Rect::new(x, y, 2.0, h),
+            CornerRadius::default(),
+            Brush::Solid(c),
+        );
+    })
+    .absolute()
+    .left(0.0)
+    .top(0.0)
+    .w_full()
+    .h(1.0) // overridden by absolute layout — canvas only draws via fill_rect
 }
 
 /// Build absolute-positioned selection rectangles for the given selection.

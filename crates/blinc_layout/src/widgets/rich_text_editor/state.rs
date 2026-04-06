@@ -7,9 +7,11 @@
 //! that mutate the document.
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::div::FontWeight;
 use crate::styled_text::StyledLine;
+use crate::widgets::cursor::{cursor_state, SharedCursorState};
 
 use super::cursor::{ActiveFormat, DocPosition, Selection};
 use super::document::RichDocument;
@@ -65,10 +67,19 @@ impl LineGeometry {
     }
 }
 
+/// A snapshot of editable state for the undo/redo stack.
+#[derive(Clone, Debug)]
+pub struct UndoEntry {
+    pub document: RichDocument,
+    pub cursor: DocPosition,
+    pub selection: Option<Selection>,
+}
+
 /// Editor data that survives across UI rebuilds.
 ///
 /// Held inside `RichTextState = Arc<Mutex<RichTextData>>`. Public fields
-/// are read-only outside Phase 4 — use the helper methods to mutate.
+/// are read-only outside the edit ops in `edit.rs` — use the helper
+/// methods to mutate.
 #[derive(Debug)]
 pub struct RichTextData {
     /// The document being edited.
@@ -84,6 +95,15 @@ pub struct RichTextData {
     pub focused: bool,
     /// Visual line geometry index, populated by the renderer each frame.
     pub line_index: Vec<LineGeometry>,
+    /// Shared cursor blink state — used by the canvas-based cursor
+    /// overlay so blinking doesn't require tree rebuilds.
+    pub cursor_state: SharedCursorState,
+    /// Undo stack — newest entry at the back. Capped at 200 entries to
+    /// match the code editor's default.
+    pub undo_stack: Vec<UndoEntry>,
+    /// Redo stack — populated when undo is invoked, cleared on any new
+    /// edit.
+    pub redo_stack: Vec<UndoEntry>,
 }
 
 impl Default for RichTextData {
@@ -101,6 +121,9 @@ impl RichTextData {
             active_format: ActiveFormat::default(),
             focused: false,
             line_index: Vec::new(),
+            cursor_state: cursor_state(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -110,11 +133,80 @@ impl RichTextData {
         self.line_index = index;
     }
 
+    /// Reset the cursor blink so it's visible immediately after typing.
+    pub fn reset_cursor_blink(&self) {
+        if let Ok(mut cs) = self.cursor_state.lock() {
+            cs.reset_blink();
+        }
+    }
+
+    /// Set the visible flag of the underlying cursor blink state.
+    pub fn set_cursor_visible(&self, visible: bool) {
+        if let Ok(mut cs) = self.cursor_state.lock() {
+            cs.set_visible(visible);
+        }
+    }
+
+    /// Snapshot current document + cursor + selection onto the undo
+    /// stack and clear the redo stack. Call this *before* any text-
+    /// modifying op.
+    pub fn push_undo(&mut self) {
+        const MAX_UNDO: usize = 200;
+        self.undo_stack.push(UndoEntry {
+            document: self.document.clone(),
+            cursor: self.cursor,
+            selection: self.selection,
+        });
+        if self.undo_stack.len() > MAX_UNDO {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    /// Pop the most recent undo entry into the document, pushing the
+    /// current state onto the redo stack. Returns `true` if anything
+    /// was undone.
+    pub fn undo(&mut self) -> bool {
+        let Some(entry) = self.undo_stack.pop() else {
+            return false;
+        };
+        self.redo_stack.push(UndoEntry {
+            document: self.document.clone(),
+            cursor: self.cursor,
+            selection: self.selection,
+        });
+        self.document = entry.document;
+        self.cursor = entry.cursor.clamp(&self.document);
+        self.selection = entry.selection;
+        self.active_format = ActiveFormat::from_position(&self.document, self.cursor);
+        self.reset_cursor_blink();
+        true
+    }
+
+    /// Pop from the redo stack, mirroring `undo`.
+    pub fn redo(&mut self) -> bool {
+        let Some(entry) = self.redo_stack.pop() else {
+            return false;
+        };
+        self.undo_stack.push(UndoEntry {
+            document: self.document.clone(),
+            cursor: self.cursor,
+            selection: self.selection,
+        });
+        self.document = entry.document;
+        self.cursor = entry.cursor.clamp(&self.document);
+        self.selection = entry.selection;
+        self.active_format = ActiveFormat::from_position(&self.document, self.cursor);
+        self.reset_cursor_blink();
+        true
+    }
+
     /// Set the cursor position (clamped to valid bounds).
     pub fn set_cursor(&mut self, pos: DocPosition) {
         let clamped = pos.clamp(&self.document);
         self.cursor = clamped;
         self.active_format = ActiveFormat::from_position(&self.document, clamped);
+        self.reset_cursor_blink();
     }
 
     /// Move the cursor and update the selection head if `extend` is true.
@@ -132,6 +224,7 @@ impl RichTextData {
         }
         self.cursor = clamped;
         self.active_format = ActiveFormat::from_position(&self.document, clamped);
+        self.reset_cursor_blink();
     }
 
     /// Find the first `LineGeometry` whose vertical band contains `local_y`.
