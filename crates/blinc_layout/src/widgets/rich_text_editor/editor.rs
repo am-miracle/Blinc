@@ -30,6 +30,7 @@ use super::edit::{
     delete_backward, delete_forward, delete_selection, insert_char, insert_text, soft_break,
     split_block,
 };
+use super::format::{apply_mark_to_selection, Mark};
 use super::render::{compute_line_geometry, render_document, RichTextTheme};
 use super::state::RichTextState;
 
@@ -88,6 +89,19 @@ pub fn rich_text_editor(
             // Sync cursor blink state's visibility with focus.
             data.set_cursor_visible(data.focused);
 
+            // Compute the editor's content height from the line index so
+            // the cursor canvas can be sized to span every visual line.
+            // Without this the canvas defaults to its `h(1.0)` and the
+            // cursor bar gets vertically clipped to a 1px dot. We add
+            // a small bottom slack so the cursor is visible at the very
+            // last line.
+            let content_height = data
+                .line_index
+                .iter()
+                .map(|g| g.y + g.height)
+                .fold(0.0_f32, f32::max)
+                .max(theme_for_render.font_size * theme_for_render.line_height);
+
             let doc_tree = render_document(&data.document, &theme_for_render, content_width);
 
             // Selection rectangles (one per visual line). The cursor
@@ -115,14 +129,15 @@ pub fn rich_text_editor(
                 Arc::clone(&state_for_render),
                 data.cursor_state.clone(),
                 theme_for_render.text,
+                content_width,
+                content_height,
             ));
             root
         })
         .w_full()
         .on_mouse_down(move |ctx| {
             let mut data = state_for_click.lock().unwrap();
-            data.focused = true;
-            data.set_cursor_visible(true);
+            data.set_focus(true);
             if let Some(pos) = data.position_from_click(ctx.local_x, ctx.local_y) {
                 let extend = ctx.shift;
                 data.move_cursor(pos, extend);
@@ -214,6 +229,36 @@ pub fn rich_text_editor(
                         data.cursor = DocPosition::new(last_block, last_line, last_col);
                         data.reset_cursor_blink();
                         changed = true;
+                    }
+                    // Cmd+B — bold
+                    66 => {
+                        if toggle_mark(&mut data, Mark::Bold) {
+                            changed = true;
+                        }
+                    }
+                    // Cmd+I — italic
+                    73 => {
+                        if toggle_mark(&mut data, Mark::Italic) {
+                            changed = true;
+                        }
+                    }
+                    // Cmd+U — underline
+                    85 => {
+                        if toggle_mark(&mut data, Mark::Underline) {
+                            changed = true;
+                        }
+                    }
+                    // Cmd+Shift+X — strikethrough
+                    88 if ctx.shift => {
+                        if toggle_mark(&mut data, Mark::Strikethrough) {
+                            changed = true;
+                        }
+                    }
+                    // Cmd+E — inline code
+                    69 => {
+                        if toggle_mark(&mut data, Mark::Code) {
+                            changed = true;
+                        }
                     }
                     _ => {}
                 }
@@ -318,8 +363,7 @@ pub fn rich_text_editor(
                 }
                 // Escape — blur
                 27 => {
-                    data.focused = false;
-                    data.set_cursor_visible(false);
+                    data.set_focus(false);
                     changed = true;
                 }
                 _ => {}
@@ -341,6 +385,8 @@ fn cursor_overlay_canvas(
     state: RichTextState,
     cursor_state: SharedCursorState,
     color: Color,
+    width: f32,
+    height: f32,
 ) -> Canvas {
     canvas(move |ctx: &mut dyn DrawContext, _bounds: CanvasBounds| {
         // Compute opacity from blink state.
@@ -372,8 +418,8 @@ fn cursor_overlay_canvas(
     .absolute()
     .left(0.0)
     .top(0.0)
-    .w_full()
-    .h(1.0) // overridden by absolute layout — canvas only draws via fill_rect
+    .w(width)
+    .h(height.max(1.0))
 }
 
 /// Build absolute-positioned selection rectangles for the given selection.
@@ -440,6 +486,47 @@ fn selection_rects(
         );
     }
     rects
+}
+
+/// Toggle an inline `mark`.
+///
+/// - With a non-empty selection, applies the toggle to the selected
+///   range via [`apply_mark_to_selection`] and pushes an undo entry.
+/// - With no selection, flips the corresponding flag on the cursor's
+///   `ActiveFormat` so the next typed character carries the mark.
+///   This matches every other rich editor's "click bold then start
+///   typing" behaviour.
+///
+/// Returns `true` if anything changed (selection mark applied OR
+/// active-format flag flipped), so the caller knows whether to bump
+/// the rebuild signal.
+fn toggle_mark(data: &mut super::state::RichTextData, mark: Mark) -> bool {
+    if let Some(sel) = data.selection {
+        if !sel.is_empty() {
+            data.push_undo();
+            let changed = apply_mark_to_selection(&mut data.document, sel, mark.clone());
+            // Refresh the active format from the cursor location so the
+            // toolbar (Phase 7) sees the new state.
+            data.active_format =
+                super::cursor::ActiveFormat::from_position(&data.document, data.cursor);
+            data.reset_cursor_blink();
+            return changed;
+        }
+    }
+
+    // No selection — flip the active format flag in place.
+    let fmt = &mut data.active_format;
+    match mark {
+        Mark::Bold => fmt.bold = !fmt.bold,
+        Mark::Italic => fmt.italic = !fmt.italic,
+        Mark::Underline => fmt.underline = !fmt.underline,
+        Mark::Strikethrough => fmt.strikethrough = !fmt.strikethrough,
+        Mark::Code => fmt.code = !fmt.code,
+        Mark::Color(c) => fmt.color = Some(c),
+        Mark::Link(url) => fmt.link = url,
+    }
+    data.reset_cursor_blink();
+    true
 }
 
 /// Move the cursor up (-1) or down (+1) one visual line by stepping in

@@ -98,6 +98,11 @@ pub struct RichTextData {
     /// Shared cursor blink state — used by the canvas-based cursor
     /// overlay so blinking doesn't require tree rebuilds.
     pub cursor_state: SharedCursorState,
+    /// Whether this editor currently holds the global text-input focus
+    /// counter. Mirrors `focused` but only flips inside the editor's
+    /// `set_focus()` so the increment / decrement of the global counter
+    /// stays balanced even when the editor is rebuilt mid-frame.
+    pub holds_focus_count: bool,
     /// Undo stack — newest entry at the back. Capped at 200 entries to
     /// match the code editor's default.
     pub undo_stack: Vec<UndoEntry>,
@@ -122,8 +127,28 @@ impl RichTextData {
             focused: false,
             line_index: Vec::new(),
             cursor_state: cursor_state(),
+            holds_focus_count: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+        }
+    }
+
+    /// Set focus state and keep the global text-input focus counter in
+    /// sync. Calling this with the same value twice is a no-op (both
+    /// for the focused flag and for the global counter), so it can be
+    /// invoked freely from event handlers.
+    pub fn set_focus(&mut self, focused: bool) {
+        if self.focused == focused {
+            return;
+        }
+        self.focused = focused;
+        self.set_cursor_visible(focused);
+        if focused && !self.holds_focus_count {
+            self.holds_focus_count = true;
+            crate::widgets::text_input::increment_focus_count();
+        } else if !focused && self.holds_focus_count {
+            self.holds_focus_count = false;
+            crate::widgets::text_input::decrement_focus_count();
         }
     }
 

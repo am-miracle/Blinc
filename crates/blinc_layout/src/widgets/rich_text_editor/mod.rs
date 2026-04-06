@@ -27,6 +27,7 @@ pub mod cursor;
 pub mod document;
 pub mod edit;
 pub mod editor;
+pub mod format;
 pub mod render;
 pub mod state;
 pub mod wrap;
@@ -38,6 +39,7 @@ pub use edit::{
     split_block,
 };
 pub use editor::rich_text_editor;
+pub use format::{apply_mark_to_selection, Mark};
 pub use render::{compute_line_geometry, render_document, RichTextTheme};
 pub use state::{rich_text_state, LineGeometry, RichTextData, RichTextState, UndoEntry};
 pub use wrap::{wrap_styled_line, WrappedLine};
