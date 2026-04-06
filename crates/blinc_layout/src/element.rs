@@ -1142,6 +1142,16 @@ pub struct RenderProps {
     pub object_fit: Option<u8>,
     /// CSS object-position override for images [x, y] in 0.0-1.0 range
     pub object_position: Option<[f32; 2]>,
+    /// CSS loading strategy override (0=eager, 1=lazy)
+    pub loading_strategy: Option<u8>,
+    /// CSS placeholder type override (0=none, 1=color, 2=image, 3=skeleton)
+    pub placeholder_type: Option<u8>,
+    /// CSS placeholder color override
+    pub placeholder_color: Option<[f32; 4]>,
+    /// CSS placeholder image source override
+    pub placeholder_image: Option<String>,
+    /// CSS fade-in duration in milliseconds
+    pub fade_duration_ms: Option<u32>,
     /// Per-SVG-tag style overrides from CSS tag-name selectors (e.g., `path { fill: red; }`)
     pub svg_tag_styles: HashMap<String, SvgTagStyle>,
     /// CSS mix-blend-mode for this element
@@ -1233,6 +1243,11 @@ impl Default for RenderProps {
             visible: true,
             object_fit: None,
             object_position: None,
+            loading_strategy: None,
+            placeholder_type: None,
+            placeholder_color: None,
+            placeholder_image: None,
+            fade_duration_ms: None,
             svg_tag_styles: HashMap::new(),
             mix_blend_mode: None,
             text_decoration_color: None,

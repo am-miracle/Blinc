@@ -2,6 +2,21 @@
 
 All notable changes to `blinc_layout` will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+#### Lazy Image Loading (Complete)
+
+- Image placeholder rendering for type 2 (image source) — uses cached preloaded thumbnail/blur-hash
+- Skeleton shimmer placeholder (type 3) — animated gradient sweep with auto-redraw
+- Fade-in animation when image loads (configurable `fade_duration_ms`)
+- CSS `loading: lazy | eager` property
+- CSS `image-placeholder-color`, `image-placeholder-image`, `image-placeholder-type`, `fade-duration` properties
+- ElementStyle/RenderProps fields for full CSS-driven lazy loading
+- `placeholder_image` and `fade_duration_ms` now flow through `ImageData` to renderer
+- Placeholder images preloaded eagerly so they're ready when type 2 placeholder renders
+
 ## [0.4.0] - 2026-04-05
 
 ### Added

@@ -602,6 +602,16 @@ pub struct ElementStyle {
     pub object_fit: Option<u8>,
     /// object-position: alignment of image within its container [x, y] in 0.0-1.0 range
     pub object_position: Option<[f32; 2]>,
+    /// loading: image loading strategy (0 = eager, 1 = lazy)
+    pub loading_strategy: Option<u8>,
+    /// Placeholder type for lazy-loaded images (0=none, 1=color, 2=image, 3=skeleton)
+    pub image_placeholder_type: Option<u8>,
+    /// Placeholder color [r, g, b, a] for lazy-loaded images
+    pub image_placeholder_color: Option<[f32; 4]>,
+    /// Placeholder image source URL/path (for image_placeholder_type == 2)
+    pub image_placeholder_image: Option<String>,
+    /// Image fade-in duration in milliseconds
+    pub fade_duration_ms: Option<u32>,
 
     // =========================================================================
     // Interaction Properties
@@ -1824,6 +1834,16 @@ impl ElementStyle {
             // Image
             object_fit: other.object_fit.or(self.object_fit),
             object_position: other.object_position.or(self.object_position),
+            loading_strategy: other.loading_strategy.or(self.loading_strategy),
+            image_placeholder_type: other.image_placeholder_type.or(self.image_placeholder_type),
+            image_placeholder_color: other
+                .image_placeholder_color
+                .or(self.image_placeholder_color),
+            image_placeholder_image: other
+                .image_placeholder_image
+                .clone()
+                .or_else(|| self.image_placeholder_image.clone()),
+            fade_duration_ms: other.fade_duration_ms.or(self.fade_duration_ms),
             // Interaction
             pointer_events: other.pointer_events.or(self.pointer_events),
             cursor: other.cursor.or(self.cursor),

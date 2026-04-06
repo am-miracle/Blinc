@@ -2,6 +2,18 @@
 
 All notable changes to `blinc_app` will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Lazy image loading completion:
+  - Skeleton shimmer placeholder rendering with auto-redraw animation
+  - Image placeholder rendering (type 2) using preloaded thumbnail/blur-hash
+  - Fade-in animation when images finish loading (configurable per element)
+  - `image_load_times` HashMap tracks when each image was first cached
+  - Placeholder images are eagerly preloaded so they're ready before main render
+  - CSS overrides for `loading_strategy`, `placeholder_type`, `placeholder_color`, `placeholder_image`, `fade_duration_ms` flow through `RenderProps`
+
 ## [0.4.0] - 2026-04-05
 
 ### Added

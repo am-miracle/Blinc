@@ -232,6 +232,10 @@ pub struct ImageData {
     pub placeholder_type: u8,
     /// Placeholder color [r, g, b, a]
     pub placeholder_color: [f32; 4],
+    /// Placeholder image source (only used when placeholder_type == 2)
+    pub placeholder_image: Option<String>,
+    /// Fade-in duration in milliseconds (0 = no fade)
+    pub fade_duration_ms: u32,
 }
 
 /// Node data for rendering
@@ -1361,6 +1365,8 @@ impl RenderTree {
                         loading_strategy: info.loading_strategy,
                         placeholder_type: info.placeholder_type,
                         placeholder_color: info.placeholder_color,
+                        placeholder_image: info.placeholder_image,
+                        fade_duration_ms: info.fade_duration_ms,
                     })
                 } else {
                     ElementType::Div
@@ -1659,6 +1665,8 @@ impl RenderTree {
                         loading_strategy: info.loading_strategy,
                         placeholder_type: info.placeholder_type,
                         placeholder_color: info.placeholder_color,
+                        placeholder_image: info.placeholder_image,
+                        fade_duration_ms: info.fade_duration_ms,
                     })
                 } else {
                     ElementType::Div
@@ -1828,6 +1836,8 @@ impl RenderTree {
                         loading_strategy: info.loading_strategy,
                         placeholder_type: info.placeholder_type,
                         placeholder_color: info.placeholder_color,
+                        placeholder_image: info.placeholder_image,
+                        fade_duration_ms: info.fade_duration_ms,
                     })
                 } else {
                     ElementType::Div
@@ -1946,6 +1956,8 @@ impl RenderTree {
                         loading_strategy: info.loading_strategy,
                         placeholder_type: info.placeholder_type,
                         placeholder_color: info.placeholder_color,
+                        placeholder_image: info.placeholder_image,
+                        fade_duration_ms: info.fade_duration_ms,
                     })
                 } else {
                     ElementType::Div
@@ -4806,6 +4818,21 @@ impl RenderTree {
         }
         if let Some(op) = style.object_position {
             props.object_position = Some(op);
+        }
+        if let Some(ls) = style.loading_strategy {
+            props.loading_strategy = Some(ls);
+        }
+        if let Some(pt) = style.image_placeholder_type {
+            props.placeholder_type = Some(pt);
+        }
+        if let Some(pc) = style.image_placeholder_color {
+            props.placeholder_color = Some(pc);
+        }
+        if let Some(ref pi) = style.image_placeholder_image {
+            props.placeholder_image = Some(pi.clone());
+        }
+        if let Some(fd) = style.fade_duration_ms {
+            props.fade_duration_ms = Some(fd);
         }
         // Pointer events
         if let Some(pe) = style.pointer_events {

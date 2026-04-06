@@ -5479,6 +5479,35 @@ fn apply_property(style: &mut ElementStyle, name: &str, value: &str) {
                 style.object_position = Some(pos);
             }
         }
+        "loading" => match value.trim() {
+            "lazy" => style.loading_strategy = Some(1),
+            "eager" => style.loading_strategy = Some(0),
+            _ => {}
+        },
+        "image-placeholder-color" => {
+            if let Some(color) = parse_color(value) {
+                style.image_placeholder_color = Some([color.r, color.g, color.b, color.a]);
+                style.image_placeholder_type = Some(1);
+            }
+        }
+        "image-placeholder-image" | "image-placeholder" => {
+            let trimmed = value.trim().trim_matches(|c| c == '"' || c == '\'');
+            if !trimmed.is_empty() {
+                style.image_placeholder_image = Some(trimmed.to_string());
+                style.image_placeholder_type = Some(2);
+            }
+        }
+        "image-placeholder-type" => match value.trim() {
+            "skeleton" => style.image_placeholder_type = Some(3),
+            "none" => style.image_placeholder_type = Some(0),
+            "color" => style.image_placeholder_type = Some(1),
+            _ => {}
+        },
+        "fade-duration" => {
+            if let Some(ms) = parse_time_value(value) {
+                style.fade_duration_ms = Some(ms);
+            }
+        }
         "pointer-events" => match value.trim() {
             "auto" => style.pointer_events = Some(blinc_core::PointerEvents::Auto),
             "none" => style.pointer_events = Some(blinc_core::PointerEvents::None),
@@ -6743,6 +6772,39 @@ fn apply_property_with_errors(
             "none" => style.object_fit = Some(4),
             _ => errors.push(ParseError::invalid_value(name, value, line, column)),
         },
+        "loading" => match value.trim() {
+            "lazy" => style.loading_strategy = Some(1),
+            "eager" => style.loading_strategy = Some(0),
+            _ => errors.push(ParseError::invalid_value(name, value, line, column)),
+        },
+        "image-placeholder-color" => {
+            if let Some(color) = parse_color(value) {
+                style.image_placeholder_color = Some([color.r, color.g, color.b, color.a]);
+                style.image_placeholder_type = Some(1);
+            } else {
+                errors.push(ParseError::invalid_value(name, value, line, column));
+            }
+        }
+        "image-placeholder-image" | "image-placeholder" => {
+            let trimmed = value.trim().trim_matches(|c| c == '"' || c == '\'');
+            if !trimmed.is_empty() {
+                style.image_placeholder_image = Some(trimmed.to_string());
+                style.image_placeholder_type = Some(2);
+            }
+        }
+        "image-placeholder-type" => match value.trim() {
+            "skeleton" => style.image_placeholder_type = Some(3),
+            "none" => style.image_placeholder_type = Some(0),
+            "color" => style.image_placeholder_type = Some(1),
+            _ => errors.push(ParseError::invalid_value(name, value, line, column)),
+        },
+        "fade-duration" => {
+            if let Some(ms) = parse_time_value(value) {
+                style.fade_duration_ms = Some(ms);
+            } else {
+                errors.push(ParseError::invalid_value(name, value, line, column));
+            }
+        }
         "object-position" => {
             if let Some(pos) = parse_object_position(value) {
                 style.object_position = Some(pos);

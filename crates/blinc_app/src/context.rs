@@ -72,6 +72,8 @@ pub struct RenderContext {
     msaa_texture: Option<CachedTexture>,
     // LRU cache for images (prevents unbounded memory growth)
     image_cache: LruCache<String, GpuImage>,
+    // Tracks when each image first appeared in the cache (for fade-in animation)
+    image_load_times: std::collections::HashMap<String, std::time::Instant>,
     // LRU cache for parsed SVG documents (avoids re-parsing)
     svg_cache: LruCache<u64, SvgDocument>,
     // Texture atlas for rasterized SVGs (single shared GPU texture, shelf-packed)
@@ -191,6 +193,10 @@ struct ImageElement {
     placeholder_type: u8,
     /// Placeholder color [r, g, b, a]
     placeholder_color: [f32; 4],
+    /// Placeholder image source (only used when placeholder_type == 2)
+    placeholder_image: Option<String>,
+    /// Fade-in duration in milliseconds (0 = no fade)
+    fade_duration_ms: u32,
     /// Z-layer index for interleaved rendering with primitives
     z_index: u32,
     /// Border width (0 = no border)
@@ -304,6 +310,7 @@ impl RenderContext {
             backdrop_texture: None,
             msaa_texture: None,
             image_cache: LruCache::new(NonZeroUsize::new(IMAGE_CACHE_CAPACITY).unwrap()),
+            image_load_times: std::collections::HashMap::new(),
             svg_cache: LruCache::new(NonZeroUsize::new(SVG_CACHE_CAPACITY).unwrap()),
             svg_atlas,
             scratch_glyphs: Vec::with_capacity(1024), // Pre-allocate for typical text
@@ -1057,6 +1064,27 @@ impl RenderContext {
         // Buffer zone: load images that are within 100px of becoming visible
         const VISIBILITY_BUFFER: f32 = 100.0;
 
+        // Eagerly load placeholder images for any lazy element with placeholder_type == 2
+        // (so the placeholder is already in cache when we go to render it)
+        for image in images {
+            if image.placeholder_type == 2 {
+                if let Some(ref placeholder_src) = image.placeholder_image {
+                    if !self.image_cache.contains(placeholder_src) {
+                        let source = blinc_image::ImageSource::from_uri(placeholder_src);
+                        if let Ok(data) = blinc_image::ImageData::load(source) {
+                            let gpu_image = self.image_ctx.create_image_labeled(
+                                data.pixels(),
+                                data.width(),
+                                data.height(),
+                                placeholder_src,
+                            );
+                            self.image_cache.put(placeholder_src.clone(), gpu_image);
+                        }
+                    }
+                }
+            }
+        }
+
         for image in images {
             // LruCache::contains also promotes to most-recently-used
             if self.image_cache.contains(&image.source) {
@@ -1123,6 +1151,9 @@ impl RenderContext {
 
             // LruCache::put evicts oldest entry if at capacity
             self.image_cache.put(image.source.clone(), gpu_image);
+            // Record load time for fade-in animation
+            self.image_load_times
+                .insert(image.source.clone(), std::time::Instant::now());
         }
     }
 
@@ -1277,33 +1308,123 @@ impl RenderContext {
             // Get cached GPU image
             let gpu_image = self.image_cache.get(&image.source);
 
+            // Compute fade-in opacity multiplier from load time + duration
+            // Returns 1.0 if no fade configured or fade complete; <1.0 during fade
+            let fade_factor = if image.fade_duration_ms > 0 && gpu_image.is_some() {
+                if let Some(loaded_at) = self.image_load_times.get(&image.source) {
+                    let elapsed_ms = loaded_at.elapsed().as_secs_f32() * 1000.0;
+                    (elapsed_ms / image.fade_duration_ms as f32).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            };
+            if fade_factor < 1.0 {
+                // Force continuous redraw while fade is in progress
+                self.has_active_flows = true;
+            }
+
             // If image is not loaded and has a placeholder, render placeholder
             if gpu_image.is_none() && image.placeholder_type != 0 {
-                // Placeholder type 1 = Color
-                if image.placeholder_type == 1 {
-                    // Render a solid color rectangle as placeholder
-                    let color = blinc_core::Color::rgba(
-                        image.placeholder_color[0],
-                        image.placeholder_color[1],
-                        image.placeholder_color[2],
-                        image.placeholder_color[3],
-                    );
-
-                    // Create a simple rectangle for the placeholder
-                    let mut ctx = GpuPaintContext::new(viewport_width, viewport_height);
-
-                    let rect = blinc_core::Rect::new(image.x, image.y, image.width, image.height);
-
-                    ctx.fill_rounded_rect(
-                        rect,
-                        blinc_core::CornerRadius::uniform(image.border_radius),
-                        color,
-                    );
-
-                    let batch = ctx.take_batch();
-                    self.renderer.render_overlay(target, &batch);
+                match image.placeholder_type {
+                    // Type 1: Solid color
+                    1 => {
+                        let color = blinc_core::Color::rgba(
+                            image.placeholder_color[0],
+                            image.placeholder_color[1],
+                            image.placeholder_color[2],
+                            image.placeholder_color[3],
+                        );
+                        let mut ctx = GpuPaintContext::new(viewport_width, viewport_height);
+                        let rect =
+                            blinc_core::Rect::new(image.x, image.y, image.width, image.height);
+                        ctx.fill_rounded_rect(
+                            rect,
+                            blinc_core::CornerRadius::uniform(image.border_radius),
+                            color,
+                        );
+                        let batch = ctx.take_batch();
+                        self.renderer.render_overlay(target, &batch);
+                    }
+                    // Type 2: Image placeholder (e.g., low-res thumbnail or blur hash)
+                    2 => {
+                        if let Some(ref placeholder_src) = image.placeholder_image {
+                            if let Some(placeholder_gpu) = self.image_cache.get(placeholder_src) {
+                                let (src_rect, dst_rect) = calculate_fit_rects(
+                                    placeholder_gpu.width(),
+                                    placeholder_gpu.height(),
+                                    image.width,
+                                    image.height,
+                                    ObjectFit::Cover,
+                                    ObjectPosition::new(0.5, 0.5),
+                                );
+                                let src_uv = src_rect_to_uv(
+                                    src_rect,
+                                    placeholder_gpu.width(),
+                                    placeholder_gpu.height(),
+                                );
+                                let instance = GpuImageInstance::new(
+                                    image.x + dst_rect[0],
+                                    image.y + dst_rect[1],
+                                    dst_rect[2],
+                                    dst_rect[3],
+                                )
+                                .with_src_uv(src_uv[0], src_uv[1], src_uv[2], src_uv[3])
+                                .with_border_radius(image.border_radius)
+                                .with_opacity(image.opacity);
+                                self.renderer.render_images(
+                                    target,
+                                    placeholder_gpu.view(),
+                                    &[instance],
+                                );
+                            }
+                        }
+                    }
+                    // Type 3: Skeleton shimmer (animated gradient sweep)
+                    3 => {
+                        let t =
+                            self.frame_count.saturating_mul(16).rem_euclid(2400) as f32 / 2400.0;
+                        let base_a = image.placeholder_color[3].max(0.4);
+                        let base = blinc_core::Color::rgba(
+                            image.placeholder_color[0],
+                            image.placeholder_color[1],
+                            image.placeholder_color[2],
+                            base_a,
+                        );
+                        let highlight_a = (base_a + 0.25).min(1.0);
+                        let highlight = blinc_core::Color::rgba(
+                            (image.placeholder_color[0] + 0.15).min(1.0),
+                            (image.placeholder_color[1] + 0.15).min(1.0),
+                            (image.placeholder_color[2] + 0.15).min(1.0),
+                            highlight_a,
+                        );
+                        let mut ctx = GpuPaintContext::new(viewport_width, viewport_height);
+                        let rect =
+                            blinc_core::Rect::new(image.x, image.y, image.width, image.height);
+                        // Base background
+                        ctx.fill_rounded_rect(
+                            rect,
+                            blinc_core::CornerRadius::uniform(image.border_radius),
+                            base,
+                        );
+                        // Shimmer band — narrow vertical strip swept horizontally
+                        let band_w = (image.width * 0.25).max(40.0);
+                        let band_x = image.x + (image.width + band_w) * t - band_w;
+                        let band_rect =
+                            blinc_core::Rect::new(band_x, image.y, band_w, image.height);
+                        ctx.fill_rounded_rect(
+                            band_rect,
+                            blinc_core::CornerRadius::uniform(image.border_radius),
+                            highlight,
+                        );
+                        let batch = ctx.take_batch();
+                        self.renderer.render_overlay(target, &batch);
+                        // Mark frame as needing redraw for animation
+                        self.has_active_flows = true;
+                    }
+                    _ => {}
                 }
-                // TODO: Placeholder type 2 = Image (thumbnail), 3 = Skeleton (shimmer)
                 continue;
             }
 
@@ -1389,7 +1510,7 @@ impl RenderContext {
                 .with_src_uv(src_uv[0], src_uv[1], src_uv[2], src_uv[3])
                 .with_tint(image.tint[0], image.tint[1], image.tint[2], image.tint[3])
                 .with_border_radius(image.border_radius)
-                .with_opacity(image.opacity)
+                .with_opacity(image.opacity * fade_factor)
                 .with_transform(ta, tb, tc, td)
                 .with_filter(image.filter_a, image.filter_b);
 
@@ -1436,6 +1557,21 @@ impl RenderContext {
             let Some(gpu_image) = self.image_cache.get(&image.source) else {
                 continue; // Skip images that failed to load
             };
+
+            // Compute fade-in opacity multiplier
+            let fade_factor = if image.fade_duration_ms > 0 {
+                if let Some(loaded_at) = self.image_load_times.get(&image.source) {
+                    let elapsed_ms = loaded_at.elapsed().as_secs_f32() * 1000.0;
+                    (elapsed_ms / image.fade_duration_ms as f32).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            };
+            if fade_factor < 1.0 {
+                self.has_active_flows = true;
+            }
 
             // Convert object_fit byte to ObjectFit enum
             let object_fit = match image.object_fit {
@@ -1493,7 +1629,7 @@ impl RenderContext {
                 .with_src_uv(src_uv[0], src_uv[1], src_uv[2], src_uv[3])
                 .with_tint(image.tint[0], image.tint[1], image.tint[2], image.tint[3])
                 .with_border_radius(image.border_radius)
-                .with_opacity(image.opacity)
+                .with_opacity(image.opacity * fade_factor)
                 .with_transform(ta, tb, tc, td)
                 .with_filter(image.filter_a, image.filter_b);
 
@@ -3010,6 +3146,29 @@ impl RenderContext {
                         .object_position
                         .unwrap_or(image_data.object_position);
 
+                    // CSS overrides for lazy loading properties
+                    let final_loading_strategy = render_node
+                        .props
+                        .loading_strategy
+                        .unwrap_or(image_data.loading_strategy);
+                    let final_placeholder_type = render_node
+                        .props
+                        .placeholder_type
+                        .unwrap_or(image_data.placeholder_type);
+                    let final_placeholder_color = render_node
+                        .props
+                        .placeholder_color
+                        .unwrap_or(image_data.placeholder_color);
+                    let final_placeholder_image = render_node
+                        .props
+                        .placeholder_image
+                        .clone()
+                        .or_else(|| image_data.placeholder_image.clone());
+                    let final_fade_duration = render_node
+                        .props
+                        .fade_duration_ms
+                        .unwrap_or(image_data.fade_duration_ms);
+
                     // Mask: prefer own, fall back to parent
                     let own_mask = render_node.props.mask_image.as_ref();
                     let parent_mask = parent_props.and_then(|p| p.mask_image.as_ref());
@@ -3030,9 +3189,11 @@ impl RenderContext {
                         clip_bounds: scaled_clip,
                         clip_radius: scaled_clip_radius,
                         layer: effective_layer,
-                        loading_strategy: image_data.loading_strategy,
-                        placeholder_type: image_data.placeholder_type,
-                        placeholder_color: image_data.placeholder_color,
+                        loading_strategy: final_loading_strategy,
+                        placeholder_type: final_placeholder_type,
+                        placeholder_color: final_placeholder_color,
+                        placeholder_image: final_placeholder_image,
+                        fade_duration_ms: final_fade_duration,
                         z_index: *z_layer,
                         border_width,
                         border_color,
@@ -3095,6 +3256,8 @@ impl RenderContext {
                             loading_strategy: 0, // Eager
                             placeholder_type: 0, // None
                             placeholder_color: [0.0; 4],
+                            placeholder_image: None,
+                            fade_duration_ms: 0,
                             z_index: *z_layer,
                             border_width: 0.0,
                             border_color: blinc_core::Color::TRANSPARENT,

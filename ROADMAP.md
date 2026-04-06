@@ -270,7 +270,7 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | Dynamic image rendering | **Done** | `DynamicImage` in PrimitiveBatch, renderer uploads + draws via image pipeline |
 | Virtualized list rendering | Planned | Only render visible items |
 | Texture atlas improvements | Done | SVG atlas, glyph atlas |
-| Lazy image loading | Partial | LoadingStrategy exists, needs completion |
+| Lazy image loading | **Done** | Viewport-aware load + 100px buffer, color/image/skeleton placeholders, fade-in animation, CSS `loading` property |
 | Render region culling | **Done** | AABB visibility test before GPU upload, shadow/rotation/affine-aware |
 | GPU memory budget | **Done** | `GpuMemoryBudget` with LRU eviction, 128 MB default, env var override |
 
