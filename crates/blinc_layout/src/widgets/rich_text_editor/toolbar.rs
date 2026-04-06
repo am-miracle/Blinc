@@ -40,14 +40,18 @@ pub fn selection_toolbar(
     version: &State<u32>,
     theme: &RichTextTheme,
 ) -> Option<Div> {
-    let data = state.lock().ok()?;
+    let mut data = state.lock().ok()?;
     let bounds = data.selection_bounds()?;
     let picker = data.picker.clone();
-    drop(data);
 
     let (x, y, w, _h) = bounds;
-    // Center the toolbar above the selection's top edge with a small gap.
-    let toolbar_w = 232.0_f32;
+    // Reserve enough horizontal room for the mark row plus the open
+    // picker, if any. The link prompt is the widest variant.
+    let toolbar_w: f32 = match picker {
+        PickerState::Link { .. } => 540.0,
+        PickerState::Color => 380.0,
+        PickerState::None => 232.0,
+    };
     let toolbar_h = 36.0_f32;
     let center_x = x + w * 0.5;
     let mut tx = (center_x - toolbar_w * 0.5).max(0.0);
@@ -57,11 +61,14 @@ pub fn selection_toolbar(
         // selection instead.
         ty = y + (bounds.3) + 6.0;
     }
-    // Keep the toolbar inside the editor's content rect width so it
-    // never escapes the right edge. We don't know the actual editor
-    // content width here, but the caller passes it via theme — for now
-    // just clamp to a generous max.
     let _ = &mut tx;
+
+    // Cache the toolbar's bounding rect so the editor's mouse-down
+    // handler can detect clicks that land on the toolbar and bail
+    // early instead of collapsing the selection. Without this, every
+    // toolbar button click would dismiss its own context.
+    data.toolbar_rect = Some((tx, ty, toolbar_w, toolbar_h));
+    drop(data);
 
     let mark_row = mark_row(state, version, theme);
     let mut toolbar = div()
@@ -73,9 +80,19 @@ pub fn selection_toolbar(
         .flex_row()
         .items_center()
         .gap_px(4.0)
-        .bg(Color::rgba(0.16, 0.16, 0.20, 0.98))
+        // Fully opaque dark surface so the toolbar always reads as a
+        // solid panel, even when it overlaps headings or large body
+        // text directly underneath it.
+        .bg(Color::rgba(0.10, 0.10, 0.13, 1.0))
         .rounded(8.0)
         .border(1.0, Color::rgba(0.30, 0.30, 0.36, 1.0))
+        .shadow(blinc_core::Shadow {
+            offset_x: 0.0,
+            offset_y: 4.0,
+            blur: 12.0,
+            spread: 0.0,
+            color: Color::rgba(0.0, 0.0, 0.0, 0.45),
+        })
         .child(mark_row);
 
     // Inline picker, rendered to the right of the mark row.
@@ -175,7 +192,13 @@ fn mark_button(
 ) -> Div {
     let state_for_click = Arc::clone(state);
     let version_for_click = version.clone();
-    let mut t = crate::text::text(label).size(13.0).color(Color::WHITE);
+    // `no_cursor()` clears the text element's default I-beam so the
+    // parent button's pointer cursor wins on hover. This only affects
+    // the cursor style — hit-testing and rendering are unchanged.
+    let mut t = crate::text::text(label)
+        .size(13.0)
+        .color(Color::WHITE)
+        .no_cursor();
     if bold {
         t = t.weight(crate::div::FontWeight::Bold);
     }
@@ -217,7 +240,12 @@ fn picker_button(
         .justify_center()
         .rounded(4.0)
         .cursor_pointer()
-        .child(crate::text::text(label).size(13.0).color(Color::WHITE))
+        .child(
+            crate::text::text(label)
+                .size(13.0)
+                .color(Color::WHITE)
+                .no_cursor(),
+        )
         .on_mouse_down(move |_| {
             if let Ok(mut data) = state_for_click.lock() {
                 on_click(&mut data);
@@ -470,7 +498,12 @@ fn prompt_button(
         .rounded(4.0)
         .bg(Color::rgba(0.20, 0.20, 0.26, 1.0))
         .cursor_pointer()
-        .child(crate::text::text(label).size(11.0).color(Color::WHITE))
+        .child(
+            crate::text::text(label)
+                .size(11.0)
+                .color(Color::WHITE)
+                .no_cursor(),
+        )
         .on_mouse_down(move |_| {
             if let Ok(mut data) = state.lock() {
                 on_click(&mut data);

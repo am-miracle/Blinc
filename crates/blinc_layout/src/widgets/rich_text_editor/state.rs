@@ -9,6 +9,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use blinc_animation::{try_get_scheduler, TickCallbackId};
+
 use crate::div::FontWeight;
 use crate::styled_text::StyledLine;
 use crate::widgets::cursor::{cursor_state, SharedCursorState};
@@ -115,11 +117,13 @@ pub struct RichTextData {
     /// Shared cursor blink state — used by the canvas-based cursor
     /// overlay so blinking doesn't require tree rebuilds.
     pub cursor_state: SharedCursorState,
-    /// Whether this editor currently holds the global text-input focus
-    /// counter. Mirrors `focused` but only flips inside the editor's
-    /// `set_focus()` so the increment / decrement of the global counter
-    /// stays balanced even when the editor is rebuilt mid-frame.
-    pub holds_focus_count: bool,
+    /// Animation-scheduler tick-callback ID, registered while the editor
+    /// is focused. The presence of any tick callback in the scheduler
+    /// drives `needs_redraw = true` on the animation thread → wakes the
+    /// event loop → only the GPU paint pass runs (no full rebuild).
+    /// This is how the editor drives cursor blinking without touching
+    /// the global text-input continuous-redraw flag.
+    pub tick_callback_id: Option<TickCallbackId>,
     /// Cached editor bounds (x, y, width, height) in screen coords,
     /// captured from the most recent pointer event. The selection
     /// toolbar uses this to position itself in absolute space.
@@ -131,6 +135,13 @@ pub struct RichTextData {
     /// Timestamp of the most recent mouse-down (used for double-click
     /// detection in the editor's click handler).
     pub last_click_time: Option<Instant>,
+    /// Bounding rect of the floating selection toolbar in
+    /// editor-content-rect coordinates, written by `toolbar.rs` whenever
+    /// the toolbar is built. The editor's `on_mouse_down` checks
+    /// against this rect and bails early when the click lands inside,
+    /// so clicking a toolbar button doesn't also collapse the
+    /// selection underneath.
+    pub toolbar_rect: Option<(f32, f32, f32, f32)>,
     /// Undo stack — newest entry at the back. Capped at 200 entries to
     /// match the code editor's default.
     pub undo_stack: Vec<UndoEntry>,
@@ -145,6 +156,18 @@ impl Default for RichTextData {
     }
 }
 
+impl Drop for RichTextData {
+    fn drop(&mut self) {
+        // Make sure we don't leak the tick callback if the editor data
+        // is dropped while still focused.
+        if let Some(id) = self.tick_callback_id.take() {
+            if let Some(scheduler) = try_get_scheduler() {
+                scheduler.remove_tick_callback(id);
+            }
+        }
+    }
+}
+
 impl RichTextData {
     pub fn new(document: RichDocument) -> Self {
         Self {
@@ -155,10 +178,11 @@ impl RichTextData {
             focused: false,
             line_index: Vec::new(),
             cursor_state: cursor_state(),
-            holds_focus_count: false,
+            tick_callback_id: None,
             editor_bounds: (0.0, 0.0, 0.0, 0.0),
             picker: PickerState::None,
             last_click_time: None,
+            toolbar_rect: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -235,22 +259,38 @@ impl RichTextData {
         Some((min_x, min_y, max_x - min_x, max_y - min_y))
     }
 
-    /// Set focus state and keep the global text-input focus counter in
-    /// sync. Calling this with the same value twice is a no-op (both
-    /// for the focused flag and for the global counter), so it can be
-    /// invoked freely from event handlers.
+    /// Set focus state and register / unregister a per-frame tick on
+    /// the animation scheduler.
+    ///
+    /// The tick callback itself is empty — its mere presence in the
+    /// scheduler's `tick_callbacks` slotmap is enough to make the
+    /// scheduler thread set `needs_redraw = true` and wake the event
+    /// loop on every frame. This drives the cursor blink animation
+    /// (the cursor canvas reads `current_opacity()` from `Instant::now()`
+    /// on each redraw) without touching the global text-input
+    /// continuous-redraw flag, so other widgets in the app are not
+    /// affected.
+    ///
+    /// Calling with the same value twice is a no-op so handlers can
+    /// invoke this freely.
     pub fn set_focus(&mut self, focused: bool) {
         if self.focused == focused {
             return;
         }
         self.focused = focused;
         self.set_cursor_visible(focused);
-        if focused && !self.holds_focus_count {
-            self.holds_focus_count = true;
-            crate::widgets::text_input::increment_focus_count();
-        } else if !focused && self.holds_focus_count {
-            self.holds_focus_count = false;
-            crate::widgets::text_input::decrement_focus_count();
+        if focused {
+            if self.tick_callback_id.is_none() {
+                if let Some(scheduler) = try_get_scheduler() {
+                    // Empty tick — we just need the scheduler to keep
+                    // ticking so it raises needs_redraw each frame.
+                    self.tick_callback_id = scheduler.register_tick_callback(|_dt| {});
+                }
+            }
+        } else if let Some(id) = self.tick_callback_id.take() {
+            if let Some(scheduler) = try_get_scheduler() {
+                scheduler.remove_tick_callback(id);
+            }
         }
     }
 

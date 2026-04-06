@@ -142,7 +142,10 @@ pub fn rich_text_editor(
             ));
 
             // Floating context toolbar — only shows when the editor is
-            // focused and has a non-empty selection.
+            // focused and has a non-empty selection. Clear any stale
+            // toolbar_rect first so a previous frame's rect doesn't
+            // keep blocking clicks after the selection is collapsed.
+            data.toolbar_rect = None;
             drop(data);
             if let Some(toolbar) = super::toolbar::selection_toolbar(
                 &state_for_render,
@@ -163,6 +166,21 @@ pub fn rich_text_editor(
                 ctx.bounds_width,
                 ctx.bounds_height,
             );
+
+            // Skip cursor placement when the click lands inside the
+            // floating toolbar — its buttons handle the click directly,
+            // and re-running position_from_click here would collapse
+            // the selection (since the toolbar's coords don't map to
+            // any text line) and dismiss the toolbar mid-click.
+            if let Some((tx, ty, tw, th)) = data.toolbar_rect {
+                if ctx.local_x >= tx
+                    && ctx.local_x < tx + tw
+                    && ctx.local_y >= ty
+                    && ctx.local_y < ty + th
+                {
+                    return;
+                }
+            }
 
             // Detect double-click within the standard 400ms window.
             let now = std::time::Instant::now();
