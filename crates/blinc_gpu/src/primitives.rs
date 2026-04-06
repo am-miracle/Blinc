@@ -1540,7 +1540,7 @@ impl PrimitiveBatch {
     /// Add tessellated path geometry with clip data and brush info to the batch
     pub fn push_path_with_brush_info(
         &mut self,
-        tessellated: crate::path::TessellatedPath,
+        mut tessellated: crate::path::TessellatedPath,
         clip_bounds: [f32; 4],
         clip_radius: [f32; 4],
         clip_type: ClipType,
@@ -1550,10 +1550,23 @@ impl PrimitiveBatch {
             return;
         }
 
-        // Update clip data
+        // Stamp clip data onto each new vertex. Path primitives share a single
+        // VBO + uniform buffer, so the legacy "batch-level" clip would get
+        // clobbered every time a new path with a different clip was submitted —
+        // making the LAST notch's clip apply to ALL paths in the batch.
+        // Carrying clip per-vertex lets multiple canvases coexist in one draw.
+        let clip_type_u = clip_type as u32;
+        for v in &mut tessellated.vertices {
+            v.clip_bounds = clip_bounds;
+            v.clip_radius = clip_radius;
+            v.clip_type = clip_type_u;
+        }
+
+        // Update batch-level clip too (kept for legacy uniform binding fallback,
+        // though the shader now reads from the per-vertex attributes).
         self.paths.clip_bounds = clip_bounds;
         self.paths.clip_radius = clip_radius;
-        self.paths.clip_type = clip_type as u32;
+        self.paths.clip_type = clip_type_u;
 
         // Update brush metadata
         self.paths.use_gradient_texture = brush_info.needs_gradient_texture;
@@ -1583,7 +1596,7 @@ impl PrimitiveBatch {
     /// Add tessellated path geometry with clip data and brush info to the foreground batch
     pub fn push_foreground_path_with_brush_info(
         &mut self,
-        tessellated: crate::path::TessellatedPath,
+        mut tessellated: crate::path::TessellatedPath,
         clip_bounds: [f32; 4],
         clip_radius: [f32; 4],
         clip_type: ClipType,
@@ -1593,10 +1606,19 @@ impl PrimitiveBatch {
             return;
         }
 
+        // Stamp clip data onto each new vertex (see push_path_with_brush_info
+        // for the rationale — same shared-batch problem applies here).
+        let clip_type_u = clip_type as u32;
+        for v in &mut tessellated.vertices {
+            v.clip_bounds = clip_bounds;
+            v.clip_radius = clip_radius;
+            v.clip_type = clip_type_u;
+        }
+
         // Update clip data
         self.foreground_paths.clip_bounds = clip_bounds;
         self.foreground_paths.clip_radius = clip_radius;
-        self.foreground_paths.clip_type = clip_type as u32;
+        self.foreground_paths.clip_type = clip_type_u;
 
         // Update brush metadata
         self.foreground_paths.use_gradient_texture = brush_info.needs_gradient_texture;

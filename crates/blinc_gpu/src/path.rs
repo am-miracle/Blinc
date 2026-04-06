@@ -21,9 +21,15 @@ pub struct PathVertex {
     pub gradient_params: [f32; 4], // 16 bytes, offset 48, gradient parameters (linear: x1,y1,x2,y2; radial: cx,cy,r,0)
     pub gradient_type: u32,        // 4 bytes, offset 64, 0 = solid, 1 = linear, 2 = radial
     pub edge_distance: f32,        // 4 bytes, offset 68, distance to nearest edge for AA
-    pub _padding: [u32; 2],        // 8 bytes, offset 72, Padding for 16-byte alignment
+    /// Per-vertex clip bounds (x, y, width, height) — see push_path_with_brush_info
+    pub clip_bounds: [f32; 4], // 16 bytes, offset 72
+    /// Per-vertex clip corner radii (or shape data for circle/ellipse)
+    pub clip_radius: [f32; 4], // 16 bytes, offset 88
+    /// Per-vertex clip type: 0=none, 1=rect, 2=circle, 3=ellipse
+    pub clip_type: u32, // 4 bytes, offset 104
+    pub _padding: [u32; 3],        // 12 bytes, offset 108, Padding for 16-byte alignment
 }
-// Total: 80 bytes
+// Total: 120 bytes
 
 /// Tessellated path geometry ready for GPU rendering
 #[derive(Default)]
@@ -790,7 +796,9 @@ pub fn tessellate_fill(path: &Path, brush: &Brush) -> TessellatedPath {
             let v = (pos.y - min_y) / bounds_height;
 
             // For gradients, we pass start/end colors and gradient params
-            // The shader computes the gradient based on UV and gradient direction
+            // The shader computes the gradient based on UV and gradient direction.
+            // Per-vertex clip fields default to "no clip" — push_path_with_brush_info
+            // overwrites them with the active clip state at the time of submission.
             PathVertex {
                 position: pos.to_array(),
                 color: [start_color.r, start_color.g, start_color.b, start_color.a],
@@ -799,7 +807,10 @@ pub fn tessellate_fill(path: &Path, brush: &Brush) -> TessellatedPath {
                 gradient_params,
                 gradient_type,
                 edge_distance,
-                _padding: [0, 0],
+                clip_bounds: [-10000.0, -10000.0, 100000.0, 100000.0],
+                clip_radius: [0.0; 4],
+                clip_type: 0,
+                _padding: [0, 0, 0],
             }
         }),
     );
@@ -873,7 +884,9 @@ pub fn tessellate_stroke(path: &Path, stroke: &Stroke, brush: &Brush) -> Tessell
             let u = (pos.x - min_x) / bounds_width;
             let v = (pos.y - min_y) / bounds_height;
 
-            // For gradients, we pass start/end colors and gradient params
+            // For gradients, we pass start/end colors and gradient params.
+            // Per-vertex clip fields default to "no clip" — push_path_with_brush_info
+            // overwrites them with the active clip state at the time of submission.
             PathVertex {
                 position: pos.to_array(),
                 color: [start_color.r, start_color.g, start_color.b, start_color.a],
@@ -882,7 +895,10 @@ pub fn tessellate_stroke(path: &Path, stroke: &Stroke, brush: &Brush) -> Tessell
                 gradient_params,
                 gradient_type,
                 edge_distance,
-                _padding: [0, 0],
+                clip_bounds: [-10000.0, -10000.0, 100000.0, 100000.0],
+                clip_radius: [0.0; 4],
+                clip_type: 0,
+                _padding: [0, 0, 0],
             }
         }),
     );

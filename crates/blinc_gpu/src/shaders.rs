@@ -2779,6 +2779,11 @@ struct VertexInput {
     @location(4) gradient_params: vec4<f32>, // linear: (x1,y1,x2,y2); radial: (cx,cy,r,0)
     @location(5) gradient_type: u32,
     @location(6) edge_distance: f32,         // distance to nearest edge (for AA)
+    // Per-vertex clip data — populated by push_path_with_brush_info so multiple
+    // path submissions with different clips can coexist in one VBO/draw call.
+    @location(7) clip_bounds: vec4<f32>,
+    @location(8) clip_radius: vec4<f32>,
+    @location(9) clip_type: u32,
 }
 
 struct VertexOutput {
@@ -2790,6 +2795,9 @@ struct VertexOutput {
     @location(4) @interpolate(flat) gradient_type: u32,
     @location(5) edge_distance: f32,
     @location(6) screen_pos: vec2<f32>,      // screen position for clip calculations
+    @location(7) @interpolate(flat) v_clip_bounds: vec4<f32>,
+    @location(8) @interpolate(flat) v_clip_radius: vec4<f32>,
+    @location(9) @interpolate(flat) v_clip_type: u32,
 }
 
 // ============================================================================
@@ -2910,6 +2918,9 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.gradient_params = in.gradient_params;
     out.gradient_type = in.gradient_type;
     out.edge_distance = in.edge_distance;
+    out.v_clip_bounds = in.clip_bounds;
+    out.v_clip_radius = in.clip_radius;
+    out.v_clip_type = in.clip_type;
 
     return out;
 }
@@ -2946,12 +2957,15 @@ fn adjust_saturation(color: vec3<f32>, saturation: f32) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Calculate clip alpha first
+    // Calculate clip alpha from per-vertex clip data so multiple paths with
+    // different clips can share a single VBO/draw without clobbering each
+    // other. The uniform clip_* fields are kept for legacy callers but no
+    // longer used here.
     let clip_alpha = calculate_clip_alpha(
         in.screen_pos,
-        uniforms.clip_bounds,
-        uniforms.clip_radius,
-        uniforms.clip_type
+        in.v_clip_bounds,
+        in.v_clip_radius,
+        in.v_clip_type
     );
 
     // Early out if fully clipped

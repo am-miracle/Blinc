@@ -2360,7 +2360,10 @@ impl GpuRenderer {
         //   gradient_params: [f32;4] - 16 bytes, offset 48
         //   gradient_type: u32       - 4 bytes, offset 64
         //   edge_distance: f32       - 4 bytes, offset 68
-        //   _padding: [u32; 2]       - 8 bytes, offset 72
+        //   clip_bounds: [f32;4]     - 16 bytes, offset 72
+        //   clip_radius: [f32;4]     - 16 bytes, offset 88
+        //   clip_type: u32           - 4 bytes, offset 104
+        //   _padding: [u32; 3]       - 12 bytes, offset 108
         let path_vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<PathVertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -2406,6 +2409,24 @@ impl GpuRenderer {
                     format: wgpu::VertexFormat::Float32,
                     offset: 68,
                     shader_location: 6,
+                },
+                // clip_bounds: vec4<f32>
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 72,
+                    shader_location: 7,
+                },
+                // clip_radius: vec4<f32>
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 88,
+                    shader_location: 8,
+                },
+                // clip_type: u32
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32,
+                    offset: 104,
+                    shader_location: 9,
                 },
             ],
         };
@@ -2778,7 +2799,7 @@ impl GpuRenderer {
             push_constant_ranges: &[],
         });
 
-        // PathVertex layout
+        // PathVertex layout — see PathVertex struct in path.rs for offset rationale
         let path_vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<PathVertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -2817,6 +2838,24 @@ impl GpuRenderer {
                     format: wgpu::VertexFormat::Float32,
                     offset: 68,
                     shader_location: 6,
+                },
+                // clip_bounds: vec4<f32>
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 72,
+                    shader_location: 7,
+                },
+                // clip_radius: vec4<f32>
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 88,
+                    shader_location: 8,
+                },
+                // clip_type: u32
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32,
+                    offset: 104,
+                    shader_location: 9,
                 },
             ],
         };
