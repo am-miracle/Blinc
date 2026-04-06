@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use blinc_core::{Color, State};
 
-use crate::div::{div, Div};
+use crate::div::{div, Div, FontWeight};
 use crate::widgets::rich_text_editor::cursor::ActiveFormat;
 
 use super::format::{apply_mark_to_selection, Mark};
@@ -51,8 +51,10 @@ pub fn selection_toolbar(
     // horizontal room than the mark row, so we widen the toolbar
     // accordingly when one of those is open.
     let toolbar_w: f32 = match picker {
-        PickerState::None => 244.0,
-        PickerState::Color => 244.0,
+        PickerState::None => 280.0,
+        PickerState::Color => 280.0,
+        // Heading row: 7 buttons * (34 + 4) + padding ≈ 280px.
+        PickerState::Heading => 300.0,
         // Wide enough for the URL field (160px min) + three buttons
         // (50/60/56px) + gaps + padding without flex shrinking the
         // children. Leave a little headroom so the input can grow.
@@ -62,6 +64,7 @@ pub fn selection_toolbar(
     let picker_row_h = match picker {
         PickerState::None => 0.0,
         PickerState::Color => 36.0,
+        PickerState::Heading => 32.0,
         PickerState::Link { .. } => 38.0,
     };
     let toolbar_h = mark_row_h + picker_row_h;
@@ -114,6 +117,11 @@ pub fn selection_toolbar(
             toolbar = toolbar
                 .child(row_separator())
                 .child(color_picker_row(state, version));
+        }
+        PickerState::Heading => {
+            toolbar = toolbar
+                .child(row_separator())
+                .child(heading_picker_row(state, version));
         }
         PickerState::Link { draft } => {
             toolbar = toolbar
@@ -183,11 +191,15 @@ fn mark_row(state: &RichTextState, version: &State<u32>, theme: &RichTextTheme) 
             |d| apply_mark_via(d, Mark::Code),
         ))
         .child(divider())
-        .child(picker_button("A", "Color", state, version, theme, |d| {
-            d.picker = if matches!(d.picker, PickerState::Color) {
+        // Color swatch button — single-click toggles the accent color
+        // on the current selection. The button face IS a colored
+        // circle so users immediately see what it does.
+        .child(color_swatch_button(state, version))
+        .child(picker_button("H", "Heading", state, version, theme, |d| {
+            d.picker = if matches!(d.picker, PickerState::Heading) {
                 PickerState::None
             } else {
-                PickerState::Color
+                PickerState::Heading
             };
         }))
         .child(picker_button("@", "Link", state, version, theme, |d| {
@@ -199,6 +211,151 @@ fn mark_row(state: &RichTextState, version: &State<u32>, theme: &RichTextTheme) 
                 }
             };
         }))
+}
+
+/// Single accent color used by the color swatch button. Toggles on/off
+/// for the current selection (or active format when no selection).
+const ACCENT_COLOR: Color = Color {
+    r: 0.40,
+    g: 0.78,
+    b: 1.00,
+    a: 1.0,
+};
+
+/// "Color toggle" handler: if the selection already carries the accent
+/// color, revert to the default text color; otherwise apply accent.
+/// Without a selection, flips the active format's color.
+fn toggle_accent_color(d: &mut super::state::RichTextData) {
+    let default_color = Color::WHITE;
+    let target = if matches!(d.active_format.color, Some(c) if color_close(c, ACCENT_COLOR)) {
+        default_color
+    } else {
+        ACCENT_COLOR
+    };
+    if let Some(sel) = d.selection {
+        if !sel.is_empty() {
+            d.push_undo();
+            apply_mark_to_selection(&mut d.document, sel, Mark::Color(target));
+            d.active_format.color = Some(target);
+            d.reset_cursor_blink();
+            return;
+        }
+    }
+    d.active_format.color = Some(target);
+    d.reset_cursor_blink();
+}
+
+fn color_close(a: Color, b: Color) -> bool {
+    (a.r - b.r).abs() < 1e-3
+        && (a.g - b.g).abs() < 1e-3
+        && (a.b - b.b).abs() < 1e-3
+        && (a.a - b.a).abs() < 1e-3
+}
+
+/// Color swatch button — same footprint as a mark button, but the
+/// content is a colored circle so users immediately recognise it as
+/// a color toggle. Click suppresses the editor's outer mouse_down so
+/// the selection isn't collapsed.
+fn color_swatch_button(state: &RichTextState, version: &State<u32>) -> Div {
+    let state_for_click = Arc::clone(state);
+    let version_for_click = version.clone();
+    div()
+        .w(28.0)
+        .h(24.0)
+        .items_center()
+        .justify_center()
+        .rounded(4.0)
+        .cursor_pointer()
+        .child(
+            div()
+                .w(14.0)
+                .h(14.0)
+                .rounded(7.0)
+                .bg(ACCENT_COLOR)
+                .border(1.0, Color::rgba(1.0, 1.0, 1.0, 0.18)),
+        )
+        .on_mouse_down(move |_| {
+            if let Ok(mut data) = state_for_click.lock() {
+                data.suppress_next_outer_click = true;
+                toggle_accent_color(&mut data);
+                drop(data);
+                version_for_click.set(version_for_click.get().wrapping_add(1));
+            }
+        })
+}
+
+/// Heading picker row — applies the chosen heading level to the
+/// current block, or reverts to plain paragraph via the "P" button.
+fn heading_picker_row(state: &RichTextState, version: &State<u32>) -> Div {
+    let mut row = div().flex_row().items_center().gap_px(4.0);
+    let levels: &[(Option<u8>, &str, f32, FontWeight)] = &[
+        (None, "P", 12.0, FontWeight::Normal),
+        (Some(1), "H1", 13.0, FontWeight::Bold),
+        (Some(2), "H2", 12.5, FontWeight::Bold),
+        (Some(3), "H3", 12.0, FontWeight::Bold),
+        (Some(4), "H4", 11.5, FontWeight::Bold),
+        (Some(5), "H5", 11.0, FontWeight::Bold),
+        (Some(6), "H6", 10.5, FontWeight::Bold),
+    ];
+    for (level, label, font_size, weight) in levels {
+        let level = *level;
+        let label = *label;
+        let font_size = *font_size;
+        let weight = *weight;
+        let state_for_click = Arc::clone(state);
+        let version_for_click = version.clone();
+        row = row.child(
+            div()
+                .w(34.0)
+                .h(24.0)
+                .items_center()
+                .justify_center()
+                .rounded(4.0)
+                .bg(Color::rgba(0.20, 0.20, 0.26, 1.0))
+                .cursor_pointer()
+                .child(
+                    crate::text::text(label)
+                        .size(font_size)
+                        .weight(weight)
+                        .color(Color::WHITE)
+                        .no_cursor(),
+                )
+                .on_mouse_down(move |_| {
+                    if let Ok(mut data) = state_for_click.lock() {
+                        data.suppress_next_outer_click = true;
+                        apply_heading_level(&mut data, level);
+                        data.picker = PickerState::None;
+                        drop(data);
+                        version_for_click.set(version_for_click.get().wrapping_add(1));
+                    }
+                }),
+        );
+    }
+    row
+}
+
+/// Apply a heading level to the current block (or selected blocks).
+/// `None` reverts to plain paragraph. Pushes undo if anything changes.
+fn apply_heading_level(data: &mut super::state::RichTextData, level: Option<u8>) {
+    use super::block_ops::set_block_kind;
+    use super::document::BlockKind;
+    let range = data.selection.unwrap_or(super::cursor::Selection {
+        anchor: data.cursor,
+        head: data.cursor,
+    });
+    let kind = match level {
+        Some(n) => BlockKind::Heading(n),
+        None => BlockKind::Paragraph,
+    };
+    data.push_undo();
+    let changed = set_block_kind(&mut data.document, range, kind);
+    if !changed {
+        data.undo_stack.pop();
+        return;
+    }
+    let cursor = data.cursor;
+    data.set_cursor(cursor);
+    data.reset_cursor_blink();
 }
 
 /// Visual style applied to a mark button's label so the glyph

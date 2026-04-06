@@ -25,7 +25,9 @@ use crate::div::{div, Div, ElementBuilder};
 use crate::stateful::{stateful_with_key, NoState};
 use crate::widgets::cursor::SharedCursorState;
 
+use super::block_ops::{indent_blocks, outdent_blocks, toggle_block_kind};
 use super::cursor::{step_backward, step_forward, DocPosition};
+use super::document::BlockKind;
 use super::edit::{
     delete_backward, delete_forward, delete_selection, insert_char, insert_text, soft_break,
     split_block,
@@ -384,6 +386,61 @@ pub fn rich_text_editor(
                             changed = true;
                         }
                     }
+                    // Cmd+Alt+0 — paragraph
+                    48 if ctx.alt => {
+                        if apply_block_kind(&mut data, BlockKind::Paragraph) {
+                            changed = true;
+                        }
+                    }
+                    // Cmd+Alt+1..6 — headings
+                    49 if ctx.alt => {
+                        if apply_block_kind(&mut data, BlockKind::Heading(1)) {
+                            changed = true;
+                        }
+                    }
+                    50 if ctx.alt => {
+                        if apply_block_kind(&mut data, BlockKind::Heading(2)) {
+                            changed = true;
+                        }
+                    }
+                    51 if ctx.alt => {
+                        if apply_block_kind(&mut data, BlockKind::Heading(3)) {
+                            changed = true;
+                        }
+                    }
+                    52 if ctx.alt => {
+                        if apply_block_kind(&mut data, BlockKind::Heading(4)) {
+                            changed = true;
+                        }
+                    }
+                    53 if ctx.alt => {
+                        if apply_block_kind(&mut data, BlockKind::Heading(5)) {
+                            changed = true;
+                        }
+                    }
+                    54 if ctx.alt => {
+                        if apply_block_kind(&mut data, BlockKind::Heading(6)) {
+                            changed = true;
+                        }
+                    }
+                    // Cmd+Shift+7 — toggle numbered list
+                    55 if ctx.shift => {
+                        if apply_block_kind(&mut data, BlockKind::NumberedItem) {
+                            changed = true;
+                        }
+                    }
+                    // Cmd+Shift+8 — toggle bullet list
+                    56 if ctx.shift => {
+                        if apply_block_kind(&mut data, BlockKind::BulletItem) {
+                            changed = true;
+                        }
+                    }
+                    // Cmd+Shift+9 — toggle quote
+                    57 if ctx.shift => {
+                        if apply_block_kind(&mut data, BlockKind::Quote) {
+                            changed = true;
+                        }
+                    }
                     _ => {}
                 }
                 if changed {
@@ -490,6 +547,33 @@ pub fn rich_text_editor(
                     data.set_focus(false);
                     changed = true;
                 }
+                // Tab — indent the current block (or selected blocks).
+                // Shift+Tab outdents. Only paragraphs and list items
+                // are affected; headings, dividers, and quotes are
+                // skipped by `indent_blocks` / `outdent_blocks`.
+                9 => {
+                    let range = block_selection(&data);
+                    let did_change = if ctx.shift {
+                        data.push_undo();
+                        let r = outdent_blocks(&mut data.document, range);
+                        if !r {
+                            data.undo_stack.pop();
+                        }
+                        r
+                    } else {
+                        data.push_undo();
+                        let r = indent_blocks(&mut data.document, range);
+                        if !r {
+                            data.undo_stack.pop();
+                        }
+                        r
+                    };
+                    if did_change {
+                        let cursor = data.cursor;
+                        data.set_cursor(cursor);
+                        changed = true;
+                    }
+                }
                 _ => {}
             }
 
@@ -498,6 +582,38 @@ pub fn rich_text_editor(
                 version_for_key.set(version_for_key.get().wrapping_add(1));
             }
         })
+}
+
+/// Build a `Selection` covering whatever block range the editor's
+/// current cursor / selection covers — used by block-level ops that
+/// need a range even when the user has no explicit selection.
+fn block_selection(data: &super::state::RichTextData) -> super::cursor::Selection {
+    if let Some(sel) = data.selection {
+        if !sel.is_empty() {
+            return sel;
+        }
+    }
+    super::cursor::Selection {
+        anchor: data.cursor,
+        head: data.cursor,
+    }
+}
+
+/// Toggle every block in the editor's current cursor range to `kind`.
+/// If every block in the range already has `kind`, they all revert
+/// to `BlockKind::Paragraph`. Pushes undo before mutating; pops the
+/// undo entry if nothing actually changed.
+fn apply_block_kind(data: &mut super::state::RichTextData, kind: BlockKind) -> bool {
+    let range = block_selection(data);
+    data.push_undo();
+    let changed = toggle_block_kind(&mut data.document, range, kind);
+    if !changed {
+        data.undo_stack.pop();
+        return false;
+    }
+    let cursor = data.cursor;
+    data.set_cursor(cursor);
+    true
 }
 
 /// Canvas overlay that draws a blinking cursor at the current document

@@ -23,6 +23,7 @@
 //! op is a free function so users can build their own toolbars and key
 //! handlers without going through a sealed setter API.
 
+pub mod block_ops;
 pub mod cursor;
 pub mod document;
 pub mod edit;
@@ -34,6 +35,9 @@ pub mod state;
 pub mod toolbar;
 pub mod wrap;
 
+pub use block_ops::{
+    indent_blocks, insert_divider_after, outdent_blocks, set_block_kind, toggle_block_kind,
+};
 pub use cursor::{ActiveFormat, DocPosition, Selection};
 pub use document::{Block, BlockKind, RichDocument};
 pub use edit::{

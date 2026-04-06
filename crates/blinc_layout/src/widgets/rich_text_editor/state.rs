@@ -128,6 +128,9 @@ pub enum PickerState {
         /// Current draft URL — committed on Enter, discarded on Esc.
         draft: String,
     },
+    /// Heading picker open. Buttons select a heading level (or
+    /// "paragraph" to clear) for the current block.
+    Heading,
 }
 
 /// Editor data that survives across UI rebuilds.
