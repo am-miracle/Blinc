@@ -129,7 +129,17 @@ pub fn rich_text_editor(
             // outer Stateful would only stick until the first state
             // mutation, after which the rebuilt inner div reverts to
             // the default arrow.
-            let mut root = div().w_full().relative().cursor_text().child(doc_tree);
+            //
+            // The `blinc-rich-text-editor` class is the canonical CSS
+            // hook for stylesheet overrides — users can target it via
+            // `.blinc-rich-text-editor { … }` in `ctx.add_css(…)` for
+            // background, padding, font, etc.
+            let mut root = div()
+                .w_full()
+                .relative()
+                .cursor_text()
+                .class("blinc-rich-text-editor")
+                .child(doc_tree);
             for child in overlay_children {
                 root = root.child(child);
             }
@@ -429,8 +439,7 @@ pub fn rich_text_editor(
                                     pos = delete_selection(&mut data.document, sel);
                                 }
                                 let fmt = data.active_format.clone();
-                                let new_pos =
-                                    insert_text(&mut data.document, pos, &text, &fmt);
+                                let new_pos = insert_text(&mut data.document, pos, &text, &fmt);
                                 data.set_cursor(new_pos);
                                 changed = true;
                             }
