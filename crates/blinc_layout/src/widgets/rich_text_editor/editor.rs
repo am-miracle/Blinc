@@ -167,19 +167,18 @@ pub fn rich_text_editor(
                 ctx.bounds_height,
             );
 
-            // Skip cursor placement when the click lands inside the
-            // floating toolbar — its buttons handle the click directly,
-            // and re-running position_from_click here would collapse
-            // the selection (since the toolbar's coords don't map to
-            // any text line) and dismiss the toolbar mid-click.
-            if let Some((tx, ty, tw, th)) = data.toolbar_rect {
-                if ctx.local_x >= tx
-                    && ctx.local_x < tx + tw
-                    && ctx.local_y >= ty
-                    && ctx.local_y < ty + th
-                {
-                    return;
-                }
+            // A toolbar button just consumed the click — skip cursor
+            // placement so we don't collapse the selection underneath.
+            // Events dispatch deepest-first, so the button's handler
+            // already ran and set this flag before we got here.
+            //
+            // We can't use a coordinate-based hit test here because
+            // bubbling events carry the *button's* local coordinates,
+            // not the editor's (Blinc's event router caches
+            // `last_hit_local_*` once and forwards them up the chain).
+            if data.suppress_next_outer_click {
+                data.suppress_next_outer_click = false;
+                return;
             }
 
             // Detect double-click within the standard 400ms window.
@@ -561,7 +560,7 @@ fn selection_rects(
     for g in &data.line_index {
         // Determine the [start_col_in_line .. end_col_in_line) range for
         // this visual line in the selection.
-        let line_chars = g.text.chars().count();
+        let line_chars = g.total_chars();
         let line_end_col = g.start.col + line_chars;
         let on_block = g.start.block;
         let on_line = g.start.line;
@@ -587,23 +586,18 @@ fn selection_rects(
         let local_start = sx_global.2 - g.start.col;
         let local_end = ex_global.2 - g.start.col;
 
-        // Pixel offsets via measurement.
-        let prefix: String = g.text.chars().take(local_start).collect();
-        let mid: String = g
-            .text
-            .chars()
-            .skip(local_start)
-            .take(local_end - local_start)
-            .collect();
-        let prefix_w = super::state::measure_width(&prefix, g.font_size, g.weight, g.italic);
-        let mid_w = super::state::measure_width(&mid, g.font_size, g.weight, g.italic);
+        // Walk runs to find the pixel x for each end of the selection
+        // range, measuring each prefix with its run's actual font.
+        let start_px = super::state::pixel_x_for_local_col(g, local_start);
+        let end_px = super::state::pixel_x_for_local_col(g, local_end);
+        let mid_w = end_px - start_px;
         if mid_w <= 0.0 {
             continue;
         }
         rects.push(
             div()
                 .absolute()
-                .left(g.x + prefix_w)
+                .left(g.x + start_px)
                 .top(g.y)
                 .w(mid_w)
                 .h(g.height)
@@ -663,8 +657,7 @@ fn move_vertical(data: &super::state::RichTextData, dir: i32) -> Option<DocPosit
         if g.start.block != cursor.block || g.start.line != cursor.line {
             return false;
         }
-        let line_chars = g.text.chars().count();
-        let end_col = g.start.col + line_chars;
+        let end_col = g.start.col + g.total_chars();
         cursor.col >= g.start.col && cursor.col <= end_col
     })?;
     let target_idx = if dir < 0 {
@@ -680,8 +673,7 @@ fn move_vertical(data: &super::state::RichTextData, dir: i32) -> Option<DocPosit
     let local_col = cursor
         .col
         .saturating_sub(data.line_index[current_idx].start.col);
-    let target_chars = g.text.chars().count();
-    let new_col = g.start.col + local_col.min(target_chars);
+    let new_col = g.start.col + local_col.min(g.total_chars());
     Some(DocPosition::new(g.start.block, g.start.line, new_col))
 }
 
@@ -690,8 +682,7 @@ fn home_of(data: &super::state::RichTextData) -> DocPosition {
     let cursor = data.cursor;
     for g in &data.line_index {
         if g.start.block == cursor.block && g.start.line == cursor.line {
-            let line_chars = g.text.chars().count();
-            let end_col = g.start.col + line_chars;
+            let end_col = g.start.col + g.total_chars();
             if cursor.col >= g.start.col && cursor.col <= end_col {
                 return DocPosition::new(g.start.block, g.start.line, g.start.col);
             }
@@ -705,8 +696,7 @@ fn end_of(data: &super::state::RichTextData) -> DocPosition {
     let cursor = data.cursor;
     for g in &data.line_index {
         if g.start.block == cursor.block && g.start.line == cursor.line {
-            let line_chars = g.text.chars().count();
-            let end_col = g.start.col + line_chars;
+            let end_col = g.start.col + g.total_chars();
             if cursor.col >= g.start.col && cursor.col <= end_col {
                 return DocPosition::new(g.start.block, g.start.line, end_col);
             }

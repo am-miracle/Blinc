@@ -18,41 +18,77 @@ use crate::widgets::cursor::{cursor_state, SharedCursorState};
 use super::cursor::{ActiveFormat, DocPosition, Selection};
 use super::document::RichDocument;
 
+/// Per-run geometry inside a single visual line.
+///
+/// A line is composed of one or more contiguous runs, each with its
+/// own font (family / size / weight / italic) — splitting on inline
+/// code is the canonical reason for multiple runs, but the same
+/// machinery generalizes to any per-span font override.
+///
+/// Each run records its *measured* pixel x and width so cursor
+/// placement and click hit-testing don't have to re-measure with the
+/// wrong font.
+#[derive(Clone, Debug)]
+pub struct RunGeometry {
+    /// Source character column where this run starts (relative to the
+    /// source line, not the visual line).
+    pub source_col: usize,
+    /// Substring of the source line that this run covers.
+    pub text: String,
+    /// Pixel x offset *within the visual line* (i.e. measured from
+    /// `LineGeometry.x`).
+    pub x_in_line: f32,
+    /// Pixel width of the run at its declared font.
+    pub width: f32,
+    /// Font family used to render and measure this run.
+    pub font_family: crate::div::FontFamily,
+    /// Font size in px.
+    pub font_size: f32,
+    /// Font weight.
+    pub weight: FontWeight,
+    /// Italic flag.
+    pub italic: bool,
+}
+
 /// Geometry for a single visual line in the rendered document.
 ///
 /// Built by the renderer at frame-build time and stored on the editor
 /// state. Click handling and cursor positioning both walk this index.
 ///
-/// One source `StyledLine` may produce many `LineGeometry` entries (one
-/// per pre-wrapped chunk). The `source_line` field tells the click
-/// handler which character it's looking at *inside the source line*, so
-/// it can recover the byte/col offset back to the original document.
+/// One source `StyledLine` may produce many `LineGeometry` entries
+/// (one per pre-wrapped chunk). Each visual line is itself a list of
+/// runs ([`RunGeometry`]), so per-span font / weight / size variation
+/// inside a line is fully captured.
 #[derive(Clone, Debug)]
 pub struct LineGeometry {
     /// Document position of the *first* character in this visual line.
     /// Cursor placement on this line is `(block, line, col)` for cols
-    /// `0..=visible_chars`.
+    /// `0..=total_chars`.
     pub start: DocPosition,
     /// X offset of the line within the editor's content rect (px).
     /// Lists/quotes/indents add to this; plain paragraphs use 0.
     pub x: f32,
     /// Y top of the line within the editor's content rect (px).
     pub y: f32,
-    /// Pixel width allocated for this line.
+    /// Pixel width allocated for this line (used for selection rects).
     pub width: f32,
     /// Pixel height of one line (font_size * line_height).
     pub height: f32,
-    /// The wrapped chunk text (suitable for cursor x measurement).
-    pub text: String,
-    /// Font size (px) used for measurement.
-    pub font_size: f32,
-    /// Font weight used for measurement (drives bold-vs-normal width).
-    pub weight: FontWeight,
-    /// Italic flag used for measurement.
-    pub italic: bool,
+    /// Runs that make up this visual line, in source order.
+    pub runs: Vec<RunGeometry>,
 }
 
 impl LineGeometry {
+    /// Concatenated text across all runs — useful for tests / dbg.
+    pub fn full_text(&self) -> String {
+        self.runs.iter().map(|r| r.text.as_str()).collect()
+    }
+
+    /// Total character count across all runs.
+    pub fn total_chars(&self) -> usize {
+        self.runs.iter().map(|r| r.text.chars().count()).sum()
+    }
+
     /// True if `(local_x, local_y)` falls inside this line's rect.
     pub fn contains(&self, local_x: f32, local_y: f32) -> bool {
         local_y >= self.y
@@ -137,11 +173,20 @@ pub struct RichTextData {
     pub last_click_time: Option<Instant>,
     /// Bounding rect of the floating selection toolbar in
     /// editor-content-rect coordinates, written by `toolbar.rs` whenever
-    /// the toolbar is built. The editor's `on_mouse_down` checks
-    /// against this rect and bails early when the click lands inside,
-    /// so clicking a toolbar button doesn't also collapse the
-    /// selection underneath.
+    /// the toolbar is built. Currently used for diagnostics — the
+    /// click-swallow path uses `suppress_next_outer_click` instead,
+    /// because pointer-down events bubble up to the editor's outer
+    /// handler with `local_x`/`local_y` in *button-local* coords, not
+    /// editor-content coords, so a rect-based check is unreliable.
     pub toolbar_rect: Option<(f32, f32, f32, f32)>,
+    /// One-shot flag set by a toolbar button's `on_mouse_down` to tell
+    /// the editor's bubbling `on_mouse_down` handler to skip cursor /
+    /// selection placement for this event. The flag is consumed
+    /// immediately by the outer handler so it never affects subsequent
+    /// clicks. This works because Blinc dispatches events deepest-first
+    /// then bubbles up, so the button's handler runs before the
+    /// editor's outer handler in the same event.
+    pub suppress_next_outer_click: bool,
     /// Undo stack — newest entry at the back. Capped at 200 entries to
     /// match the code editor's default.
     pub undo_stack: Vec<UndoEntry>,
@@ -183,6 +228,7 @@ impl RichTextData {
             picker: PickerState::None,
             last_click_time: None,
             toolbar_rect: None,
+            suppress_next_outer_click: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -203,7 +249,7 @@ impl RichTextData {
         let mut max_x = f32::NEG_INFINITY;
         let mut max_y = f32::NEG_INFINITY;
         for g in &self.line_index {
-            let line_chars = g.text.chars().count();
+            let line_chars = g.total_chars();
             let line_end_col = g.start.col + line_chars;
             let on_block = g.start.block;
             let on_line = g.start.line;
@@ -224,15 +270,9 @@ impl RichTextData {
             }
             let local_start = sx.2 - g.start.col;
             let local_end = ex.2 - g.start.col;
-            let prefix: String = g.text.chars().take(local_start).collect();
-            let mid: String = g
-                .text
-                .chars()
-                .skip(local_start)
-                .take(local_end - local_start)
-                .collect();
-            let prefix_w = measure_width(&prefix, g.font_size, g.weight, g.italic);
-            let mid_w = measure_width(&mid, g.font_size, g.weight, g.italic);
+            let prefix_w = pixel_x_for_local_col(g, local_start);
+            let end_w = pixel_x_for_local_col(g, local_end);
+            let mid_w = end_w - prefix_w;
             if mid_w <= 0.0 {
                 continue;
             }
@@ -423,12 +463,11 @@ impl RichTextData {
         let cursor = self.cursor;
         // Find the visual line whose start lies on the same source line
         // and whose char range contains `cursor.col`. Each visual line
-        // covers `[start.col .. start.col + chars_in(text))`.
+        // covers `[start.col .. start.col + total_chars)`.
         let mut chosen: Option<&LineGeometry> = None;
         for g in &self.line_index {
             if g.start.block == cursor.block && g.start.line == cursor.line {
-                let line_chars = g.text.chars().count();
-                let line_end_col = g.start.col + line_chars;
+                let line_end_col = g.start.col + g.total_chars();
                 if cursor.col >= g.start.col && cursor.col <= line_end_col {
                     chosen = Some(g);
                     break;
@@ -442,22 +481,78 @@ impl RichTextData {
         }
         let g = chosen?;
         let local_col = cursor.col.saturating_sub(g.start.col);
-        let prefix = take_chars(&g.text, local_col);
-        let prefix_width = measure_width(&prefix, g.font_size, g.weight, g.italic);
-        Some((g.x + prefix_width, g.y, g.height))
+        // Walk runs left-to-right summing widths until we find the run
+        // containing the local column. Each run is measured with its
+        // own font, so the cursor x stays correct across font changes
+        // inside a single line (e.g. proportional + monospace mixes).
+        let mut consumed = 0usize;
+        for run in &g.runs {
+            let run_chars = run.text.chars().count();
+            if local_col <= consumed + run_chars {
+                let in_run = local_col - consumed;
+                let prefix: String = run.text.chars().take(in_run).collect();
+                let prefix_w = measure_width(
+                    &prefix,
+                    run.font_size,
+                    run.weight,
+                    run.italic,
+                    Some(&run.font_family),
+                );
+                return Some((g.x + run.x_in_line + prefix_w, g.y, g.height));
+            }
+            consumed += run_chars;
+        }
+        // Past the last run — drop the cursor at the right edge of the
+        // last run if there is one, else at the line origin.
+        if let Some(last) = g.runs.last() {
+            return Some((g.x + last.x_in_line + last.width, g.y, g.height));
+        }
+        Some((g.x, g.y, g.height))
     }
 
     /// Convert a click at `(local_x, local_y)` to a `DocPosition` and
     /// return it. Snaps to the nearest line if no line is directly under
     /// the click.
+    ///
+    /// The click x is matched against each run's measured pixel range,
+    /// then column-scanned within the matching run using that run's
+    /// own font. This is what makes mixed-font lines (e.g. body text
+    /// with inline code in monospace) place the cursor where the user
+    /// actually pointed.
     pub fn position_from_click(&self, local_x: f32, local_y: f32) -> Option<DocPosition> {
         let g = self.line_at_y(local_y)?.clone();
         let inside_x = (local_x - g.x).max(0.0);
-        let col_in_line = column_at_x(&g.text, inside_x, g.font_size, g.weight, g.italic);
+
+        // Walk runs to find which one the click landed in (or past).
+        let mut consumed_chars = 0usize;
+        for run in &g.runs {
+            let run_chars = run.text.chars().count();
+            let run_left = run.x_in_line;
+            let run_right = run_left + run.width;
+            if inside_x < run_right || run_chars == 0 {
+                // Hit (or before) this run — column-scan inside it.
+                let target = (inside_x - run_left).max(0.0);
+                let in_run = column_at_x(
+                    &run.text,
+                    target,
+                    run.font_size,
+                    run.weight,
+                    run.italic,
+                    Some(&run.font_family),
+                );
+                return Some(DocPosition::new(
+                    g.start.block,
+                    g.start.line,
+                    g.start.col + consumed_chars + in_run,
+                ));
+            }
+            consumed_chars += run_chars;
+        }
+        // Click past the last run — drop the cursor at the line end.
         Some(DocPosition::new(
             g.start.block,
             g.start.line,
-            g.start.col + col_in_line,
+            g.start.col + consumed_chars,
         ))
     }
 }
@@ -478,11 +573,49 @@ fn take_chars(text: &str, n: usize) -> String {
     text.chars().take(n).collect()
 }
 
+/// Walk a `LineGeometry`'s runs and return the pixel x of `local_col`
+/// (a character index inside the visual line, not the source line),
+/// measuring with each run's own font.
+pub(crate) fn pixel_x_for_local_col(g: &LineGeometry, local_col: usize) -> f32 {
+    let mut consumed = 0usize;
+    for run in &g.runs {
+        let run_chars = run.text.chars().count();
+        if local_col <= consumed + run_chars {
+            let in_run = local_col - consumed;
+            let prefix: String = run.text.chars().take(in_run).collect();
+            let prefix_w = measure_width(
+                &prefix,
+                run.font_size,
+                run.weight,
+                run.italic,
+                Some(&run.font_family),
+            );
+            return run.x_in_line + prefix_w;
+        }
+        consumed += run_chars;
+    }
+    g.runs.last().map(|r| r.x_in_line + r.width).unwrap_or(0.0)
+}
+
 /// Measure the pixel width of `text` at the given font properties.
-pub(crate) fn measure_width(text: &str, font_size: f32, weight: FontWeight, italic: bool) -> f32 {
+///
+/// `font_family` is optional — when `None`, the default font is used.
+/// Pass the actual run font when measuring inside a multi-font line so
+/// the cursor x lines up with the rendered glyphs.
+pub(crate) fn measure_width(
+    text: &str,
+    font_size: f32,
+    weight: FontWeight,
+    italic: bool,
+    font_family: Option<&crate::div::FontFamily>,
+) -> f32 {
     let mut options = crate::text_measure::TextLayoutOptions::new();
     options.font_weight = weight.weight();
     options.italic = italic;
+    if let Some(family) = font_family {
+        options.font_name = family.name.clone();
+        options.generic_font = family.generic;
+    }
     crate::text_measure::measure_text_with_options(text, font_size, &options).width
 }
 
@@ -496,6 +629,7 @@ pub(crate) fn column_at_x(
     font_size: f32,
     weight: FontWeight,
     italic: bool,
+    font_family: Option<&crate::div::FontFamily>,
 ) -> usize {
     if target_x <= 0.0 || text.is_empty() {
         return 0;
@@ -509,8 +643,8 @@ pub(crate) fn column_at_x(
         let upto = &text[..i];
         let after_idx = next_char_index(text, i);
         let upto_inclusive = &text[..after_idx];
-        let w_before = measure_width(upto, font_size, weight, italic);
-        let w_after = measure_width(upto_inclusive, font_size, weight, italic);
+        let w_before = measure_width(upto, font_size, weight, italic, font_family);
+        let w_after = measure_width(upto_inclusive, font_size, weight, italic, font_family);
         let mid = (w_before + w_after) * 0.5;
         if target_x < mid {
             return col;
@@ -550,13 +684,28 @@ mod tests {
     use crate::widgets::rich_text_editor::document::Block;
     use blinc_core::Color;
 
+    fn make_run(text: &str, source_col: usize, x_in_line: f32) -> RunGeometry {
+        let width = measure_width(text, 14.0, FontWeight::Normal, false, None);
+        RunGeometry {
+            source_col,
+            text: text.to_string(),
+            x_in_line,
+            width,
+            font_family: crate::div::FontFamily::default(),
+            font_size: 14.0,
+            weight: FontWeight::Normal,
+            italic: false,
+        }
+    }
+
     fn sample_state() -> RichTextData {
         let doc = RichDocument::from_blocks(vec![
             Block::paragraph("hello world", Color::WHITE),
             Block::paragraph("second block", Color::WHITE),
         ]);
         let mut state = RichTextData::new(doc);
-        // Synthesize a tiny line index — two single-line blocks.
+        // Synthesize a tiny line index — two single-line blocks, each
+        // a single run.
         state.set_line_index(vec![
             LineGeometry {
                 start: DocPosition::new(0, 0, 0),
@@ -564,10 +713,7 @@ mod tests {
                 y: 0.0,
                 width: 200.0,
                 height: 20.0,
-                text: "hello world".to_string(),
-                font_size: 14.0,
-                weight: FontWeight::Normal,
-                italic: false,
+                runs: vec![make_run("hello world", 0, 0.0)],
             },
             LineGeometry {
                 start: DocPosition::new(1, 0, 0),
@@ -575,10 +721,7 @@ mod tests {
                 y: 24.0,
                 width: 200.0,
                 height: 20.0,
-                text: "second block".to_string(),
-                font_size: 14.0,
-                weight: FontWeight::Normal,
-                italic: false,
+                runs: vec![make_run("second block", 0, 0.0)],
             },
         ]);
         state

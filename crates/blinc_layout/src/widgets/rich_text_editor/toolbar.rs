@@ -45,28 +45,38 @@ pub fn selection_toolbar(
     let picker = data.picker.clone();
 
     let (x, y, w, _h) = bounds;
-    // Reserve enough horizontal room for the mark row plus the open
-    // picker, if any. The link prompt is the widest variant.
+    // Toolbar is a fixed-width column. The mark row defines the
+    // baseline width and the picker (if open) stacks below it on a
+    // second row. Some pickers (notably the link form) need more
+    // horizontal room than the mark row, so we widen the toolbar
+    // accordingly when one of those is open.
     let toolbar_w: f32 = match picker {
-        PickerState::Link { .. } => 540.0,
-        PickerState::Color => 380.0,
-        PickerState::None => 232.0,
+        PickerState::None => 244.0,
+        PickerState::Color => 244.0,
+        // Wide enough for the URL field (160px min) + three buttons
+        // (50/60/56px) + gaps + padding without flex shrinking the
+        // children. Leave a little headroom so the input can grow.
+        PickerState::Link { .. } => 420.0,
     };
-    let toolbar_h = 36.0_f32;
+    let mark_row_h = 36.0_f32;
+    let picker_row_h = match picker {
+        PickerState::None => 0.0,
+        PickerState::Color => 36.0,
+        PickerState::Link { .. } => 38.0,
+    };
+    let toolbar_h = mark_row_h + picker_row_h;
+
     let center_x = x + w * 0.5;
-    let mut tx = (center_x - toolbar_w * 0.5).max(0.0);
+    let tx = (center_x - toolbar_w * 0.5).max(0.0);
     let mut ty = y - toolbar_h - 6.0;
     if ty < 0.0 {
         // Selection is at the very top — drop the toolbar below the
         // selection instead.
-        ty = y + (bounds.3) + 6.0;
+        ty = y + bounds.3 + 6.0;
     }
-    let _ = &mut tx;
 
-    // Cache the toolbar's bounding rect so the editor's mouse-down
-    // handler can detect clicks that land on the toolbar and bail
-    // early instead of collapsing the selection. Without this, every
-    // toolbar button click would dismiss its own context.
+    // Cache rect for diagnostics; the click-swallow path uses the
+    // suppress flag set by individual button handlers.
     data.toolbar_rect = Some((tx, ty, toolbar_w, toolbar_h));
     drop(data);
 
@@ -75,14 +85,16 @@ pub fn selection_toolbar(
         .absolute()
         .left(tx)
         .top(ty)
-        .h(toolbar_h)
-        .padding_x_px(8.0)
-        .flex_row()
-        .items_center()
+        .w(toolbar_w)
+        .padding_x_px(6.0)
+        .padding_y_px(4.0)
+        .flex_col()
         .gap_px(4.0)
-        // Fully opaque dark surface so the toolbar always reads as a
-        // solid panel, even when it overlaps headings or large body
-        // text directly underneath it.
+        // Render on the foreground layer so the bg fill draws ON TOP
+        // of the document text underneath, rather than as part of the
+        // background layer where text glyphs are composited last and
+        // can show through.
+        .foreground()
         .bg(Color::rgba(0.10, 0.10, 0.13, 1.0))
         .rounded(8.0)
         .border(1.0, Color::rgba(0.30, 0.30, 0.36, 1.0))
@@ -95,22 +107,27 @@ pub fn selection_toolbar(
         })
         .child(mark_row);
 
-    // Inline picker, rendered to the right of the mark row.
+    // Inline picker, rendered as a second row below the mark row.
     match picker {
         PickerState::None => {}
         PickerState::Color => {
             toolbar = toolbar
-                .child(divider())
+                .child(row_separator())
                 .child(color_picker_row(state, version));
         }
         PickerState::Link { draft } => {
             toolbar = toolbar
-                .child(divider())
+                .child(row_separator())
                 .child(link_prompt_row(state, version, theme, &draft));
         }
     }
 
     Some(toolbar)
+}
+
+/// Horizontal hairline between the mark row and an open picker row.
+fn row_separator() -> Div {
+    div().h(1.0).w_full().bg(Color::rgba(0.34, 0.34, 0.40, 1.0))
 }
 
 /// Build the row of mark buttons (B, I, U, S, code) plus the color
@@ -120,13 +137,19 @@ fn mark_row(state: &RichTextState, version: &State<u32>, theme: &RichTextTheme) 
         .flex_row()
         .items_center()
         .gap_px(2.0)
-        .child(mark_button("B", "Bold", true, state, version, theme, |d| {
-            apply_mark_via(d, Mark::Bold)
-        }))
+        .child(mark_button(
+            "B",
+            "Bold",
+            LabelStyle::BOLD,
+            state,
+            version,
+            theme,
+            |d| apply_mark_via(d, Mark::Bold),
+        ))
         .child(mark_button(
             "I",
             "Italic",
-            false,
+            LabelStyle::ITALIC,
             state,
             version,
             theme,
@@ -135,7 +158,7 @@ fn mark_row(state: &RichTextState, version: &State<u32>, theme: &RichTextTheme) 
         .child(mark_button(
             "U",
             "Underline",
-            false,
+            LabelStyle::UNDERLINE,
             state,
             version,
             theme,
@@ -144,7 +167,7 @@ fn mark_row(state: &RichTextState, version: &State<u32>, theme: &RichTextTheme) 
         .child(mark_button(
             "S",
             "Strikethrough",
-            false,
+            LabelStyle::STRIKE,
             state,
             version,
             theme,
@@ -153,7 +176,7 @@ fn mark_row(state: &RichTextState, version: &State<u32>, theme: &RichTextTheme) 
         .child(mark_button(
             "<>",
             "Inline code",
-            false,
+            LabelStyle::CODE,
             state,
             version,
             theme,
@@ -178,13 +201,55 @@ fn mark_row(state: &RichTextState, version: &State<u32>, theme: &RichTextTheme) 
         }))
 }
 
+/// Visual style applied to a mark button's label so the glyph
+/// previews the mark itself (B is bold, I is italic, U is underlined,
+/// S has a strikethrough, `<>` is monospace).
+#[derive(Clone, Copy)]
+struct LabelStyle {
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strikethrough: bool,
+    monospace: bool,
+}
+
+impl LabelStyle {
+    const PLAIN: Self = Self {
+        bold: false,
+        italic: false,
+        underline: false,
+        strikethrough: false,
+        monospace: false,
+    };
+    const BOLD: Self = Self {
+        bold: true,
+        ..Self::PLAIN
+    };
+    const ITALIC: Self = Self {
+        italic: true,
+        ..Self::PLAIN
+    };
+    const UNDERLINE: Self = Self {
+        underline: true,
+        ..Self::PLAIN
+    };
+    const STRIKE: Self = Self {
+        strikethrough: true,
+        ..Self::PLAIN
+    };
+    const CODE: Self = Self {
+        monospace: true,
+        ..Self::PLAIN
+    };
+}
+
 /// One mark button. The label is rendered with the mark applied (e.g.
 /// the "B" button is bold) so users can tell what each button does at
 /// a glance.
 fn mark_button(
     label: &str,
     _tooltip: &str,
-    bold: bool,
+    style: LabelStyle,
     state: &RichTextState,
     version: &State<u32>,
     _theme: &RichTextTheme,
@@ -199,8 +264,20 @@ fn mark_button(
         .size(13.0)
         .color(Color::WHITE)
         .no_cursor();
-    if bold {
+    if style.bold {
         t = t.weight(crate::div::FontWeight::Bold);
+    }
+    if style.italic {
+        t = t.italic();
+    }
+    if style.underline {
+        t = t.underline();
+    }
+    if style.strikethrough {
+        t = t.strikethrough();
+    }
+    if style.monospace {
+        t = t.monospace();
     }
     div()
         .w(28.0)
@@ -212,6 +289,11 @@ fn mark_button(
         .child(t)
         .on_mouse_down(move |_| {
             if let Ok(mut data) = state_for_click.lock() {
+                // Suppress the editor's outer mouse_down so it doesn't
+                // collapse the selection during this click. Events
+                // dispatch deepest-first then bubble up, so the editor
+                // handler will see this flag set when it runs.
+                data.suppress_next_outer_click = true;
                 if on_click(&mut data) {
                     drop(data);
                     version_for_click.set(version_for_click.get().wrapping_add(1));
@@ -248,6 +330,8 @@ fn picker_button(
         )
         .on_mouse_down(move |_| {
             if let Ok(mut data) = state_for_click.lock() {
+                // See mark_button for the rationale.
+                data.suppress_next_outer_click = true;
                 on_click(&mut data);
                 drop(data);
                 version_for_click.set(version_for_click.get().wrapping_add(1));
@@ -366,6 +450,7 @@ fn color_picker_row(state: &RichTextState, version: &State<u32>) -> Div {
                 .cursor_pointer()
                 .on_mouse_down(move |_| {
                     if let Ok(mut data) = state_for_click.lock() {
+                        data.suppress_next_outer_click = true;
                         if let Some(sel) = data.selection {
                             if !sel.is_empty() {
                                 data.push_undo();
@@ -419,6 +504,16 @@ fn link_prompt_row(
     let state_for_cancel = Arc::clone(state);
     let version_for_cancel = version.clone();
 
+    // Even the input display needs to swallow clicks so the editor's
+    // outer mouse_down handler doesn't collapse the underlying
+    // selection (which would close the prompt mid-edit).
+    let state_for_input = Arc::clone(state);
+    let input_click = move |_: &crate::event_handler::EventContext| {
+        if let Ok(mut data) = state_for_input.lock() {
+            data.suppress_next_outer_click = true;
+        }
+    };
+
     div()
         .flex_row()
         .items_center()
@@ -428,15 +523,20 @@ fn link_prompt_row(
                 .h(22.0)
                 .padding_x_px(8.0)
                 .min_w(160.0)
+                .flex_grow()
                 .items_center()
                 .rounded(4.0)
                 .bg(Color::rgba(0.10, 0.10, 0.13, 1.0))
                 .border(1.0, Color::rgba(0.34, 0.34, 0.40, 1.0))
+                .cursor_text()
                 .child(
                     crate::text::text(placeholder)
                         .size(12.0)
-                        .color(placeholder_color),
-                ),
+                        .color(placeholder_color)
+                        .no_cursor()
+                        .no_wrap(),
+                )
+                .on_mouse_down(input_click),
         )
         .child(prompt_button(
             "Apply",
@@ -490,9 +590,17 @@ fn prompt_button(
     version: State<u32>,
     on_click: impl Fn(&mut super::state::RichTextData) + Send + Sync + 'static,
 ) -> Div {
+    // Pick a fixed width per button so flex doesn't shrink them to 0
+    // and force the inner text to wrap one character per line.
+    let w = match label {
+        "Apply" => 50.0,
+        "Remove" => 60.0,
+        "Cancel" => 56.0,
+        _ => 60.0,
+    };
     div()
+        .w(w)
         .h(22.0)
-        .padding_x_px(8.0)
         .items_center()
         .justify_center()
         .rounded(4.0)
@@ -502,10 +610,12 @@ fn prompt_button(
             crate::text::text(label)
                 .size(11.0)
                 .color(Color::WHITE)
-                .no_cursor(),
+                .no_cursor()
+                .no_wrap(),
         )
         .on_mouse_down(move |_| {
             if let Ok(mut data) = state.lock() {
+                data.suppress_next_outer_click = true;
                 on_click(&mut data);
                 drop(data);
                 version.set(version.get().wrapping_add(1));

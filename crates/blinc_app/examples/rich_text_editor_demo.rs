@@ -20,9 +20,8 @@ use blinc_app::prelude::*;
 use blinc_app::windowed::{WindowedApp, WindowedContext};
 use blinc_core::context_state::BlincContextState;
 use blinc_core::Color;
-use blinc_layout::styled_text::{StyledLine, TextSpan};
 use blinc_layout::widgets::rich_text_editor::{
-    document::{Block, BlockKind, RichDocument},
+    document::RichDocument,
     editor::rich_text_editor,
     render::RichTextTheme,
     state::{rich_text_state, RichTextState},
@@ -119,214 +118,58 @@ fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
 // =============================================================================
 // Sample document
 // =============================================================================
+//
+// The whole document is authored as a Markdown string and parsed into
+// a `RichDocument` via `RichDocument::from_markdown`. This is the
+// expected workflow for editor users — author content as plain
+// Markdown, hand it to the editor, get a fully-styled document.
+//
+// `SpanTemplate` and `StyledLine::from_segments` are still available
+// in `blinc_layout::styled_text` for cases where Markdown isn't the
+// right authoring format (programmatic / data-driven content).
 
-fn sample_document(theme: &RichTextTheme) -> RichDocument {
-    let text_color = theme.text;
+const SAMPLE_MARKDOWN: &str = r#"# The Rich Text Editor
 
-    RichDocument::from_blocks(vec![
-        Block::heading(1, "The Rich Text Editor", text_color),
-        Block::paragraph(
-            "A WYSIWYG editor for styled prose, built on the existing styled-text \
-             primitives. This page is a hand-built RichDocument rendered through \
-             the read-only renderer — no editing yet.",
-            text_color,
-        ),
-        Block::heading(2, "Inline marks", text_color),
-        // A paragraph showcasing every supported inline mark
-        Block {
-            kind: BlockKind::Paragraph,
-            indent: 0,
-            lines: vec![inline_marks_line(text_color)],
-        },
-        Block::heading(2, "Lists", text_color),
-        Block::heading(3, "Bullet list", text_color),
-        Block::bullet("first item — flat list, no indent", text_color),
-        Block::bullet("second item — also at depth 0", text_color),
-        nested_bullet("nested item at depth 1", text_color, 1),
-        nested_bullet("another nested item", text_color, 1),
-        nested_bullet("even deeper at depth 2", text_color, 2),
-        Block::bullet("back to depth 0", text_color),
-        Block::heading(3, "Numbered list", text_color),
-        Block::numbered("ordinals are computed at render time", text_color),
-        Block::numbered("they restart after a non-numbered block", text_color),
-        Block::numbered("…so reordering items needs no bookkeeping", text_color),
-        Block::paragraph("(plain paragraph breaks the run)", theme.muted),
-        Block::numbered("a fresh run begins again at 1", text_color),
-        Block::numbered("then 2", text_color),
-        Block::heading(2, "Block quote", text_color),
-        Block::quote(
-            "The best way to predict the future is to invent it. — Alan Kay",
-            text_color,
-        ),
-        Block::divider(),
-        Block::heading(2, "Mixed prose", text_color),
-        Block {
-            kind: BlockKind::Paragraph,
-            indent: 0,
-            lines: vec![mixed_prose_line(text_color)],
-        },
-        Block::paragraph(
-            "Phase 3 adds cursor, click-to-place, and selection. Phase 4 adds \
-             actual editing. Phase 7 ships a toolbar. Until then, this page is \
-             a smoke test that the model and renderer agree.",
-            theme.muted,
-        ),
-    ])
-}
+A WYSIWYG editor for styled prose, built on the existing styled-text primitives. The whole page below is authored as Markdown and parsed into a `RichDocument` via `RichDocument::from_markdown`.
 
-// =============================================================================
-// Helpers for spans
-// =============================================================================
+## Inline marks
 
-/// "Bold, italic, underline, strikethrough, inline code, colored, link"
-fn inline_marks_line(default: Color) -> StyledLine {
-    let segments: &[(&str, SpanFmt)] = &[
-        ("Inline marks: ", SpanFmt::EMPTY),
-        ("bold", SpanFmt::EMPTY.bold()),
-        (", ", SpanFmt::EMPTY),
-        ("italic", SpanFmt::EMPTY.italic()),
-        (", ", SpanFmt::EMPTY),
-        ("underline", SpanFmt::EMPTY.underline()),
-        (", ", SpanFmt::EMPTY),
-        ("strikethrough", SpanFmt::EMPTY.strikethrough()),
-        (", ", SpanFmt::EMPTY),
-        ("inline code", SpanFmt::EMPTY.code()),
-        (", ", SpanFmt::EMPTY),
-        (
-            "colored",
-            SpanFmt::EMPTY.color(Color::rgba(0.40, 0.78, 1.0, 1.0)),
-        ),
-        (", and a ", SpanFmt::EMPTY),
-        (
-            "hyperlink",
-            SpanFmt::EMPTY
-                .color(Color::rgba(0.45, 0.78, 1.0, 1.0))
-                .underline()
-                .link("https://example.com"),
-        ),
-        (".", SpanFmt::EMPTY),
-    ];
-    line_from_segments(default, segments)
-}
+Inline marks: **bold**, *italic*, ~~strikethrough~~, `inline code`, and a [hyperlink](https://example.com).
 
-/// A second showcase line that mixes several marks at once.
-fn mixed_prose_line(default: Color) -> StyledLine {
-    let segments: &[(&str, SpanFmt)] = &[
-        ("You can ", SpanFmt::EMPTY),
-        ("combine ", SpanFmt::EMPTY.bold().italic()),
-        ("multiple marks ", SpanFmt::EMPTY.bold().underline()),
-        ("on a single ", SpanFmt::EMPTY),
-        (
-            "run",
-            SpanFmt::EMPTY
-                .italic()
-                .color(Color::rgba(1.0, 0.65, 0.42, 1.0)),
-        ),
-        (", or ", SpanFmt::EMPTY),
-        (
-            "strike them out",
-            SpanFmt::EMPTY
-                .strikethrough()
-                .color(Color::rgba(0.55, 0.55, 0.65, 1.0)),
-        ),
-        (" entirely. Even ", SpanFmt::EMPTY),
-        (
-            "code chips",
-            SpanFmt::EMPTY
-                .code()
-                .color(Color::rgba(0.93, 0.85, 0.55, 1.0)),
-        ),
-        (" sit happily inline.", SpanFmt::EMPTY),
-    ];
-    line_from_segments(default, segments)
-}
+## Lists
 
-/// Build a `StyledLine` from a sequence of (text, format) pairs. The
-/// resulting line has one `TextSpan` per segment with byte ranges
-/// computed automatically.
-fn line_from_segments(default: Color, segments: &[(&str, SpanFmt)]) -> StyledLine {
-    let mut text = String::new();
-    let mut spans = Vec::with_capacity(segments.len());
-    for (chunk, fmt) in segments {
-        let start = text.len();
-        text.push_str(chunk);
-        let end = text.len();
-        spans.push(fmt.into_span(start, end, default));
-    }
-    StyledLine { text, spans }
-}
+### Bullet list
 
-#[derive(Clone, Copy)]
-struct SpanFmt {
-    bold: bool,
-    italic: bool,
-    underline: bool,
-    strikethrough: bool,
-    code: bool,
-    color: Option<Color>,
-    link: Option<&'static str>,
-}
+- first item — flat list, no indent
+- second item — also at depth 0
+- back to depth 0
 
-impl SpanFmt {
-    const EMPTY: Self = Self {
-        bold: false,
-        italic: false,
-        underline: false,
-        strikethrough: false,
-        code: false,
-        color: None,
-        link: None,
-    };
+### Numbered list
 
-    const fn bold(mut self) -> Self {
-        self.bold = true;
-        self
-    }
-    const fn italic(mut self) -> Self {
-        self.italic = true;
-        self
-    }
-    const fn underline(mut self) -> Self {
-        self.underline = true;
-        self
-    }
-    const fn strikethrough(mut self) -> Self {
-        self.strikethrough = true;
-        self
-    }
-    const fn code(mut self) -> Self {
-        self.code = true;
-        self
-    }
-    const fn color(mut self, c: Color) -> Self {
-        self.color = Some(c);
-        self
-    }
-    const fn link(mut self, url: &'static str) -> Self {
-        self.link = Some(url);
-        self
-    }
+1. ordinals are computed at render time
+2. they restart after a non-numbered block
+3. …so reordering items needs no bookkeeping
 
-    fn into_span(self, start: usize, end: usize, default: Color) -> TextSpan {
-        TextSpan {
-            start,
-            end,
-            color: self.color.unwrap_or(default),
-            bold: self.bold,
-            italic: self.italic,
-            underline: self.underline,
-            strikethrough: self.strikethrough,
-            code: self.code,
-            link_url: self.link.map(String::from),
-            token_type: None,
-        }
-    }
-}
+A plain paragraph breaks the run.
 
-fn nested_bullet(text: &str, color: Color, indent: u8) -> Block {
-    Block {
-        kind: BlockKind::BulletItem,
-        lines: vec![StyledLine::plain(text, color)],
-        indent,
-    }
+1. a fresh run begins again at 1
+2. then 2
+
+## Block quote
+
+> The best way to predict the future is to invent it. — Alan Kay
+
+---
+
+## Mixed prose
+
+You can **combine multiple marks** on a single *run*, or ~~strike them out~~ entirely. 
+
+Even `code spans` sit happily inline.
+
+Editing, undo/redo, and the floating selection toolbar all work — select any text and try the toolbar buttons or Cmd+B / Cmd+I / Cmd+U / Cmd+E.
+"#;
+
+fn sample_document(_theme: &RichTextTheme) -> RichDocument {
+    RichDocument::from_markdown(SAMPLE_MARKDOWN, Color::WHITE)
 }

@@ -241,14 +241,19 @@ fn char_at(text: &str, i: usize) -> char {
     text[i..].chars().next().unwrap_or('\0')
 }
 
-/// Build a `StyledLine` covering byte range `range` of `source`, rebasing
-/// span byte indices so the new line starts at 0.
+/// Build a `StyledLine` covering byte range `range` of `source`,
+/// rebasing span byte indices so the new line starts at 0.
+///
+/// Trailing whitespace is intentionally **kept** in the wrapped chunk:
+/// the editor's cursor / hit-test code (`state::cursor_geometry`,
+/// `state::position_from_click`) sums `g.start.col + g.text.chars().count()`
+/// to recover the source `(block, line, col)` of every visual line.
+/// Trimming would make `g.text.chars().count()` smaller than the
+/// actual source range covered by this chunk, which causes
+/// off-by-N cursor positioning whenever a wrap point lands at a word
+/// boundary with trailing whitespace.
 fn slice(source: &StyledLine, range: std::ops::Range<usize>) -> StyledLine {
     let text = source.text[range.clone()].to_string();
-    // Trim trailing whitespace from the visual line so it doesn't push the
-    // wrapped column wider than expected. We DON'T trim leading whitespace
-    // because pre-wrapping shouldn't drop user-visible indentation.
-    let visible_len = trim_trailing_ws(&text);
     let mut spans = Vec::new();
     for span in &source.spans {
         // Intersect [span.start, span.end) with `range`.
@@ -258,16 +263,8 @@ fn slice(source: &StyledLine, range: std::ops::Range<usize>) -> StyledLine {
             continue;
         }
         // Rebase to local coords inside the new line.
-        let mut local_start = s - range.start;
-        let mut local_end = e - range.start;
-        // Clamp to the trimmed length so spans don't extend past the
-        // visible text.
-        if local_start >= visible_len {
-            continue;
-        }
-        if local_end > visible_len {
-            local_end = visible_len;
-        }
+        let local_start = s - range.start;
+        let local_end = e - range.start;
         spans.push(TextSpan {
             start: local_start,
             end: local_end,
@@ -280,21 +277,8 @@ fn slice(source: &StyledLine, range: std::ops::Range<usize>) -> StyledLine {
             link_url: span.link_url.clone(),
             token_type: span.token_type.clone(),
         });
-        // local_start above is consumed; reassign so the borrow checker is
-        // happy on subsequent loops (defensive — not strictly necessary).
-        let _ = &mut local_start;
     }
-    let trimmed_text = text[..visible_len].to_string();
-    StyledLine {
-        text: trimmed_text,
-        spans,
-    }
-}
-
-/// Return the byte length of `text` minus its trailing whitespace.
-fn trim_trailing_ws(text: &str) -> usize {
-    let trimmed = text.trim_end();
-    trimmed.len()
+    StyledLine { text, spans }
 }
 
 fn base_options(weight: FontWeight, italic: bool) -> TextLayoutOptions {

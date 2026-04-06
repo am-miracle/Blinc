@@ -4070,6 +4070,13 @@ impl RenderContext {
             }
         }
 
+        // Generate decoration primitives for foreground text once so the
+        // three render paths below can each render them after their
+        // `render_text(target, &fg_glyphs)` call. Without this, any
+        // strikethrough / underline on a `.foreground()` element is
+        // silently dropped.
+        let fg_decorations_by_layer = generate_text_decoration_primitives_by_layer(&fg_texts);
+
         tracing::trace!(
             "render_tree_with_motion: {} texts, {} fg texts, {} z-layers with glyphs, {} css-transformed",
             texts.len(),
@@ -4236,6 +4243,11 @@ impl RenderContext {
             if !fg_glyphs.is_empty() {
                 self.render_text(target, &fg_glyphs);
             }
+            // Render foreground text decorations (strikethrough / underline)
+            // for every z-layer present in the foreground decoration index.
+            for &z in fg_decorations_by_layer.keys() {
+                self.render_text_decorations_for_layer(target, &fg_decorations_by_layer, z);
+            }
         } else {
             // Simple path (no glass)
             // Pre-generate text decorations grouped by layer for interleaved rendering
@@ -4324,6 +4336,9 @@ impl RenderContext {
                 if !fg_glyphs.is_empty() {
                     self.render_text(target, &fg_glyphs);
                 }
+                for &z in fg_decorations_by_layer.keys() {
+                    self.render_text_decorations_for_layer(target, &fg_decorations_by_layer, z);
+                }
             } else {
                 // Fast path: render full batch (handles layer effects like backdrop-filter)
                 self.renderer
@@ -4384,6 +4399,9 @@ impl RenderContext {
                 // Render foreground text (inside foreground-layer elements, after all z-layers)
                 if !fg_glyphs.is_empty() {
                     self.render_text(target, &fg_glyphs);
+                }
+                for &z in fg_decorations_by_layer.keys() {
+                    self.render_text_decorations_for_layer(target, &fg_decorations_by_layer, z);
                 }
             }
         }
