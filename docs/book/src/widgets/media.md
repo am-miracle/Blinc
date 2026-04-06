@@ -90,26 +90,36 @@ image(src)
 
 ### Lazy Loading
 
-For content-heavy applications with many images (galleries, feeds, chat apps), lazy loading defers image loading until the image is visible in the viewport. This reduces initial memory usage and load time.
+For content-heavy apps with many images (galleries, feeds, chat) lazy loading defers decode until the image is actually visible in the viewport. While the real bitmap is loading, Blinc renders a placeholder in its place; once the texture lands in cache, the image fades in over a configurable duration.
+
+#### How it works
+
+1. On each frame, the renderer tests every lazy image's quad against the current viewport AABB. Off-screen images are skipped — no decode, no GPU upload.
+2. When an image first intersects the viewport, the loader is triggered and a placeholder is drawn at the image's final layout rect.
+3. As soon as the decoded texture appears in the GPU cache, Blinc records `image_load_times[source] = Instant::now()` and starts the fade-in. `elapsed_ms / fade_duration_ms` is the alpha multiplier — once it reaches `1.0` the image is fully opaque and the fade-in flag is cleared.
+4. Placeholder images (type 2) are eagerly preloaded so they're available the moment the lazy element appears — there's no flash of empty space waiting on the thumbnail itself.
+5. While any image is fading in, the runtime keeps requesting redraws so the animation runs smoothly even when nothing else on screen is changing.
+
+#### Builder API
 
 ```rust
 use blinc_layout::prelude::*;
 use std::time::Duration;
 
-// Basic lazy loading
+// Basic lazy loading — no placeholder, just defer decode
 img("large-photo.jpg")
     .lazy()
     .w(300.0)
     .h(200.0)
 
-// With placeholder color
+// Solid color placeholder
 img("photo.jpg")
     .lazy()
     .placeholder_color(Color::rgba(0.2, 0.2, 0.2, 1.0))
     .w(300.0)
     .h(200.0)
 
-// With gradient placeholder using Brush
+// Gradient (or any Brush) placeholder
 img("photo.jpg")
     .lazy()
     .placeholder_brush(Brush::Gradient(Gradient::linear(
@@ -121,7 +131,7 @@ img("photo.jpg")
     .w(300.0)
     .h(200.0)
 
-// With thumbnail placeholder
+// Thumbnail / blur-hash placeholder — eagerly preloaded
 img("large-photo.jpg")
     .lazy()
     .placeholder_image("thumbnail.jpg")
@@ -129,7 +139,7 @@ img("large-photo.jpg")
     .w(300.0)
     .h(200.0)
 
-// Skeleton loading animation
+// Skeleton shimmer (animated band sweeping left → right)
 img("photo.jpg")
     .lazy()
     .skeleton()
@@ -137,7 +147,7 @@ img("photo.jpg")
     .w(300.0)
     .h(200.0)
 
-// Disable fade animation
+// Cross-fade off — image pops in instantly when ready
 img("photo.jpg")
     .lazy()
     .no_fade()
@@ -145,22 +155,58 @@ img("photo.jpg")
     .h(200.0)
 ```
 
-#### Loading Strategies
+#### Loading strategies
 
 | Strategy | Description |
 |----------|-------------|
-| `Eager` (default) | Load immediately when element is created |
-| `Lazy` | Load only when visible in viewport |
+| `Eager` (default) | Load and decode immediately when the element is created |
+| `Lazy` | Defer load until the image's layout rect intersects the viewport |
 
-#### Placeholder Types
+#### Placeholder types
 
 | Placeholder | Description |
 |-------------|-------------|
-| `None` | No placeholder (blank until loaded) |
+| `None` | No placeholder — empty until the bitmap arrives |
 | `Color(color)` | Solid color background |
-| `Brush(brush)` | Any brush (gradient, glass effect, etc.) |
-| `Image(url)` | Another image (e.g., low-res thumbnail, blur hash) |
-| `Skeleton` | Shimmer loading animation |
+| `Brush(brush)` | Any brush — gradients, glass effects, etc. |
+| `Image(url)` | Another image (low-res thumbnail, blur hash). Preloaded on tree build |
+| `Skeleton` | Shimmer band animation, no asset required |
+
+#### CSS overrides
+
+Lazy-loading behavior can be overridden from a stylesheet without touching the builder. This is useful for theming galleries or applying defaults to all images that match a class.
+
+```css
+.gallery-item {
+    loading: lazy;
+    image-placeholder-type: skeleton;
+    fade-duration: 250ms;
+}
+
+.avatar {
+    loading: lazy;
+    image-placeholder-color: rgba(40, 40, 50, 1.0);
+    fade-duration: 200ms;
+}
+
+.hero {
+    loading: lazy;
+    image-placeholder-image: "hero-blur.jpg";
+    fade-duration: 400ms;
+}
+```
+
+| Property | Values | Effect |
+|----------|--------|--------|
+| `loading` | `eager` \| `lazy` | Switches the loading strategy |
+| `image-placeholder-type` | `none` \| `color` \| `skeleton` | Selects which placeholder to draw |
+| `image-placeholder-color` | `<color>` | Solid color placeholder; implies `type: color` |
+| `image-placeholder-image` | `<url>` | Thumbnail placeholder; implies `type: image` |
+| `fade-duration` | `<time>` (`200ms`, `0.3s`) | Fade-in length once the bitmap is ready |
+
+CSS values override builder values. Use the builder for one-off images and CSS for repeated patterns.
+
+> **Note:** Lazy loading currently applies to raster images only. SVGs are vectorized and rasterized on demand, so deferring their decode rarely pays for itself; if you need a deferred SVG, wrap it in a `Stateful` and reveal it when needed.
 
 ---
 
