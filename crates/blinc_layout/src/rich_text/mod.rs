@@ -180,6 +180,7 @@ impl RichText {
                     italic: span.italic,
                     underline: span.underline,
                     strikethrough: span.strikethrough,
+                    code: span.code,
                     link_url: span.link_url.clone(),
                     token_type: span.token_type.clone(),
                 });
@@ -443,6 +444,32 @@ impl RichText {
     /// Set height
     pub fn h(mut self, height: f32) -> Self {
         self.style.size.height = Dimension::Length(height);
+        self
+    }
+
+    /// Wrap text at the given pixel width and recompute height for the
+    /// resulting line count.
+    ///
+    /// Without this, `RichText` reports a single-line tall layout box and
+    /// the visible content gets clipped on the right when the parent is
+    /// narrower than the intrinsic content width. Call this from any
+    /// container that knows the available width (e.g. a rich text editor
+    /// or a constrained text column).
+    pub fn wrap_to_width(mut self, max_width: f32) -> Self {
+        let mut options =
+            crate::text_measure::TextLayoutOptions::new().with_max_width(max_width.max(0.0));
+        options.font_name = self.font_family.name.clone();
+        options.generic_font = self.font_family.generic;
+        options.font_weight = self.weight.weight();
+        options.italic = self.italic;
+
+        let metrics =
+            crate::text_measure::measure_text_with_options(&self.content, self.font_size, &options);
+        self.measured_width = metrics.width;
+        self.ascender = metrics.ascender;
+        self.style.size.width = Dimension::Length(metrics.width);
+        self.style.size.height = Dimension::Length(metrics.height);
+        self.style.max_size.width = Dimension::Length(max_width.max(0.0));
         self
     }
 

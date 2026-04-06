@@ -395,6 +395,7 @@ impl<'a> Parser<'a> {
                     italic: self.current_style.italic,
                     underline: self.current_style.underline,
                     strikethrough: self.current_style.strikethrough,
+                    code: false,
                     link_url: self.current_style.link_url.clone(),
                     token_type: None,
                 };
@@ -420,6 +421,7 @@ impl<'a> Parser<'a> {
                     italic: self.current_style.italic,
                     underline: self.current_style.underline,
                     strikethrough: self.current_style.strikethrough,
+                    code: false,
                     link_url: self.current_style.link_url.clone(),
                     token_type: None,
                 };

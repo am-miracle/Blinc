@@ -26,7 +26,7 @@ use blinc_core::Color;
 use crate::syntax::TokenType;
 
 /// A span of styled text within a line
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TextSpan {
     /// Start byte index in the line
     pub start: usize,
@@ -42,6 +42,8 @@ pub struct TextSpan {
     pub underline: bool,
     /// Whether text has strikethrough decoration
     pub strikethrough: bool,
+    /// Whether the run is inline code (renders in monospace with a code chip background)
+    pub code: bool,
     /// Optional link URL (for clickable text spans)
     pub link_url: Option<String>,
     /// Token type (for intellisense callbacks)
@@ -59,6 +61,7 @@ impl TextSpan {
             italic: false,
             underline: false,
             strikethrough: false,
+            code: false,
             link_url: None,
             token_type: None,
         }
@@ -93,6 +96,12 @@ impl TextSpan {
         self
     }
 
+    /// Mark this span as inline code (monospace with chip background)
+    pub fn with_code(mut self, code: bool) -> Self {
+        self.code = code;
+        self
+    }
+
     /// Set link URL for clickable span
     pub fn with_link(mut self, url: impl Into<String>) -> Self {
         self.link_url = Some(url.into());
@@ -118,7 +127,7 @@ impl TextSpan {
 }
 
 /// A line with styled spans
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StyledLine {
     /// The raw text content
     pub text: String,

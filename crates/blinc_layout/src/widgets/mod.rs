@@ -44,6 +44,7 @@ pub mod list;
 pub mod media;
 pub mod overlay;
 pub mod radio;
+pub mod rich_text_editor;
 pub mod scroll;
 pub mod table;
 pub mod text_area;
