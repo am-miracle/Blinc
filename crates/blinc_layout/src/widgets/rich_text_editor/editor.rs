@@ -73,6 +73,7 @@ pub fn rich_text_editor(
     let state_for_key = Arc::clone(state);
     let state_for_text = Arc::clone(state);
     let theme_for_render = theme.clone();
+    let version_for_render = version.clone();
     let version_for_click = version.clone();
     let version_for_drag = version.clone();
     let version_for_key = version.clone();
@@ -119,7 +120,14 @@ pub fn rich_text_editor(
             // Wrap the document in a relative-positioned container so
             // absolute children (cursor / selection) are positioned
             // against the editor's content rect, not the window.
-            let mut root = div().w_full().relative().child(doc_tree);
+            //
+            // The text cursor (`cursor_text`) is set on this inner Div
+            // — not on the outer Stateful — because every rebuild
+            // replaces the inner Div's RenderProps. Setting it on the
+            // outer Stateful would only stick until the first state
+            // mutation, after which the rebuilt inner div reverts to
+            // the default arrow.
+            let mut root = div().w_full().relative().cursor_text().child(doc_tree);
             for child in overlay_children {
                 root = root.child(child);
             }
@@ -132,15 +140,60 @@ pub fn rich_text_editor(
                 content_width,
                 content_height,
             ));
+
+            // Floating context toolbar — only shows when the editor is
+            // focused and has a non-empty selection.
+            drop(data);
+            if let Some(toolbar) = super::toolbar::selection_toolbar(
+                &state_for_render,
+                &version_for_render,
+                &theme_for_render,
+            ) {
+                root = root.child(toolbar);
+            }
             root
         })
         .w_full()
         .on_mouse_down(move |ctx| {
             let mut data = state_for_click.lock().unwrap();
             data.set_focus(true);
+            data.editor_bounds = (
+                ctx.bounds_x,
+                ctx.bounds_y,
+                ctx.bounds_width,
+                ctx.bounds_height,
+            );
+
+            // Detect double-click within the standard 400ms window.
+            let now = std::time::Instant::now();
+            let is_double = data
+                .last_click_time
+                .map(|t| now.duration_since(t).as_millis() < 400)
+                .unwrap_or(false);
+            data.last_click_time = Some(now);
+
             if let Some(pos) = data.position_from_click(ctx.local_x, ctx.local_y) {
-                let extend = ctx.shift;
-                data.move_cursor(pos, extend);
+                if is_double {
+                    // Double-click — select the word under the cursor.
+                    if let Some(line) = data
+                        .document
+                        .blocks
+                        .get(pos.block)
+                        .and_then(|b| b.lines.get(pos.line))
+                    {
+                        let (start_col, end_col) =
+                            crate::widgets::text_edit::word_at_position(&line.text, pos.col);
+                        data.cursor = super::cursor::DocPosition::new(pos.block, pos.line, end_col);
+                        data.selection = Some(super::cursor::Selection {
+                            anchor: super::cursor::DocPosition::new(pos.block, pos.line, start_col),
+                            head: super::cursor::DocPosition::new(pos.block, pos.line, end_col),
+                        });
+                        data.reset_cursor_blink();
+                    }
+                } else {
+                    let extend = ctx.shift;
+                    data.move_cursor(pos, extend);
+                }
             }
             drop(data);
             version_for_click.set(version_for_click.get().wrapping_add(1));
@@ -174,6 +227,14 @@ pub fn rich_text_editor(
             if !data.focused {
                 return;
             }
+            // If the link prompt is open, route the keystroke into the
+            // URL draft instead of inserting into the document.
+            if let super::state::PickerState::Link { ref mut draft } = data.picker {
+                draft.push(ch);
+                drop(data);
+                version_for_text.set(version_for_text.get().wrapping_add(1));
+                return;
+            }
             // If there's a selection, replace it first.
             let mut pos = data.cursor;
             if let Some(sel) = data.selection.take() {
@@ -190,6 +251,52 @@ pub fn rich_text_editor(
             let mut data = state_for_key.lock().unwrap();
             if !data.focused {
                 return;
+            }
+
+            // Link-prompt key handling — Backspace edits the draft,
+            // Enter commits, Esc cancels. Other keys fall through so
+            // arrow keys still navigate the document underneath.
+            if matches!(data.picker, super::state::PickerState::Link { .. }) {
+                match ctx.key_code {
+                    8 => {
+                        // Backspace — pop the last character from the draft
+                        if let super::state::PickerState::Link { ref mut draft } = data.picker {
+                            draft.pop();
+                            drop(data);
+                            version_for_key.set(version_for_key.get().wrapping_add(1));
+                            return;
+                        }
+                    }
+                    13 => {
+                        // Enter — commit the link
+                        if let super::state::PickerState::Link { draft } = data.picker.clone() {
+                            if !draft.is_empty() {
+                                if let Some(sel) = data.selection {
+                                    if !sel.is_empty() {
+                                        data.push_undo();
+                                        super::format::apply_mark_to_selection(
+                                            &mut data.document,
+                                            sel,
+                                            super::format::Mark::Link(Some(draft)),
+                                        );
+                                    }
+                                }
+                            }
+                            data.picker = super::state::PickerState::None;
+                            drop(data);
+                            version_for_key.set(version_for_key.get().wrapping_add(1));
+                            return;
+                        }
+                    }
+                    27 => {
+                        // Esc — cancel the prompt
+                        data.picker = super::state::PickerState::None;
+                        drop(data);
+                        version_for_key.set(version_for_key.get().wrapping_add(1));
+                        return;
+                    }
+                    _ => {}
+                }
             }
 
             let mod_key = ctx.meta || ctx.ctrl;

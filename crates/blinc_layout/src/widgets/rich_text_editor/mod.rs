@@ -30,6 +30,7 @@ pub mod editor;
 pub mod format;
 pub mod render;
 pub mod state;
+pub mod toolbar;
 pub mod wrap;
 
 pub use cursor::{ActiveFormat, DocPosition, Selection};
@@ -41,5 +42,8 @@ pub use edit::{
 pub use editor::rich_text_editor;
 pub use format::{apply_mark_to_selection, Mark};
 pub use render::{compute_line_geometry, render_document, RichTextTheme};
-pub use state::{rich_text_state, LineGeometry, RichTextData, RichTextState, UndoEntry};
+pub use state::{
+    rich_text_state, LineGeometry, PickerState, RichTextData, RichTextState, UndoEntry,
+};
+pub use toolbar::selection_toolbar;
 pub use wrap::{wrap_styled_line, WrappedLine};

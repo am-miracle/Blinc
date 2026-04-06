@@ -75,6 +75,23 @@ pub struct UndoEntry {
     pub selection: Option<Selection>,
 }
 
+/// Which (if any) inline picker the selection toolbar is currently
+/// showing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum PickerState {
+    /// No picker open. The toolbar shows its mark buttons.
+    #[default]
+    None,
+    /// Color picker open. Buttons are a small palette of preset colors.
+    Color,
+    /// Link prompt open. A text field accumulates the URL until Enter
+    /// confirms or Esc cancels.
+    Link {
+        /// Current draft URL — committed on Enter, discarded on Esc.
+        draft: String,
+    },
+}
+
 /// Editor data that survives across UI rebuilds.
 ///
 /// Held inside `RichTextState = Arc<Mutex<RichTextData>>`. Public fields
@@ -103,6 +120,17 @@ pub struct RichTextData {
     /// `set_focus()` so the increment / decrement of the global counter
     /// stays balanced even when the editor is rebuilt mid-frame.
     pub holds_focus_count: bool,
+    /// Cached editor bounds (x, y, width, height) in screen coords,
+    /// captured from the most recent pointer event. The selection
+    /// toolbar uses this to position itself in absolute space.
+    pub editor_bounds: (f32, f32, f32, f32),
+    /// Which inline picker (if any) is currently open inside the
+    /// selection toolbar. Mutually exclusive — opening one closes the
+    /// other.
+    pub picker: PickerState,
+    /// Timestamp of the most recent mouse-down (used for double-click
+    /// detection in the editor's click handler).
+    pub last_click_time: Option<Instant>,
     /// Undo stack — newest entry at the back. Capped at 200 entries to
     /// match the code editor's default.
     pub undo_stack: Vec<UndoEntry>,
@@ -128,9 +156,83 @@ impl RichTextData {
             line_index: Vec::new(),
             cursor_state: cursor_state(),
             holds_focus_count: false,
+            editor_bounds: (0.0, 0.0, 0.0, 0.0),
+            picker: PickerState::None,
+            last_click_time: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
+    }
+
+    /// Compute the bounding rectangle of the current selection in
+    /// editor-content-rect coordinates. Returns `None` when no
+    /// selection exists or it's collapsed. The rect is the union of
+    /// every per-line selection slice.
+    pub fn selection_bounds(&self) -> Option<(f32, f32, f32, f32)> {
+        let sel = self.selection?;
+        if sel.is_empty() {
+            return None;
+        }
+        let (start, end) = sel.ordered();
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for g in &self.line_index {
+            let line_chars = g.text.chars().count();
+            let line_end_col = g.start.col + line_chars;
+            let on_block = g.start.block;
+            let on_line = g.start.line;
+            let after_start =
+                (on_block, on_line, line_end_col) >= (start.block, start.line, start.col);
+            let before_end = (on_block, on_line, g.start.col) <= (end.block, end.line, end.col);
+            if !(after_start && before_end) {
+                continue;
+            }
+            let line_start_pos = (on_block, on_line, g.start.col);
+            let line_end_pos = (on_block, on_line, line_end_col);
+            let sel_start_pos = (start.block, start.line, start.col);
+            let sel_end_pos = (end.block, end.line, end.col);
+            let sx = sel_start_pos.max(line_start_pos);
+            let ex = sel_end_pos.min(line_end_pos);
+            if sx >= ex {
+                continue;
+            }
+            let local_start = sx.2 - g.start.col;
+            let local_end = ex.2 - g.start.col;
+            let prefix: String = g.text.chars().take(local_start).collect();
+            let mid: String = g
+                .text
+                .chars()
+                .skip(local_start)
+                .take(local_end - local_start)
+                .collect();
+            let prefix_w = measure_width(&prefix, g.font_size, g.weight, g.italic);
+            let mid_w = measure_width(&mid, g.font_size, g.weight, g.italic);
+            if mid_w <= 0.0 {
+                continue;
+            }
+            let x0 = g.x + prefix_w;
+            let x1 = x0 + mid_w;
+            let y0 = g.y;
+            let y1 = g.y + g.height;
+            if x0 < min_x {
+                min_x = x0;
+            }
+            if y0 < min_y {
+                min_y = y0;
+            }
+            if x1 > max_x {
+                max_x = x1;
+            }
+            if y1 > max_y {
+                max_y = y1;
+            }
+        }
+        if !min_x.is_finite() {
+            return None;
+        }
+        Some((min_x, min_y, max_x - min_x, max_y - min_y))
     }
 
     /// Set focus state and keep the global text-input focus counter in
