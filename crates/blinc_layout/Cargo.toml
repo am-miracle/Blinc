@@ -36,9 +36,6 @@ tracing.workspace = true
 # Regex for syntax highlighting
 regex.workspace = true
 
-# Clipboard (cross-platform text + image)
-arboard = "3"
-
 # Media widgets (optional)
 blinc_media = { path = "../blinc_media", version = "0.4.0", optional = true }
 
@@ -54,3 +51,10 @@ nom = "7"
 # URL opening (for links) - desktop only
 [target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
 open = "5"
+
+# Clipboard (cross-platform text + image) — every native target. arboard
+# does not compile on `wasm32-unknown-unknown` (no platform backend), so
+# the web runner provides its own stubs / async impl in
+# `widgets/text_edit.rs` under `cfg(target_arch = "wasm32")`.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+arboard = "3"

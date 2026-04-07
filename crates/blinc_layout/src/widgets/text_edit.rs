@@ -145,6 +145,7 @@ pub fn word_at_position(text: &str, char_pos: usize) -> (usize, usize) {
 
 /// Read text from the system clipboard.
 /// Cross-platform via arboard (macOS, Windows, Linux).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn clipboard_read() -> Option<String> {
     arboard::Clipboard::new()
         .ok()
@@ -152,8 +153,18 @@ pub fn clipboard_read() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+/// Wasm32 stub. The browser clipboard API is async-only — `web_sys::Clipboard::read_text`
+/// returns a `Promise`. The Phase 0 stub returns `None` so the rich text
+/// editor's Cmd+V no-ops without crashing; a real async clipboard impl
+/// lands once the web runner is up (Phase 5 of the WASM rollout plan).
+#[cfg(target_arch = "wasm32")]
+pub fn clipboard_read() -> Option<String> {
+    None
+}
+
 /// Write text to the system clipboard.
 /// Cross-platform via arboard (macOS, Windows, Linux).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn clipboard_write(text: &str) -> bool {
     arboard::Clipboard::new()
         .ok()
@@ -161,15 +172,29 @@ pub fn clipboard_write(text: &str) -> bool {
         .is_some()
 }
 
+/// Wasm32 stub. See [`clipboard_read`] for the rationale.
+#[cfg(target_arch = "wasm32")]
+pub fn clipboard_write(_text: &str) -> bool {
+    false
+}
+
 /// Read image from the system clipboard as RGBA pixels.
 /// Returns (rgba_data, width, height) or None.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn clipboard_read_image() -> Option<(Vec<u8>, u32, u32)> {
     let mut cb = arboard::Clipboard::new().ok()?;
     let img = cb.get_image().ok()?;
     Some((img.bytes.into_owned(), img.width as u32, img.height as u32))
 }
 
+/// Wasm32 stub. See [`clipboard_read`] for the rationale.
+#[cfg(target_arch = "wasm32")]
+pub fn clipboard_read_image() -> Option<(Vec<u8>, u32, u32)> {
+    None
+}
+
 /// Write image to the system clipboard from RGBA pixels.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn clipboard_write_image(rgba: &[u8], width: u32, height: u32) -> bool {
     let img = arboard::ImageData {
         width: width as usize,
@@ -180,6 +205,12 @@ pub fn clipboard_write_image(rgba: &[u8], width: u32, height: u32) -> bool {
         .ok()
         .and_then(|mut cb| cb.set_image(img).ok())
         .is_some()
+}
+
+/// Wasm32 stub. See [`clipboard_read`] for the rationale.
+#[cfg(target_arch = "wasm32")]
+pub fn clipboard_write_image(_rgba: &[u8], _width: u32, _height: u32) -> bool {
+    false
 }
 
 #[cfg(test)]

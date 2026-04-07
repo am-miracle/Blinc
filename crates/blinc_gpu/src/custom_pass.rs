@@ -88,6 +88,13 @@ pub struct RenderPassContext<'a> {
 /// The pass is initialized once, then `render()` is called each frame.
 ///
 /// Passes are executed in registration order within their stage.
+///
+/// On native targets we require `Send` so that custom passes can be moved
+/// across threads (e.g. background compositing on a worker thread). On
+/// `wasm32` the entire wgpu API is single-threaded — `wgpu::RenderPipeline`
+/// is `!Send` — so we drop the bound to keep the trait usable in the
+/// browser. Web apps run on the main thread anyway.
+#[cfg(not(target_arch = "wasm32"))]
 pub trait CustomRenderPass: Send {
     /// Human-readable label for debugging and profiling
     fn label(&self) -> &str;
@@ -120,6 +127,40 @@ pub trait CustomRenderPass: Send {
     /// Whether this pass is currently enabled.
     ///
     /// Disabled passes are skipped without removing them from the pipeline.
+    fn enabled(&self) -> bool {
+        true
+    }
+}
+
+/// Wasm32 mirror of [`CustomRenderPass`] without the `Send` bound.
+///
+/// On the browser main thread there are no other threads to send to, and
+/// `wgpu::RenderPipeline` is `!Send` on `wasm32-unknown-unknown`, so the
+/// `Send` requirement would make every implementation impossible to compile.
+/// Trait method signatures are identical to the native version.
+#[cfg(target_arch = "wasm32")]
+pub trait CustomRenderPass {
+    /// Human-readable label for debugging and profiling
+    fn label(&self) -> &str;
+
+    /// Which stage of the pipeline this pass runs in
+    fn stage(&self) -> RenderStage;
+
+    /// Create GPU resources (pipelines, buffers, textures).
+    fn initialize(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+    );
+
+    /// Execute the render pass for this frame.
+    fn render(&mut self, ctx: &RenderPassContext);
+
+    /// Called when the viewport is resized.
+    fn resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
+
+    /// Whether this pass is currently enabled.
     fn enabled(&self) -> bool {
         true
     }
