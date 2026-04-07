@@ -27,6 +27,15 @@ smallvec.workspace = true
 # Logging
 tracing.workspace = true
 
+# Browser-only — `start_raf()` drives ticks from `requestAnimationFrame`
+# instead of a background thread, mirroring how `start_background()`
+# works on native targets. The scheduler is the canonical "tick driver"
+# abstraction so this is where the rAF integration belongs.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Window"] }
+web-time = "1.1"
+
 # Benchmarks will be added when spring physics implementation is complete
 # [dev-dependencies]
 # criterion.workspace = true

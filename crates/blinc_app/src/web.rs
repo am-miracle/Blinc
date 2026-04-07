@@ -136,10 +136,10 @@ impl WebApp {
 
         // 5. Build the shared collaborator graph that every platform
         //    needs. These mirror what the desktop runner constructs in
-        //    `WindowedApp::run` (windowed.rs ~line 2105) — we don't
-        //    set a wake_callback or call `start_background()` because
-        //    the wasm runner drives ticks synchronously from
-        //    `requestAnimationFrame` (Phase 3b).
+        //    `WindowedApp::run` (windowed.rs ~line 2105). The scheduler
+        //    is built fresh — its `start_raf()` driver gets kicked off
+        //    in [`Self::start_frame_loop`] once the user has wired their
+        //    rebuild + render callback.
         let scheduler = AnimationScheduler::new();
         let animations: SharedAnimationScheduler = Arc::new(Mutex::new(scheduler));
         let ref_dirty_flag: RefDirtyFlag = Arc::new(AtomicBool::new(false));
@@ -201,9 +201,42 @@ impl WebApp {
         &self.surface
     }
 
-    /// Borrow the surface configuration. Phase 3b will mutate this on
+    /// Borrow the surface configuration. Phase 3c will mutate this on
     /// resize and call `surface.configure(...)` again.
     pub fn surface_config(&self) -> &wgpu::SurfaceConfiguration {
         &self.surface_config
+    }
+
+    /// Borrow the shared animation scheduler.
+    ///
+    /// Use this to install a wake callback before calling
+    /// [`Self::start_frame_loop`] — the scheduler invokes the wake
+    /// callback on every tick where animations are active OR
+    /// continuous redraw is requested. The wake callback is what
+    /// actually renders a frame; the scheduler doesn't know about
+    /// wgpu surfaces.
+    pub fn scheduler(&self) -> &crate::windowed::SharedAnimationScheduler {
+        &self.ctx.animations
+    }
+
+    /// Hand control of the per-frame loop over to
+    /// [`AnimationScheduler::start_raf`].
+    ///
+    /// This is the wasm32 sibling of the desktop event-loop pump.
+    /// `start_raf` installs a `requestAnimationFrame` chain that ticks
+    /// the scheduler once per browser frame and invokes the wake
+    /// callback whenever there's something to render. Returning from
+    /// this method DOES NOT mean the loop is over — the rAF closure
+    /// chain self-perpetuates from inside the browser. Returning just
+    /// means "the loop is wired up; the runtime can drop the
+    /// constructing future".
+    ///
+    /// Wire your wake callback via [`Self::scheduler`] *before*
+    /// calling this — once `start_raf` returns, the chain is already
+    /// firing.
+    pub fn start_frame_loop(&self) {
+        if let Ok(scheduler) = self.ctx.animations.lock() {
+            scheduler.start_raf();
+        }
     }
 }

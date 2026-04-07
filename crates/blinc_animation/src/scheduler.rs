@@ -14,8 +14,16 @@ use blinc_core::AnimationAccess;
 use slotmap::{new_key_type, SlotMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::thread::JoinHandle;
+use std::time::Instant;
+// `Duration` and `thread` are only used by the desktop background-thread
+// loop; `start_raf()` lets `requestAnimationFrame` pace itself to the
+// display, and the `thread_handle` field on wasm32 is just an inert
+// `Option<JoinHandle>` that's always `None`.
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
 // ============================================================================
 // Global Animation Scheduler State
@@ -202,6 +210,98 @@ impl AnimationScheduler {
         self.wake_callback = Some(Arc::new(callback));
     }
 
+    /// Tick everything once: springs, keyframes, timelines, and tick
+    /// callbacks. Returns `(has_active, dt_secs)` so callers can decide
+    /// whether to schedule another frame.
+    ///
+    /// This is the per-frame body shared by both the desktop background
+    /// thread (see [`start_background`](Self::start_background)) and the
+    /// browser `requestAnimationFrame` driver
+    /// (see `start_raf` on wasm32). Extracted from the original
+    /// `start_background` thread closure verbatim — no semantic change.
+    fn tick_frame_inner(
+        inner: &Arc<Mutex<SchedulerInner>>,
+        needs_redraw: &Arc<AtomicBool>,
+        wants_continuous: bool,
+        wake_callback: Option<&WakeCallback>,
+    ) -> (bool, f32) {
+        let (has_active, tick_callbacks_to_call, dt) = {
+            let mut inner = inner.lock().unwrap();
+            let now = Instant::now();
+            let dt = (now - inner.last_frame).as_secs_f32();
+            let dt_ms = dt * 1000.0;
+            inner.last_frame = now;
+
+            // Update all springs
+            for (_, spring) in inner.springs.iter_mut() {
+                spring.step(dt);
+            }
+
+            // Update all keyframe animations
+            for (_, keyframe) in inner.keyframes.iter_mut() {
+                keyframe.tick(dt_ms);
+            }
+
+            // Update all timelines
+            for (_, timeline) in inner.timelines.iter_mut() {
+                timeline.tick(dt_ms);
+            }
+
+            // Collect tick callbacks to call (we'll call them after releasing the lock)
+            let callbacks: Vec<_> = inner
+                .tick_callbacks
+                .iter()
+                .map(|(_, cb)| Arc::clone(cb))
+                .collect();
+
+            // NOTE: We do NOT remove animations here!
+            // Springs, keyframes, and timelines are only removed when:
+            // 1. Their wrapper (AnimatedValue, AnimatedKeyframe, AnimatedTimeline) is dropped
+            // 2. set_immediate() is called on springs
+            // This ensures animations can be restarted after completing.
+
+            // Check if any animations are still active (playing, not just present)
+            // Tick callbacks count as active - they need continuous updates
+            let has_active = inner.springs.iter().any(|(_, s)| !s.is_settled())
+                || inner.keyframes.iter().any(|(_, k)| k.is_playing())
+                || inner.timelines.iter().any(|(_, t)| t.is_playing())
+                || !inner.tick_callbacks.is_empty();
+
+            (has_active, callbacks, dt)
+        };
+
+        // Call tick callbacks outside the lock to avoid deadlocks
+        for callback in tick_callbacks_to_call {
+            if let Ok(mut cb) = callback.lock() {
+                cb(dt);
+            }
+        }
+
+        // Signal main thread that it needs to redraw
+        // Either from active animations OR continuous redraw request (cursor blink)
+        if has_active || wants_continuous {
+            needs_redraw.store(true, Ordering::Release);
+
+            // Wake up the event loop if a callback is set
+            if let Some(callback) = wake_callback {
+                // Only log occasionally to avoid spam
+                static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+                if count % 120 == 0 {
+                    // Log once per second at 120fps
+                    tracing::debug!(
+                        "Animation tick: waking driver (continuous={}, active={})",
+                        wants_continuous,
+                        has_active
+                    );
+                }
+                callback();
+            }
+        }
+
+        (has_active || wants_continuous, dt)
+    }
+
     /// Start the scheduler on a background thread
     ///
     /// This ensures animations continue even when the window loses focus.
@@ -213,6 +313,11 @@ impl AnimationScheduler {
     ///
     /// If a wake callback is set via `set_wake_callback()`, it will be called
     /// to wake up the main thread's event loop when animations are active.
+    ///
+    /// **Not available on `wasm32-unknown-unknown`** — the browser
+    /// doesn't expose threads. Use [`Self::start_raf`] instead, which
+    /// drives the same per-frame work from `requestAnimationFrame`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start_background(&mut self) {
         if self.thread_handle.is_some() {
             return; // Already running
@@ -233,81 +338,12 @@ impl AnimationScheduler {
                 // Check if continuous redraw is requested (e.g., for cursor blink)
                 let wants_continuous = continuous_redraw.load(Ordering::Relaxed);
 
-                // Tick animations and check if any are active
-                let (has_active, tick_callbacks_to_call, dt) = {
-                    let mut inner = inner.lock().unwrap();
-                    let now = Instant::now();
-                    let dt = (now - inner.last_frame).as_secs_f32();
-                    let dt_ms = dt * 1000.0;
-                    inner.last_frame = now;
-
-                    // Update all springs
-                    for (_, spring) in inner.springs.iter_mut() {
-                        spring.step(dt);
-                    }
-
-                    // Update all keyframe animations
-                    for (_, keyframe) in inner.keyframes.iter_mut() {
-                        keyframe.tick(dt_ms);
-                    }
-
-                    // Update all timelines
-                    for (_, timeline) in inner.timelines.iter_mut() {
-                        timeline.tick(dt_ms);
-                    }
-
-                    // Collect tick callbacks to call (we'll call them after releasing the lock)
-                    let callbacks: Vec<_> = inner
-                        .tick_callbacks
-                        .iter()
-                        .map(|(_, cb)| Arc::clone(cb))
-                        .collect();
-
-                    // NOTE: We do NOT remove animations here!
-                    // Springs, keyframes, and timelines are only removed when:
-                    // 1. Their wrapper (AnimatedValue, AnimatedKeyframe, AnimatedTimeline) is dropped
-                    // 2. set_immediate() is called on springs
-                    // This ensures animations can be restarted after completing.
-
-                    // Check if any animations are still active (playing, not just present)
-                    // Tick callbacks count as active - they need continuous updates
-                    let has_active = inner.springs.iter().any(|(_, s)| !s.is_settled())
-                        || inner.keyframes.iter().any(|(_, k)| k.is_playing())
-                        || inner.timelines.iter().any(|(_, t)| t.is_playing())
-                        || !inner.tick_callbacks.is_empty();
-
-                    (has_active, callbacks, dt)
-                };
-
-                // Call tick callbacks outside the lock to avoid deadlocks
-                for callback in tick_callbacks_to_call {
-                    if let Ok(mut cb) = callback.lock() {
-                        cb(dt);
-                    }
-                }
-
-                // Signal main thread that it needs to redraw
-                // Either from active animations OR continuous redraw request (cursor blink)
-                if has_active || wants_continuous {
-                    needs_redraw.store(true, Ordering::Release);
-
-                    // Wake up the event loop if a callback is set
-                    if let Some(ref callback) = wake_callback {
-                        // Only log occasionally to avoid spam
-                        static COUNTER: std::sync::atomic::AtomicU64 =
-                            std::sync::atomic::AtomicU64::new(0);
-                        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
-                        if count % 120 == 0 {
-                            // Log once per second at 120fps
-                            tracing::debug!(
-                                "Animation thread: waking event loop (continuous={}, active={})",
-                                wants_continuous,
-                                has_active
-                            );
-                        }
-                        callback();
-                    }
-                }
+                Self::tick_frame_inner(
+                    &inner,
+                    &needs_redraw,
+                    wants_continuous,
+                    wake_callback.as_ref(),
+                );
 
                 // Sleep for remaining frame time
                 let elapsed = start.elapsed();
@@ -319,12 +355,108 @@ impl AnimationScheduler {
     }
 
     /// Stop the background thread
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn stop_background(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
         if let Some(handle) = self.thread_handle.take() {
             let _ = handle.join();
         }
         self.stop_flag.store(false, Ordering::Relaxed);
+    }
+
+    /// Start the scheduler on the browser's `requestAnimationFrame`.
+    ///
+    /// The wasm32 sibling of [`Self::start_background`]. Where the
+    /// desktop version spawns an OS thread that ticks at 120 fps and
+    /// signals the main thread via the wake callback, this version
+    /// installs a `requestAnimationFrame` callback chain that ticks
+    /// the same per-frame body once per browser frame and calls the
+    /// wake callback synchronously inside the rAF closure.
+    ///
+    /// The frame budget is whatever the browser hands you (typically
+    /// 60 fps, occasionally 120 on high-refresh displays). There is no
+    /// `target_fps` cap — `requestAnimationFrame` already paces itself
+    /// to the display.
+    ///
+    /// Set the wake callback **before** calling this. The wake
+    /// callback is what the runner uses to actually render a frame —
+    /// the scheduler doesn't know about wgpu surfaces, it just knows
+    /// "tick everything, then call wake if anything moved".
+    ///
+    /// The rAF chain self-perpetuates: each closure invocation
+    /// schedules the next via `window.requestAnimationFrame(self)`.
+    /// Stopping it requires dropping the `Closure` that owns the
+    /// chain — currently we leak it for the lifetime of the app
+    /// (matching how `start_background()` runs forever on native).
+    /// A future `stop_raf()` could swap out the captured closure
+    /// reference if we ever need teardown.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there is no global `window` object (e.g. running in
+    /// a Web Worker). Use a try-construction site if you need to
+    /// gracefully degrade.
+    #[cfg(target_arch = "wasm32")]
+    pub fn start_raf(&self) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use wasm_bindgen::closure::Closure;
+        use wasm_bindgen::JsCast;
+
+        let window = web_sys::window().expect("AnimationScheduler::start_raf needs `window`");
+
+        // Per-frame state — captured by the rAF closure. Cloning these
+        // Arcs is cheap; the closure owns its own clones for the
+        // lifetime of the app.
+        let inner = Arc::clone(&self.inner);
+        let needs_redraw = Arc::clone(&self.needs_redraw);
+        let continuous_redraw = Arc::clone(&self.continuous_redraw);
+        let wake_callback = self.wake_callback.clone();
+
+        // Self-referential closure cell. The outer `Rc` is what the
+        // closure schedules itself with via
+        // `window.request_animation_frame(closure.borrow().as_ref().unchecked_ref())`.
+        // The borrow only happens *inside* the closure body, never on
+        // the same call frame, so there's no aliasing issue.
+        // (clippy::type_complexity is allowed locally because the type
+        // *is* genuinely the rAF closure-cell shape — extracting a
+        // type alias here would just rename the same complexity.)
+        #[allow(clippy::type_complexity)]
+        let closure_cell: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+        let closure_cell_for_init = Rc::clone(&closure_cell);
+
+        // The window handle the closure needs to schedule the next frame.
+        let window_for_closure = window.clone();
+
+        *closure_cell_for_init.borrow_mut() = Some(Closure::wrap(Box::new(move || {
+            let wants_continuous = continuous_redraw.load(Ordering::Relaxed);
+            Self::tick_frame_inner(
+                &inner,
+                &needs_redraw,
+                wants_continuous,
+                wake_callback.as_ref(),
+            );
+
+            // Schedule the next frame. Borrowing closure_cell here is
+            // safe because the prior borrow_mut at install time has
+            // already been released.
+            if let Some(ref c) = *closure_cell.borrow() {
+                let _ = window_for_closure.request_animation_frame(c.as_ref().unchecked_ref());
+            }
+        }) as Box<dyn FnMut()>));
+
+        // Kick off the first frame.
+        if let Some(ref c) = *closure_cell_for_init.borrow() {
+            let _ = window.request_animation_frame(c.as_ref().unchecked_ref());
+        }
+
+        // Intentionally leak the closure cell — its only owner from
+        // here on is the rAF callback chain itself, which keeps a
+        // reference for as long as the chain runs (i.e. forever, like
+        // `start_background()` on native). If a future `stop_raf()`
+        // wants to break the chain, it can hold a Weak<RefCell<…>>
+        // and clear the inner Option.
+        std::mem::forget(closure_cell_for_init);
     }
 
     /// Check if the background thread is running
@@ -639,7 +771,12 @@ impl Clone for AnimationScheduler {
 
 impl Drop for AnimationScheduler {
     fn drop(&mut self) {
-        // Stop background thread when scheduler is dropped
+        // Stop background thread when scheduler is dropped. The web
+        // path doesn't have a thread to stop — its `requestAnimationFrame`
+        // chain is intentionally leaked for the lifetime of the app
+        // (matching native's "thread runs forever" semantics) and the
+        // browser tears it down on page unload.
+        #[cfg(not(target_arch = "wasm32"))]
         self.stop_background();
     }
 }
