@@ -337,15 +337,11 @@ pub fn rich_text_editor(
                 match ctx.key_code {
                     // Cmd+Z — undo
                     90 if !ctx.shift => {
-                        if data.undo() {
-                            changed = true;
-                        }
+                        changed |= data.undo();
                     }
                     // Cmd+Shift+Z — redo
                     90 if ctx.shift => {
-                        if data.redo() {
-                            changed = true;
-                        }
+                        changed |= data.redo();
                     }
                     // Cmd+A — select all
                     65 => {
@@ -368,33 +364,23 @@ pub fn rich_text_editor(
                     }
                     // Cmd+B — bold
                     66 => {
-                        if toggle_mark(&mut data, Mark::Bold) {
-                            changed = true;
-                        }
+                        changed |= toggle_mark(&mut data, Mark::Bold);
                     }
                     // Cmd+I — italic
                     73 => {
-                        if toggle_mark(&mut data, Mark::Italic) {
-                            changed = true;
-                        }
+                        changed |= toggle_mark(&mut data, Mark::Italic);
                     }
                     // Cmd+U — underline
                     85 => {
-                        if toggle_mark(&mut data, Mark::Underline) {
-                            changed = true;
-                        }
+                        changed |= toggle_mark(&mut data, Mark::Underline);
                     }
                     // Cmd+Shift+X — strikethrough
                     88 if ctx.shift => {
-                        if toggle_mark(&mut data, Mark::Strikethrough) {
-                            changed = true;
-                        }
+                        changed |= toggle_mark(&mut data, Mark::Strikethrough);
                     }
                     // Cmd+E — inline code
                     69 => {
-                        if toggle_mark(&mut data, Mark::Code) {
-                            changed = true;
-                        }
+                        changed |= toggle_mark(&mut data, Mark::Code);
                     }
                     // Cmd+C — copy selected text to system clipboard
                     67 => {
@@ -447,58 +433,38 @@ pub fn rich_text_editor(
                     }
                     // Cmd+Alt+0 — paragraph
                     48 if ctx.alt => {
-                        if apply_block_kind(&mut data, BlockKind::Paragraph) {
-                            changed = true;
-                        }
+                        changed |= apply_block_kind(&mut data, BlockKind::Paragraph);
                     }
                     // Cmd+Alt+1..6 — headings
                     49 if ctx.alt => {
-                        if apply_block_kind(&mut data, BlockKind::Heading(1)) {
-                            changed = true;
-                        }
+                        changed |= apply_block_kind(&mut data, BlockKind::Heading(1));
                     }
                     50 if ctx.alt => {
-                        if apply_block_kind(&mut data, BlockKind::Heading(2)) {
-                            changed = true;
-                        }
+                        changed |= apply_block_kind(&mut data, BlockKind::Heading(2));
                     }
                     51 if ctx.alt => {
-                        if apply_block_kind(&mut data, BlockKind::Heading(3)) {
-                            changed = true;
-                        }
+                        changed |= apply_block_kind(&mut data, BlockKind::Heading(3));
                     }
                     52 if ctx.alt => {
-                        if apply_block_kind(&mut data, BlockKind::Heading(4)) {
-                            changed = true;
-                        }
+                        changed |= apply_block_kind(&mut data, BlockKind::Heading(4));
                     }
                     53 if ctx.alt => {
-                        if apply_block_kind(&mut data, BlockKind::Heading(5)) {
-                            changed = true;
-                        }
+                        changed |= apply_block_kind(&mut data, BlockKind::Heading(5));
                     }
                     54 if ctx.alt => {
-                        if apply_block_kind(&mut data, BlockKind::Heading(6)) {
-                            changed = true;
-                        }
+                        changed |= apply_block_kind(&mut data, BlockKind::Heading(6));
                     }
                     // Cmd+Shift+7 — toggle numbered list
                     55 if ctx.shift => {
-                        if apply_block_kind(&mut data, BlockKind::NumberedItem) {
-                            changed = true;
-                        }
+                        changed |= apply_block_kind(&mut data, BlockKind::NumberedItem);
                     }
                     // Cmd+Shift+8 — toggle bullet list
                     56 if ctx.shift => {
-                        if apply_block_kind(&mut data, BlockKind::BulletItem) {
-                            changed = true;
-                        }
+                        changed |= apply_block_kind(&mut data, BlockKind::BulletItem);
                     }
                     // Cmd+Shift+9 — toggle quote
                     57 if ctx.shift => {
-                        if apply_block_kind(&mut data, BlockKind::Quote) {
-                            changed = true;
-                        }
+                        changed |= apply_block_kind(&mut data, BlockKind::Quote);
                     }
                     _ => {}
                 }

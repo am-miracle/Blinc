@@ -88,6 +88,22 @@ blinc_platform_ios = { path = "../../extensions/blinc_platform_ios", version = "
 # [target.'cfg(target_os = "ohos")'.dependencies]
 # blinc_platform_harmony = { path = "../../extensions/blinc_platform_harmony", version = "0.4.0", optional = true }
 
+# Web platform — wasm32 target only. Pulled in by the `web` feature.
+# Mirrors the android/ios pattern: extension crate + a few wasm-bindgen
+# bindings live behind a target gate so desktop / mobile dep trees stay
+# completely free of `web-sys`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+blinc_platform_web = { path = "../../extensions/blinc_platform_web", version = "0.4.0", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Window",
+    "Document",
+    "HtmlCanvasElement",
+] }
+web-time = { version = "1.1", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+
 [dev-dependencies]
 image.workspace = true
 tracing-subscriber.workspace = true
@@ -103,3 +119,13 @@ android = ["blinc_platform_android", "android-activity", "ndk", "jni", "android_
 ios = ["blinc_platform_ios", "blinc_gpu/ios"]
 harmony = ["blinc_gpu/harmony"]  # blinc_platform_harmony when target is available
 fuchsia = []
+# Web (wasm32) — `wasm-pack build --target web` against this feature.
+web = [
+    "blinc_platform_web",
+    "wasm-bindgen",
+    "wasm-bindgen-futures",
+    "web-sys",
+    "web-time",
+    "console_error_panic_hook",
+    "blinc_gpu/web",
+]

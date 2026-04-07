@@ -128,14 +128,16 @@ mod error;
 mod svg_atlas;
 mod text_measurer;
 
-// Windowed module is compiled for desktop (windowed feature), Android, iOS, Fuchsia, and HarmonyOS
-// since WindowedContext and shared types are used by all platforms
+// Windowed module is compiled for desktop (windowed feature), Android, iOS, Fuchsia, HarmonyOS,
+// AND web — since `WindowedContext` and the shared scheduler / overlay / registry types are
+// used by every platform runner. The web runner also lives behind a wasm32 cfg gate (see below).
 #[cfg(any(
     feature = "windowed",
     all(feature = "android", target_os = "android"),
     all(feature = "ios", target_os = "ios"),
     all(feature = "fuchsia", target_os = "fuchsia"),
-    all(feature = "harmony", target_env = "ohos")
+    all(feature = "harmony", target_env = "ohos"),
+    all(feature = "web", target_arch = "wasm32")
 ))]
 pub mod windowed;
 
@@ -171,6 +173,11 @@ pub mod ios;
 pub mod fuchsia;
 #[cfg(all(feature = "fuchsia", target_os = "fuchsia"))]
 pub use fuchsia::FuchsiaApp;
+
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+pub mod web;
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+pub use web::WebApp;
 
 #[cfg(test)]
 mod tests;

@@ -427,4 +427,57 @@ impl BlincApp {
 
         Ok((app, surface))
     }
+
+    /// Async sibling of [`Self::with_window`] for the web target.
+    ///
+    /// `with_window` blocks on `pollster::block_on(GpuRenderer::with_surface(...))`,
+    /// which cannot run on the browser main thread — wasm-bindgen-futures
+    /// requires the entire async chain to be `await`ed back into the JS
+    /// event loop. This sibling preserves the same shape but is `async`
+    /// the whole way through, calling [`GpuRenderer::with_canvas`] from
+    /// `blinc_gpu` instead of `with_surface`.
+    ///
+    /// **No system-font loading.** On the web there's no filesystem to
+    /// scan for `.ttf` paths. Apps must call
+    /// [`Self::load_font_data_to_registry`] explicitly with bundled or
+    /// fetched font bytes after `with_canvas` returns. The Phase 6
+    /// rollout adds an async preload helper in `blinc_platform_web`.
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    pub async fn with_canvas(
+        canvas: web_sys::HtmlCanvasElement,
+        config: Option<BlincConfig>,
+    ) -> Result<(Self, wgpu::Surface<'static>)> {
+        let config = config.unwrap_or_default();
+
+        let renderer_config = RendererConfig {
+            max_primitives: config.max_primitives,
+            max_glass_primitives: config.max_glass_primitives,
+            max_glyphs: config.max_glyphs,
+            sample_count: 1,
+            texture_format: None,
+            unified_text_rendering: true,
+            ..RendererConfig::default()
+        };
+
+        let (renderer, surface) = GpuRenderer::with_canvas(canvas, renderer_config)
+            .await
+            .map_err(|e| BlincError::GpuInit(e.to_string()))?;
+
+        let device = renderer.device_arc();
+        let queue = renderer.queue_arc();
+
+        let text_ctx = TextRenderingContext::new(device.clone(), queue.clone());
+
+        // Generic-font preload mirrors the desktop path so common
+        // weights are cached before the first frame. The actual font
+        // bytes have to be supplied separately by the app — see the
+        // doc comment.
+        // (`preload_fonts` and `preload_generic_styles` only register
+        // requests in the cache; they don't read from disk.)
+
+        let ctx = RenderContext::new(renderer, text_ctx, device, queue, config.sample_count);
+        let app = Self { ctx, config };
+
+        Ok((app, surface))
+    }
 }

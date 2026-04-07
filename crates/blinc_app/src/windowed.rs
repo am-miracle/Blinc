@@ -439,6 +439,65 @@ impl WindowedContext {
         }
     }
 
+    /// Create a WindowedContext for the web target.
+    ///
+    /// Mirrors [`Self::new_android`] / [`Self::new_ios`] / [`Self::new_fuchsia`]:
+    /// the web runner extracts canvas dimensions and `devicePixelRatio`
+    /// from the browser before calling, instead of going through the
+    /// `Window` trait (which requires `raw-window-handle` types that
+    /// `HtmlCanvasElement` doesn't implement).
+    ///
+    /// Wired into the `web` feature so this constructor is invisible to
+    /// non-wasm builds. The shared / animation / overlay parameters are
+    /// the same as the other `new_*` constructors so the wasm runner
+    /// can build the same `WindowedContext` shape every other platform
+    /// gets.
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_web(
+        logical_width: f32,
+        logical_height: f32,
+        scale_factor: f64,
+        physical_width: f32,
+        physical_height: f32,
+        focused: bool,
+        animations: SharedAnimationScheduler,
+        ref_dirty_flag: RefDirtyFlag,
+        reactive: SharedReactiveGraph,
+        hooks: SharedHookState,
+        overlay_mgr: OverlayManager,
+        element_registry: SharedElementRegistry,
+        ready_callbacks: SharedReadyCallbacks,
+    ) -> Self {
+        Self {
+            width: logical_width,
+            height: logical_height,
+            scale_factor,
+            safe_area: (0.0, 0.0, 0.0, 0.0),
+            physical_width,
+            physical_height,
+            focused,
+            rebuild_count: 0,
+            event_router: EventRouter::new(),
+            animations,
+            ref_dirty_flag,
+            reactive,
+            hooks,
+            overlay_manager: overlay_mgr,
+            had_visible_overlays: false,
+            element_registry,
+            ready_callbacks,
+            stylesheet: None,
+            css_sources: Vec::new(),
+            pointer_query: blinc_layout::pointer_query::PointerQueryState::new(),
+            open_window_fn: None,
+            close_fn: None,
+            drag_fn: None,
+            minimize_fn: None,
+            maximize_fn: None,
+        }
+    }
+
     /// Create a WindowedContext for Fuchsia
     ///
     /// This is used by the Fuchsia runner since it doesn't have a Window trait implementation.
