@@ -2,7 +2,7 @@
 //!
 //! Sibling of [`crate::windowed`] / [`crate::android`] / [`crate::ios`]
 //! (and the Fuchsia stub) that owns the per-frame loop and browser
-//! event wiring. The frame loop drives the same 5-phase pipeline the
+//! event wiring. The frame loop drives the same render pipeline the
 //! desktop runner uses; only the *driver* differs:
 //!
 //! - **desktop**: winit `Frame::AboutToWait` → render → `request_redraw`
@@ -10,27 +10,29 @@
 //! - **ios**: `CADisplayLink` callback → render
 //! - **web**: `window.requestAnimationFrame` → render → schedule next
 //!
-//! ## Phase 3a scope
+//! ## What's wired in this commit
 //!
-//! This commit lands the *construction* path only — [`WebApp::new`]
-//! locates the canvas, builds the [`crate::app::BlincApp`] via the new
-//! [`crate::app::BlincApp::with_canvas`] async constructor, builds a
-//! [`crate::windowed::WindowedContext`] via the new
-//! [`crate::windowed::WindowedContext::new_web`] sibling, and stores
-//! everything ready to be driven by a frame loop. The actual
-//! `requestAnimationFrame` driver and DOM event wiring land in Phase 3b.
+//! Phase 3a built the construction path. Phase 3b added
+//! `AnimationScheduler::start_raf` so the scheduler owns rAF directly.
+//! This commit (Phase 3c) wires the wake callback that actually renders
+//! a frame: `WebApp::run(canvas_id, ui_builder)` builds everything,
+//! installs a render closure as the scheduler's wake callback, enables
+//! continuous redraw so the wake fires on every rAF tick, and returns
+//! once the loop is wired. The rAF closure chain inside the scheduler
+//! keeps running for the lifetime of the page.
 //!
-//! Splitting the runner this way means each commit individually
-//! compiles, type-checks, and lints clean — and any trait-bound
-//! surprises in Phase 3b (we expect `Send`/`!Send` mismatches around
-//! `Closure::<dyn FnMut>` and the shared state) are isolated to the
-//! follow-up.
+//! Phase 3d will add DOM event listeners so input events flow through
+//! `EventRouter`. Phase 3e will add resize handling.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
 use blinc_animation::AnimationScheduler;
 use blinc_core::context_state::HookState;
 use blinc_core::reactive::ReactiveGraph;
+use blinc_layout::div::Div;
+use blinc_layout::renderer::RenderTree;
 use blinc_layout::selector::ElementRegistry;
 use blinc_layout::widgets::overlay::overlay_manager;
 use wasm_bindgen::JsCast;
@@ -42,11 +44,17 @@ use crate::windowed::{
     SharedReadyCallbacks, WindowedContext,
 };
 
+/// User-supplied UI builder closure. Called once per rebuild with a
+/// mutable reference to the runner's [`WindowedContext`]. Same shape
+/// as `WindowBuilder` in [`crate::windowed`], minus the `Send` bound
+/// (the web target is single-threaded).
+type UiBuilder = Box<dyn FnMut(&mut WindowedContext) -> Div>;
+
 /// Top-level web runner.
 ///
 /// Owns the canvas, the wgpu surface and surface configuration, the
-/// shared [`BlincApp`], and the [`WindowedContext`] that the user-supplied
-/// UI builder receives on each rebuild.
+/// shared [`BlincApp`], the [`WindowedContext`] that the user-supplied
+/// UI builder receives on each rebuild, and the cached render tree.
 ///
 /// This struct is intentionally `!Send` — every browser API it touches
 /// is single-threaded, and its sub-fields (`wgpu::Surface` on wasm32,
@@ -54,6 +62,7 @@ use crate::windowed::{
 pub struct WebApp {
     /// The HtmlCanvasElement we're rendering into. Held so we can
     /// re-read its size after a browser resize.
+    #[allow(dead_code)]
     canvas: web_sys::HtmlCanvasElement,
     /// Wgpu surface + its configured properties.
     surface: wgpu::Surface<'static>,
@@ -62,9 +71,20 @@ pub struct WebApp {
     blinc_app: BlincApp,
     /// User-facing window context. Same shape every other platform builds.
     ctx: WindowedContext,
+    /// User-supplied UI builder. Set via [`Self::set_ui_builder`] or
+    /// [`Self::run`]. Called inside [`Self::run_one_frame`] when
+    /// `needs_rebuild` is `true`.
+    ui_builder: Option<UiBuilder>,
+    /// Cached layout tree from the most recent rebuild. `None` until
+    /// the first rebuild fires.
+    current_tree: Option<RenderTree>,
+    /// Whether the next frame needs to rebuild the tree before
+    /// rendering. Set on initial setup, after a resize, or when the
+    /// user explicitly requests a rebuild.
+    needs_rebuild: bool,
     /// Last frame's logical width / height in CSS pixels. Used to
     /// detect resize events without having to query the canvas every
-    /// frame.
+    /// frame (resize handling lands in Phase 3e).
     #[allow(dead_code)]
     last_logical_size: (f32, f32),
 }
@@ -171,8 +191,173 @@ impl WebApp {
             surface_config,
             blinc_app,
             ctx,
+            ui_builder: None,
+            current_tree: None,
+            needs_rebuild: true,
             last_logical_size: (logical_width, logical_height),
         })
+    }
+
+    /// Convenience all-in-one entry point: locate the canvas, build
+    /// the runner, install the user's UI builder, wire a render
+    /// closure as the scheduler's wake callback, enable continuous
+    /// redraw, and start the rAF loop.
+    ///
+    /// Returns once the rAF chain is wired. The chain self-perpetuates
+    /// from inside the browser, so the page keeps rendering after this
+    /// future resolves.
+    ///
+    /// # Cycle / leak note
+    ///
+    /// This method intentionally creates an `Rc<RefCell<WebApp>>`
+    /// cycle: the wake callback owns a clone of the `Rc`, the wake
+    /// callback lives inside the scheduler, the scheduler lives inside
+    /// the `WindowedContext`, and the context lives inside the
+    /// `WebApp`. The cycle is what keeps everything alive past the
+    /// return of this function. The browser tears it down on page
+    /// unload, which is the expected lifecycle for a web app.
+    pub async fn run<F>(canvas_id: &str, ui_builder: F) -> Result<()>
+    where
+        F: FnMut(&mut WindowedContext) -> Div + 'static,
+    {
+        let mut app = Self::new(canvas_id).await?;
+        app.set_ui_builder(ui_builder);
+
+        // Render the first frame synchronously so the canvas isn't
+        // blank between `run().await` returning and the first rAF
+        // tick (which can be ~16ms later, longer if the browser is
+        // busy). Failures here are non-fatal — the next rAF tick will
+        // try again.
+        if let Err(e) = app.run_one_frame() {
+            tracing::error!("WebApp::run initial frame failed: {e}");
+        }
+
+        // Wrap in Rc<RefCell<…>> so the wake closure can re-borrow
+        // for each frame. The scheduler stores the wake callback as
+        // `Arc<dyn Fn()>`; on wasm32 there's no `Send + Sync` bound,
+        // so it can capture the `!Send` Rc.
+        let app_rc = Rc::new(RefCell::new(app));
+        let app_for_wake = Rc::clone(&app_rc);
+
+        // The wake callback re-borrows the app and runs one frame.
+        // `try_borrow_mut` (rather than `borrow_mut`) keeps us safe
+        // if a future Phase 3d input handler is mid-mutation when the
+        // rAF tick fires — we just skip the frame and try again next
+        // tick rather than panicking on borrow conflict.
+        let wake = move || {
+            if let Ok(mut app) = app_for_wake.try_borrow_mut() {
+                if let Err(e) = app.run_one_frame() {
+                    tracing::error!("WebApp wake-frame failed: {e}");
+                }
+            }
+        };
+
+        // Install the wake callback and enable continuous redraw so
+        // the wake fires on every rAF tick (not just when an animation
+        // is active). For a UI runtime, "render every frame the
+        // browser asks for" is the right default — see windowed.rs
+        // for the equivalent on desktop.
+        //
+        // We clone the scheduler `Arc` rather than holding the
+        // `RefCell` borrow open across the `Mutex::lock()` — the
+        // `MutexGuard` temporary that `if let Ok(...) = ...` produces
+        // outlives the `RefCell` borrow otherwise, and the borrow
+        // checker correctly rejects the drop ordering.
+        let scheduler_arc = Arc::clone(&app_rc.borrow().ctx.animations);
+        if let Ok(mut scheduler) = scheduler_arc.lock() {
+            scheduler.set_wake_callback(wake);
+            scheduler.set_continuous_redraw(true);
+        }
+
+        // Kick off the rAF chain. From here on the browser drives
+        // every frame; this future returns immediately and the runtime
+        // drops it.
+        if let Ok(scheduler) = scheduler_arc.lock() {
+            scheduler.start_raf();
+        }
+
+        // Don't return `app_rc` — let the cycle keep it alive. (See
+        // the function-level "Cycle / leak note" doc comment.)
+        Ok(())
+    }
+
+    /// Install (or replace) the UI builder closure.
+    ///
+    /// Sets `needs_rebuild = true` so the next [`Self::run_one_frame`]
+    /// call rebuilds the tree from the new builder.
+    pub fn set_ui_builder<F>(&mut self, builder: F)
+    where
+        F: FnMut(&mut WindowedContext) -> Div + 'static,
+    {
+        self.ui_builder = Some(Box::new(builder));
+        self.needs_rebuild = true;
+    }
+
+    /// Mark the tree as dirty so the next frame rebuilds it.
+    pub fn request_rebuild(&mut self) {
+        self.needs_rebuild = true;
+    }
+
+    /// Render exactly one frame: rebuild the tree if dirty, acquire
+    /// the next surface texture, render through `BlincApp`, and
+    /// present.
+    ///
+    /// Called from the scheduler's wake callback (driven by rAF) and
+    /// once synchronously from [`Self::run`] to avoid a blank-canvas
+    /// gap between init and the first rAF tick.
+    ///
+    /// Errors here do NOT abort the loop — the scheduler will call
+    /// us again on the next tick. Phase 3d's input handlers will
+    /// also call this directly to force a render after a click /
+    /// keypress.
+    pub fn run_one_frame(&mut self) -> Result<()> {
+        // 1. Rebuild the tree if needed. Splits the borrow so we can
+        //    pass &mut ctx to the user's builder while &mut self.ui_builder
+        //    is also live.
+        if self.needs_rebuild {
+            let builder = match self.ui_builder.as_mut() {
+                Some(b) => b,
+                None => {
+                    // No builder yet — nothing to render. Not an error;
+                    // the user just hasn't called `set_ui_builder`.
+                    return Ok(());
+                }
+            };
+            let element = builder(&mut self.ctx);
+
+            // Build a fresh render tree from the element. The shared
+            // element registry is kept across rebuilds so id-based
+            // queries stay stable.
+            let registry = Arc::clone(self.ctx.element_registry());
+            let mut tree = RenderTree::from_element_with_registry(&element, registry);
+            tree.compute_layout(self.ctx.width, self.ctx.height);
+            self.current_tree = Some(tree);
+            self.needs_rebuild = false;
+            self.ctx.rebuild_count = self.ctx.rebuild_count.saturating_add(1);
+        }
+
+        // 2. Render the tree to the next surface texture. If we don't
+        //    have a tree yet (no builder set), bail out gracefully.
+        let tree = match self.current_tree.as_ref() {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+
+        let frame = self
+            .surface
+            .get_current_texture()
+            .map_err(|e| BlincError::Render(format!("get_current_texture failed: {e}")))?;
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let physical_w = self.surface_config.width;
+        let physical_h = self.surface_config.height;
+        self.blinc_app
+            .render_tree(tree, &view, physical_w, physical_h)?;
+
+        frame.present();
+        Ok(())
     }
 
     /// Borrow the canvas the runner is rendering into.
@@ -201,7 +386,7 @@ impl WebApp {
         &self.surface
     }
 
-    /// Borrow the surface configuration. Phase 3c will mutate this on
+    /// Borrow the surface configuration. Phase 3e will mutate this on
     /// resize and call `surface.configure(...)` again.
     pub fn surface_config(&self) -> &wgpu::SurfaceConfiguration {
         &self.surface_config
@@ -234,6 +419,9 @@ impl WebApp {
     /// Wire your wake callback via [`Self::scheduler`] *before*
     /// calling this — once `start_raf` returns, the chain is already
     /// firing.
+    ///
+    /// Most apps should use [`Self::run`] instead — it does setup,
+    /// wake-callback wiring, and `start_raf` in one call.
     pub fn start_frame_loop(&self) {
         if let Ok(scheduler) = self.ctx.animations.lock() {
             scheduler.start_raf();

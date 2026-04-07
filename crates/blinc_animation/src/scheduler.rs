@@ -137,11 +137,20 @@ struct SchedulerInner {
     target_fps: u32,
 }
 
-/// Callback type for waking up the main thread from the animation thread
+/// Callback type for waking up the main thread from the animation thread.
 ///
 /// This is called when there are active animations that need to be rendered.
 /// The callback should wake up the event loop (e.g., via EventLoopProxy).
+///
+/// On native targets the callback is invoked from the scheduler's background
+/// thread, so it must be `Send + Sync`. On `wasm32-unknown-unknown` the rAF
+/// driver fires the callback synchronously on the main browser thread, so the
+/// `Send + Sync` bound is dropped — the web runner needs to capture an
+/// `Rc<RefCell<WebApp>>` (which is `!Send`) to render a frame.
+#[cfg(not(target_arch = "wasm32"))]
 pub type WakeCallback = Arc<dyn Fn() + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub type WakeCallback = Arc<dyn Fn()>;
 
 /// The animation scheduler that ticks all active animations
 ///
@@ -173,6 +182,23 @@ pub struct AnimationScheduler {
     wake_callback: Option<WakeCallback>,
 }
 
+// SAFETY: On wasm32 the wake callback is `Arc<dyn Fn()>` (no `Send +
+// Sync`) because the rAF driver and the runner's render closure both
+// run on the main browser thread. The wgpu surface, web_sys event
+// handlers, and the rest of the dep tree assume single-threaded
+// access. We manually opt the scheduler back into `Send + Sync` so
+// downstream types — `Mutex<AnimationScheduler>`, `Weak<Mutex<…>>`,
+// the `static FOCUSED_TEXT_AREA: Mutex<…>` slot — keep their existing
+// auto-derived `Send + Sync` and don't ripple the relaxed bound
+// throughout `blinc_layout`. This mirrors the same single-threaded-
+// platform pattern used by `blinc_platform_harmony::HarmonyAssetLoader`
+// and `blinc_platform_web::WebWindow`. There are no other threads on
+// wasm32 to send to, so the `unsafe impl` cannot fire a real footgun.
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for AnimationScheduler {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for AnimationScheduler {}
+
 impl AnimationScheduler {
     pub fn new() -> Self {
         Self {
@@ -192,10 +218,16 @@ impl AnimationScheduler {
         }
     }
 
-    /// Set a wake callback that will be called when animations need a redraw
+    /// Set a wake callback that will be called when animations need a redraw.
     ///
-    /// This callback is invoked from the background animation thread when there
-    /// are active animations. Use this to wake up an event loop from another thread.
+    /// On native: invoked from the scheduler's background thread, so `F`
+    /// must be `Send + Sync`. Use this to wake an event loop from
+    /// another thread (e.g. via `EventLoopProxy::wake`).
+    ///
+    /// On wasm32: invoked synchronously from inside the rAF closure on
+    /// the main browser thread, so the `Send + Sync` bound is dropped.
+    /// The web runner uses this to install a closure that re-borrows
+    /// its `Rc<RefCell<WebApp>>` and renders a frame.
     ///
     /// # Example
     ///
@@ -203,9 +235,21 @@ impl AnimationScheduler {
     /// let wake_proxy = event_loop.wake_proxy();
     /// scheduler.set_wake_callback(move || wake_proxy.wake());
     /// ```
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_wake_callback<F>(&mut self, callback: F)
     where
         F: Fn() + Send + Sync + 'static,
+    {
+        self.wake_callback = Some(Arc::new(callback));
+    }
+
+    /// Wasm32 sibling of [`Self::set_wake_callback`] without the
+    /// `Send + Sync` bound. See the native version's docs for the
+    /// rationale; the only difference is the relaxed bound.
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_wake_callback<F>(&mut self, callback: F)
+    where
+        F: Fn() + 'static,
     {
         self.wake_callback = Some(Arc::new(callback));
     }
