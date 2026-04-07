@@ -2,6 +2,23 @@
 //!
 //! The main renderer that manages wgpu resources and executes render passes
 //! for SDF primitives, glass effects, and text.
+//!
+//! ## A note on wasm32 + `Arc`
+//!
+//! On `wasm32-unknown-unknown` the wgpu API is single-threaded by design
+//! (the WebGPU JavaScript interface lives on the main browser thread),
+//! so `wgpu::Device` and `wgpu::Queue` are `!Send + !Sync`. Wrapping them
+//! in `Arc` is still the right call — every other Blinc subsystem uses
+//! `Arc<Device>` / `Arc<Queue>` to share GPU handles, and the
+//! alternative (per-target `Rc` vs `Arc` aliases) would leak through
+//! every storage site in `blinc_gpu`, `blinc_app::context`, the text
+//! renderer, etc. Clippy's `arc_with_non_send_sync` lint catches the
+//! theoretical footgun that an `Arc` of a `!Send` type can never
+//! actually be sent across threads, but on wasm32 there are no other
+//! threads to send to. The lint is `allow`ed at the module level for
+//! that target only.
+
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1235,6 +1252,107 @@ impl GpuRenderer {
             }
         });
         tracing::debug!("Selected texture format: {:?}", texture_format);
+
+        let renderer = Self::create_renderer(
+            instance,
+            adapter,
+            device,
+            queue,
+            texture_format,
+            config,
+            (800, 600),
+        )?;
+
+        Ok((renderer, surface))
+    }
+
+    /// Create a new renderer with a `<canvas>` element on `wasm32`.
+    ///
+    /// Mirrors [`Self::with_surface`] but takes a
+    /// [`web_sys::HtmlCanvasElement`] instead of a raw-window-handle
+    /// type, because `HtmlCanvasElement` doesn't (and can't) implement
+    /// `HasWindowHandle` / `HasDisplayHandle` — the browser exposes its
+    /// surface through `wgpu::SurfaceTarget::Canvas` instead.
+    ///
+    /// The texture format is selected from the browser-reported surface
+    /// capabilities, preferring an sRGB format. WebGPU's canonical
+    /// preferred format on Chrome is `Bgra8UnormSrgb`, but Safari
+    /// Technology Preview reports only `Rgba8UnormSrgb` — the
+    /// `find(is_srgb)` lookup handles both.
+    ///
+    /// # Browser availability
+    ///
+    /// Requires WebGPU (Chrome ≥ 113, Edge ≥ 113, Safari Technology
+    /// Preview, Firefox Nightly with the WebGPU flag). The `web` feature
+    /// also enables the `webgl` backend so wgpu can fall back to WebGL2
+    /// where WebGPU isn't available, but the fallback path will reject
+    /// some Blinc shader features (storage buffers in particular).
+    #[cfg(target_arch = "wasm32")]
+    pub async fn with_canvas(
+        canvas: web_sys::HtmlCanvasElement,
+        config: RendererConfig,
+    ) -> Result<(Self, wgpu::Surface<'static>), RendererError> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: Self::preferred_backends(),
+            ..Default::default()
+        });
+
+        let surface = instance
+            .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+            .map_err(RendererError::SurfaceError)?;
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .ok_or(RendererError::AdapterNotFound)?;
+
+        let required_limits = device_required_limits(&adapter);
+        let config = apply_renderer_config_overrides(config, &required_limits);
+        log_renderer_config(&config);
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("Blinc GPU Device (Web)"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits,
+                    memory_hints: wgpu::MemoryHints::MemoryUsage,
+                },
+                None,
+            )
+            .await
+            .map_err(RendererError::DeviceError)?;
+
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+
+        let surface_caps = surface.get_capabilities(&adapter);
+        tracing::debug!(
+            "Web surface capabilities - formats: {:?}",
+            surface_caps.formats
+        );
+        tracing::debug!(
+            "Web surface capabilities - alpha modes: {:?}",
+            surface_caps.alpha_modes
+        );
+
+        // Browsers report sRGB-correct formats for canvas surfaces
+        // (Chrome: Bgra8UnormSrgb; Safari TP: Rgba8UnormSrgb). Either
+        // is fine — pick the first sRGB format we find, falling back
+        // to whatever the browser offered if neither is sRGB-tagged.
+        let texture_format = config.texture_format.unwrap_or_else(|| {
+            surface_caps
+                .formats
+                .iter()
+                .find(|f| f.is_srgb())
+                .copied()
+                .unwrap_or(surface_caps.formats[0])
+        });
+        tracing::debug!("Web surface texture format: {:?}", texture_format);
 
         let renderer = Self::create_renderer(
             instance,

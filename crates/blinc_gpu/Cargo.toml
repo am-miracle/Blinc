@@ -18,12 +18,14 @@ vulkan = ["wgpu/vulkan-portability"]
 metal = ["wgpu/metal"]
 dx12 = ["wgpu/dx12"]
 webgl = ["wgpu/webgl"]
+webgpu = ["wgpu/webgpu"]
 # Platform-specific presets
 desktop = ["vulkan", "metal", "dx12", "winit"]  # All desktop backends + windowing
 android = ["vulkan"]                    # Android only uses Vulkan (native windowing)
 ios = ["metal"]                         # iOS only uses Metal (native windowing)
 fuchsia = ["vulkan"]                    # Fuchsia uses Vulkan via Scenic (native windowing)
 harmony = ["vulkan"]                    # HarmonyOS prefers Vulkan (native windowing)
+web = ["webgpu", "webgl"]               # Browser: WebGPU primary, WebGL2 fallback
 
 [dependencies]
 blinc_core = { path = "../blinc_core", version = "0.4.0" }
@@ -52,3 +54,12 @@ pollster.workspace = true
 
 # Path tessellation
 lyon.workspace = true
+
+# Browser-only deps for the `with_canvas` constructor — kept under a
+# wasm32 target gate so desktop / mobile builds don't pull `web-sys`
+# into their dep trees. The `blinc_platform_web` extension brings these
+# in as well; declaring them here is what lets `with_canvas` accept
+# `web_sys::HtmlCanvasElement` directly without going through that crate.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+wasm-bindgen = "0.2"
