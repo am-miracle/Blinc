@@ -10,6 +10,18 @@ publish = false
 # `cdylib` is what wasm-pack needs to emit a `.wasm` artifact + JS shim.
 crate-type = ["cdylib", "rlib"]
 
+# wasm-pack invokes Binaryen's `wasm-opt` as a post-processing step.
+# Nightly rustc emits bulk-memory and reference-type ops by default,
+# but the version of `wasm-opt` bundled with wasm-pack 0.13 needs the
+# corresponding feature flags or it errors with "Bulk memory operations
+# require bulk memory [--enable-bulk-memory]". Pass the flags through
+# explicitly so the optimizer keeps running.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ['-O', '--all-features']
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false
+
 # Strictly a wasm32 example. Native builds of this crate are
 # meaningless — there's no entry point that does anything outside the
 # browser. The target gate keeps `cargo build --workspace` from trying

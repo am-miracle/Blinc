@@ -28,29 +28,53 @@ installed:
 curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 ```
 
-Then from the workspace root:
+Then from inside this directory:
 
 ```bash
 cd examples/web_hello
 wasm-pack build --target web --release
 ```
 
-This produces `pkg/`:
+That's it. wasm-pack handles everything: cargo build → wasm-bindgen
+post-processing → wasm-opt optimization → `pkg/` next to this README.
+
+After it finishes, the example layout is:
 
 ```
-pkg/
-├── blinc_web_hello.js          # ES module loader + bindings
-├── blinc_web_hello_bg.wasm     # The actual wasm artifact
-├── blinc_web_hello.d.ts        # TypeScript type stubs
-└── package.json
+examples/web_hello/
+├── Cargo.toml
+├── README.md
+├── index.html         ← static page that imports pkg/blinc_web_hello.js
+├── src/lib.rs         ← #[wasm_bindgen(start)] entry point
+└── pkg/               ← wasm-pack output (gitignored)
+    ├── blinc_web_hello.js          # ES module loader + bindings
+    ├── blinc_web_hello_bg.wasm     # The optimized wasm artifact
+    ├── blinc_web_hello.d.ts        # TypeScript type stubs
+    └── package.json
 ```
+
+The `[package.metadata.wasm-pack.profile.release]` block in
+`Cargo.toml` passes `--all-features` to wasm-opt because the bundled
+Binaryen is older than what nightly rustc emits (bulk-memory,
+nontrapping-fptoi, etc.). Without this, wasm-opt fails with a
+"feature not allowed" validation error. The flag tells wasm-opt to
+accept every wasm feature in the spec.
 
 ## Run
 
-Any static HTTP server works. Python's built-in is the easiest:
+Browsers won't import wasm modules from `file://`, so you need a real
+HTTP server. The included script picks the first one available on
+your system:
 
 ```bash
 # from examples/web_hello/
+./serve.sh           # default port 8000
+./serve.sh 3000      # custom port
+```
+
+Or if you'd rather invoke a server directly:
+
+```bash
 python3 -m http.server 8000
 ```
 
