@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Blinc · Fetched font</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #0d0d12;
+        color: #ededf0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        justify-content: stretch;
+      }
+      #blinc-canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #unsupported {
+        display: none;
+        position: absolute;
+        inset: 0;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 12px;
+        font-size: 14px;
+        line-height: 1.5;
+        text-align: center;
+        padding: 24px;
+      }
+      #unsupported a { color: #6db3ff; }
+      .no-webgpu #blinc-canvas { display: none; }
+      .no-webgpu #unsupported { display: flex; }
+    </style>
+  </head>
+  <body>
+    <canvas id="blinc-canvas"></canvas>
+
+    <div id="unsupported">
+      <strong>WebGPU not available</strong>
+      <span>
+        Blinc's web target requires WebGPU.
+        Try Chrome / Edge 113+, or enable WebGPU in
+        <a href="https://caniuse.com/webgpu">your browser</a>.
+      </span>
+    </div>
+
+    <script type="module">
+      const hasWebGPU = "gpu" in navigator;
+      const probeCanvas = document.createElement("canvas");
+      const hasWebGL2 = !!probeCanvas.getContext("webgl2");
+
+      if (!hasWebGPU && !hasWebGL2) {
+        document.body.classList.add("no-webgpu");
+      } else {
+        const { default: init } = await import("./pkg/blinc_web_assets.js");
+        await init();
+      }
+    </script>
+  </body>
+</html>

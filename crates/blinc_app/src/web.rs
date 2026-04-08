@@ -317,7 +317,92 @@ impl WebApp {
     /// unload, which is the expected lifecycle for a web app.
     pub async fn run_with_setup<S, F>(canvas_id: &str, setup: S, ui_builder: F) -> Result<()>
     where
-        S: FnOnce(&mut Self),
+        S: FnOnce(&mut Self) + 'static,
+        F: FnMut(&mut WindowedContext) -> Div + 'static,
+    {
+        Self::run_with_setup_inner(
+            canvas_id,
+            move |app| {
+                Box::pin(async move {
+                    setup(app);
+                    Ok(())
+                })
+            },
+            ui_builder,
+        )
+        .await
+    }
+
+    /// Async sibling of [`Self::run_with_setup`] for setup steps
+    /// that need to `.await` something — typically a `fetch()` call
+    /// to load fonts or other assets before the first frame
+    /// renders.
+    ///
+    /// The setup closure receives `&mut WebApp` and returns a
+    /// `Future<Output = Result<()>>`. The returned future is
+    /// awaited synchronously inside the runner before the UI
+    /// builder is installed and the rAF loop kicks off, so any
+    /// `app.load_font_data(...)` / `app.context_mut().add_css(...)`
+    /// calls inside it land in the right order: first font, then
+    /// first frame.
+    ///
+    /// # Example: fetched font
+    ///
+    /// ```ignore
+    /// use blinc_app::web::WebApp;
+    /// use blinc_platform_web::WebAssetLoader;
+    ///
+    /// WebApp::run_with_async_setup(
+    ///     "blinc-canvas",
+    ///     |app| Box::pin(async move {
+    ///         // Single-shot fetch — bytes go straight into the
+    ///         // font registry, no copy in the asset cache.
+    ///         let bytes = WebAssetLoader::fetch_bytes("fonts/Inter.ttf").await
+    ///             .map_err(|e| BlincError::Platform(e.to_string()))?;
+    ///         app.load_font_data(bytes);
+    ///         Ok(())
+    ///     }),
+    ///     build_ui,
+    /// )
+    /// .await
+    /// ```
+    ///
+    /// The `Box::pin(async move { ... })` ceremony is needed because
+    /// stable Rust doesn't have `async FnOnce` yet — the closure
+    /// returns a boxed future. Once `async closures` stabilize this
+    /// signature can drop the boxing.
+    pub async fn run_with_async_setup<S, F>(
+        canvas_id: &str,
+        setup: S,
+        ui_builder: F,
+    ) -> Result<()>
+    where
+        S: for<'a> FnOnce(
+            &'a mut Self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<()>> + 'a>,
+        >,
+        F: FnMut(&mut WindowedContext) -> Div + 'static,
+    {
+        Self::run_with_setup_inner(canvas_id, setup, ui_builder).await
+    }
+
+    /// Shared body of `run_with_setup` and `run_with_async_setup`.
+    /// The only difference between the two is whether `setup`
+    /// returns a future or runs synchronously — the sync wrapper
+    /// just constructs an immediately-ready boxed future, so this
+    /// inner function only ever sees the async form.
+    async fn run_with_setup_inner<S, F>(
+        canvas_id: &str,
+        setup: S,
+        ui_builder: F,
+    ) -> Result<()>
+    where
+        S: for<'a> FnOnce(
+            &'a mut Self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<()>> + 'a>,
+        >,
         F: FnMut(&mut WindowedContext) -> Div + 'static,
     {
         let mut app = Self::new(canvas_id).await?;
@@ -325,8 +410,10 @@ impl WebApp {
         // Run user setup BEFORE installing the UI builder. This is
         // when fonts get loaded, CSS gets registered, etc. If setup
         // panics, we never reach the rAF loop and the browser's
-        // panic-hook surfaces it in the console.
-        setup(&mut app);
+        // panic-hook surfaces it in the console. Setup that returns
+        // an `Err` is fatal — we propagate so the caller can decide
+        // whether to surface it via `console.error`.
+        setup(&mut app).await?;
 
         app.set_ui_builder(ui_builder);
 

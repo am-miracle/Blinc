@@ -72,7 +72,7 @@ impl WebAssetLoader {
     #[cfg(target_arch = "wasm32")]
     pub async fn preload(&self, urls: &[&str]) -> Result<()> {
         for url in urls {
-            let bytes = fetch_as_bytes(url).await?;
+            let bytes = Self::fetch_bytes(url).await?;
             self.insert_raw(*url, bytes);
         }
         Ok(())
@@ -83,6 +83,33 @@ impl WebAssetLoader {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn preload(&self, _urls: &[&str]) -> Result<()> {
         Ok(())
+    }
+
+    /// Fetch a single URL and return its bytes, without inserting
+    /// into the cache.
+    ///
+    /// Useful when the caller wants to forward bytes directly to
+    /// another consumer (e.g. `WebApp::load_font_data` for the
+    /// font registry) without keeping a copy in this loader's
+    /// HashMap. The cache-keyed [`Self::preload`] is the right
+    /// choice when the same URL might be requested again later
+    /// via [`AssetLoader::load`]; `fetch_bytes` is the right
+    /// choice for one-shot bytes that have a downstream owner.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
+        fetch_as_bytes(url).await
+    }
+
+    /// Cross-host placeholder for `fetch_bytes`. Returns
+    /// `PlatformError::Unsupported` because there is no `fetch()`
+    /// API outside a browser. The non-wasm32 path exists so
+    /// downstream `cargo check` from a desktop box doesn't error
+    /// on the missing item.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn fetch_bytes(_url: &str) -> Result<Vec<u8>> {
+        Err(PlatformError::Unsupported(
+            "WebAssetLoader::fetch_bytes is wasm32-only".to_string(),
+        ))
     }
 
     fn key_for(path: &AssetPath) -> String {

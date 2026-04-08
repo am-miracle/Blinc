@@ -32,6 +32,7 @@ members = [
     "examples/web_hello",
     "examples/web_scroll",
     "examples/web_drag",
+    "examples/web_assets",
 ]
 
 # Platform-specific crates are included but have target-gated dependencies
