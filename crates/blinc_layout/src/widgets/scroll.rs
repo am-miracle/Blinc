@@ -2376,9 +2376,84 @@ impl ElementBuilder for Scroll {
 // Convenience Constructor
 // ============================================================================
 
-/// Create a new scroll container with default bounce physics
+/// Per-call-site registry of `SharedScrollPhysics` keyed by
+/// [`InstanceKey`]. Each `scroll()` / `scroll_no_bounce()` call site
+/// gets its own slot, identified by the source location of the call
+/// (file/line/column + per-frame call index — see [`InstanceKey`] for
+/// the exact key format).
 ///
-/// The scroll container inherits ALL Div methods, so you have full layout control.
+/// This is what makes `scroll()` survive tree rebuilds without the
+/// caller having to reach for `ctx.use_state_keyed("scroll_physics",
+/// …) + Scroll::with_physics(…)`. On each rebuild, the same call
+/// site looks up the same key and gets back the same physics —
+/// scroll position, momentum, and bounce state are all preserved.
+///
+/// Resize is the canonical case: when the window resizes, the runner
+/// re-runs the user's UI builder so width/height-dependent layout
+/// (e.g. `scroll().w_full().h(ctx.height - 96.0)`) reflects the new
+/// dimensions, but the underlying physics has to survive that
+/// rebuild or the user sees their scroll position snap back to 0
+/// every time they grab the window edge.
+///
+/// **Threading**: `thread_local!` is correct on both desktop and
+/// wasm32. Desktop's UI builder runs on the main thread; wasm32's
+/// runs on the browser main thread (the only thread that exists).
+/// We never share scroll physics between threads.
+///
+/// **Cleanup**: entries here are *not* garbage-collected when the
+/// associated scroll widget disappears from the tree. The leak is
+/// bounded by the number of distinct scroll-call sites in the user's
+/// source, which is small in practice. If a future workload turns
+/// up many short-lived dynamic scroll containers, gate cleanup on
+/// the `reset_call_counters()` boundary.
+thread_local! {
+    static SCROLL_PHYSICS_REGISTRY: std::cell::RefCell<
+        std::collections::HashMap<String, SharedScrollPhysics>
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Look up (or insert) the `SharedScrollPhysics` for a given
+/// [`InstanceKey`]. The first call at a given source location
+/// allocates fresh physics; every subsequent call (across rebuilds)
+/// returns the same `Arc<Mutex<…>>`.
+fn physics_for_key(key: &crate::key::InstanceKey) -> SharedScrollPhysics {
+    let id = key.get().to_string();
+    SCROLL_PHYSICS_REGISTRY.with(|reg| {
+        let mut reg = reg.borrow_mut();
+        reg.entry(id)
+            .or_insert_with(|| Arc::new(Mutex::new(ScrollPhysics::default())))
+            .clone()
+    })
+}
+
+/// Same lookup as [`physics_for_key`] but seeds fresh entries with a
+/// caller-provided [`ScrollConfig`] instead of the default.
+fn physics_for_key_with_config(
+    key: &crate::key::InstanceKey,
+    config: ScrollConfig,
+) -> SharedScrollPhysics {
+    let id = key.get().to_string();
+    SCROLL_PHYSICS_REGISTRY.with(|reg| {
+        let mut reg = reg.borrow_mut();
+        reg.entry(id)
+            .or_insert_with(|| Arc::new(Mutex::new(ScrollPhysics::new(config))))
+            .clone()
+    })
+}
+
+/// Create a new scroll container with default bounce physics.
+///
+/// The scroll container inherits ALL Div methods, so you have full
+/// layout control.
+///
+/// **Physics persists across rebuilds.** Each `scroll()` call site
+/// gets its own [`InstanceKey`]-derived slot in a thread-local
+/// registry, so window resizes, theme changes, and other rebuild
+/// triggers no longer reset the scroll position. If you need
+/// explicit control of the physics object (e.g. to share one
+/// physics across multiple Scroll widgets, or to read the current
+/// offset from outside the scroll), use [`Scroll::with_physics`]
+/// directly with your own `SharedScrollPhysics`.
 ///
 /// # Example
 ///
@@ -2391,13 +2466,20 @@ impl ElementBuilder for Scroll {
 ///     .shadow_sm()
 ///     .child(div().flex_col().gap(8.0));
 /// ```
+#[track_caller]
 pub fn scroll() -> Scroll {
-    Scroll::new()
+    let key = crate::key::InstanceKey::new("scroll");
+    Scroll::with_physics(physics_for_key(&key))
 }
 
-/// Create a scroll container with bounce disabled
+/// Create a scroll container with bounce disabled.
+///
+/// Same auto-persistence semantics as [`scroll`] — each call site
+/// gets its own slot in the per-call-site physics registry.
+#[track_caller]
 pub fn scroll_no_bounce() -> Scroll {
-    Scroll::with_config(ScrollConfig::no_bounce())
+    let key = crate::key::InstanceKey::new("scroll_no_bounce");
+    Scroll::with_physics(physics_for_key_with_config(&key, ScrollConfig::no_bounce()))
 }
 
 #[cfg(test)]

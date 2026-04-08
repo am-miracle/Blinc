@@ -795,7 +795,27 @@ impl WebApp {
     /// also call this directly to force a render after a click /
     /// keypress.
     pub fn run_one_frame(&mut self) -> Result<()> {
-        // 1. Rebuild the tree if needed. Splits the borrow so we can
+        // 1. Tick scroll physics on the existing tree BEFORE any
+        //    rebuild. This advances momentum / bounce / spring-back
+        //    one step every rAF tick — without it, the wheel input
+        //    moves the position once and then everything freezes
+        //    because the physics never gets a chance to step. The
+        //    desktop runner does the same at
+        //    [`windowed.rs:3492`](crate::windowed). The current_time
+        //    units are milliseconds since app start; `web_time`
+        //    gives us a monotonic clock that works on both native
+        //    and wasm32.
+        {
+            use std::sync::OnceLock;
+            static START: OnceLock<web_time::Instant> = OnceLock::new();
+            let start = START.get_or_init(web_time::Instant::now);
+            let now_ms = start.elapsed().as_millis() as u64;
+            if let Some(ref mut tree) = self.current_tree {
+                tree.tick_scroll_physics(now_ms);
+            }
+        }
+
+        // 2. Rebuild the tree if needed. Splits the borrow so we can
         //    pass &mut ctx to the user's builder while &mut self.ui_builder
         //    is also live.
         if self.needs_rebuild {
@@ -807,6 +827,17 @@ impl WebApp {
                     return Ok(());
                 }
             };
+
+            // Reset per-call-site index counters so `InstanceKey::new`
+            // (and everything that builds on it — `scroll()`, the
+            // stateful registry, the auto-persisted scroll-physics
+            // store) can map a call site at the same source location
+            // to the same key across rebuilds. Mirrors
+            // `windowed.rs:3655` exactly. Without this, every rebuild
+            // would assign fresh InstanceKeys → fresh physics →
+            // scroll position resets on every resize.
+            blinc_layout::reset_call_counters();
+
             let element = builder(&mut self.ctx);
 
             // Build a fresh render tree from the element. The shared
@@ -838,7 +869,7 @@ impl WebApp {
             self.ctx.rebuild_count = self.ctx.rebuild_count.saturating_add(1);
         }
 
-        // 2. Render the tree to the next surface texture. If we don't
+        // 3. Render the tree to the next surface texture. If we don't
         //    have a tree yet (no builder set), bail out gracefully.
         let tree = match self.current_tree.as_ref() {
             Some(t) => t,
