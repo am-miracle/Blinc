@@ -127,13 +127,13 @@ fn build_ui(ctx: &mut WindowedContext) -> Div {
         content = content.child(
             div()
                 .w_full()
-                .h(80.0)
+                .h_fit()
                 .bg(Color::rgba(0.16, 0.16, 0.21, 1.0))
                 .rounded(12.0)
-                .p(16.0)
+                .p_px(16.0)
                 .flex_row()
                 .items_center()
-                .gap(12.0)
+                .gap_px(12.0)
                 // Accent strip on the left edge — visually separates
                 // cards and gives the wheel-driven scroll something
                 // colorful to move past.
@@ -163,7 +163,8 @@ fn build_ui(ctx: &mut WindowedContext) -> Div {
         .bg(Color::rgba(0.07, 0.07, 0.10, 1.0))
         .flex_col()
         .items_center()
-        .p(16.0)
+        .p_px(16.0)
+        .gap_px(12.0)
         .child(
             text("Blinc · Wheel-scroll demo")
                 .size(22.0)
@@ -177,28 +178,21 @@ fn build_ui(ctx: &mut WindowedContext) -> Div {
             .color(Color::rgba(0.65, 0.65, 0.72, 1.0)),
         )
         .child(
-            div()
-                .w(ctx.width - 32.0)
+            scroll()
+                .w_full()
                 .h(ctx.height - 96.0)
                 .rounded(16.0)
                 .bg(Color::rgba(0.11, 0.11, 0.14, 1.0))
-                .child(
-                    scroll()
-                        .w(ctx.width - 32.0)
-                        .h(ctx.height - 96.0)
-                        .rounded(16.0)
-                        .bg(Color::rgba(0.11, 0.11, 0.14, 1.0))
-                        .child(content)
-                        .on_scroll(|e| {
-                            // INFO so it shows up at the default
-                            // tracing-wasm level. Drop to DEBUG once
-                            // we've validated the wheel pipeline.
-                            tracing::info!(
-                                "blinc_web_scroll: scroll delta=({:.1}, {:.1})",
-                                e.scroll_delta_x,
-                                e.scroll_delta_y
-                            );
-                        }),
-                ),
+                .child(content)
+                .on_scroll(|e| {
+                    // INFO so it shows up at the default
+                    // tracing-wasm level. Drop to DEBUG once
+                    // we've validated the wheel pipeline.
+                    tracing::info!(
+                        "blinc_web_scroll: scroll delta=({:.1}, {:.1})",
+                        e.scroll_delta_x,
+                        e.scroll_delta_y
+                    );
+                }),
         )
 }
