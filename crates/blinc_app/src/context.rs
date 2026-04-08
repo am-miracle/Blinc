@@ -1924,10 +1924,24 @@ impl RenderContext {
                 }
             }
 
-            // Rasterize at physical pixel resolution for HiDPI displays
-            // svg.width/height are logical sizes, multiply by scale_factor for physical pixels
-            let raster_width = ((svg.width * scale_factor).ceil() as u32).max(1);
-            let raster_height = ((svg.height * scale_factor).ceil() as u32).max(1);
+            // Rasterize at physical pixel resolution.
+            //
+            // `svg.width` / `svg.height` come out of `collect_elements_recursive`
+            // already multiplied by `tree.scale_factor()` (see the SVG branch
+            // around line 3066: `base_width = bounds.width * scale`), so they
+            // are in *physical* pixels, not logical pixels — the same units
+            // the GPU draw quad will be sized in. Multiplying by `scale_factor`
+            // a second time here used to rasterize each icon at 4× its drawn
+            // area on Retina (9× on 3× DPR), bloating the SVG atlas
+            // (`cn_demo` was hitting the 4096×4096 ceiling on the first frame
+            // and burning ~134 MB of CPU+GPU memory between the two mirror
+            // buffers in `svg_atlas.rs`). resvg already does sub-pixel AA at
+            // the target resolution, so 1:1 physical-pixel rasterization is
+            // sharp enough; if a future workload turns up edge cases that
+            // need supersampling, gate it behind an explicit knob rather than
+            // a silent multiply.
+            let raster_width = (svg.width.ceil() as u32).max(1);
+            let raster_height = (svg.height.ceil() as u32).max(1);
 
             // Detect tintable SVGs: simple currentColor icons that can use shader tinting
             // instead of CPU re-rasterization per color variant.

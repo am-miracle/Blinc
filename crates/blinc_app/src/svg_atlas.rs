@@ -87,7 +87,16 @@ impl SvgAtlas {
     }
 
     /// Allocate space, write pixels, and insert a cache entry. Returns the region.
-    /// Returns None if the atlas is completely full (even after growing).
+    ///
+    /// Returns `None` if the atlas is full at the maximum size — callers
+    /// should either fall back to a per-icon texture or simply skip the
+    /// element for this frame. We deliberately do *not* `clear()` and
+    /// retry on overflow at MAX_SIZE: that turns the atlas into a
+    /// thrashing cache where every overflowing frame wipes valid entries
+    /// and re-rasterizes them on the next frame, churning the GPU and
+    /// keeping the texture pinned at the maximum 4096×4096 footprint
+    /// (~67 MB CPU + ~67 MB GPU) forever. If repeated overflow happens,
+    /// the warning surfaces it instead of silently degrading.
     pub fn insert(
         &mut self,
         cache_key: u64,
@@ -100,13 +109,20 @@ impl SvgAtlas {
         let region = match self.allocate(width, height) {
             Some(r) => r,
             None => {
-                // Try growing
+                // Try growing — succeeds until we hit MAX_SIZE
                 if self.grow(device) {
                     self.allocate(width, height)?
                 } else {
-                    // At max size, clear and retry
-                    self.clear();
-                    self.allocate(width, height)?
+                    tracing::warn!(
+                        "SVG atlas at max size {}x{} could not fit {}x{} ({} entries, {:.1}% used) — skipping insertion",
+                        self.width,
+                        self.height,
+                        width,
+                        height,
+                        self.entries.len(),
+                        self.utilization() * 100.0,
+                    );
+                    return None;
                 }
             }
         };
