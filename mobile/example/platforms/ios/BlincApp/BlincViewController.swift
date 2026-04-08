@@ -95,6 +95,13 @@ class BlincViewController: UIViewController {
         displayLink?.invalidate()
         displayLink = nil
 
+        // Clear the keyboard helper's context pointer BEFORE
+        // destroying the context. The helper is a singleton that
+        // outlives this view controller; leaving a dangling
+        // pointer there would cause a use-after-free the next
+        // time the keyboard delegate forwards a character.
+        BlincKeyboardHelper.blincContext = nil
+
         // Clean up Blinc resources
         if let gpu = gpuRenderer {
             blinc_destroy_gpu(gpu)
@@ -125,6 +132,14 @@ class BlincViewController: UIViewController {
         }
         renderContext = ctx
         os_log(.info, log: log, "Render context created")
+
+        // Wire the active context into BlincKeyboardHelper so its
+        // hidden UITextField delegate can forward typed
+        // characters back into the Rust runtime via
+        // `blinc_ios_handle_text_input`. Without this, the soft
+        // keyboard pops up but every keystroke is silently
+        // dropped.
+        BlincKeyboardHelper.blincContext = ctx
 
         // Initialize GPU with Metal layer
         let metalLayer = metalView.metalLayer

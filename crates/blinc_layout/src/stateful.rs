@@ -986,6 +986,14 @@ impl StateTransitions for TextFieldState {
             // Idle transitions
             (TextFieldState::Idle, POINTER_ENTER) => Some(TextFieldState::Hovered),
             (TextFieldState::Idle, FOCUS) => Some(TextFieldState::Focused),
+            // POINTER_DOWN on Idle → Focused. This handles
+            // touchscreens where there's no POINTER_ENTER before
+            // POINTER_DOWN (a finger tap goes straight from "no
+            // contact" to "contact" without any hover phase). On
+            // desktop the existing `(Hovered, POINTER_DOWN)`
+            // arm catches the hover-then-click path, and on
+            // touch this arm catches the tap-without-hover path.
+            (TextFieldState::Idle, POINTER_DOWN) => Some(TextFieldState::Focused),
             // Hovered transitions
             (TextFieldState::Hovered, POINTER_LEAVE) => Some(TextFieldState::Idle),
             (TextFieldState::Hovered, POINTER_DOWN) => Some(TextFieldState::Focused),

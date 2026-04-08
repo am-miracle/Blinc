@@ -49,6 +49,71 @@ use crate::windowed::{
     SharedReadyCallbacks, WindowedContext,
 };
 
+// =============================================================================
+// Soft keyboard FFI — runtime-resolved via dlsym
+// =============================================================================
+
+/// Cached lookup of `blinc_ios_show_keyboard`. See the call site
+/// in `build_frame` for the rationale on why these are resolved
+/// at runtime instead of via a strong `extern "C"` reference.
+fn keyboard_show_fn() -> Option<extern "C" fn()> {
+    use std::sync::OnceLock;
+    static FN: OnceLock<Option<extern "C" fn()>> = OnceLock::new();
+    *FN.get_or_init(|| unsafe { lookup_extern_fn(b"blinc_ios_show_keyboard\0") })
+}
+
+/// Cached lookup of `blinc_ios_hide_keyboard`. Symmetric with
+/// `keyboard_show_fn`.
+fn keyboard_hide_fn() -> Option<extern "C" fn()> {
+    use std::sync::OnceLock;
+    static FN: OnceLock<Option<extern "C" fn()>> = OnceLock::new();
+    *FN.get_or_init(|| unsafe { lookup_extern_fn(b"blinc_ios_hide_keyboard\0") })
+}
+
+/// Look up a C symbol in the global namespace via
+/// `dlsym(RTLD_DEFAULT, ...)`. Returns `None` if the symbol
+/// isn't present in the linked binary (e.g. user iOS app didn't
+/// copy `BlincNativeBridge.swift` from
+/// `extensions/blinc_platform_ios/templates/`).
+///
+/// `name` MUST be a null-terminated byte string. The caller's
+/// fixed-string usage (`b"blinc_ios_show_keyboard\0"`) ensures
+/// that property at compile time.
+///
+/// # Safety
+///
+/// Caller must guarantee that `name` is a valid C string and
+/// that the symbol — if found — actually has the function
+/// signature it's transmuted to. We only call this from
+/// `keyboard_show_fn` / `keyboard_hide_fn`, both of which
+/// transmute to `extern "C" fn()` and the templates `@_cdecl`
+/// declarations match exactly.
+unsafe fn lookup_extern_fn(name: &[u8]) -> Option<extern "C" fn()> {
+    extern "C" {
+        fn dlsym(handle: *mut std::ffi::c_void, symbol: *const i8) -> *mut std::ffi::c_void;
+    }
+    // `RTLD_DEFAULT` on Apple platforms is the magic value
+    // `(void *) -2`. We can't import the constant from libc
+    // without pulling in the libc crate as a dependency for one
+    // value, so we hard-code it. The value is documented in
+    // `dlfcn.h` and stable across all macOS / iOS / tvOS / watchOS
+    // releases. Linux uses `(void *) 0` for the same constant,
+    // but this entire module is iOS-only so the Linux value is
+    // irrelevant here.
+    const RTLD_DEFAULT: *mut std::ffi::c_void = -2isize as *mut std::ffi::c_void;
+    debug_assert!(name.last() == Some(&0), "name must be null-terminated");
+    let sym = dlsym(RTLD_DEFAULT, name.as_ptr() as *const i8);
+    if sym.is_null() {
+        None
+    } else {
+        // SAFETY: `sym` is non-null, points at a function
+        // exported by the linked binary, and the caller has
+        // committed to the function having signature
+        // `extern "C" fn()`.
+        Some(std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(sym))
+    }
+}
+
 /// iOS application runner
 ///
 /// Provides methods for running a Blinc application on iOS with Metal rendering.
@@ -501,6 +566,60 @@ impl IOSRenderContext {
         &self.render_state
     }
 
+    /// Handle text input from the soft keyboard.
+    ///
+    /// Broadcasts a `TEXT_INPUT` event for each character in
+    /// `text` to all focused text-input handlers in the tree.
+    /// The handlers internally check `is_focused()` so the event
+    /// only lands on the active text widget.
+    ///
+    /// Called from Swift via the `blinc_ios_handle_text_input`
+    /// FFI when `BlincKeyboardHelper`'s hidden `UITextField`
+    /// captures a keystroke through its
+    /// `shouldChangeCharactersIn` delegate. Without this path
+    /// the iOS soft keyboard pops up correctly but typed
+    /// characters never reach the Rust text-input widget — the
+    /// keyboard is purely visual.
+    pub fn handle_text_input(&mut self, text: &str) {
+        let tree = match &mut self.render_tree {
+            Some(t) => t,
+            None => {
+                tracing::debug!("[Blinc] iOS handle_text_input: no render tree");
+                return;
+            }
+        };
+        for c in text.chars() {
+            tree.broadcast_text_input_event(c, false, false, false, false);
+        }
+    }
+
+    /// Handle a key-down event from the soft keyboard.
+    ///
+    /// Used for non-character keys the iOS keyboard sends
+    /// (Backspace, Return, …). The `shouldChangeCharactersIn`
+    /// delegate detects backspace via `range.length > 0 &&
+    /// string.isEmpty`; the Swift side then calls
+    /// `blinc_ios_handle_key_down(ctx, 8)` which maps to the
+    /// same `key_code = 8` desktop dispatches for the Backspace
+    /// key.
+    pub fn handle_key_down(&mut self, key_code: u32) {
+        let tree = match &mut self.render_tree {
+            Some(t) => t,
+            None => {
+                tracing::debug!("[Blinc] iOS handle_key_down: no render tree");
+                return;
+            }
+        };
+        tree.broadcast_key_event(
+            blinc_core::events::event_types::KEY_DOWN,
+            key_code,
+            false,
+            false,
+            false,
+            false,
+        );
+    }
+
     /// Handle a touch event
     ///
     /// Call this from your UIView's touch handling methods.
@@ -596,6 +715,18 @@ impl IOSRenderContext {
         match touch.phase {
             TouchPhase::Began => {
                 tracing::trace!("[Blinc] iOS Touch BEGAN at ({:.1}, {:.1})", lx, ly);
+                // Blur any focused text inputs BEFORE processing
+                // mouse down. Mirrors the desktop runner's
+                // behavior at [`windowed.rs:2913`](crate::windowed):
+                // tapping anywhere globally clears focus, and the
+                // text input that gets tapped re-focuses itself
+                // via its own `on_mouse_down` handler. The
+                // resulting focus-count drop fires
+                // `take_keyboard_state_change()` on the next
+                // frame, which the runner forwards to
+                // `blinc_ios_hide_keyboard` — so tapping outside
+                // an input also dismisses the soft keyboard.
+                blinc_layout::widgets::blur_all_text_inputs();
                 self.windowed_ctx
                     .event_router
                     .on_mouse_down(tree, lx, ly, MouseButton::Left);
@@ -889,16 +1020,39 @@ pub extern "C" fn blinc_build_frame(ctx: *mut IOSRenderContext) {
             sched.tick();
         }
 
-        // Soft keyboard: show/hide based on text widget focus
+        // Soft keyboard: show/hide based on text widget focus.
+        //
+        // The implementation lives in `BlincNativeBridge.swift`
+        // (at `extensions/blinc_platform_ios/templates/`), which
+        // user iOS apps copy into their Xcode project on init.
+        // Apps that don't include the bridge — common during
+        // bring-up, or for headless / read-only apps that don't
+        // need text input — would otherwise get a hard linker
+        // error from the strong `extern "C"` reference:
+        //
+        //     Undefined symbols for architecture arm64:
+        //       "_blinc_ios_show_keyboard", referenced from:
+        //         _blinc_build_frame in libblinc...
+        //       "_blinc_ios_hide_keyboard", referenced from:
+        //         _blinc_build_frame in libblinc...
+        //
+        // To keep the rlib self-linkable regardless of whether
+        // the user copied the Swift template, we resolve the
+        // symbols at *runtime* via `dlsym(RTLD_DEFAULT, ...)`.
+        // The rlib has no link-time dependency on the Swift
+        // bridge — only on libc's `dlsym`, which is always
+        // present on iOS — and the lookup is cached in a
+        // `OnceLock` so the cost is paid exactly once per
+        // process. If the symbol is found, we call it; if not,
+        // we silently no-op (text input still works at the
+        // model level, the soft keyboard just doesn't pop up).
         if let Some(show) = blinc_layout::widgets::text_input::take_keyboard_state_change() {
-            extern "C" {
-                fn blinc_ios_show_keyboard();
-                fn blinc_ios_hide_keyboard();
-            }
             if show {
-                blinc_ios_show_keyboard();
-            } else {
-                blinc_ios_hide_keyboard();
+                if let Some(f) = keyboard_show_fn() {
+                    f();
+                }
+            } else if let Some(f) = keyboard_hide_fn() {
+                f();
             }
         }
 
@@ -1060,6 +1214,75 @@ pub extern "C" fn blinc_handle_touch(
         (*ctx).handle_touch(touch);
     }
     tracing::trace!("[Blinc FFI] blinc_handle_touch completed");
+}
+
+/// Forward characters typed on the iOS soft keyboard to the
+/// focused text-input widget.
+///
+/// Called from Swift's `BlincKeyboardHelper.shouldChangeCharactersIn`
+/// delegate every time the user types a character. The text is
+/// a UTF-8 C string (NUL-terminated). For backspace, see
+/// [`blinc_ios_handle_key_down`] — UITextField reports
+/// deletions as `(range.length > 0, replacementString.isEmpty)`,
+/// which Swift detects and forwards via the key-down path
+/// instead.
+///
+/// # Arguments
+/// * `ctx` - Render context pointer
+/// * `text` - UTF-8 NUL-terminated string with the typed
+///   character(s). Almost always a single character, but a
+///   multi-character payload (e.g. autocorrect insertion) is
+///   handled by broadcasting one TEXT_INPUT event per char.
+///
+/// # Safety
+/// `ctx` must be a valid pointer returned by `blinc_create_context`.
+/// `text` must be a valid NUL-terminated UTF-8 string for the
+/// duration of the call.
+#[no_mangle]
+pub extern "C" fn blinc_ios_handle_text_input(
+    ctx: *mut IOSRenderContext,
+    text: *const std::os::raw::c_char,
+) {
+    if ctx.is_null() || text.is_null() {
+        return;
+    }
+    let c_str = unsafe { std::ffi::CStr::from_ptr(text) };
+    let text = match c_str.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("[Blinc FFI] blinc_ios_handle_text_input: invalid UTF-8: {e}");
+            return;
+        }
+    };
+    unsafe {
+        (*ctx).handle_text_input(text);
+    }
+}
+
+/// Forward a key-down event from the iOS soft keyboard.
+///
+/// Used for non-character keys the keyboard sends — primarily
+/// Backspace (key code 8) and Return (key code 13). Swift's
+/// `shouldChangeCharactersIn` detects backspace via
+/// `range.length > 0 && replacementString.isEmpty` and calls
+/// this with `key_code = 8`. Return is detected via the
+/// `textFieldShouldReturn` delegate.
+///
+/// Key codes match the desktop runner's table at
+/// [`windowed.rs:3052`](crate::windowed) (8 = Backspace,
+/// 13 = Enter, 27 = Escape, 37/39 = ←/→, …) so the same
+/// `text_input` widget handlers fire on every platform.
+///
+/// # Safety
+/// `ctx` must be a valid pointer returned by `blinc_create_context`.
+#[no_mangle]
+pub extern "C" fn blinc_ios_handle_key_down(ctx: *mut IOSRenderContext, key_code: u32) {
+    if ctx.is_null() {
+        return;
+    }
+    unsafe {
+        (*ctx).handle_key_down(key_code);
+    }
 }
 
 /// Handle a touch event with force/pressure (C FFI for Swift)
