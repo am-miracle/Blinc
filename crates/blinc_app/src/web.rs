@@ -29,8 +29,8 @@ use std::rc::Rc;
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
 use blinc_animation::AnimationScheduler;
-use blinc_core::context_state::HookState;
-use blinc_core::reactive::ReactiveGraph;
+use blinc_core::context_state::{BlincContextState, HookState};
+use blinc_core::reactive::{ReactiveGraph, SignalId};
 use blinc_layout::div::Div;
 use blinc_layout::renderer::RenderTree;
 use blinc_layout::selector::ElementRegistry;
@@ -210,6 +210,33 @@ impl WebApp {
         let ref_dirty_flag: RefDirtyFlag = Arc::new(AtomicBool::new(false));
         let reactive: SharedReactiveGraph = Arc::new(Mutex::new(ReactiveGraph::new()));
         let hooks = Arc::new(Mutex::new(HookState::new()));
+
+        // Initialize the global `BlincContextState` singleton with
+        // this runner's reactive graph, hook state, and dirty flag —
+        // exactly the same call the desktop runner makes at
+        // [`windowed.rs:2114`](crate::windowed). Without this,
+        // every component that reaches for `BlincContextState::get()`
+        // (which is every `ctx.use_state*`, every `Stateful::on_state`
+        // body, every `State::set`, every signal-driven rebuild
+        // path, …) panics or no-ops because the singleton is
+        // uninitialized. The previous web runner created the four
+        // shared collaborators and stuffed them into `WindowedContext`
+        // but never wired them into the global, so reactive state
+        // worked through `ctx.*` directly but `Stateful` widgets
+        // and the implicit-context APIs all silently failed.
+        if !BlincContextState::is_initialized() {
+            #[allow(clippy::type_complexity)]
+            let stateful_callback: Arc<dyn Fn(&[SignalId]) + Send + Sync> =
+                Arc::new(|signal_ids| {
+                    blinc_layout::check_stateful_deps(signal_ids);
+                });
+            BlincContextState::init_with_callback(
+                Arc::clone(&reactive),
+                Arc::clone(&hooks),
+                Arc::clone(&ref_dirty_flag),
+                stateful_callback,
+            );
+        }
         let overlay_mgr = overlay_manager();
         let element_registry: SharedElementRegistry = Arc::new(ElementRegistry::new());
         let ready_callbacks: SharedReadyCallbacks = Arc::new(Mutex::new(Vec::new()));
@@ -881,6 +908,20 @@ impl WebApp {
             }
         }
         if blinc_layout::widgets::take_needs_rebuild() {
+            self.needs_rebuild = true;
+        }
+        // The reactive `State::set` path flips this atomic via the
+        // `BlincContextState` singleton. Desktop polls it at
+        // [`windowed.rs:3513`](crate::windowed) under the same name.
+        // Without this poll, every `state.set(new_value)` call from
+        // a click / drag handler would correctly mutate the state
+        // cell but never trigger a tree rebuild, so the new value
+        // would never make it onto the screen.
+        if self
+            .ctx
+            .dirty_flag()
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
             self.needs_rebuild = true;
         }
 
