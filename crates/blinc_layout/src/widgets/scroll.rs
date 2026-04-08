@@ -2469,7 +2469,34 @@ fn physics_for_key_with_config(
 #[track_caller]
 pub fn scroll() -> Scroll {
     let key = crate::key::InstanceKey::new("scroll");
-    Scroll::with_physics(physics_for_key(&key))
+    // On wasm32, default `scroll()` to **bounce-disabled**.
+    //
+    // The desktop runner gets reliable `ScrollPhase::Ended` events
+    // from winit when a trackpad gesture lifts, so the bounce
+    // animation knows exactly when to fire. Browser DOM wheel events
+    // have no equivalent phase, *and* macOS layers ~800ms of
+    // OS-level momentum-scroll events on top of the user's actual
+    // gesture — every workaround for "when did the user finish
+    // scrolling?" introduces a new problem (1s delay before bounce,
+    // wobble from spring restarts as momentum events arrive after
+    // the spring settled, false-positive bounces when the user
+    // grazes the edge by a single pixel of rubber-band, …).
+    //
+    // Native HTML scrolling has no rubber-band either, except for
+    // iOS / macOS Safari at the *page* level — and that bounce is
+    // owned by the OS, not by anything inside a `<canvas>`. So
+    // disabling bounce inside Blinc canvases on the web matches
+    // what users already expect.
+    //
+    // Bounce machinery is still fully wired and works on desktop;
+    // web users who want it can opt in via
+    // `Scroll::with_config(ScrollConfig::default())` or supply
+    // their own `SharedScrollPhysics` to `Scroll::with_physics`.
+    #[cfg(not(target_arch = "wasm32"))]
+    let physics = physics_for_key(&key);
+    #[cfg(target_arch = "wasm32")]
+    let physics = physics_for_key_with_config(&key, ScrollConfig::no_bounce());
+    Scroll::with_physics(physics)
 }
 
 /// Create a scroll container with bounce disabled.

@@ -74,10 +74,9 @@ type UiBuilder = Box<dyn FnMut(&mut WindowedContext) -> Div>;
 /// wasm32 (where it wraps `performance.now()`).
 ///
 /// Used as the `current_time` argument to
-/// `RenderTree::tick_scroll_physics` and as the timestamp for
-/// wheel-idle debouncing in [`WebApp::tick_wheel_idle_check`]. The
-/// epoch is per-app, not absolute, but every consumer is comparing
-/// deltas so that's all we need.
+/// `RenderTree::tick_scroll_physics`. The epoch is per-app, not
+/// absolute, but every consumer is comparing deltas so that's all
+/// we need.
 fn now_ms() -> u64 {
     use std::sync::OnceLock;
     static START: OnceLock<web_time::Instant> = OnceLock::new();
@@ -85,13 +84,6 @@ fn now_ms() -> u64 {
     start.elapsed().as_millis() as u64
 }
 
-/// Quiet period after the last wheel event before we synthesise a
-/// `tree.on_scroll_end()` call. 150ms matches the desktop runner's
-/// trackpad-momentum-end heuristic. Too short and rapid wheels look
-/// like multiple separate gestures (each with its own bounce); too
-/// long and the user feels a noticeable lag before momentum kicks
-/// in.
-const WHEEL_IDLE_MS: u64 = 150;
 
 /// Top-level web runner.
 ///
@@ -130,13 +122,6 @@ pub struct WebApp {
     /// that don't actually correspond to a canvas size change (devtools
     /// toggle, focus changes, …).
     last_logical_size: (f32, f32),
-    /// Timestamp (ms since app start) of the most recent wheel event.
-    /// Used to synthesise a `tree.on_scroll_end()` call ~150ms after
-    /// the user stops wheeling, since DOM wheel events have no
-    /// gesture-ended phase. Without this, the scroll widget stays in
-    /// the `Scrolling` state forever and never enters Decelerating /
-    /// Bouncing — momentum and bounce-back never play.
-    last_wheel_at_ms: Option<u64>,
 }
 
 impl WebApp {
@@ -245,7 +230,6 @@ impl WebApp {
             current_tree: None,
             needs_rebuild: true,
             last_logical_size: (logical_width, logical_height),
-            last_wheel_at_ms: None,
         })
     }
 
@@ -647,25 +631,6 @@ impl WebApp {
     }
 
     fn dispatch_scroll(app: &mut Self, delta_x: f32, delta_y: f32) {
-        // Drop wheel events while any scroll widget is in the
-        // `Bouncing` state. This is the second half of the macOS
-        // trackpad-momentum fix: the inline `tree.on_gesture_end()`
-        // below starts the bounce on the *first* overscroll wheel,
-        // and `apply_scroll_delta` itself early-returns while
-        // Bouncing — but the spring still settles in 200-300ms,
-        // and the OS keeps emitting momentum-scroll wheel events
-        // for ~800ms total. Without this guard, the momentum
-        // wheels arriving *after* the spring settles get accepted
-        // by the now-`Idle` scroll, push position back into
-        // overscroll, and re-trigger `start_bounce` with a fresh
-        // initial position — that restart-cycle is the visible
-        // wobble.
-        if let Some(tree) = app.current_tree.as_ref() {
-            if tree.has_bouncing_scroll() {
-                return;
-            }
-        }
-
         // Hit-test under the cursor first (immutable borrow), then
         // walk the chain of scroll containers from leaf to root via
         // `dispatch_scroll_chain`. This is the same path the desktop
@@ -673,6 +638,17 @@ impl WebApp {
         // and is what *actually moves* the scroll position — the
         // simpler `EventRouter::on_scroll` only emits a SCROLL bubble
         // event, it does not advance scroll physics.
+        //
+        // Note: the `scroll()` builder defaults to **bounce-disabled**
+        // on wasm32 (see `widgets/scroll.rs::scroll`), so there is
+        // intentionally no inline `on_gesture_end` here — without a
+        // reliable `ScrollPhase::Ended` from the DOM there is no
+        // safe way to fire bounce-back without producing either a
+        // ~1s lag (wait for the OS-momentum tail to subside) or
+        // visible wobble (restart the spring as each momentum wheel
+        // re-overscrolls a settled `Idle` scroll). Web users that
+        // actually want bounce can opt in via
+        // `Scroll::with_config(ScrollConfig::default())`.
         let hit = {
             let tree = match app.current_tree.as_ref() {
                 Some(t) => t,
@@ -691,62 +667,7 @@ impl WebApp {
         let (mx, my) = app.ctx.event_router.mouse_position();
         if let Some(tree) = app.current_tree.as_mut() {
             tree.dispatch_scroll_chain(hit.node, &hit.ancestors, mx, my, delta_x, delta_y);
-
-            // Synthesise a `gesture-ended` *immediately* after every
-            // wheel dispatch. The desktop runner only does this when
-            // winit reports `ScrollPhase::Ended` (finger lift on a
-            // trackpad), which works because winit knows about the
-            // gesture lifetime. Browser wheel events have no phase,
-            // and macOS layers an extra ~800ms of OS-level
-            // momentum-scroll events on top of the user's actual
-            // gesture — *each* of those reset the wheel-idle timer
-            // we used to debounce. The result was a ~1s delay
-            // between scrolling past the edge and the bounce
-            // animation kicking in.
-            //
-            // `tree.on_gesture_end()` walks every scroll-physics
-            // entry, no-ops on non-overscrolling ones, and
-            // immediately starts bounce springs on overscrolling
-            // ones via `start_bounce()`. The follow-up momentum
-            // wheel events that keep firing for the next ~800ms
-            // hit the `Bouncing` early-return in
-            // [widgets/scroll.rs:504](crate::widgets::scroll), so
-            // they don't fight the spring or restart it.
-            tree.on_gesture_end();
         }
-
-        // Record the wheel timestamp so the per-frame
-        // `Self::tick_wheel_idle_check` (called from `run_one_frame`)
-        // can still synthesise an `on_scroll_end` after a quiet
-        // period. The inline `on_gesture_end` above handles the
-        // overscroll-bounce case immediately; this idle path is
-        // what eventually transitions a non-overscrolling
-        // `Scrolling` state back to `Idle` after the user has
-        // stopped wheeling, so the FSM doesn't stay armed.
-        app.last_wheel_at_ms = Some(now_ms());
-    }
-
-    /// Per-frame check: if the user hasn't wheeled in
-    /// [`WHEEL_IDLE_MS`] milliseconds, fire `tree.on_scroll_end()`
-    /// so the scroll widget can transition `Scrolling →
-    /// Decelerating` (for momentum) or `Scrolling → Bouncing` (when
-    /// overscrolling at the edge). Cleared after firing so we
-    /// don't fire it repeatedly while the user holds still.
-    ///
-    /// `now` is whatever the caller already computed via [`now_ms`]
-    /// — we take it as a parameter rather than reading the clock
-    /// again so the same frame uses a consistent timestamp.
-    fn tick_wheel_idle_check(app: &mut Self, now: u64) {
-        let Some(last) = app.last_wheel_at_ms else {
-            return;
-        };
-        if now.saturating_sub(last) < WHEEL_IDLE_MS {
-            return;
-        }
-        if let Some(ref mut tree) = app.current_tree {
-            tree.on_scroll_end();
-        }
-        app.last_wheel_at_ms = None;
     }
 
     fn dispatch_key_down(app: &mut Self, key_code: u32) {
@@ -916,13 +837,6 @@ impl WebApp {
         if let Some(ref mut tree) = self.current_tree {
             tree.tick_scroll_physics(now);
         }
-
-        // Synthesise a `gesture-ended` after a quiet period since
-        // the last wheel event. DOM wheel events don't carry a
-        // phase, so without this the scroll widget stays in the
-        // `Scrolling` state forever and never enters Decelerating
-        // / Bouncing — momentum and bounce-back never play.
-        Self::tick_wheel_idle_check(self, now);
 
         // 2. Rebuild the tree if needed. Splits the borrow so we can
         //    pass &mut ctx to the user's builder while &mut self.ui_builder
