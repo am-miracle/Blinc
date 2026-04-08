@@ -535,7 +535,7 @@ impl BarChartBuilder {
             // Vertical bars
             let available_width = self.width - padding * 2.0;
             let bar_width = if !self.data.is_empty() {
-                (available_width - self.bar_gap * (self.data.len() - 1).max(0) as f32)
+                (available_width - self.bar_gap * (self.data.len() - 1) as f32)
                     / self.data.len() as f32
             } else {
                 available_width
@@ -578,7 +578,7 @@ impl BarChartBuilder {
             // Horizontal bars
             let available_height = self.height - padding * 2.0;
             let bar_height = if !self.data.is_empty() {
-                (available_height - self.bar_gap * (self.data.len() - 1).max(0) as f32)
+                (available_height - self.bar_gap * (self.data.len() - 1) as f32)
                     / self.data.len() as f32
             } else {
                 available_height

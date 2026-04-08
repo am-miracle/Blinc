@@ -100,10 +100,10 @@ pub struct WebApp {
     /// rendering. Set on initial setup, after a resize, or when the
     /// user explicitly requests a rebuild.
     needs_rebuild: bool,
-    /// Last frame's logical width / height in CSS pixels. Used to
-    /// detect resize events without having to query the canvas every
-    /// frame (resize handling lands in Phase 3e).
-    #[allow(dead_code)]
+    /// Last frame's logical width / height in CSS pixels. Used by
+    /// [`Self::handle_resize`] to short-circuit `window.resize` events
+    /// that don't actually correspond to a canvas size change (devtools
+    /// toggle, focus changes, …).
     last_logical_size: (f32, f32),
 }
 
@@ -542,6 +542,32 @@ impl WebApp {
             closure.forget();
         }
 
+        // ----- resize (on window) -----
+        //
+        // `window.resize` fires for any viewport change — browser-window
+        // resize, devtools toggle, fullscreen enter/exit, orientation
+        // change. The actual diff against the previous canvas size lives
+        // inside `handle_resize`, which bails when nothing changed.
+        //
+        // The listener has to attach to `window`, not `canvas`: a CSS
+        // `width: 100%` canvas only sees its own dimensions change as a
+        // side-effect of the window resizing, and there is no DOM event
+        // for "an element's CSS-computed size changed" outside of
+        // `ResizeObserver` (which we can adopt later if apps need to
+        // react to non-window-driven layout shifts).
+        {
+            let app_rc = Rc::clone(&app_rc);
+            let closure = Closure::<dyn FnMut(_)>::new(move |_evt: web_sys::Event| {
+                if let Ok(mut app) = app_rc.try_borrow_mut() {
+                    Self::handle_resize(&mut app);
+                }
+            });
+            window
+                .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
+                .map_err(|e| BlincError::Platform(format!("add resize listener failed: {e:?}")))?;
+            closure.forget();
+        }
+
         Ok(())
     }
 
@@ -637,6 +663,86 @@ impl WebApp {
                 tree.dispatch_event(node, event_type, mx, my);
             }
         }
+    }
+
+    /// Re-read the canvas's CSS dimensions and `devicePixelRatio`,
+    /// resize the GPU framebuffer + surface configuration to match,
+    /// update the [`WindowedContext`] dimensions, and mark the tree
+    /// for rebuild on the next frame.
+    ///
+    /// Called from the `resize` event handler installed by
+    /// [`Self::install_input_listeners`]. Skips work entirely when
+    /// the logical dimensions haven't actually changed since the last
+    /// resize — `window.resize` fires for things like browser-tab
+    /// activation and devtools-toggle that don't actually change the
+    /// canvas size.
+    ///
+    /// Zero-size guards: a 0×0 canvas (which can happen during
+    /// fullscreen transitions or before CSS layout settles) would
+    /// produce a wgpu validation error from `surface.configure(...)`.
+    /// We bail early in that case and wait for a real resize event
+    /// to arrive.
+    fn handle_resize(app: &mut Self) {
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return,
+        };
+
+        let logical_width = app.canvas.client_width() as f32;
+        let logical_height = app.canvas.client_height() as f32;
+        if logical_width <= 0.0 || logical_height <= 0.0 {
+            // Canvas is currently zero-sized — typical during fullscreen
+            // transitions or before initial layout. Skip until a real
+            // resize event lands.
+            return;
+        }
+        let scale_factor = window.device_pixel_ratio();
+
+        // Skip if nothing actually changed. `window.resize` fires for
+        // many non-resize events (devtools toggle, focus changes…).
+        let (last_w, last_h) = app.last_logical_size;
+        let last_dpr = app.ctx.scale_factor;
+        if (last_w - logical_width).abs() < 0.5
+            && (last_h - logical_height).abs() < 0.5
+            && (last_dpr - scale_factor).abs() < 0.001
+        {
+            return;
+        }
+
+        let physical_width = (logical_width * scale_factor as f32).round().max(1.0);
+        let physical_height = (logical_height * scale_factor as f32).round().max(1.0);
+
+        // Resize the canvas's GPU framebuffer to match the new
+        // physical dimensions. The CSS size is what the browser
+        // already laid out for us; we have to push the matching
+        // pixel size into the canvas's `width`/`height` attributes
+        // before reconfiguring the wgpu surface.
+        app.canvas.set_width(physical_width as u32);
+        app.canvas.set_height(physical_height as u32);
+
+        // Update surface config and re-configure. wgpu requires a
+        // configure call any time the size changes, otherwise
+        // `get_current_texture` returns `Outdated` on the next frame.
+        app.surface_config.width = physical_width as u32;
+        app.surface_config.height = physical_height as u32;
+        app.surface
+            .configure(app.blinc_app.device(), &app.surface_config);
+
+        // Update WindowedContext dimensions so the user's UI builder
+        // sees the new logical size on the next rebuild. The renderer
+        // also reads `tree.scale_factor()` which we set per-frame in
+        // `run_one_frame`, so changing the DPR mid-resize is handled
+        // automatically by the next rebuild.
+        app.ctx.width = logical_width;
+        app.ctx.height = logical_height;
+        app.ctx.scale_factor = scale_factor;
+        app.ctx.physical_width = physical_width;
+        app.ctx.physical_height = physical_height;
+        app.last_logical_size = (logical_width, logical_height);
+
+        // Force a rebuild so the layout pass uses the new viewport
+        // dimensions on the next rAF tick.
+        app.needs_rebuild = true;
     }
 
     /// Install (or replace) the UI builder closure.
