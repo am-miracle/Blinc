@@ -105,7 +105,12 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", optional = true, features = [
     "Window",
     "Document",
+    "Element",
+    "EventTarget",
     "HtmlCanvasElement",
+    "MouseEvent",
+    "WheelEvent",
+    "KeyboardEvent",
 ] }
 console_error_panic_hook = { version = "0.1", optional = true }
 # `web-time` is in the regular `[dependencies]` table because the

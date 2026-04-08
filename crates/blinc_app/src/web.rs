@@ -35,6 +35,7 @@ use blinc_layout::div::Div;
 use blinc_layout::renderer::RenderTree;
 use blinc_layout::selector::ElementRegistry;
 use blinc_layout::widgets::overlay::overlay_manager;
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 
 use crate::app::BlincApp;
@@ -43,6 +44,23 @@ use crate::windowed::{
     RefDirtyFlag, SharedAnimationScheduler, SharedElementRegistry, SharedReactiveGraph,
     SharedReadyCallbacks, WindowedContext,
 };
+
+/// Convert a [`blinc_platform::MouseButton`] (the wasm-side input
+/// helper output) into the [`blinc_layout::event_router::MouseButton`]
+/// the dispatch path consumes. Mirrors `convert_button` from the
+/// desktop runner at `windowed.rs:2312`.
+fn convert_layout_button(
+    b: blinc_platform::MouseButton,
+) -> blinc_layout::event_router::MouseButton {
+    match b {
+        blinc_platform::MouseButton::Left => blinc_layout::event_router::MouseButton::Left,
+        blinc_platform::MouseButton::Right => blinc_layout::event_router::MouseButton::Right,
+        blinc_platform::MouseButton::Middle => blinc_layout::event_router::MouseButton::Middle,
+        blinc_platform::MouseButton::Back => blinc_layout::event_router::MouseButton::Back,
+        blinc_platform::MouseButton::Forward => blinc_layout::event_router::MouseButton::Forward,
+        blinc_platform::MouseButton::Other(n) => blinc_layout::event_router::MouseButton::Other(n),
+    }
+}
 
 /// User-supplied UI builder closure. Called once per rebuild with a
 /// mutable reference to the runner's [`WindowedContext`]. Same shape
@@ -286,6 +304,15 @@ impl WebApp {
             }
         };
 
+        // Install browser DOM event listeners. They share the same
+        // `Rc<RefCell<WebApp>>` cycle as the wake callback. The
+        // `try_borrow_mut` guard inside each handler dodges
+        // reentrancy with the rAF wake callback (which holds its own
+        // clone): if the rAF tick is mid-render when an event fires,
+        // we drop that one event rather than panicking — the next
+        // event will succeed.
+        Self::install_input_listeners(Rc::clone(&app_rc))?;
+
         // Install the wake callback and enable continuous redraw so
         // the wake fires on every rAF tick (not just when an animation
         // is active). For a UI runtime, "render every frame the
@@ -332,6 +359,284 @@ impl WebApp {
     /// font situation.
     pub fn load_font_data(&mut self, bytes: Vec<u8>) -> usize {
         self.blinc_app.load_font_data_to_registry(bytes)
+    }
+
+    /// Install browser DOM event listeners that route input through the
+    /// shared [`WindowedContext::event_router`] and dispatch the
+    /// resulting events through the cached render tree.
+    ///
+    /// This is the wasm32 sibling of the desktop runner's input pump
+    /// (`windowed.rs:2326+`). Same contract:
+    /// - Mouse coords arrive in CSS pixels (which are also logical
+    ///   pixels for our purposes — the canvas's `client_width`/
+    ///   `client_height` are CSS pixels, and the renderer's layout
+    ///   thinks in logical pixels).
+    /// - `EventRouter::on_mouse_*` returns a `Vec<(LayoutNodeId, u32)>`
+    ///   of events that need to be dispatched through
+    ///   `RenderTree::dispatch_event` to actually fire user handlers.
+    /// - Keyboard events use the legacy DOM `keyCode` (8 = Backspace,
+    ///   13 = Enter, 27 = Escape, 65-90 = A-Z, etc.) which is what the
+    ///   `EventRouter::on_key_*` API takes — no enum conversion needed.
+    ///
+    /// Each closure captures an `Rc<RefCell<WebApp>>` clone and uses
+    /// `try_borrow_mut` to dodge reentrancy with the rAF wake callback
+    /// (which holds its own clone). If the borrow fails, the event is
+    /// dropped — the next event of the same kind will succeed.
+    /// `Closure::forget()` deliberately leaks each closure for the
+    /// lifetime of the app, matching the rAF chain leak in
+    /// [`AnimationScheduler::start_raf`].
+    ///
+    /// Keyboard listeners are installed on `document` rather than the
+    /// canvas because canvases don't get keyboard focus without
+    /// `tabindex` shenanigans, and `document` events are reliably
+    /// delivered.
+    fn install_input_listeners(app_rc: Rc<RefCell<Self>>) -> Result<()> {
+        let window = web_sys::window().ok_or_else(|| {
+            BlincError::Platform(
+                "WebApp::install_input_listeners called without a global `window` object"
+                    .to_string(),
+            )
+        })?;
+        let document = window.document().ok_or_else(|| {
+            BlincError::Platform(
+                "WebApp::install_input_listeners called without a `document` object".to_string(),
+            )
+        })?;
+        // Borrow once to get a clone of the canvas reference. The
+        // canvas itself lives inside the WebApp, but `add_event_listener`
+        // only needs the EventTarget for the lifetime of the call —
+        // the closures we attach own the routing back into the WebApp.
+        let canvas = app_rc.borrow().canvas.clone();
+
+        // ----- mousemove -----
+        {
+            let app_rc = Rc::clone(&app_rc);
+            let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::MouseEvent| {
+                if let Ok(mut app) = app_rc.try_borrow_mut() {
+                    let x = evt.offset_x() as f32;
+                    let y = evt.offset_y() as f32;
+                    Self::dispatch_mouse_move(&mut app, x, y);
+                }
+            });
+            canvas
+                .add_event_listener_with_callback("mousemove", closure.as_ref().unchecked_ref())
+                .map_err(|e| {
+                    BlincError::Platform(format!("add mousemove listener failed: {e:?}"))
+                })?;
+            closure.forget();
+        }
+
+        // ----- mousedown -----
+        {
+            let app_rc = Rc::clone(&app_rc);
+            let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::MouseEvent| {
+                if let Ok(mut app) = app_rc.try_borrow_mut() {
+                    let x = evt.offset_x() as f32;
+                    let y = evt.offset_y() as f32;
+                    let button = blinc_platform_web::input::convert_mouse_button(evt.button());
+                    Self::dispatch_mouse_down(&mut app, x, y, button);
+                }
+            });
+            canvas
+                .add_event_listener_with_callback("mousedown", closure.as_ref().unchecked_ref())
+                .map_err(|e| {
+                    BlincError::Platform(format!("add mousedown listener failed: {e:?}"))
+                })?;
+            closure.forget();
+        }
+
+        // ----- mouseup -----
+        {
+            let app_rc = Rc::clone(&app_rc);
+            let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::MouseEvent| {
+                if let Ok(mut app) = app_rc.try_borrow_mut() {
+                    let x = evt.offset_x() as f32;
+                    let y = evt.offset_y() as f32;
+                    let button = blinc_platform_web::input::convert_mouse_button(evt.button());
+                    Self::dispatch_mouse_up(&mut app, x, y, button);
+                }
+            });
+            canvas
+                .add_event_listener_with_callback("mouseup", closure.as_ref().unchecked_ref())
+                .map_err(|e| BlincError::Platform(format!("add mouseup listener failed: {e:?}")))?;
+            closure.forget();
+        }
+
+        // ----- wheel -----
+        {
+            let app_rc = Rc::clone(&app_rc);
+            let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::WheelEvent| {
+                // Prevent the page from scrolling under the canvas
+                // when the user wheels over it. Apps that want page
+                // scrolling can revisit this in a future config knob.
+                evt.prevent_default();
+                if let Ok(mut app) = app_rc.try_borrow_mut() {
+                    // Normalise wheel delta to pixels. delta_mode 0 is
+                    // pixels (most browsers); 1 is lines (Firefox
+                    // legacy); 2 is pages.
+                    let multiplier: f32 = match evt.delta_mode() {
+                        0 => 1.0,            // pixels
+                        1 => 16.0,           // line ≈ 16px
+                        2 => app.ctx.height, // page = viewport height
+                        _ => 1.0,
+                    };
+                    let dx = -(evt.delta_x() as f32) * multiplier;
+                    let dy = -(evt.delta_y() as f32) * multiplier;
+                    Self::dispatch_scroll(&mut app, dx, dy);
+                }
+            });
+            canvas
+                .add_event_listener_with_callback("wheel", closure.as_ref().unchecked_ref())
+                .map_err(|e| BlincError::Platform(format!("add wheel listener failed: {e:?}")))?;
+            closure.forget();
+        }
+
+        // ----- keydown (on document, not canvas) -----
+        {
+            let app_rc = Rc::clone(&app_rc);
+            let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::KeyboardEvent| {
+                if let Ok(mut app) = app_rc.try_borrow_mut() {
+                    // The DOM `keyCode` attribute returns the legacy
+                    // virtual-key code (8 = Backspace, 13 = Enter,
+                    // 27 = Escape, 65-90 = A-Z, …). This matches the
+                    // codes the desktop runner builds in
+                    // `windowed.rs:3052` exactly, so the same widget
+                    // key shortcuts work without translation.
+                    let key_code = evt.key_code();
+                    Self::dispatch_key_down(&mut app, key_code);
+
+                    // For printable single-character keys, also
+                    // dispatch TEXT_INPUT so editor widgets can
+                    // observe the typed character. The `key()` value
+                    // is the W3C key string ("a", "Hello", "Enter"…);
+                    // we only forward single-character non-control
+                    // values, and only when no Ctrl/Cmd is held
+                    // (matches the desktop runner's behaviour).
+                    let key_str = evt.key();
+                    let mut chars = key_str.chars();
+                    if let (Some(ch), None) = (chars.next(), chars.next()) {
+                        if !ch.is_control() && !evt.ctrl_key() && !evt.meta_key() {
+                            Self::dispatch_text_input(&mut app, ch);
+                        }
+                    }
+                }
+            });
+            document
+                .add_event_listener_with_callback("keydown", closure.as_ref().unchecked_ref())
+                .map_err(|e| BlincError::Platform(format!("add keydown listener failed: {e:?}")))?;
+            closure.forget();
+        }
+
+        // ----- keyup (on document) -----
+        {
+            let app_rc = Rc::clone(&app_rc);
+            let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::KeyboardEvent| {
+                if let Ok(mut app) = app_rc.try_borrow_mut() {
+                    let key_code = evt.key_code();
+                    Self::dispatch_key_up(&mut app, key_code);
+                }
+            });
+            document
+                .add_event_listener_with_callback("keyup", closure.as_ref().unchecked_ref())
+                .map_err(|e| BlincError::Platform(format!("add keyup listener failed: {e:?}")))?;
+            closure.forget();
+        }
+
+        Ok(())
+    }
+
+    // ===========================================================================
+    // Per-event dispatch helpers
+    // ===========================================================================
+    //
+    // Each helper takes a `&mut WebApp` (already borrowed mutably by
+    // the calling closure) and runs the EventRouter call → dispatch
+    // pending events through the cached render tree. Factored out so
+    // every event-handler closure stays a one-liner.
+
+    fn dispatch_mouse_move(app: &mut Self, x: f32, y: f32) {
+        let tree = match app.current_tree.as_ref() {
+            Some(t) => t,
+            None => return,
+        };
+        let pending = app.ctx.event_router.on_mouse_move(tree, x, y);
+        Self::dispatch_pending(app, pending);
+    }
+
+    fn dispatch_mouse_down(app: &mut Self, x: f32, y: f32, button: blinc_platform::MouseButton) {
+        let tree = match app.current_tree.as_ref() {
+            Some(t) => t,
+            None => return,
+        };
+        let pending = app
+            .ctx
+            .event_router
+            .on_mouse_down(tree, x, y, convert_layout_button(button));
+        Self::dispatch_pending(app, pending);
+    }
+
+    fn dispatch_mouse_up(app: &mut Self, x: f32, y: f32, button: blinc_platform::MouseButton) {
+        let tree = match app.current_tree.as_ref() {
+            Some(t) => t,
+            None => return,
+        };
+        let pending = app
+            .ctx
+            .event_router
+            .on_mouse_up(tree, x, y, convert_layout_button(button));
+        Self::dispatch_pending(app, pending);
+    }
+
+    fn dispatch_scroll(app: &mut Self, delta_x: f32, delta_y: f32) {
+        let tree = match app.current_tree.as_ref() {
+            Some(t) => t,
+            None => return,
+        };
+        let pending = app.ctx.event_router.on_scroll(tree, delta_x, delta_y);
+        Self::dispatch_pending(app, pending);
+    }
+
+    fn dispatch_key_down(app: &mut Self, key_code: u32) {
+        if let Some((node, event_type)) = app.ctx.event_router.on_key_down(key_code) {
+            let (mx, my) = app.ctx.event_router.mouse_position();
+            if let Some(tree) = app.current_tree.as_mut() {
+                tree.dispatch_event(node, event_type, mx, my);
+            }
+        }
+    }
+
+    fn dispatch_key_up(app: &mut Self, key_code: u32) {
+        if let Some((node, event_type)) = app.ctx.event_router.on_key_up(key_code) {
+            let (mx, my) = app.ctx.event_router.mouse_position();
+            if let Some(tree) = app.current_tree.as_mut() {
+                tree.dispatch_event(node, event_type, mx, my);
+            }
+        }
+    }
+
+    fn dispatch_text_input(app: &mut Self, ch: char) {
+        if let Some((node, event_type)) = app.ctx.event_router.on_text_input(ch) {
+            let (mx, my) = app.ctx.event_router.mouse_position();
+            if let Some(tree) = app.current_tree.as_mut() {
+                tree.dispatch_event(node, event_type, mx, my);
+            }
+        }
+    }
+
+    /// Dispatch a batch of pending events through the cached render
+    /// tree. Mouse handlers all use this — the EventRouter returns a
+    /// list of (node, event_type) pairs that the tree's handler
+    /// registry needs to walk through individually.
+    fn dispatch_pending(app: &mut Self, pending: Vec<(blinc_layout::tree::LayoutNodeId, u32)>) {
+        if pending.is_empty() {
+            return;
+        }
+        let (mx, my) = app.ctx.event_router.mouse_position();
+        if let Some(tree) = app.current_tree.as_mut() {
+            for (node, event_type) in pending {
+                tree.dispatch_event(node, event_type, mx, my);
+            }
+        }
     }
 
     /// Install (or replace) the UI builder closure.
