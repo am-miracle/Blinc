@@ -614,12 +614,32 @@ impl WebApp {
     }
 
     fn dispatch_scroll(app: &mut Self, delta_x: f32, delta_y: f32) {
-        let tree = match app.current_tree.as_ref() {
-            Some(t) => t,
-            None => return,
+        // Hit-test under the cursor first (immutable borrow), then
+        // walk the chain of scroll containers from leaf to root via
+        // `dispatch_scroll_chain`. This is the same path the desktop
+        // runner takes ([`windowed.rs:3327-3340`](crate::windowed))
+        // and is what *actually moves* the scroll position — the
+        // simpler `EventRouter::on_scroll` only emits a SCROLL bubble
+        // event, it does not advance scroll physics.
+        let hit = {
+            let tree = match app.current_tree.as_ref() {
+                Some(t) => t,
+                None => return,
+            };
+            app.ctx.event_router.on_scroll_nested(tree, delta_x, delta_y)
         };
-        let pending = app.ctx.event_router.on_scroll(tree, delta_x, delta_y);
-        Self::dispatch_pending(app, pending);
+
+        let Some(hit) = hit else {
+            // Cursor isn't over any element — nothing to scroll. This
+            // happens before the user has moved the mouse over the
+            // canvas (mouse_position defaults to (0, 0)).
+            return;
+        };
+
+        let (mx, my) = app.ctx.event_router.mouse_position();
+        if let Some(tree) = app.current_tree.as_mut() {
+            tree.dispatch_scroll_chain(hit.node, &hit.ancestors, mx, my, delta_x, delta_y);
+        }
     }
 
     fn dispatch_key_down(app: &mut Self, key_code: u32) {

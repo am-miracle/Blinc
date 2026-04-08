@@ -46,7 +46,7 @@ use blinc_app::web::WebApp;
 use blinc_app::windowed::WindowedContext;
 use blinc_core::Color;
 use blinc_layout::div::{div, Div};
-use blinc_layout::prelude::Scroll;
+use blinc_layout::prelude::scroll;
 use blinc_layout::text::text;
 use wasm_bindgen::prelude::*;
 
@@ -183,7 +183,7 @@ fn build_ui(ctx: &mut WindowedContext) -> Div {
                 .rounded(16.0)
                 .bg(Color::rgba(0.11, 0.11, 0.14, 1.0))
                 .child(
-                    Scroll::new()
+                    scroll()
                         .w(ctx.width - 32.0)
                         .h(ctx.height - 96.0)
                         .rounded(16.0)
