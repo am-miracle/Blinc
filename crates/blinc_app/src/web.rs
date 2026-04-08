@@ -672,14 +672,38 @@ impl WebApp {
         let (mx, my) = app.ctx.event_router.mouse_position();
         if let Some(tree) = app.current_tree.as_mut() {
             tree.dispatch_scroll_chain(hit.node, &hit.ancestors, mx, my, delta_x, delta_y);
+
+            // Synthesise a `gesture-ended` *immediately* after every
+            // wheel dispatch. The desktop runner only does this when
+            // winit reports `ScrollPhase::Ended` (finger lift on a
+            // trackpad), which works because winit knows about the
+            // gesture lifetime. Browser wheel events have no phase,
+            // and macOS layers an extra ~800ms of OS-level
+            // momentum-scroll events on top of the user's actual
+            // gesture — *each* of those reset the wheel-idle timer
+            // we used to debounce. The result was a ~1s delay
+            // between scrolling past the edge and the bounce
+            // animation kicking in.
+            //
+            // `tree.on_gesture_end()` walks every scroll-physics
+            // entry, no-ops on non-overscrolling ones, and
+            // immediately starts bounce springs on overscrolling
+            // ones via `start_bounce()`. The follow-up momentum
+            // wheel events that keep firing for the next ~800ms
+            // hit the `Bouncing` early-return in
+            // [widgets/scroll.rs:504](crate::widgets::scroll), so
+            // they don't fight the spring or restart it.
+            tree.on_gesture_end();
         }
 
         // Record the wheel timestamp so the per-frame
         // `Self::tick_wheel_idle_check` (called from `run_one_frame`)
-        // can synthesise an `on_scroll_end` after a quiet period.
-        // DOM wheel events have no gesture-ended phase, so without
-        // this debounce the scroll widget never leaves the
-        // `Scrolling` state and momentum / bounce never play.
+        // can still synthesise an `on_scroll_end` after a quiet
+        // period. The inline `on_gesture_end` above handles the
+        // overscroll-bounce case immediately; this idle path is
+        // what eventually transitions a non-overscrolling
+        // `Scrolling` state back to `Idle` after the user has
+        // stopped wheeling, so the FSM doesn't stay armed.
         app.last_wheel_at_ms = Some(now_ms());
     }
 
