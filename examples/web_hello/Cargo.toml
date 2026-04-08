@@ -35,3 +35,9 @@ wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["console"] }
 console_error_panic_hook = "0.1"
 tracing = { workspace = true }
+# Bridge `tracing::debug!` / `tracing::warn!` from blinc_text /
+# blinc_gpu / blinc_app into the browser DevTools console so we can
+# actually see what's happening inside the wasm. Without this every
+# `tracing::debug!` line is a no-op on wasm32.
+tracing-wasm = "0.2"
+tracing-subscriber = { workspace = true, features = ["registry"] }

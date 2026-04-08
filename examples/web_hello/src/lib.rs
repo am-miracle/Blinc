@@ -18,6 +18,22 @@
 //! `python3 -m http.server`) and open `http://localhost:8000/` in
 //! Chrome 113+ (or any browser with WebGPU enabled — see the README).
 //!
+//! ## Fonts
+//!
+//! Browser-provided fonts (system fonts, `@font-face` declarations,
+//! the `FontFace` API) are NOT accessible from wgpu — they live in
+//! the browser's compositor and 2D-canvas pipeline, not in the
+//! WebGPU pipeline. Blinc needs the actual TTF/OTF bytes to feed
+//! through `swash` for glyph rasterization. The two real options are:
+//!
+//! 1. **Bundle**: `include_bytes!("../fonts/Inter.ttf")` ships the
+//!    font inside the wasm artifact. Simplest, but adds the font
+//!    file size to the wasm bundle. This example uses option 1
+//!    with a 755 KB Arial.ttf for proof-of-life.
+//! 2. **Fetch**: pre-load via `WebAssetLoader::preload(&["fonts/Inter.ttf"])`
+//!    before calling `WebApp::run`. This is the canonical pattern
+//!    for real apps and is what Phase 6 of the rollout will document.
+//!
 //! ## What's deliberately missing
 //!
 //! - **Input** — Phase 3d wires DOM events through `EventRouter`.
@@ -25,10 +41,6 @@
 //! - **Resize** — Phase 3e re-reads the canvas size and reconfigures
 //!   the surface. Until then, the canvas stays at whatever size CSS
 //!   gave it at startup.
-//! - **Fonts** — Phase 6 adds an async font preload helper. Until
-//!   then, text falls back to wgpu's built-in glyph rasterizer with
-//!   no system font lookup; "Hello, WebGPU!" renders fine because
-//!   the renderer ships its own minimal font for ASCII fallback.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -38,6 +50,14 @@ use blinc_core::Color;
 use blinc_layout::div::{div, Div};
 use blinc_layout::text::text;
 use wasm_bindgen::prelude::*;
+
+/// Bundled font. Browsers can't hand wgpu their system fonts (those
+/// live in the compositor's 2D pipeline, not in WebGPU), so the font
+/// bytes have to live on the wasm side. We `include_bytes!` Arial here
+/// for proof-of-life. Real apps should fetch fonts on demand via
+/// `WebAssetLoader::preload` (Phase 6) instead of bundling them — at
+/// 755 KB, Arial alone roughly doubles the wasm payload.
+const ARIAL_TTF: &[u8] = include_bytes!("../fonts/Arial.ttf");
 
 /// wasm-bindgen entry point. The `start` attribute makes this run
 /// automatically when the browser loads the generated `.js` shim.
@@ -53,13 +73,38 @@ pub fn _start() {
     // unreachable executed`.
     console_error_panic_hook::set_once();
 
-    // `tracing::info!` lines fire through whatever subscriber the host
-    // app installs; for this example we leave the subscriber unset
-    // (no console output) to keep the surface area minimal. A future
-    // example will demonstrate `tracing-wasm` for proper console logs.
+    // Bridge `tracing::*` macros from the Rust crates into the browser
+    // DevTools console. INFO level keeps the per-frame DEBUG lines from
+    // the renderer / scheduler / text path out of the console — at
+    // 60fps those drown the JS thread and hang the page. Bump to
+    // DEBUG temporarily when chasing a specific bug.
+    tracing_wasm::set_as_global_default_with_config(
+        tracing_wasm::WASMLayerConfigBuilder::new()
+            .set_max_level(tracing::Level::INFO)
+            .build(),
+    );
 
     wasm_bindgen_futures::spawn_local(async {
-        if let Err(e) = WebApp::run("blinc-canvas", build_ui).await {
+        // `run_with_setup` lets us touch the WebApp between init and
+        // the first frame. We use the setup hook to register Arial
+        // with the font registry — without this, every text element
+        // shapes zero glyphs and renders nothing (the wasm32 init
+        // path skips system font discovery because there's no
+        // filesystem).
+        let result = WebApp::run_with_setup(
+            "blinc-canvas",
+            |app| {
+                let faces = app.load_font_data(ARIAL_TTF.to_vec());
+                web_sys::console::log_1(
+                    &format!("blinc_web_hello: registered {faces} font face(s) from Arial.ttf")
+                        .into(),
+                );
+            },
+            build_ui,
+        )
+        .await;
+
+        if let Err(e) = result {
             // We don't have a tracing subscriber yet, so reach for
             // web-sys directly to put the error somewhere visible.
             web_sys::console::error_1(&format!("blinc_web_hello: WebApp::run failed: {e}").into());
