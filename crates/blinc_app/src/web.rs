@@ -113,10 +113,20 @@ pub struct WebApp {
     /// Cached layout tree from the most recent rebuild. `None` until
     /// the first rebuild fires.
     current_tree: Option<RenderTree>,
-    /// Whether the next frame needs to rebuild the tree before
-    /// rendering. Set on initial setup, after a resize, or when the
-    /// user explicitly requests a rebuild.
+    /// Whether the next frame needs to re-run the user's UI builder
+    /// before rendering. Set when an event handler marks the tree
+    /// dirty, when the user explicitly requests a rebuild, or when
+    /// `take_needs_rebuild` flips the global widget rebuild flag.
     needs_rebuild: bool,
+    /// Whether the next rebuild must bypass `incremental_update` and
+    /// fall back to a full `from_element_with_registry`. Set by
+    /// [`Self::handle_resize`] because viewport-size changes don't
+    /// propagate cleanly through the incremental path — parent
+    /// constraints have to be re-derived from scratch for the new
+    /// dimensions or you get the old layout stretched into the new
+    /// viewport. Mirrors `ws.needs_relayout` on the desktop runner
+    /// at [`windowed.rs:3684`](crate::windowed).
+    needs_full_rebuild: bool,
     /// Last frame's logical width / height in CSS pixels. Used by
     /// [`Self::handle_resize`] to short-circuit `window.resize` events
     /// that don't actually correspond to a canvas size change (devtools
@@ -229,6 +239,7 @@ impl WebApp {
             ui_builder: None,
             current_tree: None,
             needs_rebuild: true,
+            needs_full_rebuild: false,
             last_logical_size: (logical_width, logical_height),
         })
     }
@@ -789,8 +800,13 @@ impl WebApp {
         app.last_logical_size = (logical_width, logical_height);
 
         // Force a rebuild so the layout pass uses the new viewport
-        // dimensions on the next rAF tick.
+        // dimensions on the next rAF tick. `needs_full_rebuild`
+        // bypasses the `incremental_update` path because viewport-
+        // size changes don't propagate parent constraints cleanly
+        // through it — desktop does the same at
+        // [`windowed.rs:3684`](crate::windowed).
         app.needs_rebuild = true;
+        app.needs_full_rebuild = true;
     }
 
     /// Install (or replace) the UI builder closure.
@@ -838,9 +854,51 @@ impl WebApp {
             tree.tick_scroll_physics(now);
         }
 
-        // 2. Rebuild the tree if needed. Splits the borrow so we can
-        //    pass &mut ctx to the user's builder while &mut self.ui_builder
-        //    is also live.
+        // 2. Detect rebuild triggers. Mirrors the desktop runner's
+        //    Phase 1 polling at [`windowed.rs:3500-3535`](crate::windowed)
+        //    but trimmed to the subset that's wired up on wasm32. Each
+        //    `if` is independent — the first `true` branch wins and
+        //    the rest still execute (for the side effect of clearing
+        //    their respective dirty flags).
+        //
+        //    - `tree.needs_rebuild()` catches widgets that called
+        //      `dirty_tracker.mark_dirty(...)` from inside an event
+        //      handler (Stateful::on_state, click handlers that mutate
+        //      element state, etc.).
+        //
+        //    - `widgets::take_needs_rebuild()` catches the global
+        //      `NEEDS_REBUILD` atomic that text widgets and the
+        //      stateful registry flip when their internal state
+        //      changes (text input focus, cursor movement, …).
+        //
+        //    Without this block, drag handlers and Stateful containers
+        //    can fire all they want — the runner never re-evaluates
+        //    the user's UI builder, so nothing visibly changes on
+        //    screen.
+        if let Some(ref tree) = self.current_tree {
+            if tree.needs_rebuild() {
+                self.needs_rebuild = true;
+            }
+        }
+        if blinc_layout::widgets::take_needs_rebuild() {
+            self.needs_rebuild = true;
+        }
+
+        // 3. Rebuild / incrementally update the tree if needed.
+        //    Mirrors the desktop runner's flow at
+        //    [`windowed.rs:3653-3795`](crate::windowed): on the first
+        //    frame (no existing tree) we do a full build via
+        //    `from_element_with_registry`; on subsequent dirty
+        //    frames we hand the new element tree to
+        //    `RenderTree::incremental_update`, which preserves all
+        //    accumulated state (scroll_physics, scroll_offsets,
+        //    node_states, motion_bindings, dirty tracker, …) and
+        //    only rebuilds the subtrees whose hashes actually
+        //    changed.
+        //
+        //    Splits the borrow so we can pass `&mut ctx` to the
+        //    user's builder while `&mut self.ui_builder` is also
+        //    live.
         if self.needs_rebuild {
             let builder = match self.ui_builder.as_mut() {
                 Some(b) => b,
@@ -860,54 +918,108 @@ impl WebApp {
             // would assign fresh InstanceKeys → fresh physics →
             // scroll position resets on every resize.
             blinc_layout::reset_call_counters();
+            // Same lifecycle hooks the desktop runner clears at
+            // `windowed.rs:3657-3658` — stale Stateful base-prop
+            // updaters and click-outside handlers from the previous
+            // tree have to be dropped before the new builder runs.
+            blinc_layout::clear_stateful_base_updaters();
+            blinc_layout::click_outside::clear_click_outside_handlers();
 
             let element = builder(&mut self.ctx);
 
-            // Build a fresh render tree from the element. The shared
-            // element registry is kept across rebuilds so id-based
-            // queries stay stable.
-            let registry = Arc::clone(self.ctx.element_registry());
-            let mut tree = RenderTree::from_element_with_registry(&element, registry);
+            // `needs_full_rebuild` is the resize escape hatch — see
+            // `handle_resize`. Viewport-size changes don't propagate
+            // parent constraints cleanly through `incremental_update`,
+            // so we throw away the existing tree and build fresh.
+            // Desktop does the same at
+            // [`windowed.rs:3684-3738`](crate::windowed).
+            if self.needs_full_rebuild {
+                self.current_tree = None;
+                self.needs_full_rebuild = false;
+            }
 
-            // Wire the AnimationScheduler weak ref into the tree.
-            // Internally `set_animations` walks the existing
-            // `scroll_physics` map and calls `set_scheduler` on each
-            // entry, which is what gives the bounce-spring path a
-            // live `Weak<Mutex<AnimationScheduler>>` to upgrade
-            // inside `ScrollPhysics::tick`. Without this, the
-            // Bouncing arm of the state machine takes its
-            // "no scheduler — snap to bounds" early-out
-            // ([widgets/scroll.rs:849-861](crate::widgets::scroll))
-            // and overscroll snaps instantly instead of animating
-            // back. The desktop runner makes the same call right
-            // after `from_element_with_registry` at
-            // [windowed.rs:3700](crate::windowed).
-            tree.set_animations(&self.ctx.animations);
+            if let Some(ref mut existing_tree) = self.current_tree {
+                // Incremental update path. The framework hashes the
+                // new element tree against the stored
+                // per-node hashes and applies the minimal possible
+                // change set:
+                //
+                //   NoChanges      → nothing — early-out, render the
+                //                    existing tree as-is.
+                //   VisualOnly     → render-prop updates were applied
+                //                    in place; no relayout needed.
+                //   LayoutChanged  → render-prop updates applied in
+                //                    place, but layout dimensions
+                //                    moved → recompute layout.
+                //   ChildrenChanged → subtrees were rebuilt in place,
+                //                    layout must be recomputed.
+                //
+                // This is the same match the desktop runner does at
+                // [`windowed.rs:3748-3795`](crate::windowed). Doing
+                // a full `RenderTree::from_element_with_registry`
+                // here instead would throw away all the live tree
+                // state (scroll_physics, node_states, motion bindings,
+                // dirty tracker, …) on every dirty trigger — that's
+                // why scroll position used to snap back on click.
+                use blinc_layout::UpdateResult;
+                match existing_tree.incremental_update(&element) {
+                    UpdateResult::NoChanges | UpdateResult::VisualOnly => {
+                        // Nothing to relayout; render path picks up
+                        // the in-place prop updates.
+                    }
+                    UpdateResult::LayoutChanged | UpdateResult::ChildrenChanged => {
+                        existing_tree.compute_layout(self.ctx.width, self.ctx.height);
+                    }
+                }
+                // Clear the dirty tracker now that we've consumed
+                // its signal — without this, the next frame's
+                // `tree.needs_rebuild()` poll would still return
+                // `true` and we'd loop forever.
+                existing_tree.clear_dirty();
+            } else {
+                // First-frame build path. No tree to update yet, so
+                // construct a fresh one and wire all the per-tree
+                // services (scheduler weak ref for scroll-bounce
+                // springs, DPI scale, layout) before stashing it in
+                // `current_tree`.
+                let registry = Arc::clone(self.ctx.element_registry());
+                let mut tree = RenderTree::from_element_with_registry(&element, registry);
 
-            // CRITICAL: tell the tree about the device pixel ratio
-            // BEFORE computing layout. The renderer multiplies layout
-            // coordinates by `tree.scale_factor()` to convert
-            // logical→physical pixels inside the GPU paint context.
-            // Without this call, layout coords go straight to physical
-            // 1:1 — on a Retina display the entire UI ends up rendered
-            // into the top-left quadrant of a 2× canvas, and the rest
-            // of the surface stays at the GPU clear color (transparent
-            // black through the canvas-composited backbuffer). This is
-            // exactly what `windowed.rs:3706` does on desktop.
-            tree.set_scale_factor(self.ctx.scale_factor as f32);
+                // Wire the AnimationScheduler weak ref into the tree.
+                // Internally `set_animations` walks the existing
+                // `scroll_physics` map and calls `set_scheduler` on
+                // each entry, which is what gives the bounce-spring
+                // path a live `Weak<Mutex<AnimationScheduler>>` to
+                // upgrade inside `ScrollPhysics::tick`. The desktop
+                // runner makes the same call at
+                // [`windowed.rs:3700`](crate::windowed).
+                tree.set_animations(&self.ctx.animations);
 
-            // Layout is computed in *logical* coordinates — that's
-            // what the user's UI builder thinks in. The scale factor
-            // above is what scales the result up to physical pixels
-            // at render time.
-            tree.compute_layout(self.ctx.width, self.ctx.height);
+                // CRITICAL: tell the tree about the device pixel
+                // ratio BEFORE computing layout. The renderer
+                // multiplies layout coordinates by
+                // `tree.scale_factor()` to convert logical→physical
+                // pixels inside the GPU paint context. Without this
+                // call, layout coords go straight to physical 1:1 —
+                // on a Retina display the entire UI ends up rendered
+                // into the top-left quadrant of a 2× canvas. Same
+                // call as `windowed.rs:3706`.
+                tree.set_scale_factor(self.ctx.scale_factor as f32);
 
-            self.current_tree = Some(tree);
+                // Layout is computed in *logical* coordinates — that's
+                // what the user's UI builder thinks in. The scale
+                // factor above is what scales the result up to
+                // physical pixels at render time.
+                tree.compute_layout(self.ctx.width, self.ctx.height);
+
+                self.current_tree = Some(tree);
+            }
+
             self.needs_rebuild = false;
             self.ctx.rebuild_count = self.ctx.rebuild_count.saturating_add(1);
         }
 
-        // 3. Render the tree to the next surface texture. If we don't
+        // 4. Render the tree to the next surface texture. If we don't
         //    have a tree yet (no builder set), bail out gracefully.
         let tree = match self.current_tree.as_ref() {
             Some(t) => t,
