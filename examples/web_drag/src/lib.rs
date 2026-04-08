@@ -81,19 +81,18 @@ impl blinc_layout::stateful::StateTransitions for DragFSM {
     }
 }
 
-/// Atomic state for the draggable card: position + dragging flag
-/// change together via `State::update` so an intermediate frame
-/// never sees one updated before the other.
-#[derive(Clone, Debug, Default)]
-struct CardState {
-    /// Visual offset from the card's natural layout position. Reset
-    /// to (0, 0) every drag end so the next drag starts fresh.
-    offset_x: f32,
-    offset_y: f32,
-    /// Whether a drag is currently in progress. Drives the visual
-    /// "lifted" treatment (raised z-index, slightly transparent).
-    dragging: bool,
-}
+/// Visual offset of the card from its natural layout position.
+/// Stored in a single tuple so a `State::update` rewrites both axes
+/// atomically — the rebuild that follows always sees a consistent
+/// pair instead of x-from-frame-N + y-from-frame-N+1.
+///
+/// We deliberately do *not* track an "is dragging" bool here. The
+/// Stateful container already owns a `DragFSM` (`Idle` /
+/// `Dragging`) that the framework transitions automatically as
+/// DRAG / DRAG_END / POINTER_UP events fire — the on_state body
+/// reads that via `ctx.state()` instead of duplicating the
+/// dragging flag here.
+type CardOffset = (f32, f32);
 
 /// wasm-bindgen entry point. The `start` attribute makes this run
 /// automatically when the browser loads the generated `.js` shim.
@@ -162,37 +161,44 @@ fn build_ui(_ctx: &mut WindowedContext) -> Div {
 
 /// The draggable card. Single Stateful container that:
 ///
-/// - Owns a `CardState` cell holding the visual offset and the
-///   `dragging` flag, both keyed under `"web_drag_card"` so the
-///   state survives tree rebuilds.
-/// - Re-runs its `on_state` body whenever the cell's signal
-///   changes (the `deps([...])` line wires the dependency).
-/// - Captures the cell into the `on_mouse_down` / `on_drag` /
-///   `on_drag_end` closures and mutates it via `state.update(...)`,
-///   which flips `ref_dirty_flag` via the BlincContextState
-///   singleton — the runner picks that up on the next frame and
-///   rebuilds.
+/// - Holds its dragging-vs-idle status in the framework's built-in
+///   `DragFSM` — `ctx.state()` inside the on_state body returns
+///   the current FSM state, no parallel `bool` needed. The
+///   framework transitions Idle → Dragging on the first DRAG
+///   event and Dragging → Idle on DRAG_END / POINTER_UP via the
+///   `StateTransitions` impl above.
 ///
-/// This is structurally identical to the `sortable_list_section`
-/// in [`sortable_demo.rs`](../../crates/blinc_app/examples/sortable_demo.rs#L324),
-/// minus the multi-item swap detection — it's just one card you
-/// can move around.
+/// - Holds the *visual offset* in a separate `State<CardOffset>`
+///   cell, listed in `deps([offset.signal_id()])`. The offset
+///   changes on every drag tick — much more frequently than the
+///   FSM transition — so decoupling the two cells keeps the
+///   re-render cadence right and matches the same split the
+///   `sortable_list_section` in
+///   [`sortable_demo.rs`](../../crates/blinc_app/examples/sortable_demo.rs#L324)
+///   uses (`State<SortListState>` for the items + `State<f32>`
+///   for `drag_offset`).
+///
+/// - Each handler captures its own clone of the offset cell and
+///   mutates it via `set` / `update`. Those mutations flip
+///   `ref_dirty_flag` through the `BlincContextState` singleton,
+///   the runner picks that up on the next frame, and the
+///   incremental update path re-runs the on_state body with the
+///   fresh values.
 fn draggable_card() -> Stateful<DragFSM> {
     let blinc = BlincContextState::get();
-    let state: State<CardState> = blinc.use_state_keyed("web_drag_card", CardState::default);
+    let offset: State<CardOffset> = blinc.use_state_keyed("web_drag_offset", || (0.0, 0.0));
 
     // Clones for each handler. The native sortable demo follows the
     // same pattern — every closure that captures the state cell
     // takes its own clone, so the borrow checker stays happy.
-    let state_for_render = state.clone();
-    let state_for_down = state.clone();
-    let state_for_drag = state.clone();
-    let state_for_end = state.clone();
+    let offset_for_drag = offset.clone();
+    let offset_for_end = offset.clone();
 
     stateful_with_key::<DragFSM>("web-drag-card-container")
-        .deps([state.signal_id()])
-        .on_state(move |_ctx| {
-            let s = state_for_render.get();
+        .deps([offset.signal_id()])
+        .on_state(move |ctx| {
+            let (ox, oy) = offset.get();
+            let dragging = matches!(ctx.state(), DragFSM::Dragging);
 
             let mut card = div()
                 .w(220.0)
@@ -211,49 +217,34 @@ fn draggable_card() -> Stateful<DragFSM> {
             // While dragging: lift visually via translate + opacity
             // dip + raised z-index. Same recipe as
             // `sortable_demo.rs:379-384`.
-            if s.dragging {
+            if dragging {
                 card = card
-                    .transform(Transform::translate(s.offset_x, s.offset_y))
+                    .transform(Transform::translate(ox, oy))
                     .opacity(0.85)
                     .z_index(100);
             }
 
             card
         })
-        .on_mouse_down(move |_e| {
-            // Mark the card as dragging. The visual offset starts
-            // at (0, 0) — the EventRouter's drag tracker will feed
-            // us cumulative deltas in `e.drag_delta_*` from the
-            // mousedown anchor onward.
-            state_for_down.update(|mut s| {
-                s.dragging = true;
-                s.offset_x = 0.0;
-                s.offset_y = 0.0;
-                s
-            });
-        })
         .on_drag(move |e| {
             // Update offset directly from the drag deltas the
             // EventRouter accumulates. These are computed
             // relative to the mousedown anchor, so they go to
             // (0, 0) at the start of each drag and grow as the
-            // pointer moves.
-            state_for_drag.update(|mut s| {
-                s.offset_x = e.drag_delta_x;
-                s.offset_y = e.drag_delta_y;
-                s
-            });
+            // pointer moves. The DragFSM transition Idle →
+            // Dragging happens automatically inside the
+            // Stateful's `register_state_handlers` path on the
+            // same DRAG event that fires us, so by the time the
+            // next rebuild runs, `ctx.state()` is already
+            // `DragFSM::Dragging`.
+            offset_for_drag.set((e.drag_delta_x, e.drag_delta_y));
         })
         .on_drag_end(move |_e| {
-            // Reset visual state on drop. The card animates back
-            // to (0, 0) instantly because there's no transition on
-            // it — for a smoother release, this is where you'd
-            // start a spring on the offset.
-            state_for_end.update(|mut s| {
-                s.dragging = false;
-                s.offset_x = 0.0;
-                s.offset_y = 0.0;
-                s
-            });
+            // Snap back to the layout position. The DragFSM
+            // transition Dragging → Idle is fired by the framework
+            // on DRAG_END, so we just need to reset our visual
+            // offset and let the next rebuild render the card at
+            // its layout position.
+            offset_for_end.set((0.0, 0.0));
         })
 }
