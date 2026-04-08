@@ -647,6 +647,25 @@ impl WebApp {
     }
 
     fn dispatch_scroll(app: &mut Self, delta_x: f32, delta_y: f32) {
+        // Drop wheel events while any scroll widget is in the
+        // `Bouncing` state. This is the second half of the macOS
+        // trackpad-momentum fix: the inline `tree.on_gesture_end()`
+        // below starts the bounce on the *first* overscroll wheel,
+        // and `apply_scroll_delta` itself early-returns while
+        // Bouncing — but the spring still settles in 200-300ms,
+        // and the OS keeps emitting momentum-scroll wheel events
+        // for ~800ms total. Without this guard, the momentum
+        // wheels arriving *after* the spring settles get accepted
+        // by the now-`Idle` scroll, push position back into
+        // overscroll, and re-trigger `start_bounce` with a fresh
+        // initial position — that restart-cycle is the visible
+        // wobble.
+        if let Some(tree) = app.current_tree.as_ref() {
+            if tree.has_bouncing_scroll() {
+                return;
+            }
+        }
+
         // Hit-test under the cursor first (immutable borrow), then
         // walk the chain of scroll containers from leaf to root via
         // `dispatch_scroll_chain`. This is the same path the desktop

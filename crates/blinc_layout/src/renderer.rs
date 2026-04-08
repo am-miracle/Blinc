@@ -4118,6 +4118,22 @@ impl RenderTree {
         }
     }
 
+    /// Returns `true` if any registered scroll physics is currently in
+    /// the `Bouncing` state — i.e. an edge bounce-back spring is
+    /// actively animating.
+    ///
+    /// Used by the web runner to absorb the macOS trackpad's ~800ms
+    /// of OS-level momentum-scroll wheel events that arrive *after*
+    /// a bounce has started: instead of letting them re-trigger
+    /// `start_bounce` (which restarts the spring with a new initial
+    /// position and produces a wobble), the runner drops the wheel
+    /// event entirely while this returns true.
+    pub fn has_bouncing_scroll(&self) -> bool {
+        self.scroll_physics
+            .values()
+            .any(|p| p.lock().unwrap().state == crate::stateful::ScrollState::Bouncing)
+    }
+
     /// Tick all scroll physics and return true if any are animating
     ///
     /// Call this each frame with the current time in milliseconds.
