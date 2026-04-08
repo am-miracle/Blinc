@@ -243,14 +243,14 @@ impl GradientTextureCache {
         // Initialize with a white-to-white gradient (placeholder)
         let placeholder = RasterizedGradient::two_stop(Color::WHITE, Color::WHITE);
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &placeholder.pixels,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(GRADIENT_TEXTURE_WIDTH * 4),
                 rows_per_image: Some(1),
@@ -301,14 +301,14 @@ impl GradientTextureCache {
 
         // Upload to GPU
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             pixels,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(GRADIENT_TEXTURE_WIDTH * 4),
                 rows_per_image: Some(1),
@@ -328,14 +328,14 @@ impl GradientTextureCache {
     /// Upload a rasterized gradient to the GPU texture (legacy method)
     pub fn upload(&mut self, queue: &wgpu::Queue, gradient: &RasterizedGradient) {
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &gradient.pixels,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(GRADIENT_TEXTURE_WIDTH * 4),
                 rows_per_image: Some(1),

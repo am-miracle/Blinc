@@ -227,13 +227,13 @@ impl Backbuffer {
         surface_texture: &wgpu::Texture,
     ) {
         encoder.copy_texture_to_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &self.buffers[self.write_index].texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: surface_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,

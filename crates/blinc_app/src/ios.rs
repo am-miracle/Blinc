@@ -1360,7 +1360,7 @@ pub extern "C" fn blinc_init_gpu(
     };
 
     // Create wgpu instance with Metal backend
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::METAL,
         ..Default::default()
     });

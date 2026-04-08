@@ -59,9 +59,13 @@ web-time = "1.1"
 [target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
 open = "5"
 
-# Clipboard (cross-platform text + image) — every native target. arboard
-# does not compile on `wasm32-unknown-unknown` (no platform backend), so
-# the web runner provides its own stubs / async impl in
-# `widgets/text_edit.rs` under `cfg(target_arch = "wasm32")`.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Clipboard (cross-platform text + image) — desktop + iOS only.
+# `arboard` does not compile on `wasm32-unknown-unknown` (no platform
+# backend) or on Android (no X11/Wayland/UIKit clipboard layer either).
+# The wasm runner provides its own stubs / async impl in
+# `widgets/text_edit.rs` under `cfg(target_arch = "wasm32")`; the
+# Android runner stubs the clipboard via the system clipboard service
+# in `BlincNativeBridge.kt` and the matching Rust handler that the
+# native bridge dispatches into.
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
 arboard = "3"

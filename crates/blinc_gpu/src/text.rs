@@ -671,14 +671,14 @@ impl TextRenderingContext {
         // Upload pixel data
         if let Some(texture) = &self.atlas_texture {
             self.queue.write_texture(
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
                 pixels,
-                wgpu::ImageDataLayout {
+                wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(width),
                     rows_per_image: Some(height),
@@ -727,14 +727,14 @@ impl TextRenderingContext {
         // Upload pixel data (RGBA = 4 bytes per pixel)
         if let Some(texture) = &self.color_atlas_texture {
             self.queue.write_texture(
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
                 pixels,
-                wgpu::ImageDataLayout {
+                wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(width * 4), // 4 bytes per pixel for RGBA
                     rows_per_image: Some(height),

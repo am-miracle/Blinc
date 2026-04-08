@@ -52,8 +52,17 @@ rust-version = "1.75"
 # zyntax_zrtl = { git = "https://github.com/darmie/zyntax" }
 
 # GPU rendering
-wgpu = "23.0"
-naga = "23.0"
+#
+# Pinned to wgpu 26.0.1 + wgpu-hal 26.0.6: wgpu 23 hits a "Parent device
+# is lost" crash on the Pixel 10 Pro / Tensor G5 PowerVR D-Series Vulkan
+# driver (25.1@6794074) during SDF render-pipeline creation. The 26.0.6
+# wgpu-hal patch series ships fixes for several PowerVR/Mali pipeline-
+# creation issues. Avoiding 27/28/29 because they carry their own
+# regressions and we want a stable, known-good base. wgpu-hal is a
+# transitive dep — bumping `wgpu = "=26.0.1"` pulls wgpu-hal 26.0.6 via
+# its `^26.0` constraint.
+wgpu = "=26.0.1"
+naga = "=26.0.0"
 bytemuck = { version = "1.14", features = ["derive"] }
 
 # Layout engine

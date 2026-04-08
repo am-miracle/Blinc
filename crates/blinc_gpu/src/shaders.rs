@@ -219,16 +219,25 @@ fn vs_main(
     // Triangle 1: 0 → 1 → 3 (TL → TR → BL) - upper-left triangle
     // Triangle 2: 1 → 2 → 3 (TR → BR → BL) - lower-right triangle
     // Shared edge: 1-3 (top-right to bottom-left = / diagonal)
-    let quad_verts = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 0.0), // 0 - top-left
-        vec2<f32>(1.0, 0.0), // 1 - top-right
-        vec2<f32>(0.0, 1.0), // 3 - bottom-left
-        vec2<f32>(1.0, 0.0), // 1 - top-right
-        vec2<f32>(1.0, 1.0), // 2 - bottom-right
-        vec2<f32>(0.0, 1.0), // 3 - bottom-left
-    );
-
-    let uv = quad_verts[vertex_index];
+    //
+    // PowerVR Vulkan codegen bug workaround: dynamic indexing into a
+    // `let array<...>(literal)` produces an `OpConstantComposite` +
+    // `OpAccessChain` pattern that the Pixel 10 Pro / Tensor G5
+    // PowerVR driver compiles incorrectly — vertex_index 0..2 work
+    // but 3..5 silently produce degenerate output, collapsing the
+    // second triangle to a point and leaving every primitive a
+    // half-quad. Replacing the array-literal indexing with an explicit
+    // `switch` forces naga to emit `OpSwitch`, which the driver
+    // handles correctly. Confirmed on Android 16 / driver 25.1@6794074.
+    var uv: vec2<f32>;
+    switch vertex_index {
+        case 0u: { uv = vec2<f32>(0.0, 0.0); } // 0 - top-left
+        case 1u: { uv = vec2<f32>(1.0, 0.0); } // 1 - top-right
+        case 2u: { uv = vec2<f32>(0.0, 1.0); } // 3 - bottom-left
+        case 3u: { uv = vec2<f32>(1.0, 0.0); } // 1 - top-right
+        case 4u: { uv = vec2<f32>(1.0, 1.0); } // 2 - bottom-right
+        default: { uv = vec2<f32>(0.0, 1.0); } // 3 - bottom-left
+    }
     let pos = vec2<f32>(
         bounds.x + uv.x * bounds.z,
         bounds.y + uv.y * bounds.w
@@ -1660,16 +1669,19 @@ fn vs_main(
 
     // Generate quad vertices
     // Quad vertices split along / diagonal (1-3 shared edge)
-    let quad_verts = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 0.0), // 0 - top-left
-        vec2<f32>(1.0, 0.0), // 1 - top-right
-        vec2<f32>(0.0, 1.0), // 3 - bottom-left
-        vec2<f32>(1.0, 0.0), // 1 - top-right
-        vec2<f32>(1.0, 1.0), // 2 - bottom-right
-        vec2<f32>(0.0, 1.0), // 3 - bottom-left
-    );
-
-    let local_uv = quad_verts[vertex_index];
+    // PowerVR Vulkan codegen bug workaround — see SDF_SHADER vs_main
+    // for the rationale. `let array<...>(literal)[runtime]` is broken
+    // for indices 3..5 on the Pixel 10 Pro PowerVR driver; an explicit
+    // `switch` keeps the same vertex layout and renders correctly.
+    var local_uv: vec2<f32>;
+    switch vertex_index {
+        case 0u: { local_uv = vec2<f32>(0.0, 0.0); } // 0 - top-left
+        case 1u: { local_uv = vec2<f32>(1.0, 0.0); } // 1 - top-right
+        case 2u: { local_uv = vec2<f32>(0.0, 1.0); } // 3 - bottom-left
+        case 3u: { local_uv = vec2<f32>(1.0, 0.0); } // 1 - top-right
+        case 4u: { local_uv = vec2<f32>(1.0, 1.0); } // 2 - bottom-right
+        default: { local_uv = vec2<f32>(0.0, 1.0); } // 3 - bottom-left
+    }
 
     // Position in screen space
     let pos = vec2<f32>(
@@ -1858,16 +1870,19 @@ fn vs_main(
     );
 
     // Generate quad vertices split along / diagonal (1-3 shared edge)
-    let quad_verts = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 0.0), // 0 - top-left
-        vec2<f32>(1.0, 0.0), // 1 - top-right
-        vec2<f32>(0.0, 1.0), // 3 - bottom-left
-        vec2<f32>(1.0, 0.0), // 1 - top-right
-        vec2<f32>(1.0, 1.0), // 2 - bottom-right
-        vec2<f32>(0.0, 1.0), // 3 - bottom-left
-    );
-
-    let local_uv = quad_verts[vertex_index];
+    // PowerVR Vulkan codegen bug workaround — see SDF_SHADER vs_main
+    // for the rationale. `let array<...>(literal)[runtime]` is broken
+    // for indices 3..5 on the Pixel 10 Pro PowerVR driver; an explicit
+    // `switch` keeps the same vertex layout and renders correctly.
+    var local_uv: vec2<f32>;
+    switch vertex_index {
+        case 0u: { local_uv = vec2<f32>(0.0, 0.0); } // 0 - top-left
+        case 1u: { local_uv = vec2<f32>(1.0, 0.0); } // 1 - top-right
+        case 2u: { local_uv = vec2<f32>(0.0, 1.0); } // 3 - bottom-left
+        case 3u: { local_uv = vec2<f32>(1.0, 0.0); } // 1 - top-right
+        case 4u: { local_uv = vec2<f32>(1.0, 1.0); } // 2 - bottom-right
+        default: { local_uv = vec2<f32>(0.0, 1.0); } // 3 - bottom-left
+    }
     let pos = vec2<f32>(
         bounds.x + local_uv.x * bounds.z,
         bounds.y + local_uv.y * bounds.w
@@ -2463,16 +2478,19 @@ fn vs_main(
     );
 
     // Generate quad vertices split along / diagonal (1-3 shared edge)
-    let quad_verts = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 0.0), // 0 - top-left
-        vec2<f32>(1.0, 0.0), // 1 - top-right
-        vec2<f32>(0.0, 1.0), // 3 - bottom-left
-        vec2<f32>(1.0, 0.0), // 1 - top-right
-        vec2<f32>(1.0, 1.0), // 2 - bottom-right
-        vec2<f32>(0.0, 1.0), // 3 - bottom-left
-    );
-
-    let local_uv = quad_verts[vertex_index];
+    // PowerVR Vulkan codegen bug workaround — see SDF_SHADER vs_main
+    // for the rationale. `let array<...>(literal)[runtime]` is broken
+    // for indices 3..5 on the Pixel 10 Pro PowerVR driver; an explicit
+    // `switch` keeps the same vertex layout and renders correctly.
+    var local_uv: vec2<f32>;
+    switch vertex_index {
+        case 0u: { local_uv = vec2<f32>(0.0, 0.0); } // 0 - top-left
+        case 1u: { local_uv = vec2<f32>(1.0, 0.0); } // 1 - top-right
+        case 2u: { local_uv = vec2<f32>(0.0, 1.0); } // 3 - bottom-left
+        case 3u: { local_uv = vec2<f32>(1.0, 0.0); } // 1 - top-right
+        case 4u: { local_uv = vec2<f32>(1.0, 1.0); } // 2 - bottom-right
+        default: { local_uv = vec2<f32>(0.0, 1.0); } // 3 - bottom-left
+    }
     let pos = vec2<f32>(
         bounds.x + local_uv.x * bounds.z,
         bounds.y + local_uv.y * bounds.w

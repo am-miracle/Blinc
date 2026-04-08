@@ -265,13 +265,45 @@ impl AndroidApp {
                                 match Self::init_gpu(&window) {
                                     Ok((app_instance, surf)) => {
                                         let format = app_instance.texture_format();
+                                        // Use `Inherit` rather than `Auto`.
+                                        //
+                                        // The Pixel 10 Pro / Tensor G5
+                                        // PowerVR Vulkan driver
+                                        // (25.1@6794074) ONLY reports
+                                        // `[Inherit]` as a supported
+                                        // composite alpha mode — `Opaque`
+                                        // is rejected at `Surface::configure`
+                                        // with a validation error. `Auto`
+                                        // also resolves to `Inherit` here,
+                                        // but goes through a code path that
+                                        // produced a blank/black surface.
+                                        // Forcing `Inherit` explicitly works
+                                        // around it. Per the Vulkan spec
+                                        // (VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR),
+                                        // the application is responsible for
+                                        // configuring the host window's
+                                        // alpha treatment — we do that on
+                                        // the Java side by setting
+                                        // `window.setFormat(PixelFormat.OPAQUE)`
+                                        // in `MainActivity.onCreate` so the
+                                        // SurfaceFlinger composes our
+                                        // framebuffer as fully opaque.
+                                        let alpha_mode = wgpu::CompositeAlphaMode::Inherit;
+                                        tracing::info!(
+                                            "Android surface: format={:?}, alpha_mode={:?}, size={}x{}",
+                                            format,
+                                            alpha_mode,
+                                            width,
+                                            height,
+                                        );
+
                                         let config = wgpu::SurfaceConfiguration {
                                             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                                             format,
                                             width,
                                             height,
                                             present_mode: wgpu::PresentMode::AutoVsync,
-                                            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                                            alpha_mode,
                                             view_formats: vec![],
                                             desired_maximum_frame_latency: 2,
                                         };
@@ -989,8 +1021,30 @@ impl AndroidApp {
                     &render_tree,
                 ) {
                     // Render
-                    match surf.get_current_texture() {
+                    //
+                    // The PowerVR Vulkan driver on the Pixel 10 Pro
+                    // appears to mark every acquired SurfaceTexture as
+                    // `suboptimal`, and on some drivers a suboptimal
+                    // texture's contents are silently discarded during
+                    // presentation. We log + reconfigure when that
+                    // happens, mirroring the desktop runner. We also
+                    // explicitly handle `Outdated`, which the wgpu 26
+                    // surface API can return after the swapchain becomes
+                    // stale (e.g. after a window resize the runner
+                    // hasn't picked up yet).
+                    let frame = surf.get_current_texture();
+                    static SUBOPTIMAL_LOGGED: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    match frame {
                         Ok(output) => {
+                            if output.suboptimal
+                                && !SUBOPTIMAL_LOGGED
+                                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+                            {
+                                tracing::warn!(
+                                    "SurfaceTexture is suboptimal — will reconfigure swapchain"
+                                );
+                            }
                             let view = output.texture.create_view(&Default::default());
                             if let Err(e) = app_instance.render_tree_with_motion(
                                 tree,
@@ -1001,9 +1055,17 @@ impl AndroidApp {
                             ) {
                                 tracing::error!("Render error: {}", e);
                             }
+                            let was_suboptimal = output.suboptimal;
                             output.present();
+                            if was_suboptimal {
+                                surf.configure(&app_instance.device(), config);
+                            }
                         }
-                        Err(wgpu::SurfaceError::Lost) => {
+                        Err(wgpu::SurfaceError::Lost)
+                        | Err(wgpu::SurfaceError::Outdated) => {
+                            tracing::warn!(
+                                "Surface lost / outdated — reconfiguring swapchain"
+                            );
                             surf.configure(&app_instance.device(), config);
                         }
                         Err(wgpu::SurfaceError::OutOfMemory) => {
@@ -1062,6 +1124,39 @@ impl AndroidApp {
     fn init_gpu(window: &NativeWindow) -> Result<(BlincApp, wgpu::Surface<'static>)> {
         use blinc_gpu::{GpuRenderer, RendererConfig, TextRenderingContext};
 
+        // Force the underlying ANativeWindow to use an opaque (no-alpha)
+        // pixel format BEFORE we create the wgpu/Vulkan swapchain on it.
+        //
+        // Why: NativeActivity windows default to a TRANSLUCENT pixel
+        // format on modern Android, which makes SurfaceFlinger composite
+        // our framebuffer using its alpha channel. On the Pixel 10 Pro /
+        // Tensor G5 PowerVR Vulkan driver this combines with `Inherit`
+        // composite alpha to produce a fully invisible window even though
+        // wgpu is rendering opaque content. `R8G8B8X8_UNORM` (the modern
+        // alias of the legacy `WINDOW_FORMAT_RGBX_8888`) tells the
+        // compositor "this surface has no alpha — treat every pixel as
+        // opaque". The Java-side `window.setFormat(PixelFormat.OPAQUE)`
+        // we set in MainActivity is silently overridden once the
+        // NativeActivity's native window comes up, so this NDK-side call
+        // (which lives in the same process and runs after InitWindow) is
+        // the authoritative one. Calling it on a window that's already
+        // RGBA8888 is harmless on devices where the bug doesn't apply.
+        if let Err(e) = window.set_buffers_geometry(
+            0,
+            0,
+            Some(ndk::hardware_buffer_format::HardwareBufferFormat::R8G8B8X8_UNORM),
+        ) {
+            tracing::warn!(
+                "ANativeWindow_setBuffersGeometry(R8G8B8X8_UNORM) failed: {} \
+                — surface may composite with alpha and appear blank on PowerVR-class GPUs",
+                e
+            );
+        } else {
+            tracing::info!(
+                "ANativeWindow buffer format forced to R8G8B8X8_UNORM (opaque)"
+            );
+        }
+
         let config = crate::BlincConfig::default();
 
         let renderer_config = RendererConfig {
@@ -1075,7 +1170,7 @@ impl AndroidApp {
         };
 
         // Create instance with Vulkan backend
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
         });

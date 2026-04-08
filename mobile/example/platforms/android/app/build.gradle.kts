@@ -5,12 +5,16 @@ plugins {
 
 android {
     namespace = "com.blinc.example"
-    compileSdk = 34
+    // compileSdk 35 (Android 15) gives us the platform headers needed
+    // for the 16 KB-page-size APK packaging the Pixel 10 Pro / Android
+    // 16 enforces. Bumping past 34 also means the AGP zip-aligner
+    // automatically pads native libs to 16 KB.
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.blinc.example"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
@@ -32,6 +36,17 @@ android {
 
     kotlinOptions {
         jvmTarget = "1.8"
+    }
+
+    // Force jniLibs to be stored uncompressed and 16 KB-aligned within
+    // the APK. AGP 8.5+ does this automatically when targetSdk >= 35,
+    // but being explicit guards against future regressions and signals
+    // intent. `useLegacyPackaging = false` is the default in AGP 8+ but
+    // older example projects sometimes flip it on.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
     }
 
     sourceSets {

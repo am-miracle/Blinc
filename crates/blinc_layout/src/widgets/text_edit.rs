@@ -143,9 +143,28 @@ pub fn word_at_position(text: &str, char_pos: usize) -> (usize, usize) {
     }
 }
 
+// =============================================================================
+// Clipboard adapters
+// =============================================================================
+//
+// `arboard` covers macOS, Windows, Linux, and iOS — but NOT
+// `wasm32-unknown-unknown` (no platform backend) and NOT
+// `target_os = "android"` (no X11/Wayland or UIKit clipboard
+// layer that arboard knows how to talk to). Both excluded targets
+// fall back to no-op stubs here. The Android runner can still
+// reach the system clipboard through the
+// `clipboard.copy` / `clipboard.paste` namespace handlers in
+// `BlincNativeBridge.kt`, which apps wire up via the native
+// bridge — that path is intentionally not surfaced through these
+// sync helpers because the rich-text editor's Cmd+C / Cmd+V
+// keybinds expect a synchronous return.
+//
+// `cfg(any(target_arch = "wasm32", target_os = "android"))` is
+// the no-op path; everything else uses arboard.
+
 /// Read text from the system clipboard.
-/// Cross-platform via arboard (macOS, Windows, Linux).
-#[cfg(not(target_arch = "wasm32"))]
+/// Cross-platform via arboard (macOS, Windows, Linux, iOS).
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn clipboard_read() -> Option<String> {
     arboard::Clipboard::new()
         .ok()
@@ -153,18 +172,19 @@ pub fn clipboard_read() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
-/// Wasm32 stub. The browser clipboard API is async-only — `web_sys::Clipboard::read_text`
-/// returns a `Promise`. The Phase 0 stub returns `None` so the rich text
-/// editor's Cmd+V no-ops without crashing; a real async clipboard impl
-/// lands once the web runner is up (Phase 5 of the WASM rollout plan).
-#[cfg(target_arch = "wasm32")]
+/// Stub for wasm32 + Android. The browser clipboard API is
+/// async-only and the Android system clipboard is reached via the
+/// native bridge (`clipboard.paste` namespace) instead of a
+/// synchronous helper. Returns `None` so Cmd+V keybinds in the
+/// rich text editor no-op without crashing.
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
 pub fn clipboard_read() -> Option<String> {
     None
 }
 
 /// Write text to the system clipboard.
-/// Cross-platform via arboard (macOS, Windows, Linux).
-#[cfg(not(target_arch = "wasm32"))]
+/// Cross-platform via arboard (macOS, Windows, Linux, iOS).
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn clipboard_write(text: &str) -> bool {
     arboard::Clipboard::new()
         .ok()
@@ -172,29 +192,29 @@ pub fn clipboard_write(text: &str) -> bool {
         .is_some()
 }
 
-/// Wasm32 stub. See [`clipboard_read`] for the rationale.
-#[cfg(target_arch = "wasm32")]
+/// Stub for wasm32 + Android. See [`clipboard_read`] for rationale.
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
 pub fn clipboard_write(_text: &str) -> bool {
     false
 }
 
 /// Read image from the system clipboard as RGBA pixels.
 /// Returns (rgba_data, width, height) or None.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn clipboard_read_image() -> Option<(Vec<u8>, u32, u32)> {
     let mut cb = arboard::Clipboard::new().ok()?;
     let img = cb.get_image().ok()?;
     Some((img.bytes.into_owned(), img.width as u32, img.height as u32))
 }
 
-/// Wasm32 stub. See [`clipboard_read`] for the rationale.
-#[cfg(target_arch = "wasm32")]
+/// Stub for wasm32 + Android. See [`clipboard_read`] for rationale.
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
 pub fn clipboard_read_image() -> Option<(Vec<u8>, u32, u32)> {
     None
 }
 
 /// Write image to the system clipboard from RGBA pixels.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn clipboard_write_image(rgba: &[u8], width: u32, height: u32) -> bool {
     let img = arboard::ImageData {
         width: width as usize,
@@ -207,8 +227,8 @@ pub fn clipboard_write_image(rgba: &[u8], width: u32, height: u32) -> bool {
         .is_some()
 }
 
-/// Wasm32 stub. See [`clipboard_read`] for the rationale.
-#[cfg(target_arch = "wasm32")]
+/// Stub for wasm32 + Android. See [`clipboard_read`] for rationale.
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
 pub fn clipboard_write_image(_rgba: &[u8], _width: u32, _height: u32) -> bool {
     false
 }

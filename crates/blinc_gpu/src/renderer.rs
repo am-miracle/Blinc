@@ -1114,7 +1114,7 @@ impl GpuRenderer {
 
     /// Create a new renderer without a surface (for headless rendering)
     pub async fn new(config: RendererConfig) -> Result<Self, RendererError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: Self::preferred_backends(),
             ..Default::default()
         });
@@ -1126,7 +1126,7 @@ impl GpuRenderer {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or(RendererError::AdapterNotFound)?;
+            .map_err(|_| RendererError::AdapterNotFound)?;
 
         let required_limits = device_required_limits(&adapter);
         let config = apply_renderer_config_overrides(config, &required_limits);
@@ -1142,8 +1142,8 @@ impl GpuRenderer {
                     // This helps reduce RSS on integrated GPUs (Apple Silicon) where GPU memory
                     // is shared with CPU and counts against process memory.
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
+                    trace: wgpu::Trace::Off,
                 },
-                None,
             )
             .await
             .map_err(RendererError::DeviceError)?;
@@ -1179,7 +1179,7 @@ impl GpuRenderer {
             + Sync
             + 'static,
     {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: Self::preferred_backends(),
             ..Default::default()
         });
@@ -1195,7 +1195,7 @@ impl GpuRenderer {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or(RendererError::AdapterNotFound)?;
+            .map_err(|_| RendererError::AdapterNotFound)?;
 
         let required_limits = device_required_limits(&adapter);
         let config = apply_renderer_config_overrides(config, &required_limits);
@@ -1211,8 +1211,8 @@ impl GpuRenderer {
                     // This helps reduce RSS on integrated GPUs (Apple Silicon) where GPU memory
                     // is shared with CPU and counts against process memory.
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
+                    trace: wgpu::Trace::Off,
                 },
-                None,
             )
             .await
             .map_err(RendererError::DeviceError)?;
@@ -1292,7 +1292,7 @@ impl GpuRenderer {
         canvas: web_sys::HtmlCanvasElement,
         config: RendererConfig,
     ) -> Result<(Self, wgpu::Surface<'static>), RendererError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: Self::preferred_backends(),
             ..Default::default()
         });
@@ -1308,7 +1308,7 @@ impl GpuRenderer {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or(RendererError::AdapterNotFound)?;
+            .map_err(|_| RendererError::AdapterNotFound)?;
 
         let required_limits = device_required_limits(&adapter);
         let config = apply_renderer_config_overrides(config, &required_limits);
@@ -1321,8 +1321,8 @@ impl GpuRenderer {
                     required_features: wgpu::Features::empty(),
                     required_limits,
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
+                    trace: wgpu::Trace::Off,
                 },
-                None,
             )
             .await
             .map_err(RendererError::DeviceError)?;
@@ -1383,7 +1383,7 @@ impl GpuRenderer {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or(RendererError::AdapterNotFound)?;
+            .map_err(|_| RendererError::AdapterNotFound)?;
 
         let required_limits = device_required_limits(&adapter);
         let config = apply_renderer_config_overrides(config, &required_limits);
@@ -1396,8 +1396,8 @@ impl GpuRenderer {
                     required_features: wgpu::Features::empty(),
                     required_limits,
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
+                    trace: wgpu::Trace::Off,
                 },
-                None,
             )
             .await
             .map_err(RendererError::DeviceError)?;
@@ -1556,14 +1556,14 @@ impl GpuRenderer {
         });
         // Initialize with white pixel
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &placeholder_path_image,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &[255u8, 255, 255, 255], // White pixel
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4),
                 rows_per_image: Some(1),
@@ -1605,14 +1605,14 @@ impl GpuRenderer {
             view_formats: &[],
         });
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &dummy_blend_dest,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &[0u8, 0, 0, 0], // Transparent pixel
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4),
                 rows_per_image: Some(1),
@@ -3090,7 +3090,11 @@ impl GpuRenderer {
     /// Poll the device to process completed GPU operations and free resources.
     /// Call this after frame rendering to prevent memory accumulation.
     pub fn poll(&self) {
-        self.device.poll(wgpu::Maintain::Wait);
+        // wgpu 26: `Maintain::Wait` was renamed to `PollType::Wait`. Result
+        // is a `Result<PollStatus, _>` rather than the old `MaintainResult`,
+        // and we don't care about the precise status here — we just want
+        // to block until the GPU is idle.
+        let _ = self.device.poll(wgpu::PollType::Wait);
     }
 
     /// Bind real glyph atlas textures into the default SDF bind group.
@@ -3186,13 +3190,13 @@ impl GpuRenderer {
                             label: Some("Flow Scene Copy Encoder"),
                         });
                 copy_encoder.copy_texture_to_texture(
-                    wgpu::ImageCopyTexture {
+                    wgpu::TexelCopyTextureInfo {
                         texture: src_tex,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
                     },
-                    wgpu::ImageCopyTexture {
+                    wgpu::TexelCopyTextureInfo {
                         texture: scene_tex,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
@@ -3247,6 +3251,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load, // Preserve existing content
                         store: wgpu::StoreOp::Store,
@@ -3475,6 +3480,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: clear_color[0],
@@ -3743,6 +3749,7 @@ impl GpuRenderer {
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: target,
                         resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color {
                                 r: clear_color[0],
@@ -3802,6 +3809,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: clear_color[0],
@@ -4048,6 +4056,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: msaa_target,
                     resolve_target: Some(resolve_target),
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: clear_color[0],
@@ -4228,6 +4237,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load, // Keep existing content
                         store: wgpu::StoreOp::Store,
@@ -4314,6 +4324,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: backdrop,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: backdrop_load,
                         store: wgpu::StoreOp::Store,
@@ -4492,6 +4503,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: backdrop,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: backdrop_load,
                         store: wgpu::StoreOp::Store,
@@ -4527,6 +4539,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: target_load,
                         store: wgpu::StoreOp::Store,
@@ -4559,6 +4572,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -4659,6 +4673,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -4717,6 +4732,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -4756,6 +4772,7 @@ impl GpuRenderer {
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: target,
                         resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Load,
                             store: wgpu::StoreOp::Store,
@@ -4845,6 +4862,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None, // No MSAA resolve needed for overlay
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load, // Keep existing content
                         store: wgpu::StoreOp::Store,
@@ -5098,6 +5116,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -5171,6 +5190,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -5250,6 +5270,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -5296,6 +5317,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -5520,6 +5542,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &cached.msaa_view,
                     resolve_target: Some(&cached.resolve_view),
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Discard, // MSAA texture discarded after resolve
@@ -5570,6 +5593,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load, // Keep existing content
                         store: wgpu::StoreOp::Store,
@@ -5754,6 +5778,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &cached.msaa_view,
                     resolve_target: Some(&cached.resolve_view),
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Discard,
@@ -5792,6 +5817,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -5904,6 +5930,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load, // Keep existing content
                         store: wgpu::StoreOp::Store,
@@ -6573,6 +6600,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(color),
                         store: wgpu::StoreOp::Store,
@@ -6655,6 +6683,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load, // Preserve existing content
                         store: wgpu::StoreOp::Store,
@@ -7429,6 +7458,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -7690,6 +7720,7 @@ impl GpuRenderer {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
+                depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load, // Preserve existing content
                     store: wgpu::StoreOp::Store,
@@ -7770,6 +7801,7 @@ impl GpuRenderer {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
+                depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -7825,13 +7857,13 @@ impl GpuRenderer {
                     label: Some("Blur Copy Encoder"),
                 });
             encoder.copy_texture_to_texture(
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture: &input.texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture: &output.texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
@@ -7923,6 +7955,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: output_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -8021,6 +8054,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: output,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -8107,6 +8141,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: output,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -8188,6 +8223,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: output,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -8441,6 +8477,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: output,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -8481,13 +8518,13 @@ impl GpuRenderer {
                     label: Some("Layer Effect Copy Encoder"),
                 });
             encoder.copy_texture_to_texture(
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture: &input.texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture: &output.texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
@@ -8619,13 +8656,13 @@ impl GpuRenderer {
                     label: Some("Layer Effect Fallback Copy"),
                 });
             encoder.copy_texture_to_texture(
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture: &input.texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture: &output.texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
@@ -8705,6 +8742,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: output,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -8773,6 +8811,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: clear_color[0],
@@ -8897,6 +8936,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &layer_texture.view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -9104,13 +9144,13 @@ impl GpuRenderer {
                             label: Some("Tight Blit Blend Dest Copy"),
                         });
                 copy_encoder.copy_texture_to_texture(
-                    wgpu::ImageCopyTexture {
+                    wgpu::TexelCopyTextureInfo {
                         texture: target_texture,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
                     },
-                    wgpu::ImageCopyTexture {
+                    wgpu::TexelCopyTextureInfo {
                         texture: &temp.texture,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
@@ -9159,6 +9199,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -9234,13 +9275,13 @@ impl GpuRenderer {
                             label: Some("Blend Dest Copy Encoder"),
                         });
                 copy_encoder.copy_texture_to_texture(
-                    wgpu::ImageCopyTexture {
+                    wgpu::TexelCopyTextureInfo {
                         texture: target_texture,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
                     },
-                    wgpu::ImageCopyTexture {
+                    wgpu::TexelCopyTextureInfo {
                         texture: &temp.texture,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
@@ -9323,6 +9364,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         // Load existing content - we're blending on top
                         load: wgpu::LoadOp::Load,
@@ -9443,6 +9485,7 @@ impl GpuRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -9677,6 +9720,7 @@ impl GpuRenderer {
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: target,
                         resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations {
                             // Don't clear - we're rendering on top of existing content
                             load: wgpu::LoadOp::Load,
@@ -9785,6 +9829,7 @@ impl GpuRenderer {
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: target,
                             resolve_target: None,
+                            depth_slice: None,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Load, // Don't clear, draw on top
                                 store: wgpu::StoreOp::Store,
@@ -9881,7 +9926,7 @@ mod tests {
 
     /// Helper to create a test wgpu device
     async fn create_test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
@@ -9892,10 +9937,11 @@ mod tests {
                 force_fallback_adapter: false,
                 compatible_surface: None,
             })
-            .await?;
+            .await
+            .ok()?;
 
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default(), None)
+            .request_device(&wgpu::DeviceDescriptor::default())
             .await
             .ok()?;
 
