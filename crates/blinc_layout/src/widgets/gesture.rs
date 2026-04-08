@@ -65,9 +65,9 @@ const TAP_MAX_DURATION: u64 = 300;
 const LONG_PRESS_DURATION: u64 = 500;
 
 fn elapsed_ms() -> u64 {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    static START: std::sync::OnceLock<web_time::Instant> = std::sync::OnceLock::new();
     START
-        .get_or_init(std::time::Instant::now)
+        .get_or_init(web_time::Instant::now)
         .elapsed()
         .as_millis() as u64
 }

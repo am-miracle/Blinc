@@ -39,6 +39,12 @@ raw-window-handle = { workspace = true }
 # Async
 pollster.workspace = true
 
+# `web_time::Instant` — drop-in `std::time::Instant` replacement that
+# works on `wasm32-unknown-unknown` via `performance.now()`. On native
+# it's a zero-cost re-export. See `blinc_animation/Cargo.toml` for
+# the full rationale.
+web-time = "1.1"
+
 # Error handling
 thiserror.workspace = true
 anyhow.workspace = true
@@ -101,8 +107,9 @@ web-sys = { version = "0.3", optional = true, features = [
     "Document",
     "HtmlCanvasElement",
 ] }
-web-time = { version = "1.1", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
+# `web-time` is in the regular `[dependencies]` table because the
+# import path `use web_time::Instant` is the same on every target.
 
 [dev-dependencies]
 image.workspace = true
@@ -125,7 +132,6 @@ web = [
     "wasm-bindgen",
     "wasm-bindgen-futures",
     "web-sys",
-    "web-time",
     "console_error_panic_hook",
     "blinc_gpu/web",
 ]

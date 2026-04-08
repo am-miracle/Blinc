@@ -48,6 +48,13 @@ html-escape = "0.2"
 # CSS parser combinators
 nom = "7"
 
+# `web_time::Instant` — drop-in replacement for `std::time::Instant`
+# that works on `wasm32-unknown-unknown` via `performance.now()`. On
+# native targets it's a `pub use std::time::Instant` re-export with
+# zero overhead. Required because `std::time::Instant::now()` panics
+# at runtime on wasm32 with "time not implemented on this platform".
+web-time = "1.1"
+
 # URL opening (for links) - desktop only
 [target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
 open = "5"

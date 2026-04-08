@@ -15,7 +15,13 @@ use slotmap::{new_key_type, SlotMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::JoinHandle;
-use std::time::Instant;
+// `web_time::Instant` is a drop-in replacement for `std::time::Instant`.
+// On native targets it re-exports the std type with zero overhead. On
+// `wasm32-unknown-unknown` it routes through `performance.now()`,
+// which is the only way to get a monotonic clock in a browser — the
+// std impl panics with "time not implemented on this platform" the
+// moment `Instant::now()` is actually called.
+use web_time::Instant;
 // `Duration` and `thread` are only used by the desktop background-thread
 // loop; `start_raf()` lets `requestAnimationFrame` pace itself to the
 // display, and the `thread_handle` field on wasm32 is just an inert
@@ -886,7 +892,7 @@ impl SchedulerHandle {
             let mut guard = inner.lock().unwrap();
             // Reset last_frame to now to prevent huge dt on first tick
             // This ensures new springs start animating smoothly from their current frame
-            guard.last_frame = std::time::Instant::now();
+            guard.last_frame = Instant::now();
             guard.springs.insert(spring)
         })
     }
@@ -1354,7 +1360,7 @@ pub struct AnimatedKeyframe {
     /// Delay before animation starts (ms)
     delay_ms: u32,
     /// Time when animation started (for delay tracking)
-    start_time: Option<std::time::Instant>,
+    start_time: Option<Instant>,
 }
 
 impl AnimatedKeyframe {
@@ -1446,7 +1452,7 @@ impl AnimatedKeyframe {
 
         // Track start time for delay
         if self.delay_ms > 0 {
-            self.start_time = Some(std::time::Instant::now());
+            self.start_time = Some(Instant::now());
         } else {
             self.start_time = None;
         }

@@ -35,8 +35,8 @@ use crate::widgets::cursor::{cursor_state, CursorAnimation, SharedCursorState};
 
 /// Get elapsed time in milliseconds since app start (for cursor blinking)
 pub fn elapsed_ms() -> u64 {
-    static START_TIME: OnceLock<std::time::Instant> = OnceLock::new();
-    let start = START_TIME.get_or_init(std::time::Instant::now);
+    static START_TIME: OnceLock<web_time::Instant> = OnceLock::new();
+    let start = START_TIME.get_or_init(web_time::Instant::now);
     start.elapsed().as_millis() as u64
 }
 
@@ -479,7 +479,7 @@ pub struct TextInputData {
     /// CSS class names for stylesheet matching (set via TextInput::class())
     pub(crate) css_classes: Vec<String>,
     /// Last click timestamp for double-click detection
-    pub(crate) last_click_time: Option<std::time::Instant>,
+    pub(crate) last_click_time: Option<web_time::Instant>,
     /// Anchor position for drag-to-select
     pub(crate) drag_select_anchor: Option<usize>,
 }
@@ -1525,7 +1525,7 @@ impl TextInput {
                     let cursor_pos = d.cursor_position_from_x(text_x, font_size);
 
                     // Double-click detection (select word)
-                    let now = std::time::Instant::now();
+                    let now = web_time::Instant::now();
                     let is_double_click = d
                         .last_click_time
                         .map(|t| now.duration_since(t).as_millis() < 400)

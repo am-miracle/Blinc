@@ -78,7 +78,7 @@ pub struct RenderContext {
     // LRU cache for images (prevents unbounded memory growth)
     image_cache: LruCache<String, GpuImage>,
     // Tracks when each image first appeared in the cache (for fade-in animation)
-    image_load_times: std::collections::HashMap<String, std::time::Instant>,
+    image_load_times: std::collections::HashMap<String, web_time::Instant>,
     // LRU cache for parsed SVG documents (avoids re-parsing)
     svg_cache: LruCache<u64, SvgDocument>,
     // Texture atlas for rasterized SVGs (single shared GPU texture, shelf-packed)
@@ -1165,7 +1165,7 @@ impl RenderContext {
             self.image_cache.put(image.source.clone(), gpu_image);
             // Record load time for fade-in animation
             self.image_load_times
-                .insert(image.source.clone(), std::time::Instant::now());
+                .insert(image.source.clone(), web_time::Instant::now());
         }
     }
 
@@ -4429,8 +4429,8 @@ impl RenderContext {
             let stylesheet = tree.stylesheet();
 
             // Use monotonic time for smooth animation
-            static START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-            let start = START_TIME.get_or_init(std::time::Instant::now);
+            static START_TIME: std::sync::OnceLock<web_time::Instant> = std::sync::OnceLock::new();
+            let start = START_TIME.get_or_init(web_time::Instant::now);
             let elapsed_secs = start.elapsed().as_secs_f32();
 
             for flow_el in &flow_elements {

@@ -5,7 +5,7 @@
 //! either a smooth sine wave or spring-based animation.
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use web_time::Instant;
 
 use blinc_core::{Brush, Color, CornerRadius, DrawContext, Rect};
 

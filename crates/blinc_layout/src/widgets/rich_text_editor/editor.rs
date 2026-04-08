@@ -194,7 +194,7 @@ pub fn rich_text_editor(
             }
 
             // Detect double-click within the standard 400ms window.
-            let now = std::time::Instant::now();
+            let now = web_time::Instant::now();
             let is_double = data
                 .last_click_time
                 .map(|t| now.duration_since(t).as_millis() < 400)
