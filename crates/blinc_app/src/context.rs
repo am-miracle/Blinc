@@ -622,8 +622,15 @@ impl RenderContext {
                     self.render_rasterized_svgs(target, &svgs, scale_factor);
                 }
             } else if self.renderer.unified_text_rendering() {
-                // Unified rendering: combine text glyphs with foreground primitives
-                let unified_primitives = fg_batch.get_unified_foreground_primitives();
+                // Unified rendering: combine text glyphs with foreground primitives.
+                // See the simple-path branch below for the rationale on
+                // extending `unified_primitives` with the local
+                // `all_glyphs` — `get_unified_foreground_primitives()`
+                // reads from `fg_batch.glyphs`, which is empty here.
+                let mut unified_primitives = fg_batch.get_unified_foreground_primitives();
+                for glyph in &all_glyphs {
+                    unified_primitives.push(GpuPrimitive::from_glyph(glyph));
+                }
                 if !unified_primitives.is_empty() {
                     self.render_unified(target, &unified_primitives);
                 }
@@ -705,8 +712,21 @@ impl RenderContext {
                 }
             } else if self.renderer.unified_text_rendering() {
                 // Unified rendering: combine text glyphs with foreground primitives
-                // This ensures text and shapes transform together during animations
-                let unified_primitives = fg_batch.get_unified_foreground_primitives();
+                // This ensures text and shapes transform together during animations.
+                //
+                // `get_unified_foreground_primitives()` reads from
+                // `fg_batch.glyphs`, which is empty here — the glyph
+                // preparation loop above writes into the local
+                // `all_glyphs` vec, not into the batch. We have to
+                // extend the unified primitive list with our local
+                // glyphs ourselves, otherwise the unified path silently
+                // drops every text element. (The `render_tree_with_motion`
+                // variant doesn't hit this because it pushes glyphs
+                // through a different intermediate buffer.)
+                let mut unified_primitives = fg_batch.get_unified_foreground_primitives();
+                for glyph in &all_glyphs {
+                    unified_primitives.push(GpuPrimitive::from_glyph(glyph));
+                }
                 if !unified_primitives.is_empty() {
                     self.render_unified(target, &unified_primitives);
                 }
@@ -897,12 +917,43 @@ impl RenderContext {
     ///
     /// This ensures text and shapes transform together during animations,
     /// preventing visual lag when parent containers have motion transforms.
+    ///
+    /// **Glyph atlas binding is required.** The unified rendering path
+    /// converts text glyphs into `GpuPrimitive`s with `prim_type =
+    /// PRIM_TEXT`, which the SDF shader's `case PRIM_TEXT:` arm
+    /// samples from `glyph_atlas` / `color_glyph_atlas`. The default
+    /// SDF bind group has 1×1 placeholder textures bound to those
+    /// slots — without explicitly binding the real atlases via
+    /// `render_primitives_overlay_with_glyphs`, every text quad
+    /// samples a transparent placeholder pixel and the text renders
+    /// invisibly.
+    ///
+    /// `render_tree_with_motion` (the desktop / mobile path) handles
+    /// this via the same call. Skipping it was a `render_tree`
+    /// (headless / web) path bug — text was being correctly converted
+    /// to primitives but the placeholder atlas was producing zero
+    /// output for every glyph quad.
     fn render_unified(&mut self, target: &wgpu::TextureView, primitives: &[GpuPrimitive]) {
         if primitives.is_empty() {
             return;
         }
 
-        self.renderer.render_primitives_overlay(target, primitives);
+        if let (Some(atlas_view), Some(color_atlas_view)) =
+            (self.text_ctx.atlas_view(), self.text_ctx.color_atlas_view())
+        {
+            self.renderer.render_primitives_overlay_with_glyphs(
+                target,
+                primitives,
+                atlas_view,
+                color_atlas_view,
+            );
+        } else {
+            // No atlas available — fall back to plain primitive
+            // rendering. Text quads will sample placeholder pixels
+            // and render invisibly, but at least non-text primitives
+            // still render.
+            self.renderer.render_primitives_overlay(target, primitives);
+        }
     }
 
     /// Render text decorations for a specific z-layer

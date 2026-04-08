@@ -207,6 +207,32 @@ impl WebApp {
     /// from inside the browser, so the page keeps rendering after this
     /// future resolves.
     ///
+    /// Apps that need to load fonts, register CSS, or otherwise touch
+    /// the runner before the first frame should use [`Self::run_with_setup`]
+    /// instead — `run` is a thin wrapper that passes a no-op setup.
+    pub async fn run<F>(canvas_id: &str, ui_builder: F) -> Result<()>
+    where
+        F: FnMut(&mut WindowedContext) -> Div + 'static,
+    {
+        Self::run_with_setup(canvas_id, |_| {}, ui_builder).await
+    }
+
+    /// Same as [`Self::run`], plus a synchronous `setup` callback that
+    /// runs after the runner is constructed and before the first frame
+    /// is rendered. This is the canonical place to:
+    ///
+    /// - Load bundled font bytes via [`Self::load_font_data`]. Required
+    ///   for any text to render — the wasm32 init path skips system
+    ///   font discovery (no filesystem) so the font registry starts
+    ///   empty.
+    /// - Register CSS via `app.context_mut().add_css(...)`.
+    /// - Wire up any other one-shot config that touches the runner.
+    ///
+    /// The setup callback receives a `&mut WebApp` and runs exactly
+    /// once. It cannot be `async`; if you need fetch-based asset
+    /// loading, do it BEFORE calling `run_with_setup` and pass the
+    /// fetched bytes through your closure's environment.
+    ///
     /// # Cycle / leak note
     ///
     /// This method intentionally creates an `Rc<RefCell<WebApp>>`
@@ -216,11 +242,19 @@ impl WebApp {
     /// `WebApp`. The cycle is what keeps everything alive past the
     /// return of this function. The browser tears it down on page
     /// unload, which is the expected lifecycle for a web app.
-    pub async fn run<F>(canvas_id: &str, ui_builder: F) -> Result<()>
+    pub async fn run_with_setup<S, F>(canvas_id: &str, setup: S, ui_builder: F) -> Result<()>
     where
+        S: FnOnce(&mut Self),
         F: FnMut(&mut WindowedContext) -> Div + 'static,
     {
         let mut app = Self::new(canvas_id).await?;
+
+        // Run user setup BEFORE installing the UI builder. This is
+        // when fonts get loaded, CSS gets registered, etc. If setup
+        // panics, we never reach the rAF loop and the browser's
+        // panic-hook surfaces it in the console.
+        setup(&mut app);
+
         app.set_ui_builder(ui_builder);
 
         // Render the first frame synchronously so the canvas isn't
@@ -281,6 +315,25 @@ impl WebApp {
         Ok(())
     }
 
+    /// Load font data from a byte buffer into the underlying
+    /// [`BlincApp`]'s font registry.
+    ///
+    /// Returns the number of font faces registered (a single TTF
+    /// usually has one face; TTC collections have several). Call this
+    /// from a [`Self::run_with_setup`] setup closure with bundled
+    /// `include_bytes!(...)` data, or with bytes fetched via
+    /// `WebAssetLoader::preload`.
+    ///
+    /// **You must call this for at least one font.** The wasm32 init
+    /// path deliberately skips system font discovery (no filesystem),
+    /// so the font registry starts empty. Without a registered font,
+    /// every text element fails to shape glyphs and renders as nothing.
+    /// This is symmetric with how `BlincApp::with_canvas` documents the
+    /// font situation.
+    pub fn load_font_data(&mut self, bytes: Vec<u8>) -> usize {
+        self.blinc_app.load_font_data_to_registry(bytes)
+    }
+
     /// Install (or replace) the UI builder closure.
     ///
     /// Sets `needs_rebuild = true` so the next [`Self::run_one_frame`]
@@ -330,7 +383,25 @@ impl WebApp {
             // queries stay stable.
             let registry = Arc::clone(self.ctx.element_registry());
             let mut tree = RenderTree::from_element_with_registry(&element, registry);
+
+            // CRITICAL: tell the tree about the device pixel ratio
+            // BEFORE computing layout. The renderer multiplies layout
+            // coordinates by `tree.scale_factor()` to convert
+            // logical→physical pixels inside the GPU paint context.
+            // Without this call, layout coords go straight to physical
+            // 1:1 — on a Retina display the entire UI ends up rendered
+            // into the top-left quadrant of a 2× canvas, and the rest
+            // of the surface stays at the GPU clear color (transparent
+            // black through the canvas-composited backbuffer). This is
+            // exactly what `windowed.rs:3706` does on desktop.
+            tree.set_scale_factor(self.ctx.scale_factor as f32);
+
+            // Layout is computed in *logical* coordinates — that's
+            // what the user's UI builder thinks in. The scale factor
+            // above is what scales the result up to physical pixels
+            // at render time.
             tree.compute_layout(self.ctx.width, self.ctx.height);
+
             self.current_tree = Some(tree);
             self.needs_rebuild = false;
             self.ctx.rebuild_count = self.ctx.rebuild_count.saturating_add(1);
