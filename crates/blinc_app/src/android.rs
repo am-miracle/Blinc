@@ -24,7 +24,9 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use android_activity::input::{InputEvent as AndroidInputEvent, MotionAction};
+use android_activity::input::{
+    InputEvent as AndroidInputEvent, KeyAction, KeyMapChar, Keycode, MotionAction,
+};
 use android_activity::{AndroidApp as NdkAndroidApp, InputStatus, MainEvent, PollEvent};
 use ndk::native_window::NativeWindow;
 
@@ -585,6 +587,23 @@ impl AndroidApp {
                                                     lx,
                                                     ly
                                                 );
+                                                // Blur any focused text inputs
+                                                // BEFORE processing the touch.
+                                                // The text input that gets
+                                                // tapped re-focuses itself via
+                                                // its own `on_mouse_down`
+                                                // handler; tapping outside
+                                                // any input clears focus,
+                                                // which decrements the focus
+                                                // count, which fires
+                                                // `take_keyboard_state_change`
+                                                // on the next frame so the
+                                                // soft keyboard hides
+                                                // automatically. Mirrors the
+                                                // desktop runner at
+                                                // `windowed.rs:2913` and the
+                                                // iOS runner.
+                                                blinc_layout::widgets::blur_all_text_inputs();
                                                 router.on_mouse_down(
                                                     &*tree,
                                                     lx,
@@ -696,6 +715,90 @@ impl AndroidApp {
                                         InputStatus::Unhandled
                                     }
                                 }
+                                AndroidInputEvent::KeyEvent(key_event) => {
+                                    // Forward soft-keyboard / hardware-keyboard
+                                    // input to the Rust text-input widget. The
+                                    // mirror of the iOS path in `ios.rs::handle_text_input`
+                                    // / `handle_key_down` — without this, the
+                                    // Android IME pops up correctly (the runner
+                                    // already calls `app.show_soft_input(true)`
+                                    // when `take_keyboard_state_change()` returns
+                                    // `Some(true)`) but every typed character is
+                                    // silently dropped because nothing forwards
+                                    // it through to `broadcast_text_input_event`.
+                                    //
+                                    // We only react to `KeyAction::Down`. Up
+                                    // events are uninteresting for the
+                                    // text-input widget which advances state on
+                                    // press, not release.
+                                    if key_event.action() == KeyAction::Down {
+                                        let key_code = key_event.key_code();
+                                        let meta_state = key_event.meta_state();
+
+                                        // Map Android `Keycode` -> the virtual
+                                        // key codes the desktop runner uses
+                                        // (which the `text_input` widget's
+                                        // `on_key_down` handler matches against
+                                        // at line 1639 of `text_input.rs`):
+                                        //   8  = Backspace / Delete
+                                        //   13 = Enter / Return
+                                        //   27 = Escape
+                                        //   37/38/39/40 = ←/↑/→/↓
+                                        //   36 = Home, 35 = End
+                                        // Anything not in the table falls
+                                        // through to the unicode-character
+                                        // path below, which broadcasts as
+                                        // TEXT_INPUT instead.
+                                        let virtual_key = match key_code {
+                                            Keycode::Del => Some(8u32),
+                                            Keycode::Enter | Keycode::NumpadEnter => Some(13u32),
+                                            Keycode::Escape => Some(27u32),
+                                            Keycode::DpadLeft => Some(37u32),
+                                            Keycode::DpadUp => Some(38u32),
+                                            Keycode::DpadRight => Some(39u32),
+                                            Keycode::DpadDown => Some(40u32),
+                                            Keycode::MoveHome => Some(36u32),
+                                            Keycode::MoveEnd => Some(35u32),
+                                            _ => None,
+                                        };
+
+                                        if let Some(vkey) = virtual_key {
+                                            tree.broadcast_key_event(
+                                                blinc_core::events::event_types::KEY_DOWN,
+                                                vkey,
+                                                false,
+                                                false,
+                                                false,
+                                                false,
+                                            );
+                                        } else {
+                                            // Unicode character path. The
+                                            // android-activity API exposes a
+                                            // per-device `KeyCharacterMap` that
+                                            // maps `(key_code, meta_state)` to
+                                            // a unicode char (or a combining
+                                            // accent). For now we ignore
+                                            // combining accents and
+                                            // forward only direct unicode
+                                            // characters — full dead-key
+                                            // composition would track an
+                                            // accent buffer across events,
+                                            // mirroring the desktop runner.
+                                            if let Ok(map) = app.device_key_character_map(
+                                                key_event.device_id(),
+                                            ) {
+                                                if let Ok(KeyMapChar::Unicode(ch)) =
+                                                    map.get(key_code, meta_state)
+                                                {
+                                                    tree.broadcast_text_input_event(
+                                                        ch, false, false, false, false,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    InputStatus::Handled
+                                }
                                 _ => InputStatus::Unhandled,
                             }
                         }) {
@@ -799,11 +902,51 @@ impl AndroidApp {
             // =========================================================
             // Soft keyboard: show/hide based on text widget focus
             // =========================================================
+            //
+            // We prefer routing through the JVM `BlincNativeBridge`
+            // (`keyboard.show` / `keyboard.hide`) which uses
+            // `InputMethodManager.showSoftInput` against the Activity's
+            // decor view. The NDK helper `ANativeActivity_showSoftInput`
+            // (which `app.show_soft_input(true)` wraps) is famously
+            // unreliable on modern Android — on most devices it silently
+            // no-ops because the NativeActivity decor view is not
+            // focusable in touch mode.
+            //
+            // The bridge is wired up by user code in `android_main` via
+            // `blinc_platform_android::init_android_native_bridge(&app)`.
+            // If it isn't initialized, we fall back to the unreliable NDK
+            // path so apps that opt out of the bridge still get *something*.
             if let Some(show) = blinc_layout::widgets::text_input::take_keyboard_state_change() {
-                if show {
-                    app.show_soft_input(true);
+                let bridge_ready =
+                    blinc_core::native_bridge::NativeBridgeState::is_initialized();
+                let routed_via_bridge = if bridge_ready {
+                    let result: blinc_core::native_bridge::NativeResult<()> =
+                        blinc_core::native_bridge::native_call(
+                            "keyboard",
+                            if show { "show" } else { "hide" },
+                            (),
+                        );
+                    match result {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::warn!(
+                                "BlincNativeBridge keyboard.{} failed: {:?} — falling back to NDK helper",
+                                if show { "show" } else { "hide" },
+                                e
+                            );
+                            false
+                        }
+                    }
                 } else {
-                    app.hide_soft_input(true);
+                    false
+                };
+
+                if !routed_via_bridge {
+                    if show {
+                        app.show_soft_input(true);
+                    } else {
+                        app.hide_soft_input(true);
+                    }
                 }
             }
 

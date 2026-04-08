@@ -91,26 +91,89 @@ impl AndroidNativeBridgeAdapter {
     ///
     /// # Arguments
     /// * `app` - AndroidApp from android_main
+    ///
+    /// # Class loading note
+    ///
+    /// The `android_main` thread is attached to the JVM via JNI but uses the
+    /// **system** class loader, which only sees framework classes — not the
+    /// app's own classes like `com.blinc.BlincNativeBridge`. Calling
+    /// `env.find_class()` directly from this thread results in a
+    /// `ClassNotFoundException`. To resolve app classes, we have to go
+    /// through the `Activity`'s class loader, which is reachable via the
+    /// `ANativeActivity.clazz` jobject that android-activity exposes through
+    /// `app.activity_as_ptr()`.
     pub fn from_android_app(app: &android_activity::AndroidApp) -> Result<Self, NativeBridgeError> {
         // Get JavaVM from AndroidApp
         let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr() as *mut _) }.map_err(|e| {
             NativeBridgeError::PlatformError(format!("Failed to get JavaVM: {}", e))
         })?;
 
-        // Attach thread and find the bridge class in a scope so env is dropped before we move vm
+        // android-activity's `activity_as_ptr()` is named misleadingly: the
+        // returned pointer is actually the activity *instance* jobject — i.e.
+        // `ANativeActivity.clazz`, not the ANativeActivity struct itself.
+        // See android-activity 0.6 native_activity/mod.rs:activity_as_ptr.
+        let activity_jobject = app.activity_as_ptr() as jni::sys::jobject;
+        if activity_jobject.is_null() {
+            return Err(NativeBridgeError::PlatformError(
+                "Activity jobject is null".into(),
+            ));
+        }
+
+        // Attach thread and resolve the bridge class via the Activity's
+        // class loader, which has visibility into application classes.
         let bridge_class = {
             let mut env = vm.attach_current_thread().map_err(|e| {
                 NativeBridgeError::PlatformError(format!("Failed to attach thread: {}", e))
             })?;
 
-            // Find the BlincNativeBridge class
-            let class = env.find_class("com/blinc/BlincNativeBridge").map_err(|e| {
+            let activity_obj = unsafe { JObject::from_raw(activity_jobject) };
+
+            // Activity → Class<?> → ClassLoader
+            let activity_class = env
+                .get_object_class(&activity_obj)
+                .map_err(|e| NativeBridgeError::PlatformError(format!(
+                    "Failed to get Activity class: {}", e
+                )))?;
+
+            let loader_obj = env
+                .call_method(
+                    &activity_class,
+                    "getClassLoader",
+                    "()Ljava/lang/ClassLoader;",
+                    &[],
+                )
+                .and_then(|v| v.l())
+                .map_err(|e| NativeBridgeError::PlatformError(format!(
+                    "Failed to get ClassLoader: {}", e
+                )))?;
+
+            // ClassLoader.loadClass("com.blinc.BlincNativeBridge")
+            let class_name = env.new_string("com.blinc.BlincNativeBridge").map_err(|e| {
                 NativeBridgeError::PlatformError(format!(
-                    "Failed to find BlincNativeBridge class: {}",
+                    "Failed to allocate class name string: {}",
                     e
                 ))
             })?;
-            env.new_global_ref(class).map_err(|e| {
+
+            let bridge_obj = env
+                .call_method(
+                    &loader_obj,
+                    "loadClass",
+                    "(Ljava/lang/String;)Ljava/lang/Class;",
+                    &[JValue::Object(&class_name)],
+                )
+                .and_then(|v| v.l())
+                .map_err(|e| {
+                    NativeBridgeError::PlatformError(format!(
+                        "Failed to load BlincNativeBridge via Activity ClassLoader: {}",
+                        e
+                    ))
+                })?;
+
+            // Cast jobject → JClass and pin a global ref so the class
+            // outlives the local frame.
+            let bridge_jclass: JClass = bridge_obj.into();
+            env.new_global_ref(bridge_jclass).map_err(|e| {
                 NativeBridgeError::PlatformError(format!("Failed to create global ref: {}", e))
             })?
         };
