@@ -877,6 +877,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let prim = primitives[in.instance_index];
     let p = in.uv;
 
+    // Screen-space derivative magnitude, computed up-front *outside*
+    // any control flow that depends on per-instance data. WGSL strictly
+    // requires `fwidth` / `dpdx` / `dpdy` to be called from uniform
+    // control flow; computing it here on the continuously-interpolated
+    // `in.uv` (which is uniform across every 2x2 pixel quad regardless
+    // of which primitive a quad belongs to) satisfies the rule.
+    //
+    // For an axis-aligned screen-space SDF this is identical to
+    // `fwidth(d)`: `d` is locally 1-Lipschitz in pixels, so
+    // `length(vec2(fwidth(p.x), fwidth(p.y)))` returns ~1.0 for
+    // axis-aligned edges and ~1.41 for 45° diagonals — the same range
+    // the previous `fwidth(d)` produced. Native backends (Metal,
+    // Vulkan, DX12) didn't enforce the uniformity rule so the old
+    // `fwidth(d)` worked there; Dawn (Chrome's WebGPU validator)
+    // rejects it because `d` is computed inside a switch that branches
+    // on a non-uniform `prim_type`. See
+    // https://www.w3.org/TR/WGSL/#uniformity for the spec rule.
+    let d_fw_screen = length(vec2<f32>(fwidth(p.x), fwidth(p.y)));
+
     let prim_type = prim.type_info.x;
     let fill_type = prim.type_info.y;
     let clip_type = prim.type_info.z;
@@ -1282,7 +1301,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             return inner_result;
         }
         case PRIM_TEXT: {
-            // Text glyph - sample from glyph atlas
+            // Text glyph - sample from glyph atlas.
             // UV bounds are stored in gradient_params: (u_min, v_min, u_max, v_max)
             // fill_type stores is_color flag (1 = color emoji, 0 = grayscale)
             let uv_bounds = prim.gradient_params;
@@ -1295,14 +1314,34 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // Map to atlas UV coordinates
             let atlas_uv = uv_bounds.xy + local_uv * (uv_bounds.zw - uv_bounds.xy);
 
+            // Use `textureSampleLevel(..., 0.0)` instead of `textureSample`
+            // here. WGSL's uniform-control-flow rule applies to
+            // *implicit-LOD* sampling — `textureSample` derives mip
+            // level from quad derivatives, which require all four
+            // pixels in the 2x2 derivative quad to take the same code
+            // path. We're inside `switch prim_type { case PRIM_TEXT: }`
+            // and `prim_type` comes from a per-instance buffer lookup
+            // (`primitives[in.instance_index]`), which Dawn classifies
+            // as non-uniform — so any implicit-LOD sample inside ANY
+            // arm of this switch fails validation.
+            //
+            // `textureSampleLevel(t, s, uv, 0.0)` takes the LOD as an
+            // explicit parameter, so no derivatives are needed and the
+            // uniformity rule doesn't apply. The glyph atlas is a
+            // single-mip texture (R8Unorm / Rgba8UnormSrgb, no mipmap
+            // chain), so LOD 0 is the only valid level anyway —
+            // sampling at LOD 0 is byte-identical to what
+            // `textureSample` would have produced. Native backends
+            // (Metal, Vulkan, DX12) accept both forms; Dawn (Chrome's
+            // WebGPU validator) requires the explicit form here.
             var text_result: vec4<f32>;
             if is_color {
                 // Color emoji - sample RGBA directly from color atlas
-                text_result = textureSample(color_glyph_atlas, glyph_sampler, atlas_uv);
+                text_result = textureSampleLevel(color_glyph_atlas, glyph_sampler, atlas_uv, 0.0);
             } else {
-                // Grayscale text - sample coverage from R channel, apply color tint
-                let coverage = textureSample(glyph_atlas, glyph_sampler, atlas_uv).r;
-                // Apply gamma correction for crisp text rendering
+                // Grayscale text - sample coverage from R channel,
+                // apply gamma correction, tint with primitive color
+                let coverage = textureSampleLevel(glyph_atlas, glyph_sampler, atlas_uv, 0.0).r;
                 let gamma_coverage = pow(coverage, 0.7);
                 text_result = vec4<f32>(prim.color.rgb, prim.color.a * gamma_coverage);
             }
@@ -1326,12 +1365,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Anti-aliasing: smooth transition at edge using screen-space adaptive width.
-    // fwidth(d) gives |dpdx(d)| + |dpdy(d)| which adapts to the local SDF gradient:
-    //   - Axis-aligned edges: fwidth ≈ 1.0 → AA width ≈ 0.75px (same as before)
-    //   - 45° corner curves:  fwidth ≈ 1.414 → AA width ≈ 1.06px (wider for diagonal)
-    // The wider AA at diagonal angles compensates for rectangular pixel grid alignment,
-    // producing uniform visual edge quality on both straight edges and curves.
-    let d_fw = fwidth(d);
+    //
+    // We reuse `d_fw_screen`, which was computed at the top of fs_main
+    // from `fwidth(p.x) + fwidth(p.y)` on the uniformly-interpolated
+    // input position. For an axis-aligned screen-space SDF (which `d`
+    // is, after the prim_type switch above), this is mathematically
+    // identical to `fwidth(d)` because `d` is locally 1-Lipschitz in
+    // pixel space:
+    //
+    //   - Axis-aligned edges: d_fw_screen ≈ 1.0 → AA width ≈ 0.75px
+    //   - 45° corner curves:  d_fw_screen ≈ 1.41 → AA width ≈ 1.06px
+    //
+    // The hoist is required for WGSL strict mode (Dawn/Chrome) — the
+    // direct `fwidth(d)` would be "called from non-uniform control
+    // flow" because `d` was assigned inside the prim_type switch.
+    let d_fw = d_fw_screen;
     let aa_width = max(d_fw * 0.75, 0.5);
     let fill_alpha = 1.0 - smoothstep(-aa_width, aa_width, d);
 
@@ -1692,23 +1740,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // Check if this is a color emoji glyph
+    // Use `textureSampleLevel(..., 0.0)` instead of `textureSample`
+    // for both atlas paths. WGSL's uniform-control-flow rule applies
+    // to *implicit-LOD* sampling — `textureSample` derives the mip
+    // level from quad derivatives, which need all four pixels in the
+    // 2x2 derivative quad to take the same code path. The `is_color`
+    // flag is per-glyph (`@interpolate(flat)`) and can vary between
+    // adjacent quads, so Dawn classifies the `if in.is_color > 0.5`
+    // branch as non-uniform and rejects implicit-LOD samples inside.
+    //
+    // The glyph atlases are single-mip textures (R8Unorm and
+    // Rgba8UnormSrgb, no mipmap chain), so LOD 0 is the only valid
+    // level — `textureSampleLevel(..., 0.0)` is byte-identical to
+    // what `textureSample` would have produced. Native backends
+    // (Metal, Vulkan, DX12) accept both forms; Dawn requires the
+    // explicit form here.
     if in.is_color > 0.5 {
         // Color emoji: sample RGBA from color atlas, use texture color directly
-        let emoji_color = textureSample(color_atlas, glyph_sampler, in.uv);
-        // Apply clip alpha only - keep original emoji colors
+        let emoji_color = textureSampleLevel(color_atlas, glyph_sampler, in.uv, 0.0);
         return vec4<f32>(emoji_color.rgb, emoji_color.a * clip_alpha);
     } else {
         // Grayscale text: sample coverage from glyph atlas, apply tint color
-        let coverage = textureSample(glyph_atlas, glyph_sampler, in.uv).r;
+        let coverage = textureSampleLevel(glyph_atlas, glyph_sampler, in.uv, 0.0).r;
 
         // Use coverage directly with slight gamma correction for cleaner edges
-        // The rasterizer provides good coverage values - we just need to
-        // apply a subtle curve to sharpen without losing anti-aliasing
         // pow(x, 0.7) brightens mid-tones, making strokes appear crisper
         let aa_alpha = pow(coverage, 0.7);
-
-        // Apply both text alpha and clip alpha
         return vec4<f32>(in.color.rgb, in.color.a * aa_alpha * clip_alpha);
     }
 }
@@ -2973,6 +3030,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
+    // Use `textureSampleLevel(..., 0.0)` instead of `textureSample`
+    // for the gradient and image lookups. WGSL's uniform-control-flow
+    // rule applies to *implicit-LOD* sampling — `textureSample`
+    // derives mip level from quad derivatives, which need all four
+    // pixels in the 2x2 derivative quad to take the same code path.
+    // The brush type is selected by `in.gradient_type` (per-vertex)
+    // and `uniforms.use_image_texture` / `use_gradient_texture` /
+    // `use_glass_effect` (uniform), but Dawn classifies the per-vertex
+    // value as non-uniform — so any implicit-LOD sample inside a
+    // branch keyed on it fails validation.
+    //
+    // Both the gradient texture (1D ramp) and the image brush texture
+    // are created with `mip_level_count: 1` (see
+    // `gradient_texture.rs:222` and `image.rs:39`), so LOD 0 is the
+    // only valid level. `textureSampleLevel(t, s, uv, 0.0)` is
+    // byte-identical to what `textureSample` would have produced.
+    // Native backends (Metal, Vulkan, DX12) accept both forms; Dawn
+    // requires the explicit form here.
+
     var color: vec4<f32>;
 
     // Check for glass effect first
@@ -3001,7 +3077,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let uv_min = uniforms.image_uv_bounds.xy;
         let uv_max = uniforms.image_uv_bounds.zw;
         let image_uv = uv_min + in.uv * (uv_max - uv_min);
-        color = textureSample(image_texture, image_sampler, image_uv);
+        color = textureSampleLevel(image_texture, image_sampler, image_uv, 0.0);
         // Apply tint from vertex color (multiply)
         color = vec4<f32>(color.rgb * in.color.rgb, color.a * in.color.a);
     } else if (in.gradient_type == 0u) {
@@ -3018,8 +3094,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Project UV onto gradient line
         var t: f32;
         if (g_len_sq > 0.0001) {
-            let p = in.uv - g_start;
-            t = clamp(dot(p, g_dir) / g_len_sq, 0.0, 1.0);
+            let p_lin = in.uv - g_start;
+            t = clamp(dot(p_lin, g_dir) / g_len_sq, 0.0, 1.0);
         } else {
             t = 0.0;
         }
@@ -3027,7 +3103,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Sample from gradient texture or mix vertex colors
         if (uniforms.use_gradient_texture == 1u) {
             // Multi-stop gradient: sample from 1D texture
-            color = textureSample(gradient_texture, gradient_sampler, t);
+            color = textureSampleLevel(gradient_texture, gradient_sampler, t, 0.0);
         } else {
             // 2-stop fast path: mix vertex colors
             color = mix(in.color, in.end_color, t);
@@ -3042,7 +3118,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Sample from gradient texture or mix vertex colors
         if (uniforms.use_gradient_texture == 1u) {
             // Multi-stop gradient: sample from 1D texture
-            color = textureSample(gradient_texture, gradient_sampler, t);
+            color = textureSampleLevel(gradient_texture, gradient_sampler, t, 0.0);
         } else {
             // 2-stop fast path: mix vertex colors
             color = mix(in.color, in.end_color, t);
