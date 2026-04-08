@@ -739,14 +739,79 @@ impl WebApp {
     /// tree. Mouse handlers all use this — the EventRouter returns a
     /// list of (node, event_type) pairs that the tree's handler
     /// registry needs to walk through individually.
+    ///
+    /// Each event is forwarded via [`RenderTree::dispatch_event_full`]
+    /// (not the simpler `dispatch_event`) so the runner can populate
+    /// the per-event auxiliary fields the EventContext needs:
+    ///
+    ///   - **`drag_delta_x` / `drag_delta_y`** — read from
+    ///     `EventRouter::drag_delta()`. The router accumulates these
+    ///     between mousedown and mouseup; without forwarding them
+    ///     here, every `on_drag` handler receives `(0, 0)` and the
+    ///     dragged element never moves. This was the silent
+    ///     `web_drag` bug — the chain reached the handler, just
+    ///     with empty deltas.
+    ///   - **`bounds_x/y/w/h`** + **`local_x/y`** — looked up via
+    ///     `EventRouter::get_node_bounds(node)` so the handler can
+    ///     reason about element-local coordinates (e.g. the
+    ///     sortable demo's `e.local_y` to figure out which list
+    ///     item the cursor hit).
+    ///
+    /// Mirrors the desktop runner's per-event population pass at
+    /// [`windowed.rs:2864-2882`](crate::windowed) (which writes
+    /// the same fields onto a `PendingEvent` struct before passing
+    /// it to `dispatch_event_full`).
     fn dispatch_pending(app: &mut Self, pending: Vec<(blinc_layout::tree::LayoutNodeId, u32)>) {
         if pending.is_empty() {
             return;
         }
         let (mx, my) = app.ctx.event_router.mouse_position();
+        let (drag_dx, drag_dy) = app.ctx.event_router.drag_delta();
+        // Snapshot per-node bounds before borrowing the tree mutably
+        // — `get_node_bounds` lives on `EventRouter`, and we'd
+        // otherwise have a `&self.ctx` + `&mut self.current_tree`
+        // borrow conflict.
+        struct DispatchEntry {
+            node: blinc_layout::tree::LayoutNodeId,
+            event_type: u32,
+            bounds: (f32, f32, f32, f32),
+        }
+        let entries: Vec<DispatchEntry> = pending
+            .iter()
+            .map(|&(node, event_type)| DispatchEntry {
+                node,
+                event_type,
+                bounds: app
+                    .ctx
+                    .event_router
+                    .get_node_bounds(node)
+                    .unwrap_or((0.0, 0.0, 0.0, 0.0)),
+            })
+            .collect();
+
         if let Some(tree) = app.current_tree.as_mut() {
-            for (node, event_type) in pending {
-                tree.dispatch_event(node, event_type, mx, my);
+            for entry in entries {
+                let DispatchEntry {
+                    node,
+                    event_type,
+                    bounds: (bx, by, bw, bh),
+                } = entry;
+                let local_x = mx - bx;
+                let local_y = my - by;
+                // Drag deltas only meaningful for DRAG / DRAG_END;
+                // for everything else they're (0, 0) by virtue of
+                // the router resetting them on mouseup.
+                let (dx, dy) = if event_type == blinc_core::events::event_types::DRAG
+                    || event_type == blinc_core::events::event_types::DRAG_END
+                {
+                    (drag_dx, drag_dy)
+                } else {
+                    (0.0, 0.0)
+                };
+                tree.dispatch_event_full(
+                    node, event_type, mx, my, local_x, local_y, bx, by, bw, bh, dx, dy,
+                    /* pinch_scale */ 1.0,
+                );
             }
         }
     }
