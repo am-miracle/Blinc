@@ -337,7 +337,7 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | Android | Stable | wgpu (Vulkan) |
 | iOS | Stable | wgpu (Metal) |
 | HarmonyOS | In progress | wgpu (Vulkan/OpenGL ES) |
-| Web (WASM) | Future | wgpu WebGPU backend |
+| Web (WASM) | **Preview (Tier 2)** | wgpu WebGPU + WebGL2 fallback. Render / events / state / drag / scroll / async asset preload all working. See [`docs/web.md`](docs/web.md). Touch input, IME, file dialogs, and a11y are pending. |
 | Embedded (RPi) | Future | Framebuffer or Vulkan |
 
 ---
@@ -353,7 +353,7 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | 0.6.0 | Q4 2026 | Zyntax DSL v1 — lexer, parser, type checker, Rust codegen, build.rs integration | Planned |
 | 0.7.0 | Q1 2027 | Developer experience — hot reload, visual inspector, layout/animation debugger, performance profiler | Planned |
 | 0.8.0 | Q1 2027 | Accessibility v1 — semantic roles, screen reader, keyboard navigation, ARIA-like attributes, high contrast, reduced motion | Planned |
-| 0.9.0 | Q2 2027 | Platform expansion — HarmonyOS stable, Web (WASM) preview | Planned |
+| 0.9.0 | Q2 2027 | Platform expansion — HarmonyOS stable, Web (WASM) preview | In progress (Web preview shipped — see [`docs/web.md`](docs/web.md); HarmonyOS still in progress) |
 | 1.0.0 | Q3 2027 | Stable API, full documentation, Zyntax hot reload + LSP, production certification | Planned |
 
 ---

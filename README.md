@@ -18,7 +18,7 @@
 - **GPUI-Style Builder API** - Declarative, chainable element builders (`div()`, `text()`, `svg()`, `image()`)
 - **Flexbox Layout** - Powered by Taffy with 100+ Tailwind-style builder methods
 - **Spring Physics** - Interruptible animations with RK4 integration (Framer Motion quality)
-- **Cross-Platform** - Desktop (macOS, Windows, Linux), Android, iOS
+- **Cross-Platform** - Desktop (macOS, Windows, Linux), Android, iOS, Web (wasm32 + WebGPU, [preview](docs/web.md))
 - **Fine-Grained Reactivity** - Signal-based state without VDOM overhead
 - **State Machines** - Harel statecharts for complex widget interactions
 - **Image Support** - PNG, JPEG, GIF, WebP, BMP with cross-platform asset loading

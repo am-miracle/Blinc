@@ -226,6 +226,116 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-features -- -W clippy::all -A clippy::type_complexity -A dead_code
 
+  wasm32-check:
+    name: Wasm32 Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (with wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-wasm32-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm32-
+
+      # Check the runner crate by itself with the `web` feature only.
+      # Plain `cargo check --workspace` won't work for wasm32 because the
+      # desktop platform crates (rfd, tray-icon, muda, notify-rust, …)
+      # don't compile on wasm32 — they're target-gated under
+      # `cfg(not(target_arch = "wasm32"))` but Cargo's feature unification
+      # still tries to resolve them. So we drive the wasm32 build through
+      # the `web` feature on `blinc_app` directly, the same way the
+      # examples do.
+      - name: Cargo check (blinc_app, wasm32, web feature)
+        run: |
+          cargo check \
+            -p blinc_app \
+            --target wasm32-unknown-unknown \
+            --features web \
+            --no-default-features
+
+      - name: Cargo check (web examples, wasm32)
+        run: |
+          cargo check \
+            -p blinc_web_hello \
+            -p blinc_web_scroll \
+            -p blinc_web_drag \
+            -p blinc_web_assets \
+            --target wasm32-unknown-unknown
+
+      - name: Clippy (blinc_app, wasm32, web feature)
+        run: |
+          cargo clippy \
+            -p blinc_app \
+            --target wasm32-unknown-unknown \
+            --features web \
+            --no-default-features \
+            -- -W clippy::all -A clippy::type_complexity -A dead_code
+
+      - name: Clippy (web examples, wasm32)
+        run: |
+          cargo clippy \
+            -p blinc_web_hello \
+            -p blinc_web_scroll \
+            -p blinc_web_drag \
+            -p blinc_web_assets \
+            --target wasm32-unknown-unknown \
+            -- -W clippy::all -A clippy::type_complexity -A dead_code
+
+  wasm32-pack-build:
+    name: Wasm32 Pack Build
+    runs-on: ubuntu-latest
+    needs: wasm32-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (with wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-wasm-pack-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-pack-
+
+      # Build every web example so any Cargo.toml /
+      # wasm-pack metadata regression surfaces in CI. The
+      # `--release` profile runs `wasm-opt -O --all-features` via
+      # the `[package.metadata.wasm-pack.profile.release]` block in
+      # each example's Cargo.toml.
+      - name: wasm-pack build web_hello
+        run: wasm-pack build examples/web_hello --target web --release
+
+      - name: wasm-pack build web_scroll
+        run: wasm-pack build examples/web_scroll --target web --release
+
+      - name: wasm-pack build web_drag
+        run: wasm-pack build examples/web_drag --target web --release
+
+      - name: wasm-pack build web_assets
+        run: wasm-pack build examples/web_assets --target web --release
+
   docs:
     name: Documentation
     runs-on: ubuntu-latest
