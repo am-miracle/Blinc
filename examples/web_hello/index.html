@@ -63,12 +63,21 @@
     </div>
 
     <script type="module">
-      // Trivial WebGPU presence check before we even try to load the
-      // wasm. If neither WebGPU nor WebGL2 is available, show the
-      // unsupported message instead of letting the wasm panic.
+      // Trivial WebGPU/WebGL2 presence check before we even try to
+      // load the wasm. If neither is available, show the unsupported
+      // message instead of letting the wasm panic.
+      //
+      // CRITICAL: probe via a *throwaway* canvas, never the canvas we
+      // hand to wgpu. Calling `canvas.getContext("webgl2")` on a
+      // canvas locks its context type to webgl2 forever — every
+      // subsequent `getContext("webgpu")` on the same element then
+      // returns `null`, and wgpu's surface creation fails with
+      // "canvas already in use". Spec is at
+      // https://html.spec.whatwg.org/multipage/canvas.html#dom-canvas-getcontext
+      // ("Bitmap rendering context creation algorithm").
       const hasWebGPU = "gpu" in navigator;
-      const canvas = document.getElementById("blinc-canvas");
-      const hasWebGL2 = !!(canvas && canvas.getContext("webgl2"));
+      const probeCanvas = document.createElement("canvas");
+      const hasWebGL2 = !!probeCanvas.getContext("webgl2");
 
       if (!hasWebGPU && !hasWebGL2) {
         document.body.classList.add("no-webgpu");
