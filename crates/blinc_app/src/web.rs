@@ -990,7 +990,67 @@ impl WebApp {
             self.needs_rebuild = true;
         }
 
-        // 3. Rebuild / incrementally update the tree if needed.
+        // 3. Drain pending visual updates from `Stateful::on_drag` /
+        //    `on_state` / `dispatch_state` and any other handler
+        //    that mutates state without restructuring the tree.
+        //
+        //    `State::set` / `State::update` and the FSM transition
+        //    helpers do *not* flip `ref_dirty_flag` — that's the
+        //    `set_rebuild` path. Instead they call
+        //    `refresh_props_internal`, which:
+        //
+        //      1. Re-runs the matching `Stateful::on_state` callback
+        //         to compute fresh `RenderProps` + child Div for the
+        //         current state.
+        //      2. Pushes the result onto two global queues —
+        //         `PENDING_PROP_UPDATES` (visual-only prop changes
+        //         like `transform`, `opacity`, `bg`) and
+        //         `PENDING_SUBTREE_REBUILDS` (children added /
+        //         removed / restructured).
+        //      3. Sets the global `NEEDS_REDRAW` flag.
+        //
+        //    The runner has to drain both queues every frame and
+        //    apply them to `current_tree`. Without this, the
+        //    on_state callback fires (so the framework "knows" the
+        //    new render props), but the queue contents never reach
+        //    the live tree, so the next render still sees the old
+        //    props and nothing visually changes. Mirrors the same
+        //    drain block on desktop at
+        //    [`windowed.rs:3590-3642`](crate::windowed) verbatim,
+        //    minus the FLIP / motion / overlay-rebuild bits this
+        //    runner doesn't yet wire up.
+        let has_stateful_updates = blinc_layout::take_needs_redraw();
+        let has_pending_rebuilds = blinc_layout::has_pending_subtree_rebuilds();
+        if has_stateful_updates || has_pending_rebuilds {
+            // Apply queued render-prop updates to existing nodes.
+            // These are the cheap visual-only path: same node, new
+            // `RenderProps` (e.g. `transform: translate(dx, dy)`).
+            let prop_updates = blinc_layout::take_pending_prop_updates();
+            if let Some(ref mut tree) = self.current_tree {
+                for (node_id, props) in &prop_updates {
+                    tree.update_render_props(*node_id, |p| *p = props.clone());
+                }
+            }
+
+            // Apply queued subtree rebuilds. Each entry replaces a
+            // parent's children with a freshly built Div from the
+            // matching `Stateful::on_state` callback. Returns
+            // `true` if any of the rebuilds had `needs_layout =
+            // true` (i.e. the structural change might have
+            // affected layout dimensions), in which case we
+            // recompute layout once at the end.
+            let mut needs_relayout = false;
+            if let Some(ref mut tree) = self.current_tree {
+                needs_relayout = tree.process_pending_subtree_rebuilds();
+            }
+            if needs_relayout {
+                if let Some(ref mut tree) = self.current_tree {
+                    tree.compute_layout(self.ctx.width, self.ctx.height);
+                }
+            }
+        }
+
+        // 4. Rebuild / incrementally update the tree if needed.
         //    Mirrors the desktop runner's flow at
         //    [`windowed.rs:3653-3795`](crate::windowed): on the first
         //    frame (no existing tree) we do a full build via
@@ -1125,7 +1185,7 @@ impl WebApp {
             self.ctx.rebuild_count = self.ctx.rebuild_count.saturating_add(1);
         }
 
-        // 4. Render the tree to the next surface texture. If we don't
+        // 5. Render the tree to the next surface texture. If we don't
         //    have a tree yet (no builder set), bail out gracefully.
         let tree = match self.current_tree.as_ref() {
             Some(t) => t,
