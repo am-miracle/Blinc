@@ -30,6 +30,7 @@ members = [
     "extensions/blinc_platform_harmony",
     "extensions/blinc_platform_web",
     "examples/web_hello",
+    "examples/web_scroll",
 ]
 
 # Platform-specific crates are included but have target-gated dependencies

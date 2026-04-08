@@ -1,0 +1,43 @@
+[package]
+name = "blinc_web_scroll"
+description = "Blinc web example — wheel scrolling, click events, animated frame loop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+# `cdylib` is what wasm-pack needs to emit a `.wasm` artifact + JS shim.
+crate-type = ["cdylib", "rlib"]
+
+# wasm-pack invokes Binaryen's `wasm-opt` as a post-processing step.
+# Nightly rustc emits bulk-memory and reference-type ops by default,
+# but the version of `wasm-opt` bundled with wasm-pack 0.13 needs the
+# corresponding feature flags or it errors with "Bulk memory operations
+# require bulk memory [--enable-bulk-memory]". Pass the flags through
+# explicitly so the optimizer keeps running.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ['-O', '--all-features']
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false
+
+# Strictly a wasm32 example. Native builds of this crate are
+# meaningless — there's no entry point that does anything outside the
+# browser. The target gate keeps `cargo build --workspace` from trying
+# to link an empty cdylib on macOS / Linux.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+blinc_app = { path = "../../crates/blinc_app", default-features = false, features = ["web"] }
+blinc_layout = { path = "../../crates/blinc_layout" }
+blinc_core = { path = "../../crates/blinc_core" }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["console"] }
+console_error_panic_hook = "0.1"
+tracing = { workspace = true }
+# Bridge `tracing::debug!` / `tracing::warn!` from blinc_text /
+# blinc_gpu / blinc_app into the browser DevTools console so we can
+# actually see what's happening inside the wasm. Without this every
+# `tracing::debug!` line is a no-op on wasm32.
+tracing-wasm = "0.2"
+tracing-subscriber = { workspace = true, features = ["registry"] }
