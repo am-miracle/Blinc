@@ -68,6 +68,31 @@ fn convert_layout_button(
 /// (the web target is single-threaded).
 type UiBuilder = Box<dyn FnMut(&mut WindowedContext) -> Div>;
 
+/// Milliseconds since the runner was first constructed. Backed by a
+/// `web_time::Instant` so the clock is monotonic on both native
+/// (where `web_time::Instant` re-exports `std::time::Instant`) and
+/// wasm32 (where it wraps `performance.now()`).
+///
+/// Used as the `current_time` argument to
+/// `RenderTree::tick_scroll_physics` and as the timestamp for
+/// wheel-idle debouncing in [`WebApp::tick_wheel_idle_check`]. The
+/// epoch is per-app, not absolute, but every consumer is comparing
+/// deltas so that's all we need.
+fn now_ms() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<web_time::Instant> = OnceLock::new();
+    let start = START.get_or_init(web_time::Instant::now);
+    start.elapsed().as_millis() as u64
+}
+
+/// Quiet period after the last wheel event before we synthesise a
+/// `tree.on_scroll_end()` call. 150ms matches the desktop runner's
+/// trackpad-momentum-end heuristic. Too short and rapid wheels look
+/// like multiple separate gestures (each with its own bounce); too
+/// long and the user feels a noticeable lag before momentum kicks
+/// in.
+const WHEEL_IDLE_MS: u64 = 150;
+
 /// Top-level web runner.
 ///
 /// Owns the canvas, the wgpu surface and surface configuration, the
@@ -105,6 +130,13 @@ pub struct WebApp {
     /// that don't actually correspond to a canvas size change (devtools
     /// toggle, focus changes, …).
     last_logical_size: (f32, f32),
+    /// Timestamp (ms since app start) of the most recent wheel event.
+    /// Used to synthesise a `tree.on_scroll_end()` call ~150ms after
+    /// the user stops wheeling, since DOM wheel events have no
+    /// gesture-ended phase. Without this, the scroll widget stays in
+    /// the `Scrolling` state forever and never enters Decelerating /
+    /// Bouncing — momentum and bounce-back never play.
+    last_wheel_at_ms: Option<u64>,
 }
 
 impl WebApp {
@@ -213,6 +245,7 @@ impl WebApp {
             current_tree: None,
             needs_rebuild: true,
             last_logical_size: (logical_width, logical_height),
+            last_wheel_at_ms: None,
         })
     }
 
@@ -640,6 +673,37 @@ impl WebApp {
         if let Some(tree) = app.current_tree.as_mut() {
             tree.dispatch_scroll_chain(hit.node, &hit.ancestors, mx, my, delta_x, delta_y);
         }
+
+        // Record the wheel timestamp so the per-frame
+        // `Self::tick_wheel_idle_check` (called from `run_one_frame`)
+        // can synthesise an `on_scroll_end` after a quiet period.
+        // DOM wheel events have no gesture-ended phase, so without
+        // this debounce the scroll widget never leaves the
+        // `Scrolling` state and momentum / bounce never play.
+        app.last_wheel_at_ms = Some(now_ms());
+    }
+
+    /// Per-frame check: if the user hasn't wheeled in
+    /// [`WHEEL_IDLE_MS`] milliseconds, fire `tree.on_scroll_end()`
+    /// so the scroll widget can transition `Scrolling →
+    /// Decelerating` (for momentum) or `Scrolling → Bouncing` (when
+    /// overscrolling at the edge). Cleared after firing so we
+    /// don't fire it repeatedly while the user holds still.
+    ///
+    /// `now` is whatever the caller already computed via [`now_ms`]
+    /// — we take it as a parameter rather than reading the clock
+    /// again so the same frame uses a consistent timestamp.
+    fn tick_wheel_idle_check(app: &mut Self, now: u64) {
+        let Some(last) = app.last_wheel_at_ms else {
+            return;
+        };
+        if now.saturating_sub(last) < WHEEL_IDLE_MS {
+            return;
+        }
+        if let Some(ref mut tree) = app.current_tree {
+            tree.on_scroll_end();
+        }
+        app.last_wheel_at_ms = None;
     }
 
     fn dispatch_key_down(app: &mut Self, key_code: u32) {
@@ -805,15 +869,17 @@ impl WebApp {
         //    units are milliseconds since app start; `web_time`
         //    gives us a monotonic clock that works on both native
         //    and wasm32.
-        {
-            use std::sync::OnceLock;
-            static START: OnceLock<web_time::Instant> = OnceLock::new();
-            let start = START.get_or_init(web_time::Instant::now);
-            let now_ms = start.elapsed().as_millis() as u64;
-            if let Some(ref mut tree) = self.current_tree {
-                tree.tick_scroll_physics(now_ms);
-            }
+        let now = now_ms();
+        if let Some(ref mut tree) = self.current_tree {
+            tree.tick_scroll_physics(now);
         }
+
+        // Synthesise a `gesture-ended` after a quiet period since
+        // the last wheel event. DOM wheel events don't carry a
+        // phase, so without this the scroll widget stays in the
+        // `Scrolling` state forever and never enters Decelerating
+        // / Bouncing — momentum and bounce-back never play.
+        Self::tick_wheel_idle_check(self, now);
 
         // 2. Rebuild the tree if needed. Splits the borrow so we can
         //    pass &mut ctx to the user's builder while &mut self.ui_builder
@@ -845,6 +911,21 @@ impl WebApp {
             // queries stay stable.
             let registry = Arc::clone(self.ctx.element_registry());
             let mut tree = RenderTree::from_element_with_registry(&element, registry);
+
+            // Wire the AnimationScheduler weak ref into the tree.
+            // Internally `set_animations` walks the existing
+            // `scroll_physics` map and calls `set_scheduler` on each
+            // entry, which is what gives the bounce-spring path a
+            // live `Weak<Mutex<AnimationScheduler>>` to upgrade
+            // inside `ScrollPhysics::tick`. Without this, the
+            // Bouncing arm of the state machine takes its
+            // "no scheduler — snap to bounds" early-out
+            // ([widgets/scroll.rs:849-861](crate::widgets::scroll))
+            // and overscroll snaps instantly instead of animating
+            // back. The desktop runner makes the same call right
+            // after `from_element_with_registry` at
+            // [windowed.rs:3700](crate::windowed).
+            tree.set_animations(&self.ctx.animations);
 
             // CRITICAL: tell the tree about the device pixel ratio
             // BEFORE computing layout. The renderer multiplies layout
