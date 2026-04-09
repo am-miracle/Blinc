@@ -10,19 +10,6 @@
 //! - **ios**: `CADisplayLink` callback → render
 //! - **web**: `window.requestAnimationFrame` → render → schedule next
 //!
-//! ## What's wired in this commit
-//!
-//! Phase 3a built the construction path. Phase 3b added
-//! `AnimationScheduler::start_raf` so the scheduler owns rAF directly.
-//! This commit (Phase 3c) wires the wake callback that actually renders
-//! a frame: `WebApp::run(canvas_id, ui_builder)` builds everything,
-//! installs a render closure as the scheduler's wake callback, enables
-//! continuous redraw so the wake fires on every rAF tick, and returns
-//! once the loop is wired. The rAF closure chain inside the scheduler
-//! keeps running for the lifetime of the page.
-//!
-//! Phase 3d will add DOM event listeners so input events flow through
-//! `EventRouter`. Phase 3e will add resize handling.
 
 use std::cell::RefCell;
 use std::rc::Rc;
