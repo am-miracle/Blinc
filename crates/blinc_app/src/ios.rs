@@ -447,8 +447,7 @@ impl IOSRenderContext {
         // and waiting for the 500 ms long-press deadline to fire.
         // Without this, no events come in while the finger is still
         // and the timer never gets polled.
-        let long_press_pending =
-            blinc_layout::widgets::text_input::is_long_press_armed();
+        let long_press_pending = blinc_layout::widgets::text_input::is_long_press_armed();
 
         dirty
             || wake_requested
@@ -1230,8 +1229,8 @@ pub extern "C" fn blinc_build_frame(ctx: *mut IOSRenderContext) {
         if needs_scroll_pass {
             let viewport_h = ctx.windowed_ctx.height;
             if let Some(ref mut tree) = ctx.render_tree {
-                let scrolled = tree
-                    .scroll_focused_text_input_above_keyboard(viewport_h, current_inset);
+                let scrolled =
+                    tree.scroll_focused_text_input_above_keyboard(viewport_h, current_inset);
                 if scrolled {
                     // Force a redraw on the next frame so the new
                     // scroll offset is reflected in the rendered output.

@@ -71,7 +71,6 @@ fn now_ms() -> u64 {
     start.elapsed().as_millis() as u64
 }
 
-
 /// Top-level web runner.
 ///
 /// Owns the canvas, the wgpu surface and surface configuration, the
@@ -358,17 +357,12 @@ impl WebApp {
     /// stable Rust doesn't have `async FnOnce` yet — the closure
     /// returns a boxed future. Once `async closures` stabilize this
     /// signature can drop the boxing.
-    pub async fn run_with_async_setup<S, F>(
-        canvas_id: &str,
-        setup: S,
-        ui_builder: F,
-    ) -> Result<()>
+    pub async fn run_with_async_setup<S, F>(canvas_id: &str, setup: S, ui_builder: F) -> Result<()>
     where
         S: for<'a> FnOnce(
             &'a mut Self,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<()>> + 'a>,
-        >,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>,
         F: FnMut(&mut WindowedContext) -> Div + 'static,
     {
         Self::run_with_setup_inner(canvas_id, setup, ui_builder).await
@@ -379,17 +373,12 @@ impl WebApp {
     /// returns a future or runs synchronously — the sync wrapper
     /// just constructs an immediately-ready boxed future, so this
     /// inner function only ever sees the async form.
-    async fn run_with_setup_inner<S, F>(
-        canvas_id: &str,
-        setup: S,
-        ui_builder: F,
-    ) -> Result<()>
+    async fn run_with_setup_inner<S, F>(canvas_id: &str, setup: S, ui_builder: F) -> Result<()>
     where
         S: for<'a> FnOnce(
             &'a mut Self,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<()>> + 'a>,
-        >,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>,
         F: FnMut(&mut WindowedContext) -> Div + 'static,
     {
         let mut app = Self::new(canvas_id).await?;
@@ -766,7 +755,9 @@ impl WebApp {
                 Some(t) => t,
                 None => return,
             };
-            app.ctx.event_router.on_scroll_nested(tree, delta_x, delta_y)
+            app.ctx
+                .event_router
+                .on_scroll_nested(tree, delta_x, delta_y)
         };
 
         let Some(hit) = hit else {

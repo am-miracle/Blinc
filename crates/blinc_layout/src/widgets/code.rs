@@ -1623,9 +1623,7 @@ impl CodeEditor {
                                             Ok(d) => d,
                                             Err(_) => return,
                                         };
-                                        if !d.focused
-                                            || captured_cursor.line >= d.lines.len()
-                                        {
+                                        if !d.focused || captured_cursor.line >= d.lines.len() {
                                             return;
                                         }
                                         let line = &d.lines[captured_cursor.line];
@@ -1636,19 +1634,13 @@ impl CodeEditor {
                                         let col = captured_cursor
                                             .column
                                             .min(line_chars.saturating_sub(1));
-                                        let (start, end) =
-                                            text_edit::word_at_position(line, col);
+                                        let (start, end) = text_edit::word_at_position(line, col);
                                         if start == end {
                                             return;
                                         }
-                                        d.selection_start = Some(TextPosition::new(
-                                            captured_cursor.line,
-                                            start,
-                                        ));
-                                        d.cursor = TextPosition::new(
-                                            captured_cursor.line,
-                                            end,
-                                        );
+                                        d.selection_start =
+                                            Some(TextPosition::new(captured_cursor.line, start));
+                                        d.cursor = TextPosition::new(captured_cursor.line, end);
                                         d.drag_anchor = None;
                                         true
                                     };
@@ -1721,10 +1713,7 @@ impl CodeEditor {
                     // Also drift-cancel the long-press timer so a
                     // real cursor drag doesn't also fire the paste
                     // menu mid-gesture.
-                    crate::widgets::text_input::check_long_press_drift(
-                        ctx.mouse_x,
-                        ctx.mouse_y,
-                    );
+                    crate::widgets::text_input::check_long_press_drift(ctx.mouse_x, ctx.mouse_y);
                     if new_cursor != d.cursor {
                         d.cursor = new_cursor;
                         d.selection_start = None;

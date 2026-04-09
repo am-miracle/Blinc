@@ -303,8 +303,7 @@ impl AndroidApp {
             // deadline (the user holding their finger still on a text
             // input emits no input events, so without this clamp the
             // 100 ms idle poll could miss the deadline by up to 100 ms).
-            let long_press_pending =
-                blinc_layout::widgets::text_input::is_long_press_armed();
+            let long_press_pending = blinc_layout::widgets::text_input::is_long_press_armed();
             let poll_timeout = if needs_rebuild || needs_redraw_next_frame {
                 Some(std::time::Duration::ZERO) // Don't wait - vsync paces us
             } else if long_press_pending {
@@ -912,9 +911,7 @@ impl AndroidApp {
             // remain correct even when the event has bubbled to an
             // ancestor whose bounds differ from the original hit target.
             if !pending_events.is_empty() {
-                if let (Some(ref mut tree), Some(ref windowed_ctx)) =
-                    (&mut render_tree, &ctx)
-                {
+                if let (Some(ref mut tree), Some(ref windowed_ctx)) = (&mut render_tree, &ctx) {
                     let router = &windowed_ctx.event_router;
                     for event in pending_events {
                         let (bounds_x, bounds_y, bounds_width, bounds_height) = router
@@ -1032,8 +1029,7 @@ impl AndroidApp {
             // already up in those cases. Re-tap detection lives below
             // via `focus_tap_generation`.
             if let Some(show) = blinc_layout::widgets::text_input::take_keyboard_state_change() {
-                let bridge_ready =
-                    blinc_core::native_bridge::NativeBridgeState::is_initialized();
+                let bridge_ready = blinc_core::native_bridge::NativeBridgeState::is_initialized();
                 let routed_via_bridge = if bridge_ready {
                     let result: blinc_core::native_bridge::NativeResult<()> =
                         blinc_core::native_bridge::native_call(
@@ -1099,8 +1095,7 @@ impl AndroidApp {
             let inset_changed =
                 pending_inset_px >= 0 && pending_inset_px != last_applied_keyboard_inset_px;
             let tap_changed = current_tap_gen != last_focus_tap_generation;
-            let needs_scroll_pass = inset_changed
-                || (tap_changed && pending_inset_px > 0);
+            let needs_scroll_pass = inset_changed || (tap_changed && pending_inset_px > 0);
 
             if needs_scroll_pass {
                 let inset_to_apply = pending_inset_px.max(0) as f32;
@@ -1439,11 +1434,8 @@ impl AndroidApp {
                                 surf.configure(app_instance.device(), config);
                             }
                         }
-                        Err(wgpu::SurfaceError::Lost)
-                        | Err(wgpu::SurfaceError::Outdated) => {
-                            tracing::warn!(
-                                "Surface lost / outdated — reconfiguring swapchain"
-                            );
+                        Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
+                            tracing::warn!("Surface lost / outdated — reconfiguring swapchain");
                             surf.configure(app_instance.device(), config);
                         }
                         Err(wgpu::SurfaceError::OutOfMemory) => {
@@ -1530,9 +1522,7 @@ impl AndroidApp {
                 e
             );
         } else {
-            tracing::info!(
-                "ANativeWindow buffer format forced to R8G8B8X8_UNORM (opaque)"
-            );
+            tracing::info!("ANativeWindow buffer format forced to R8G8B8X8_UNORM (opaque)");
         }
 
         let config = crate::BlincConfig::default();

@@ -129,11 +129,9 @@ impl AndroidNativeBridgeAdapter {
             let activity_obj = unsafe { JObject::from_raw(activity_jobject) };
 
             // Activity → Class<?> → ClassLoader
-            let activity_class = env
-                .get_object_class(&activity_obj)
-                .map_err(|e| NativeBridgeError::PlatformError(format!(
-                    "Failed to get Activity class: {}", e
-                )))?;
+            let activity_class = env.get_object_class(&activity_obj).map_err(|e| {
+                NativeBridgeError::PlatformError(format!("Failed to get Activity class: {}", e))
+            })?;
 
             let loader_obj = env
                 .call_method(
@@ -143,9 +141,9 @@ impl AndroidNativeBridgeAdapter {
                     &[],
                 )
                 .and_then(|v| v.l())
-                .map_err(|e| NativeBridgeError::PlatformError(format!(
-                    "Failed to get ClassLoader: {}", e
-                )))?;
+                .map_err(|e| {
+                    NativeBridgeError::PlatformError(format!("Failed to get ClassLoader: {}", e))
+                })?;
 
             // ClassLoader.loadClass("com.blinc.BlincNativeBridge")
             let class_name = env.new_string("com.blinc.BlincNativeBridge").map_err(|e| {

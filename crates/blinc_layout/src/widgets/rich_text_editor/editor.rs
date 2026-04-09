@@ -330,9 +330,8 @@ pub fn rich_text_editor(
                                 true
                             };
                             if did_update {
-                                version_for_long_press.set(
-                                    version_for_long_press.get().wrapping_add(1),
-                                );
+                                version_for_long_press
+                                    .set(version_for_long_press.get().wrapping_add(1));
                             }
                         })),
                     );
@@ -357,10 +356,7 @@ pub fn rich_text_editor(
                 if touch {
                     // Drift-cancel any armed long-press so a real
                     // cursor drag doesn't also fire the paste menu.
-                    crate::widgets::text_input::check_long_press_drift(
-                        ctx.mouse_x,
-                        ctx.mouse_y,
-                    );
+                    crate::widgets::text_input::check_long_press_drift(ctx.mouse_x, ctx.mouse_y);
                     if data.cursor != pos {
                         data.move_cursor(pos, false);
                         crate::widgets::text_edit::haptic_selection();

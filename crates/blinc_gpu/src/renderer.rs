@@ -1133,18 +1133,16 @@ impl GpuRenderer {
         log_renderer_config(&config);
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("Blinc GPU Device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits,
-                    // MemoryUsage hint tells the driver to prefer lower memory over performance.
-                    // This helps reduce RSS on integrated GPUs (Apple Silicon) where GPU memory
-                    // is shared with CPU and counts against process memory.
-                    memory_hints: wgpu::MemoryHints::MemoryUsage,
-                    trace: wgpu::Trace::Off,
-                },
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("Blinc GPU Device"),
+                required_features: wgpu::Features::empty(),
+                required_limits,
+                // MemoryUsage hint tells the driver to prefer lower memory over performance.
+                // This helps reduce RSS on integrated GPUs (Apple Silicon) where GPU memory
+                // is shared with CPU and counts against process memory.
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Off,
+            })
             .await
             .map_err(RendererError::DeviceError)?;
 
@@ -1202,18 +1200,16 @@ impl GpuRenderer {
         log_renderer_config(&config);
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("Blinc GPU Device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits,
-                    // MemoryUsage hint tells the driver to prefer lower memory over performance.
-                    // This helps reduce RSS on integrated GPUs (Apple Silicon) where GPU memory
-                    // is shared with CPU and counts against process memory.
-                    memory_hints: wgpu::MemoryHints::MemoryUsage,
-                    trace: wgpu::Trace::Off,
-                },
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("Blinc GPU Device"),
+                required_features: wgpu::Features::empty(),
+                required_limits,
+                // MemoryUsage hint tells the driver to prefer lower memory over performance.
+                // This helps reduce RSS on integrated GPUs (Apple Silicon) where GPU memory
+                // is shared with CPU and counts against process memory.
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Off,
+            })
             .await
             .map_err(RendererError::DeviceError)?;
 
@@ -1315,15 +1311,13 @@ impl GpuRenderer {
         log_renderer_config(&config);
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("Blinc GPU Device (Web)"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits,
-                    memory_hints: wgpu::MemoryHints::MemoryUsage,
-                    trace: wgpu::Trace::Off,
-                },
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("Blinc GPU Device (Web)"),
+                required_features: wgpu::Features::empty(),
+                required_limits,
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Off,
+            })
             .await
             .map_err(RendererError::DeviceError)?;
 
@@ -1390,15 +1384,13 @@ impl GpuRenderer {
         log_renderer_config(&config);
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("Blinc GPU Device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits,
-                    memory_hints: wgpu::MemoryHints::MemoryUsage,
-                    trace: wgpu::Trace::Off,
-                },
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("Blinc GPU Device"),
+                required_features: wgpu::Features::empty(),
+                required_limits,
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Off,
+            })
             .await
             .map_err(RendererError::DeviceError)?;
 

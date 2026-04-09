@@ -112,9 +112,7 @@ pub fn _start() {
         .await;
 
         if let Err(e) = result {
-            web_sys::console::error_1(
-                &format!("blinc_web_assets: WebApp::run failed: {e}").into(),
-            );
+            web_sys::console::error_1(&format!("blinc_web_assets: WebApp::run failed: {e}").into());
         }
     });
 }
