@@ -385,10 +385,34 @@ pub fn clipboard_write(text: &str) -> bool {
     result.is_ok()
 }
 
-/// Stub for wasm32. See [`clipboard_read`] for rationale.
+/// Web: write to the system clipboard via
+/// `navigator.clipboard.writeText(text)`. The browser's clipboard
+/// write API is async and returns a Promise — we fire it and forget
+/// the result, returning `true` immediately so the caller (the
+/// widget's Cmd+C / Cmd+X handler) can move on with the visual
+/// "selection deleted" half of cut.
+///
+/// Returns `false` only if there's no `window` or `navigator`
+/// (e.g. running in a worker context with no DOM).
+///
+/// Note: writing to the clipboard requires a user-initiated event
+/// gesture in most browsers. Cmd+C / Cmd+X / Cmd+X via the menu
+/// all qualify because they originate from a `keydown` /
+/// `pointerup` / `click` handler. Programmatic writes from
+/// `setTimeout` or async tasks WITHOUT a user gesture will be
+/// silently rejected by the browser.
 #[cfg(target_arch = "wasm32")]
-pub fn clipboard_write(_text: &str) -> bool {
-    false
+pub fn clipboard_write(text: &str) -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let clipboard = window.navigator().clipboard();
+    // Fire and forget — the returned Promise resolves
+    // asynchronously, but we don't have a sync way to await it
+    // here and the widget's UX doesn't actually need to wait for
+    // the write to complete. The browser handles the rest.
+    let _ = clipboard.write_text(text);
+    true
 }
 
 /// Read image from the system clipboard as RGBA pixels.

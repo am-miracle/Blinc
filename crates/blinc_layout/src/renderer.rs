@@ -2925,10 +2925,20 @@ impl RenderTree {
             self.element_registry.mark_on_ready_triggered(string_id);
         }
 
-        // Invoke callbacks with bounds after a delay
-        // The delay allows window resize/fullscreen animations to complete
-        // so that triggered animations are visible to the user
+        // Invoke callbacks with bounds after a short delay so any
+        // window-resize / fullscreen animation has settled and the
+        // bounds are stable when the user's animation kicks off.
+        //
+        // wasm32 has no `std::thread::spawn` (the stdlib path
+        // panics with `operation not supported on this platform`),
+        // so on the web target we just fire the callbacks
+        // synchronously inline. The 200ms delay was a stability
+        // workaround for desktop window-manager redraw races that
+        // doesn't apply in the browser — there's no separate
+        // window-resize animation; the rAF tick that mutated the
+        // tree IS the resize completion.
         if !to_trigger.is_empty() {
+            #[cfg(not(target_arch = "wasm32"))]
             std::thread::spawn(move || {
                 // Magic delay to let the window settle
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -2938,6 +2948,12 @@ impl RenderTree {
                     callback(bounds);
                 }
             });
+
+            #[cfg(target_arch = "wasm32")]
+            for (string_id, callback, bounds) in to_trigger {
+                tracing::trace!("on_ready callback invoked for '{}'", string_id);
+                callback(bounds);
+            }
         }
     }
 

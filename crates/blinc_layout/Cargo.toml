@@ -62,10 +62,24 @@ open = "5"
 # Clipboard (cross-platform text + image) — desktop + iOS only.
 # `arboard` does not compile on `wasm32-unknown-unknown` (no platform
 # backend) or on Android (no X11/Wayland/UIKit clipboard layer either).
-# The wasm runner provides its own stubs / async impl in
-# `widgets/text_edit.rs` under `cfg(target_arch = "wasm32")`; the
-# Android runner stubs the clipboard via the system clipboard service
-# in `BlincNativeBridge.kt` and the matching Rust handler that the
-# native bridge dispatches into.
+# The wasm runner provides its own impl in `widgets/text_edit.rs`
+# under `cfg(target_arch = "wasm32")` that goes through
+# `navigator.clipboard.writeText()` (see `web-sys` features below);
+# the Android runner stubs the clipboard via the system clipboard
+# service in `BlincNativeBridge.kt` and the matching Rust handler
+# that the native bridge dispatches into.
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
 arboard = "3"
+
+# Web clipboard plumbing for the wasm32 target. The text widgets
+# need to call `navigator.clipboard.writeText(...)` directly from
+# inside their Cmd+C / Cmd+X handlers, which requires
+# `web_sys::Window` + `Navigator::clipboard()` + `Clipboard::write_text()`.
+# `clipboard_read` on wasm intentionally does NOT use this — paste
+# is wired through a document-level `paste` event listener in the
+# web runner that broadcasts the pasted text into the focused
+# widget, bypassing the sync `clipboard_read` API entirely (the
+# browser clipboard read API is async-only and can't satisfy a
+# sync `Option<String>` return).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Window", "Navigator", "Clipboard"] }

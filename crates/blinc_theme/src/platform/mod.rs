@@ -15,6 +15,9 @@ mod ios;
 #[cfg(target_os = "android")]
 mod android;
 
+#[cfg(target_arch = "wasm32")]
+mod web;
+
 use crate::theme::ColorScheme;
 
 /// Supported platforms
@@ -89,12 +92,18 @@ pub fn detect_system_color_scheme() -> ColorScheme {
         android::detect_color_scheme()
     }
 
+    #[cfg(target_arch = "wasm32")]
+    {
+        web::detect_color_scheme()
+    }
+
     #[cfg(not(any(
         target_os = "macos",
         target_os = "windows",
         target_os = "linux",
         target_os = "ios",
-        target_os = "android"
+        target_os = "android",
+        target_arch = "wasm32"
     )))]
     {
         ColorScheme::Light

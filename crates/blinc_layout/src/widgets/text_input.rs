@@ -886,7 +886,33 @@ pub struct TextInputData {
     pub(crate) last_click_time: Option<web_time::Instant>,
     /// Anchor position for drag-to-select
     pub(crate) drag_select_anchor: Option<usize>,
+    /// Undo history. Each entry snapshots `(value, cursor, selection_start)`
+    /// captured immediately BEFORE a text-mutating operation runs (insert,
+    /// delete_*). Cmd+Z pops from this stack onto the redo stack and
+    /// restores the popped entry. Capped at [`UNDO_HISTORY_MAX`] entries
+    /// — older entries are dropped from the front when the cap is hit.
+    pub(crate) undo_stack: Vec<UndoEntry>,
+    /// Redo history. Populated by [`Self::undo`] (and cleared by any new
+    /// edit since a fresh edit starts a new branch in the history). Cmd+Shift+Z
+    /// (or Cmd+Y) pops from this stack onto the undo stack.
+    pub(crate) redo_stack: Vec<UndoEntry>,
 }
+
+/// One snapshot in the undo / redo history. Stores the full pre-edit
+/// state of the text input. We snapshot the entire `value` rather than
+/// a diff because the typical input field is short enough that the
+/// memory cost is negligible (a 100-entry stack of 80-char strings is
+/// ~8 KB).
+#[derive(Clone, Debug)]
+pub struct UndoEntry {
+    pub value: String,
+    pub cursor: usize,
+    pub selection_start: Option<usize>,
+}
+
+/// Maximum number of entries kept in the undo / redo stacks. Once
+/// exceeded, the oldest entry is dropped from the front to make room.
+const UNDO_HISTORY_MAX: usize = 100;
 
 impl std::fmt::Debug for TextInputData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -937,7 +963,69 @@ impl TextInputData {
             css_classes: Vec::new(),
             last_click_time: None,
             drag_select_anchor: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
+    }
+
+    /// Snapshot the current `(value, cursor, selection_start)` triple
+    /// onto the undo stack and clear the redo stack. Called from inside
+    /// the text-mutating helpers BEFORE they apply their change so the
+    /// snapshot represents the pre-edit state.
+    ///
+    /// New edits invalidate the redo branch — once you type something
+    /// after an undo, the path you undid is no longer reachable.
+    pub(crate) fn push_undo(&mut self) {
+        self.undo_stack.push(UndoEntry {
+            value: self.value.clone(),
+            cursor: self.cursor,
+            selection_start: self.selection_start,
+        });
+        if self.undo_stack.len() > UNDO_HISTORY_MAX {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    /// Pop the most recent undo entry, push the current state onto the
+    /// redo stack, and restore the popped state. Returns `true` if any
+    /// state was actually restored (i.e. the undo stack was non-empty).
+    pub fn undo(&mut self) -> bool {
+        let Some(entry) = self.undo_stack.pop() else {
+            return false;
+        };
+        self.redo_stack.push(UndoEntry {
+            value: self.value.clone(),
+            cursor: self.cursor,
+            selection_start: self.selection_start,
+        });
+        if self.redo_stack.len() > UNDO_HISTORY_MAX {
+            self.redo_stack.remove(0);
+        }
+        self.value = entry.value;
+        self.cursor = entry.cursor;
+        self.selection_start = entry.selection_start;
+        true
+    }
+
+    /// Symmetric inverse of [`Self::undo`]. Returns `true` when the
+    /// redo stack had something to apply.
+    pub fn redo(&mut self) -> bool {
+        let Some(entry) = self.redo_stack.pop() else {
+            return false;
+        };
+        self.undo_stack.push(UndoEntry {
+            value: self.value.clone(),
+            cursor: self.cursor,
+            selection_start: self.selection_start,
+        });
+        if self.undo_stack.len() > UNDO_HISTORY_MAX {
+            self.undo_stack.remove(0);
+        }
+        self.value = entry.value;
+        self.cursor = entry.cursor;
+        self.selection_start = entry.selection_start;
+        true
     }
 
     pub fn with_placeholder(placeholder: impl Into<String>) -> Self {
@@ -968,6 +1056,14 @@ impl TextInputData {
 
     /// Insert text at cursor, respecting input type constraints
     pub fn insert(&mut self, text: &str) {
+        // Snapshot for undo BEFORE the mutation. We snapshot
+        // unconditionally even if the eventual `filtered` text turns
+        // out empty (e.g. typing a non-digit into an InputType::Number)
+        // because the cost is one no-op undo entry, and the
+        // alternative — snapshotting after filtering — would mean the
+        // undo history conflates "I typed nothing" with "I typed
+        // something that got dropped", which is the wrong UX.
+        self.push_undo();
         // Delete selection first if any
         if let Some(start) = self.selection_start {
             let (from, to) = if start < self.cursor {
@@ -1022,6 +1118,11 @@ impl TextInputData {
     }
 
     pub fn delete_backward(&mut self) {
+        // Snapshot for undo BEFORE the mutation. We always snapshot
+        // even when there's nothing to delete (cursor at 0, no
+        // selection) — the resulting no-op undo entry is harmless
+        // and keeps the call sites simple.
+        self.push_undo();
         if let Some(start) = self.selection_start {
             let (from, to) = if start < self.cursor {
                 (start, self.cursor)
@@ -1045,6 +1146,7 @@ impl TextInputData {
     }
 
     pub fn delete_forward(&mut self) {
+        self.push_undo();
         if let Some(start) = self.selection_start {
             let (from, to) = if start < self.cursor {
                 (start, self.cursor)
@@ -1152,10 +1254,15 @@ impl TextInputData {
 
     /// Delete from cursor to the previous word boundary
     pub fn delete_word_backward(&mut self) {
+        // Push BEFORE the early-return delete_selection branch so we
+        // don't end up with the selection-delete branch double-pushing
+        // (delete_selection also pushes its own undo). Take the
+        // selection-delete fast path WITHOUT pushing here, then bail.
         if self.selection_start.is_some() {
             self.delete_selection();
             return;
         }
+        self.push_undo();
         let target = crate::widgets::text_edit::word_boundary_left(&self.value, self.cursor);
         if target < self.cursor {
             let byte_start = self
@@ -1181,6 +1288,7 @@ impl TextInputData {
             self.delete_selection();
             return;
         }
+        self.push_undo();
         let target = crate::widgets::text_edit::word_boundary_right(&self.value, self.cursor);
         if target > self.cursor {
             let byte_start = self
@@ -1201,30 +1309,34 @@ impl TextInputData {
 
     /// Delete the current selection, returning true if text changed
     pub fn delete_selection(&mut self) -> bool {
-        if let Some(start) = self.selection_start.take() {
-            let (from, to) = if start < self.cursor {
-                (start, self.cursor)
-            } else {
-                (self.cursor, start)
-            };
-            let byte_from = self
-                .value
-                .char_indices()
-                .nth(from)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let byte_to = self
-                .value
-                .char_indices()
-                .nth(to)
-                .map(|(i, _)| i)
-                .unwrap_or(self.value.len());
-            self.value = format!("{}{}", &self.value[..byte_from], &self.value[byte_to..]);
-            self.cursor = from;
-            true
-        } else {
-            false
+        if self.selection_start.is_none() {
+            return false;
         }
+        // Snapshot before mutating, but only if there's actually a
+        // selection to delete. Calling `push_undo` for a no-op delete
+        // would otherwise pollute the history with empty entries.
+        self.push_undo();
+        let start = self.selection_start.take().expect("checked above");
+        let (from, to) = if start < self.cursor {
+            (start, self.cursor)
+        } else {
+            (self.cursor, start)
+        };
+        let byte_from = self
+            .value
+            .char_indices()
+            .nth(from)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let byte_to = self
+            .value
+            .char_indices()
+            .nth(to)
+            .map(|(i, _)| i)
+            .unwrap_or(self.value.len());
+        self.value = format!("{}{}", &self.value[..byte_from], &self.value[byte_to..]);
+        self.cursor = from;
+        true
     }
 
     pub fn validate(&mut self) {
@@ -1915,8 +2027,26 @@ impl TextInput {
                     // blur.
                     set_focused_editable_node(ctx.node_id, None);
 
-                    // Get font size for cursor positioning
-                    let font_size = config_for_click.lock().unwrap().font_size;
+                    // Get font size + the horizontal offset of the
+                    // text content area inside the widget bounds.
+                    // The widget renders a `padding_x`-wide spacer
+                    // before the clip container that holds the text
+                    // (see [`build_text_input_inner`]), and the
+                    // border on the parent stateful adds another
+                    // `border_width` on the left edge — so the very
+                    // first glyph sits at
+                    // `local_x = padding_x + border_width`, NOT at
+                    // `local_x = 0`. Without subtracting this offset
+                    // before calling `cursor_position_from_x`, every
+                    // click is shifted right by ~13.5px and the very
+                    // first character is unreachable: clicking on the
+                    // "H" of "Hello World" lands a cursor position
+                    // PAST the H, so a drag-select that starts there
+                    // misses the first character.
+                    let (font_size, text_origin_x) = {
+                        let cfg = config_for_click.lock().unwrap();
+                        (cfg.font_size, cfg.padding_x + cfg.border_width)
+                    };
 
                     // Update FSM state
                     {
@@ -1949,8 +2079,12 @@ impl TextInput {
                         d.computed_width = Some(ctx.bounds_width);
                     }
 
-                    // Calculate cursor position from click x position
-                    let text_x = ctx.local_x.max(0.0);
+                    // Calculate cursor position from click x position.
+                    // Translate widget-local x into text-content x by
+                    // subtracting the left padding + border, then clamp
+                    // to >= 0 so clicks in the padding gutter snap to
+                    // the start of the text instead of going negative.
+                    let text_x = (ctx.local_x - text_origin_x).max(0.0);
                     let cursor_pos = d.cursor_position_from_x(text_x, font_size);
 
                     // Double-click detection (select word)
@@ -2089,8 +2223,19 @@ impl TextInput {
                             return;
                         }
 
-                        let font_size = config_for_drag.lock().unwrap().font_size;
-                        let text_x = ctx.local_x.max(0.0);
+                        // Mirror the offset translation in
+                        // on_mouse_down: convert widget-local x into
+                        // text-content x by subtracting the left
+                        // padding + border before mapping to a
+                        // character index. Without this, the drag
+                        // would cover one character less than the
+                        // mouse-down anchor on the very first
+                        // character.
+                        let (font_size, text_origin_x) = {
+                            let cfg = config_for_drag.lock().unwrap();
+                            (cfg.font_size, cfg.padding_x + cfg.border_width)
+                        };
+                        let text_x = (ctx.local_x - text_origin_x).max(0.0);
                         let new_pos = d.cursor_position_from_x(text_x, font_size);
 
                         // Touch input branches its drag semantics:
@@ -2264,6 +2409,28 @@ impl TextInput {
                                             d.insert(&clean);
                                             value_changed = true;
                                         }
+                                    }
+                                }
+                                // Cmd+Z: undo. Cmd+Shift+Z and Cmd+Y
+                                // are both treated as redo (the two
+                                // are mutually exclusive convention-
+                                // wise on macOS vs Windows, so we
+                                // accept both — single-source-of-
+                                // truth: the user pressed something
+                                // that means "redo").
+                                90 if ctx.shift => {
+                                    if d.redo() {
+                                        value_changed = true;
+                                    }
+                                }
+                                90 => {
+                                    if d.undo() {
+                                        value_changed = true;
+                                    }
+                                }
+                                89 => {
+                                    if d.redo() {
+                                        value_changed = true;
                                     }
                                 }
                                 _ => changed = false,

@@ -6,6 +6,7 @@
 //! - Linux: Adwaita (GNOME)
 //! - iOS: iOS Human Interface Guidelines
 //! - Android: Material You
+//! - Web: default Catppuccin-derived [`crate::themes::BlincTheme`]
 
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -21,6 +22,9 @@ pub mod ios;
 
 #[cfg(target_os = "android")]
 pub mod android;
+
+#[cfg(target_arch = "wasm32")]
+pub mod web;
 
 use crate::theme::ThemeBundle;
 
@@ -49,6 +53,11 @@ pub fn platform_theme_bundle() -> ThemeBundle {
     #[cfg(target_os = "android")]
     {
         return android::AndroidTheme::bundle();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        return web::WebTheme::bundle();
     }
 
     // Fallback for other platforms

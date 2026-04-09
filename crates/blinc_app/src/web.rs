@@ -49,6 +49,184 @@ fn convert_layout_button(
     }
 }
 
+/// Identifier for the four edit-menu actions wired through the
+/// custom right-click context menu. Used by `synthesize_edit_action`
+/// (and its helper closures inside `handle_context_menu`) to keep
+/// the closure type small and `'static` — capturing the `WebApp`
+/// would force a `Rc<RefCell<…>>` clone into every menu-item
+/// callback and complicate the dispatch path significantly.
+#[derive(Clone, Copy)]
+enum EditAction {
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+}
+
+/// Synthesise an edit-menu action against the currently focused
+/// editable widget. Each action dispatches a Cmd+key chord through
+/// `RenderTree::broadcast_key_event`, which the widget's
+/// `on_key_down` handler translates into the matching edit
+/// operation:
+///
+///   * Cut        → Cmd+X (key code 88)
+///   * Copy       → Cmd+C (key code 67)
+///   * Select All → Cmd+A (key code 65)
+///
+/// Paste is special-cased because the widget's Cmd+V handler reads
+/// from `clipboard_read`, which on wasm32 is a permanent `None`
+/// stub (the browser clipboard read API is async-only and can't
+/// satisfy the widget's sync `Option<String>` contract). For
+/// Paste, we call `navigator.clipboard.readText()` directly,
+/// resolve the Promise via `wasm_bindgen_futures::spawn_local`,
+/// then dispatch the resolved text into the focused widget via
+/// `broadcast_text_input_event` once it lands.
+///
+/// This function operates entirely on global state — it doesn't
+/// take a `&mut WebApp` because the menu-item click handlers can't
+/// borrow the runner without elaborate `Rc<RefCell<…>>` plumbing.
+/// The render tree is reached via the global
+/// [`BlincContextState`] singleton, which both the runner and the
+/// widget tree already share.
+fn synthesize_edit_action(action: EditAction) {
+    use blinc_core::events::event_types;
+    // Set the touch-input flag back to false so the widget routes
+    // the synthetic key event through its keyboard-shortcut path
+    // (the same path Cmd+C / Cmd+V take from the keyboard handler).
+    blinc_layout::widgets::text_input::set_touch_input(false);
+
+    // Sync clipboard write helpers can be called inline. Cut /
+    // Copy / Select All all dispatch a Cmd+key event into the
+    // focused widget's key handler, which does its own selection
+    // bookkeeping and clipboard write.
+    //
+    // We dispatch via the static `TREE_BROADCAST` channel that the
+    // runner installs into the global before each frame; this is
+    // the same path the document-level `paste` listener uses for
+    // its broadcasted text-input events. The runner's render path
+    // already holds the only `&mut RenderTree`, so this helper
+    // can't get one — instead it routes through the broadcast
+    // helpers via a queue that the next frame drains.
+    //
+    // For now we take the simpler approach: queue the action via a
+    // global `Mutex<Option<EditAction>>` slot that the next
+    // `dispatch_pending` / frame tick consumes. The frame loop
+    // re-runs constantly because the cursor blink animation keeps
+    // the rAF chain alive.
+    if let Ok(mut slot) = PENDING_EDIT_ACTION.lock() {
+        // Coalesce repeated taps — only the most recent matters.
+        *slot = Some(action);
+    }
+    // Force a redraw so the next rAF tick picks up the queued
+    // action even if the page is otherwise idle.
+    blinc_layout::request_redraw();
+    let _ = event_types::KEY_DOWN; // silence unused-import on cfg paths
+}
+
+/// Slot for a pending edit-menu action queued by
+/// `synthesize_edit_action` and consumed inside the WebApp's
+/// frame loop. Single-slot because the menu only ever fires one
+/// action at a time.
+static PENDING_EDIT_ACTION: std::sync::Mutex<Option<EditAction>> = std::sync::Mutex::new(None);
+
+/// Drain any queued edit-menu action and dispatch it through the
+/// supplied render tree. Called from inside `WebApp::run_one_frame`
+/// (where we have a real `&mut RenderTree`) before the per-frame
+/// rebuild + render pass.
+fn drain_pending_edit_action(tree: &mut blinc_layout::renderer::RenderTree) {
+    use blinc_core::events::event_types;
+    let Some(action) = PENDING_EDIT_ACTION.lock().ok().and_then(|mut s| s.take()) else {
+        return;
+    };
+    let (key_code, meta) = match action {
+        EditAction::Cut => (88, true),       // Cmd+X
+        EditAction::Copy => (67, true),      // Cmd+C
+        EditAction::SelectAll => (65, true), // Cmd+A
+        EditAction::Paste => {
+            // Paste goes through the async clipboard read path —
+            // kick off the Promise here and bail without
+            // dispatching a synthetic key event. The widget will
+            // see the pasted text via `broadcast_text_input_event`
+            // once the Promise resolves.
+            spawn_paste_from_clipboard();
+            return;
+        }
+    };
+    tree.broadcast_key_event(event_types::KEY_DOWN, key_code, false, false, false, meta);
+}
+
+/// Read text from `navigator.clipboard.readText()` (async) and
+/// broadcast it into the focused widget once it resolves. Used by
+/// the right-click context menu's Paste button — Cmd+V via the
+/// keyboard goes through the document-level `paste` event listener
+/// instead, which is sync.
+fn spawn_paste_from_clipboard() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let clipboard = window.navigator().clipboard();
+    let promise = clipboard.read_text();
+    wasm_bindgen_futures::spawn_local(async move {
+        let result = wasm_bindgen_futures::JsFuture::from(promise).await;
+        let Ok(value) = result else {
+            return;
+        };
+        let Some(text) = value.as_string() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        // Queue the pasted text via a separate slot — same shape
+        // as `PENDING_EDIT_ACTION`. The next frame drains it.
+        if let Ok(mut slot) = PENDING_PASTE_TEXT.lock() {
+            *slot = Some(text);
+        }
+        blinc_layout::request_redraw();
+    });
+}
+
+/// Slot for clipboard text resolved asynchronously by
+/// [`spawn_paste_from_clipboard`]. Drained on the next frame by
+/// [`drain_pending_paste_text`].
+static PENDING_PASTE_TEXT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn drain_pending_paste_text(tree: &mut blinc_layout::renderer::RenderTree) {
+    let Some(text) = PENDING_PASTE_TEXT.lock().ok().and_then(|mut s| s.take()) else {
+        return;
+    };
+    for ch in text.chars() {
+        tree.broadcast_text_input_event(ch, false, false, false, false);
+    }
+}
+
+/// Map a Blinc [`CursorStyle`](blinc_layout::element::CursorStyle) to
+/// the matching CSS `cursor` keyword. Mirrors the desktop
+/// `convert_cursor_style` (windowed.rs:4172) but yields CSS strings
+/// instead of `blinc_platform::Cursor` enum values, since on the web
+/// we set the cursor via `canvas.style.cursor = "<keyword>"` directly
+/// rather than through a winit-style cursor abstraction.
+fn cursor_style_to_css(cursor: blinc_layout::element::CursorStyle) -> &'static str {
+    use blinc_layout::element::CursorStyle;
+    match cursor {
+        CursorStyle::Default => "default",
+        CursorStyle::Pointer => "pointer",
+        CursorStyle::Text => "text",
+        CursorStyle::Crosshair => "crosshair",
+        CursorStyle::Move => "move",
+        CursorStyle::NotAllowed => "not-allowed",
+        CursorStyle::ResizeNS => "ns-resize",
+        CursorStyle::ResizeEW => "ew-resize",
+        CursorStyle::ResizeNESW => "nesw-resize",
+        CursorStyle::ResizeNWSE => "nwse-resize",
+        CursorStyle::Grab => "grab",
+        CursorStyle::Grabbing => "grabbing",
+        CursorStyle::Wait => "wait",
+        CursorStyle::Progress => "progress",
+        CursorStyle::None => "none",
+    }
+}
+
 /// User-supplied UI builder closure. Called once per rebuild with a
 /// mutable reference to the runner's [`WindowedContext`]. Same shape
 /// as `WindowBuilder` in [`crate::windowed`], minus the `Send` bound
@@ -118,9 +296,60 @@ pub struct WebApp {
     /// that don't actually correspond to a canvas size change (devtools
     /// toggle, focus changes, …).
     last_logical_size: (f32, f32),
+    /// Last single-touch position, in canvas-local CSS pixels. `Some`
+    /// while exactly one finger is on the screen so the touchmove
+    /// handler can compute a per-frame delta and dispatch it as a
+    /// scroll. Cleared on touchend / touchcancel and on
+    /// multi-touch (we don't try to drive scroll from pinch /
+    /// two-finger pans yet).
+    last_touch_pos: Option<(f32, f32)>,
+    /// Last CSS cursor string we wrote to the canvas's
+    /// `style.cursor`. Tracked so the per-mousemove cursor refresh
+    /// only touches the DOM when the hovered element's
+    /// `CursorStyle` actually changes — without this guard every
+    /// mousemove queues a layout-invalidating style write, which
+    /// shows up as visible jank when the user just sweeps the
+    /// mouse across the canvas.
+    last_cursor: &'static str,
 }
 
 impl WebApp {
+    /// Initialize the global [`blinc_theme::ThemeState`] with the
+    /// default web theme bundle and the user's current
+    /// `prefers-color-scheme`. Idempotent — safe to call multiple
+    /// times; the second call is a no-op once the singleton is
+    /// already populated.
+    ///
+    /// Mirrors `WindowedApp::init_theme` (windowed.rs:1979) which
+    /// the desktop runner calls in `WindowedApp::run` for the same
+    /// reason: every theme-aware widget panics on the first frame
+    /// without an initialized `ThemeState`.
+    fn init_theme() {
+        use blinc_theme::{
+            detect_system_color_scheme, platform_theme_bundle, set_redraw_callback, ThemeState,
+        };
+
+        if ThemeState::try_get().is_none() {
+            let bundle = platform_theme_bundle();
+            let scheme = detect_system_color_scheme();
+            ThemeState::init(bundle, scheme);
+        }
+
+        // Theme changes (e.g. user toggling OS dark mode while the
+        // page is open) need to invalidate the tree so widgets pick
+        // up the new tokens. We don't yet hook the
+        // `prefers-color-scheme` media-query change event from the
+        // browser, but if a future runner addition fires it through
+        // `ThemeState::set_color_scheme` this callback will route
+        // it to a full rebuild + CSS reparse — same shape the
+        // desktop runner uses.
+        set_redraw_callback(|| {
+            tracing::debug!("Theme changed - requesting full rebuild + CSS reparse");
+            blinc_layout::widgets::request_css_reparse();
+            blinc_layout::widgets::request_full_rebuild();
+        });
+    }
+
     /// Locate the `<canvas id="…">` in the DOM, set up its physical
     /// framebuffer to match the device pixel ratio, build the GPU
     /// renderer for it, and assemble a [`WebApp`] ready for a frame
@@ -170,6 +399,22 @@ impl WebApp {
 
         // 3. Build the GPU renderer from the canvas.
         let (blinc_app, surface) = BlincApp::with_canvas(canvas.clone(), None).await?;
+
+        // 3a. Wire the global text measurer to the BlincApp's font
+        // registry. Without this, the layout system falls back to
+        // the heuristic measurer in `text_measurer.rs::estimate_size`
+        // which assumes every glyph is exactly `0.55 * font_size`
+        // wide — fine for rough flexbox sizing of one-shot text
+        // labels, completely wrong for any widget that hit-tests
+        // against per-glyph positions. The visible bug is text
+        // selection / cursor placement landing several pixels off
+        // from where you clicked, because the text widget computes
+        // character offsets from estimated widths while the
+        // renderer draws glyphs at their actual font metrics.
+        // Same call the desktop runner makes at
+        // [`windowed.rs:2535`](crate::windowed) and the iOS runner
+        // does inside `init_text_measurer()` at `ios.rs:203`.
+        crate::text_measurer::init_text_measurer_with_registry(blinc_app.font_registry());
 
         // 4. Configure the surface for the canvas's physical dimensions.
         let texture_format = blinc_app.texture_format();
@@ -223,6 +468,18 @@ impl WebApp {
                 stateful_callback,
             );
         }
+
+        // Initialize the global ThemeState the same way the desktop /
+        // Android / iOS runners do (windowed.rs:1979, android.rs:110,
+        // ios.rs:152). Without this, any widget that reads a theme
+        // token — buttons, text inputs, scroll bars, the entire `cn`
+        // component library — panics on the first frame with
+        // "ThemeState not initialized". The web target uses the
+        // default Catppuccin-derived bundle (re-exported as
+        // `WebTheme::bundle()`) and reads the user's preferred color
+        // scheme from `window.matchMedia('(prefers-color-scheme: dark)')`.
+        Self::init_theme();
+
         let overlay_mgr = overlay_manager();
         let element_registry: SharedElementRegistry = Arc::new(ElementRegistry::new());
         let ready_callbacks: SharedReadyCallbacks = Arc::new(Mutex::new(Vec::new()));
@@ -254,6 +511,8 @@ impl WebApp {
             needs_rebuild: true,
             needs_full_rebuild: false,
             last_logical_size: (logical_width, logical_height),
+            last_touch_pos: None,
+            last_cursor: "default",
         })
     }
 
@@ -545,9 +804,30 @@ impl WebApp {
         }
 
         // ----- mousedown -----
+        //
+        // Skip right-click (button 2) and middle-click (button 1)
+        // here. Right-click is owned by the `contextmenu` listener
+        // below, which builds the custom edit-menu overlay; we
+        // don't want the same gesture to also fire `on_mouse_down`
+        // through the regular dispatch path because that would:
+        //   1. Call `blur_all_text_inputs()`, dropping the focus
+        //      and selection on whichever input the user
+        //      right-clicked.
+        //   2. Re-fire `EventRouter::on_mouse_down` against the
+        //      hit-test target, which clears the text widget's
+        //      selection_start. By the time the user picks "Copy"
+        //      from the menu, there's nothing selected to copy.
+        // Native macOS / Windows behavior is "right-click leaves
+        // focus and selection alone", and that's what we mirror
+        // here. Middle-click is also dropped because we have no
+        // wired-up middle-click semantics yet — better to ignore
+        // it than to treat it like a left-click.
         {
             let app_rc = Rc::clone(&app_rc);
             let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::MouseEvent| {
+                if evt.button() != 0 {
+                    return;
+                }
                 if let Ok(mut app) = app_rc.try_borrow_mut() {
                     let x = evt.offset_x() as f32;
                     let y = evt.offset_y() as f32;
@@ -564,9 +844,17 @@ impl WebApp {
         }
 
         // ----- mouseup -----
+        //
+        // Mirror the mousedown filter: only the left button drives
+        // dispatch_mouse_up. Right-button mouseups would otherwise
+        // fire POINTER_UP / DRAG_END events that the framework
+        // doesn't expect from a right-click.
         {
             let app_rc = Rc::clone(&app_rc);
             let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::MouseEvent| {
+                if evt.button() != 0 {
+                    return;
+                }
                 if let Ok(mut app) = app_rc.try_borrow_mut() {
                     let x = evt.offset_x() as f32;
                     let y = evt.offset_y() as f32;
@@ -609,6 +897,222 @@ impl WebApp {
             closure.forget();
         }
 
+        // ----- touchstart / touchmove / touchend / touchcancel -----
+        //
+        // The web target needs touch handling for two distinct
+        // reasons:
+        //
+        //   1. **Tap-as-click**: a single-finger tap should reach
+        //      every widget the same way a mouse click does so
+        //      buttons, text inputs, links, etc. all work on a
+        //      mobile browser. We synthesize mousedown/mouseup
+        //      from touchstart/touchend at the touch position,
+        //      mirroring the iOS runner's
+        //      `MouseButton::Left` dispatch from `TouchPhase::Began`
+        //      / `Ended` (see ios.rs:828-908).
+        //
+        //   2. **Swipe-to-scroll**: a single-finger drag should
+        //      advance scroll containers under the finger. Touch
+        //      events don't fire wheel events, so without this
+        //      handler the mobile browser can't scroll a Blinc
+        //      `scroll()` container at all. We track
+        //      `last_touch_pos` between touchmove ticks and feed
+        //      the delta into `dispatch_scroll`, the same path
+        //      the wheel handler uses.
+        //
+        // We deliberately ignore multi-touch (pinch / two-finger
+        // pan) here — those need their own pinch-zoom plumbing
+        // through `EventRouter::on_pinch`, and the framework
+        // doesn't yet wire pinch through the web runner. Single-
+        // finger gestures cover the common UX (taps, swipes,
+        // long presses) and that matches what `web_mobile_demo`
+        // exercises.
+        //
+        // Each handler converts page-relative `client_x` /
+        // `client_y` to canvas-local CSS pixels via the canvas's
+        // `getBoundingClientRect()`. Touch events don't carry
+        // `offset_x` / `offset_y`, so we have to do this
+        // ourselves.
+        {
+            // Helper closure shared by all four touch handlers:
+            // grab the first touch and translate to canvas-local
+            // CSS pixels. Returns `None` if there's no first
+            // touch (zero-touch touchend, multi-touch ignored).
+            //
+            // The bounding rect is read on every event because
+            // page scroll, layout shifts, and CSS animations can
+            // all move the canvas — caching here would silently
+            // drift away from reality.
+            let canvas_for_touch = canvas.clone();
+            let touch_local_pos =
+                move |touch_list: web_sys::TouchList| -> Option<(f32, f32, usize)> {
+                    let len = touch_list.length() as usize;
+                    if len == 0 {
+                        return None;
+                    }
+                    let touch = touch_list.get(0)?;
+                    let rect = canvas_for_touch.get_bounding_client_rect();
+                    let x = touch.client_x() as f32 - rect.left() as f32;
+                    let y = touch.client_y() as f32 - rect.top() as f32;
+                    Some((x, y, len))
+                };
+
+            // touchstart
+            {
+                let app_rc = Rc::clone(&app_rc);
+                let touch_local_pos = touch_local_pos.clone();
+                let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::TouchEvent| {
+                    // `prevent_default` here also stops the
+                    // browser from synthesising a follow-up
+                    // mousedown 300ms later (the legacy
+                    // touch-to-click compat path), which would
+                    // otherwise cause every tap to fire two
+                    // POINTER_DOWN events.
+                    evt.prevent_default();
+                    if let Ok(mut app) = app_rc.try_borrow_mut() {
+                        if let Some((x, y, len)) = touch_local_pos(evt.touches()) {
+                            // Mark this event sequence as touch
+                            // input so editable widgets switch to
+                            // mobile UX (touch drag = move cursor,
+                            // double-tap = native edit menu, etc.).
+                            blinc_layout::widgets::text_input::set_touch_input(true);
+                            if len == 1 {
+                                app.last_touch_pos = Some((x, y));
+                                Self::dispatch_mouse_down(
+                                    &mut app,
+                                    x,
+                                    y,
+                                    blinc_platform::MouseButton::Left,
+                                );
+                            } else {
+                                // Multi-touch: cancel any
+                                // single-touch tracking so a
+                                // pinch doesn't get
+                                // misinterpreted as a swipe when
+                                // the user lifts a finger.
+                                app.last_touch_pos = None;
+                            }
+                        }
+                    }
+                });
+                canvas
+                    .add_event_listener_with_callback(
+                        "touchstart",
+                        closure.as_ref().unchecked_ref(),
+                    )
+                    .map_err(|e| {
+                        BlincError::Platform(format!("add touchstart listener failed: {e:?}"))
+                    })?;
+                closure.forget();
+            }
+
+            // touchmove
+            {
+                let app_rc = Rc::clone(&app_rc);
+                let touch_local_pos = touch_local_pos.clone();
+                let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::TouchEvent| {
+                    // Block the browser's default touch-scroll
+                    // behavior (rubber-band, address-bar reveal,
+                    // pull-to-refresh) so the canvas owns scroll
+                    // semantics end-to-end.
+                    evt.prevent_default();
+                    if let Ok(mut app) = app_rc.try_borrow_mut() {
+                        if let Some((x, y, len)) = touch_local_pos(evt.touches()) {
+                            if len == 1 {
+                                if let Some((px, py)) = app.last_touch_pos {
+                                    let dx = x - px;
+                                    let dy = y - py;
+                                    // Sub-pixel jitter guard
+                                    // mirroring ios.rs:874.
+                                    if dx.abs() > 0.5 || dy.abs() > 0.5 {
+                                        Self::dispatch_scroll(&mut app, dx, dy);
+                                    }
+                                }
+                                app.last_touch_pos = Some((x, y));
+                                // Also forward as a mouse_move so
+                                // hover state / drag handlers
+                                // see the touch path.
+                                Self::dispatch_mouse_move(&mut app, x, y);
+                            } else {
+                                app.last_touch_pos = None;
+                            }
+                        }
+                    }
+                });
+                canvas
+                    .add_event_listener_with_callback("touchmove", closure.as_ref().unchecked_ref())
+                    .map_err(|e| {
+                        BlincError::Platform(format!("add touchmove listener failed: {e:?}"))
+                    })?;
+                closure.forget();
+            }
+
+            // touchend
+            {
+                let app_rc = Rc::clone(&app_rc);
+                let touch_local_pos = touch_local_pos.clone();
+                let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::TouchEvent| {
+                    evt.prevent_default();
+                    if let Ok(mut app) = app_rc.try_borrow_mut() {
+                        // touchend's `touches()` is the list of
+                        // STILL-ACTIVE touches (not the ones that
+                        // just ended), so we read the released
+                        // touch from `changed_touches()` instead.
+                        let pos = touch_local_pos(evt.changed_touches())
+                            .or(app.last_touch_pos.map(|(x, y)| (x, y, 1)));
+                        if let Some((x, y, _)) = pos {
+                            Self::dispatch_mouse_up(
+                                &mut app,
+                                x,
+                                y,
+                                blinc_platform::MouseButton::Left,
+                            );
+                        }
+                        // Cancel any armed long-press timer the
+                        // user just dismissed by lifting their
+                        // finger before the deadline.
+                        blinc_layout::widgets::text_input::cancel_long_press_timer();
+                        app.last_touch_pos = None;
+                    }
+                });
+                canvas
+                    .add_event_listener_with_callback("touchend", closure.as_ref().unchecked_ref())
+                    .map_err(|e| {
+                        BlincError::Platform(format!("add touchend listener failed: {e:?}"))
+                    })?;
+                closure.forget();
+            }
+
+            // touchcancel
+            {
+                let app_rc = Rc::clone(&app_rc);
+                let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::TouchEvent| {
+                    evt.prevent_default();
+                    if let Ok(mut app) = app_rc.try_borrow_mut() {
+                        if let Some((x, y)) = app.last_touch_pos {
+                            Self::dispatch_mouse_up(
+                                &mut app,
+                                x,
+                                y,
+                                blinc_platform::MouseButton::Left,
+                            );
+                        }
+                        blinc_layout::widgets::text_input::cancel_long_press_timer();
+                        app.last_touch_pos = None;
+                    }
+                });
+                canvas
+                    .add_event_listener_with_callback(
+                        "touchcancel",
+                        closure.as_ref().unchecked_ref(),
+                    )
+                    .map_err(|e| {
+                        BlincError::Platform(format!("add touchcancel listener failed: {e:?}"))
+                    })?;
+                closure.forget();
+            }
+        }
+
         // ----- keydown (on document, not canvas) -----
         {
             let app_rc = Rc::clone(&app_rc);
@@ -621,7 +1125,11 @@ impl WebApp {
                     // `windowed.rs:3052` exactly, so the same widget
                     // key shortcuts work without translation.
                     let key_code = evt.key_code();
-                    Self::dispatch_key_down(&mut app, key_code);
+                    let shift = evt.shift_key();
+                    let ctrl = evt.ctrl_key();
+                    let alt = evt.alt_key();
+                    let meta = evt.meta_key();
+                    Self::dispatch_key_down(&mut app, key_code, shift, ctrl, alt, meta);
 
                     // For printable single-character keys, also
                     // dispatch TEXT_INPUT so editor widgets can
@@ -633,8 +1141,13 @@ impl WebApp {
                     let key_str = evt.key();
                     let mut chars = key_str.chars();
                     if let (Some(ch), None) = (chars.next(), chars.next()) {
-                        if !ch.is_control() && !evt.ctrl_key() && !evt.meta_key() {
-                            Self::dispatch_text_input(&mut app, ch);
+                        if !ch.is_control() && !ctrl && !meta {
+                            // Prevent the browser from also acting on
+                            // the key (e.g. quick-find triggering on
+                            // `/`, space scrolling the page) when a
+                            // Blinc text input is consuming it.
+                            evt.prevent_default();
+                            Self::dispatch_text_input(&mut app, ch, shift, ctrl, alt, meta);
                         }
                     }
                 }
@@ -651,12 +1164,112 @@ impl WebApp {
             let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::KeyboardEvent| {
                 if let Ok(mut app) = app_rc.try_borrow_mut() {
                     let key_code = evt.key_code();
-                    Self::dispatch_key_up(&mut app, key_code);
+                    let shift = evt.shift_key();
+                    let ctrl = evt.ctrl_key();
+                    let alt = evt.alt_key();
+                    let meta = evt.meta_key();
+                    Self::dispatch_key_up(&mut app, key_code, shift, ctrl, alt, meta);
                 }
             });
             document
                 .add_event_listener_with_callback("keyup", closure.as_ref().unchecked_ref())
                 .map_err(|e| BlincError::Platform(format!("add keyup listener failed: {e:?}")))?;
+            closure.forget();
+        }
+
+        // ----- paste (on document) -----
+        //
+        // The browser's `paste` event is the only path that gives us
+        // sync access to clipboard text. `navigator.clipboard.readText()`
+        // is async-only and can't satisfy the widget's sync
+        // `clipboard_read() -> Option<String>` contract — so instead of
+        // routing Cmd+V through the widget's clipboard_read handler, we
+        // intercept the paste event itself and broadcast each character
+        // as a TEXT_INPUT event into the focused widget. The browser
+        // fires this event for:
+        //   * Cmd+V / Ctrl+V keyboard shortcut
+        //   * Right-click → Paste from the browser's native context menu
+        //   * Edit → Paste from the browser's menu bar
+        //   * Mobile long-press → Paste
+        //
+        // Our custom context menu's Paste button doesn't go through
+        // this path because it can't synthesize a real paste event
+        // (the browser only fires those for user gestures); it calls
+        // `navigator.clipboard.readText()` directly and dispatches the
+        // resolved text via `broadcast_text_input_event`.
+        {
+            let app_rc = Rc::clone(&app_rc);
+            let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::ClipboardEvent| {
+                if let Ok(mut app) = app_rc.try_borrow_mut() {
+                    let Some(data) = evt.clipboard_data() else {
+                        return;
+                    };
+                    let text = data.get_data("text/plain").unwrap_or_default();
+                    if text.is_empty() {
+                        return;
+                    }
+                    evt.prevent_default();
+                    if let Some(tree) = app.current_tree.as_mut() {
+                        // Broadcast each char individually so the
+                        // widget's `on_event(TEXT_INPUT, …)` handler
+                        // sees them through `EventContext::key_char`,
+                        // matching how the keydown handler delivers
+                        // single typed characters. The widget appends
+                        // each character to its buffer; multi-line
+                        // pastes flow through naturally because '\n'
+                        // is just another char from the widget's
+                        // perspective.
+                        for ch in text.chars() {
+                            tree.broadcast_text_input_event(ch, false, false, false, false);
+                        }
+                    }
+                }
+            });
+            document
+                .add_event_listener_with_callback("paste", closure.as_ref().unchecked_ref())
+                .map_err(|e| BlincError::Platform(format!("add paste listener failed: {e:?}")))?;
+            closure.forget();
+        }
+
+        // ----- contextmenu (on canvas) -----
+        //
+        // The browser's right-click menu (Inspect Element, Save Image,
+        // …) is unhelpful inside a Blinc canvas — Blinc owns its own
+        // hit-testing and the browser has no idea which Blinc widget
+        // the cursor is over. Suppress the default menu via
+        // `preventDefault()` so the canvas owns the right-click
+        // gesture, then route a synthetic `show_edit_menu` call into
+        // Rust the same way the iOS double-tap path does. The web
+        // implementation of `show_edit_menu` lives in the Rust web
+        // runner (see `Self::handle_show_edit_menu`); it builds an
+        // absolutely positioned `<div>` overlay with Cut / Copy /
+        // Paste / Select All buttons.
+        //
+        // Whether or not we actually show a menu depends on whether
+        // the user clicked on a focused editable widget — there's no
+        // point showing a Cut / Copy menu over a header text. We
+        // check `focused_editable_node_id()` for the gate.
+        {
+            let app_rc = Rc::clone(&app_rc);
+            let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::MouseEvent| {
+                evt.prevent_default();
+                if let Ok(mut app) = app_rc.try_borrow_mut() {
+                    let x = evt.offset_x() as f32;
+                    let y = evt.offset_y() as f32;
+                    // Anchor the menu in viewport (page) coordinates
+                    // because the overlay is appended to `document.body`,
+                    // not the canvas. `client_x/y` give us
+                    // viewport-relative pixels.
+                    let page_x = evt.client_x() as f32;
+                    let page_y = evt.client_y() as f32;
+                    Self::handle_context_menu(&mut app, x, y, page_x, page_y);
+                }
+            });
+            canvas
+                .add_event_listener_with_callback("contextmenu", closure.as_ref().unchecked_ref())
+                .map_err(|e| {
+                    BlincError::Platform(format!("add contextmenu listener failed: {e:?}"))
+                })?;
             closure.forget();
         }
 
@@ -704,10 +1317,52 @@ impl WebApp {
             None => return,
         };
         let pending = app.ctx.event_router.on_mouse_move(tree, x, y);
+
+        // Update the canvas cursor based on the hovered element's
+        // `CursorStyle`. Mirrors the desktop runner's
+        // `window.set_cursor(...)` call inside `MouseEvent::Moved`
+        // (windowed.rs:2926-2930), translated to CSS
+        // `style.cursor` writes on the canvas. The query has to
+        // run BEFORE `dispatch_pending` so the immutable tree
+        // borrow doesn't conflict with the mutable borrow that
+        // `dispatch_pending` needs.
+        let cursor_style = tree
+            .get_cursor_at(&app.ctx.event_router, x, y)
+            .unwrap_or(blinc_layout::element::CursorStyle::Default);
+        let css_cursor = cursor_style_to_css(cursor_style);
+        if css_cursor != app.last_cursor {
+            // Touch the DOM only when the cursor actually changes.
+            // `style.cursor` writes are cheap individually but they
+            // queue style invalidations on the canvas — without
+            // this guard, every mousemove (60+/sec on a fast
+            // pointer sweep) churns through the browser's style
+            // recalc path for no visible benefit.
+            if let Some(html_canvas) = app.canvas.dyn_ref::<web_sys::HtmlElement>() {
+                let _ = html_canvas.style().set_property("cursor", css_cursor);
+            }
+            app.last_cursor = css_cursor;
+        }
+
         Self::dispatch_pending(app, pending);
     }
 
     fn dispatch_mouse_down(app: &mut Self, x: f32, y: f32, button: blinc_platform::MouseButton) {
+        // Mouse is the primary input — flip touch flag off so any
+        // editable widget that branches on `is_touch_input()`
+        // (text_input drag = move-cursor vs select-text) reverts
+        // to desktop semantics.
+        blinc_layout::widgets::text_input::set_touch_input(false);
+
+        // Blur any focused text inputs BEFORE processing the click.
+        // Mirrors the desktop runner at windowed.rs:2913 and the
+        // iOS runner at ios.rs:848: tapping anywhere globally
+        // clears focus, and the text input that gets clicked
+        // re-focuses itself via its own on_mouse_down handler.
+        // Without this, clicking outside an input keeps the input
+        // focused indefinitely — the user can never blur it
+        // except by clicking another input.
+        blinc_layout::widgets::blur_all_text_inputs();
+
         let tree = match app.current_tree.as_ref() {
             Some(t) => t,
             None => return,
@@ -773,30 +1428,271 @@ impl WebApp {
         }
     }
 
-    fn dispatch_key_down(app: &mut Self, key_code: u32) {
-        if let Some((node, event_type)) = app.ctx.event_router.on_key_down(key_code) {
-            let (mx, my) = app.ctx.event_router.mouse_position();
-            if let Some(tree) = app.current_tree.as_mut() {
-                tree.dispatch_event(node, event_type, mx, my);
-            }
+    fn dispatch_key_down(
+        app: &mut Self,
+        key_code: u32,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+        meta: bool,
+    ) {
+        // Update the router so it can fire any blur / focus-change
+        // logic that depends on key state. The return value is
+        // (node, event_type) for a hit-tested target — we ignore it
+        // because we broadcast instead, mirroring the desktop
+        // runner. The router still tracks focus internally, which
+        // is what `dispatch_text_input` relies on later for
+        // "focused element" semantics.
+        let _ = app.ctx.event_router.on_key_down(key_code);
+
+        // Broadcast KEY_DOWN to every key handler in the tree.
+        // Each widget checks its own focus state to decide whether
+        // to act, mirroring `windowed.rs:3463-3473`. Without this
+        // path the text-input widget never sees Backspace / Enter
+        // / arrow keys etc., because the router-based dispatch
+        // walks an event-bubble chain that doesn't reach handlers
+        // registered at the focused node when the focus changed
+        // mid-rebuild.
+        if let Some(tree) = app.current_tree.as_mut() {
+            tree.broadcast_key_event(
+                blinc_core::events::event_types::KEY_DOWN,
+                key_code,
+                shift,
+                ctrl,
+                alt,
+                meta,
+            );
         }
     }
 
-    fn dispatch_key_up(app: &mut Self, key_code: u32) {
-        if let Some((node, event_type)) = app.ctx.event_router.on_key_up(key_code) {
-            let (mx, my) = app.ctx.event_router.mouse_position();
-            if let Some(tree) = app.current_tree.as_mut() {
-                tree.dispatch_event(node, event_type, mx, my);
-            }
+    fn dispatch_key_up(
+        app: &mut Self,
+        key_code: u32,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+        meta: bool,
+    ) {
+        let _ = app.ctx.event_router.on_key_up(key_code);
+        if let Some(tree) = app.current_tree.as_mut() {
+            tree.broadcast_key_event(
+                blinc_core::events::event_types::KEY_UP,
+                key_code,
+                shift,
+                ctrl,
+                alt,
+                meta,
+            );
         }
     }
 
-    fn dispatch_text_input(app: &mut Self, ch: char) {
-        if let Some((node, event_type)) = app.ctx.event_router.on_text_input(ch) {
-            let (mx, my) = app.ctx.event_router.mouse_position();
-            if let Some(tree) = app.current_tree.as_mut() {
-                tree.dispatch_event(node, event_type, mx, my);
+    fn dispatch_text_input(
+        app: &mut Self,
+        ch: char,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+        meta: bool,
+    ) {
+        // Broadcast TEXT_INPUT through `RenderTree::broadcast_text_input_event`
+        // — the only path that actually populates `EventContext::key_char`,
+        // which the text_input / text_area / code_editor / rich_text_editor
+        // widgets all read inside their `on_event(TEXT_INPUT, …)` handlers.
+        // The previous web runner used `tree.dispatch_event(...)` which
+        // sends the event but leaves `key_char` as `None`, so widgets saw
+        // the event fire but then bailed out without inserting anything
+        // (the typing path is "if let Some(c) = ctx.key_char { d.insert(c) }").
+        if let Some(tree) = app.current_tree.as_mut() {
+            tree.broadcast_text_input_event(ch, shift, ctrl, alt, meta);
+        }
+    }
+
+    /// Handle a right-click on the canvas. Shows a custom context
+    /// menu with Cut / Copy / Paste / Select All when the click
+    /// lands on a focused editable widget; bails silently otherwise.
+    ///
+    /// `canvas_x` / `canvas_y` are the click position in canvas-local
+    /// CSS pixels (used for hit-testing). `page_x` / `page_y` are the
+    /// click position in viewport-relative CSS pixels (used to
+    /// position the overlay, which lives under `document.body`).
+    ///
+    /// The menu items each invoke `synthesize_edit_action`, which
+    /// dispatches the corresponding Cmd+key chord into the focused
+    /// widget. Cut / Copy then route through the widget's existing
+    /// Cmd+X / Cmd+C handlers, which call `clipboard_write` (now
+    /// implemented for wasm via `navigator.clipboard.writeText`).
+    /// Paste calls `navigator.clipboard.readText()` directly and
+    /// dispatches the resolved text via `broadcast_text_input_event`,
+    /// bypassing the widget's Cmd+V → `clipboard_read` path entirely
+    /// (the browser clipboard read API is async-only and can't
+    /// satisfy the widget's sync `Option<String>` contract).
+    fn handle_context_menu(app: &mut Self, canvas_x: f32, canvas_y: f32, page_x: f32, page_y: f32) {
+        // Hit-test the click position so we can decide whether
+        // there's anything worth popping a menu for. We bail if the
+        // click doesn't land on a focused editable widget.
+        let focused = blinc_layout::widgets::text_input::focused_editable_node_id();
+        if focused.is_none() {
+            // No focused editable — let the click pass through to
+            // normal mouse_down handling so it can focus an input
+            // first. We could re-fire the right-click as a left
+            // mouse_down here, but that interferes with apps that
+            // want to use right-click for their own menus.
+            return;
+        }
+
+        // Update the router's mouse position so subsequent
+        // synthetic key events that read mouse coords get the
+        // right values for hit testing the focused node's bounds.
+        if let Some(tree) = app.current_tree.as_ref() {
+            let _ = app.ctx.event_router.on_mouse_move(tree, canvas_x, canvas_y);
+        }
+
+        // Build the overlay. We construct it directly via web_sys
+        // rather than going through Blinc's element registry
+        // because (a) the menu has to layer above the canvas at
+        // arbitrary viewport coordinates which Blinc's layout
+        // engine isn't built for, and (b) the menu needs real
+        // DOM event listeners that can call back into Rust to
+        // dispatch the chosen action — element-tree handlers
+        // don't see DOM-level click events at all.
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Some(document) = window.document() else {
+            return;
+        };
+
+        // Tear down any previously open Blinc context menu so a
+        // second right-click doesn't stack a new menu on top of
+        // the old one. We tag the menu with a stable id so we can
+        // find it again.
+        const MENU_ID: &str = "blinc-context-menu";
+        if let Some(existing) = document.get_element_by_id(MENU_ID) {
+            existing.remove();
+        }
+
+        let Ok(menu) = document.create_element("div") else {
+            return;
+        };
+        let _ = menu.set_attribute("id", MENU_ID);
+        // Inline styles instead of a stylesheet because we want
+        // the menu to work without the host page providing any
+        // CSS. The colors mirror the dark Catppuccin-ish palette
+        // the rest of `web_mobile_demo` uses so the menu doesn't
+        // look out of place.
+        let style = format!(
+            "position:fixed;left:{}px;top:{}px;\
+             background:#1e1e2e;color:#cdd6f4;\
+             border:1px solid #45475a;border-radius:8px;\
+             padding:4px 0;\
+             font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;\
+             box-shadow:0 8px 24px rgba(0,0,0,0.4);\
+             z-index:9999;\
+             min-width:160px;",
+            page_x, page_y,
+        );
+        let _ = menu.set_attribute("style", &style);
+
+        // Build the four menu items. Each item registers a click
+        // handler that calls `synthesize_edit_action` with the
+        // corresponding action.
+        for (label, action) in [
+            ("Cut", EditAction::Cut),
+            ("Copy", EditAction::Copy),
+            ("Paste", EditAction::Paste),
+            ("Select All", EditAction::SelectAll),
+        ] {
+            let Ok(item) = document.create_element("div") else {
+                continue;
+            };
+            let _ =
+                item.set_attribute("style", "padding:6px 16px;cursor:pointer;user-select:none;");
+            item.set_text_content(Some(label));
+
+            // Hover highlight via CSS pseudo-classes is awkward
+            // for inline-styled elements; do it through JS
+            // listeners instead.
+            if let Some(html_item) = item.dyn_ref::<web_sys::HtmlElement>() {
+                let html_item_clone = html_item.clone();
+                let on_over = Closure::<dyn FnMut(_)>::new(move |_evt: web_sys::MouseEvent| {
+                    let _ = html_item_clone
+                        .style()
+                        .set_property("background", "#313244");
+                });
+                let _ = html_item.add_event_listener_with_callback(
+                    "mouseover",
+                    on_over.as_ref().unchecked_ref(),
+                );
+                on_over.forget();
+
+                let html_item_clone = html_item.clone();
+                let on_out = Closure::<dyn FnMut(_)>::new(move |_evt: web_sys::MouseEvent| {
+                    let _ = html_item_clone.style().set_property("background", "");
+                });
+                let _ = html_item
+                    .add_event_listener_with_callback("mouseout", on_out.as_ref().unchecked_ref());
+                on_out.forget();
             }
+
+            // Action handler dispatches the chosen edit action and
+            // removes the menu. We listen for `mousedown` (not
+            // `click`) and call `stop_propagation()` so the
+            // document-level dismiss listener — which also fires
+            // on mousedown — never sees this event. Listening for
+            // `click` would race with the document mousedown:
+            // mousedown bubbles to document → dismiss handler
+            // removes the menu → mouseup → click never fires
+            // because the element is gone. We can't capture
+            // `&mut WebApp` directly here because the closure
+            // outlives this stack frame; route through
+            // `synthesize_edit_action`, which queues the action
+            // into a global slot that the next frame drains.
+            let on_action = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::MouseEvent| {
+                evt.stop_propagation();
+                evt.prevent_default();
+                synthesize_edit_action(action);
+                if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                    if let Some(menu) = doc.get_element_by_id(MENU_ID) {
+                        menu.remove();
+                    }
+                }
+            });
+            let _ = item
+                .add_event_listener_with_callback("mousedown", on_action.as_ref().unchecked_ref());
+            on_action.forget();
+
+            let _ = menu.append_child(&item);
+        }
+
+        // Close the menu on any outside click or scroll. We
+        // attach a one-shot mousedown listener on `document` that
+        // removes the menu and unregisters itself.
+        let dismiss = Closure::<dyn FnMut(_)>::new(move |_evt: web_sys::MouseEvent| {
+            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                if let Some(menu) = doc.get_element_by_id(MENU_ID) {
+                    menu.remove();
+                }
+            }
+        });
+        // Schedule listener attachment for the next tick so the
+        // current right-click event doesn't immediately trigger
+        // the dismiss handler.
+        let document_clone = document.clone();
+        let dismiss_attach = Closure::<dyn FnMut()>::new(move || {
+            let _ = document_clone.add_event_listener_with_callback_and_add_event_listener_options(
+                "mousedown",
+                dismiss.as_ref().unchecked_ref(),
+                web_sys::AddEventListenerOptions::new().once(true),
+            );
+        });
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            dismiss_attach.as_ref().unchecked_ref(),
+            0,
+        );
+        dismiss_attach.forget();
+
+        if let Some(body) = document.body() {
+            let _ = body.append_child(&menu);
         }
     }
 
@@ -1009,6 +1905,20 @@ impl WebApp {
         let now = now_ms();
         if let Some(ref mut tree) = self.current_tree {
             tree.tick_scroll_physics(now);
+
+            // Drain any context-menu actions queued by
+            // `handle_context_menu` (Cut / Copy / Select All)
+            // and any clipboard text resolved by the async
+            // `spawn_paste_from_clipboard` Promise. Both queues
+            // are global mutexes — the runner is the only place
+            // we have a `&mut RenderTree` to feed them into.
+            // Doing it here, before the rebuild trigger detection
+            // below, means the synthetic key event flips the
+            // widget's dirty flag in time for the same frame to
+            // pick up the rebuild instead of waiting one extra
+            // tick.
+            drain_pending_edit_action(tree);
+            drain_pending_paste_text(tree);
         }
 
         // 2. Detect rebuild triggers. Mirrors the desktop runner's

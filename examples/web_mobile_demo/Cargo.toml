@@ -1,0 +1,29 @@
+[package]
+name = "blinc_web_mobile_demo"
+description = "Blinc web example — full mobile UI demo (counter, soft keyboard, keyframe canvas animations) running on wasm32 + WebGPU"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ['-O', '--all-features']
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+blinc_app = { path = "../../crates/blinc_app", default-features = false, features = ["web"] }
+blinc_layout = { path = "../../crates/blinc_layout" }
+blinc_core = { path = "../../crates/blinc_core" }
+blinc_platform_web = { path = "../../extensions/blinc_platform_web" }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["console"] }
+console_error_panic_hook = "0.1"
+tracing = { workspace = true }
+tracing-wasm = "0.2"
+tracing-subscriber = { workspace = true, features = ["registry"] }
