@@ -23,6 +23,11 @@
 //! let page = router.outlet(); // returns Div
 //! ```
 
+// `clippy::missing_const_for_thread_local` mis-fires on nightly clippy
+// 0.1.96+ when the initializer is already wrapped in `const { ... }`.
+// See `blinc_layout::motion` for the same workaround.
+#![allow(clippy::missing_const_for_thread_local)]
+
 pub mod history;
 pub mod route;
 pub mod transition;

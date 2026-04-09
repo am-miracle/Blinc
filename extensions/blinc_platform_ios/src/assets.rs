@@ -30,7 +30,7 @@ impl IOSAssetLoader {
     /// Create a new iOS asset loader
     pub fn new() -> Self {
         // Get the main bundle's resource path
-        let resource_path = unsafe {
+        let resource_path = {
             let bundle = NSBundle::mainBundle();
             bundle
                 .resourcePath()

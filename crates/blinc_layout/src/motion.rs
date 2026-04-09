@@ -49,6 +49,13 @@
 //! }
 //! ```
 
+// `clippy::missing_const_for_thread_local` mis-fires on nightly clippy
+// 0.1.96+ when the `thread_local!` initializer is already wrapped in
+// `const { ... }`. The lint should be a no-op in that case but
+// currently re-flags it. Suppressed at the module level so the macro
+// expansion (which is what the lint attaches to) is covered.
+#![allow(clippy::missing_const_for_thread_local)]
+
 use std::cell::RefCell;
 use std::sync::Arc;
 

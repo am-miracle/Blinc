@@ -25,6 +25,11 @@
 //! OverlayContext::init(overlay_manager);
 //! ```
 
+// `clippy::missing_const_for_thread_local` mis-fires on nightly clippy
+// 0.1.96+ when the initializer is already wrapped in `const { ... }` —
+// see `motion.rs` for the same workaround.
+#![allow(clippy::missing_const_for_thread_local)]
+
 use std::cell::Cell;
 use std::sync::OnceLock;
 

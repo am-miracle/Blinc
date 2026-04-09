@@ -71,22 +71,22 @@ pub fn detect_system_color_scheme() -> ColorScheme {
 
     #[cfg(target_os = "windows")]
     {
-        return windows::detect_color_scheme();
+        windows::detect_color_scheme()
     }
 
     #[cfg(target_os = "linux")]
     {
-        return linux::detect_color_scheme();
+        linux::detect_color_scheme()
     }
 
     #[cfg(target_os = "ios")]
     {
-        return ios::detect_color_scheme();
+        ios::detect_color_scheme()
     }
 
     #[cfg(target_os = "android")]
     {
-        return android::detect_color_scheme();
+        android::detect_color_scheme()
     }
 
     #[cfg(not(any(

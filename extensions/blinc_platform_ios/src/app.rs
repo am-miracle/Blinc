@@ -27,11 +27,21 @@ pub struct IOSPlatform {
 impl IOSPlatform {
     /// Get the main screen's scale factor
     fn get_screen_scale() -> f64 {
-        // On iOS, UIScreen::mainScreen() requires MainThreadMarker
-        // We assume this is called from the main thread
+        // On iOS, UIScreen::mainScreen() requires MainThreadMarker.
+        // We assume this is called from the main thread.
+        //
+        // `mainScreen` is technically deprecated in modern iOS (Apple
+        // recommends `view.window.windowScene.screen` instead) but at
+        // platform-init time we don't have a view / window / scene to
+        // hand — those don't exist until the UIApplicationDelegate
+        // boots up. The deprecated form continues to work for
+        // single-screen apps, which is the only configuration Blinc's
+        // iOS runner currently supports.
+        #[allow(deprecated)]
         let mtm = MainThreadMarker::new().expect("Must be called from main thread");
+        #[allow(deprecated)]
         let screen = UIScreen::mainScreen(mtm);
-        screen.scale() as f64
+        screen.scale()
     }
 }
 

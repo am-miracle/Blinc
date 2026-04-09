@@ -33,11 +33,8 @@ impl BlincAndroidApp {
 
     /// Handle Android events
     pub fn handle_event(&mut self, app: &AndroidApp, event: PollEvent) {
-        match event {
-            PollEvent::Main(main_event) => {
-                self.handle_main_event(app, main_event);
-            }
-            _ => {}
+        if let PollEvent::Main(main_event) = event {
+            self.handle_main_event(app, main_event);
         }
     }
 

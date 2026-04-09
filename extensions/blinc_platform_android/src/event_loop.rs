@@ -123,8 +123,8 @@ impl EventLoop for AndroidEventLoop {
         while !should_exit {
             // Poll for events with 16ms timeout (~60fps)
             self.app
-                .poll_events(Some(Duration::from_millis(16)), |event| match event {
-                    PollEvent::Main(main_event) => match main_event {
+                .poll_events(Some(Duration::from_millis(16)), |event| if let PollEvent::Main(main_event) = event {
+                    match main_event {
                         MainEvent::InitWindow { .. } => {
                             info!("Android: Native window initialized");
                             if let Some(native) = self.app.native_window() {
@@ -233,8 +233,7 @@ impl EventLoop for AndroidEventLoop {
                         }
 
                         _ => {}
-                    },
-                    _ => {}
+                    }
                 });
 
             // Check if animation thread requested a wake

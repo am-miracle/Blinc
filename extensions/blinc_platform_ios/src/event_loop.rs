@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 #[cfg(target_os = "ios")]
-use tracing::{debug, info, warn};
+use tracing::info;
 
 /// Wake proxy for iOS event loop
 ///
@@ -22,6 +22,13 @@ use tracing::{debug, info, warn};
 pub struct IOSWakeProxy {
     /// Flag indicating a wake was requested
     wake_requested: Arc<AtomicBool>,
+}
+
+#[cfg(target_os = "ios")]
+impl Default for IOSWakeProxy {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(target_os = "ios")]
@@ -75,6 +82,13 @@ pub struct IOSEventLoop {
 }
 
 #[cfg(target_os = "ios")]
+impl Default for IOSEventLoop {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_os = "ios")]
 impl IOSEventLoop {
     /// Create a new iOS event loop
     pub fn new() -> Self {
@@ -93,7 +107,7 @@ impl IOSEventLoop {
 impl EventLoop for IOSEventLoop {
     type Window = IOSWindow;
 
-    fn run<F>(self, mut handler: F) -> Result<(), PlatformError>
+    fn run<F>(self, _handler: F) -> Result<(), PlatformError>
     where
         F: FnMut(Event, &Self::Window) -> ControlFlow + 'static,
     {
