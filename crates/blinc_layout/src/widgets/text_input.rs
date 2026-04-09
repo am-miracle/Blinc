@@ -416,11 +416,21 @@ pub fn set_focused_editable_node(
 
 /// Clear the focused-editable node id and drop any registered blur
 /// callback. See [`set_focused_editable_node`].
+///
+/// Also dismisses any open native edit menu (Cut / Copy / Paste /
+/// Select All) and cancels any armed long-press timer. The edit
+/// menu is anchored to the focused widget — leaving it visible
+/// after focus moves away would let the user pick Cut / Copy / etc.
+/// against the wrong (now-unfocused) input. Cancelling the
+/// long-press is the same logic: a timer that fires while no
+/// editable is focused would pop a menu against a stale anchor.
 pub fn clear_focused_editable_node() {
     FOCUSED_EDITABLE_NODE_ID.store(0, Ordering::Relaxed);
     if let Ok(mut slot) = FOCUSED_EDITABLE_BLUR_CALLBACK.lock() {
         *slot = None;
     }
+    crate::widgets::text_edit::hide_edit_menu();
+    cancel_long_press_timer();
 }
 
 /// Get the LayoutNodeId of the currently focused generic editable widget,
