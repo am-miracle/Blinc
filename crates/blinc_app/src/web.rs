@@ -227,11 +227,78 @@ fn cursor_style_to_css(cursor: blinc_layout::element::CursorStyle) -> &'static s
     }
 }
 
-/// User-supplied UI builder closure. Called once per rebuild with a
-/// mutable reference to the runner's [`WindowedContext`]. Same shape
-/// as `WindowBuilder` in [`crate::windowed`], minus the `Send` bound
-/// (the web target is single-threaded).
-type UiBuilder = Box<dyn FnMut(&mut WindowedContext) -> Div>;
+/// Object-safe UI builder trait, type-erased over the concrete
+/// element type the user's closure returns. The two methods do the
+/// two things the runner needs to do with a freshly built element —
+/// spawn a new `RenderTree` or apply an incremental update to an
+/// existing one — so the concrete `E: ElementBuilder` never has to
+/// leave the closure. This is what lets the public
+/// `WebApp::run_with_setup` accept `FnMut(&mut WindowedContext) -> E`
+/// for ANY `E: ElementBuilder`, matching how the desktop runner's
+/// `WindowedApp::run` already works.
+///
+/// Previously the runner stored
+/// `Box<dyn FnMut(&mut WindowedContext) -> Div>`, which forced every
+/// example's `build_ui` to concretely return a `Div`. That broke the
+/// cross-target convention for examples whose root element is a
+/// `Scroll`, a `Stateful<T>`, or anything else — `scroll()` returns
+/// a `Scroll`, `stateful()` returns a `Stateful<T>`, neither of which
+/// is a `Div`. Type-erasing through this trait fixes the mismatch
+/// without asking callers to wrap every non-`Div` root in a
+/// containing `div().child(…)` just to satisfy the web runner.
+trait UiBuilderFn: 'static {
+    /// First-frame build path: call the user's closure to produce a
+    /// fresh element tree, then hand it to
+    /// `RenderTree::from_element_with_registry` and return the
+    /// constructed tree. Called when `current_tree` is `None`.
+    fn build_from_scratch(
+        &mut self,
+        ctx: &mut WindowedContext,
+        registry: std::sync::Arc<blinc_layout::selector::ElementRegistry>,
+    ) -> blinc_layout::renderer::RenderTree;
+
+    /// Incremental-update path: call the user's closure and apply
+    /// the result to an existing tree. Returns the `UpdateResult` so
+    /// the runner can decide whether to recompute layout.
+    fn build_and_update(
+        &mut self,
+        ctx: &mut WindowedContext,
+        tree: &mut blinc_layout::renderer::RenderTree,
+    ) -> blinc_layout::UpdateResult;
+}
+
+/// Blanket impl covering every `FnMut(&mut WindowedContext) -> E`
+/// where `E: ElementBuilder`. This is the one place in the web
+/// runner where we have the concrete `E` in scope; from here on up
+/// the rest of the runner operates on `dyn UiBuilderFn`.
+impl<F, E> UiBuilderFn for F
+where
+    F: FnMut(&mut WindowedContext) -> E + 'static,
+    E: blinc_layout::ElementBuilder + 'static,
+{
+    fn build_from_scratch(
+        &mut self,
+        ctx: &mut WindowedContext,
+        registry: std::sync::Arc<blinc_layout::selector::ElementRegistry>,
+    ) -> blinc_layout::renderer::RenderTree {
+        let element = self(ctx);
+        blinc_layout::renderer::RenderTree::from_element_with_registry(&element, registry)
+    }
+
+    fn build_and_update(
+        &mut self,
+        ctx: &mut WindowedContext,
+        tree: &mut blinc_layout::renderer::RenderTree,
+    ) -> blinc_layout::UpdateResult {
+        let element = self(ctx);
+        tree.incremental_update(&element)
+    }
+}
+
+/// User-supplied UI builder, boxed as a trait object so the
+/// concrete return type is type-erased. See [`UiBuilderFn`] for why
+/// this can't just be `FnMut(&mut WindowedContext) -> Div`.
+type UiBuilder = Box<dyn UiBuilderFn>;
 
 /// Milliseconds since the runner was first constructed. Backed by a
 /// `web_time::Instant` so the clock is monotonic on both native
@@ -528,9 +595,10 @@ impl WebApp {
     /// Apps that need to load fonts, register CSS, or otherwise touch
     /// the runner before the first frame should use [`Self::run_with_setup`]
     /// instead — `run` is a thin wrapper that passes a no-op setup.
-    pub async fn run<F>(canvas_id: &str, ui_builder: F) -> Result<()>
+    pub async fn run<F, E>(canvas_id: &str, ui_builder: F) -> Result<()>
     where
-        F: FnMut(&mut WindowedContext) -> Div + 'static,
+        F: FnMut(&mut WindowedContext) -> E + 'static,
+        E: blinc_layout::ElementBuilder + 'static,
     {
         Self::run_with_setup(canvas_id, |_| {}, ui_builder).await
     }
@@ -560,10 +628,11 @@ impl WebApp {
     /// `WebApp`. The cycle is what keeps everything alive past the
     /// return of this function. The browser tears it down on page
     /// unload, which is the expected lifecycle for a web app.
-    pub async fn run_with_setup<S, F>(canvas_id: &str, setup: S, ui_builder: F) -> Result<()>
+    pub async fn run_with_setup<S, F, E>(canvas_id: &str, setup: S, ui_builder: F) -> Result<()>
     where
         S: FnOnce(&mut Self) + 'static,
-        F: FnMut(&mut WindowedContext) -> Div + 'static,
+        F: FnMut(&mut WindowedContext) -> E + 'static,
+        E: blinc_layout::ElementBuilder + 'static,
     {
         Self::run_with_setup_inner(
             canvas_id,
@@ -616,13 +685,18 @@ impl WebApp {
     /// stable Rust doesn't have `async FnOnce` yet — the closure
     /// returns a boxed future. Once `async closures` stabilize this
     /// signature can drop the boxing.
-    pub async fn run_with_async_setup<S, F>(canvas_id: &str, setup: S, ui_builder: F) -> Result<()>
+    pub async fn run_with_async_setup<S, F, E>(
+        canvas_id: &str,
+        setup: S,
+        ui_builder: F,
+    ) -> Result<()>
     where
         S: for<'a> FnOnce(
             &'a mut Self,
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>,
-        F: FnMut(&mut WindowedContext) -> Div + 'static,
+        F: FnMut(&mut WindowedContext) -> E + 'static,
+        E: blinc_layout::ElementBuilder + 'static,
     {
         Self::run_with_setup_inner(canvas_id, setup, ui_builder).await
     }
@@ -632,13 +706,18 @@ impl WebApp {
     /// returns a future or runs synchronously — the sync wrapper
     /// just constructs an immediately-ready boxed future, so this
     /// inner function only ever sees the async form.
-    async fn run_with_setup_inner<S, F>(canvas_id: &str, setup: S, ui_builder: F) -> Result<()>
+    async fn run_with_setup_inner<S, F, E>(
+        canvas_id: &str,
+        setup: S,
+        ui_builder: F,
+    ) -> Result<()>
     where
         S: for<'a> FnOnce(
             &'a mut Self,
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>,
-        F: FnMut(&mut WindowedContext) -> Div + 'static,
+        F: FnMut(&mut WindowedContext) -> E + 'static,
+        E: blinc_layout::ElementBuilder + 'static,
     {
         let mut app = Self::new(canvas_id).await?;
 
@@ -1866,9 +1945,10 @@ impl WebApp {
     ///
     /// Sets `needs_rebuild = true` so the next [`Self::run_one_frame`]
     /// call rebuilds the tree from the new builder.
-    pub fn set_ui_builder<F>(&mut self, builder: F)
+    pub fn set_ui_builder<F, E>(&mut self, builder: F)
     where
-        F: FnMut(&mut WindowedContext) -> Div + 'static,
+        F: FnMut(&mut WindowedContext) -> E + 'static,
+        E: blinc_layout::ElementBuilder + 'static,
     {
         self.ui_builder = Some(Box::new(builder));
         self.needs_rebuild = true;
@@ -2066,8 +2146,6 @@ impl WebApp {
             blinc_layout::clear_stateful_base_updaters();
             blinc_layout::click_outside::clear_click_outside_handlers();
 
-            let element = builder(&mut self.ctx);
-
             // `needs_full_rebuild` is the resize escape hatch — see
             // `handle_resize`. Viewport-size changes don't propagate
             // parent constraints cleanly through `incremental_update`,
@@ -2103,7 +2181,7 @@ impl WebApp {
                 // dirty tracker, …) on every dirty trigger — that's
                 // why scroll position used to snap back on click.
                 use blinc_layout::UpdateResult;
-                match existing_tree.incremental_update(&element) {
+                match builder.build_and_update(&mut self.ctx, existing_tree) {
                     UpdateResult::NoChanges | UpdateResult::VisualOnly => {
                         // Nothing to relayout; render path picks up
                         // the in-place prop updates.
@@ -2124,7 +2202,7 @@ impl WebApp {
                 // springs, DPI scale, layout) before stashing it in
                 // `current_tree`.
                 let registry = Arc::clone(self.ctx.element_registry());
-                let mut tree = RenderTree::from_element_with_registry(&element, registry);
+                let mut tree = builder.build_from_scratch(&mut self.ctx, registry);
 
                 // Wire the AnimationScheduler weak ref into the tree.
                 // Internally `set_animations` walks the existing

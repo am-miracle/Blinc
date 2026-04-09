@@ -10,7 +10,8 @@
 //! Run with: cargo run -p blinc_app --example css_features_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
+use blinc_app::windowed::WindowedApp;
 use blinc_core::Color;
 use blinc_theme::{ColorToken, ThemeState};
 
@@ -81,6 +82,7 @@ const STYLESHEET: &str = r#"
     }
 "#;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -109,7 +111,7 @@ fn main() -> Result<()> {
     })
 }
 
-fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     let theme = ThemeState::get();
     let bg = theme.color(ColorToken::Background);
 

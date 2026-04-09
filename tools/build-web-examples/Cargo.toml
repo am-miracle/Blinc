@@ -1,0 +1,21 @@
+[package]
+name = "blinc-build-web-examples"
+description = "Codegen tool that auto-discovers examples in crates/blinc_app/examples/ and emits wasm wrapper crates under examples/_generated/"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Intentionally NOT in the workspace's default-members. Developers run
+# this tool explicitly via `cargo run -p blinc-build-web-examples`;
+# regular `cargo build` does not pull it.
+[[bin]]
+name = "blinc-build-web-examples"
+path = "src/main.rs"
+
+[dependencies]
+# AST parse + traversal of example source files. We only read .rs,
+# we don't re-emit from the AST (we emit wrapper files from string
+# templates instead), so the minimal `parsing` + `full` feature set
+# is enough. No `printing` dependency, no `proc-macro2` span rewrites.
+syn = { version = "2", features = ["full", "parsing", "extra-traits"] }

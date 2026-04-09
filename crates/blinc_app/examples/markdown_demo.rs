@@ -7,12 +7,13 @@
 //! Run with: cargo run -p blinc_app --example markdown_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
 use blinc_core::{Color, SignalId, State};
 use blinc_layout::markdown::markdown_light;
 use blinc_layout::prelude::NoState;
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -29,7 +30,7 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    WindowedApp::run(config, build_ui)
+    blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
 const DEFAULT_MARKDOWN: &str = r#"# Welcome to Markdown Editor
@@ -72,6 +73,7 @@ Ordered list:
 ### Code Blocks
 
 ```rust
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     println!("Hello, Blinc!");
 }
@@ -127,7 +129,7 @@ Line breaks work too:<br>This is on a new line.
 *Edit the markdown on the left to see changes!*
 "#;
 
-fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     // Create text area state for editing that persists across rebuilds
     let markdown_state = ctx.use_state_keyed("markdown_source", || {
         let mut state = TextAreaState::new();

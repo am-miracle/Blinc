@@ -12,10 +12,12 @@
 //! Run with: cargo run -p blinc_app --example image_css_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
+use blinc_app::windowed::WindowedApp;
 
 const IMG: &str = "crates/blinc_app/examples/assets/avatar.jpg";
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -291,7 +293,7 @@ const STYLESHEET: &str = r#"
 // UI STRUCTURE
 // ============================================================================
 
-fn build_ui(_ctx: &WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(_ctx: &mut WindowedContext) -> impl ElementBuilder {
     div()
         .id("root")
         .flex_col()

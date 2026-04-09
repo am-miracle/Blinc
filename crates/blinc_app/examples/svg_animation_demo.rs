@@ -10,7 +10,8 @@
 //! Run with: cargo run -p blinc_app --example svg_animation_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
+use blinc_app::windowed::WindowedApp;
 use blinc_core::Color;
 use blinc_theme::{ColorToken, ThemeState};
 
@@ -95,6 +96,7 @@ const BENTO_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0
   <path d="M26,30 L38,30 M44,30 L56,30 M62,30 L74,30 M26,50 L38,50 M44,50 L56,50 M62,50 L74,50 M26,70 L38,70 M44,70 L56,70 M62,70 L74,70" fill="none" stroke="#e91e63" stroke-width="8" stroke-linecap="round"/>
 </svg>"##;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -320,7 +322,7 @@ const SVG_CSS: &str = r#"
 }
 "#;
 
-fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     let theme = ThemeState::get();
     let bg = theme.color(ColorToken::Background);
 

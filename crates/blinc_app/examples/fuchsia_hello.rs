@@ -1,5 +1,10 @@
 //! Fuchsia Hello World Example
 //!
+//! no-web: this example targets Fuchsia OS specifically and uses the
+//! `fuchsia` runner feature. It is not cross-platform in the same
+//! sense as the other examples. (The `no-web:` marker tells
+//! `tools/build-web-examples` to skip this file during discovery.)
+//!
 //! A simple Blinc application for Fuchsia OS demonstrating
 //! basic UI rendering with touch interactions.
 //!

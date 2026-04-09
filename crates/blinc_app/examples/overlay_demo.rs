@@ -12,9 +12,10 @@
 //! Run with: cargo run -p blinc_app --example overlay_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
 use blinc_layout::stateful::{ButtonState, SharedState};
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -28,10 +29,10 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    WindowedApp::run(config, build_ui)
+    blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     let overlay_mgr = ctx.overlay_manager();
 
     // Create button states via context for persistence across rebuilds

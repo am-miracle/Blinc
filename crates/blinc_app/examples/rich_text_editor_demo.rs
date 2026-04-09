@@ -17,7 +17,7 @@
 //! Run with: `cargo run -p blinc_app --example rich_text_editor_demo --features windowed`
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
 use blinc_core::context_state::BlincContextState;
 use blinc_core::Color;
 use blinc_layout::widgets::rich_text_editor::{
@@ -27,6 +27,7 @@ use blinc_layout::widgets::rich_text_editor::{
     state::{rich_text_state, RichTextState},
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -41,10 +42,10 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    WindowedApp::run(config, |ctx| build_ui(ctx))
+    blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     let theme = RichTextTheme::dark();
 
     // Compute the explicit pixel width of the column the document renders

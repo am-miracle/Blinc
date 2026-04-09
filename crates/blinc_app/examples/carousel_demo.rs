@@ -9,7 +9,7 @@
 //! Run with: cargo run -p blinc_app --example carousel_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
 use blinc_core::{Color, State, Transform};
 use blinc_layout::prelude::NoState;
 use blinc_layout::selector::{ScrollBehavior, ScrollBlock, ScrollOptions, ScrollRef};
@@ -21,6 +21,7 @@ const CARD_HEIGHT: f32 = 360.0;
 const CARD_GAP: f32 = 20.0;
 const VIEWPORT_WIDTH: f32 = 400.0;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -37,10 +38,10 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    WindowedApp::run(config, |ctx| build_ui(ctx))
+    blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     // Create a ScrollRef for programmatic scroll control
     let scroll_ref = ctx.use_scroll_ref("carousel_scroll");
 

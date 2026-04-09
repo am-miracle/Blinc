@@ -1,0 +1,25 @@
+# Auto-generated wasm wrapper crates for `crates/blinc_app/examples/*.rs`.
+#
+# These are produced by the `tools/build-web-examples` codegen tool by
+# walking the example source tree, finding files that match the cross-
+# target convention (`pub fn build_ui(ctx: &mut WindowedContext) -> Div`),
+# and emitting one tiny wrapper crate per discovered example. The
+# wrappers are gitignored because they're 100% derived from their
+# upstream `.rs` file — checking them in would be pure noise and would
+# create a manual sync burden every time an example changes.
+#
+# Regenerate locally with:
+#
+#     cargo run -p blinc-build-web-examples
+#
+# CI runs the same command before `mdbook build` and copies the
+# resulting wasm artifacts under `target/web-examples-out/` into the
+# book's static output (see `.github/workflows/docs.yml`).
+#
+# `.gitkeep` and this file are tracked so the directory exists on a
+# fresh clone — the workspace `members = [..., "examples/_generated/*"]`
+# glob tolerates an empty match, so cargo doesn't error before the
+# tool has populated anything.
+*
+!.gitignore
+!.gitkeep

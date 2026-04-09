@@ -10,8 +10,9 @@
 //! Run with: cargo run -p blinc_app --example image_layer_test --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -25,10 +26,10 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    WindowedApp::run(config, |ctx| build_ui(ctx))
+    blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-fn build_ui(_ctx: &WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(_ctx: &mut WindowedContext) -> impl ElementBuilder {
     let image_path = "crates/blinc_app/examples/assets/avatar.jpg";
 
     div()

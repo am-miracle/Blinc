@@ -16,7 +16,7 @@
 
 use blinc_animation::{AnimationPreset, SpringConfig};
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
 use blinc_core::Color;
 use blinc_layout::motion::{motion, StaggerConfig};
 use blinc_layout::prelude::stateful_from_handle;
@@ -39,6 +39,7 @@ struct PullToRefresh {
     icon_opacity: f32,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -55,10 +56,12 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    WindowedApp::run(config, |ctx| build_ui(ctx))
+    blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
+/// See [`scroll::build_ui`](../scroll/fn.build_ui.html) for the
+/// cross-target example convention this signature follows.
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     let theme = ThemeState::get();
     div()
         .w(ctx.width)

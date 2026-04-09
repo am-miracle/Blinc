@@ -8,7 +8,7 @@
 
 use blinc_animation::SpringConfig;
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
 use blinc_core::Color;
 use blinc_layout::stateful::{ButtonState, NoState};
 use blinc_theme::{ColorToken, ThemeState};
@@ -82,6 +82,7 @@ impl MenuItem {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -99,10 +100,10 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    WindowedApp::run(config, |ctx| build_ui(ctx))
+    blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     let width = ctx.width;
     let height = ctx.height;
 

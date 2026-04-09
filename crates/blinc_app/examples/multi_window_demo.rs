@@ -1,5 +1,11 @@
 //! Multi-Window Demo
 //!
+//! no-web: the web target has no multi-window concept — a browser
+//! tab is a single `<canvas>`. `open_window_with()` and modal
+//! secondary windows don't translate to the browser. Kept
+//! desktop-only on purpose. (The `no-web:` marker tells
+//! `tools/build-web-examples` to skip this file during discovery.)
+//!
 //! Demonstrates:
 //! - Opening themed secondary windows via open_window_with()
 //! - Modal windows that block input to the primary window

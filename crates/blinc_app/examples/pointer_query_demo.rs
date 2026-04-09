@@ -20,7 +20,8 @@
 //! Run with: cargo run -p blinc_app --example pointer_query_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
+use blinc_app::windowed::WindowedApp;
 use blinc_core::Color;
 
 const STYLESHEET: &str = r#"
@@ -117,6 +118,7 @@ const STYLESHEET: &str = r#"
     }
 "#;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -146,7 +148,7 @@ fn main() -> Result<()> {
 }
 
 /// Build the static UI layout. All pointer-reactive effects are CSS-driven.
-fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     div()
         .w(ctx.width)
         .h(ctx.height)

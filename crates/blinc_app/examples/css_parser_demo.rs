@@ -1,5 +1,11 @@
 //! CSS Parser Demo
 //!
+//! no-web: this example is a CLI-style diagnostic that prints parse
+//! errors to stdout — it does not drive a `WindowedApp::run` / canvas
+//! event loop, so there's nothing for the web target to render. Kept
+//! desktop-only on purpose. (The `no-web:` marker tells
+//! `tools/build-web-examples` to skip this file during discovery.)
+//!
 //! Demonstrates the CSS parser with error collection and colored diagnostics.
 //!
 //! Run with: cargo run -p blinc_app --example css_parser_demo

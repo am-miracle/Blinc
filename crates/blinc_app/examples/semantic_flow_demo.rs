@@ -10,7 +10,8 @@
 //! Run with: cargo run -p blinc_app --example semantic_flow_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
+use blinc_app::windowed::WindowedApp;
 use blinc_core::{Color, Shadow};
 use blinc_layout::flow;
 
@@ -101,6 +102,7 @@ const STYLESHEET: &str = r#"
     }
 "#;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -128,7 +130,7 @@ fn main() -> Result<()> {
     })
 }
 
-fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     let bg = Color::rgba(0.12, 0.12, 0.14, 1.0);
     let card_w = 280.0;
     let card_h = 280.0;

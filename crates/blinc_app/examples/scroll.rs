@@ -14,11 +14,12 @@
 //! Run with: cargo run -p blinc_app --example scroll --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
 use blinc_core::State;
 use blinc_layout::prelude::{ButtonState, NoState, Scroll, ScrollPhysics, SharedScrollPhysics};
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     // Initialize tracing for logging
     tracing_subscriber::fmt()
@@ -35,11 +36,16 @@ fn main() -> Result<()> {
     };
 
     // Run the windowed application - state is managed via ctx.use_state
-    WindowedApp::run(config, |ctx| build_ui(ctx))
+    blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-/// Build the main UI with a scroll container
-fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
+/// Build the main UI with a scroll container.
+///
+/// `pub` and the `(&mut WindowedContext) -> Div` signature are part of
+/// the cross-target example convention: the same function runs on
+/// desktop (via `WindowedApp::run`) and on web (via `WebApp::run_with_setup`
+/// in the auto-generated wrapper crate under `examples/_generated/scroll/`).
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     // Use reactive state for direction - persists across rebuilds, keyed by string
     let direction_state = ctx.use_state_keyed("scroll_direction", || ScrollDirection::Vertical);
     let current_direction = direction_state.get();

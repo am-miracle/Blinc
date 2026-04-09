@@ -8,9 +8,11 @@
 //! Run with: cargo run -p blinc_app --example css_debug --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
+use blinc_app::windowed::WindowedApp;
 use blinc_core::State;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
@@ -158,7 +160,7 @@ const STYLESHEET: &str = r#"
         }
 "#;
 
-fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     let count = ctx.use_state_keyed("rebuild-trigger", || 0i32);
 
     div()

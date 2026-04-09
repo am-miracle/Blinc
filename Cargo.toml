@@ -34,6 +34,17 @@ members = [
     "examples/web_drag",
     "examples/web_assets",
     "examples/web_mobile_demo",
+    # Auto-generated wasm wrapper crates produced by
+    # `tools/build-web-examples` from the cross-target examples in
+    # `crates/blinc_app/examples/`. The directory is gitignored except
+    # for the .gitignore + .gitkeep marker; the glob below tolerates
+    # an empty match so a fresh checkout still resolves the workspace
+    # before the codegen tool has run.
+    "examples/_generated/*",
+    # Codegen tool for the generated wrappers above. Not in
+    # `default-members` — regular `cargo build` does not pull it.
+    # Run with `cargo run -p blinc-build-web-examples`.
+    "tools/build-web-examples",
 ]
 
 # Platform-specific crates are included but have target-gated dependencies

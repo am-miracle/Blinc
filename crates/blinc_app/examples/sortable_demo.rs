@@ -8,7 +8,8 @@
 //! Run with: cargo run -p blinc_app --example sortable_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
+use blinc_app::windowed::WindowedContext;
+use blinc_app::windowed::WindowedApp;
 use blinc_core::context_state::BlincContextState;
 use blinc_core::events::event_types;
 use blinc_core::reactive::State;
@@ -170,6 +171,7 @@ const GRID_COLS: i32 = 3;
 // Main
 // ============================================================================
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -282,7 +284,7 @@ const STYLESHEET: &str = r#"
 // Layout
 // ============================================================================
 
-fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     div()
         .w(ctx.width)
         .h(ctx.height)
