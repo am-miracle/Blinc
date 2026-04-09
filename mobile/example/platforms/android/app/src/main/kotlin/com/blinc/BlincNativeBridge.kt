@@ -683,6 +683,24 @@ object BlincNativeBridge {
     // to `WindowedContext.height`.
     @JvmStatic
     external fun nativeDispatchKeyboardInset(insetLogicalPx: Int)
+
+    // JNI bridge for synthesized key-down events with modifier flags.
+    //
+    // Called from `BlincEditMenuHelper.onActionItemClicked` when the
+    // user picks Cut / Copy / Paste / Select All from the native edit
+    // menu. The Rust handler
+    // (`Java_com_blinc_BlincNativeBridge_nativeDispatchKeyDownWithModifiers`
+    // in `crates/blinc_app/src/android.rs`) queues the event and the
+    // android_main poll loop dispatches it through `tree.broadcast_key_event`
+    // on the next tick — which lands in the existing Cmd-shortcut
+    // branch of every Blinc text-editable widget's `on_key_down`
+    // handler.
+    //
+    // `modifiers` bitmask: shift=0x01, ctrl=0x02, alt=0x04, meta=0x08.
+    // The edit menu callbacks always set the meta bit so the dispatch
+    // routes through the Cmd-shortcut path.
+    @JvmStatic
+    external fun nativeDispatchKeyDownWithModifiers(keyCode: Int, modifiers: Int)
 }
 
 // =============================================================================
@@ -743,9 +761,37 @@ object BlincEditMenuHelper {
             override fun onPrepareActionMode(mode: android.view.ActionMode, menu: android.view.Menu): Boolean = false
 
             override fun onActionItemClicked(mode: android.view.ActionMode, item: android.view.MenuItem): Boolean {
-                // TODO: dispatch to Rust via a `nativeDispatchKeyDown(keyCode, meta)`
-                // JNI export. For now we just close the menu so the
-                // user gets visual feedback that the tap registered.
+                // Dispatch the matching Cmd+key into Rust via the
+                // JNI key-down-with-modifiers export. The Blinc
+                // text-editable widgets already handle these
+                // shortcut codes in their `on_key_down` handlers,
+                // so the menu plugs into the same code path the
+                // hardware-keyboard shortcuts use on every platform.
+                //
+                // We always set the meta (Cmd) modifier bit (0x08)
+                // since the widget handlers gate clipboard ops
+                // behind `ctx.meta`.
+                val keyCode = when (item.itemId) {
+                    android.R.id.cut -> 88        // Cmd+X
+                    android.R.id.copy -> 67       // Cmd+C
+                    android.R.id.paste -> 86      // Cmd+V
+                    android.R.id.selectAll -> 65  // Cmd+A
+                    else -> -1
+                }
+                if (keyCode >= 0) {
+                    try {
+                        // Fully qualified — this method lives on the
+                        // top-level `BlincNativeBridge` object, not
+                        // on `BlincEditMenuHelper`. Calling it
+                        // unqualified from inside the helper trips
+                        // an Unresolved reference at the Kotlin
+                        // compile step.
+                        BlincNativeBridge.nativeDispatchKeyDownWithModifiers(keyCode, 0x08)
+                    } catch (e: UnsatisfiedLinkError) {
+                        // Native side not loaded — silently ignore so
+                        // the menu still dismisses cleanly.
+                    }
+                }
                 mode.finish()
                 return true
             }

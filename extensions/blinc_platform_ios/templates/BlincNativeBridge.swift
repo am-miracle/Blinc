@@ -607,6 +607,20 @@ class BlincAudioRecorderHelper {
 class BlincHiddenTextField: UITextField {
     weak var blincDelegate: BlincKeyboardHelper?
 
+    /// Bitmask of edit-menu actions the field should report as
+    /// available the next time `UIMenuController` queries
+    /// `canPerformAction(_:withSender:)`. Set by
+    /// `BlincEditMenuHelper.show(...)` right before the menu pops up.
+    /// Defaults to all four actions enabled when the user just
+    /// double-tapped a word.
+    ///
+    /// Bits match `text_edit::edit_menu_actions`:
+    ///   bit 0 = Cut
+    ///   bit 1 = Copy
+    ///   bit 2 = Paste
+    ///   bit 3 = Select All
+    var blincEditMenuActions: Int = 0
+
     override func deleteBackward() {
         // Forward to the Blinc helper *first*, then call super
         // so the field's own (empty) buffer behavior is
@@ -614,6 +628,66 @@ class BlincHiddenTextField: UITextField {
         // so the order is mostly cosmetic.
         blincDelegate?.didPressBackspace()
         super.deleteBackward()
+    }
+
+    /// Tell `UIMenuController` which standard menu items to show.
+    ///
+    /// The hidden text field has no text content of its own (Blinc
+    /// owns the buffer), so `UITextField`'s default
+    /// `canPerformAction` would return false for cut/copy and
+    /// inconsistent values for paste/selectAll. We override it to
+    /// return true exclusively for the four selectors corresponding
+    /// to bits set in `blincEditMenuActions`, and false for
+    /// everything else (including the system selectors that would
+    /// otherwise show up like Look Up, Translate, Share, etc.).
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(UIResponderStandardEditActions.cut(_:)) {
+            return blincEditMenuActions & 0x01 != 0
+        }
+        if action == #selector(UIResponderStandardEditActions.copy(_:)) {
+            return blincEditMenuActions & 0x02 != 0
+        }
+        if action == #selector(UIResponderStandardEditActions.paste(_:)) {
+            return blincEditMenuActions & 0x04 != 0
+        }
+        if action == #selector(UIResponderStandardEditActions.selectAll(_:)) {
+            return blincEditMenuActions & 0x08 != 0
+        }
+        return false
+    }
+
+    /// Intercept the system Cut action and dispatch a synthesized
+    /// `Cmd+X` key-down event into Rust. Each Blinc text-editable
+    /// widget already handles `Cmd+X` in its `on_key_down` handler
+    /// (writing the selection to the clipboard and deleting it), so
+    /// this routes the menu choice through the same code path the
+    /// hardware-keyboard shortcut uses on every platform.
+    override func cut(_ sender: Any?) {
+        forwardEditMenuKey(keyCode: 88) // X
+    }
+
+    /// Cmd+C
+    override func copy(_ sender: Any?) {
+        forwardEditMenuKey(keyCode: 67) // C
+    }
+
+    /// Cmd+V
+    override func paste(_ sender: Any?) {
+        forwardEditMenuKey(keyCode: 86) // V
+    }
+
+    /// Cmd+A
+    override func selectAll(_ sender: Any?) {
+        forwardEditMenuKey(keyCode: 65) // A
+    }
+
+    /// Helper: dispatch the given key code into Rust with the meta
+    /// (Cmd) modifier set. The bit layout matches
+    /// `IOSRenderContext::handle_key_down_with_modifiers`:
+    /// shift=0x01, ctrl=0x02, alt=0x04, meta=0x08.
+    private func forwardEditMenuKey(keyCode: UInt32) {
+        guard let ctx = BlincKeyboardHelper.blincContext else { return }
+        blinc_ios_handle_key_down_with_modifiers(ctx, keyCode, 0x08)
     }
 }
 
@@ -647,7 +721,12 @@ class BlincKeyboardHelper: NSObject, UITextFieldDelegate {
     /// characters into the Rust runtime.
     static var blincContext: OpaquePointer? = nil
 
-    private var hiddenTextField: BlincHiddenTextField?
+    /// The hidden text field that hosts the soft keyboard.
+    /// `BlincEditMenuHelper` reads this to anchor `UIMenuController`
+    /// against it (so the menu's `canPerformAction` queries hit the
+    /// hidden field's overrides) and to set the `blincEditMenuActions`
+    /// bitmask before showing the menu.
+    fileprivate(set) var hiddenTextField: BlincHiddenTextField?
 
     private override init() {
         super.init()
@@ -870,38 +949,51 @@ class BlincEditMenuHelper: NSObject {
     }
 
     func show(anchor: CGPoint, selectionRect: CGRect, actions: Int) {
-        guard let window = currentKeyWindow() else { return }
-
-        // Make sure the hidden text field is the first responder so
-        // UIMenuController has somewhere to anchor.
+        // Make sure the hidden text field exists and is the first
+        // responder. `showKeyboard()` is idempotent — if the keyboard
+        // is already up (the common case, since the user just
+        // double-tapped a focused input) it just calls
+        // `becomeFirstResponder()` on the existing field.
         BlincKeyboardHelper.shared.showKeyboard()
 
+        guard let hidden = BlincKeyboardHelper.shared.hiddenTextField else { return }
+
+        // Tell the hidden text field which standard menu items it
+        // should report as available the next time UIMenuController
+        // queries `canPerformAction(_:withSender:)`. The override on
+        // `BlincHiddenTextField` reads this bitmask to decide.
+        hidden.blincEditMenuActions = actions
+
         let menu = UIMenuController.shared
-        // The target rect is in the coordinate space of the view
-        // that called `setTargetRect:inView:`. We use the key
-        // window's coordinate space because the Rust side passes
-        // anchors in window-space points (logical pixels = UIKit
-        // points on iPhone / iPad).
+        // Anchor the menu against the hidden text field — that's
+        // what makes UIMenuController query the field's
+        // `canPerformAction` (and dispatch to its `cut/copy/paste/
+        // selectAll` overrides) instead of the window or some
+        // other ancestor.
+        //
+        // The rect is in the hidden text field's local coordinate
+        // space, which lives at -1000,-1000 in window coords. We
+        // convert the Rust-supplied window-space anchor into the
+        // field's local coords first.
+        let localAnchor = hidden.convert(anchor, from: nil)
         if #available(iOS 13.0, *) {
-            menu.showMenu(from: window, rect: CGRect(
-                x: anchor.x,
-                y: anchor.y,
+            menu.showMenu(from: hidden, rect: CGRect(
+                x: localAnchor.x,
+                y: localAnchor.y,
                 width: max(selectionRect.width, 1),
                 height: max(selectionRect.height, 24)
             ))
         }
-        // Note: action visibility is controlled by the
-        // first-responder view's `canPerformAction(_:withSender:)`
-        // override. The `actions` bitmask isn't propagated yet —
-        // wiring it through requires a custom UIView subclass that
-        // returns true only for the bits set. Track in followup.
-        _ = actions
     }
 
     func hide() {
         if #available(iOS 13.0, *) {
             UIMenuController.shared.hideMenu()
         }
+        // Clear the actions bitmask so a stale double-tap doesn't
+        // leave the field reporting actions as available the next
+        // time something else queries `canPerformAction`.
+        BlincKeyboardHelper.shared.hiddenTextField?.blincEditMenuActions = 0
     }
 
     private func currentKeyWindow() -> UIWindow? {

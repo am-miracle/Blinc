@@ -160,6 +160,26 @@ void blinc_ios_handle_text_input(IOSRenderContext* _Nonnull ctx, const char* _No
 /// @param key_code  Virtual key code (8 = Backspace, etc.)
 void blinc_ios_handle_key_down(IOSRenderContext* _Nonnull ctx, uint32_t key_code);
 
+/// Forward a key-down event with explicit modifier flags.
+///
+/// Same as `blinc_ios_handle_key_down` but lets the Swift caller mark
+/// the event as Cmd / Ctrl / Alt / Shift held. The native edit menu
+/// uses this to dispatch synthesized `Cmd+X / Cmd+C / Cmd+V / Cmd+A`
+/// events when the user picks Cut / Copy / Paste / Select All from
+/// `UIMenuController` — the meta modifier routes the key-down into
+/// the existing Cmd-shortcut branch of every Blinc text-editable
+/// widget's `on_key_down` handler.
+///
+/// @param ctx        Render context pointer
+/// @param key_code   Virtual key code (88 = X, 67 = C, 86 = V, 65 = A)
+/// @param modifiers  Bitmask: bit 0 = shift, bit 1 = ctrl,
+///                   bit 2 = alt, bit 3 = meta (Cmd)
+void blinc_ios_handle_key_down_with_modifiers(
+    IOSRenderContext* _Nonnull ctx,
+    uint32_t key_code,
+    uint32_t modifiers
+);
+
 /// Update the soft-keyboard inset (height of the screen the
 /// keyboard is currently obscuring) in **logical points / pixels**
 /// — this is the same coordinate space the Rust runner uses for

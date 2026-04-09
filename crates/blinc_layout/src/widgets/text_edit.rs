@@ -15,6 +15,22 @@
 // templates declare two namespaces backing this module: `haptics`
 // for the per-character feedback and `edit_menu` for the
 // double-tap context menu.
+//
+// IMPORTANT — `blinc_core::native_bridge::native_call` panics if
+// `NativeBridgeState::init()` was never called. The Android runner
+// initializes the bridge automatically via the user-app's
+// `init_android_native_bridge` call, but the iOS runner currently
+// doesn't, and on desktop / web there's no bridge at all. We guard
+// every call site with `NativeBridgeState::is_initialized()` so the
+// helpers are *true* no-ops on uninitialized platforms instead of
+// panicking the touch handler. The widgets call these from inside
+// `on_mouse_down` / `on_drag` closures, which run on the platform
+// runner's main thread — a panic there crashes the entire app
+// (`panic in a function that cannot unwind` because the C FFI
+// boundary doesn't allow Rust unwinding).
+fn bridge_ready() -> bool {
+    blinc_core::native_bridge::NativeBridgeState::is_initialized()
+}
 
 /// Trigger a light haptic "selection changed" feedback on mobile.
 ///
@@ -27,6 +43,9 @@
 /// No-op on desktop / web and on mobile builds where the
 /// `BlincNativeBridge` isn't initialized.
 pub fn haptic_selection() {
+    if !bridge_ready() {
+        return;
+    }
     let _ = blinc_core::native_bridge::native_call::<(), _>("haptics", "selection", ());
 }
 
@@ -34,6 +53,9 @@ pub fn haptic_selection() {
 /// `haptic_selection`. Used for "I just selected the word under your
 /// finger" feedback on double-tap.
 pub fn haptic_impact_light() {
+    if !bridge_ready() {
+        return;
+    }
     use blinc_core::native_bridge::NativeValue;
     // The bridge templates use `impact` with a `style` arg:
     // 0 = light, 1 = medium, 2 = heavy.
@@ -89,6 +111,9 @@ pub fn show_edit_menu(
     selection_height: f32,
     actions: u32,
 ) {
+    if !bridge_ready() {
+        return;
+    }
     use blinc_core::native_bridge::NativeValue;
     let _ = blinc_core::native_bridge::native_call::<(), _>(
         "edit_menu",
@@ -109,6 +134,9 @@ pub fn show_edit_menu(
 /// showing. Called when focus changes, the user taps elsewhere, or
 /// the editor's content shifts so the anchor would be wrong.
 pub fn hide_edit_menu() {
+    if !bridge_ready() {
+        return;
+    }
     let _ = blinc_core::native_bridge::native_call::<(), _>("edit_menu", "hide", ());
 }
 
@@ -281,12 +309,34 @@ pub fn clipboard_read() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
-/// Stub for wasm32 + Android. The browser clipboard API is
-/// async-only and the Android system clipboard is reached via the
-/// native bridge (`clipboard.paste` namespace) instead of a
-/// synchronous helper. Returns `None` so Cmd+V keybinds in the
-/// rich text editor no-op without crashing.
-#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+/// Android: route through the native bridge `clipboard.paste`
+/// namespace, which `BlincNativeBridge.kt` implements with the
+/// system `ClipboardManager`. This is what the soft-keyboard /
+/// edit-menu paste button needs to actually paste — without it,
+/// `clipboard_read` was a hardcoded `None` stub and Cmd+V was
+/// silently dropped.
+///
+/// Falls back to `None` when the native bridge isn't initialized
+/// (e.g. during tests, or in apps that don't link the
+/// `BlincNativeBridge` Kotlin object).
+#[cfg(target_os = "android")]
+pub fn clipboard_read() -> Option<String> {
+    if !bridge_ready() {
+        return None;
+    }
+    let result: blinc_core::native_bridge::NativeResult<String> =
+        blinc_core::native_bridge::native_call("clipboard", "paste", ());
+    match result {
+        Ok(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
+/// Stub for wasm32. The browser clipboard API is async-only, so a
+/// synchronous helper can't reach it; Cmd+V keybinds no-op without
+/// crashing. Web apps that need paste should use the `Clipboard`
+/// API in their own JS bindings.
+#[cfg(target_arch = "wasm32")]
 pub fn clipboard_read() -> Option<String> {
     None
 }
@@ -301,8 +351,21 @@ pub fn clipboard_write(text: &str) -> bool {
         .is_some()
 }
 
-/// Stub for wasm32 + Android. See [`clipboard_read`] for rationale.
-#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+/// Android: route through the native bridge `clipboard.copy`
+/// namespace, which `BlincNativeBridge.kt` implements with the
+/// system `ClipboardManager`. Mirrors [`clipboard_read`].
+#[cfg(target_os = "android")]
+pub fn clipboard_write(text: &str) -> bool {
+    if !bridge_ready() {
+        return false;
+    }
+    let result: blinc_core::native_bridge::NativeResult<()> =
+        blinc_core::native_bridge::native_call("clipboard", "copy", (text,));
+    result.is_ok()
+}
+
+/// Stub for wasm32. See [`clipboard_read`] for rationale.
+#[cfg(target_arch = "wasm32")]
 pub fn clipboard_write(_text: &str) -> bool {
     false
 }

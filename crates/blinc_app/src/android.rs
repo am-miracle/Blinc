@@ -43,6 +43,23 @@ use std::sync::{
 /// notification). The android_main loop converts `-1` to `0.0`.
 static PENDING_IME_INSET_PX: AtomicI32 = AtomicI32::new(-1);
 
+/// Queue of synthesized key-down events waiting to be dispatched on
+/// the next android_main poll loop tick.
+///
+/// JNI handlers run on whichever thread Kotlin called them from
+/// (typically the UI thread for `BlincNativeBridge` callbacks), but
+/// the `RenderTree` lives on the `android_main` thread. We can't
+/// touch the tree from the JNI handler directly, so the handler
+/// pushes a `(key_code, modifiers)` tuple here and android_main
+/// drains the queue every tick, dispatching each entry through
+/// `tree.broadcast_key_event`.
+///
+/// Used by the native edit menu (Cut / Copy / Paste / Select All)
+/// callbacks in `BlincEditMenuHelper.kt` to route into the existing
+/// Cmd-shortcut branch of every Blinc text-editable widget's
+/// `on_key_down` handler.
+static PENDING_KEY_DOWN_EVENTS: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+
 use android_activity::input::{
     InputEvent as AndroidInputEvent, KeyAction, KeyMapChar, Keycode, MotionAction,
 };
@@ -1100,6 +1117,48 @@ impl AndroidApp {
             }
 
             // =========================================================
+            // Drain pending key-down events from JNI handlers.
+            //
+            // The native edit menu (`BlincEditMenuHelper`) pushes
+            // synthesized Cmd+key events here when the user picks
+            // Cut / Copy / Paste / Select All. JNI callbacks run on
+            // Kotlin's UI thread and can't touch the render tree, so
+            // they queue the event and we dispatch it here on the
+            // android_main thread, where the tree lives.
+            // =========================================================
+            let key_events_to_dispatch: Vec<(u32, u32)> = {
+                if let Ok(mut queue) = PENDING_KEY_DOWN_EVENTS.lock() {
+                    std::mem::take(&mut *queue)
+                } else {
+                    Vec::new()
+                }
+            };
+            if !key_events_to_dispatch.is_empty() {
+                if let Some(ref mut tree) = render_tree {
+                    for (key_code, modifiers) in key_events_to_dispatch {
+                        let shift = modifiers & 0x01 != 0;
+                        let ctrl = modifiers & 0x02 != 0;
+                        let alt = modifiers & 0x04 != 0;
+                        let meta = modifiers & 0x08 != 0;
+                        tracing::debug!(
+                            "Dispatching synthesized KEY_DOWN: key_code={}, mods={:#x}",
+                            key_code,
+                            modifiers
+                        );
+                        tree.broadcast_key_event(
+                            blinc_core::events::event_types::KEY_DOWN,
+                            key_code,
+                            shift,
+                            ctrl,
+                            alt,
+                            meta,
+                        );
+                    }
+                    needs_redraw_next_frame = true;
+                }
+            }
+
+            // =========================================================
             // PHASE 1: Check for incremental updates (prop changes, subtree rebuilds)
             // This avoids full rebuild for simple state changes
             // =========================================================
@@ -1613,4 +1672,45 @@ pub extern "system" fn Java_com_blinc_BlincNativeBridge_nativeDispatchKeyboardIn
     // a real keyboard-inset update.
     let clamped = inset_logical_px.max(0);
     PENDING_IME_INSET_PX.store(clamped, Ordering::Relaxed);
+}
+
+/// JNI export — receive a synthesized key-down event from Kotlin.
+///
+/// Called from `BlincEditMenuHelper.onActionItemClicked` when the user
+/// picks Cut / Copy / Paste / Select All from the native edit menu.
+/// The Kotlin side passes the matching desktop-style key code:
+///
+///   Cut        → 88 (Cmd+X)
+///   Copy       → 67 (Cmd+C)
+///   Paste      → 86 (Cmd+V)
+///   Select All → 65 (Cmd+A)
+///
+/// `modifiers` is the same bitmask iOS uses (shift=0x01, ctrl=0x02,
+/// alt=0x04, meta=0x08); the menu callbacks always set the meta bit
+/// (`0x08`) so the dispatch routes through the existing Cmd-shortcut
+/// branch of every Blinc text-editable widget's `on_key_down` handler.
+///
+/// JNI handlers run on Kotlin's UI thread, but the `RenderTree` only
+/// lives on the `android_main` thread. We push the event onto a
+/// `PENDING_KEY_DOWN_EVENTS` queue and android_main drains it on the
+/// next poll-loop tick.
+///
+/// # Kotlin declaration
+/// ```kotlin
+/// external fun nativeDispatchKeyDownWithModifiers(keyCode: Int, modifiers: Int)
+/// ```
+///
+/// # JNI signature
+/// `(II)V`
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_blinc_BlincNativeBridge_nativeDispatchKeyDownWithModifiers(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    key_code: jni::sys::jint,
+    modifiers: jni::sys::jint,
+) {
+    if let Ok(mut queue) = PENDING_KEY_DOWN_EVENTS.lock() {
+        queue.push((key_code.max(0) as u32, modifiers.max(0) as u32));
+    }
 }

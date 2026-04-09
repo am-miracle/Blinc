@@ -205,6 +205,26 @@ impl IOSApp {
         // Initialize the theme system
         Self::init_theme();
 
+        // Initialize the native bridge state if it isn't already.
+        // The Rust side of `text_edit::haptic_*` and
+        // `show_edit_menu` / `hide_edit_menu` go through
+        // `blinc_core::native_bridge::native_call`, which panics if
+        // `NativeBridgeState::init()` was never called. Each helper
+        // also has its own `bridge_ready` guard so they no-op when
+        // no platform adapter is registered, but the bridge state
+        // itself still has to exist for the `is_initialized` check
+        // to return without panicking.
+        //
+        // Initializing here means the iOS runner ALWAYS has a bridge
+        // state, even if no Swift code calls
+        // `blinc_set_native_call_fn` to register an adapter — in
+        // that case the helpers fall through their `bridge_ready`
+        // checks and produce no haptics / no edit menu, but the
+        // touch handler doesn't crash.
+        if !blinc_core::native_bridge::NativeBridgeState::is_initialized() {
+            blinc_core::native_bridge::NativeBridgeState::init();
+        }
+
         // Shared state
         let ref_dirty_flag: RefDirtyFlag = Arc::new(AtomicBool::new(false));
         let reactive: SharedReactiveGraph = Arc::new(Mutex::new(ReactiveGraph::new()));
@@ -630,6 +650,25 @@ impl IOSRenderContext {
     /// same `key_code = 8` desktop dispatches for the Backspace
     /// key.
     pub fn handle_key_down(&mut self, key_code: u32) {
+        self.handle_key_down_with_modifiers(key_code, 0);
+    }
+
+    /// Handle a key-down event with explicit modifier flags.
+    ///
+    /// Same as [`handle_key_down`] but lets the caller mark the event
+    /// as Cmd/Ctrl/Alt/Shift held. The native edit menu uses this to
+    /// dispatch synthesized `Cmd+X / Cmd+C / Cmd+V / Cmd+A` events when
+    /// the user picks Cut / Copy / Paste / Select All from the
+    /// `UIMenuController` — those land in the existing Cmd-shortcut
+    /// branch of every Blinc text-editable widget's `on_key_down`
+    /// handler, which already handles clipboard ops and select-all.
+    ///
+    /// `modifiers` is a bitmask:
+    ///   - bit 0 (0x01): shift
+    ///   - bit 1 (0x02): ctrl
+    ///   - bit 2 (0x04): alt
+    ///   - bit 3 (0x08): meta (Cmd on macOS, Win on Windows)
+    pub fn handle_key_down_with_modifiers(&mut self, key_code: u32, modifiers: u32) {
         let tree = match &mut self.render_tree {
             Some(t) => t,
             None => {
@@ -637,13 +676,17 @@ impl IOSRenderContext {
                 return;
             }
         };
+        let shift = modifiers & 0x01 != 0;
+        let ctrl = modifiers & 0x02 != 0;
+        let alt = modifiers & 0x04 != 0;
+        let meta = modifiers & 0x08 != 0;
         tree.broadcast_key_event(
             blinc_core::events::event_types::KEY_DOWN,
             key_code,
-            false,
-            false,
-            false,
-            false,
+            shift,
+            ctrl,
+            alt,
+            meta,
         );
     }
 
@@ -1398,6 +1441,39 @@ pub extern "C" fn blinc_ios_handle_key_down(ctx: *mut IOSRenderContext, key_code
     }
     unsafe {
         (*ctx).handle_key_down(key_code);
+    }
+}
+
+/// Forward a key-down event with explicit modifier flags.
+///
+/// Same as [`blinc_ios_handle_key_down`] but lets the Swift caller mark
+/// the event as Cmd / Ctrl / Alt / Shift held. The native edit menu
+/// uses this to dispatch synthesized `Cmd+X / Cmd+C / Cmd+V / Cmd+A`
+/// events when the user picks Cut / Copy / Paste / Select All from
+/// `UIMenuController` — the modifier bits route the event into the
+/// existing Cmd-shortcut branch of every Blinc text-editable widget's
+/// `on_key_down` handler, which already handles clipboard ops and
+/// select-all.
+///
+/// `modifiers` is a bitmask:
+///   - bit 0 (0x01): shift
+///   - bit 1 (0x02): ctrl
+///   - bit 2 (0x04): alt
+///   - bit 3 (0x08): meta (Cmd on macOS)
+///
+/// # Safety
+/// `ctx` must be a valid pointer returned by `blinc_create_context`.
+#[no_mangle]
+pub extern "C" fn blinc_ios_handle_key_down_with_modifiers(
+    ctx: *mut IOSRenderContext,
+    key_code: u32,
+    modifiers: u32,
+) {
+    if ctx.is_null() {
+        return;
+    }
+    unsafe {
+        (*ctx).handle_key_down_with_modifiers(key_code, modifiers);
     }
 }
 
