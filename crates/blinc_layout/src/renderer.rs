@@ -3889,10 +3889,18 @@ impl RenderTree {
             return false;
         }
 
-        // Find the focused text input node. Text input takes precedence
-        // over text area because the two focus trackers are independent;
-        // in practice only one is set at a time.
-        let focused_node = crate::widgets::text_input::focused_text_input_node_id()
+        // Find the focused text-editable node.
+        //
+        // The generic `focused_editable_node_id` is the modern lookup —
+        // every text-editable widget (`text_input`, `text_area`,
+        // `code_editor`, `rich_text_editor`) writes its layout node id
+        // there on focus, so a single lookup covers all of them. The
+        // typed `focused_text_input_node_id` / `focused_text_area_node_id`
+        // calls are kept as fallbacks in case any widget grows a focus
+        // path that bypasses the generic atomic (or for older code that
+        // sets the typed trackers but not the generic one).
+        let focused_node = crate::widgets::text_input::focused_editable_node_id()
+            .or_else(crate::widgets::text_input::focused_text_input_node_id)
             .or_else(crate::widgets::text_input::focused_text_area_node_id);
 
         let Some(focused_node) = focused_node else {

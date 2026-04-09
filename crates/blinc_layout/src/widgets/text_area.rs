@@ -1694,6 +1694,17 @@ impl TextArea {
                     // `text_input::focus_tap_generation` docs.
                     crate::widgets::text_input::bump_focus_tap_generation();
 
+                    // Register the layout node id with the generic
+                    // focused-editable atomic so the scroll-into-view
+                    // helper has a single lookup that covers every
+                    // text-editable widget regardless of which typed
+                    // tracker (text_input vs text_area) holds the data.
+                    //
+                    // No blur callback — text_area has its own
+                    // dedicated `FOCUSED_TEXT_AREA` tracker that the
+                    // typed blur path walks.
+                    crate::widgets::text_input::set_focused_editable_node(ctx.node_id, None);
+
                     // Set focus via FSM transition
                     {
                         let mut shared = shared_for_click.lock().unwrap();

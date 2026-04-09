@@ -1496,6 +1496,40 @@ impl CodeEditor {
                         request_continuous_redraw_pub();
                     }
 
+                    // Bump the focus-tap generation counter and
+                    // register this node id as the generic focused
+                    // editable so the mobile runner's
+                    // scroll-into-view helper picks this up. See
+                    // `text_input::focus_tap_generation` for the
+                    // rationale and `RenderTree::scroll_focused_text_input_above_keyboard`
+                    // for the consumer.
+                    //
+                    // The blur callback captures `state` so
+                    // `blur_all_text_inputs` (called when the user
+                    // taps outside any editable widget) can flip
+                    // `d.focused = false`, hide the cursor, and
+                    // decrement the focus count — which dismisses
+                    // the soft keyboard. Without this, tapping
+                    // outside the editor would leave it visually
+                    // focused with the keyboard still up.
+                    crate::widgets::text_input::bump_focus_tap_generation();
+                    let blur_state = Arc::clone(&data_for_click);
+                    crate::widgets::text_input::set_focused_editable_node(
+                        ctx.node_id,
+                        Some(Box::new(move || {
+                            if let Ok(mut d) = blur_state.lock() {
+                                if d.focused {
+                                    d.focused = false;
+                                    d.selection_start = None;
+                                    if let Ok(mut cs) = d.cursor_state.lock() {
+                                        cs.visible = false;
+                                    }
+                                    decrement_focus_count();
+                                }
+                            }
+                        })),
+                    );
+
                     // Don't close search on code click — use Escape or close button
 
                     // Account for gutter, padding, and scroll in click coordinates
@@ -1759,6 +1793,7 @@ impl CodeEditor {
                                 cs.visible = false;
                             }
                             decrement_focus_count();
+                            crate::widgets::text_input::clear_focused_editable_node();
                         }
                         _ => {
                             // Check for Cmd+key combos

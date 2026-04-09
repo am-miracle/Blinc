@@ -179,6 +179,34 @@ pub fn rich_text_editor(
                 ctx.bounds_height,
             );
 
+            // Tell the mobile platform runner that the user just tapped
+            // the rich-text editor. The tap-generation counter
+            // (`focus_tap_generation`) drives scroll-into-view on
+            // re-taps and cross-input focus swaps; the
+            // generic-editable-node atomic
+            // (`set_focused_editable_node`) is what the
+            // `RenderTree::scroll_focused_text_input_above_keyboard`
+            // helper looks up to find the editor's bounds. Both are
+            // populated unconditionally — even when the click ends up
+            // being suppressed below for a toolbar button — so the
+            // user always sees the keyboard re-engage with the editor.
+            //
+            // The blur callback captures the editor state so when the
+            // user taps outside, `blur_all_text_inputs` can call
+            // `set_focus(false)`, which both clears the local
+            // `focused` flag AND decrements the global focus count
+            // (the global hook lives inside `RichTextEditorState::set_focus`).
+            crate::widgets::text_input::bump_focus_tap_generation();
+            let blur_state = Arc::clone(&state_for_click);
+            crate::widgets::text_input::set_focused_editable_node(
+                ctx.node_id,
+                Some(Box::new(move || {
+                    if let Ok(mut data) = blur_state.lock() {
+                        data.set_focus(false);
+                    }
+                })),
+            );
+
             // A toolbar button just consumed the click — skip cursor
             // placement so we don't collapse the selection underneath.
             // Events dispatch deepest-first, so the button's handler

@@ -316,6 +316,15 @@ impl RichTextData {
     ///
     /// Calling with the same value twice is a no-op so handlers can
     /// invoke this freely.
+    ///
+    /// Also drives the global text-editable focus tracker so the
+    /// mobile soft-keyboard show/hide path picks the editor up. We
+    /// route through `increment_focus_count` / `decrement_focus_count`
+    /// in `widgets::text_input` because they're the central
+    /// focus-counting hooks every editable widget shares — they fire
+    /// `take_keyboard_state_change()` on the next frame when the
+    /// global focus count crosses `0 → 1` / `1 → 0`, which the
+    /// platform runners forward to `keyboard.show` / `keyboard.hide`.
     pub fn set_focus(&mut self, focused: bool) {
         if self.focused == focused {
             return;
@@ -323,6 +332,7 @@ impl RichTextData {
         self.focused = focused;
         self.set_cursor_visible(focused);
         if focused {
+            crate::widgets::text_input::increment_focus_count();
             if self.tick_callback_id.is_none() {
                 if let Some(scheduler) = try_get_scheduler() {
                     // Empty tick — we just need the scheduler to keep
@@ -330,9 +340,13 @@ impl RichTextData {
                     self.tick_callback_id = scheduler.register_tick_callback(|_dt| {});
                 }
             }
-        } else if let Some(id) = self.tick_callback_id.take() {
-            if let Some(scheduler) = try_get_scheduler() {
-                scheduler.remove_tick_callback(id);
+        } else {
+            crate::widgets::text_input::decrement_focus_count();
+            crate::widgets::text_input::clear_focused_editable_node();
+            if let Some(id) = self.tick_callback_id.take() {
+                if let Some(scheduler) = try_get_scheduler() {
+                    scheduler.remove_tick_callback(id);
+                }
             }
         }
     }

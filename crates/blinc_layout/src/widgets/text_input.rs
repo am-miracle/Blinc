@@ -63,9 +63,48 @@ static GLOBAL_FOCUS_COUNT: AtomicU64 = AtomicU64::new(0);
 /// input handler, runner stores the last value it saw, and runs
 /// scroll-into-view whenever the value advances.
 ///
-/// Used by [`focus_tap_generation`] / bumped by the `text_input` and
-/// `text_area` widgets' `on_mouse_down` handlers.
+/// Used by [`focus_tap_generation`] / bumped by the `text_input`,
+/// `text_area`, `code_editor`, and `rich_text_editor` widgets'
+/// `on_mouse_down` handlers.
 static FOCUS_TAP_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Layout node ID of the currently focused text-editable widget, encoded as
+/// the raw `u64` from `LayoutNodeId::to_raw()`. `0` is the sentinel for
+/// "nothing focused" since taffy never assigns id `0`.
+///
+/// `text_input` and `text_area` track their focus through dedicated
+/// `FOCUSED_TEXT_INPUT` / `FOCUSED_TEXT_AREA` mutexes (which carry the
+/// full widget data), but other text-editable widgets (`code_editor`,
+/// `rich_text_editor`) don't share that data layout — they have their
+/// own state types that the global trackers can't store. This atomic is
+/// the lowest-common-denominator pointer-back: every editable widget can
+/// register its own LayoutNodeId here on focus, and the
+/// `scroll_focused_text_input_above_keyboard` helper consults this
+/// generic ID when the typed lookups (`focused_text_input_node_id` /
+/// `focused_text_area_node_id`) come up empty.
+///
+/// Bumped by [`set_focused_editable_node`] / cleared by
+/// [`clear_focused_editable_node`]. Read by [`focused_editable_node_id`].
+static FOCUSED_EDITABLE_NODE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Companion to `FOCUSED_EDITABLE_NODE_ID` — an opaque blur callback
+/// that the focused widget registers alongside its node id, so
+/// [`blur_all_text_inputs`] can dismiss the editor when the user taps
+/// outside it. The dedicated trackers (`FOCUSED_TEXT_INPUT` /
+/// `FOCUSED_TEXT_AREA`) carry typed widget data and can call into the
+/// widget's blur path directly; widgets that don't fit those types
+/// (`code_editor`, `rich_text_editor`) instead pass a closure here so
+/// the global blur path remains a single call.
+///
+/// `Box<dyn Fn() + Send + Sync>` rather than `FnOnce` because the
+/// closure is invoked at most once but `take()` and replace would race
+/// with the writer that just registered it. The closure typically
+/// captures an `Arc<Mutex<...>>` to the widget state so it can flip
+/// the local `focused` flag, decrement the global focus count, and
+/// release any cursor-tick callbacks the widget held.
+#[allow(clippy::type_complexity)]
+static FOCUSED_EDITABLE_BLUR_CALLBACK: Mutex<Option<Box<dyn Fn() + Send + Sync>>> =
+    Mutex::new(None);
 
 static NEEDS_REBUILD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static NEEDS_RELAYOUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -156,13 +195,64 @@ pub fn focus_tap_generation() -> u64 {
     FOCUS_TAP_GENERATION.load(Ordering::Relaxed)
 }
 
-/// Internal: bump the tap generation counter.
+/// Bump the tap generation counter.
 ///
-/// Called by the `text_input` and `text_area` widgets from their
-/// `on_mouse_down` handlers, after they've confirmed the tap landed
-/// on the widget (passes the disabled / pointer_events check).
-pub(crate) fn bump_focus_tap_generation() {
+/// Called by text-editable widgets (`text_input`, `text_area`,
+/// `code_editor`, `rich_text_editor`) from their `on_mouse_down`
+/// handlers, after they've confirmed the tap landed on the widget
+/// (passes the disabled / pointer_events check). Mobile runners poll
+/// this via [`focus_tap_generation`] to drive scroll-into-view on
+/// re-taps and cross-input focus swaps.
+pub fn bump_focus_tap_generation() {
     FOCUS_TAP_GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Register a text-editable widget's `LayoutNodeId` as the currently
+/// focused editable, optionally with a blur callback.
+///
+/// Called by widgets that don't fit the dedicated `text_input` /
+/// `text_area` focus trackers (`code_editor`, `rich_text_editor`).
+/// Pass `node_id` from the widget's `on_mouse_down` handler so the
+/// scroll-into-view helper knows which node to keep above the
+/// soft keyboard.
+///
+/// `blur_callback`, if `Some`, is invoked from
+/// [`blur_all_text_inputs`] when the user taps outside any editable
+/// widget. It should clear the widget's local `focused` flag, call
+/// [`decrement_focus_count`] (so the soft keyboard hides), and
+/// release any cursor-tick callbacks the widget held. Widgets that
+/// have their own `on_event(BLUR)` handling can pass `None` and
+/// rely on that path instead.
+pub fn set_focused_editable_node(
+    node_id: LayoutNodeId,
+    blur_callback: Option<Box<dyn Fn() + Send + Sync>>,
+) {
+    FOCUSED_EDITABLE_NODE_ID.store(node_id.to_raw(), Ordering::Relaxed);
+    if let Ok(mut slot) = FOCUSED_EDITABLE_BLUR_CALLBACK.lock() {
+        *slot = blur_callback;
+    }
+}
+
+/// Clear the focused-editable node id and drop any registered blur
+/// callback. See [`set_focused_editable_node`].
+pub fn clear_focused_editable_node() {
+    FOCUSED_EDITABLE_NODE_ID.store(0, Ordering::Relaxed);
+    if let Ok(mut slot) = FOCUSED_EDITABLE_BLUR_CALLBACK.lock() {
+        *slot = None;
+    }
+}
+
+/// Get the LayoutNodeId of the currently focused generic editable widget,
+/// if any. Used by the mobile-runner scroll-into-view helper as a fallback
+/// when the typed `focused_text_input_node_id` / `focused_text_area_node_id`
+/// lookups return `None` (e.g. for `code_editor` and `rich_text_editor`).
+pub fn focused_editable_node_id() -> Option<LayoutNodeId> {
+    let raw = FOCUSED_EDITABLE_NODE_ID.load(Ordering::Relaxed);
+    if raw == 0 {
+        None
+    } else {
+        Some(LayoutNodeId::from_raw(raw))
+    }
 }
 
 pub fn take_needs_continuous_redraw() -> bool {
@@ -217,7 +307,7 @@ pub fn request_css_reparse() {
     NEEDS_CSS_REPARSE.store(true, Ordering::SeqCst);
 }
 
-pub(crate) fn increment_focus_count() {
+pub fn increment_focus_count() {
     let prev = GLOBAL_FOCUS_COUNT.fetch_add(1, Ordering::Relaxed);
     // If this is the first focused text widget, enable continuous redraw for cursor animation
     // and show the soft keyboard on mobile platforms
@@ -227,7 +317,7 @@ pub(crate) fn increment_focus_count() {
     }
 }
 
-pub(crate) fn decrement_focus_count() {
+pub fn decrement_focus_count() {
     let prev = GLOBAL_FOCUS_COUNT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
         Some(v.saturating_sub(1))
     });
@@ -341,6 +431,27 @@ fn blur_focused_text_area() {
 pub fn blur_all_text_inputs() {
     use crate::stateful::refresh_stateful;
     use blinc_core::events::event_types;
+
+    // Run any registered generic-editable blur callback first so
+    // widgets that don't fit the typed `text_input` / `text_area`
+    // trackers (`code_editor`, `rich_text_editor`) get their local
+    // `focused = false` and matching `decrement_focus_count` call
+    // when the user taps outside. The callback is taken out of the
+    // slot before invocation so a re-entrant blur can't run it
+    // twice. After running, `clear_focused_editable_node` zeroes the
+    // node id so the scroll-into-view helper doesn't reach for a
+    // stale entry on the next frame.
+    let editable_blur = {
+        if let Ok(mut slot) = FOCUSED_EDITABLE_BLUR_CALLBACK.lock() {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some(cb) = editable_blur {
+        cb();
+    }
+    clear_focused_editable_node();
 
     // Blur focused TextInput
     {
@@ -1545,6 +1656,21 @@ impl TextInput {
                     // `blinc_app::ios::blinc_build_frame` for the
                     // consumers.
                     bump_focus_tap_generation();
+
+                    // Register this node id as the generic
+                    // focused-editable. The scroll-into-view helper
+                    // consults this when the typed
+                    // `focused_text_input_node_id` lookup is empty
+                    // (e.g. for code_editor / rich_text_editor); we
+                    // populate it here too so a single lookup site
+                    // covers every editable widget.
+                    //
+                    // No blur callback because text_input has its own
+                    // dedicated `FOCUSED_TEXT_INPUT` tracker that
+                    // `blur_all_text_inputs` walks via the typed path
+                    // — passing a callback here would cause double
+                    // blur.
+                    set_focused_editable_node(ctx.node_id, None);
 
                     // Get font size for cursor positioning
                     let font_size = config_for_click.lock().unwrap().font_size;
