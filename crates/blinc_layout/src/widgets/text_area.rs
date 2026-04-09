@@ -1688,6 +1688,12 @@ impl TextArea {
                         return;
                     }
 
+                    // Bump the focus-tap generation counter so the
+                    // mobile runner sees this as a "user tapped a text
+                    // area" event even if it was already focused. See
+                    // `text_input::focus_tap_generation` docs.
+                    crate::widgets::text_input::bump_focus_tap_generation();
+
                     // Set focus via FSM transition
                     {
                         let mut shared = shared_for_click.lock().unwrap();

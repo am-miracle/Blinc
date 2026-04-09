@@ -20,9 +20,28 @@
 //! ```
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicI32, Ordering},
     Arc, Mutex,
 };
+
+/// Latest soft-keyboard inset reported by the JVM in **logical pixels**.
+///
+/// Set from Kotlin via the JNI export
+/// `Java_com_blinc_BlincNativeBridge_nativeDispatchKeyboardInset` (defined
+/// below in `blinc_app::android`), which `BlincNativeBridge` invokes from
+/// its `setOnApplyWindowInsetsListener` whenever
+/// `WindowInsets.Type.ime().bottom` changes. The Kotlin side does the
+/// `pixels_raw / display_density` division before pushing, so this value
+/// is directly comparable to `WindowedContext.height`.
+///
+/// `i32` because `AtomicF32` isn't in stable std; we round to the nearest
+/// pixel on the Kotlin side, which is more than enough resolution for
+/// keyboard-inset triggered scroll-into-view.
+///
+/// `-1` is the sentinel meaning "no value pushed yet" (so a stale `0`
+/// from a previous run can't accidentally suppress the first real
+/// notification). The android_main loop converts `-1` to `0.0`.
+static PENDING_IME_INSET_PX: AtomicI32 = AtomicI32::new(-1);
 
 use android_activity::input::{
     InputEvent as AndroidInputEvent, KeyAction, KeyMapChar, Keycode, MotionAction,
@@ -143,6 +162,7 @@ impl AndroidApp {
 
         // Initialize global context state singleton
         if !BlincContextState::is_initialized() {
+            #[allow(clippy::type_complexity)]
             let stateful_callback: Arc<dyn Fn(&[SignalId]) + Send + Sync> =
                 Arc::new(|signal_ids| {
                     blinc_layout::check_stateful_deps(signal_ids);
@@ -233,6 +253,21 @@ impl AndroidApp {
         let mut last_frame_time_ms: u64 = 0;
         let mut running = true;
         let mut focused = false;
+        // Latest keyboard inset already pushed into `windowed_ctx.keyboard_inset`.
+        // The poll loop reads `PENDING_IME_INSET_PX` (set from Kotlin via the
+        // `Java_com_blinc_BlincNativeBridge_nativeDispatchKeyboardInset` JNI
+        // export) and only triggers `scroll_focused_text_input_above_keyboard`
+        // when the value changes — otherwise we'd re-clamp the focused
+        // input's container scroll offset every vsync tick and fight the
+        // user trying to pan around.
+        let mut last_applied_keyboard_inset_px: i32 = -1;
+        // Last value of `text_input::focus_tap_generation()` we processed.
+        // The widget bumps that counter on every `on_mouse_down` that
+        // lands on a text input — that's the signal we use to detect
+        // re-taps and same-frame focus swaps that
+        // `take_keyboard_state_change` misses (because that flag only
+        // fires on `0 → 1` / `1 → 0` focus-count transitions).
+        let mut last_focus_tap_generation: u64 = 0;
 
         // Touch tracking for scroll delta calculation
         // On mobile, scroll happens via touch drag, not wheel events
@@ -309,7 +344,7 @@ impl AndroidApp {
                                             view_formats: vec![],
                                             desired_maximum_frame_latency: 2,
                                         };
-                                        surf.configure(&app_instance.device(), &config);
+                                        surf.configure(app_instance.device(), &config);
 
                                         // Update text measurer
                                         crate::text_measurer::init_text_measurer_with_registry(
@@ -391,7 +426,7 @@ impl AndroidApp {
                                     if width > 0 && height > 0 {
                                         config.width = width;
                                         config.height = height;
-                                        surf.configure(&app_instance.device(), config);
+                                        surf.configure(app_instance.device(), config);
 
                                         if let Some(ref mut windowed_ctx) = ctx {
                                             let scale_factor = windowed_ctx.scale_factor;
@@ -823,21 +858,55 @@ impl AndroidApp {
             }
 
             // Dispatch collected events to the tree (critical for click handlers!)
+            //
+            // Use `dispatch_event_full` (matches the desktop and iOS runners)
+            // so the receiving handler sees `EventContext::local_x/local_y`
+            // and `bounds_*` populated. The simpler `dispatch_event` only
+            // forwards `mouse_x/mouse_y` and leaves the local-coordinate
+            // fields at their default `0.0`, which silently broke any
+            // handler that does click-to-position cursor placement,
+            // hit-test math, or in-element coordinate work — most
+            // visibly the `text_input` widget, which compiled
+            // `cursor_position_from_x(0.0, _) == 0` on every tap and
+            // dropped the caret at the start of the field on every
+            // refocus. Look up the actual node bounds via
+            // `EventRouter::get_node_bounds` so the local coordinates
+            // remain correct even when the event has bubbled to an
+            // ancestor whose bounds differ from the original hit target.
             if !pending_events.is_empty() {
-                if let Some(ref mut tree) = render_tree {
+                if let (Some(ref mut tree), Some(ref windowed_ctx)) =
+                    (&mut render_tree, &ctx)
+                {
+                    let router = &windowed_ctx.event_router;
                     for event in pending_events {
+                        let (bounds_x, bounds_y, bounds_width, bounds_height) = router
+                            .get_node_bounds(event.node_id)
+                            .unwrap_or((0.0, 0.0, 0.0, 0.0));
+                        let local_x = event.mouse_x - bounds_x;
+                        let local_y = event.mouse_y - bounds_y;
                         tracing::debug!(
-                            "Dispatching event: node={:?}, type={}, pos=({:.1}, {:.1})",
-                            event.node_id,
-                            event.event_type,
-                            event.mouse_x,
-                            event.mouse_y
-                        );
-                        tree.dispatch_event(
+                            "Dispatching event: node={:?}, type={}, pos=({:.1}, {:.1}), local=({:.1}, {:.1})",
                             event.node_id,
                             event.event_type,
                             event.mouse_x,
                             event.mouse_y,
+                            local_x,
+                            local_y,
+                        );
+                        tree.dispatch_event_full(
+                            event.node_id,
+                            event.event_type,
+                            event.mouse_x,
+                            event.mouse_y,
+                            local_x,
+                            local_y,
+                            bounds_x,
+                            bounds_y,
+                            bounds_width,
+                            bounds_height,
+                            0.0, // drag_delta_x — touch drag uses scroll path
+                            0.0, // drag_delta_y
+                            1.0, // pinch_scale
                         );
                     }
                 }
@@ -916,6 +985,14 @@ impl AndroidApp {
             // `blinc_platform_android::init_android_native_bridge(&app)`.
             // If it isn't initialized, we fall back to the unreliable NDK
             // path so apps that opt out of the bridge still get *something*.
+            // Show / hide the soft keyboard when focus crosses the global
+            // 0 / 1 boundary. `take_keyboard_state_change` returns
+            // `Some(true)` on the first text input gaining focus and
+            // `Some(false)` when the last focused input loses it; it does
+            // NOT fire on re-taps or focus-swaps between two inputs.
+            // That's fine for show/hide signaling — the keyboard is
+            // already up in those cases. Re-tap detection lives below
+            // via `focus_tap_generation`.
             if let Some(show) = blinc_layout::widgets::text_input::take_keyboard_state_change() {
                 let bridge_ready =
                     blinc_core::native_bridge::NativeBridgeState::is_initialized();
@@ -948,6 +1025,72 @@ impl AndroidApp {
                         app.hide_soft_input(true);
                     }
                 }
+            }
+
+            // =========================================================
+            // Soft-keyboard inset → scroll the focused text input above the
+            // keyboard.
+            //
+            // Driven by `PENDING_IME_INSET_PX`, set from Kotlin via the
+            // `Java_com_blinc_BlincNativeBridge_nativeDispatchKeyboardInset`
+            // JNI export. The Kotlin side reads
+            // `WindowInsets.Type.ime().bottom`, divides by display density,
+            // and pushes the logical-pixel value here.
+            //
+            // We need TWO independent triggers because the focus-count
+            // signal `take_keyboard_state_change` is not enough on its
+            // own:
+            //
+            //   1. **Inset change** — keyboard slides in or out.
+            //      Caught by diffing `pending_inset_px` against
+            //      `last_applied_keyboard_inset_px`.
+            //
+            //   2. **Tap-on-text-input generation bump** — the user
+            //      tapped a text input (any of them, including
+            //      re-tapping the same one) and we should re-evaluate
+            //      whether the focused input is currently obscured.
+            //      `take_keyboard_state_change` misses this because it
+            //      only fires on `0 → 1` / `1 → 0` focus-count
+            //      transitions; re-tapping a focused input stays at
+            //      count = 1 the whole time. We use a separate
+            //      `focus_tap_generation` counter that bumps in the
+            //      `text_input` widget's `on_mouse_down` handler.
+            // =========================================================
+            let pending_inset_px = PENDING_IME_INSET_PX.load(Ordering::Relaxed);
+            let current_tap_gen = blinc_layout::widgets::text_input::focus_tap_generation();
+            let inset_changed =
+                pending_inset_px >= 0 && pending_inset_px != last_applied_keyboard_inset_px;
+            let tap_changed = current_tap_gen != last_focus_tap_generation;
+            let needs_scroll_pass = inset_changed
+                || (tap_changed && pending_inset_px > 0);
+
+            if needs_scroll_pass {
+                let inset_to_apply = pending_inset_px.max(0) as f32;
+                if let Some(ref mut windowed_ctx) = ctx {
+                    windowed_ctx.keyboard_inset = inset_to_apply;
+                    let viewport_h = windowed_ctx.height;
+                    if let Some(ref mut tree) = render_tree {
+                        let scrolled = tree
+                            .scroll_focused_text_input_above_keyboard(viewport_h, inset_to_apply);
+                        if scrolled {
+                            needs_redraw_next_frame = true;
+                        }
+                    }
+                    tracing::debug!(
+                        "Android keyboard inset: last={} pending={} viewport_h={} tap_gen={}->{} inset_changed={} tap_changed={}",
+                        last_applied_keyboard_inset_px,
+                        pending_inset_px,
+                        windowed_ctx.height,
+                        last_focus_tap_generation,
+                        current_tap_gen,
+                        inset_changed,
+                        tap_changed,
+                    );
+                }
+                if pending_inset_px >= 0 {
+                    last_applied_keyboard_inset_px = pending_inset_px;
+                }
+                last_focus_tap_generation = current_tap_gen;
             }
 
             // =========================================================
@@ -1201,7 +1344,7 @@ impl AndroidApp {
                             let was_suboptimal = output.suboptimal;
                             output.present();
                             if was_suboptimal {
-                                surf.configure(&app_instance.device(), config);
+                                surf.configure(app_instance.device(), config);
                             }
                         }
                         Err(wgpu::SurfaceError::Lost)
@@ -1209,7 +1352,7 @@ impl AndroidApp {
                             tracing::warn!(
                                 "Surface lost / outdated — reconfiguring swapchain"
                             );
-                            surf.configure(&app_instance.device(), config);
+                            surf.configure(app_instance.device(), config);
                         }
                         Err(wgpu::SurfaceError::OutOfMemory) => {
                             tracing::error!("Out of GPU memory");
@@ -1424,4 +1567,44 @@ pub fn dispatch_stream_data(stream_id: u64, data: &[u8]) {
         stream_id,
         blinc_core::native_bridge::NativeValue::Bytes(data.to_vec()),
     );
+}
+
+/// JNI export — receive a soft-keyboard inset update from Kotlin.
+///
+/// Called from `BlincNativeBridge`'s `setOnApplyWindowInsetsListener`
+/// whenever `WindowInsets.Type.ime().bottom` changes (the Android
+/// equivalent of `UIKeyboardWillChangeFrameNotification`).
+///
+/// The Kotlin side converts the raw pixel value (which Android reports
+/// in physical pixels) to **logical pixels** by dividing by the display
+/// density before pushing here, so the value stored in
+/// `PENDING_IME_INSET_PX` is directly comparable to
+/// `WindowedContext.height` and `width` (which the Android runner
+/// also stores in logical pixels).
+///
+/// The android_main poll loop reads this atomic on every tick and
+/// pushes the value into `WindowedContext.keyboard_inset` if it
+/// changed. From there the layout / scroll-into-focused-input
+/// machinery picks it up via the same path the iOS runner uses.
+///
+/// # Kotlin declaration
+/// ```kotlin
+/// external fun nativeDispatchKeyboardInset(insetLogicalPx: Int)
+/// ```
+///
+/// # JNI signature
+/// `(I)V`
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_blinc_BlincNativeBridge_nativeDispatchKeyboardInset(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    inset_logical_px: jni::sys::jint,
+) {
+    // Clamp anything negative (which would be nonsense from the IME
+    // API but worth defending against) to zero. Sentinel `-1` is
+    // reserved for "not yet pushed", so anything we accept here is
+    // a real keyboard-inset update.
+    let clamped = inset_logical_px.max(0);
+    PENDING_IME_INSET_PX.store(clamped, Ordering::Relaxed);
 }

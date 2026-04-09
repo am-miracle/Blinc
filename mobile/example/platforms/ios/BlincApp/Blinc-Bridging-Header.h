@@ -160,6 +160,24 @@ void blinc_ios_handle_text_input(IOSRenderContext* _Nonnull ctx, const char* _No
 /// @param key_code  Virtual key code (8 = Backspace, etc.)
 void blinc_ios_handle_key_down(IOSRenderContext* _Nonnull ctx, uint32_t key_code);
 
+/// Update the soft-keyboard inset (height of the screen the
+/// keyboard is currently obscuring) in **logical points / pixels**
+/// — this is the same coordinate space the Rust runner uses for
+/// `WindowedContext.width/height`.
+///
+/// `BlincKeyboardHelper` subscribes to
+/// `UIKeyboardWillChangeFrameNotification` and
+/// `UIKeyboardWillHideNotification`, intersects the keyboard's
+/// reported screen frame with the active key window, and pushes
+/// the height through this FFI export. Pass `0.0` when the
+/// keyboard is hidden — the Rust side picks the new value up on
+/// the next frame and the layout / scroll-into-focused-input
+/// machinery responds.
+///
+/// @param ctx    Render context pointer
+/// @param inset  Keyboard height in logical points (`0.0` = hidden)
+void blinc_ios_set_keyboard_inset(IOSRenderContext* _Nonnull ctx, float inset);
+
 // =============================================================================
 // State Management
 // =============================================================================

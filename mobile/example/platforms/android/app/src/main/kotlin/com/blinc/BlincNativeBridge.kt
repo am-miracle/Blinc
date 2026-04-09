@@ -52,6 +52,11 @@ object BlincNativeBridge {
     // the Activity when callers pass one in.
     private var activityRef: java.lang.ref.WeakReference<android.app.Activity>? = null
 
+    // Last IME inset (in logical pixels) we pushed to Rust. Used by the
+    // window-insets listener to skip duplicate dispatches when nothing
+    // about the keyboard has actually changed.
+    private var lastDispatchedImeInsetPx: Int = -1
+
     /**
      * Initialize with application context
      */
@@ -59,10 +64,80 @@ object BlincNativeBridge {
         appContext = context.applicationContext
         if (context is android.app.Activity) {
             activityRef = java.lang.ref.WeakReference(context)
+            attachKeyboardInsetListener(context)
         }
     }
 
     private fun currentActivity(): android.app.Activity? = activityRef?.get()
+
+    /**
+     * Wire up an IME inset listener on the activity's decor view.
+     *
+     * Mirrors the iOS `UIKeyboardWillChangeFrameNotification` path. Whenever
+     * the soft keyboard's bottom inset changes (show, hide, hardware-keyboard
+     * attach, split-keyboard mode change, IME swap, etc.) the listener
+     * computes the inset height in **logical pixels** and pushes it to
+     * the Rust runtime via the [nativeDispatchKeyboardInset] JNI export.
+     *
+     * The Rust side stores the value in a global atomic that the
+     * `android_main` poll loop reads on every tick to drive the
+     * "scroll focused text input above the keyboard" behavior.
+     *
+     * Implementation note — `WindowInsets.Type.ime()` requires API 30+.
+     * On older devices we fall back to a global-layout listener that
+     * diffs `decorView.getWindowVisibleDisplayFrame().bottom` against
+     * `decorView.height` — less precise, no animation tracking, but
+     * gives us SOMETHING on API 24-29.
+     */
+    private fun attachKeyboardInsetListener(activity: android.app.Activity) {
+        val decorView = activity.window?.decorView ?: return
+        val density = activity.resources.displayMetrics.density.coerceAtLeast(0.001f)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Modern path (API 30+): WindowInsets.Type.ime() reports the
+            // exact IME inset in physical pixels and gets called for
+            // every animation frame as the keyboard slides in / out.
+            decorView.setOnApplyWindowInsetsListener { v, insets ->
+                val imeBottomPx = insets.getInsets(android.view.WindowInsets.Type.ime()).bottom
+                val logicalPx = (imeBottomPx.toFloat() / density).toInt()
+                if (logicalPx != lastDispatchedImeInsetPx) {
+                    lastDispatchedImeInsetPx = logicalPx
+                    try {
+                        nativeDispatchKeyboardInset(logicalPx)
+                    } catch (e: UnsatisfiedLinkError) {
+                        // Native side hasn't loaded the symbol yet — most
+                        // likely because the user app isn't using
+                        // blinc_app::android::AndroidApp::run. Skip
+                        // silently; the inset just won't propagate.
+                    }
+                }
+                v.onApplyWindowInsets(insets)
+            }
+            // Force an initial dispatch so we have a baseline (otherwise
+            // the very first frame after activity launch sees a stale
+            // sentinel and doesn't update until the user taps a field).
+            decorView.requestApplyInsets()
+        } else {
+            // Legacy path (API 24-29): use the visible-display-frame
+            // diff. This catches show / hide but not the per-frame
+            // animation steps.
+            val rect = android.graphics.Rect()
+            decorView.viewTreeObserver.addOnGlobalLayoutListener {
+                decorView.getWindowVisibleDisplayFrame(rect)
+                val screenHeight = decorView.rootView.height
+                val keyboardPx = (screenHeight - rect.bottom).coerceAtLeast(0)
+                val logicalPx = (keyboardPx.toFloat() / density).toInt()
+                if (logicalPx != lastDispatchedImeInsetPx) {
+                    lastDispatchedImeInsetPx = logicalPx
+                    try {
+                        nativeDispatchKeyboardInset(logicalPx)
+                    } catch (e: UnsatisfiedLinkError) {
+                        // see modern-path branch
+                    }
+                }
+            }
+        }
+    }
 
     /**
      * Register a native function handler
@@ -540,4 +615,20 @@ object BlincNativeBridge {
     // JNI bridge for stream data
     @JvmStatic
     external fun nativeDispatchStreamData(streamId: Long, data: ByteArray)
+
+    // JNI bridge for soft-keyboard inset updates.
+    //
+    // Called from `attachKeyboardInsetListener` whenever
+    // `WindowInsets.Type.ime().bottom` changes. The Rust runtime
+    // (`Java_com_blinc_BlincNativeBridge_nativeDispatchKeyboardInset` in
+    // `crates/blinc_app/src/android.rs`) stores the value in a global
+    // atomic that the `android_main` poll loop reads on every tick to
+    // drive the "scroll focused text input above the keyboard" behavior.
+    //
+    // The Kotlin side already converts the raw physical-pixel value
+    // from `WindowInsets` into LOGICAL pixels by dividing by the
+    // display density, so the Rust side gets a value directly comparable
+    // to `WindowedContext.height`.
+    @JvmStatic
+    external fun nativeDispatchKeyboardInset(insetLogicalPx: Int)
 }

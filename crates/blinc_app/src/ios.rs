@@ -27,6 +27,17 @@
 //! 3. Call `IOSApp::render_frame()` on each display link callback
 //! 4. Forward touch events to `IOSApp::handle_touch()`
 
+// All `extern "C" fn blinc_*` exports in this module take raw `*mut`
+// pointers from the Swift caller and dereference them. Each one
+// documents its safety contract in a `# Safety` section: "must be a
+// valid pointer returned by `blinc_create_context`". `clippy::not_unsafe_ptr_arg_deref`
+// would have us promote every export to `unsafe extern "C" fn`, which
+// is technically more accurate but doesn't change anything for the C
+// caller (Swift) and forces every Swift call site to wrap them. We
+// prefer the documented-contract approach used by every other Rust
+// FFI library targeting Swift / Obj-C.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -201,6 +212,7 @@ impl IOSApp {
 
         // Initialize global context state singleton
         if !BlincContextState::is_initialized() {
+            #[allow(clippy::type_complexity)]
             let stateful_callback: Arc<dyn Fn(&[SignalId]) + Send + Sync> =
                 Arc::new(|signal_ids| {
                     blinc_layout::check_stateful_deps(signal_ids);
@@ -324,6 +336,8 @@ impl IOSApp {
             is_scrolling: false,
             gesture_detector: GestureDetector::new(),
             last_frame_time_ms: 0,
+            last_applied_keyboard_inset: 0.0,
+            last_focus_tap_generation: 0,
         })
     }
 
@@ -363,6 +377,19 @@ pub struct IOSRenderContext {
     gesture_detector: GestureDetector,
     /// Last frame time for CSS animation delta calculation
     last_frame_time_ms: u64,
+    /// Keyboard inset value applied last frame, used to detect changes so
+    /// `scroll_focused_text_input_above_keyboard` only runs when the inset
+    /// actually moves (otherwise we'd re-clamp the scroll offset every
+    /// vsync tick, fighting any user pan).
+    last_applied_keyboard_inset: f32,
+    /// Last value of `text_input::focus_tap_generation()` we processed.
+    /// The widget bumps that counter on every `on_mouse_down` that lands
+    /// on a text input (or text area), regardless of whether the tap
+    /// transitions focus state. We use it as a "user just tapped an
+    /// input" signal that catches re-taps and same-frame focus swaps —
+    /// the things `take_keyboard_state_change` misses because it only
+    /// fires on `0 → 1` / `1 → 0` focus-count transitions.
+    last_focus_tap_generation: u64,
 }
 
 impl IOSRenderContext {
@@ -618,6 +645,38 @@ impl IOSRenderContext {
             false,
             false,
         );
+    }
+
+    /// Update the soft-keyboard inset (height in logical points / pixels).
+    ///
+    /// Pushed from `BlincKeyboardHelper` in
+    /// `BlincNativeBridge.swift` whenever UIKit posts a
+    /// `UIKeyboardWillChangeFrameNotification`. The Swift side already
+    /// intersects the keyboard frame with the key window's bounds and
+    /// converts to UIKit points (which equal Blinc's logical pixels), so
+    /// this method just stashes the value on the shared `WindowedContext`
+    /// and triggers a redraw so the next-frame layout pass picks it up.
+    ///
+    /// On hide events the Swift side computes a zero intersection and
+    /// passes `0.0`, which collapses the inset and lets the UI return
+    /// to its full-viewport layout.
+    pub fn handle_keyboard_inset(&mut self, inset: f32) {
+        let clamped = inset.max(0.0);
+        if (self.windowed_ctx.keyboard_inset - clamped).abs() < 0.5 {
+            // Sub-pixel diff — ignore. Avoids redraw spam during
+            // mid-animation `WillChangeFrame` events that fire every
+            // ~16 ms while the keyboard slides in.
+            return;
+        }
+        tracing::debug!(
+            "[Blinc] iOS keyboard inset: {} -> {}",
+            self.windowed_ctx.keyboard_inset,
+            clamped
+        );
+        self.windowed_ctx.keyboard_inset = clamped;
+        // The frame loop polls `take_keyboard_state_change` and other
+        // dirty flags every tick on iOS, so the next vsync tick picks
+        // this up automatically.
     }
 
     /// Handle a touch event
@@ -1046,6 +1105,13 @@ pub extern "C" fn blinc_build_frame(ctx: *mut IOSRenderContext) {
         // process. If the symbol is found, we call it; if not,
         // we silently no-op (text input still works at the
         // model level, the soft keyboard just doesn't pop up).
+        // Show / hide the soft keyboard when focus crosses the global
+        // 0 / 1 boundary. `take_keyboard_state_change` returns
+        // `Some(true)` on the first text input gaining focus and
+        // `Some(false)` when the last focused input loses it; it does
+        // NOT fire on re-taps or focus-swaps between two inputs.
+        // That's fine for show/hide signaling — the keyboard is
+        // already up in those cases.
         if let Some(show) = blinc_layout::widgets::text_input::take_keyboard_state_change() {
             if show {
                 if let Some(f) = keyboard_show_fn() {
@@ -1054,6 +1120,49 @@ pub extern "C" fn blinc_build_frame(ctx: *mut IOSRenderContext) {
             } else if let Some(f) = keyboard_hide_fn() {
                 f();
             }
+        }
+
+        // Soft-keyboard inset → scroll the focused text input above the
+        // keyboard so the user can see what they're typing. Driven by
+        // `WindowedContext.keyboard_inset`, which is updated by Swift via
+        // `blinc_ios_set_keyboard_inset` whenever UIKit posts
+        // `UIKeyboardWillChangeFrameNotification`.
+        //
+        // We need TWO independent triggers because the focus-count
+        // signal `take_keyboard_state_change` is not enough on its own:
+        //
+        //   1. **Inset change** — keyboard slides in or out, hardware
+        //      keyboard attach / detach. Caught by diffing
+        //      `current_inset` against `last_applied_keyboard_inset`.
+        //
+        //   2. **Tap-on-text-input generation bump** — the user tapped
+        //      a text input (any of them, including re-tapping the
+        //      same one) and we should re-evaluate whether the focused
+        //      input is currently obscured. `take_keyboard_state_change`
+        //      misses this because it only fires on `0 → 1` / `1 → 0`
+        //      focus-count transitions; re-tapping a focused input
+        //      stays at count = 1 the whole time. We use a separate
+        //      `focus_tap_generation` counter that bumps in the
+        //      `text_input` widget's `on_mouse_down` handler.
+        let current_inset = ctx.windowed_ctx.keyboard_inset;
+        let current_tap_gen = blinc_layout::widgets::text_input::focus_tap_generation();
+        let inset_changed = (current_inset - ctx.last_applied_keyboard_inset).abs() > 0.5;
+        let tap_changed = current_tap_gen != ctx.last_focus_tap_generation;
+        let needs_scroll_pass = inset_changed || (tap_changed && current_inset > 0.0);
+
+        if needs_scroll_pass {
+            let viewport_h = ctx.windowed_ctx.height;
+            if let Some(ref mut tree) = ctx.render_tree {
+                let scrolled = tree
+                    .scroll_focused_text_input_above_keyboard(viewport_h, current_inset);
+                if scrolled {
+                    // Force a redraw on the next frame so the new
+                    // scroll offset is reflected in the rendered output.
+                    blinc_layout::request_redraw();
+                }
+            }
+            ctx.last_applied_keyboard_inset = current_inset;
+            ctx.last_focus_tap_generation = current_tap_gen;
         }
 
         // PHASE 1: Process incremental updates (prop changes, subtree rebuilds)
@@ -1282,6 +1391,29 @@ pub extern "C" fn blinc_ios_handle_key_down(ctx: *mut IOSRenderContext, key_code
     }
     unsafe {
         (*ctx).handle_key_down(key_code);
+    }
+}
+
+/// Update the keyboard inset (height of the soft keyboard) in
+/// logical points / pixels.
+///
+/// Pushed from `BlincKeyboardHelper` in `BlincNativeBridge.swift`
+/// whenever UIKit posts a `UIKeyboardWillChangeFrameNotification`
+/// or `UIKeyboardWillHideNotification`. Swift already intersects
+/// the keyboard's reported screen frame with the key window's
+/// bounds and converts to UIKit points, so the value here is
+/// directly comparable to `WindowedContext.height`. Pass `0.0`
+/// when the keyboard is hidden.
+///
+/// # Safety
+/// `ctx` must be a valid pointer returned by `blinc_create_context`.
+#[no_mangle]
+pub extern "C" fn blinc_ios_set_keyboard_inset(ctx: *mut IOSRenderContext, inset: f32) {
+    if ctx.is_null() {
+        return;
+    }
+    unsafe {
+        (*ctx).handle_keyboard_inset(inset);
     }
 }
 

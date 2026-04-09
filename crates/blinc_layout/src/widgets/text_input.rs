@@ -48,6 +48,25 @@ pub const CURSOR_BLINK_INTERVAL_MS: u64 = 400;
 // =============================================================================
 
 static GLOBAL_FOCUS_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Generation counter that increments on every text-input tap, regardless
+/// of whether the tap actually transitions focus state. Polled by mobile
+/// runners (`blinc_app::android` / `blinc_app::ios`) to detect "user tapped
+/// a text input again" events that `take_keyboard_state_change` misses,
+/// because that flag only fires on `0 → 1` / `1 → 0` focus-count
+/// transitions.
+///
+/// Re-tapping the same input (or a different input while the keyboard is
+/// already up) does NOT cross those transitions, so the runner has no
+/// other way to know the user wanted to re-engage the keyboard. This
+/// counter gives it that signal: bump on every tap that lands on a text
+/// input handler, runner stores the last value it saw, and runs
+/// scroll-into-view whenever the value advances.
+///
+/// Used by [`focus_tap_generation`] / bumped by the `text_input` and
+/// `text_area` widgets' `on_mouse_down` handlers.
+static FOCUS_TAP_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 static NEEDS_REBUILD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static NEEDS_RELAYOUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static NEEDS_CSS_REPARSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -113,6 +132,37 @@ pub fn take_keyboard_state_change() -> Option<bool> {
 
 pub fn has_focused_text_input() -> bool {
     GLOBAL_FOCUS_COUNT.load(Ordering::Relaxed) > 0
+}
+
+/// Get the current text-input tap generation counter.
+///
+/// Increments on every tap that lands on a text input or text area
+/// `on_mouse_down` handler, regardless of whether the focus state
+/// actually transitioned. Mobile platform runners use this as a more
+/// reliable "user just tapped an input" signal than
+/// [`take_keyboard_state_change`], which only fires on transitions
+/// of the global focus count and misses re-taps of an already-focused
+/// input.
+///
+/// The runner pattern is:
+/// ```ignore
+/// let gen = focus_tap_generation();
+/// if gen != last_seen_gen {
+///     last_seen_gen = gen;
+///     tree.scroll_focused_text_input_above_keyboard(viewport_h, inset);
+/// }
+/// ```
+pub fn focus_tap_generation() -> u64 {
+    FOCUS_TAP_GENERATION.load(Ordering::Relaxed)
+}
+
+/// Internal: bump the tap generation counter.
+///
+/// Called by the `text_input` and `text_area` widgets from their
+/// `on_mouse_down` handlers, after they've confirmed the tap landed
+/// on the widget (passes the disabled / pointer_events check).
+pub(crate) fn bump_focus_tap_generation() {
+    FOCUS_TAP_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn take_needs_continuous_redraw() -> bool {
@@ -1485,6 +1535,16 @@ impl TextInput {
                     if d.disabled {
                         return;
                     }
+
+                    // Bump the focus-tap generation counter so the
+                    // mobile runner picks this up as a "user tapped a
+                    // text input" event, even if the input was already
+                    // focused. This drives scroll-into-view on re-taps
+                    // — see `focus_tap_generation` for the rationale
+                    // and `blinc_app::android::android_main` /
+                    // `blinc_app::ios::blinc_build_frame` for the
+                    // consumers.
+                    bump_focus_tap_generation();
 
                     // Get font size for cursor positioning
                     let font_size = config_for_click.lock().unwrap().font_size;

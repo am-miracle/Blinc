@@ -593,6 +593,87 @@ class BlincKeyboardHelper: NSObject, UITextFieldDelegate {
 
     private override init() {
         super.init()
+
+        // Subscribe to keyboard frame notifications. We use
+        // `WillChangeFrame` rather than `WillShow` / `WillHide`
+        // because the former fires for every transition, including
+        // hardware-keyboard attach (which collapses the soft
+        // keyboard to a small inline accessory bar — height drops
+        // but isn't zero), interactive dismissal (the user dragging
+        // the keyboard down), and split-keyboard / floating-keyboard
+        // mode changes on iPad. `WillShow`/`WillHide` miss those.
+        //
+        // The notification's `userInfo` contains:
+        //   * `UIKeyboardFrameEndUserInfoKey`   — final frame in
+        //     SCREEN coordinates as `NSValue<CGRect>`. We compute the
+        //     intersection with the current key window's bounds to
+        //     get the actually-obscured area (the keyboard frame can
+        //     extend below the bottom of the screen during the
+        //     animation), then take the height in POINTS (which is
+        //     UIKit's logical-pixel unit — same coordinate space the
+        //     Rust runner stores in `WindowedContext.width/height`).
+        //   * `UIKeyboardAnimationDurationUserInfoKey` /
+        //     `UIKeyboardAnimationCurveUserInfoKey` — duration and
+        //     timing curve of the system animation. We don't push
+        //     these into Rust right now (the runner just snaps to
+        //     the new inset on the next frame), but they're worth
+        //     a future hook for matching the system curve when
+        //     we animate the scroll-into-view.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleKeyboardFrameChange(_:)),
+            name: UIResponder.keyboardWillChangeFrameNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleKeyboardFrameChange(_:)),
+            name: UIResponder.keyboardWillHideNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    /// Compute the inset (height of the screen the keyboard is
+    /// covering) and forward to Rust via the new FFI export.
+    /// `keyboardWillHide` is wired to the same handler — UIKit
+    /// posts a final frame at the bottom of the screen for the
+    /// hide path, so the intersection-with-window-bounds math
+    /// naturally produces zero in that case.
+    @objc private func handleKeyboardFrameChange(_ notification: Notification) {
+        guard let userInfo = notification.userInfo else { return }
+        guard let endFrameValue = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue else { return }
+        let keyboardFrameInScreen = endFrameValue.cgRectValue
+
+        // Find the active key window so we can convert from screen
+        // coordinates and compute the intersection with the visible
+        // area. On iOS 13+ we go through `connectedScenes`; the
+        // top-most foreground active scene's first key window is the
+        // one our `BlincViewController` lives in.
+        let keyWindow: UIWindow? = UIApplication.shared
+            .connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .filter { $0.activationState == .foregroundActive }
+            .flatMap { $0.windows }
+            .first { $0.isKeyWindow }
+
+        guard let window = keyWindow else { return }
+
+        let keyboardFrameInWindow = window.convert(keyboardFrameInScreen, from: nil)
+        let intersection = keyboardFrameInWindow.intersection(window.bounds)
+
+        // `intersection.height` is in points (UIKit logical units).
+        // The Rust runner already stores logical pixels in
+        // `WindowedContext.width/height`, so this maps 1:1 with no
+        // DPI conversion needed.
+        let insetPoints = intersection.isNull ? 0.0 : Double(intersection.height)
+
+        if let ctx = BlincKeyboardHelper.blincContext {
+            blinc_ios_set_keyboard_inset(ctx, Float(insetPoints))
+        }
     }
 
     func showKeyboard() {

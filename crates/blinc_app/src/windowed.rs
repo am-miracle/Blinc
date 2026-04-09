@@ -242,6 +242,26 @@ pub struct WindowedContext {
     /// On mobile: notch, status bar, home indicator.
     /// On desktop: all zeros.
     pub safe_area: (f32, f32, f32, f32),
+    /// Soft-keyboard inset, in **logical** pixels — height in pixels of
+    /// the area at the bottom of the screen currently obscured by an
+    /// on-screen keyboard. Zero when the keyboard is hidden.
+    ///
+    /// Updated by the platform runner from native keyboard events:
+    ///
+    ///   - iOS: parsed from
+    ///     `UIKeyboardWillChangeFrameNotification.userInfo[UIKeyboardFrameEndUserInfoKey]`
+    ///     in `BlincKeyboardHelper`, pushed via the
+    ///     `blinc_ios_set_keyboard_inset` FFI export.
+    ///   - Android: read from
+    ///     `WindowInsets.Type.ime().bottom` in
+    ///     `BlincNativeBridge.kt`, dispatched into Rust through the
+    ///     `keyboard.set_inset` native-bridge handler.
+    ///   - Desktop / web / Fuchsia: always zero.
+    ///
+    /// The text-input refocus path consumes this to scroll the focused
+    /// input above the keyboard when it appears, mirroring the iOS UIKit
+    /// `UIScrollView.contentInset` adjustment dance.
+    pub keyboard_inset: f32,
     /// Physical window width (for internal use)
     pub(crate) physical_width: f32,
     /// Physical window height (for internal use)
@@ -319,6 +339,7 @@ impl WindowedContext {
             height: logical_height,
             scale_factor,
             safe_area: window.safe_area_insets(),
+            keyboard_inset: 0.0,
             physical_width: physical_width as f32,
             physical_height: physical_height as f32,
             focused: window.is_focused(),
@@ -347,6 +368,7 @@ impl WindowedContext {
     ///
     /// This is used by the Android runner since it doesn't have a Window trait implementation.
     #[cfg(all(feature = "android", target_os = "android"))]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_android(
         logical_width: f32,
         logical_height: f32,
@@ -367,6 +389,7 @@ impl WindowedContext {
             height: logical_height,
             scale_factor,
             safe_area: (0.0, 0.0, 0.0, 0.0),
+            keyboard_inset: 0.0,
             physical_width,
             physical_height,
             focused,
@@ -395,6 +418,7 @@ impl WindowedContext {
     ///
     /// This is used by the iOS runner since it doesn't have a Window trait implementation.
     #[cfg(all(feature = "ios", target_os = "ios"))]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_ios(
         logical_width: f32,
         logical_height: f32,
@@ -415,6 +439,7 @@ impl WindowedContext {
             height: logical_height,
             scale_factor,
             safe_area: (0.0, 0.0, 0.0, 0.0),
+            keyboard_inset: 0.0,
             physical_width,
             physical_height,
             focused,
@@ -474,6 +499,7 @@ impl WindowedContext {
             height: logical_height,
             scale_factor,
             safe_area: (0.0, 0.0, 0.0, 0.0),
+            keyboard_inset: 0.0,
             physical_width,
             physical_height,
             focused,
@@ -522,6 +548,7 @@ impl WindowedContext {
             height: logical_height,
             scale_factor,
             safe_area: (0.0, 0.0, 0.0, 0.0),
+            keyboard_inset: 0.0,
             physical_width,
             physical_height,
             focused,

@@ -3842,6 +3842,156 @@ impl RenderTree {
         self.scroll_offsets.insert(node_id, (offset_x, offset_y));
     }
 
+    /// Scroll the currently-focused text input (or text area) into view above
+    /// the soft keyboard.
+    ///
+    /// Called by mobile platform runners (`blinc_app::android`,
+    /// `blinc_app::ios`) whenever the soft-keyboard inset changes — usually
+    /// in response to `UIKeyboardWillChangeFrameNotification` (iOS) or a
+    /// `WindowInsets.Type.ime()` callback (Android).
+    ///
+    /// Behavior:
+    ///
+    /// 1. Look up the currently focused text input via the global focus
+    ///    tracker in `widgets::text_input` (or `widgets::text_area`). If
+    ///    nothing is focused, return without doing anything.
+    /// 2. Walk the focused node's ancestors looking for the nearest enclosing
+    ///    scroll container. If none is found, return — there's no scroll
+    ///    surface to adjust.
+    /// 3. Compute how much the input is currently obscured by the keyboard:
+    ///    `obstruction = max(0, input.bottom + margin - (viewport.height - keyboard_inset))`
+    ///    where `viewport.height` is the full window logical height. The
+    ///    margin (default 16 px) keeps a comfortable gap between the input
+    ///    and the keyboard top edge.
+    /// 4. If `obstruction > 0`, scroll the container up by that amount,
+    ///    clamping to the container's content size so we don't over-scroll.
+    ///    Scroll offsets in Blinc are negative for "content moved up" so
+    ///    we subtract from the current y offset.
+    /// 5. If the keyboard hides (`keyboard_inset == 0`), do not auto-scroll
+    ///    back — the user can keep their current position. The original
+    ///    position would require remembering pre-keyboard scroll state per
+    ///    container, which is fragile across rebuilds.
+    ///
+    /// `viewport_height` is the **logical** window height in the same units
+    /// the layout tree uses (UIKit points on iOS, density-independent
+    /// pixels on Android). `keyboard_inset` is the keyboard's height in
+    /// the same units. Both come from `WindowedContext`.
+    ///
+    /// Returns `true` if any scroll offset was updated (so the caller knows
+    /// to request a redraw); `false` otherwise.
+    pub fn scroll_focused_text_input_above_keyboard(
+        &mut self,
+        viewport_height: f32,
+        keyboard_inset: f32,
+    ) -> bool {
+        if keyboard_inset <= 0.0 {
+            // Nothing to scroll above — the keyboard is hidden.
+            return false;
+        }
+
+        // Find the focused text input node. Text input takes precedence
+        // over text area because the two focus trackers are independent;
+        // in practice only one is set at a time.
+        let focused_node = crate::widgets::text_input::focused_text_input_node_id()
+            .or_else(crate::widgets::text_input::focused_text_area_node_id);
+
+        let Some(focused_node) = focused_node else {
+            return false;
+        };
+
+        // Walk ancestors to find the nearest scroll container.
+        let scroll_container = self
+            .layout_tree
+            .ancestors(focused_node)
+            .into_iter()
+            .find(|&ancestor| self.is_scroll_container(ancestor));
+
+        let Some(scroll_container) = scroll_container else {
+            // The focused input isn't inside any scroll container — there's
+            // no surface to scroll. Caller falls back to other strategies
+            // (e.g. shrinking the safe area or letting the keyboard cover
+            // the input).
+            return false;
+        };
+
+        // Get absolute bounds for the focused input. `get_absolute_bounds`
+        // already accounts for ancestor scroll offsets, so the returned
+        // y is the input's actual on-screen position right now.
+        let Some(input_bounds) = self.get_absolute_bounds(focused_node) else {
+            return false;
+        };
+
+        // Visible bottom edge of the screen — anything below this is
+        // covered by the soft keyboard.
+        const MARGIN: f32 = 16.0;
+        let visible_bottom = viewport_height - keyboard_inset;
+        let input_bottom = input_bounds.y + input_bounds.height;
+        let obstruction = (input_bottom + MARGIN) - visible_bottom;
+
+        if obstruction <= 0.0 {
+            // Already fully visible above the keyboard.
+            return false;
+        }
+
+        // Apply the scroll. Blinc scroll offsets are negative for
+        // "content moved up", so we subtract `obstruction` from the
+        // current Y offset.
+        let (current_x, current_y) = self.get_scroll_offset(scroll_container);
+        let target_y = current_y - obstruction;
+
+        // Clamp to the container's max scroll. The viewport / content
+        // sizes come from the layout tree directly so the calculation
+        // matches `dispatch_scroll_chain_with_time`'s clamping logic.
+        let scroll_bounds = self.layout_tree.get_bounds(scroll_container, (0.0, 0.0));
+        let scroll_viewport_h = scroll_bounds.map(|b| b.height).unwrap_or(viewport_height);
+        let (_content_w, content_h) = self
+            .layout_tree
+            .get_content_size(scroll_container)
+            .unwrap_or((0.0, scroll_viewport_h));
+        let max_offset_y = if content_h > scroll_viewport_h {
+            -(content_h - scroll_viewport_h)
+        } else {
+            0.0
+        };
+        let clamped_y = target_y.clamp(max_offset_y, 0.0);
+
+        if (clamped_y - current_y).abs() < 0.5 {
+            // Effectively unchanged.
+            return false;
+        }
+
+        tracing::debug!(
+            "scroll_focused_text_input_above_keyboard: container={:?} \
+             input_bottom={:.1} visible_bottom={:.1} obstruction={:.1} \
+             current_y={:.1} -> {:.1}",
+            scroll_container,
+            input_bottom,
+            visible_bottom,
+            obstruction,
+            current_y,
+            clamped_y,
+        );
+
+        // Write through both the legacy `scroll_offsets` map AND the
+        // physics state if it exists, so the next frame samples the
+        // updated value via `get_scroll_offset` regardless of which
+        // path is active.
+        self.scroll_offsets
+            .insert(scroll_container, (current_x, clamped_y));
+        if let Some(physics) = self.scroll_physics.get(&scroll_container) {
+            if let Ok(mut p) = physics.try_lock() {
+                p.offset_x = current_x;
+                p.offset_y = clamped_y;
+                // Snap velocity to zero so the scroll doesn't keep
+                // drifting after we set the offset programmatically.
+                p.velocity_x = 0.0;
+                p.velocity_y = 0.0;
+            }
+        }
+
+        true
+    }
+
     /// Get the scroll offset for a node
     ///
     /// Reads from scroll physics if available (has direction-aware bounds),
@@ -11801,12 +11951,43 @@ impl RenderTree {
     /// Get absolute bounds for a node (traversing up the tree, accounting for scroll)
     pub fn get_absolute_bounds(&self, node: LayoutNodeId) -> Option<ElementBounds> {
         let mut bounds = self.layout_tree.get_absolute_bounds(node)?;
-        // Walk up ancestors and apply scroll offsets from scroll containers
+        // Walk up ancestors and apply scroll offsets from scroll containers.
+        //
+        // Touch scrolling on mobile (and momentum / bounce on desktop)
+        // updates the per-container `scroll_physics` state, which is the
+        // SOURCE OF TRUTH for "where this container is currently
+        // scrolled to". The legacy `scroll_offsets` HashMap is only
+        // written for code paths that don't use physics
+        // (`set_scroll_offset`, immediate scroll commands). Reading
+        // only the HashMap here would return stale offsets after a
+        // touch scroll, which silently broke
+        // `scroll_focused_text_input_above_keyboard` — the helper
+        // saw the focused input's *original* on-screen position
+        // (pre-scroll) and concluded it was already visible above the
+        // keyboard, even though the user had scrolled it under the
+        // keyboard.
+        //
+        // We mirror `get_scroll_offset`'s precedence: physics first,
+        // HashMap fallback. The `try_lock` is intentional — under
+        // contention we'd rather get a slightly-stale value than
+        // block on a paint thread; the next frame catches up.
         for ancestor in self.layout_tree.ancestors(node) {
-            if let Some(&(sx, sy)) = self.scroll_offsets.get(&ancestor) {
-                bounds.x += sx;
-                bounds.y += sy;
-            }
+            let (sx, sy) = if let Some(physics) = self.scroll_physics.get(&ancestor) {
+                if let Ok(p) = physics.try_lock() {
+                    (p.offset_x, p.offset_y)
+                } else {
+                    self.scroll_offsets
+                        .get(&ancestor)
+                        .copied()
+                        .unwrap_or((0.0, 0.0))
+                }
+            } else if let Some(&offset) = self.scroll_offsets.get(&ancestor) {
+                offset
+            } else {
+                continue;
+            };
+            bounds.x += sx;
+            bounds.y += sy;
         }
         Some(bounds)
     }
