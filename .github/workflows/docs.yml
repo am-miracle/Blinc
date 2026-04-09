@@ -35,7 +35,17 @@ jobs:
     name: Build Book
     runs-on: ubuntu-latest
     steps:
+      # `fetch-depth: 100` so the `blinc-build-web-examples`
+      # incremental planner can `git diff` against the SHA stamped
+      # in `examples/_generated/.last-build-sha` (restored from the
+      # `actions/cache` step below). With the default depth of 1
+      # the diff fails for any cache older than HEAD~1, and the
+      # planner falls back to a full rebuild — correct, but
+      # defeats the cache. 100 commits is enough headroom that the
+      # cache stays useful even when CI hasn't run for a few days.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 100
 
       # The codegen tool + wasm-pack invocations need a working
       # Rust toolchain with the wasm32 target. Cached between runs
@@ -65,6 +75,38 @@ jobs:
           if ! command -v wasm-pack >/dev/null 2>&1; then
             curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
           fi
+
+      # wasm-pack 0.13 ships its own bundled `wasm-opt` (binaryen
+      # 116). That binary segfaults on the larger generated wasm
+      # modules (e.g. `cn_demo` — 1666 generated icon constants +
+      # the full `blinc_cn` component set). Installing a modern
+      # binaryen via apt puts a fresh `wasm-opt` on PATH, and
+      # wasm-pack will prefer the system binary over its bundled
+      # one when both exist.
+      - name: Install fresh binaryen (wasm-opt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binaryen
+          wasm-opt --version || true
+
+      # Cache the per-example wasm-pack outputs so the
+      # `blinc-build-web-examples` incremental planner can skip
+      # wrappers whose inputs haven't changed since the last
+      # successful run. The cache key uses the lockfile + the
+      # codegen tool's source so dep bumps and tool changes
+      # invalidate everything; the planner's per-example git diff
+      # then handles fine-grained invalidation on top of that
+      # baseline. The `.last-build-sha` stamp lives alongside the
+      # pkg/ directories so it travels with the cache.
+      - name: Cache generated example pkg/ directories
+        uses: actions/cache@v4
+        with:
+          path: |
+            examples/_generated/**/pkg
+            examples/_generated/.last-build-sha
+          key: web-examples-pkg-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'tools/build-web-examples/src/**') }}
+          restore-keys: |
+            web-examples-pkg-v1-${{ runner.os }}-
 
       # Regenerates `examples/_generated/<name>/` wrapper crates
       # from the cross-target source in `crates/blinc_app/examples/`,

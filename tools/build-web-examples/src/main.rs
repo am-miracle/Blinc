@@ -504,6 +504,13 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [package.metadata.wasm-pack.profile.release]
+# `--all-features` is required because rustc's wasm32 codegen
+# emits `memory.copy` instructions, which wasm-opt rejects unless
+# bulk-memory (and other current proposals) are enabled. The
+# bundled wasm-opt 116 in wasm-pack 0.13.1 segfaults on the
+# larger generated modules (e.g. cn_demo) — CI installs a fresh
+# binaryen via apt so wasm-pack picks the system binary up
+# instead of the bundled crashy one.
 wasm-opt = ['-O', '--all-features']
 
 [package.metadata.wasm-pack.profile.dev]
@@ -1075,23 +1082,349 @@ fn patch_summary(workspace_root: &Path, examples: &[ExampleMeta]) -> std::io::Re
 }
 
 // ============================================================================
+// Incremental build planning — skip wasm-pack on wrappers whose inputs haven't
+// changed since the last successful run
+// ============================================================================
+//
+// Each successful `--build` run stamps the current `git rev-parse
+// HEAD` into `examples/_generated/.last-build-sha`. The next run
+// reads that stamp, runs `git diff --name-only $LAST_SHA HEAD` (and
+// against the working tree) and uses the changed-file list to
+// decide which wrappers actually need a fresh `wasm-pack build`.
+//
+// File classification:
+//
+//   - `crates/blinc_app/examples/<name>.rs` → only `<name>` rebuilds
+//   - `Cargo.lock` / `crates/!blinc_app/**` / `extensions/**` /
+//     `tools/build-web-examples/**` / wrapper templates →
+//     "shared change", every wrapper rebuilds
+//   - anything else → ignored
+//
+// On a fresh checkout (no stamp file) or when git isn't available
+// (e.g. running outside a git checkout, or `--force-rebuild` is
+// passed) the planner falls back to rebuilding everything.
+//
+// `wasm-pack build --target web --release` is what dominates the
+// per-wrapper time even when cargo's incremental build does
+// nothing — `wasm-bindgen` + `wasm-opt` re-run unconditionally on
+// every invocation. Skipping the call entirely for unchanged
+// wrappers is the difference between a no-op CI run finishing in
+// seconds vs. ~20 minutes.
+
+/// Marker file in `examples/_generated/` recording the git commit
+/// SHA at which the previous successful `--build` run finished.
+/// Plain text, single line, no newline.
+const LAST_BUILD_SHA_PATH: &str = "examples/_generated/.last-build-sha";
+
+/// Decision the planner returns for one example.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildAction {
+    /// Run `wasm-pack build` for this wrapper.
+    Rebuild,
+    /// Skip — `pkg/` from the previous run is still good.
+    Skip,
+}
+
+/// Planner output: what to do for each discovered example, plus
+/// the human-readable reason the plan came out that way (so the
+/// CI log explains why it's rebuilding everything vs. one wrapper).
+struct BuildPlan {
+    actions: Vec<(String, BuildAction)>,
+    reason: String,
+}
+
+/// Decide which wrappers need rebuilding by diffing the current
+/// working tree against the last successful build SHA.
+///
+/// `force` short-circuits the planner and forces a full rebuild —
+/// the `--force-rebuild` flag exposes this for the rare case where
+/// a developer needs to bypass the cache.
+fn plan_builds(workspace_root: &Path, examples: &[ExampleMeta], force: bool) -> BuildPlan {
+    if force {
+        return BuildPlan {
+            actions: examples
+                .iter()
+                .map(|m| (m.name.clone(), BuildAction::Rebuild))
+                .collect(),
+            reason: "--force-rebuild".to_string(),
+        };
+    }
+
+    let stamp_path = workspace_root.join(LAST_BUILD_SHA_PATH);
+    let last_sha = match fs::read_to_string(&stamp_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => {
+            return BuildPlan {
+                actions: examples
+                    .iter()
+                    .map(|m| (m.name.clone(), BuildAction::Rebuild))
+                    .collect(),
+                reason: "no last-build-sha stamp (cold start)".to_string(),
+            };
+        }
+    };
+
+    if last_sha.is_empty() {
+        return BuildPlan {
+            actions: examples
+                .iter()
+                .map(|m| (m.name.clone(), BuildAction::Rebuild))
+                .collect(),
+            reason: "empty last-build-sha stamp".to_string(),
+        };
+    }
+
+    // Anything modified since the last successful build, including
+    // uncommitted local edits. We collect both the diff against the
+    // stamped SHA *and* the diff against the working tree so a
+    // developer iterating on an example without committing still
+    // gets that example rebuilt.
+    let mut changed: Vec<String> = Vec::new();
+    let committed = git_changed_files(workspace_root, &[&last_sha, "HEAD"]);
+    if let Some(list) = committed {
+        changed.extend(list);
+    } else {
+        return BuildPlan {
+            actions: examples
+                .iter()
+                .map(|m| (m.name.clone(), BuildAction::Rebuild))
+                .collect(),
+            reason: format!(
+                "git diff against {last_sha} failed (shallow clone? rewritten history?)"
+            ),
+        };
+    }
+    if let Some(working_tree) = git_changed_files(workspace_root, &["HEAD"]) {
+        changed.extend(working_tree);
+    }
+    // Also catch untracked files via `git ls-files --others --exclude-standard`,
+    // which `git diff` doesn't report. New examples land in this bucket
+    // before they're added to the index.
+    if let Some(untracked) = git_untracked_files(workspace_root) {
+        changed.extend(untracked);
+    }
+    changed.sort();
+    changed.dedup();
+
+    if changed.is_empty() {
+        return BuildPlan {
+            actions: examples
+                .iter()
+                .map(|m| (m.name.clone(), BuildAction::Skip))
+                .collect(),
+            reason: format!("no files changed since {last_sha}"),
+        };
+    }
+
+    // Categorise. The example bucket maps file→stem; the shared
+    // bucket is just a flag.
+    let mut changed_examples: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut shared_changes: Vec<String> = Vec::new();
+    for path in &changed {
+        if let Some(rest) = path.strip_prefix("crates/blinc_app/examples/") {
+            // Only top-level *.rs files in that directory count;
+            // subdirectories (like the `assets/` folder) don't.
+            if let Some(stem) = rest.strip_suffix(".rs") {
+                if !stem.contains('/') {
+                    changed_examples.insert(stem.to_string());
+                    continue;
+                }
+            }
+            // Files under crates/blinc_app/examples/ that aren't
+            // top-level .rs (e.g. assets/) don't affect any
+            // wrapper's wasm output, so they're ignored.
+            continue;
+        }
+        if path == "Cargo.lock"
+            || path.starts_with("crates/")
+            || path.starts_with("extensions/")
+            || path.starts_with("tools/build-web-examples/")
+            || path == ".github/workflows/docs.yml"
+        {
+            shared_changes.push(path.clone());
+        }
+        // Anything else (docs/, README, etc.) is ignored — those
+        // files don't affect what wasm-pack would produce.
+    }
+
+    if !shared_changes.is_empty() {
+        return BuildPlan {
+            actions: examples
+                .iter()
+                .map(|m| (m.name.clone(), BuildAction::Rebuild))
+                .collect(),
+            reason: format!(
+                "{} shared file(s) changed (e.g. {}); rebuilding all wrappers",
+                shared_changes.len(),
+                shared_changes.first().map(|s| s.as_str()).unwrap_or("")
+            ),
+        };
+    }
+
+    let actions: Vec<(String, BuildAction)> = examples
+        .iter()
+        .map(|m| {
+            let action = if changed_examples.contains(&m.name) {
+                BuildAction::Rebuild
+            } else {
+                BuildAction::Skip
+            };
+            (m.name.clone(), action)
+        })
+        .collect();
+
+    let rebuild_count = actions
+        .iter()
+        .filter(|(_, a)| *a == BuildAction::Rebuild)
+        .count();
+    BuildPlan {
+        actions,
+        reason: format!(
+            "{} example file(s) changed since {last_sha}; rebuilding {} wrapper(s)",
+            changed_examples.len(),
+            rebuild_count
+        ),
+    }
+}
+
+/// Run `git diff --name-only <range...>` from `workspace_root` and
+/// return the resulting list of paths (workspace-relative). Returns
+/// `None` if git isn't available or the diff fails — the caller
+/// treats that as "fall back to a full rebuild".
+fn git_changed_files(workspace_root: &Path, args: &[&str]) -> Option<Vec<String>> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(workspace_root)
+        .arg("diff")
+        .arg("--name-only");
+    for a in args {
+        cmd.arg(a);
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(out.stdout).ok()?;
+    Some(
+        stdout
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+    )
+}
+
+/// Run `git ls-files --others --exclude-standard` to list untracked
+/// (but not gitignored) files. Used so newly-added example files
+/// register as "changed" before they're staged.
+fn git_untracked_files(workspace_root: &Path) -> Option<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .current_dir(workspace_root)
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(out.stdout).ok()?;
+    Some(
+        stdout
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+    )
+}
+
+/// Read the current `git rev-parse HEAD` and stamp it into
+/// `examples/_generated/.last-build-sha` so the next run can diff
+/// against it. Failures (non-git checkout, IO error) are logged
+/// but non-fatal.
+fn write_last_build_sha(workspace_root: &Path) {
+    let out = match std::process::Command::new("git")
+        .current_dir(workspace_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => {
+            eprintln!("  WARN: could not read git HEAD; skipping last-build-sha stamp");
+            return;
+        }
+    };
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() {
+        return;
+    }
+    let stamp = workspace_root.join(LAST_BUILD_SHA_PATH);
+    if let Some(parent) = stamp.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Err(e) = fs::write(&stamp, &sha) {
+        eprintln!("  WARN: could not write {}: {e}", stamp.display());
+    }
+}
+
+// ============================================================================
 // Build + stage — optional wasm-pack integration behind `--build`
 // ============================================================================
 
 /// Run `wasm-pack build --target web --release` in each wrapper
-/// directory. Returns the list of wrappers that failed so the
-/// caller can report a non-zero exit code.
-fn build_wrappers_with_wasm_pack(workspace_root: &Path, examples: &[ExampleMeta]) -> Vec<String> {
+/// directory whose inputs have changed since the last successful
+/// build (per the [`plan_builds`] git-diff planner). Returns the
+/// list of wrappers that failed so the caller can report a non-zero
+/// exit code.
+fn build_wrappers_with_wasm_pack(
+    workspace_root: &Path,
+    examples: &[ExampleMeta],
+    force_rebuild: bool,
+) -> Vec<String> {
+    let plan = plan_builds(workspace_root, examples, force_rebuild);
+    println!("  plan: {}", plan.reason);
+
     let mut failed = Vec::new();
+    let mut skipped = 0usize;
+    let mut built = 0usize;
+
+    // Map name → action for quick lookup as we iterate examples in
+    // their original (sorted) order.
+    let action_for: std::collections::HashMap<&str, BuildAction> =
+        plan.actions.iter().map(|(n, a)| (n.as_str(), *a)).collect();
+
     for meta in examples {
         let wrapper_dir = workspace_root.join(GENERATED_DIR).join(&meta.name);
+        let pkg_dir = wrapper_dir.join("pkg");
+        let action = action_for
+            .get(meta.name.as_str())
+            .copied()
+            .unwrap_or(BuildAction::Rebuild);
+
+        // A "skip" decision is only honoured if the previous run's
+        // pkg/ output is actually still on disk. CI cache restores
+        // sometimes drop wrappers; without this guard, the planner
+        // would happily declare a wrapper up-to-date and the
+        // staging step would then complain that pkg/ is missing.
+        let pkg_intact = pkg_dir.join("package.json").exists();
+        if action == BuildAction::Skip && pkg_intact {
+            println!("  ✓ skip {} (no inputs changed)", meta.name);
+            skipped += 1;
+            continue;
+        }
+        if action == BuildAction::Skip && !pkg_intact {
+            println!(
+                "  ! rebuild {} (planner said skip, but pkg/ is missing)",
+                meta.name
+            );
+        }
+
         println!("  wasm-pack build {}", meta.name);
         let status = std::process::Command::new("wasm-pack")
             .args(["build", "--target", "web", "--release"])
             .current_dir(&wrapper_dir)
             .status();
         match status {
-            Ok(s) if s.success() => {}
+            Ok(s) if s.success() => {
+                built += 1;
+            }
             Ok(s) => {
                 eprintln!("    FAILED: wasm-pack exited with {s}");
                 failed.push(meta.name.clone());
@@ -1102,6 +1435,21 @@ fn build_wrappers_with_wasm_pack(workspace_root: &Path, examples: &[ExampleMeta]
             }
         }
     }
+
+    println!(
+        "  summary: built {}, skipped {} (no input changes), failed {}",
+        built,
+        skipped,
+        failed.len()
+    );
+
+    // Stamp the build SHA only if every wrapper succeeded. A
+    // partial failure leaves the previous SHA in place so the next
+    // run still rebuilds whatever broke.
+    if failed.is_empty() {
+        write_last_build_sha(workspace_root);
+    }
+
     failed
 }
 
@@ -1210,6 +1558,11 @@ struct Args {
     /// Useful for CI steps that just want fresh wrappers without
     /// touching the book source tree (e.g. a nightly lint run).
     no_gallery: bool,
+    /// When set, bypass the git-diff incremental planner and run
+    /// `wasm-pack build` for every wrapper unconditionally. Used
+    /// when the cache is suspected stale or when iterating on the
+    /// codegen tool itself.
+    force_rebuild: bool,
 }
 
 fn parse_args() -> Args {
@@ -1229,6 +1582,7 @@ fn parse_args() -> Args {
                 i += 1;
             }
             "--no-gallery" => args.no_gallery = true,
+            "--force-rebuild" => args.force_rebuild = true,
             "--help" | "-h" => {
                 println!(
                     "blinc-build-web-examples — codegen for cross-target example wrappers\n\n\
@@ -1237,10 +1591,17 @@ fn parse_args() -> Args {
                      FLAGS:\n    \
                      --build              After generating wrappers, run\n    \
                                           `wasm-pack build --target web --release` in each.\n    \
+                                          Skips wrappers whose inputs haven't changed since\n    \
+                                          the last successful build (per `git diff` against\n    \
+                                          `examples/_generated/.last-build-sha`).\n    \
                      --stage-to <dir>     After `--build`, copy `index.html` + `pkg/`\n    \
                                           from each wrapper into `<dir>/<example>/`. Implies --build.\n    \
                      --no-gallery         Skip writing the mdBook gallery pages and\n    \
                                           SUMMARY.md patch.\n    \
+                     --force-rebuild      Bypass the git-diff incremental planner and\n    \
+                                          rebuild every wrapper. Use when the cache is\n    \
+                                          suspected stale or when iterating on the codegen\n    \
+                                          tool itself.\n    \
                      --help, -h           Show this help and exit.\n"
                 );
                 std::process::exit(0);
@@ -1293,6 +1654,9 @@ fn main() {
     if args.build {
         println!("  wasm-pack : on");
     }
+    if args.force_rebuild {
+        println!("  force     : on (incremental planner bypassed)");
+    }
     if let Some(stage) = args.stage_to.as_ref() {
         println!("  stage-to  : {}", stage.display());
     }
@@ -1336,7 +1700,7 @@ fn main() {
     if args.build {
         println!();
         println!("Running wasm-pack build on {} wrapper(s)…", found.len());
-        build_failures = build_wrappers_with_wasm_pack(&workspace_root, &found);
+        build_failures = build_wrappers_with_wasm_pack(&workspace_root, &found, args.force_rebuild);
     }
 
     if let Some(stage_dir) = args.stage_to.as_ref() {
