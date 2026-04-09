@@ -566,8 +566,24 @@ fn main() {}
 #[no_mangle]
 pub extern "C" fn ios_app_init() {
     use std::io::Write;
+    // Filter out the chatty wgpu/naga shader-compilation crates so the
+    // Xcode console only shows blinc + app traces. Without this filter
+    // every shader compile dumps thousands of lines of `naga::front`
+    // type-resolution debug output which drowns out touch-event traces.
+    let filter = tracing_subscriber::EnvFilter::new(
+        "info,\
+         blinc_layout=debug,\
+         blinc_app=debug,\
+         blinc_animation=debug,\
+         blinc_layout::widgets::text_input=debug,\
+         blinc_layout::widgets::text_edit=debug,\
+         wgpu=warn,\
+         wgpu_core=warn,\
+         wgpu_hal=warn,\
+         naga=warn",
+    );
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
 

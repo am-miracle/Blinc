@@ -20,7 +20,7 @@ required-features = ["desktop"]
 blinc_core = { path = "../../crates/blinc_core" }
 blinc_layout = { path = "../../crates/blinc_layout" }
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 blinc_app = { path = "../../crates/blinc_app", default-features = false, features = ["android"] }

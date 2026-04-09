@@ -1601,16 +1601,61 @@ impl CodeEditor {
                             // Single touch: position cursor only,
                             // no drag anchor, light haptic. Also
                             // arm the long-press timer so a press-
-                            // and-hold of 500 ms shows the edit
-                            // menu with PASTE available.
+                            // and-hold of 500 ms selects the word
+                            // under the finger and shows the edit
+                            // menu — matches the iOS UITextField
+                            // long-press UX and stays consistent
+                            // with the double-tap behavior above.
                             d.drag_anchor = None;
                             let line_height = d.config.font_size * d.config.line_height;
+                            let captured_cursor = d.cursor;
                             crate::widgets::text_edit::haptic_selection();
                             crate::widgets::text_edit::hide_edit_menu();
+                            let data_for_long_press = Arc::clone(&data_for_click);
+                            let shared_for_long_press = Arc::clone(&shared_for_click);
                             crate::widgets::text_input::arm_long_press_timer(
                                 ctx.bounds_x + click_x,
                                 ctx.bounds_y + click_y,
                                 line_height,
+                                Some(Box::new(move || {
+                                    let did_update = {
+                                        let mut d = match data_for_long_press.lock() {
+                                            Ok(d) => d,
+                                            Err(_) => return,
+                                        };
+                                        if !d.focused
+                                            || captured_cursor.line >= d.lines.len()
+                                        {
+                                            return;
+                                        }
+                                        let line = &d.lines[captured_cursor.line];
+                                        let line_chars = line.chars().count();
+                                        if line_chars == 0 {
+                                            return;
+                                        }
+                                        let col = captured_cursor
+                                            .column
+                                            .min(line_chars.saturating_sub(1));
+                                        let (start, end) =
+                                            text_edit::word_at_position(line, col);
+                                        if start == end {
+                                            return;
+                                        }
+                                        d.selection_start = Some(TextPosition::new(
+                                            captured_cursor.line,
+                                            start,
+                                        ));
+                                        d.cursor = TextPosition::new(
+                                            captured_cursor.line,
+                                            end,
+                                        );
+                                        d.drag_anchor = None;
+                                        true
+                                    };
+                                    if did_update {
+                                        refresh_stateful(&shared_for_long_press);
+                                    }
+                                })),
                             );
                         } else {
                             d.drag_anchor = Some(d.cursor);

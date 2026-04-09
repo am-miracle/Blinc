@@ -98,7 +98,6 @@ public final class BlincNativeBridge {
 
     /// Register default handlers for common functionality
     public func registerDefaults() {
-
         // =====================================================================
         // Device namespace
         // =====================================================================
@@ -123,8 +122,15 @@ public final class BlincNativeBridge {
         }
 
         register(namespace: "device", name: "has_notch") { _ in
-            if #available(iOS 11.0, *) {
-                let window = UIApplication.shared.windows.first
+            if #available(iOS 13.0, *) {
+                let window = UIApplication.shared.connectedScenes
+                    .compactMap { $0 as? UIWindowScene }
+                    .flatMap { $0.windows }
+                    .first { $0.isKeyWindow }
+                    ?? UIApplication.shared.connectedScenes
+                        .compactMap { $0 as? UIWindowScene }
+                        .flatMap { $0.windows }
+                        .first
                 return (window?.safeAreaInsets.top ?? 0) > 20
             }
             return false
@@ -253,13 +259,32 @@ public final class BlincNativeBridge {
         //   bit 3 (0x08) = SELECT_ALL
 
         register(namespace: "edit_menu", name: "show") { args in
-            let anchorX = (args[safe: 0] as? Double).map { CGFloat($0) } ?? 0
-            let anchorY = (args[safe: 1] as? Double).map { CGFloat($0) } ?? 0
-            let selX = (args[safe: 2] as? Double).map { CGFloat($0) } ?? anchorX
-            let selY = (args[safe: 3] as? Double).map { CGFloat($0) } ?? anchorY
-            let selW = (args[safe: 4] as? Double).map { CGFloat($0) } ?? 0
-            let selH = (args[safe: 5] as? Double).map { CGFloat($0) } ?? 24
-            let actions = args[safe: 6] as? Int ?? 0
+            // Coerce via NSNumber so any numeric type (Double, Float,
+            // Int, NSNumber) ends up as a CGFloat. A direct
+            // `as? Double` cast fails silently when the JSON parser
+            // produces an NSNumber that doesn't bridge as Double —
+            // which is exactly what happens for `NativeValue::Float32`
+            // values from the Rust side.
+            func coerceCGFloat(_ value: Any?) -> CGFloat? {
+                if let n = value as? NSNumber {
+                    return CGFloat(truncating: n)
+                }
+                return nil
+            }
+            func coerceInt(_ value: Any?) -> Int? {
+                if let n = value as? NSNumber {
+                    return n.intValue
+                }
+                return nil
+            }
+            let anchorX = coerceCGFloat(args[safe: 0]) ?? 0
+            let anchorY = coerceCGFloat(args[safe: 1]) ?? 0
+            let selX = coerceCGFloat(args[safe: 2]) ?? anchorX
+            let selY = coerceCGFloat(args[safe: 3]) ?? anchorY
+            let selW = coerceCGFloat(args[safe: 4]) ?? 0
+            let selH = coerceCGFloat(args[safe: 5]) ?? 24
+            let actions = coerceInt(args[safe: 6]) ?? 0
+
             DispatchQueue.main.async {
                 BlincEditMenuHelper.shared.show(
                     anchor: CGPoint(x: anchorX, y: anchorY),
@@ -689,6 +714,37 @@ class BlincHiddenTextField: UITextField {
         guard let ctx = BlincKeyboardHelper.blincContext else { return }
         blinc_ios_handle_key_down_with_modifiers(ctx, keyCode, 0x08)
     }
+
+    // MARK: - UITextInput geometry overrides
+    //
+    // The hidden text field has no real text content (Blinc owns
+    // the buffer), so the default `UITextField` implementations of
+    // these geometry queries return `CGRect.zero` or NaN-filled
+    // rects for any range/position UIKit asks about. UIKit's
+    // `UIEditMenuInteraction` chrome layout queries the first
+    // responder for selection geometry during menu presentation
+    // and unions the result with the delegate-supplied target
+    // rect — when the responder returns NaN, the union goes NaN
+    // and the chrome positions the menu at NaN coordinates,
+    // producing dozens of CoreGraphics warnings followed by an
+    // invisible menu.
+    //
+    // We override each geometry method to return a finite, 1pt
+    // rect at the field's origin. The actual menu position comes
+    // from `BlincEditMenuInteractionDelegate.targetRectFor`, so
+    // these values only need to be finite — not accurate.
+
+    override func caretRect(for position: UITextPosition) -> CGRect {
+        return CGRect(x: 0, y: 0, width: 1, height: 1)
+    }
+
+    override func firstRect(for range: UITextRange) -> CGRect {
+        return CGRect(x: 0, y: 0, width: 1, height: 1)
+    }
+
+    override func selectionRects(for range: UITextRange) -> [UITextSelectionRect] {
+        return []
+    }
 }
 
 /// Helper class that uses a hidden `BlincHiddenTextField` to
@@ -815,6 +871,18 @@ class BlincKeyboardHelper: NSObject, UITextFieldDelegate {
 
     func showKeyboard() {
         if hiddenTextField == nil {
+            // Position the hidden text field off-screen at
+            // (-1000, -1000). It exists only to host the soft
+            // keyboard and dispatch keystrokes back into Rust —
+            // it must never be visible, never receive touches,
+            // and never participate in layout. The off-screen
+            // frame is the simplest way to satisfy all three.
+            //
+            // The UIKit edit-menu chrome's NaN-on-empty-text
+            // problem is handled separately by the
+            // `caretRect`/`firstRect`/`selectionRects` overrides
+            // on `BlincHiddenTextField`, which return finite
+            // 1pt rects regardless of the field's frame.
             let tf = BlincHiddenTextField(frame: CGRect(x: -1000, y: -1000, width: 1, height: 1))
             tf.autocorrectionType = .no
             tf.autocapitalizationType = .none
@@ -944,6 +1012,30 @@ class BlincEditMenuHelper: NSObject {
     }
 
     func show(anchor: CGPoint, selectionRect: CGRect, actions: Int) {
+        // Sanitize coordinates: replace NaN/inf with finite fallbacks
+        // and ensure the selection rect has a meaningful non-zero
+        // area. UIKit's edit-menu chrome layout divides by source-
+        // rect-derived metrics in places, and tiny (1pt-wide) rects
+        // trigger the same NaN cascade as zero-area rects. The
+        // minimum 32x44 here is the typical hit-test target for an
+        // iOS text-selection caret — small enough not to obscure
+        // anything, large enough that UIKit's chrome math always
+        // resolves to finite values.
+        let MIN_W: CGFloat = 32
+        let MIN_H: CGFloat = 44
+        let safeAnchorX = anchor.x.isFinite ? anchor.x : 0
+        let safeAnchorY = anchor.y.isFinite ? anchor.y : 0
+        let safeAnchor = CGPoint(x: safeAnchorX, y: safeAnchorY)
+        let rawX = selectionRect.origin.x.isFinite ? selectionRect.origin.x : safeAnchorX
+        let rawY = selectionRect.origin.y.isFinite ? selectionRect.origin.y : safeAnchorY
+        let rawW = (selectionRect.width.isFinite && selectionRect.width >= MIN_W) ? selectionRect.width : MIN_W
+        let rawH = (selectionRect.height.isFinite && selectionRect.height >= MIN_H) ? selectionRect.height : MIN_H
+        // Center the minimum rect on the anchor when the original
+        // selection rect was a zero-width caret.
+        let safeRectX = (selectionRect.width >= MIN_W) ? rawX : safeAnchorX - rawW / 2
+        let safeRectY = (selectionRect.height >= MIN_H) ? rawY : safeAnchorY - rawH / 2
+        let safeRect = CGRect(x: safeRectX, y: safeRectY, width: rawW, height: rawH)
+
         // Make sure the hidden text field exists and is the first
         // responder. `showKeyboard()` is idempotent — if the keyboard
         // is already up (the common case, since the user just
@@ -951,8 +1043,22 @@ class BlincEditMenuHelper: NSObject {
         // `becomeFirstResponder()` on the existing field.
         BlincKeyboardHelper.shared.showKeyboard()
 
-        guard let hidden = BlincKeyboardHelper.shared.hiddenTextField else { return }
-        guard let window = currentKeyWindow() else { return }
+        guard let hidden = BlincKeyboardHelper.shared.hiddenTextField else {
+            return
+        }
+        guard let window = currentKeyWindow() else {
+            return
+        }
+        // Use the root view controller's view as the host for the
+        // interaction, NOT the window itself. UIEditMenuInteraction
+        // is designed to live on a regular UIView; hosting on a
+        // UIWindow confuses UIKit's chrome layout pipeline (the
+        // chrome's coordinate-space resolution against a UIWindow
+        // produces NaN values during the presentation animation
+        // setup with no calls to the responder geometry overrides
+        // — i.e. it's not the responder's fault, it's the host
+        // view's class).
+        let hostView = window.rootViewController?.view ?? window
 
         // Tell the hidden text field which standard menu items it
         // should report as available the next time
@@ -969,38 +1075,43 @@ class BlincEditMenuHelper: NSObject {
         //
         // Critical: the interaction must be added to a view that
         // is **on screen** because `presentEditMenu` positions the
-        // menu in that view's coordinate space. Anchoring on the
-        // hidden text field (which lives at -1000, -1000) puts
-        // the source point off-screen and the menu renders
-        // invisibly. Anchor on the key window instead — the Rust
-        // side already passes the anchor in window coords, so
-        // no conversion is needed.
+        // menu in that view's coordinate space. We host on the
+        // root view controller's view — the Rust side passes the
+        // anchor in window coords, which equals root view coords
+        // for any normal app where the root VC's view fills the
+        // window.
         if #available(iOS 16.0, *) {
             let interaction: UIEditMenuInteraction
             if let existing = editMenuInteraction as? UIEditMenuInteraction,
-               existing.view === window {
+               existing.view === hostView {
                 interaction = existing
             } else {
                 // If we previously installed the interaction on a
                 // different view (e.g. an old window after a scene
                 // change), tear it down and re-add to the current
-                // window.
+                // host view.
                 if let old = editMenuInteraction as? UIEditMenuInteraction,
                    let oldView = old.view {
                     oldView.removeInteraction(old)
                 }
                 let new = UIEditMenuInteraction(delegate: BlincEditMenuInteractionDelegate.shared)
-                window.addInteraction(new)
+                hostView.addInteraction(new)
                 editMenuInteraction = new
                 interaction = new
             }
-            // Stash the current actions on the delegate so its
-            // `menuFor:atLocation:` callback knows which items to
-            // build.
+            // Stash the current actions and target rect on the
+            // delegate so its `menuFor:` and `targetRectFor:`
+            // callbacks know which items to build and where to
+            // anchor. We also pre-compute and stash the target rect
+            // because UIKit's default "small rect at source point"
+            // implementation produces NaN values during chrome
+            // layout when the source rect has zero area, so we
+            // explicitly hand UIKit a finite, non-zero rect.
             BlincEditMenuInteractionDelegate.shared.currentActions = actions
+            BlincEditMenuInteractionDelegate.shared.currentTargetRect = safeRect
             let config = UIEditMenuConfiguration(
                 identifier: "blinc.editMenu" as NSString,
-                sourcePoint: anchor
+                sourcePoint: safeAnchor
             )
             interaction.presentEditMenu(with: config)
             return
@@ -1008,16 +1119,11 @@ class BlincEditMenuHelper: NSObject {
 
         // iOS 13-15 fallback: legacy UIMenuController. This API
         // takes the rect in the *anchor view's* coordinate space.
-        // We use the key window directly so the rect is in window
-        // coords (matching what the Rust side passes in).
+        // We use the host view so the rect is in root-view coords
+        // (matching what the Rust side passes in).
         let menu = UIMenuController.shared
         if #available(iOS 13.0, *) {
-            menu.showMenu(from: window, rect: CGRect(
-                x: anchor.x,
-                y: anchor.y,
-                width: max(selectionRect.width, 1),
-                height: max(selectionRect.height, 24)
-            ))
+            menu.showMenu(from: hostView, rect: safeRect)
         }
     }
 
@@ -1057,6 +1163,28 @@ class BlincEditMenuInteractionDelegate: NSObject, UIEditMenuInteractionDelegate 
     /// Bitmask of actions to expose, captured from the Rust
     /// side at `BlincEditMenuHelper.show(...)` time.
     var currentActions: Int = 0
+
+    /// Target rect (in the host view's coordinate space) the
+    /// edit menu should anchor against. Set by
+    /// `BlincEditMenuHelper.show(...)` immediately before calling
+    /// `presentEditMenu`. The rect is sanitized to have non-zero
+    /// width and height — UIKit's chrome layout for the edit
+    /// menu performs CG arithmetic that produces NaN values when
+    /// it's handed a zero-area rect, which manifests as dozens of
+    /// CoreGraphics warnings and an invisible menu.
+    var currentTargetRect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 24)
+
+    /// Tell UIKit exactly which rect the menu should point at.
+    /// Without this delegate method UIKit defaults to "small rect
+    /// at the source point" which, in practice, causes a
+    /// CoreGraphics divide-by-zero somewhere inside the chrome
+    /// layout pipeline (see `currentTargetRect`).
+    func editMenuInteraction(
+        _ interaction: UIEditMenuInteraction,
+        targetRectFor configuration: UIEditMenuConfiguration
+    ) -> CGRect {
+        return currentTargetRect
+    }
 
     func editMenuInteraction(
         _ interaction: UIEditMenuInteraction,

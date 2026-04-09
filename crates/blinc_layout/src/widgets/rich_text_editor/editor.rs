@@ -270,14 +270,71 @@ pub fn rich_text_editor(
                     // starting a selection (touch drag will move it).
                     // Light haptic to mirror UITextField focus feedback.
                     // Also arm the long-press timer for the
-                    // press-and-hold edit menu.
+                    // press-and-hold edit menu, with a callback that
+                    // selects the word under the press position so
+                    // long-press matches the double-tap UX above.
                     data.move_cursor(pos, false);
                     crate::widgets::text_edit::haptic_selection();
                     crate::widgets::text_edit::hide_edit_menu();
+                    let captured_pos = pos;
+                    let state_for_long_press = Arc::clone(&state_for_click);
+                    let version_for_long_press = version_for_click.clone();
                     crate::widgets::text_input::arm_long_press_timer(
                         ctx.bounds_x + ctx.local_x,
                         ctx.bounds_y + ctx.local_y,
                         24.0,
+                        Some(Box::new(move || {
+                            let did_update = {
+                                let mut data = match state_for_long_press.lock() {
+                                    Ok(d) => d,
+                                    Err(_) => return,
+                                };
+                                if !data.focused {
+                                    return;
+                                }
+                                let line_text = data
+                                    .document
+                                    .blocks
+                                    .get(captured_pos.block)
+                                    .and_then(|b| b.lines.get(captured_pos.line))
+                                    .map(|l| l.text.clone());
+                                let Some(line_text) = line_text else {
+                                    return;
+                                };
+                                let (start_col, end_col) =
+                                    crate::widgets::text_edit::word_at_position(
+                                        &line_text,
+                                        captured_pos.col,
+                                    );
+                                if start_col == end_col {
+                                    return;
+                                }
+                                data.cursor = super::cursor::DocPosition::new(
+                                    captured_pos.block,
+                                    captured_pos.line,
+                                    end_col,
+                                );
+                                data.selection = Some(super::cursor::Selection {
+                                    anchor: super::cursor::DocPosition::new(
+                                        captured_pos.block,
+                                        captured_pos.line,
+                                        start_col,
+                                    ),
+                                    head: super::cursor::DocPosition::new(
+                                        captured_pos.block,
+                                        captured_pos.line,
+                                        end_col,
+                                    ),
+                                });
+                                data.reset_cursor_blink();
+                                true
+                            };
+                            if did_update {
+                                version_for_long_press.set(
+                                    version_for_long_press.get().wrapping_add(1),
+                                );
+                            }
+                        })),
                     );
                 } else {
                     let extend = ctx.shift;

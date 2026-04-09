@@ -80,8 +80,8 @@ where
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::Off,
             },
-            None,
         ))
         .expect("Failed to create device");
 
@@ -106,18 +106,16 @@ where
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
-            WindowEvent::Resized(new_size) => {
-                if new_size.width > 0 && new_size.height > 0 {
-                    if let (Some(surface), Some(device), Some(config)) =
-                        (&self.surface, &self.device, &mut self.config)
-                    {
-                        config.width = new_size.width;
-                        config.height = new_size.height;
-                        surface.configure(device, config);
-                    }
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
+            WindowEvent::Resized(new_size) if new_size.width > 0 && new_size.height > 0 => {
+                if let (Some(surface), Some(device), Some(config)) =
+                    (&self.surface, &self.device, &mut self.config)
+                {
+                    config.width = new_size.width;
+                    config.height = new_size.height;
+                    surface.configure(device, config);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::RedrawRequested => {

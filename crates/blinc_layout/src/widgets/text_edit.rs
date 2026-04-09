@@ -42,28 +42,45 @@ fn bridge_ready() -> bool {
 ///
 /// No-op on desktop / web and on mobile builds where the
 /// `BlincNativeBridge` isn't initialized.
+///
+/// **Currently disabled** while we debug an interaction between the
+/// haptic dispatch and the edit menu presentation on iOS — the
+/// haptic call goes through the same `native_call` bridge as
+/// `show_edit_menu`, and we need to rule out any cross-talk before
+/// re-enabling. Re-enable by deleting the early `return`.
 pub fn haptic_selection() {
-    if !bridge_ready() {
-        return;
+    return;
+    #[allow(unreachable_code)]
+    {
+        if !bridge_ready() {
+            return;
+        }
+        let _ = blinc_core::native_bridge::native_call::<(), _>("haptics", "selection", ());
     }
-    let _ = blinc_core::native_bridge::native_call::<(), _>("haptics", "selection", ());
 }
 
 /// Trigger a single short impact haptic — heavier than
 /// `haptic_selection`. Used for "I just selected the word under your
 /// finger" feedback on double-tap.
+///
+/// **Currently disabled** — see [`haptic_selection`] for the
+/// rationale.
 pub fn haptic_impact_light() {
-    if !bridge_ready() {
-        return;
+    return;
+    #[allow(unreachable_code)]
+    {
+        if !bridge_ready() {
+            return;
+        }
+        use blinc_core::native_bridge::NativeValue;
+        // The bridge templates use `impact` with a `style` arg:
+        // 0 = light, 1 = medium, 2 = heavy.
+        let _ = blinc_core::native_bridge::native_call::<(), _>(
+            "haptics",
+            "impact",
+            vec![NativeValue::Int32(0)],
+        );
     }
-    use blinc_core::native_bridge::NativeValue;
-    // The bridge templates use `impact` with a `style` arg:
-    // 0 = light, 1 = medium, 2 = heavy.
-    let _ = blinc_core::native_bridge::native_call::<(), _>(
-        "haptics",
-        "impact",
-        vec![NativeValue::Int32(0)],
-    );
 }
 
 /// Available actions in a text-input edit menu, encoded as a bitmask
@@ -284,24 +301,31 @@ pub fn word_at_position(text: &str, char_pos: usize) -> (usize, usize) {
 // Clipboard adapters
 // =============================================================================
 //
-// `arboard` covers macOS, Windows, Linux, and iOS — but NOT
-// `wasm32-unknown-unknown` (no platform backend) and NOT
-// `target_os = "android"` (no X11/Wayland or UIKit clipboard
-// layer that arboard knows how to talk to). Both excluded targets
-// fall back to no-op stubs here. The Android runner can still
-// reach the system clipboard through the
-// `clipboard.copy` / `clipboard.paste` namespace handlers in
-// `BlincNativeBridge.kt`, which apps wire up via the native
-// bridge — that path is intentionally not surfaced through these
-// sync helpers because the rich-text editor's Cmd+C / Cmd+V
-// keybinds expect a synchronous return.
+// `arboard` covers macOS, Windows, and Linux. It does NOT cover:
 //
-// `cfg(any(target_arch = "wasm32", target_os = "android"))` is
-// the no-op path; everything else uses arboard.
+//   * `wasm32-unknown-unknown` — no platform backend at all.
+//   * `target_os = "android"` — no X11/Wayland and arboard's UIKit
+//     path doesn't apply.
+//   * `target_os = "ios"` — arboard nominally builds for iOS but
+//     its UIPasteboard path doesn't actually round-trip strings in
+//     the iOS Simulator (Cut appears to work because the visual
+//     effect of removing the selection happens regardless of the
+//     write succeeding, but Paste comes back empty). The
+//     `BlincNativeBridge` Swift side already exposes
+//     `clipboard.copy` / `clipboard.paste` namespace handlers that
+//     call `UIPasteboard.general` directly, so we route through
+//     those instead — same pattern as Android.
+//
+// All three excluded targets get their own `cfg` block below.
+// Everything else (desktop) uses arboard directly.
 
 /// Read text from the system clipboard.
-/// Cross-platform via arboard (macOS, Windows, Linux, iOS).
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+/// Desktop: cross-platform via arboard (macOS, Windows, Linux).
+#[cfg(not(any(
+    target_arch = "wasm32",
+    target_os = "android",
+    target_os = "ios"
+)))]
 pub fn clipboard_read() -> Option<String> {
     arboard::Clipboard::new()
         .ok()
@@ -309,17 +333,16 @@ pub fn clipboard_read() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
-/// Android: route through the native bridge `clipboard.paste`
-/// namespace, which `BlincNativeBridge.kt` implements with the
-/// system `ClipboardManager`. This is what the soft-keyboard /
-/// edit-menu paste button needs to actually paste — without it,
-/// `clipboard_read` was a hardcoded `None` stub and Cmd+V was
-/// silently dropped.
+/// Android / iOS: route through the native bridge `clipboard.paste`
+/// namespace, which `BlincNativeBridge.kt` (Android) and
+/// `BlincNativeBridge.swift` (iOS) implement against the system
+/// `ClipboardManager` / `UIPasteboard.general`. This is what the
+/// soft-keyboard / edit-menu paste button needs to actually paste.
 ///
 /// Falls back to `None` when the native bridge isn't initialized
 /// (e.g. during tests, or in apps that don't link the
-/// `BlincNativeBridge` Kotlin object).
-#[cfg(target_os = "android")]
+/// `BlincNativeBridge` glue).
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub fn clipboard_read() -> Option<String> {
     if !bridge_ready() {
         return None;
@@ -342,8 +365,12 @@ pub fn clipboard_read() -> Option<String> {
 }
 
 /// Write text to the system clipboard.
-/// Cross-platform via arboard (macOS, Windows, Linux, iOS).
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+/// Desktop: cross-platform via arboard (macOS, Windows, Linux).
+#[cfg(not(any(
+    target_arch = "wasm32",
+    target_os = "android",
+    target_os = "ios"
+)))]
 pub fn clipboard_write(text: &str) -> bool {
     arboard::Clipboard::new()
         .ok()
@@ -351,10 +378,12 @@ pub fn clipboard_write(text: &str) -> bool {
         .is_some()
 }
 
-/// Android: route through the native bridge `clipboard.copy`
-/// namespace, which `BlincNativeBridge.kt` implements with the
-/// system `ClipboardManager`. Mirrors [`clipboard_read`].
-#[cfg(target_os = "android")]
+/// Android / iOS: route through the native bridge `clipboard.copy`
+/// namespace, which `BlincNativeBridge.kt` (Android) and
+/// `BlincNativeBridge.swift` (iOS) implement against the system
+/// `ClipboardManager` / `UIPasteboard.general`. Mirrors
+/// [`clipboard_read`].
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub fn clipboard_write(text: &str) -> bool {
     if !bridge_ready() {
         return false;
@@ -372,21 +401,34 @@ pub fn clipboard_write(_text: &str) -> bool {
 
 /// Read image from the system clipboard as RGBA pixels.
 /// Returns (rgba_data, width, height) or None.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+/// Desktop: cross-platform via arboard (macOS, Windows, Linux).
+#[cfg(not(any(
+    target_arch = "wasm32",
+    target_os = "android",
+    target_os = "ios"
+)))]
 pub fn clipboard_read_image() -> Option<(Vec<u8>, u32, u32)> {
     let mut cb = arboard::Clipboard::new().ok()?;
     let img = cb.get_image().ok()?;
     Some((img.bytes.into_owned(), img.width as u32, img.height as u32))
 }
 
-/// Stub for wasm32 + Android. See [`clipboard_read`] for rationale.
-#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+/// Stub for wasm32 + Android + iOS. The native bridge clipboard
+/// namespace currently only handles strings; image clipboard support
+/// would need separate `clipboard.copy_image` / `clipboard.paste_image`
+/// handlers on the Swift / Kotlin sides.
+#[cfg(any(target_arch = "wasm32", target_os = "android", target_os = "ios"))]
 pub fn clipboard_read_image() -> Option<(Vec<u8>, u32, u32)> {
     None
 }
 
 /// Write image to the system clipboard from RGBA pixels.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+/// Desktop: cross-platform via arboard (macOS, Windows, Linux).
+#[cfg(not(any(
+    target_arch = "wasm32",
+    target_os = "android",
+    target_os = "ios"
+)))]
 pub fn clipboard_write_image(rgba: &[u8], width: u32, height: u32) -> bool {
     let img = arboard::ImageData {
         width: width as usize,
@@ -399,8 +441,8 @@ pub fn clipboard_write_image(rgba: &[u8], width: u32, height: u32) -> bool {
         .is_some()
 }
 
-/// Stub for wasm32 + Android. See [`clipboard_read`] for rationale.
-#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+/// Stub for wasm32 + Android + iOS. See [`clipboard_read_image`] for rationale.
+#[cfg(any(target_arch = "wasm32", target_os = "android", target_os = "ios"))]
 pub fn clipboard_write_image(_rgba: &[u8], _width: u32, _height: u32) -> bool {
     false
 }

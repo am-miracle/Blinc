@@ -158,6 +158,17 @@ struct LongPressArm {
     /// hint). The width is intentionally 0 because the menu hugs
     /// the anchor point, not a real selection rect.
     bounds_height: f32,
+    /// Optional pre-show callback. Fired immediately before
+    /// `show_edit_menu` when the long-press deadline elapses, so
+    /// the focused widget can update its selection state to match
+    /// the iOS UITextField / Android EditText UX of selecting the
+    /// word under the finger on a long press (mirroring the
+    /// double-tap behavior). Captured at arm time with an `Arc` to
+    /// the widget's data state and the cursor position computed
+    /// from the press location, so the callback runs entirely
+    /// against state owned by the widget and doesn't need to walk
+    /// any registries at fire time.
+    on_fire: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -178,6 +189,15 @@ const LONG_PRESS_MAX_DRIFT_PX: f32 = 10.0;
 /// The runner's frame poll calls [`fire_long_press_timer_if_due`]
 /// each tick to check whether the deadline has elapsed.
 ///
+/// `on_fire` is an optional pre-show callback that runs when the
+/// deadline elapses, immediately before the edit menu is shown.
+/// Editable widgets pass a closure here that selects the word
+/// under the press position so a long-press behaves the same as a
+/// double-tap (matches iOS UITextField / Android EditText UX). The
+/// closure should capture an `Arc` to the widget's data state and
+/// any state needed to update the selection (cursor position,
+/// stateful refresh handle).
+///
 /// Calling this overwrites any previously armed timer — only the
 /// most recent press counts, mirroring the iOS UITextField behavior
 /// where re-tapping during a press cancels the previous long-press.
@@ -185,6 +205,7 @@ pub fn arm_long_press_timer(
     anchor_x: f32,
     anchor_y: f32,
     bounds_height: f32,
+    on_fire: Option<Box<dyn Fn() + Send + Sync>>,
 ) {
     if let Ok(mut slot) = LONG_PRESS_ARM.lock() {
         *slot = Some(LongPressArm {
@@ -194,6 +215,7 @@ pub fn arm_long_press_timer(
             start_x: anchor_x,
             start_y: anchor_y,
             bounds_height,
+            on_fire,
         });
     }
 }
@@ -262,11 +284,20 @@ pub fn fire_long_press_timer_if_due() -> bool {
     };
 
     if let Some(arm) = arm {
-        // Long press fired — show the paste menu. We expose CUT /
-        // COPY too so the user can still cut/copy a selection that
-        // was made earlier (e.g. via double-tap). SELECT_ALL is
-        // also useful from a long press in an empty area. The
-        // bridge will dim items the field reports as unavailable.
+        // Long press fired. Run the widget-supplied pre-show
+        // callback first so the focused editable can update its
+        // selection state to match the iOS UITextField /
+        // Android EditText UX of selecting the word under the
+        // finger on a long press (mirroring double-tap). The
+        // callback is registered at arm time and captures an
+        // `Arc` to the widget's data + a stateful refresh handle.
+        if let Some(cb) = arm.on_fire.as_ref() {
+            cb();
+        }
+        // Then show the paste menu. We expose CUT / COPY too so
+        // the user can still cut/copy the just-selected word.
+        // SELECT_ALL is also useful from a long press. The bridge
+        // will dim items the field reports as unavailable.
         use crate::widgets::text_edit::edit_menu_actions;
         crate::widgets::text_edit::haptic_impact_light();
         crate::widgets::text_edit::show_edit_menu(
@@ -1993,10 +2024,45 @@ impl TextInput {
                             // available — matching the iOS
                             // UITextField / Android EditText
                             // long-press-to-paste UX.
+                            // Capture clones of the data + stateful
+                            // refresh handle for the long-press
+                            // callback. The closure runs at
+                            // deadline-fire time and selects the
+                            // word at the captured cursor position,
+                            // matching the double-tap UX.
+                            let data_for_long_press = std::sync::Arc::clone(&data_for_click);
+                            let stateful_for_long_press =
+                                std::sync::Arc::clone(&stateful_for_click);
+                            let captured_cursor = cursor_pos;
                             arm_long_press_timer(
                                 ctx.bounds_x + text_x,
                                 ctx.bounds_y,
                                 ctx.bounds_height,
+                                Some(Box::new(move || {
+                                    let did_update = {
+                                        let mut d = match data_for_long_press.lock() {
+                                            Ok(d) => d,
+                                            Err(_) => return,
+                                        };
+                                        if !d.visual.is_focused() {
+                                            return;
+                                        }
+                                        let (start, end) =
+                                            crate::widgets::text_edit::word_at_position(
+                                                &d.value,
+                                                captured_cursor,
+                                            );
+                                        if start == end {
+                                            return;
+                                        }
+                                        d.selection_start = Some(start);
+                                        d.cursor = end;
+                                        true
+                                    };
+                                    if did_update {
+                                        refresh_stateful(&stateful_for_long_press);
+                                    }
+                                })),
                             );
                         } else {
                             d.drag_select_anchor = Some(cursor_pos);

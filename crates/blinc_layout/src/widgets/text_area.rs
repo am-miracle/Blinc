@@ -1774,10 +1774,21 @@ impl TextArea {
                     if crate::widgets::text_input::is_touch_input() {
                         crate::widgets::text_edit::haptic_selection();
                         crate::widgets::text_edit::hide_edit_menu();
+                        // No word-selection callback here: text_area
+                        // doesn't yet implement double-tap word
+                        // selection either, so passing `None` keeps
+                        // both gestures consistent within the widget
+                        // (long press just shows the menu without
+                        // selecting anything). When text_area gains
+                        // double-tap word selection, mirror the
+                        // text_input/code pattern and pass a closure
+                        // that calls `text_edit::word_at_position`
+                        // against the cursor's line.
                         crate::widgets::text_input::arm_long_press_timer(
                             ctx.bounds_x + click_x,
                             ctx.bounds_y + click_y,
                             ctx.bounds_height.clamp(24.0, 48.0),
+                            None,
                         );
                     }
 
