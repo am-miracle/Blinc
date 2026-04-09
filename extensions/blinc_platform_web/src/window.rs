@@ -16,7 +16,7 @@
 
 use blinc_platform::{Cursor, Window, WindowId};
 
-/// Wrapper around an [`HtmlCanvasElement`] that satisfies the
+/// Wrapper around a `web_sys::HtmlCanvasElement` that satisfies the
 /// [`blinc_platform::Window`] contract.
 ///
 /// The window's *logical* size is read from `canvas.client_width()` /

@@ -1,11 +1,14 @@
 //! Blinc Web Platform
 //!
 //! HtmlCanvasElement integration, browser event conversion, and
-//! fetch-based asset loading for `wasm32-unknown-unknown`. The crate is
-//! a sibling of [`blinc_platform_desktop`], [`blinc_platform_android`],
-//! [`blinc_platform_ios`], and [`blinc_platform_harmony`] — it owns
+//! fetch-based asset loading for `wasm32-unknown-unknown`. The crate
+//! is a sibling of `blinc_platform_desktop`, `blinc_platform_android`,
+//! `blinc_platform_ios`, and `blinc_platform_harmony` — it owns
 //! everything that needs `wasm-bindgen` / `web-sys` so the rest of the
 //! Blinc workspace stays free of JS bindings.
+//! (Cross-crate references are plain code spans rather than intra-doc
+//! links because the sibling crates are workspace siblings, not
+//! dependencies of this crate, so rustdoc can't resolve them.)
 //!
 //! # Architecture
 //!
@@ -23,7 +26,7 @@
 //!
 //! On non-wasm hosts every type still exists (so `cargo check` from a
 //! desktop box doesn't error), but the methods that touch `web-sys`
-//! return [`PlatformError::Unsupported`].
+//! return `PlatformError::Unsupported`.
 //!
 //! # Usage
 //!

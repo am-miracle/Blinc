@@ -4,7 +4,7 @@
 //! the bare "render one Div" example doesn't touch:
 //!
 //! - **Wheel events** route through `EventRouter::on_scroll` and drive
-//!   the [`Scroll`] widget's physics, which produces continuous frame
+//!   the `Scroll` widget's physics, which produces continuous frame
 //!   ticks via the animation scheduler. Proves the rAF loop ↔ scheduler
 //!   ↔ scroll-physics chain end-to-end.
 //! - **Click events** route through `EventRouter::on_mouse_down` and

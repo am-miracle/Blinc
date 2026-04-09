@@ -2447,7 +2447,7 @@ fn physics_for_key_with_config(
 /// layout control.
 ///
 /// **Physics persists across rebuilds.** Each `scroll()` call site
-/// gets its own [`InstanceKey`]-derived slot in a thread-local
+/// gets its own [`crate::InstanceKey`]-derived slot in a thread-local
 /// registry, so window resizes, theme changes, and other rebuild
 /// triggers no longer reset the scroll position. If you need
 /// explicit control of the physics object (e.g. to share one

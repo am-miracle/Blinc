@@ -7,7 +7,7 @@
 //! (button index, key string, dx/dy, …) to the helpers here.
 //!
 //! Splitting the conversion this way mirrors how
-//! [`blinc_platform_desktop::input`] keeps winit out of its
+//! `blinc_platform_desktop::input` keeps winit out of its
 //! `convert_*` signatures by passing in primitives where possible.
 //!
 //! # Key string mapping

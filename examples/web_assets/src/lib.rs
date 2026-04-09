@@ -8,13 +8,16 @@
 //! every glyph the page might possibly need *before* the first
 //! frame renders.
 //!
-//! This example uses [`WebApp::run_with_async_setup`] +
-//! [`WebAssetLoader::fetch_bytes`] to fetch `fonts/Arial.ttf` over
-//! HTTP at startup, then hand the bytes to
-//! [`WebApp::load_font_data`]. The wasm artifact stays small; the
-//! font lives next to `index.html` and is fetched once on the
-//! first page load (and then cached by the browser like any other
-//! static asset).
+//! This example uses `WebApp::run_with_async_setup` +
+//! `WebAssetLoader::fetch_bytes` to fetch `fonts/Arial.ttf` over
+//! HTTP at startup, then hand the bytes to `WebApp::load_font_data`.
+//! The wasm artifact stays small; the font lives next to `index.html`
+//! and is fetched once on the first page load (and then cached by the
+//! browser like any other static asset).
+//! (Plain code spans rather than intra-doc links because this crate
+//! is `#![cfg(target_arch = "wasm32")]` — on a host doc build the
+//! `WebApp` / `WebAssetLoader` imports are gated out and rustdoc
+//! can't resolve the symbols.)
 //!
 //! ## Build
 //!
@@ -35,7 +38,7 @@
 //!   (FOIT/FOUT) should bundle a system-ish fallback first via
 //!   `app.load_font_data(BUNDLED_FALLBACK)` and *then* fetch the
 //!   real font asynchronously.
-//! - **Multi-font preload.** [`WebAssetLoader::preload`] takes an
+//! - **Multi-font preload.** `WebAssetLoader::preload` takes an
 //!   array of URLs and stores them all in the loader's cache. For
 //!   N fonts you'd loop through them inside the async setup
 //!   closure and call `app.load_font_data(...)` on each. This

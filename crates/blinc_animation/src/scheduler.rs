@@ -365,8 +365,11 @@ impl AnimationScheduler {
     /// to wake up the main thread's event loop when animations are active.
     ///
     /// **Not available on `wasm32-unknown-unknown`** — the browser
-    /// doesn't expose threads. Use [`Self::start_raf`] instead, which
+    /// doesn't expose threads. Use `Self::start_raf` instead, which
     /// drives the same per-frame work from `requestAnimationFrame`.
+    /// (Plain code reference rather than an intra-doc link because
+    /// `start_raf` itself is `#[cfg(target_arch = "wasm32")]`-gated
+    /// and isn't visible to rustdoc on host targets.)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn start_background(&mut self) {
         if self.thread_handle.is_some() {
