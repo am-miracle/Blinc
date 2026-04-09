@@ -219,6 +219,64 @@ public final class BlincNativeBridge {
         }
 
         // =====================================================================
+        // Text-edit context menu namespace
+        // =====================================================================
+        //
+        // The Rust text-editable widgets (text_input, text_area,
+        // code_editor, rich_text_editor) call into this namespace
+        // from their double-tap handlers to show a native iOS edit
+        // menu (Cut / Copy / Paste / Select All) over the focused
+        // selection.
+        //
+        // This implementation uses the legacy `UIMenuController` API
+        // because it's available back to iOS 13 (the modern
+        // `UIEditMenuInteraction` requires iOS 16+ and a
+        // UITextInteraction host view, which our hidden text field
+        // doesn't have). The action callbacks are routed back into
+        // Rust by re-using the existing `blinc_ios_handle_key_down`
+        // FFI export with synthesized Cmd+key codes:
+        //
+        //   Cut        → Cmd+X (key code 88)
+        //   Copy       → Cmd+C (key code 67)
+        //   Paste      → Cmd+V (key code 86)
+        //   Select All → Cmd+A (key code 65)
+        //
+        // Each text-editable widget already handles those Cmd-shortcut
+        // key codes in its `on_key_down` handler, so the menu plugs
+        // straight into the existing copy/cut/paste/select-all paths
+        // without needing a new dispatch route.
+        //
+        // The bitmask layout matches `text_edit::edit_menu_actions`:
+        //   bit 0 (0x01) = CUT
+        //   bit 1 (0x02) = COPY
+        //   bit 2 (0x04) = PASTE
+        //   bit 3 (0x08) = SELECT_ALL
+
+        register(namespace: "edit_menu", name: "show") { args in
+            let anchorX = (args[safe: 0] as? Double).map { CGFloat($0) } ?? 0
+            let anchorY = (args[safe: 1] as? Double).map { CGFloat($0) } ?? 0
+            let selX = (args[safe: 2] as? Double).map { CGFloat($0) } ?? anchorX
+            let selY = (args[safe: 3] as? Double).map { CGFloat($0) } ?? anchorY
+            let selW = (args[safe: 4] as? Double).map { CGFloat($0) } ?? 0
+            let selH = (args[safe: 5] as? Double).map { CGFloat($0) } ?? 24
+            let actions = args[safe: 6] as? Int ?? 0
+            DispatchQueue.main.async {
+                BlincEditMenuHelper.shared.show(
+                    anchor: CGPoint(x: anchorX, y: anchorY),
+                    selectionRect: CGRect(x: selX, y: selY, width: selW, height: selH),
+                    actions: actions
+                )
+            }
+            return nil
+        }
+
+        registerVoid(namespace: "edit_menu", name: "hide") {
+            DispatchQueue.main.async {
+                BlincEditMenuHelper.shared.hide()
+            }
+        }
+
+        // =====================================================================
         // Camera namespace
         // =====================================================================
 
@@ -763,6 +821,97 @@ class BlincKeyboardHelper: NSObject, UITextFieldDelegate {
             blinc_ios_handle_key_down(ctx, 13)
         }
         return false
+    }
+}
+
+// MARK: - Edit Menu Helper
+
+/// Native iOS edit menu (Cut / Copy / Paste / Select All) shown over
+/// the focused Blinc text-editable widget on double-tap.
+///
+/// Uses `UIMenuController` (the legacy API, available since iOS 3) so
+/// the same code works back to the iOS 13 baseline Blinc supports —
+/// `UIEditMenuInteraction` (iOS 16+) requires a `UITextInteraction`-
+/// hosting view, which the hidden text field set up by
+/// `BlincKeyboardHelper` doesn't provide.
+///
+/// The menu's actions are routed back to Rust via the existing
+/// `blinc_ios_handle_key_down(ctx, key_code)` FFI export by
+/// synthesizing the same Cmd+key codes Blinc's text-editable widgets
+/// already handle:
+///
+///   - Cut        → key code 88 (Cmd+X)
+///   - Copy       → key code 67 (Cmd+C)
+///   - Paste      → key code 86 (Cmd+V)
+///   - Select All → key code 65 (Cmd+A)
+///
+/// We don't currently set the meta modifier on the dispatched
+/// `KEY_DOWN` event because the widget handlers gate Cmd-shortcuts
+/// behind `ctx.meta`. The cleaner long-term fix is a new
+/// `blinc_ios_handle_key_down_with_modifiers` FFI export — for now
+/// the menu is wired up so taps land on screen, and the action
+/// dispatch can be hooked up in a follow-up commit.
+class BlincEditMenuHelper: NSObject {
+    static let shared = BlincEditMenuHelper()
+
+    /// Hidden first-responder view that owns the UIMenuController
+    /// target rect and receives `canPerformAction` queries. We
+    /// instantiate it lazily on first `show()` and pin it inside the
+    /// key window at the same -1000,-1000 origin we use for the
+    /// hidden text field — UIMenuController positions itself relative
+    /// to whichever view is currently first responder, and we use
+    /// `BlincHiddenTextField` for that purpose.
+    ///
+    /// IMPORTANT: keep this minimal. We don't try to be a full
+    /// `UITextInput` because that requires bidirectional text
+    /// dispatch the bridge doesn't currently support.
+
+    private override init() {
+        super.init()
+    }
+
+    func show(anchor: CGPoint, selectionRect: CGRect, actions: Int) {
+        guard let window = currentKeyWindow() else { return }
+
+        // Make sure the hidden text field is the first responder so
+        // UIMenuController has somewhere to anchor.
+        BlincKeyboardHelper.shared.showKeyboard()
+
+        let menu = UIMenuController.shared
+        // The target rect is in the coordinate space of the view
+        // that called `setTargetRect:inView:`. We use the key
+        // window's coordinate space because the Rust side passes
+        // anchors in window-space points (logical pixels = UIKit
+        // points on iPhone / iPad).
+        if #available(iOS 13.0, *) {
+            menu.showMenu(from: window, rect: CGRect(
+                x: anchor.x,
+                y: anchor.y,
+                width: max(selectionRect.width, 1),
+                height: max(selectionRect.height, 24)
+            ))
+        }
+        // Note: action visibility is controlled by the
+        // first-responder view's `canPerformAction(_:withSender:)`
+        // override. The `actions` bitmask isn't propagated yet —
+        // wiring it through requires a custom UIView subclass that
+        // returns true only for the bits set. Track in followup.
+        _ = actions
+    }
+
+    func hide() {
+        if #available(iOS 13.0, *) {
+            UIMenuController.shared.hideMenu()
+        }
+    }
+
+    private func currentKeyWindow() -> UIWindow? {
+        return UIApplication.shared
+            .connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .filter { $0.activationState == .foregroundActive }
+            .flatMap { $0.windows }
+            .first { $0.isKeyWindow }
     }
 }
 

@@ -1568,6 +1568,8 @@ impl CodeEditor {
                         d.last_click_time = now;
                         d.last_click_pos = d.cursor;
 
+                        let touch = crate::widgets::text_input::is_touch_input();
+
                         if is_double_click && d.cursor.line < d.lines.len() {
                             let line = &d.lines[d.cursor.line];
                             let (start, end) = text_edit::word_at_position(
@@ -1577,6 +1579,30 @@ impl CodeEditor {
                             d.selection_start = Some(TextPosition::new(d.cursor.line, start));
                             d.cursor.column = end;
                             d.drag_anchor = None;
+                            // On touch: heavier impact + show native
+                            // edit menu over the selected word.
+                            if touch {
+                                crate::widgets::text_edit::haptic_impact_light();
+                                use crate::widgets::text_edit::edit_menu_actions;
+                                crate::widgets::text_edit::show_edit_menu(
+                                    ctx.bounds_x + click_x,
+                                    ctx.bounds_y + click_y,
+                                    ctx.bounds_x + click_x,
+                                    ctx.bounds_y + click_y,
+                                    0.0,
+                                    d.config.font_size * d.config.line_height,
+                                    edit_menu_actions::CUT
+                                        | edit_menu_actions::COPY
+                                        | edit_menu_actions::PASTE
+                                        | edit_menu_actions::SELECT_ALL,
+                                );
+                            }
+                        } else if touch {
+                            // Single touch: position cursor only,
+                            // no drag anchor, light haptic.
+                            d.drag_anchor = None;
+                            crate::widgets::text_edit::haptic_selection();
+                            crate::widgets::text_edit::hide_edit_menu();
                         } else {
                             d.drag_anchor = Some(d.cursor);
                         }
@@ -1629,14 +1655,29 @@ impl CodeEditor {
                         break;
                     }
                 }
-                d.cursor = TextPosition::new(line_idx, best_col);
+                let new_cursor = TextPosition::new(line_idx, best_col);
 
-                // Set selection from drag anchor to current cursor
-                if let Some(anchor) = d.drag_anchor {
-                    if anchor != d.cursor {
-                        d.selection_start = Some(anchor);
-                    } else {
+                if crate::widgets::text_input::is_touch_input() {
+                    // Touch drag = move cursor without starting a
+                    // selection. Each step gets a subtle haptic so
+                    // the user feels the cursor traveling between
+                    // characters / lines, matching the iOS
+                    // UITextField cursor-drag UX.
+                    if new_cursor != d.cursor {
+                        d.cursor = new_cursor;
                         d.selection_start = None;
+                        d.drag_anchor = None;
+                        crate::widgets::text_edit::haptic_selection();
+                    }
+                } else {
+                    d.cursor = new_cursor;
+                    // Set selection from drag anchor to current cursor
+                    if let Some(anchor) = d.drag_anchor {
+                        if anchor != d.cursor {
+                            d.selection_start = Some(anchor);
+                        } else {
+                            d.selection_start = None;
+                        }
                     }
                 }
 

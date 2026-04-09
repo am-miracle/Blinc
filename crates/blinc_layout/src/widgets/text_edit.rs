@@ -3,6 +3,114 @@
 //! Contains word boundary detection, clipboard integration, and
 //! other helpers shared between multi-line text editing widgets.
 
+// =============================================================================
+// Mobile haptic feedback + native edit menu helpers
+// =============================================================================
+//
+// These wrap `blinc_core::native_bridge::native_call` and are no-ops on
+// platforms / apps that don't have a native bridge installed (desktop /
+// web). The actual implementations live in `BlincNativeBridge.swift`
+// (`UIImpactFeedbackGenerator` / `UIMenuController` / `UIEditMenu`) and
+// `BlincNativeBridge.kt` (`Vibrator` / `ActionMode`). Both bridge
+// templates already declare a `haptics` namespace; this commit adds an
+// `edit_menu` namespace alongside it for the double-tap context menu.
+
+/// Trigger a light haptic "selection changed" feedback on mobile.
+///
+/// Maps to `UISelectionFeedbackGenerator.selectionChanged()` on iOS and
+/// a short low-amplitude vibration on Android. Used when the user drags
+/// the cursor with their finger so each character boundary crossed
+/// gives a subtle tactile click — matches the native iOS UITextField /
+/// Android EditText cursor-drag UX.
+///
+/// No-op on desktop / web and on mobile builds where the
+/// `BlincNativeBridge` isn't initialized.
+pub fn haptic_selection() {
+    let _ = blinc_core::native_bridge::native_call::<(), _>("haptics", "selection", ());
+}
+
+/// Trigger a single short impact haptic — heavier than
+/// `haptic_selection`. Used for "I just selected the word under your
+/// finger" feedback on double-tap.
+pub fn haptic_impact_light() {
+    use blinc_core::native_bridge::NativeValue;
+    // The bridge templates use `impact` with a `style` arg:
+    // 0 = light, 1 = medium, 2 = heavy.
+    let _ = blinc_core::native_bridge::native_call::<(), _>(
+        "haptics",
+        "impact",
+        vec![NativeValue::Int32(0)],
+    );
+}
+
+/// Available actions in a text-input edit menu, encoded as a bitmask
+/// the native side decides how to render.
+///
+///   - bit 0 (0x01): Cut
+///   - bit 1 (0x02): Copy
+///   - bit 2 (0x04): Paste
+///   - bit 3 (0x08): Select All
+///
+/// On iOS this becomes a `UIEditMenuInteraction` (iOS 16+) or a
+/// `UIMenuController` with `UIMenuItem`s for the listed commands. On
+/// Android it becomes an `ActionMode.Callback2` with the matching
+/// menu items.
+pub mod edit_menu_actions {
+    pub const CUT: u32 = 0x01;
+    pub const COPY: u32 = 0x02;
+    pub const PASTE: u32 = 0x04;
+    pub const SELECT_ALL: u32 = 0x08;
+}
+
+/// Show the native text-edit context menu (iOS UIEditMenuInteraction
+/// / Android ActionMode) at the given screen-space position, with the
+/// given selection bounds and supported actions.
+///
+/// The menu's actions route back to Rust through the same
+/// `BlincNativeBridge` callback path: when the user picks Copy, the
+/// native side calls `native_call("edit_menu", "on_action", (action,))`
+/// which the Blinc app dispatches to whichever editable widget owns
+/// the focus.
+///
+/// `actions` is a bitmask of `edit_menu_actions::*` constants —
+/// callers should OR together the actions appropriate for the current
+/// state (e.g. omit CUT/COPY when there's no selection, omit PASTE
+/// when the clipboard is empty).
+///
+/// Returns `Ok(())` if the bridge is wired up. No-op on desktop / web
+/// and on mobile builds without an initialized native bridge.
+pub fn show_edit_menu(
+    anchor_x: f32,
+    anchor_y: f32,
+    selection_x: f32,
+    selection_y: f32,
+    selection_width: f32,
+    selection_height: f32,
+    actions: u32,
+) {
+    use blinc_core::native_bridge::NativeValue;
+    let _ = blinc_core::native_bridge::native_call::<(), _>(
+        "edit_menu",
+        "show",
+        vec![
+            NativeValue::Float32(anchor_x),
+            NativeValue::Float32(anchor_y),
+            NativeValue::Float32(selection_x),
+            NativeValue::Float32(selection_y),
+            NativeValue::Float32(selection_width),
+            NativeValue::Float32(selection_height),
+            NativeValue::Int32(actions as i32),
+        ],
+    );
+}
+
+/// Hide the native text-edit context menu, if any is currently
+/// showing. Called when focus changes, the user taps elsewhere, or
+/// the editor's content shifts so the anchor would be wrong.
+pub fn hide_edit_menu() {
+    let _ = blinc_core::native_bridge::native_call::<(), _>("edit_menu", "hide", ());
+}
+
 /// Find the start of the previous word from a character position in a line.
 /// Words are separated by whitespace and punctuation boundaries.
 pub fn word_boundary_left(text: &str, char_pos: usize) -> usize {

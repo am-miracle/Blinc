@@ -622,6 +622,12 @@ impl AndroidApp {
                                                     lx,
                                                     ly
                                                 );
+                                                // Mark this event as touch input
+                                                // so editable widgets can branch
+                                                // their drag / double-tap logic
+                                                // for mobile semantics. See
+                                                // `widgets::text_input::is_touch_input`.
+                                                blinc_layout::widgets::text_input::set_touch_input(true);
                                                 // Blur any focused text inputs
                                                 // BEFORE processing the touch.
                                                 // The text input that gets

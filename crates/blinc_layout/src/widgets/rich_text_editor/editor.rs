@@ -229,6 +229,8 @@ pub fn rich_text_editor(
                 .unwrap_or(false);
             data.last_click_time = Some(now);
 
+            let touch = crate::widgets::text_input::is_touch_input();
+
             if let Some(pos) = data.position_from_click(ctx.local_x, ctx.local_y) {
                 if is_double {
                     // Double-click — select the word under the cursor.
@@ -246,7 +248,30 @@ pub fn rich_text_editor(
                             head: super::cursor::DocPosition::new(pos.block, pos.line, end_col),
                         });
                         data.reset_cursor_blink();
+                        if touch {
+                            crate::widgets::text_edit::haptic_impact_light();
+                            use crate::widgets::text_edit::edit_menu_actions;
+                            crate::widgets::text_edit::show_edit_menu(
+                                ctx.bounds_x + ctx.local_x,
+                                ctx.bounds_y + ctx.local_y,
+                                ctx.bounds_x + ctx.local_x,
+                                ctx.bounds_y + ctx.local_y,
+                                0.0,
+                                24.0,
+                                edit_menu_actions::CUT
+                                    | edit_menu_actions::COPY
+                                    | edit_menu_actions::PASTE
+                                    | edit_menu_actions::SELECT_ALL,
+                            );
+                        }
                     }
+                } else if touch {
+                    // Touch single-tap: position the caret without
+                    // starting a selection (touch drag will move it).
+                    // Light haptic to mirror UITextField focus feedback.
+                    data.move_cursor(pos, false);
+                    crate::widgets::text_edit::haptic_selection();
+                    crate::widgets::text_edit::hide_edit_menu();
                 } else {
                     let extend = ctx.shift;
                     data.move_cursor(pos, extend);
@@ -260,9 +285,19 @@ pub fn rich_text_editor(
             if !data.focused {
                 return;
             }
-            // Drag extends selection from anchor to current pointer.
+            // Touch drag = move cursor (no selection extension), with
+            // a subtle haptic per character boundary.
+            // Mouse drag = extend selection from anchor to pointer.
+            let touch = crate::widgets::text_input::is_touch_input();
             if let Some(pos) = data.position_from_click(ctx.local_x, ctx.local_y) {
-                data.move_cursor(pos, true);
+                if touch {
+                    if data.cursor != pos {
+                        data.move_cursor(pos, false);
+                        crate::widgets::text_edit::haptic_selection();
+                    }
+                } else {
+                    data.move_cursor(pos, true);
+                }
             }
             drop(data);
             version_for_drag.set(version_for_drag.get().wrapping_add(1));

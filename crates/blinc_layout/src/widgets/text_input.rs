@@ -106,6 +106,23 @@ static FOCUSED_EDITABLE_NODE_ID: AtomicU64 = AtomicU64::new(0);
 static FOCUSED_EDITABLE_BLUR_CALLBACK: Mutex<Option<Box<dyn Fn() + Send + Sync>>> =
     Mutex::new(None);
 
+/// Whether the most recent pointer event came from a touchscreen rather
+/// than a mouse / trackpad.
+///
+/// Set to `true` from the iOS / Android runners on every
+/// `TouchPhase::Began` (and reset to `false` from the desktop / web
+/// runners on `mouse_down`). Editable widgets read this on
+/// `on_mouse_down` / `on_drag` to switch between desktop semantics
+/// (drag = extend selection) and mobile semantics (drag = move cursor
+/// with haptic feedback, double-tap = native context menu).
+///
+/// Polled by [`is_touch_input`]. Updated by
+/// [`set_touch_input`]. The flag is *sticky* — it stays set until a
+/// non-touch input event flips it back, so re-rendering between
+/// touch frames doesn't lose the bit.
+static INPUT_SOURCE_IS_TOUCH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 static NEEDS_REBUILD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static NEEDS_RELAYOUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static NEEDS_CSS_REPARSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -253,6 +270,27 @@ pub fn focused_editable_node_id() -> Option<LayoutNodeId> {
     } else {
         Some(LayoutNodeId::from_raw(raw))
     }
+}
+
+/// Set whether the most recent pointer input came from a touchscreen.
+///
+/// Called by platform runners on every input event so editable widgets
+/// can branch on input source: mouse drags extend selections, touch
+/// drags move the cursor with haptic feedback. Pass `true` from
+/// `TouchPhase::Began` / `MotionAction::Down` (mobile), and `false`
+/// from desktop / web `mouse_down` paths.
+///
+/// The flag is sticky between events — calling once per input event
+/// is enough; the widget consults it during the same frame's event
+/// dispatch.
+pub fn set_touch_input(is_touch: bool) {
+    INPUT_SOURCE_IS_TOUCH.store(is_touch, Ordering::Relaxed);
+}
+
+/// Returns true if the most recent pointer event came from a
+/// touchscreen. See [`set_touch_input`] for the contract.
+pub fn is_touch_input() -> bool {
+    INPUT_SOURCE_IS_TOUCH.load(Ordering::Relaxed)
 }
 
 pub fn take_needs_continuous_redraw() -> bool {
@@ -1718,17 +1756,63 @@ impl TextInput {
                         .unwrap_or(false);
                     d.last_click_time = Some(now);
 
+                    let touch = is_touch_input();
+
                     if is_double_click {
-                        // Select word at cursor
+                        // Select word at cursor — same on touch and
+                        // mouse. On touch we additionally fire an
+                        // impact haptic and ask the platform to show
+                        // the native edit menu (Cut / Copy / Paste /
+                        // Select All) anchored at the tap position.
                         let (start, end) =
                             crate::widgets::text_edit::word_at_position(&d.value, cursor_pos);
                         d.selection_start = Some(start);
                         d.cursor = end;
+                        if touch {
+                            crate::widgets::text_edit::haptic_impact_light();
+                            // Show edit menu — actions reflect the
+                            // current state. There IS a selection
+                            // (the just-selected word) so Cut / Copy
+                            // are available; SELECT_ALL is always
+                            // valid; PASTE depends on clipboard
+                            // contents but we let the native side
+                            // figure that out (it'll dim the menu
+                            // item if the system clipboard is empty).
+                            use crate::widgets::text_edit::edit_menu_actions;
+                            crate::widgets::text_edit::show_edit_menu(
+                                ctx.bounds_x + text_x,
+                                ctx.bounds_y,
+                                ctx.bounds_x + text_x,
+                                ctx.bounds_y,
+                                0.0,
+                                ctx.bounds_height,
+                                edit_menu_actions::CUT
+                                    | edit_menu_actions::COPY
+                                    | edit_menu_actions::PASTE
+                                    | edit_menu_actions::SELECT_ALL,
+                            );
+                        }
                     } else {
-                        // Single click: position cursor, start potential drag selection
+                        // Single click: position cursor. On touch, we
+                        // do NOT start a drag-select anchor — touch
+                        // drag is repurposed for cursor movement (see
+                        // the on_drag handler below). On mouse,
+                        // single-click + drag extends selection just
+                        // like the desktop UX expects.
                         d.cursor = cursor_pos;
                         d.selection_start = None;
-                        d.drag_select_anchor = Some(cursor_pos);
+                        if touch {
+                            d.drag_select_anchor = None;
+                            // Subtle haptic on single-tap focus, mirroring
+                            // iOS UITextField's selection feedback.
+                            crate::widgets::text_edit::haptic_selection();
+                            // Hide any leftover edit menu from a
+                            // previous double-tap so the user gets a
+                            // clean re-engagement.
+                            crate::widgets::text_edit::hide_edit_menu();
+                        } else {
+                            d.drag_select_anchor = Some(cursor_pos);
+                        }
                     }
                     d.reset_cursor_blink();
 
@@ -1755,7 +1839,33 @@ impl TextInput {
                         let text_x = ctx.local_x.max(0.0);
                         let new_pos = d.cursor_position_from_x(text_x, font_size);
 
-                        if let Some(anchor) = d.drag_select_anchor {
+                        // Touch input branches its drag semantics:
+                        //
+                        //   * Mouse drag (desktop / web) — extends
+                        //     selection from the anchor recorded by
+                        //     `on_mouse_down`. Same behavior as
+                        //     `text_input` has always had.
+                        //
+                        //   * Touch drag (mobile) — moves the caret
+                        //     to wherever the finger is, without
+                        //     starting a selection. Each character
+                        //     boundary crossed gets a subtle
+                        //     selection-changed haptic, mirroring the
+                        //     UITextField / Android EditText cursor-
+                        //     drag UX. Selection is reserved for
+                        //     double-tap and the native edit menu.
+                        //
+                        // The branch is gated on
+                        // `text_input::is_touch_input()`, which the
+                        // platform runners flip on every touch /
+                        // mouse event.
+                        if is_touch_input() {
+                            if new_pos != d.cursor {
+                                d.cursor = new_pos;
+                                d.selection_start = None;
+                                crate::widgets::text_edit::haptic_selection();
+                            }
+                        } else if let Some(anchor) = d.drag_select_anchor {
                             if new_pos != anchor {
                                 d.selection_start = Some(anchor);
                                 d.cursor = new_pos;

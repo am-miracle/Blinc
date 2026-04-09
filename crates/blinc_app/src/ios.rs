@@ -774,6 +774,13 @@ impl IOSRenderContext {
         match touch.phase {
             TouchPhase::Began => {
                 tracing::trace!("[Blinc] iOS Touch BEGAN at ({:.1}, {:.1})", lx, ly);
+                // Mark this event as touch input so editable widgets
+                // can branch their drag / double-tap logic for mobile
+                // semantics (drag = move cursor + haptic, double-tap
+                // = native edit menu). Sticky between events; the
+                // desktop / web runners flip this back to false on
+                // mouse_down. See `widgets::text_input::is_touch_input`.
+                blinc_layout::widgets::text_input::set_touch_input(true);
                 // Blur any focused text inputs BEFORE processing
                 // mouse down. Mirrors the desktop runner's
                 // behavior at [`windowed.rs:2913`](crate::windowed):

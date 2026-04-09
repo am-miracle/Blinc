@@ -2360,6 +2360,20 @@ impl WindowedApp {
                                             x,
                                             y,
                                         }) => {
+                                            // Mark this event as mouse (not
+                                            // touch) input so editable widgets
+                                            // restore desktop semantics
+                                            // (drag = extend selection). The
+                                            // flag is sticky between events
+                                            // and gets flipped back to true
+                                            // by the touch path on
+                                            // touchscreens — desktop runners
+                                            // don't see touch events at all,
+                                            // but a docked tablet running
+                                            // the desktop runner could mix
+                                            // both, so we set this on every
+                                            // mouse press to be safe.
+                                            blinc_layout::widgets::text_input::set_touch_input(false);
                                             ctx.event_router.on_mouse_down(
                                                 tree,
                                                 *x / sf,

@@ -1760,6 +1760,17 @@ impl TextArea {
                     d.selection_start = None; // Clear any selection
                     d.reset_cursor_blink();
 
+                    // Mobile UX touches: light haptic on every tap +
+                    // hide any leftover edit menu from a previous
+                    // double-tap. The edit menu itself fires from a
+                    // double-tap detector below. The double-tap
+                    // tracking lives on the data lock so we don't
+                    // need extra fields here.
+                    if crate::widgets::text_input::is_touch_input() {
+                        crate::widgets::text_edit::haptic_selection();
+                        crate::widgets::text_edit::hide_edit_menu();
+                    }
+
                     true // needs refresh
                 }; // Lock released here
 

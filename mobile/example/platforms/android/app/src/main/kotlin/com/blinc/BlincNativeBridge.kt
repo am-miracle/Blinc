@@ -307,6 +307,58 @@ object BlincNativeBridge {
         }
 
         // =====================================================================
+        // Text-edit context menu namespace
+        // =====================================================================
+        //
+        // Mirrors the iOS `edit_menu` namespace. Rust text-editable
+        // widgets call into this from their double-tap handlers to
+        // show a native Android contextual menu (Cut / Copy / Paste /
+        // Select All) over the focused selection.
+        //
+        // Android's equivalent of iOS `UIMenuController` is
+        // `ActionMode` started against the activity's content view.
+        // The action callbacks are routed back into Rust by
+        // synthesizing the same Cmd+key codes the desktop runner
+        // uses for the corresponding shortcuts:
+        //
+        //   Cut        → key code 88 (Cmd+X)
+        //   Copy       → key code 67 (Cmd+C)
+        //   Paste      → key code 86 (Cmd+V)
+        //   Select All → key code 65 (Cmd+A)
+        //
+        // Each Blinc text-editable widget already handles those
+        // shortcut codes, so the menu plugs into the existing
+        // copy/cut/paste paths once the dispatch is wired up.
+        //
+        // Bitmask layout matches `text_edit::edit_menu_actions`:
+        //   bit 0 = CUT
+        //   bit 1 = COPY
+        //   bit 2 = PASTE
+        //   bit 3 = SELECT_ALL
+
+        register("edit_menu", "show") { args ->
+            val anchorX = (args.optDouble(0, 0.0)).toFloat()
+            val anchorY = (args.optDouble(1, 0.0)).toFloat()
+            val selX = (args.optDouble(2, anchorX.toDouble())).toFloat()
+            val selY = (args.optDouble(3, anchorY.toDouble())).toFloat()
+            val selW = (args.optDouble(4, 0.0)).toFloat()
+            val selH = (args.optDouble(5, 24.0)).toFloat()
+            val actions = args.optInt(6, 0)
+            val activity = currentActivity()
+            activity?.runOnUiThread {
+                BlincEditMenuHelper.show(activity, anchorX, anchorY, selX, selY, selW, selH, actions)
+            }
+            null
+        }
+
+        registerVoid("edit_menu", "hide") {
+            val activity = currentActivity()
+            activity?.runOnUiThread {
+                BlincEditMenuHelper.hide()
+            }
+        }
+
+        // =====================================================================
         // Keyboard namespace
         // =====================================================================
 
@@ -631,4 +683,119 @@ object BlincNativeBridge {
     // to `WindowedContext.height`.
     @JvmStatic
     external fun nativeDispatchKeyboardInset(insetLogicalPx: Int)
+}
+
+// =============================================================================
+// Edit menu helper
+// =============================================================================
+
+/**
+ * Native Android contextual edit menu (Cut / Copy / Paste / Select All)
+ * shown over the focused Blinc text-editable widget on double-tap.
+ *
+ * Mirrors the iOS `BlincEditMenuHelper`. Uses
+ * [android.view.ActionMode] (the framework-level equivalent of iOS's
+ * UIMenuController) anchored at the position the Rust side passed in
+ * via `edit_menu.show`.
+ *
+ * Action callbacks need to be wired through to Rust via the same
+ * shortcut-key dispatch path Blinc's text-editable widgets already
+ * use for Cmd+X / Cmd+C / Cmd+V / Cmd+A. That requires a JNI export
+ * for `handleKeyDownWithModifiers` (or similar) which doesn't exist
+ * yet — for now the menu shows on screen and the actions can be
+ * wired up in a follow-up commit.
+ */
+object BlincEditMenuHelper {
+    private var currentActionMode: android.view.ActionMode? = null
+
+    fun show(
+        activity: android.app.Activity,
+        anchorX: Float,
+        anchorY: Float,
+        @Suppress("UNUSED_PARAMETER") selectionX: Float,
+        @Suppress("UNUSED_PARAMETER") selectionY: Float,
+        @Suppress("UNUSED_PARAMETER") selectionWidth: Float,
+        @Suppress("UNUSED_PARAMETER") selectionHeight: Float,
+        actions: Int,
+    ) {
+        // Dismiss any existing menu first.
+        hide()
+
+        val rootView = activity.window?.decorView?.rootView ?: return
+        val callback = object : android.view.ActionMode.Callback {
+            override fun onCreateActionMode(mode: android.view.ActionMode, menu: android.view.Menu): Boolean {
+                if (actions and 0x01 != 0) {
+                    menu.add(0, android.R.id.cut, 0, android.R.string.cut)
+                }
+                if (actions and 0x02 != 0) {
+                    menu.add(0, android.R.id.copy, 1, android.R.string.copy)
+                }
+                if (actions and 0x04 != 0) {
+                    menu.add(0, android.R.id.paste, 2, android.R.string.paste)
+                }
+                if (actions and 0x08 != 0) {
+                    menu.add(0, android.R.id.selectAll, 3, android.R.string.selectAll)
+                }
+                return true
+            }
+
+            override fun onPrepareActionMode(mode: android.view.ActionMode, menu: android.view.Menu): Boolean = false
+
+            override fun onActionItemClicked(mode: android.view.ActionMode, item: android.view.MenuItem): Boolean {
+                // TODO: dispatch to Rust via a `nativeDispatchKeyDown(keyCode, meta)`
+                // JNI export. For now we just close the menu so the
+                // user gets visual feedback that the tap registered.
+                mode.finish()
+                return true
+            }
+
+            override fun onDestroyActionMode(mode: android.view.ActionMode) {
+                if (currentActionMode === mode) {
+                    currentActionMode = null
+                }
+            }
+        }
+
+        currentActionMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            // API 23+: use the floating action mode anchored to a
+            // rect in the root view's coordinate space, which is
+            // closer to the iOS UIMenuController behavior.
+            rootView.startActionMode(
+                object : android.view.ActionMode.Callback2() {
+                    override fun onCreateActionMode(mode: android.view.ActionMode, menu: android.view.Menu) =
+                        callback.onCreateActionMode(mode, menu)
+                    override fun onPrepareActionMode(mode: android.view.ActionMode, menu: android.view.Menu) =
+                        callback.onPrepareActionMode(mode, menu)
+                    override fun onActionItemClicked(mode: android.view.ActionMode, item: android.view.MenuItem) =
+                        callback.onActionItemClicked(mode, item)
+                    override fun onDestroyActionMode(mode: android.view.ActionMode) =
+                        callback.onDestroyActionMode(mode)
+                    override fun onGetContentRect(
+                        mode: android.view.ActionMode,
+                        view: android.view.View,
+                        outRect: android.graphics.Rect,
+                    ) {
+                        // Anchor the menu over the tap point. Convert
+                        // logical pixels to physical pixels using the
+                        // display density (the Rust side passes
+                        // logical px / DIP).
+                        val density = activity.resources.displayMetrics.density
+                        val px = (anchorX * density).toInt()
+                        val py = (anchorY * density).toInt()
+                        outRect.set(px, py, px + 1, py + 1)
+                    }
+                },
+                android.view.ActionMode.TYPE_FLOATING,
+            )
+        } else {
+            // API < 23: legacy primary action mode (sticks to the top
+            // of the screen). Less ideal but functional.
+            rootView.startActionMode(callback)
+        }
+    }
+
+    fun hide() {
+        currentActionMode?.finish()
+        currentActionMode = null
+    }
 }
