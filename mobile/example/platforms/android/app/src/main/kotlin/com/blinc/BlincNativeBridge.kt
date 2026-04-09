@@ -702,8 +702,9 @@ object BlincNativeBridge {
  * shortcut-key dispatch path Blinc's text-editable widgets already
  * use for Cmd+X / Cmd+C / Cmd+V / Cmd+A. That requires a JNI export
  * for `handleKeyDownWithModifiers` (or similar) which doesn't exist
- * yet — for now the menu shows on screen and the actions can be
- * wired up in a follow-up commit.
+ * yet — until then the menu shows on screen so the user gets visual
+ * feedback that the gesture registered, and the action dispatch is
+ * a TODO.
  */
 object BlincEditMenuHelper {
     private var currentActionMode: android.view.ActionMode? = null

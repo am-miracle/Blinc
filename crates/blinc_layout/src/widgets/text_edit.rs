@@ -12,8 +12,9 @@
 // web). The actual implementations live in `BlincNativeBridge.swift`
 // (`UIImpactFeedbackGenerator` / `UIMenuController` / `UIEditMenu`) and
 // `BlincNativeBridge.kt` (`Vibrator` / `ActionMode`). Both bridge
-// templates already declare a `haptics` namespace; this commit adds an
-// `edit_menu` namespace alongside it for the double-tap context menu.
+// templates declare two namespaces backing this module: `haptics`
+// for the per-character feedback and `edit_menu` for the
+// double-tap context menu.
 
 /// Trigger a light haptic "selection changed" feedback on mobile.
 ///

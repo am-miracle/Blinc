@@ -848,9 +848,8 @@ class BlincKeyboardHelper: NSObject, UITextFieldDelegate {
 /// We don't currently set the meta modifier on the dispatched
 /// `KEY_DOWN` event because the widget handlers gate Cmd-shortcuts
 /// behind `ctx.meta`. The cleaner long-term fix is a new
-/// `blinc_ios_handle_key_down_with_modifiers` FFI export — for now
-/// the menu is wired up so taps land on screen, and the action
-/// dispatch can be hooked up in a follow-up commit.
+/// `blinc_ios_handle_key_down_with_modifiers` FFI export — until
+/// then the menu shows on screen and the action dispatch is a TODO.
 class BlincEditMenuHelper: NSObject {
     static let shared = BlincEditMenuHelper()
 
