@@ -1766,9 +1766,19 @@ impl TextArea {
                     // double-tap detector below. The double-tap
                     // tracking lives on the data lock so we don't
                     // need extra fields here.
+                    //
+                    // Also arm the long-press timer so a press-and-
+                    // hold of 500 ms shows the edit menu with
+                    // PASTE available — matches the iOS
+                    // UITextField / Android EditText long-press UX.
                     if crate::widgets::text_input::is_touch_input() {
                         crate::widgets::text_edit::haptic_selection();
                         crate::widgets::text_edit::hide_edit_menu();
+                        crate::widgets::text_input::arm_long_press_timer(
+                            ctx.bounds_x + click_x,
+                            ctx.bounds_y + click_y,
+                            ctx.bounds_height.clamp(24.0, 48.0),
+                        );
                     }
 
                     true // needs refresh

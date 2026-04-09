@@ -298,8 +298,17 @@ impl AndroidApp {
         while running {
             // When animating: don't wait - vsync in present() handles frame pacing
             // When idle: wait for events to save power
+            // When a text-input long-press is armed: poll at ~30 Hz so
+            // the 500 ms deadline fires within ~33 ms of the actual
+            // deadline (the user holding their finger still on a text
+            // input emits no input events, so without this clamp the
+            // 100 ms idle poll could miss the deadline by up to 100 ms).
+            let long_press_pending =
+                blinc_layout::widgets::text_input::is_long_press_armed();
             let poll_timeout = if needs_rebuild || needs_redraw_next_frame {
                 Some(std::time::Duration::ZERO) // Don't wait - vsync paces us
+            } else if long_press_pending {
+                Some(std::time::Duration::from_millis(33))
             } else {
                 Some(std::time::Duration::from_millis(100)) // Idle - save power
             };
@@ -731,6 +740,11 @@ impl AndroidApp {
                                                     lx,
                                                     ly
                                                 );
+                                                // Cancel any armed text-input long-press
+                                                // timer. Lifting the finger before the
+                                                // 500 ms deadline means the user wasn't
+                                                // trying to long-press.
+                                                blinc_layout::widgets::text_input::cancel_long_press_timer();
                                                 windowed_ctx.pointer_query.set_pressure(0.0);
                                                 router.on_mouse_up(&*tree, lx, ly, MouseButton::Left);
 
@@ -754,6 +768,7 @@ impl AndroidApp {
                                             }
                                             MotionAction::Cancel => {
                                                 tracing::debug!("Touch CANCEL");
+                                                blinc_layout::widgets::text_input::cancel_long_press_timer();
                                                 windowed_ctx.pointer_query.set_pressure(0.0);
                                                 windowed_ctx.pointer_query.set_touch_count(0);
                                                 router.on_mouse_leave();
@@ -1156,6 +1171,18 @@ impl AndroidApp {
                     }
                     needs_redraw_next_frame = true;
                 }
+            }
+
+            // Long-press timer poll. Editable widgets arm this from
+            // their `on_mouse_down` handlers when `is_touch_input()`
+            // is true; the user holding their finger still for 500
+            // ms (with no drift past 10 px) fires the helper, which
+            // calls `show_edit_menu` with PASTE available — matching
+            // the EditText long-press-to-paste UX. Cancellation
+            // happens via `MotionAction::Up` / `Cancel` and
+            // drift-detection inside the touch-move branch above.
+            if blinc_layout::widgets::text_input::fire_long_press_timer_if_due() {
+                needs_redraw_next_frame = true;
             }
 
             // =========================================================

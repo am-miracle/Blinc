@@ -420,6 +420,9 @@ impl IOSRenderContext {
     /// - Stateful elements need redraw (ButtonState changes, etc.)
     /// - Animations are active
     /// - Wake was requested by animation thread
+    /// - A text-input long-press timer is armed (so the runner
+    ///   tick polls `fire_long_press_timer_if_due` while the user
+    ///   holds their finger still on a text input)
     pub fn needs_render(&self) -> bool {
         let dirty = self.ref_dirty_flag.load(Ordering::SeqCst);
         let wake_requested = self.wake_proxy.take_wake_request();
@@ -440,12 +443,20 @@ impl IOSRenderContext {
             .map(|tree| !tree.css_animations_empty())
             .unwrap_or(false);
 
+        // Long-press timer armed — the user is touching a text input
+        // and waiting for the 500 ms long-press deadline to fire.
+        // Without this, no events come in while the finger is still
+        // and the timer never gets polled.
+        let long_press_pending =
+            blinc_layout::widgets::text_input::is_long_press_armed();
+
         dirty
             || wake_requested
             || animations_active
             || has_stateful_updates
             || has_pending_rebuilds
             || css_animating
+            || long_press_pending
     }
     /// Update the window size
     ///
@@ -877,6 +888,10 @@ impl IOSRenderContext {
             }
             TouchPhase::Ended => {
                 tracing::trace!("[Blinc] iOS Touch ENDED at ({:.1}, {:.1})", lx, ly);
+                // Cancel any armed text-input long-press timer.
+                // Lifting the finger before the 500 ms deadline
+                // means the user wasn't trying to long-press.
+                blinc_layout::widgets::text_input::cancel_long_press_timer();
                 self.windowed_ctx
                     .event_router
                     .on_mouse_up(tree, lx, ly, MouseButton::Left);
@@ -894,6 +909,7 @@ impl IOSRenderContext {
             }
             TouchPhase::Cancelled => {
                 tracing::trace!("[Blinc] iOS Touch CANCELLED");
+                blinc_layout::widgets::text_input::cancel_long_press_timer();
                 self.windowed_ctx.event_router.on_mouse_leave();
                 // Clear touch tracking on cancel too
                 self.last_touch_pos = None;
@@ -1171,6 +1187,17 @@ pub extern "C" fn blinc_build_frame(ctx: *mut IOSRenderContext) {
                 f();
             }
         }
+
+        // Long-press timer poll. Editable widgets arm this from
+        // their `on_mouse_down` handlers when `is_touch_input()`
+        // is true; the user holding their finger still for 500 ms
+        // (with no drift past 10 px) fires the helper, which calls
+        // `show_edit_menu` with PASTE available — matching the iOS
+        // UITextField long-press-to-paste UX. The timer is
+        // cancelled by `on_drag` drift detection (above) and by
+        // the `TouchPhase::Ended` / `Cancelled` handlers in
+        // `handle_touch`.
+        blinc_layout::widgets::text_input::fire_long_press_timer_if_due();
 
         // Soft-keyboard inset → scroll the focused text input above the
         // keyboard so the user can see what they're typing. Driven by

@@ -1599,10 +1599,19 @@ impl CodeEditor {
                             }
                         } else if touch {
                             // Single touch: position cursor only,
-                            // no drag anchor, light haptic.
+                            // no drag anchor, light haptic. Also
+                            // arm the long-press timer so a press-
+                            // and-hold of 500 ms shows the edit
+                            // menu with PASTE available.
                             d.drag_anchor = None;
+                            let line_height = d.config.font_size * d.config.line_height;
                             crate::widgets::text_edit::haptic_selection();
                             crate::widgets::text_edit::hide_edit_menu();
+                            crate::widgets::text_input::arm_long_press_timer(
+                                ctx.bounds_x + click_x,
+                                ctx.bounds_y + click_y,
+                                line_height,
+                            );
                         } else {
                             d.drag_anchor = Some(d.cursor);
                         }
@@ -1663,6 +1672,14 @@ impl CodeEditor {
                     // the user feels the cursor traveling between
                     // characters / lines, matching the iOS
                     // UITextField cursor-drag UX.
+                    //
+                    // Also drift-cancel the long-press timer so a
+                    // real cursor drag doesn't also fire the paste
+                    // menu mid-gesture.
+                    crate::widgets::text_input::check_long_press_drift(
+                        ctx.mouse_x,
+                        ctx.mouse_y,
+                    );
                     if new_cursor != d.cursor {
                         d.cursor = new_cursor;
                         d.selection_start = None;

@@ -269,9 +269,16 @@ pub fn rich_text_editor(
                     // Touch single-tap: position the caret without
                     // starting a selection (touch drag will move it).
                     // Light haptic to mirror UITextField focus feedback.
+                    // Also arm the long-press timer for the
+                    // press-and-hold edit menu.
                     data.move_cursor(pos, false);
                     crate::widgets::text_edit::haptic_selection();
                     crate::widgets::text_edit::hide_edit_menu();
+                    crate::widgets::text_input::arm_long_press_timer(
+                        ctx.bounds_x + ctx.local_x,
+                        ctx.bounds_y + ctx.local_y,
+                        24.0,
+                    );
                 } else {
                     let extend = ctx.shift;
                     data.move_cursor(pos, extend);
@@ -291,6 +298,12 @@ pub fn rich_text_editor(
             let touch = crate::widgets::text_input::is_touch_input();
             if let Some(pos) = data.position_from_click(ctx.local_x, ctx.local_y) {
                 if touch {
+                    // Drift-cancel any armed long-press so a real
+                    // cursor drag doesn't also fire the paste menu.
+                    crate::widgets::text_input::check_long_press_drift(
+                        ctx.mouse_x,
+                        ctx.mouse_y,
+                    );
                     if data.cursor != pos {
                         data.move_cursor(pos, false);
                         crate::widgets::text_edit::haptic_selection();
