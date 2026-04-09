@@ -6,8 +6,8 @@
 
 use blinc_animation::SpringConfig;
 use blinc_app::prelude::*;
-use blinc_app::windowed::WindowedContext;
 use blinc_app::windowed::WindowedApp;
+use blinc_app::windowed::WindowedContext;
 use blinc_cn::prelude::*;
 use blinc_core::Color;
 use blinc_layout::selector::ScrollRef;

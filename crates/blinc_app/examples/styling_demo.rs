@@ -11,8 +11,8 @@
 //! Run with: cargo run -p blinc_app --example styling_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::WindowedContext;
 use blinc_app::windowed::WindowedApp;
+use blinc_app::windowed::WindowedContext;
 use blinc_core::{Color, Shadow, Transform};
 use blinc_layout::css;
 use blinc_layout::css_parser::Stylesheet;

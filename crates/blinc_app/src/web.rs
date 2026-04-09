@@ -706,11 +706,7 @@ impl WebApp {
     /// returns a future or runs synchronously — the sync wrapper
     /// just constructs an immediately-ready boxed future, so this
     /// inner function only ever sees the async form.
-    async fn run_with_setup_inner<S, F, E>(
-        canvas_id: &str,
-        setup: S,
-        ui_builder: F,
-    ) -> Result<()>
+    async fn run_with_setup_inner<S, F, E>(canvas_id: &str, setup: S, ui_builder: F) -> Result<()>
     where
         S: for<'a> FnOnce(
             &'a mut Self,

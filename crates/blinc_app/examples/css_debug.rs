@@ -8,8 +8,8 @@
 //! Run with: cargo run -p blinc_app --example css_debug --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::WindowedContext;
 use blinc_app::windowed::WindowedApp;
+use blinc_app::windowed::WindowedContext;
 use blinc_core::State;
 
 #[cfg(not(target_arch = "wasm32"))]

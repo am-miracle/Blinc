@@ -5,8 +5,8 @@
 //! Run with: cargo run -p blinc_app --example tabler_icons_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::WindowedContext;
 use blinc_app::windowed::WindowedApp;
+use blinc_app::windowed::WindowedContext;
 use blinc_core::Color;
 use blinc_tabler_icons::{filled, outline};
 use blinc_theme::{ColorToken, ThemeState};

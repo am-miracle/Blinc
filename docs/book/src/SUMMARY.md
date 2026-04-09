@@ -15,6 +15,53 @@
 - [iOS](./mobile/ios.md)
 - [CLI Reference](./mobile/cli.md)
 
+# Example Gallery
+
+<!-- begin:web-examples -->
+- [Example Gallery](./web/example-gallery.md)
+  - [Canvas Element](./web/example-gallery/canvas_demo.md)
+  - [Canvas Kit Interactive](./web/example-gallery/canvas_kit_demo.md)
+  - [Carousel Demo - Selector API Showcase](./web/example-gallery/carousel_demo.md)
+  - [blinc_cn Components](./web/example-gallery/cn_demo.md)
+  - [Code Element](./web/example-gallery/code_demo.md)
+  - [Minimal Code Element Test](./web/example-gallery/code_test.md)
+  - [Complex SVG](./web/example-gallery/complex_svg_demo.md)
+  - [CSS Debug](./web/example-gallery/css_debug.md)
+  - [CSS Visual Features](./web/example-gallery/css_features_demo.md)
+  - [Layer Effects](./web/example-gallery/effects_demo.md)
+  - [Emoji and HTML Entities](./web/example-gallery/emoji_demo.md)
+  - [@flow Shader](./web/example-gallery/flow_demo.md)
+  - [Fluid Surface](./web/example-gallery/fluid_demo.md)
+  - [Image CSS Styling](./web/example-gallery/image_css_demo.md)
+  - [Image Layer Test](./web/example-gallery/image_layer_test.md)
+  - [Keyframe Animation Canvas](./web/example-gallery/keyframe_canvas.md)
+  - [Markdown Editor](./web/example-gallery/markdown_demo.md)
+  - [Motion Demo](./web/example-gallery/motion_demo.md)
+  - [Music Player Glass Card](./web/example-gallery/music_player.md)
+  - [Notch Menu Bar](./web/example-gallery/notch_demo.md)
+  - [Overflow Fade](./web/example-gallery/overflow_fade_demo.md)
+  - [Overlay System](./web/example-gallery/overlay_demo.md)
+  - [Pointer Query](./web/example-gallery/pointer_query_demo.md)
+  - [Rich Text Element](./web/example-gallery/rich_text_demo.md)
+  - [Rich Text Editor](./web/example-gallery/rich_text_editor_demo.md)
+  - [Scroll Container](./web/example-gallery/scroll.md)
+  - [Semantic @flow](./web/example-gallery/semantic_flow_demo.md)
+  - [Sortable](./web/example-gallery/sortable_demo.md)
+  - [Stateful API](./web/example-gallery/stateful_demo.md)
+  - [Unified Styling API](./web/example-gallery/styling_demo.md)
+  - [SVG Animation](./web/example-gallery/svg_animation_demo.md)
+  - [Table Builder](./web/example-gallery/table_demo.md)
+  - [Tabler Icons](./web/example-gallery/tabler_icons_demo.md)
+  - [Minimal text positioning test](./web/example-gallery/text_position_test.md)
+  - [Text Input Widgets](./web/example-gallery/text_widgets.md)
+  - [Text Wrapping Test](./web/example-gallery/text_wrap_test.md)
+  - [Theme System](./web/example-gallery/theme_demo.md)
+  - [Timeline Animation](./web/example-gallery/timeline_demo.md)
+  - [Typography](./web/example-gallery/typography_demo.md)
+  - [Wet Glass](./web/example-gallery/wet_glass_demo.md)
+  - [Windowed Application](./web/example-gallery/windowed.md)
+<!-- end:web-examples -->
+
 # Web Development
 
 - [Overview](./web/overview.md)
@@ -88,3 +135,7 @@
 - [Layout & Diff](./architecture/layout-diff.md)
 - [Animation System](./architecture/animation.md)
 - [Stateful Elements & FSM](./architecture/stateful.md)
+
+# Contributing
+
+- [Writing Examples](./contributing/examples.md)

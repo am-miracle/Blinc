@@ -12,8 +12,8 @@
 //! Run with: cargo run -p blinc_app --example image_css_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::WindowedContext;
 use blinc_app::windowed::WindowedApp;
+use blinc_app::windowed::WindowedContext;
 
 const IMG: &str = "crates/blinc_app/examples/assets/avatar.jpg";
 

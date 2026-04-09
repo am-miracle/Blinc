@@ -7,8 +7,8 @@
 //! Run with: cargo run -p blinc_app --example flow_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::WindowedContext;
 use blinc_app::windowed::WindowedApp;
+use blinc_app::windowed::WindowedContext;
 use blinc_core::Color;
 
 const STYLESHEET: &str = r#"

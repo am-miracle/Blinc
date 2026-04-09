@@ -1,8 +1,8 @@
-//! Rich Text Editor Demo (Phase 2: read-only renderer)
+//! Rich Text Editor
 //!
-//! Builds a hand-authored `RichDocument` and renders it through the
-//! editor's read-only renderer. Demonstrates every block kind and inline
-//! mark currently supported by the editor model:
+//! Full editable rich text editor with cursor, selection, and inline
+//! formatting. Demonstrates every block kind and inline mark currently
+//! supported by the editor model:
 //!
 //! - Headings (H1–H3)
 //! - Paragraphs with mixed bold / italic / underline / strikethrough /
@@ -10,9 +10,6 @@
 //! - Bullet and numbered lists, including nested lists via `indent`
 //! - Block quote
 //! - Horizontal divider
-//!
-//! Editing, cursor, selection, and the toolbar all land in later phases —
-//! this is purely a render-only smoke test for Phase 1+2.
 //!
 //! Run with: `cargo run -p blinc_app --example rich_text_editor_demo --features windowed`
 

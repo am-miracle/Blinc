@@ -80,6 +80,21 @@ const EXAMPLES_DIR: &str = "crates/blinc_app/examples";
 /// Directory where this tool writes generated wrapper crates.
 const GENERATED_DIR: &str = "examples/_generated";
 
+/// mdBook source root. The tool writes the auto-generated example
+/// gallery pages here and patches `SUMMARY.md` to include them.
+const BOOK_SRC_DIR: &str = "docs/book/src";
+
+/// Base GitHub URL for "view source" links in the gallery. Points at
+/// `main` so the links track the current state of the repo.
+const SOURCE_LINK_BASE: &str = "https://github.com/project-blinc/Blinc/blob/main";
+
+/// Markers that bracket the gallery section inside `SUMMARY.md`. The
+/// tool rewrites everything between these two lines on each run; the
+/// rest of SUMMARY.md is left untouched. Keep both markers on their
+/// own lines with exact whitespace.
+const SUMMARY_BEGIN: &str = "<!-- begin:web-examples -->";
+const SUMMARY_END: &str = "<!-- end:web-examples -->";
+
 /// Crates we know how to infer as wrapper dependencies. Each entry
 /// is `(use_path_prefix, cargo_package_name, relative_path_from_wrapper_dir)`.
 ///
@@ -88,24 +103,64 @@ const GENERATED_DIR: &str = "examples/_generated";
 /// examples stay small. A new workspace crate that examples start
 /// depending on needs one line added here.
 const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
-    ("blinc_animation::", "blinc_animation", "../../../crates/blinc_animation"),
+    (
+        "blinc_animation::",
+        "blinc_animation",
+        "../../../crates/blinc_animation",
+    ),
     ("blinc_cn::", "blinc_cn", "../../../crates/blinc_cn"),
-    ("blinc_icons::", "blinc_icons", "../../../crates/blinc_icons"),
+    (
+        "blinc_icons::",
+        "blinc_icons",
+        "../../../crates/blinc_icons",
+    ),
     (
         "blinc_tabler_icons::",
         "blinc_tabler_icons",
         "../../../crates/blinc_tabler_icons",
     ),
-    ("blinc_canvas_kit::", "blinc_canvas_kit", "../../../crates/blinc_canvas_kit"),
-    ("blinc_theme::", "blinc_theme", "../../../crates/blinc_theme"),
+    (
+        "blinc_canvas_kit::",
+        "blinc_canvas_kit",
+        "../../../crates/blinc_canvas_kit",
+    ),
+    (
+        "blinc_theme::",
+        "blinc_theme",
+        "../../../crates/blinc_theme",
+    ),
     ("blinc_text::", "blinc_text", "../../../crates/blinc_text"),
-    ("blinc_paint::", "blinc_paint", "../../../crates/blinc_paint"),
-    ("blinc_router::", "blinc_router", "../../../crates/blinc_router"),
+    (
+        "blinc_paint::",
+        "blinc_paint",
+        "../../../crates/blinc_paint",
+    ),
+    (
+        "blinc_router::",
+        "blinc_router",
+        "../../../crates/blinc_router",
+    ),
     ("blinc_svg::", "blinc_svg", "../../../crates/blinc_svg"),
-    ("blinc_image::", "blinc_image", "../../../crates/blinc_image"),
-    ("blinc_media::", "blinc_media", "../../../crates/blinc_media"),
-    ("blinc_platform::", "blinc_platform", "../../../crates/blinc_platform"),
-    ("blinc_macros::", "blinc_macros", "../../../crates/blinc_macros"),
+    (
+        "blinc_image::",
+        "blinc_image",
+        "../../../crates/blinc_image",
+    ),
+    (
+        "blinc_media::",
+        "blinc_media",
+        "../../../crates/blinc_media",
+    ),
+    (
+        "blinc_platform::",
+        "blinc_platform",
+        "../../../crates/blinc_platform",
+    ),
+    (
+        "blinc_macros::",
+        "blinc_macros",
+        "../../../crates/blinc_macros",
+    ),
 ];
 
 // ============================================================================
@@ -123,6 +178,11 @@ struct ExampleMeta {
     /// the display title in the index.html `<title>` and in the
     /// gallery page.
     title: String,
+    /// Short description lifted from subsequent `//!` lines in the
+    /// doc block. Stops at the first `Run with:` line (which every
+    /// example uses as a footer) or at the end of the doc block.
+    /// Rendered verbatim as markdown on the gallery page.
+    description: String,
     /// Extra `blinc_*` workspace crates this example imports, in
     /// deterministic order. Each entry is `(package_name, path)`.
     extra_deps: Vec<(String, String)>,
@@ -157,10 +217,7 @@ fn discover_examples(workspace_root: &Path) -> Vec<ExampleMeta> {
         let source = match fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!(
-                    "  skip {stem}: cannot read {}: {e}",
-                    path.display()
-                );
+                eprintln!("  skip {stem}: cannot read {}: {e}", path.display());
                 continue;
             }
         };
@@ -193,6 +250,7 @@ fn discover_examples(workspace_root: &Path) -> Vec<ExampleMeta> {
         }
 
         let title = extract_title(&source).unwrap_or_else(|| format_fallback_title(&stem));
+        let description = extract_description(&source);
         let extra_deps = infer_extra_deps(&source);
 
         let relative_path = path
@@ -205,6 +263,7 @@ fn discover_examples(workspace_root: &Path) -> Vec<ExampleMeta> {
             name: stem,
             source_path: relative_path,
             title,
+            description,
             extra_deps,
         });
     }
@@ -261,6 +320,58 @@ fn extract_title(source: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract the example's short description from its top-of-file
+/// doc comment block. The description is everything between the
+/// title line and either the first `Run with:` footer or the end
+/// of the doc block, with `//!` prefixes stripped. Blank `//!`
+/// lines become paragraph breaks; lines that start with `- ` stay
+/// as bullet list entries.
+///
+/// If the example has no description (i.e. only a title line in
+/// its doc block), this returns an empty string — callers fall back
+/// to a generic "see source" blurb.
+fn extract_description(source: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut past_title = false;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let Some(body) = trimmed.strip_prefix("//!") else {
+            // First non-comment line ends the doc block.
+            if !trimmed.is_empty() {
+                break;
+            }
+            continue;
+        };
+        let body = body.strip_prefix(' ').unwrap_or(body);
+
+        if !past_title {
+            // Skip the title line itself — we already captured it
+            // via `extract_title`. Blank line right after the title
+            // flips the state machine into description-collection.
+            if body.trim().is_empty() {
+                past_title = true;
+            }
+            continue;
+        }
+
+        // Stop at the trailing `Run with: cargo run ...` footer.
+        // Every example uses the same convention.
+        if body.trim_start().starts_with("Run with:") {
+            break;
+        }
+
+        lines.push(body.to_string());
+    }
+
+    // Trim trailing blank lines so the rendered markdown doesn't
+    // end with gratuitous whitespace.
+    while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+
+    lines.join("\n")
 }
 
 /// Fallback title for examples whose doc block is missing or
@@ -324,8 +435,14 @@ fn generate_wrapper(workspace_root: &Path, meta: &ExampleMeta) -> std::io::Resul
         wrapper_dir.join("build.rs"),
         render_build_rs(&example_path_from_wrapper, &meta.name),
     )?;
-    fs::write(src_dir.join("lib.rs"), render_lib_rs(&meta.name, &crate_name))?;
-    fs::write(wrapper_dir.join("index.html"), render_index_html(&meta.title, &crate_name))?;
+    fs::write(
+        src_dir.join("lib.rs"),
+        render_lib_rs(&meta.name, &crate_name),
+    )?;
+    fs::write(
+        wrapper_dir.join("index.html"),
+        render_index_html(&meta.title, &crate_name),
+    )?;
 
     let serve_sh_path = wrapper_dir.join("serve.sh");
     fs::write(&serve_sh_path, render_serve_sh())?;
@@ -726,6 +843,317 @@ fi
 }
 
 // ============================================================================
+// Gallery — mdBook markdown emission + SUMMARY.md patching
+// ============================================================================
+//
+// The tool writes three things under `docs/book/src/web/`:
+//
+//   1. `example-gallery.md` — the gallery landing page, a grid of
+//      cards linking to each per-example sub-page. Auto-generated
+//      from the discovered example list.
+//   2. `example-gallery/<name>.md` — one page per example: title,
+//      description, lazy-loaded iframe, "view source" GitHub link.
+//   3. `SUMMARY.md` — patched between the
+//      `<!-- begin:web-examples -->` / `<!-- end:web-examples -->`
+//      markers to add nested entries for each example page. The
+//      rest of SUMMARY.md is left untouched.
+//
+// The per-example sub-pages use an iframe with `loading="lazy"` so
+// browsing the gallery doesn't spawn 40+ WebGPU contexts at once
+// (Chrome refuses to allocate that many). The iframe src points at
+// `../../examples/<name>/index.html`, which resolves against the
+// book's HTML output root — CI copies `examples/_generated/<name>/`
+// into `target/book/examples/<name>/` after the mdbook build so
+// the relative path lines up at serve time.
+
+/// Path (relative to the workspace root) of the gallery's sub-page
+/// directory under the mdBook source tree.
+const GALLERY_SUBDIR: &str = "docs/book/src/web/example-gallery";
+
+/// Path (relative to the workspace root) of the gallery index page.
+const GALLERY_INDEX: &str = "docs/book/src/web/example-gallery.md";
+
+/// Path (relative to the workspace root) of `SUMMARY.md`.
+const SUMMARY_PATH: &str = "docs/book/src/SUMMARY.md";
+
+/// Write the gallery index page, one sub-page per example, and
+/// patch SUMMARY.md to include them. Idempotent.
+fn emit_gallery(workspace_root: &Path, examples: &[ExampleMeta]) -> std::io::Result<()> {
+    let gallery_dir = workspace_root.join(GALLERY_SUBDIR);
+    fs::create_dir_all(&gallery_dir)?;
+
+    // Remove any stale sub-pages before writing new ones, so a
+    // rename / removal upstream cleans up here.
+    if let Ok(entries) = fs::read_dir(&gallery_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            let _ = fs::remove_file(&path);
+        }
+    }
+
+    // Per-example sub-pages.
+    for meta in examples {
+        let page = render_gallery_page(meta);
+        fs::write(gallery_dir.join(format!("{}.md", meta.name)), page)?;
+    }
+
+    // Gallery index page (the landing grid).
+    let index = render_gallery_index(examples);
+    fs::write(workspace_root.join(GALLERY_INDEX), index)?;
+
+    // Patch SUMMARY.md between the begin/end markers.
+    patch_summary(workspace_root, examples)?;
+
+    Ok(())
+}
+
+/// Render the per-example gallery sub-page. Keeps the iframe at a
+/// fixed height that matches the default wgpu canvas aspect ratio
+/// well enough for most demos; authors can tune per-example heights
+/// later via a manifest field if the default feels cramped.
+fn render_gallery_page(meta: &ExampleMeta) -> String {
+    let source_url = format!(
+        "{SOURCE_LINK_BASE}/{path}",
+        path = meta.source_path.to_string_lossy().replace('\\', "/"),
+    );
+    // Gallery sub-pages live at `docs/book/src/web/example-gallery/<name>.md`,
+    // which renders to `target/book/web/example-gallery/<name>.html`.
+    // CI stages wasm-pack output at `target/book/examples/<name>/`.
+    // So the iframe path is `../../examples/<name>/index.html`.
+    let iframe_src = format!("../../examples/{name}/index.html", name = meta.name);
+
+    let description = if meta.description.trim().is_empty() {
+        String::from(
+            "This example is auto-generated from the cross-target source \
+             in `crates/blinc_app/examples/`. See the linked source file \
+             for the full details.",
+        )
+    } else {
+        meta.description.clone()
+    };
+
+    format!(
+        r#"# {title}
+
+{description}
+
+<iframe
+  src="{iframe_src}"
+  width="100%"
+  height="560"
+  loading="lazy"
+  style="border:1px solid #45475a;border-radius:8px;background:#181825;"
+  title="Blinc {name} example"
+></iframe>
+
+[Open in a new tab]({iframe_src}) · [View source on GitHub]({source_url})
+"#,
+        title = meta.title,
+        description = description,
+        iframe_src = iframe_src,
+        source_url = source_url,
+        name = meta.name,
+    )
+}
+
+/// Render the gallery index page. Alphabetised grid of cards, one
+/// per example. Each card links to the per-example sub-page.
+fn render_gallery_index(examples: &[ExampleMeta]) -> String {
+    let mut body = String::new();
+    body.push_str(
+        "# Example Gallery\n\n\
+         Every example in [`crates/blinc_app/examples/`](https://github.com/project-blinc/Blinc/tree/main/crates/blinc_app/examples)\n\
+         that follows the cross-target convention is auto-built for the web\n\
+         target by `tools/build-web-examples` and embedded below. The same\n\
+         `build_ui` function that runs on desktop, iOS, and Android runs\n\
+         here — no per-target forks. See the\n\
+         [Contributing → Examples](../contributing/examples.md) page for the\n\
+         convention that makes this work.\n\n\
+         Click any card to open the example in a focused view with a\n\
+         lazy-loaded iframe. Each demo spawns its own WebGPU context, so\n\
+         loading more than ~8 at once will start hitting Chrome's\n\
+         per-tab GPU context limit — the per-example pages keep that\n\
+         manageable.\n\n\
+         ## Examples\n\n",
+    );
+
+    for meta in examples {
+        let first_desc_line = meta
+            .description
+            .lines()
+            .map(|l| l.trim())
+            .find(|l| !l.is_empty() && !l.starts_with('-'))
+            .unwrap_or("Auto-built from the cross-target source.")
+            .to_string();
+        body.push_str(&format!(
+            "- [**{title}**](./example-gallery/{name}.md) — {blurb}\n",
+            title = meta.title,
+            name = meta.name,
+            blurb = first_desc_line,
+        ));
+    }
+
+    body
+}
+
+/// Rewrite `SUMMARY.md` between the begin/end markers with a nested
+/// list of the discovered examples. Preserves everything outside
+/// the markers. Fails (but warns) if either marker is missing.
+fn patch_summary(workspace_root: &Path, examples: &[ExampleMeta]) -> std::io::Result<()> {
+    let path = workspace_root.join(SUMMARY_PATH);
+    let Ok(content) = fs::read_to_string(&path) else {
+        eprintln!(
+            "  WARN: {} not found — skipping SUMMARY patch",
+            path.display()
+        );
+        return Ok(());
+    };
+
+    let Some(begin_idx) = content.find(SUMMARY_BEGIN) else {
+        eprintln!(
+            "  WARN: {} missing `{SUMMARY_BEGIN}` marker — skipping SUMMARY patch",
+            path.display()
+        );
+        return Ok(());
+    };
+    let Some(end_idx) = content.find(SUMMARY_END) else {
+        eprintln!(
+            "  WARN: {} missing `{SUMMARY_END}` marker — skipping SUMMARY patch",
+            path.display()
+        );
+        return Ok(());
+    };
+    if end_idx <= begin_idx {
+        eprintln!(
+            "  WARN: {} has `{SUMMARY_END}` before `{SUMMARY_BEGIN}` — skipping SUMMARY patch",
+            path.display()
+        );
+        return Ok(());
+    }
+
+    // Figure out the indentation of the begin marker line so the
+    // generated list entries line up with whatever surrounds it.
+    // Lines in SUMMARY.md typically start at column 0 or use `- `
+    // bullet indentation.
+    let prefix_end = begin_idx + SUMMARY_BEGIN.len();
+    // Walk backwards from begin_idx to the start of the line.
+    let line_start = content[..begin_idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let indent: String = content[line_start..begin_idx]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+
+    // Build the replacement block. The gallery index is listed as
+    // the parent entry; each example sub-page is a nested child.
+    let mut generated = String::new();
+    generated.push_str(&format!(
+        "{indent}- [Example Gallery](./web/example-gallery.md)\n"
+    ));
+    for meta in examples {
+        generated.push_str(&format!(
+            "{indent}  - [{title}](./web/example-gallery/{name}.md)\n",
+            title = meta.title,
+            name = meta.name,
+        ));
+    }
+
+    let mut new_content = String::new();
+    // Content up to and including the begin marker line.
+    new_content.push_str(&content[..prefix_end]);
+    new_content.push('\n');
+    new_content.push_str(&generated);
+    // Re-indent the end marker to match the begin marker.
+    new_content.push_str(&indent);
+    new_content.push_str(&content[end_idx..]);
+
+    fs::write(&path, new_content)?;
+    println!("  patched {}", path.display());
+    Ok(())
+}
+
+// ============================================================================
+// Build + stage — optional wasm-pack integration behind `--build`
+// ============================================================================
+
+/// Run `wasm-pack build --target web --release` in each wrapper
+/// directory. Returns the list of wrappers that failed so the
+/// caller can report a non-zero exit code.
+fn build_wrappers_with_wasm_pack(workspace_root: &Path, examples: &[ExampleMeta]) -> Vec<String> {
+    let mut failed = Vec::new();
+    for meta in examples {
+        let wrapper_dir = workspace_root.join(GENERATED_DIR).join(&meta.name);
+        println!("  wasm-pack build {}", meta.name);
+        let status = std::process::Command::new("wasm-pack")
+            .args(["build", "--target", "web", "--release"])
+            .current_dir(&wrapper_dir)
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                eprintln!("    FAILED: wasm-pack exited with {s}");
+                failed.push(meta.name.clone());
+            }
+            Err(e) => {
+                eprintln!("    FAILED: could not spawn wasm-pack: {e}");
+                failed.push(meta.name.clone());
+            }
+        }
+    }
+    failed
+}
+
+/// Copy each built wrapper's public-facing files (`index.html` +
+/// `pkg/`) into `stage_dir/<name>/`. CI uses this to drop the
+/// wasm artifacts into `target/book/examples/` so mdBook's iframe
+/// references resolve at serve time.
+fn stage_wrappers(
+    workspace_root: &Path,
+    examples: &[ExampleMeta],
+    stage_dir: &Path,
+) -> std::io::Result<()> {
+    fs::create_dir_all(stage_dir)?;
+    for meta in examples {
+        let wrapper_dir = workspace_root.join(GENERATED_DIR).join(&meta.name);
+        let pkg_dir = wrapper_dir.join("pkg");
+        if !pkg_dir.exists() {
+            eprintln!(
+                "  skip stage {}: pkg/ missing (wasm-pack didn't run?)",
+                meta.name
+            );
+            continue;
+        }
+        let dest = stage_dir.join(&meta.name);
+        // Fresh target — clear anything left from a previous run.
+        let _ = fs::remove_dir_all(&dest);
+        fs::create_dir_all(&dest)?;
+        copy_dir_recursive(&pkg_dir, &dest.join("pkg"))?;
+        fs::copy(wrapper_dir.join("index.html"), dest.join("index.html"))?;
+        println!("  staged {} → {}", meta.name, dest.display());
+    }
+    Ok(())
+}
+
+/// Recursive copy helper. `std::fs` doesn't ship one.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Pruning — remove wrapper dirs whose upstream example has gone away
 // ============================================================================
 
@@ -763,7 +1191,73 @@ fn prune_stale_wrappers(workspace_root: &Path, keep_names: &[String]) -> std::io
 // main
 // ============================================================================
 
+/// Command-line flags the tool understands. Parsed via a tiny
+/// ad-hoc loop to avoid dragging `clap` into the dep tree for five
+/// arguments.
+#[derive(Default)]
+struct Args {
+    /// When set, run `wasm-pack build --target web --release` in
+    /// each generated wrapper after the codegen stage finishes.
+    /// CI uses this; local dev usually doesn't (developers run
+    /// wasm-pack themselves while iterating on a single example).
+    build: bool,
+    /// When set, copy each built wrapper's `index.html` + `pkg/`
+    /// into `<stage>/<example-name>/`. Implies `--build`. CI uses
+    /// this to drop artifacts into `target/book/examples/` before
+    /// uploading the pages artifact.
+    stage_to: Option<PathBuf>,
+    /// When set, skip writing the gallery markdown / SUMMARY patch.
+    /// Useful for CI steps that just want fresh wrappers without
+    /// touching the book source tree (e.g. a nightly lint run).
+    no_gallery: bool,
+}
+
+fn parse_args() -> Args {
+    let mut args = Args::default();
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i].as_str() {
+            "--build" => args.build = true,
+            "--stage-to" => {
+                let val = raw.get(i + 1).unwrap_or_else(|| {
+                    eprintln!("error: --stage-to requires a value");
+                    std::process::exit(2);
+                });
+                args.stage_to = Some(PathBuf::from(val));
+                args.build = true; // --stage-to implies --build
+                i += 1;
+            }
+            "--no-gallery" => args.no_gallery = true,
+            "--help" | "-h" => {
+                println!(
+                    "blinc-build-web-examples — codegen for cross-target example wrappers\n\n\
+                     USAGE:\n    \
+                     cargo run -p blinc-build-web-examples -- [FLAGS]\n\n\
+                     FLAGS:\n    \
+                     --build              After generating wrappers, run\n    \
+                                          `wasm-pack build --target web --release` in each.\n    \
+                     --stage-to <dir>     After `--build`, copy `index.html` + `pkg/`\n    \
+                                          from each wrapper into `<dir>/<example>/`. Implies --build.\n    \
+                     --no-gallery         Skip writing the mdBook gallery pages and\n    \
+                                          SUMMARY.md patch.\n    \
+                     --help, -h           Show this help and exit.\n"
+                );
+                std::process::exit(0);
+            }
+            other => {
+                eprintln!("error: unknown argument `{other}` (try --help)");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    args
+}
+
 fn main() {
+    let args = parse_args();
+
     // Resolve the workspace root from CARGO_MANIFEST_DIR. The tool's
     // own Cargo.toml lives at `tools/build-web-examples/`, so two
     // `..` jumps land us at the workspace root.
@@ -778,9 +1272,30 @@ fn main() {
         .expect("workspace root two levels above tool crate")
         .to_path_buf();
 
-    println!("blinc-build-web-examples: workspace at {}", workspace_root.display());
-    println!("  source   : {}", workspace_root.join(EXAMPLES_DIR).display());
-    println!("  output   : {}", workspace_root.join(GENERATED_DIR).display());
+    println!(
+        "blinc-build-web-examples: workspace at {}",
+        workspace_root.display()
+    );
+    println!(
+        "  source    : {}",
+        workspace_root.join(EXAMPLES_DIR).display()
+    );
+    println!(
+        "  wrappers  : {}",
+        workspace_root.join(GENERATED_DIR).display()
+    );
+    if !args.no_gallery {
+        println!(
+            "  book      : {}",
+            workspace_root.join(BOOK_SRC_DIR).display()
+        );
+    }
+    if args.build {
+        println!("  wasm-pack : on");
+    }
+    if let Some(stage) = args.stage_to.as_ref() {
+        println!("  stage-to  : {}", stage.display());
+    }
     println!();
     println!("Discovering examples…");
     let found = discover_examples(&workspace_root);
@@ -809,19 +1324,62 @@ fn main() {
         eprintln!("  WARN: prune failed: {e}");
     }
 
+    if !args.no_gallery {
+        println!();
+        println!("Emitting gallery markdown + SUMMARY patch…");
+        if let Err(e) = emit_gallery(&workspace_root, &found) {
+            eprintln!("  WARN: gallery emission failed: {e}");
+        }
+    }
+
+    let mut build_failures: Vec<String> = Vec::new();
+    if args.build {
+        println!();
+        println!("Running wasm-pack build on {} wrapper(s)…", found.len());
+        build_failures = build_wrappers_with_wasm_pack(&workspace_root, &found);
+    }
+
+    if let Some(stage_dir) = args.stage_to.as_ref() {
+        println!();
+        println!("Staging built wrappers into {}…", stage_dir.display());
+        // `stage_dir` may be relative; resolve against the current
+        // working directory (which for `cargo run -p …` is the
+        // workspace root, so this Just Works in CI).
+        let stage_abs = if stage_dir.is_absolute() {
+            stage_dir.clone()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| workspace_root.clone())
+                .join(stage_dir)
+        };
+        if let Err(e) = stage_wrappers(&workspace_root, &found, &stage_abs) {
+            eprintln!("  WARN: stage failed: {e}");
+        }
+    }
+
     println!();
     println!(
         "Done. {ok}/{total} wrappers written.{extra}",
         ok = ok,
         total = found.len(),
-        extra = if failed.is_empty() {
+        extra = if failed.is_empty() && build_failures.is_empty() {
             String::new()
         } else {
-            format!(" Failures: {}", failed.join(", "))
+            let mut msg = String::new();
+            if !failed.is_empty() {
+                msg.push_str(&format!(" Codegen failures: {}.", failed.join(", ")));
+            }
+            if !build_failures.is_empty() {
+                msg.push_str(&format!(
+                    " wasm-pack failures: {}.",
+                    build_failures.join(", ")
+                ));
+            }
+            msg
         }
     );
 
-    if !failed.is_empty() {
+    if !failed.is_empty() || !build_failures.is_empty() {
         std::process::exit(1);
     }
 }

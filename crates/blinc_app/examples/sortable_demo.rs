@@ -8,8 +8,8 @@
 //! Run with: cargo run -p blinc_app --example sortable_demo --features windowed
 
 use blinc_app::prelude::*;
-use blinc_app::windowed::WindowedContext;
 use blinc_app::windowed::WindowedApp;
+use blinc_app::windowed::WindowedContext;
 use blinc_core::context_state::BlincContextState;
 use blinc_core::events::event_types;
 use blinc_core::reactive::State;

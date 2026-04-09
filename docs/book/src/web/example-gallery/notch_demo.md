@@ -1,0 +1,16 @@
+# Notch Menu Bar
+
+Demonstrates a macOS-style menu bar with a notched dropdown that slides
+horizontally between icons. The dropdown maintains a seamless visual
+connection to the menu bar via concave curves.
+
+<iframe
+  src="../../examples/notch_demo/index.html"
+  width="100%"
+  height="560"
+  loading="lazy"
+  style="border:1px solid #45475a;border-radius:8px;background:#181825;"
+  title="Blinc notch_demo example"
+></iframe>
+
+[Open in a new tab](../../examples/notch_demo/index.html) · [View source on GitHub](https://github.com/project-blinc/Blinc/blob/main/crates/blinc_app/examples/notch_demo.rs)
