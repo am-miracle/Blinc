@@ -2012,16 +2012,24 @@ fn calculate_glass_clip_alpha(p: vec2<f32>, clip_bounds: vec4<f32>) -> f32 {
 
 // High quality blur using golden-angle spiral sampling
 // CSS spec: blur(Npx) means standard deviation = N pixels
+//
+// Uses `textureSampleLevel(.., .., uv, 0.0)` instead of `textureSample` so
+// the call is legal from non-uniform control flow. The fragment shader
+// `discard`s for shadow-only fragments before reaching the blur path,
+// which makes flow non-uniform across the quad — and WGSL/WebGPU bans
+// implicit-derivative samples (`textureSample`) in that case. The
+// backdrop has `mip_level_count: 1`, so explicitly sampling LOD 0 is
+// functionally identical to the implicit form.
 fn blur_backdrop(uv: vec2<f32>, blur_radius: f32) -> vec4<f32> {
     if blur_radius < 0.5 {
-        return textureSample(backdrop_texture, backdrop_sampler, uv);
+        return textureSampleLevel(backdrop_texture, backdrop_sampler, uv, 0.0);
     }
 
     let texel_size = 1.0 / uniforms.viewport_size;
     let sigma = blur_radius; // CSS spec: blur radius IS the standard deviation
 
     // Start with center sample (highest weight)
-    var color = textureSample(backdrop_texture, backdrop_sampler, uv);
+    var color = textureSampleLevel(backdrop_texture, backdrop_sampler, uv, 0.0);
     var total_weight = 1.0;
 
     let golden_angle = 2.39996323; // 137.5 degrees in radians
@@ -2045,7 +2053,7 @@ fn blur_backdrop(uv: vec2<f32>, blur_radius: f32) -> vec4<f32> {
             let sample_pos = uv + offset;
             let weight = gaussian_weight(ring_radius, sigma);
 
-            color += textureSample(backdrop_texture, backdrop_sampler, sample_pos) * weight;
+            color += textureSampleLevel(backdrop_texture, backdrop_sampler, sample_pos, 0.0) * weight;
             total_weight += weight;
         }
     }
@@ -2055,6 +2063,9 @@ fn blur_backdrop(uv: vec2<f32>, blur_radius: f32) -> vec4<f32> {
 
 // High quality blur with clip bounds for scroll containers
 // CSS spec: blur(Npx) means standard deviation = N pixels
+//
+// Uses `textureSampleLevel` for the same uniform-control-flow reason
+// documented on `blur_backdrop` above.
 fn blur_backdrop_clipped(uv: vec2<f32>, blur_radius: f32, clip_bounds: vec4<f32>) -> vec4<f32> {
     let clip_min = clip_bounds.xy / uniforms.viewport_size;
     let clip_max = (clip_bounds.xy + clip_bounds.zw) / uniforms.viewport_size;
@@ -2062,7 +2073,7 @@ fn blur_backdrop_clipped(uv: vec2<f32>, blur_radius: f32, clip_bounds: vec4<f32>
 
     if blur_radius < 0.5 {
         let clamped_uv = select(uv, clamp(uv, clip_min, clip_max), has_clip);
-        return textureSample(backdrop_texture, backdrop_sampler, clamped_uv);
+        return textureSampleLevel(backdrop_texture, backdrop_sampler, clamped_uv, 0.0);
     }
 
     let texel_size = 1.0 / uniforms.viewport_size;
@@ -2070,7 +2081,7 @@ fn blur_backdrop_clipped(uv: vec2<f32>, blur_radius: f32, clip_bounds: vec4<f32>
 
     // Start with center sample (highest weight)
     let center_uv = select(uv, clamp(uv, clip_min, clip_max), has_clip);
-    var color = textureSample(backdrop_texture, backdrop_sampler, center_uv);
+    var color = textureSampleLevel(backdrop_texture, backdrop_sampler, center_uv, 0.0);
     var total_weight = 1.0;
 
     let golden_angle = 2.39996323; // 137.5 degrees in radians
@@ -2095,7 +2106,7 @@ fn blur_backdrop_clipped(uv: vec2<f32>, blur_radius: f32, clip_bounds: vec4<f32>
             sample_pos = select(sample_pos, clamp(sample_pos, clip_min, clip_max), has_clip);
 
             let weight = gaussian_weight(ring_radius, sigma);
-            color += textureSample(backdrop_texture, backdrop_sampler, sample_pos) * weight;
+            color += textureSampleLevel(backdrop_texture, backdrop_sampler, sample_pos, 0.0) * weight;
             total_weight += weight;
         }
     }
@@ -2562,9 +2573,15 @@ fn gaussian_weight(x: f32, sigma: f32) -> f32 {
 
 // High quality blur using golden-angle spiral sampling
 // CSS spec: blur(Npx) means standard deviation = N pixels
+//
+// Uses `textureSampleLevel(.., .., uv, 0.0)` for the same uniform-control-flow
+// reason documented on the equivalent function in GLASS_SHADER above:
+// the fragment shader `discard`s shadow-only fragments, so plain
+// `textureSample` (which needs implicit derivatives) is illegal here.
+// The backdrop has `mip_level_count: 1`, so explicit LOD 0 is identical.
 fn blur_backdrop(uv: vec2<f32>, radius: f32, clip_bounds: vec4<f32>) -> vec4<f32> {
     if radius < 0.5 {
-        return textureSample(backdrop_texture, backdrop_sampler, uv);
+        return textureSampleLevel(backdrop_texture, backdrop_sampler, uv, 0.0);
     }
 
     let texel_size = 1.0 / uniforms.viewport_size;
@@ -2577,7 +2594,7 @@ fn blur_backdrop(uv: vec2<f32>, radius: f32, clip_bounds: vec4<f32>) -> vec4<f32
 
     // Start with center sample (highest weight)
     let center_uv = select(uv, clamp(uv, clip_min, clip_max), has_clip);
-    var color = textureSample(backdrop_texture, backdrop_sampler, center_uv);
+    var color = textureSampleLevel(backdrop_texture, backdrop_sampler, center_uv, 0.0);
     var total_weight = 1.0;
 
     // Golden angle spiral for smooth sample distribution
@@ -2603,7 +2620,7 @@ fn blur_backdrop(uv: vec2<f32>, radius: f32, clip_bounds: vec4<f32>) -> vec4<f32
             sample_pos = select(sample_pos, clamp(sample_pos, clip_min, clip_max), has_clip);
 
             let weight = gaussian_weight(ring_radius, sigma);
-            color += textureSample(backdrop_texture, backdrop_sampler, sample_pos) * weight;
+            color += textureSampleLevel(backdrop_texture, backdrop_sampler, sample_pos, 0.0) * weight;
             total_weight += weight;
         }
     }
@@ -3005,6 +3022,13 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 // ============================================================================
 
 // Simple box blur for glass effect (samples backdrop in a small radius)
+//
+// Uses `textureSampleLevel` instead of `textureSample` so this is legal
+// to call from non-uniform control flow. The path-pipeline fragment
+// shader takes glass-effect branches based on per-vertex clip flags
+// (`use_glass_effect`), which are not provably uniform across the
+// rasterized triangle, so WGSL/WebGPU rejects implicit-derivative
+// samples here.
 fn sample_blur(uv: vec2<f32>, blur_radius: f32, viewport_size: vec2<f32>) -> vec4<f32> {
     let pixel_size = 1.0 / viewport_size;
     var total = vec4<f32>(0.0);
@@ -3016,7 +3040,7 @@ fn sample_blur(uv: vec2<f32>, blur_radius: f32, viewport_size: vec2<f32>) -> vec
         for (var y = -sample_radius; y <= sample_radius; y++) {
             let offset = vec2<f32>(f32(x), f32(y)) * pixel_size * blur_radius * 0.5;
             let sample_uv = clamp(uv + offset, vec2<f32>(0.0), vec2<f32>(1.0));
-            total += textureSample(backdrop_texture, backdrop_sampler, sample_uv);
+            total += textureSampleLevel(backdrop_texture, backdrop_sampler, sample_uv, 0.0);
             samples += 1.0;
         }
     }

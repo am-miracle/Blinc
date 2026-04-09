@@ -4308,6 +4308,21 @@ impl RenderTree {
             .any(|p| p.lock().unwrap().state == crate::stateful::ScrollState::Bouncing)
     }
 
+    /// Returns `true` if any registered scroll physics is currently
+    /// past its scroll bounds (rubber-band overscroll).
+    ///
+    /// Used by the web runner to shorten the wheel-end debounce when
+    /// the user is staring at a stuck rubber-band stretch — there is
+    /// nothing more to scroll past the edge, so the bounce-back can
+    /// fire after only a couple of frames of wheel-event silence
+    /// instead of the full debounce window the runner uses to absorb
+    /// gaps between adjacent in-bounds wheel events.
+    pub fn has_overscrolling_scroll(&self) -> bool {
+        self.scroll_physics
+            .values()
+            .any(|p| p.lock().unwrap().is_overscrolling())
+    }
+
     /// Tick all scroll physics and return true if any are animating
     ///
     /// Call this each frame with the current time in milliseconds.

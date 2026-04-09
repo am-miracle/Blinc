@@ -378,6 +378,29 @@ pub struct WebApp {
     /// shows up as visible jank when the user just sweeps the
     /// mouse across the canvas.
     last_cursor: &'static str,
+    /// Timestamp (`now_ms()` epoch) of the most recent wheel-scroll
+    /// dispatch. `None` while no scroll is in flight.
+    ///
+    /// The DOM has no equivalent of winit's `TouchPhase::Ended` for
+    /// wheel events, so the runner can't know directly when a
+    /// scroll gesture is "over". Instead, every wheel tick stamps
+    /// this field, and [`Self::run_one_frame`] checks each rAF tick
+    /// whether enough idle time has elapsed to synthesize an
+    /// `on_scroll_end` — which is what kicks the bounce-back
+    /// spring on scroll containers that ended an overscroll
+    /// gesture in rubber-band territory. Without this, scrolling
+    /// past the edge leaves the offset stuck inside the
+    /// `Scrolling` state forever and the user can never see the
+    /// edge bounce back.
+    last_wheel_time_ms: Option<u64>,
+    /// Accumulated wheel delta (x, y) since the last `run_one_frame`
+    /// drain. The wheel handler adds into this instead of
+    /// dispatching directly so the runner can apply a true
+    /// per-frame speed cap — multiple wheel events that arrive
+    /// inside a single rAF interval coalesce into one capped
+    /// dispatch on the next frame, instead of stacking up at the
+    /// scroll widget without bound.
+    pending_wheel_delta: (f32, f32),
 }
 
 impl WebApp {
@@ -580,6 +603,8 @@ impl WebApp {
             last_logical_size: (logical_width, logical_height),
             last_touch_pos: None,
             last_cursor: "default",
+            last_wheel_time_ms: None,
+            pending_wheel_delta: (0.0, 0.0),
         })
     }
 
@@ -944,6 +969,19 @@ impl WebApp {
         }
 
         // ----- wheel -----
+        //
+        // The handler does NOT dispatch directly to scroll physics.
+        // Instead, it accumulates the raw delta into
+        // `pending_wheel_delta`, and `run_one_frame` drains it once
+        // per rAF tick through a damping function. This is what
+        // gives the runner a true *per-frame* speed cap rather than
+        // a per-event one — multiple wheel events arriving inside a
+        // single frame interval coalesce into one dispatch, so the
+        // user can't accidentally push the scroll offset hundreds
+        // of pixels deep into rubber-band on a fast macOS trackpad
+        // swipe (which fires ~10 events per 16 ms frame during the
+        // gesture and then leaks ~800 ms of momentum-tail events on
+        // top).
         {
             let app_rc = Rc::clone(&app_rc);
             let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::WheelEvent| {
@@ -961,9 +999,10 @@ impl WebApp {
                         2 => app.ctx.height, // page = viewport height
                         _ => 1.0,
                     };
-                    let dx = -(evt.delta_x() as f32) * multiplier;
-                    let dy = -(evt.delta_y() as f32) * multiplier;
-                    Self::dispatch_scroll(&mut app, dx, dy);
+                    let raw_dx = -(evt.delta_x() as f32) * multiplier;
+                    let raw_dy = -(evt.delta_y() as f32) * multiplier;
+                    app.pending_wheel_delta.0 += raw_dx;
+                    app.pending_wheel_delta.1 += raw_dy;
                 }
             });
             canvas
@@ -1142,6 +1181,19 @@ impl WebApp {
                                 y,
                                 blinc_platform::MouseButton::Left,
                             );
+                        }
+                        // Finger lifted — fire `on_gesture_end()` on
+                        // every scroll container in the tree. This is
+                        // the touch sibling of the wheel-idle
+                        // debounce in `run_one_frame`: we have a
+                        // reliable end-of-gesture signal here (touch
+                        // events have no momentum tail in the DOM),
+                        // so any scroll widget that ended its drag
+                        // in rubber-band territory snaps back
+                        // immediately rather than waiting for the
+                        // 180 ms wheel debounce to elapse.
+                        if let Some(ref tree) = app.current_tree {
+                            tree.on_gesture_end();
                         }
                         // Cancel any armed long-press timer the
                         // user just dismissed by lifting their
@@ -1470,16 +1522,19 @@ impl WebApp {
         // simpler `EventRouter::on_scroll` only emits a SCROLL bubble
         // event, it does not advance scroll physics.
         //
-        // Note: the `scroll()` builder defaults to **bounce-disabled**
-        // on wasm32 (see `widgets/scroll.rs::scroll`), so there is
-        // intentionally no inline `on_gesture_end` here — without a
-        // reliable `ScrollPhase::Ended` from the DOM there is no
-        // safe way to fire bounce-back without producing either a
-        // ~1s lag (wait for the OS-momentum tail to subside) or
-        // visible wobble (restart the spring as each momentum wheel
-        // re-overscrolls a settled `Idle` scroll). Web users that
-        // actually want bounce can opt in via
-        // `Scroll::with_config(ScrollConfig::default())`.
+        // Wheel events that arrive while a bounce-back spring is
+        // already running are dropped: `apply_scroll_delta` early-
+        // returns in that state anyway, but skipping the dispatch
+        // here also keeps `last_wheel_time_ms` from being refreshed
+        // by macOS's ~800ms momentum-tail wheel events, which is
+        // what would otherwise prevent the idle-debounce in
+        // `run_one_frame` from ever firing during a bounce.
+        if let Some(tree) = app.current_tree.as_ref() {
+            if tree.has_bouncing_scroll() {
+                return;
+            }
+        }
+
         let hit = {
             let tree = match app.current_tree.as_ref() {
                 Some(t) => t,
@@ -1501,6 +1556,14 @@ impl WebApp {
         if let Some(tree) = app.current_tree.as_mut() {
             tree.dispatch_scroll_chain(hit.node, &hit.ancestors, mx, my, delta_x, delta_y);
         }
+
+        // Stamp the wheel time *after* dispatching so the idle
+        // debounce in `run_one_frame` measures from the last wheel
+        // event the runner actually processed. The
+        // [`Self::run_one_frame`] callsite consumes this stamp via
+        // an idle-timeout check that fires `tree.on_scroll_end()`
+        // — see the field doc on `last_wheel_time_ms`.
+        app.last_wheel_time_ms = Some(now_ms());
     }
 
     fn dispatch_key_down(
@@ -1979,8 +2042,86 @@ impl WebApp {
         //    gives us a monotonic clock that works on both native
         //    and wasm32.
         let now = now_ms();
+
+        // Drain accumulated wheel delta and dispatch as a single
+        // damped per-frame scroll. The wheel handler accumulates
+        // raw browser deltas into `pending_wheel_delta`; here we
+        // collapse the entire frame's worth of events into one
+        // dispatch.
+        //
+        // Damping curve: `dy_eff = sign(dy) * |dy|^DAMP_EXPONENT`.
+        //
+        // The exponent is sub-linear (< 1.0) so small deltas pass
+        // through almost unchanged (slow / careful scrolling feels
+        // 1:1 responsive) while large deltas — the kind macOS
+        // trackpad emits during fast swipes and momentum tails —
+        // get compressed. A linear cap is too binary: it makes the
+        // jump from "below cap" to "exactly at cap" feel like a
+        // wall, and it doesn't slow medium speeds at all. The
+        // power curve gives a smooth slowdown across the whole
+        // range.
+        //
+        // 0.7 was picked empirically: deltas under ~25 px stay
+        // within ~10% of their raw value, 100 px shrinks to ~25 px,
+        // 200 px shrinks to ~40 px. That's enough to keep
+        // rubber-band depth bounded under fast trackpad swipes
+        // without making slow wheel notches feel sluggish.
+        let (pending_dx, pending_dy) = self.pending_wheel_delta;
+        self.pending_wheel_delta = (0.0, 0.0);
+        if pending_dx != 0.0 || pending_dy != 0.0 {
+            const DAMP_EXPONENT: f32 = 0.7;
+            let damp = |d: f32| -> f32 {
+                if d == 0.0 {
+                    0.0
+                } else {
+                    d.signum() * d.abs().powf(DAMP_EXPONENT)
+                }
+            };
+            let dx = damp(pending_dx);
+            let dy = damp(pending_dy);
+            Self::dispatch_scroll(self, dx, dy);
+        }
+
         if let Some(ref mut tree) = self.current_tree {
             tree.tick_scroll_physics(now);
+
+            // Synthesize the missing `ScrollPhase::Ended` signal that
+            // the desktop runner gets from winit but the DOM doesn't
+            // expose for wheel events. The wheel handler stamps
+            // `last_wheel_time_ms` on every dispatched event; once
+            // enough idle time has elapsed since the last stamp, we
+            // fire `on_scroll_end()` on the tree, which kicks the
+            // bounce-back spring on any scroll container that ended
+            // a gesture in rubber-band territory. Without this hook
+            // the scroll position stays parked in overscroll forever
+            // and the user sees a stuck-at-the-edge scroll.
+            //
+            // The debounce window is two-tiered:
+            //
+            //   - **Overscrolling**: 32 ms (~2 frames at 60 fps).
+            //     Once the offset is past the edge there is nothing
+            //     more to scroll, so the moment wheel events stop
+            //     arriving we want the bounce — any longer feels
+            //     laggy because the user is staring at a stuck
+            //     rubber-band stretch.
+            //   - **Not overscrolling**: 120 ms. Long enough to
+            //     bridge the gap between adjacent macOS trackpad
+            //     momentum events and discrete wheel notches so the
+            //     state machine doesn't flap from `Scrolling` to
+            //     `Idle` mid-scroll.
+            //
+            // The `has_bouncing_scroll` early-out in `dispatch_scroll`
+            // protects us from the macOS ~800 ms tail re-arming
+            // this stamp during the bounce itself.
+            if let Some(last) = self.last_wheel_time_ms {
+                let elapsed = now.saturating_sub(last);
+                let overscrolling = tree.has_overscrolling_scroll();
+                let debounce_ms = if overscrolling { 32 } else { 120 };
+                if elapsed >= debounce_ms {
+                    tree.on_scroll_end();
+                    self.last_wheel_time_ms = None;
+                }
+            }
 
             // Drain any context-menu actions queued by
             // `handle_context_menu` (Cut / Copy / Select All)

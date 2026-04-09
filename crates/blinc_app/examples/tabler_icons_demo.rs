@@ -25,7 +25,7 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    WindowedApp::run(config, move |ctx| build_ui(ctx))
+    WindowedApp::run(config, build_ui)
 }
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
