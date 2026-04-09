@@ -952,30 +952,45 @@ class BlincEditMenuHelper: NSObject {
         BlincKeyboardHelper.shared.showKeyboard()
 
         guard let hidden = BlincKeyboardHelper.shared.hiddenTextField else { return }
+        guard let window = currentKeyWindow() else { return }
 
         // Tell the hidden text field which standard menu items it
         // should report as available the next time
         // `canPerformAction(_:withSender:)` is queried. The override
         // on `BlincHiddenTextField` reads this bitmask to decide.
+        // We still set this even though the iOS 16+ path returns a
+        // fully custom menu — the legacy `UIMenuController` fallback
+        // (iOS 13-15) reads it from `canPerformAction`.
         hidden.blincEditMenuActions = actions
-
-        // Convert the Rust-supplied window-space anchor into the
-        // hidden text field's local coordinate space. The hidden
-        // field lives at -1000,-1000 in window coords so the menu
-        // origin needs the offset applied.
-        let localAnchor = hidden.convert(anchor, from: nil)
 
         // iOS 16+: use UIEditMenuInteraction. UIMenuController is
         // deprecated in 16 and on a UITextField first responder
-        // `showMenu(from:rect:)` is mostly silently ignored — that's
-        // why the menu was invisible in the simulator.
+        // `showMenu(from:rect:)` is mostly silently ignored.
+        //
+        // Critical: the interaction must be added to a view that
+        // is **on screen** because `presentEditMenu` positions the
+        // menu in that view's coordinate space. Anchoring on the
+        // hidden text field (which lives at -1000, -1000) puts
+        // the source point off-screen and the menu renders
+        // invisibly. Anchor on the key window instead — the Rust
+        // side already passes the anchor in window coords, so
+        // no conversion is needed.
         if #available(iOS 16.0, *) {
             let interaction: UIEditMenuInteraction
-            if let existing = editMenuInteraction as? UIEditMenuInteraction {
+            if let existing = editMenuInteraction as? UIEditMenuInteraction,
+               existing.view === window {
                 interaction = existing
             } else {
+                // If we previously installed the interaction on a
+                // different view (e.g. an old window after a scene
+                // change), tear it down and re-add to the current
+                // window.
+                if let old = editMenuInteraction as? UIEditMenuInteraction,
+                   let oldView = old.view {
+                    oldView.removeInteraction(old)
+                }
                 let new = UIEditMenuInteraction(delegate: BlincEditMenuInteractionDelegate.shared)
-                hidden.addInteraction(new)
+                window.addInteraction(new)
                 editMenuInteraction = new
                 interaction = new
             }
@@ -985,18 +1000,21 @@ class BlincEditMenuHelper: NSObject {
             BlincEditMenuInteractionDelegate.shared.currentActions = actions
             let config = UIEditMenuConfiguration(
                 identifier: "blinc.editMenu" as NSString,
-                sourcePoint: localAnchor
+                sourcePoint: anchor
             )
             interaction.presentEditMenu(with: config)
             return
         }
 
-        // iOS 13-15 fallback: legacy UIMenuController.
+        // iOS 13-15 fallback: legacy UIMenuController. This API
+        // takes the rect in the *anchor view's* coordinate space.
+        // We use the key window directly so the rect is in window
+        // coords (matching what the Rust side passes in).
         let menu = UIMenuController.shared
         if #available(iOS 13.0, *) {
-            menu.showMenu(from: hidden, rect: CGRect(
-                x: localAnchor.x,
-                y: localAnchor.y,
+            menu.showMenu(from: window, rect: CGRect(
+                x: anchor.x,
+                y: anchor.y,
                 width: max(selectionRect.width, 1),
                 height: max(selectionRect.height, 24)
             ))
