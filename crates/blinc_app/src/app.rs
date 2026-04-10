@@ -466,14 +466,28 @@ impl BlincApp {
         let device = renderer.device_arc();
         let queue = renderer.queue_arc();
 
-        let text_ctx = TextRenderingContext::new(device.clone(), queue.clone());
+        let mut text_ctx = TextRenderingContext::new(device.clone(), queue.clone());
 
         // Generic-font preload mirrors the desktop path so common
         // weights are cached before the first frame. The actual font
-        // bytes have to be supplied separately by the app — see the
-        // doc comment.
-        // (`preload_fonts` and `preload_generic_styles` only register
-        // requests in the cache; they don't read from disk.)
+        // bytes have to be supplied separately by the caller via
+        // `load_font_data()` — these calls only register the
+        // generic-family → weight mappings so the shaper knows
+        // which families to resolve `font-family: sans-serif` /
+        // `monospace` to. Without them, CSS `font-family: monospace`
+        // falls back to the first registered font (usually Arial)
+        // instead of the intended monospace font.
+        text_ctx.preload_generic_styles(
+            blinc_gpu::GenericFont::SansSerif,
+            &[100, 200, 300, 400, 500, 600, 700, 800, 900],
+            false,
+        );
+        text_ctx.preload_generic_styles(
+            blinc_gpu::GenericFont::SansSerif,
+            &[100, 200, 300, 400, 500, 600, 700, 800, 900],
+            true,
+        );
+        text_ctx.preload_generic_styles(blinc_gpu::GenericFont::Monospace, &[400, 700], false);
 
         let ctx = RenderContext::new(renderer, text_ctx, device, queue, config.sample_count);
         let app = Self { ctx, config };

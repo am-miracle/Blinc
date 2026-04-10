@@ -275,8 +275,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let opacity = input.params.y;
     let border_width = input.params.z;
 
-    // Sample the texture
-    var color = textureSample(image_texture, image_sampler, input.uv);
+    // Sample the texture.
+    // Uses `textureSampleLevel` (explicit LOD 0) instead of
+    // `textureSample` because the `discard` statements above for
+    // clip rejection make control flow non-uniform, and WGSL
+    // forbids implicit-derivative sampling (`textureSample`) in
+    // non-uniform flow. The image texture has no mipmaps so LOD 0
+    // is identical to the implicit form.
+    var color = textureSampleLevel(image_texture, image_sampler, input.uv, 0.0);
 
     // Apply tint
     color = color * input.tint;

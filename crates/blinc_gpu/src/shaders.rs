@@ -3489,8 +3489,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // Sample layer texture
-    let src = textureSample(layer_texture, layer_sampler, in.uv);
+    // Sample layer texture (LOD 0 — non-uniform flow from discard above)
+    let src = textureSampleLevel(layer_texture, layer_sampler, in.uv, 0.0);
 
     // Apply opacity
     var src_alpha = src.a * uniforms.opacity;
@@ -3514,7 +3514,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (uniforms.blend_mode != BLEND_NORMAL) {
         // Compute screen UV from fragment position
         let screen_uv = in.frag_pos / uniforms.viewport_size;
-        let dst = textureSample(dest_texture, dest_sampler, screen_uv);
+        let dst = textureSampleLevel(dest_texture, dest_sampler, screen_uv, 0.0);
 
         // Unpremultiply source (src.a > 0 since src_alpha > 0.001 and opacity <= 1.0)
         let src_c = src.rgb / src.a;
