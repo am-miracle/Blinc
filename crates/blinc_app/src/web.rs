@@ -2517,6 +2517,13 @@ impl WebApp {
         self.render_state
             .set_viewport_size(self.ctx.width, self.ctx.height);
 
+        // Set blend target for mix-blend-mode support. The blend
+        // shader reads from the dest texture to composite — without
+        // this, non-Normal blend modes (multiply, screen, overlay,
+        // etc.) render as solid black. Desktop does this at
+        // windowed.rs:4031.
+        self.blinc_app.set_blend_target(&frame.texture);
+
         self.blinc_app.render_tree_with_motion(
             tree,
             &self.render_state,
