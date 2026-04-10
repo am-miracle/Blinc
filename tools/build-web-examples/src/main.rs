@@ -963,6 +963,8 @@ fn render_gallery_page(meta: &ExampleMeta) -> String {
   title="Blinc {name} example"
 ></iframe>
 
+> **Tip:** Some demos are best viewed in a full browser window. Click "Open in a new tab" below for the full experience.
+
 [Open in a new tab]({iframe_src}) · [View source on GitHub]({source_url})
 "#,
         title = meta.title,
