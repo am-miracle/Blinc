@@ -9,7 +9,7 @@ documentation = "https://docs.rs/blinc_platform_web"
 rust-version.workspace = true
 keywords = ["ui", "gui", "web", "wasm", "blinc"]
 categories = ["gui", "wasm"]
-publish = false
+publish = true
 
 [lib]
 crate-type = ["lib", "cdylib"]  # cdylib so wasm-bindgen can build the .wasm
