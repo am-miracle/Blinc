@@ -282,8 +282,21 @@ where
         ctx: &mut WindowedContext,
         registry: std::sync::Arc<blinc_layout::selector::ElementRegistry>,
     ) -> blinc_layout::renderer::RenderTree {
-        let element = self(ctx);
-        blinc_layout::renderer::RenderTree::from_element_with_registry(&element, registry)
+        let user_ui = self(ctx);
+        // Compose user UI with overlay layer, mirroring
+        // windowed.rs:3713-3719. The overlay layer is an
+        // absolutely-positioned div that renders modals, toasts,
+        // dropdowns, and context menus on top of the user content.
+        // Without this wrapper, `overlay_manager.show()` pushes
+        // content into the manager but nothing ever renders it.
+        let overlay_layer = ctx.overlay_manager.build_overlay_layer();
+        let composed = Div::new()
+            .w(ctx.width)
+            .h(ctx.height)
+            .relative()
+            .child(user_ui)
+            .child(overlay_layer);
+        blinc_layout::renderer::RenderTree::from_element_with_registry(&composed, registry)
     }
 
     fn build_and_update(
@@ -291,8 +304,15 @@ where
         ctx: &mut WindowedContext,
         tree: &mut blinc_layout::renderer::RenderTree,
     ) -> blinc_layout::UpdateResult {
-        let element = self(ctx);
-        tree.incremental_update(&element)
+        let user_ui = self(ctx);
+        let overlay_layer = ctx.overlay_manager.build_overlay_layer();
+        let composed = Div::new()
+            .w(ctx.width)
+            .h(ctx.height)
+            .relative()
+            .child(user_ui)
+            .child(overlay_layer);
+        tree.incremental_update(&composed)
     }
 }
 
