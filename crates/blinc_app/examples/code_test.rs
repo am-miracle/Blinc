@@ -1,5 +1,8 @@
 //! Minimal Code Element Test
 //!
+//! no-web: minimal diagnostic test — code_demo covers the same features
+//! in the web gallery.
+//!
 //! Run with: cargo run -p blinc_app --example code_test --features windowed
 
 use blinc_app::prelude::*;
