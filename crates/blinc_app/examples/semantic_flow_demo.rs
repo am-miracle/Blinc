@@ -160,8 +160,10 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         .child(
             div()
                 .flex_row()
+                .flex_wrap()
                 .gap(16.0)
                 .items_center()
+                .justify_center()
                 .child(card(
                     "terrain-card",
                     "Terrain",
