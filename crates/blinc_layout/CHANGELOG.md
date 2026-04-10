@@ -2,6 +2,18 @@
 
 All notable changes to `blinc_layout` will be documented in this file.
 
+## [0.5.0] - 2026-04-10
+
+### Added
+
+- `RenderTree::has_overscrolling_scroll()` for web scroll bounce-back debounce
+- `FontRegistry::invalidate_generic_cache()` clears negative lookups after font loads
+
+### Fixed
+
+- Code editor `std::time::SystemTime` → `web_time::SystemTime` for wasm32 compatibility
+- SVG color tint applied via post-rasterization `apply_tint()` for non-`currentColor` sources
+
 ## [Unreleased]
 
 ### Added

@@ -2,6 +2,56 @@
 
 All notable changes to `blinc_app` will be documented in this file.
 
+## [0.5.0] - 2026-04-10
+
+### Added
+
+- **Web/WASM platform support** (`WebApp` runner):
+  - Desktop-parity frame loop: overlays, motion containers, CSS animations/transitions, FLIP, pointer query, blend modes, @flow shaders, theme tick, focus sync
+  - `WebAssetLoader` for image loading via browser `fetch()` API + `insert_asset()` for bundled assets
+  - `preload_assets(&[urls])` async method for runtime image fetching
+  - Per-frame wheel delta coalescing with sub-linear damping for smooth scroll
+  - Scroll bounce-back physics with wheel-idle debounce (32ms overscroll / 120ms in-bounds)
+  - Touch gesture-end fires `on_gesture_end()` immediately (no momentum tail)
+  - `set_blend_target()` wired for CSS `mix-blend-mode` support
+  - `OverlayContext::init()` for blinc_cn component overlay support
+  - Fixed canvas viewport via `data-width`/`data-height`/`data-dpr` attributes
+  - `BlincConfig { max_primitives: 20_000 }` default for wasm (up from 10k)
+  - `RenderState` created in `WebApp::new` for full render path
+  - `process_pending_scroll_refs()` wired for `ScrollRef::scroll_to`
+  - Global animation scheduler registered (`blinc_animation::set_global_scheduler`)
+  - Animation-driven stateful rebuilds (`check_stateful_animations`)
+  - CSS stylesheet layout overrides on subtree rebuilds
+- **Auto-generated web example wrappers** (`tools/build-web-examples`):
+  - Cross-target convention: `pub fn build_ui(ctx) -> impl ElementBuilder`
+  - 40+ examples auto-discovered, wrapper crates generated
+  - mdBook gallery with lazy-loaded iframes
+  - `--build` flag with git-diff incremental planner
+  - `--force-rebuild` escape hatch
+  - Image asset auto-detection and `preload_assets` codegen
+  - CI staging copies per-example assets alongside wasm output
+  - Gallery sub-pages with "best viewed in full window" tip
+- **Monospace font resolution**: JetBrains Mono bundled, generic font cache invalidation after font load
+- **SVG color tint**: post-rasterization `apply_tint()` for non-currentColor sources
+- **SVG atlas eviction**: per-frame mark-and-sweep prevents animated SVG atlas overflow
+- Mobile iOS edit menu visibility fix, paste round-trip, long-press word select
+- Soft keyboard + text input cursor positioning on mobile
+
+### Fixed
+
+- Glass shader `textureSample` → `textureSampleLevel` for WebGPU uniform-control-flow compliance
+- Image shader `fwidth` → constant AA width for WebGPU compliance
+- Composite shader (layer effects) `textureSample` → `textureSampleLevel`
+- Drop shadow + glow shader `textureSample` → `textureSampleLevel`
+- `std::time::SystemTime` → `web_time::SystemTime` in code editor double-click detection
+- SVG atlas blink on animated SVGs (eviction moved to `begin_frame`)
+- CSS styling lost after stateful interaction (missing `apply_stylesheet_layout_overrides` on subtree rebuild)
+- 13 examples moved `ctx.add_css()` from `fn main` into `build_ui` for web compatibility
+- CI: removed fragile pkg/ cache, widened paths trigger, fresh binaryen for cn_demo wasm-opt crash
+- Adapter limits: wasm uses `supported.clone()` for browser-safe device creation
+- VERTEX_STORAGE capability check with descriptive error for Safari
+- Surface `COPY_SRC` usage for blend mode two-pass compositing on Chrome
+
 ## [Unreleased]
 
 ### Added

@@ -9,9 +9,9 @@ documentation = "https://docs.rs/blinc_router"
 rust-version.workspace = true
 
 [dependencies]
-blinc_core = { path = "../blinc_core", version = "0.4.0" }
-blinc_animation = { path = "../blinc_animation", version = "0.4.0" }
-blinc_layout = { path = "../blinc_layout", version = "0.4.0" }
-blinc_platform = { path = "../blinc_platform", version = "0.4.0" }
+blinc_core = { path = "../blinc_core", version = "0.5.0" }
+blinc_animation = { path = "../blinc_animation", version = "0.5.0" }
+blinc_layout = { path = "../blinc_layout", version = "0.5.0" }
+blinc_platform = { path = "../blinc_platform", version = "0.5.0" }
 tracing.workspace = true
 rustc-hash.workspace = true

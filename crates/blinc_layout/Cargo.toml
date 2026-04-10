@@ -19,9 +19,9 @@ recorder = []
 media = ["dep:blinc_media"]
 
 [dependencies]
-blinc_core = { path = "../blinc_core", version = "0.4.0" }
-blinc_animation = { path = "../blinc_animation", version = "0.4.0" }
-blinc_theme = { path = "../blinc_theme", version = "0.4.0" }
+blinc_core = { path = "../blinc_core", version = "0.5.0" }
+blinc_animation = { path = "../blinc_animation", version = "0.5.0" }
+blinc_theme = { path = "../blinc_theme", version = "0.5.0" }
 
 # Layout
 taffy.workspace = true
@@ -37,7 +37,7 @@ tracing.workspace = true
 regex.workspace = true
 
 # Media widgets (optional)
-blinc_media = { path = "../blinc_media", version = "0.4.0", optional = true }
+blinc_media = { path = "../blinc_media", version = "0.5.0", optional = true }
 
 # Markdown parsing
 pulldown-cmark = "0.10"

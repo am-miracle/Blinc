@@ -2,6 +2,18 @@
 
 All notable changes to `blinc_gpu` will be documented in this file.
 
+## [0.5.0] - 2026-04-10
+
+### Fixed
+
+- All WGSL shaders: `textureSample` → `textureSampleLevel` in non-uniform control flow paths for WebGPU compliance (glass, simple glass, image, composite, drop shadow, glow, path pipeline)
+- Image shader: `fwidth` → constant 0.75px AA width (WebGPU rejects derivative functions from non-uniform flow)
+- `device_required_limits`: wasm32 uses adapter's reported limits directly (`supported.clone()`) instead of requesting defaults that Safari/Firefox can't satisfy
+- VERTEX_STORAGE capability check: descriptive error on browsers without storage buffer vertex access
+- Monospace font fallback list: added "JetBrains Mono" and "Fira Code" to `find_generic_font_id` named fallbacks
+- `preload_generic_styles` on `with_canvas` path for web font family resolution
+- `TextRenderingContext::invalidate_generic_font_cache()` clears negative cache entries after font loads
+
 ## [0.4.0] - 2026-04-05
 
 ### Added

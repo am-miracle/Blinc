@@ -1,6 +1,6 @@
 # Blinc Roadmap
 
-> Last updated: 2026-04-04
+> Last updated: 2026-04-10
 
 ## Vision
 
@@ -53,7 +53,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | Number input (stepper) | Planned | text_input + increment/decrement |
 | Data grid | Planned | Sortable, filterable table |
 | Virtualized list | **Done** | `virtual_list(count, builder)` — variable-height items, CSS classes, flexbox layout |
-| Rich text editor | Planned | Beyond code editor, styled content |
+| Rich text editor | **Done** | `rich_text_editor()` — formatting toolbar, undo/redo, selection, clipboard |
 
 ---
 
@@ -268,7 +268,7 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 |---------|--------|-------|
 | draw_rgba_pixels | **Done** | `DrawContext::draw_rgba_pixels()` — GPU texture upload + render per frame |
 | Dynamic image rendering | **Done** | `DynamicImage` in PrimitiveBatch, renderer uploads + draws via image pipeline |
-| Virtualized list rendering | Planned | Only render visible items |
+| Virtualized list rendering | **Done** | `virtual_list()` — viewport-aware, variable-height, CSS classes |
 | Texture atlas improvements | Done | SVG atlas, glyph atlas |
 | Lazy image loading | **Done** | Viewport-aware load + 100px buffer, color/image/skeleton placeholders, fade-in animation, CSS `loading` property |
 | Render region culling | **Done** | AABB visibility test before GPU upload, shadow/rotation/affine-aware |
@@ -305,7 +305,7 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 |---------|--------|-------|
 | Blinc Book | Partial | Core concepts, 3D rendering, flow shaders (vertex/material), routing, media |
 | API reference (rustdoc) | Partial | Many crates need doc improvements |
-| Interactive examples | Planned | WASM playground |
+| Interactive examples | **Done** | 40+ live WebGPU demos in mdBook gallery, auto-generated from cross-target examples |
 | Video tutorials | Planned | Getting started, advanced topics |
 | Skills.md (AI agents) | Done | Example-driven reference for LLMs |
 
@@ -349,11 +349,11 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | 0.2.0 | Q2 2026 | Desktop production readiness — system integration, multi-window, IME, clipboard, DnD, tray, hotkeys, code editor, virtual list | **Complete** |
 | 0.3.0 | Q3 2026 | Mobile production readiness — gestures, safe area, haptics, navigation/router, deep linking, media (audio/video/camera), native bridge | **Complete** |
 | 0.4.0 | Q3 2026 | GPU & rendering — 3D mesh pipeline (PBR, shadows, normal maps, skeletal animation), custom shaders (bind groups, compute, post-processing), render culling, memory budget | **Complete** (pulled forward from 0.5.0) |
-| 0.5.0 | Q4 2026 | Missing widgets (date/time/color picker, range slider, number input, data grid, rich text editor), lazy image loading, virtualized list rendering | In progress |
+| 0.5.0 | Q2 2026 | Web/WASM platform (WebGPU), rich text editor, virtualized list, lazy image loading, mobile soft keyboard + edit menu | **Complete** |
 | 0.6.0 | Q4 2026 | Zyntax DSL v1 — lexer, parser, type checker, Rust codegen, build.rs integration | Planned |
 | 0.7.0 | Q1 2027 | Developer experience — hot reload, visual inspector, layout/animation debugger, performance profiler | Planned |
 | 0.8.0 | Q1 2027 | Accessibility v1 — semantic roles, screen reader, keyboard navigation, ARIA-like attributes, high contrast, reduced motion | Planned |
-| 0.9.0 | Q2 2027 | Platform expansion — HarmonyOS stable, Web (WASM) preview | In progress (Web preview shipped — see [`docs/web.md`](docs/web.md); HarmonyOS still in progress) |
+| 0.9.0 | Q2 2027 | Platform expansion — HarmonyOS stable | In progress |
 | 1.0.0 | Q3 2027 | Stable API, full documentation, Zyntax hot reload + LSP, production certification | Planned |
 
 ---
@@ -362,7 +362,7 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 
 See individual crate READMEs for architecture details. The most impactful areas to contribute:
 
-1. **Missing widgets** (Phase 1.4) — date picker, color picker, data grid, rich text editor
+1. **Missing widgets** (Phase 1.4) — date picker, color picker, data grid
 2. **Zyntax DSL** (Phase 3) — lexer, parser, codegen
 3. **Accessibility** (Phase 6) — screen reader, keyboard nav, ARIA
 4. **Developer tooling** (Phase 5) — hot reload, visual inspector, debugger
