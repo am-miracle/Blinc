@@ -1,5 +1,8 @@
 //! Text Wrapping Test Example
 //!
+//! no-web: diagnostic test, not a showcase demo — kept desktop-only
+//! to avoid cluttering the web example gallery.
+//!
 //! Verifies that:
 //! 1. Explicit \n characters render as line breaks
 //! 2. Text auto-wraps when exceeding container width
