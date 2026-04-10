@@ -59,6 +59,19 @@ fn device_required_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
     //   BLINC_WGPU_MAX_BUFFER_MB=512
     // The value is clamped to the adapter-supported maximum.
     let supported = adapter.limits();
+
+    // On wasm32, start from `downlevel_defaults()` which sets compute
+    // limits to 0. Safari and Firefox's WebGPU implementations don't
+    // support compute shaders yet — their
+    // `max_compute_workgroups_per_dimension` is 0. Using
+    // `Limits::default()` (which requests 65535) causes device
+    // creation to fail on those browsers with "Limit … value 65535
+    // is better than allowed 0". The downlevel base avoids requesting
+    // features the browser can't provide, while still getting full
+    // render pipeline support.
+    #[cfg(target_arch = "wasm32")]
+    let mut limits = wgpu::Limits::downlevel_defaults();
+    #[cfg(not(target_arch = "wasm32"))]
     let mut limits = wgpu::Limits::default();
 
     if let Some(mib) = env_u64("BLINC_WGPU_MAX_BUFFER_MB") {
