@@ -136,7 +136,6 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             scroll().h_full().w_full().child(
                 div()
                     .flex_row()
-                    
                     .justify_center()
                     .gap_px(20.0)
                     .child(flow_card("ripple-box", "Ripple", "Concentric ring waves"))
