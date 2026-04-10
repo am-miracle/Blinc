@@ -3,7 +3,7 @@
 //! emits one wasm wrapper crate per example under
 //! `examples/_generated/<name>/`.
 //!
-//! See [`docs/book/src/contributing/examples.md`] for the convention
+//! See `docs/book/src/contributing/examples.md` for the convention
 //! an example must satisfy to be picked up by this tool. The
 //! short version: the example file must define a top-level
 //! `pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder`.
