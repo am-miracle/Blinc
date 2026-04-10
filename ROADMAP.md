@@ -337,7 +337,7 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | Android | Stable | wgpu (Vulkan) |
 | iOS | Stable | wgpu (Metal) |
 | HarmonyOS | In progress | wgpu (Vulkan/OpenGL ES) |
-| Web (WASM) | **Preview (Tier 2)** | wgpu WebGPU + WebGL2 fallback. Render / events / state / drag / scroll / async asset preload all working. See [`docs/web.md`](docs/web.md). Touch input, IME, file dialogs, and a11y are pending. |
+| Web (WASM) | **Preview (Tier 2)** | wgpu WebGPU + WebGL2 fallback. Render / events / state / drag / scroll / async asset preload / overlays / CSS animations / motion containers / @flow shaders / glass morphism all working. See [`docs/web.md`](docs/web.md). Known issue: text measurement divergence (centering/decoration width off due to limited bundled fonts vs desktop system fonts). Touch input, IME, file dialogs, and a11y are pending. |
 | Embedded (RPi) | Future | Framebuffer or Vulkan |
 
 ---
