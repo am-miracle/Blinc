@@ -2298,10 +2298,16 @@ impl RenderContext {
                 // Resolve currentColor references in SVG source.
                 // For tintable SVGs: rasterize as white — color applied via shader tint.
                 // For non-tintable: replace with actual tint color for CPU rasterization.
+                // For SVGs that have a tint but no currentColor at all (e.g.
+                // hard-coded `fill="white"`), the post-rasterize `apply_tint`
+                // path below handles it instead.
+                let has_current_color = effective_source.contains("currentColor");
+                let needs_post_raster_tint =
+                    !is_tintable && svg.tint.is_some() && !has_current_color;
                 let final_source = if is_tintable {
                     std::borrow::Cow::Owned(effective_source.replace("currentColor", "#ffffff"))
                 } else if let Some(tint) = svg.tint {
-                    if effective_source.contains("currentColor") {
+                    if has_current_color {
                         std::borrow::Cow::Owned(
                             effective_source.replace("currentColor", &color_val(tint)),
                         )
@@ -2315,13 +2321,26 @@ impl RenderContext {
                 let rasterized =
                     RasterizedSvg::from_str(&final_source, raster_width, raster_height);
 
-                let rasterized = match rasterized {
+                let mut rasterized = match rasterized {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::warn!("Failed to rasterize SVG: {}", e);
                         continue;
                     }
                 };
+
+                // When a tint color is set but the SVG source doesn't
+                // use `currentColor` (e.g. hard-coded `fill="white"`),
+                // the currentColor replacement above was a no-op and
+                // the rasterized pixels still carry the original fill.
+                // Apply the tint as a post-rasterization color replace:
+                // every non-transparent pixel gets its RGB replaced
+                // with the tint color while preserving the original
+                // alpha. This makes `.color(Color::RED)` work on any
+                // SVG regardless of how its fills are authored.
+                if needs_post_raster_tint {
+                    rasterized.apply_tint(svg.tint.unwrap());
+                }
 
                 // Insert into atlas (handles grow/clear internally)
                 if self
