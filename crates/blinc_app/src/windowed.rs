@@ -284,9 +284,9 @@ pub struct WindowedContext {
     /// Hook state for call-order based signal persistence
     hooks: SharedHookState,
     /// Overlay manager for modals, dialogs, toasts, etc.
-    overlay_manager: OverlayManager,
+    pub(crate) overlay_manager: OverlayManager,
     /// Whether overlays were visible last frame (for triggering rebuilds)
-    had_visible_overlays: bool,
+    pub(crate) had_visible_overlays: bool,
     /// Element registry for query API (shared with RenderTree)
     element_registry: SharedElementRegistry,
     /// Callbacks to run after UI is ready (motion bindings registered)

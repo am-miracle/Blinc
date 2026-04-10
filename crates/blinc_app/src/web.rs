@@ -22,6 +22,7 @@ use blinc_layout::div::Div;
 use blinc_layout::renderer::RenderTree;
 use blinc_layout::selector::ElementRegistry;
 use blinc_layout::widgets::overlay::overlay_manager;
+use blinc_layout::widgets::OverlayManagerExt;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 
@@ -408,6 +409,15 @@ pub struct WebApp {
     /// instead of the stripped-down `render_tree` (which skips
     /// @flow shaders, motion containers, blend modes, and overlays).
     render_state: blinc_layout::RenderState,
+    /// Shared CSS animation/transition store. Desktop runner creates
+    /// this at windowed.rs:2174 and attaches it to every new tree.
+    /// Required for `@keyframes` animations and `transition:` to
+    /// progress frame-over-frame.
+    css_anim_store: Arc<Mutex<blinc_layout::CssAnimationStore>>,
+    /// Timestamp of the previous frame in `now_ms()` epoch, used to
+    /// compute `dt_ms` for CSS animation/transition ticking. `0`
+    /// on the first frame (the tick code treats that as 16 ms).
+    last_frame_time_ms: u64,
 }
 
 impl WebApp {
@@ -627,10 +637,13 @@ impl WebApp {
         // Build the RenderState that the full render path
         // (`render_tree_with_motion`) needs. Mirrors
         // windowed.rs:2590 where the desktop runner creates one.
-        // Must clone the animations Arc before it moves into
-        // WindowedContext above — both hold a reference to the
-        // same scheduler.
         let render_state = blinc_layout::RenderState::new(Arc::clone(&ctx.animations));
+
+        // CSS animation / transition store — shared between the
+        // runner (which ticks it each frame) and the tree (which
+        // reads animated property values back during
+        // apply_all_css_animation_props / apply_all_css_transition_props).
+        let css_anim_store = Arc::new(Mutex::new(blinc_layout::CssAnimationStore::new()));
 
         Ok(Self {
             canvas,
@@ -648,6 +661,8 @@ impl WebApp {
             last_wheel_time_ms: None,
             pending_wheel_delta: (0.0, 0.0),
             render_state,
+            css_anim_store,
+            last_frame_time_ms: 0,
         })
     }
 
@@ -2074,41 +2089,12 @@ impl WebApp {
     /// also call this directly to force a render after a click /
     /// keypress.
     pub fn run_one_frame(&mut self) -> Result<()> {
-        // 1. Tick scroll physics on the existing tree BEFORE any
-        //    rebuild. This advances momentum / bounce / spring-back
-        //    one step every rAF tick — without it, the wheel input
-        //    moves the position once and then everything freezes
-        //    because the physics never gets a chance to step. The
-        //    desktop runner does the same at
-        //    [`windowed.rs:3492`](crate::windowed). The current_time
-        //    units are milliseconds since app start; `web_time`
-        //    gives us a monotonic clock that works on both native
-        //    and wasm32.
         let now = now_ms();
 
-        // Drain accumulated wheel delta and dispatch as a single
-        // damped per-frame scroll. The wheel handler accumulates
-        // raw browser deltas into `pending_wheel_delta`; here we
-        // collapse the entire frame's worth of events into one
-        // dispatch.
-        //
-        // Damping curve: `dy_eff = sign(dy) * |dy|^DAMP_EXPONENT`.
-        //
-        // The exponent is sub-linear (< 1.0) so small deltas pass
-        // through almost unchanged (slow / careful scrolling feels
-        // 1:1 responsive) while large deltas — the kind macOS
-        // trackpad emits during fast swipes and momentum tails —
-        // get compressed. A linear cap is too binary: it makes the
-        // jump from "below cap" to "exactly at cap" feel like a
-        // wall, and it doesn't slow medium speeds at all. The
-        // power curve gives a smooth slowdown across the whole
-        // range.
-        //
-        // 0.7 was picked empirically: deltas under ~25 px stay
-        // within ~10% of their raw value, 100 px shrinks to ~25 px,
-        // 200 px shrinks to ~40 px. That's enough to keep
-        // rubber-band depth bounded under fast trackpad swipes
-        // without making slow wheel notches feel sluggish.
+        // ─── Phase 0: clear per-frame state ──────────────────────
+        self.render_state.clear_overlays();
+
+        // ─── Phase 0b: drain accumulated wheel delta ─────────────
         let (pending_dx, pending_dy) = self.pending_wheel_delta;
         self.pending_wheel_delta = (0.0, 0.0);
         if pending_dx != 0.0 || pending_dy != 0.0 {
@@ -2120,49 +2106,15 @@ impl WebApp {
                     d.signum() * d.abs().powf(DAMP_EXPONENT)
                 }
             };
-            let dx = damp(pending_dx);
-            let dy = damp(pending_dy);
-            Self::dispatch_scroll(self, dx, dy);
+            Self::dispatch_scroll(self, damp(pending_dx), damp(pending_dy));
         }
 
+        // ─── Phase 1a: scroll physics + pending refs ─────────────
         if let Some(ref mut tree) = self.current_tree {
             tree.tick_scroll_physics(now);
-
-            // Drain pending ScrollRef commands (scroll_to,
-            // scroll_to_with_options). Desktop runner does this at
-            // windowed.rs:3534. Without it, PendingScroll commands
-            // written by ScrollRef::scroll_to_with_options sit in the
-            // ScrollRefInner forever and never reach ScrollPhysics.
             tree.process_pending_scroll_refs();
 
-            // Synthesize the missing `ScrollPhase::Ended` signal that
-            // the desktop runner gets from winit but the DOM doesn't
-            // expose for wheel events. The wheel handler stamps
-            // `last_wheel_time_ms` on every dispatched event; once
-            // enough idle time has elapsed since the last stamp, we
-            // fire `on_scroll_end()` on the tree, which kicks the
-            // bounce-back spring on any scroll container that ended
-            // a gesture in rubber-band territory. Without this hook
-            // the scroll position stays parked in overscroll forever
-            // and the user sees a stuck-at-the-edge scroll.
-            //
-            // The debounce window is two-tiered:
-            //
-            //   - **Overscrolling**: 32 ms (~2 frames at 60 fps).
-            //     Once the offset is past the edge there is nothing
-            //     more to scroll, so the moment wheel events stop
-            //     arriving we want the bounce — any longer feels
-            //     laggy because the user is staring at a stuck
-            //     rubber-band stretch.
-            //   - **Not overscrolling**: 120 ms. Long enough to
-            //     bridge the gap between adjacent macOS trackpad
-            //     momentum events and discrete wheel notches so the
-            //     state machine doesn't flap from `Scrolling` to
-            //     `Idle` mid-scroll.
-            //
-            // The `has_bouncing_scroll` early-out in `dispatch_scroll`
-            // protects us from the macOS ~800 ms tail re-arming
-            // this stamp during the bounce itself.
+            // Wheel-end debounce (no ScrollPhase::Ended on DOM).
             if let Some(last) = self.last_wheel_time_ms {
                 let elapsed = now.saturating_sub(last);
                 let overscrolling = tree.has_overscrolling_scroll();
@@ -2173,42 +2125,36 @@ impl WebApp {
                 }
             }
 
-            // Drain any context-menu actions queued by
-            // `handle_context_menu` (Cut / Copy / Select All)
-            // and any clipboard text resolved by the async
-            // `spawn_paste_from_clipboard` Promise. Both queues
-            // are global mutexes — the runner is the only place
-            // we have a `&mut RenderTree` to feed them into.
-            // Doing it here, before the rebuild trigger detection
-            // below, means the synthetic key event flips the
-            // widget's dirty flag in time for the same frame to
-            // pick up the rebuild instead of waiting one extra
-            // tick.
             drain_pending_edit_action(tree);
             drain_pending_paste_text(tree);
         }
 
-        // 2. Detect rebuild triggers. Mirrors the desktop runner's
-        //    Phase 1 polling at [`windowed.rs:3500-3535`](crate::windowed)
-        //    but trimmed to the subset that's wired up on wasm32. Each
-        //    `if` is independent — the first `true` branch wins and
-        //    the rest still execute (for the side effect of clearing
-        //    their respective dirty flags).
-        //
-        //    - `tree.needs_rebuild()` catches widgets that called
-        //      `dirty_tracker.mark_dirty(...)` from inside an event
-        //      handler (Stateful::on_state, click handlers that mutate
-        //      element state, etc.).
-        //
-        //    - `widgets::take_needs_rebuild()` catches the global
-        //      `NEEDS_REBUILD` atomic that text widgets and the
-        //      stateful registry flip when their internal state
-        //      changes (text input focus, cursor movement, …).
-        //
-        //    Without this block, drag handlers and Stateful containers
-        //    can fire all they want — the runner never re-evaluates
-        //    the user's UI builder, so nothing visibly changes on
-        //    screen.
+        // ─── Phase 1b: motion system (pre-overlay) ───────────────
+        self.render_state.process_global_motion_exit_starts();
+        self.render_state.process_global_motion_exit_cancels();
+        self.render_state.process_global_motion_starts();
+        self.render_state.sync_shared_motion_states();
+
+        // ─── Phase 1c: overlay manager update ────────────────────
+        self.ctx.overlay_manager.set_viewport_with_scale(
+            self.ctx.width,
+            self.ctx.height,
+            self.ctx.scale_factor as f32,
+        );
+        self.ctx.overlay_manager.update(now);
+
+        if self.ctx.overlay_manager.is_dirty() {
+            let registry = self.ctx.element_registry().clone();
+            if let Some(overlay_node_id) =
+                registry.get(blinc_layout::widgets::overlay::OVERLAY_LAYER_ID)
+            {
+                let overlay_content = self.ctx.overlay_manager.build_overlay_layer();
+                blinc_layout::queue_subtree_rebuild(overlay_node_id, overlay_content);
+            }
+            self.ctx.overlay_manager.take_dirty();
+        }
+
+        // ─── Phase 1d: rebuild triggers ──────────────────────────
         if let Some(ref tree) = self.current_tree {
             if tree.needs_rebuild() {
                 self.needs_rebuild = true;
@@ -2217,13 +2163,6 @@ impl WebApp {
         if blinc_layout::widgets::take_needs_rebuild() {
             self.needs_rebuild = true;
         }
-        // The reactive `State::set` path flips this atomic via the
-        // `BlincContextState` singleton. Desktop polls it at
-        // [`windowed.rs:3513`](crate::windowed) under the same name.
-        // Without this poll, every `state.set(new_value)` call from
-        // a click / drag handler would correctly mutate the state
-        // cell but never trigger a tree rebuild, so the new value
-        // would never make it onto the screen.
         if self
             .ctx
             .dirty_flag()
@@ -2231,56 +2170,23 @@ impl WebApp {
         {
             self.needs_rebuild = true;
         }
+        if blinc_layout::widgets::take_needs_relayout() {
+            self.needs_full_rebuild = true;
+        }
+        if blinc_layout::widgets::take_needs_css_reparse() {
+            self.ctx.reparse_css();
+        }
 
-        // 3. Drain pending visual updates from `Stateful::on_drag` /
-        //    `on_state` / `dispatch_state` and any other handler
-        //    that mutates state without restructuring the tree.
-        //
-        //    `State::set` / `State::update` and the FSM transition
-        //    helpers do *not* flip `ref_dirty_flag` — that's the
-        //    `set_rebuild` path. Instead they call
-        //    `refresh_props_internal`, which:
-        //
-        //      1. Re-runs the matching `Stateful::on_state` callback
-        //         to compute fresh `RenderProps` + child Div for the
-        //         current state.
-        //      2. Pushes the result onto two global queues —
-        //         `PENDING_PROP_UPDATES` (visual-only prop changes
-        //         like `transform`, `opacity`, `bg`) and
-        //         `PENDING_SUBTREE_REBUILDS` (children added /
-        //         removed / restructured).
-        //      3. Sets the global `NEEDS_REDRAW` flag.
-        //
-        //    The runner has to drain both queues every frame and
-        //    apply them to `current_tree`. Without this, the
-        //    on_state callback fires (so the framework "knows" the
-        //    new render props), but the queue contents never reach
-        //    the live tree, so the next render still sees the old
-        //    props and nothing visually changes. Mirrors the same
-        //    drain block on desktop at
-        //    [`windowed.rs:3590-3642`](crate::windowed) verbatim,
-        //    minus the FLIP / motion / overlay-rebuild bits this
-        //    runner doesn't yet wire up.
+        // ─── Phase 2: drain stateful prop/subtree updates ────────
         let has_stateful_updates = blinc_layout::take_needs_redraw();
         let has_pending_rebuilds = blinc_layout::has_pending_subtree_rebuilds();
         if has_stateful_updates || has_pending_rebuilds {
-            // Apply queued render-prop updates to existing nodes.
-            // These are the cheap visual-only path: same node, new
-            // `RenderProps` (e.g. `transform: translate(dx, dy)`).
             let prop_updates = blinc_layout::take_pending_prop_updates();
             if let Some(ref mut tree) = self.current_tree {
                 for (node_id, props) in &prop_updates {
                     tree.update_render_props(*node_id, |p| *p = props.clone());
                 }
             }
-
-            // Apply queued subtree rebuilds. Each entry replaces a
-            // parent's children with a freshly built Div from the
-            // matching `Stateful::on_state` callback. Returns
-            // `true` if any of the rebuilds had `needs_layout =
-            // true` (i.e. the structural change might have
-            // affected layout dimensions), in which case we
-            // recompute layout once at the end.
             let mut needs_relayout = false;
             if let Some(ref mut tree) = self.current_tree {
                 needs_relayout = tree.process_pending_subtree_rebuilds();
@@ -2292,131 +2198,66 @@ impl WebApp {
             }
         }
 
-        // 4. Rebuild / incrementally update the tree if needed.
-        //    Mirrors the desktop runner's flow at
-        //    [`windowed.rs:3653-3795`](crate::windowed): on the first
-        //    frame (no existing tree) we do a full build via
-        //    `from_element_with_registry`; on subsequent dirty
-        //    frames we hand the new element tree to
-        //    `RenderTree::incremental_update`, which preserves all
-        //    accumulated state (scroll_physics, scroll_offsets,
-        //    node_states, motion_bindings, dirty tracker, …) and
-        //    only rebuilds the subtrees whose hashes actually
-        //    changed.
-        //
-        //    Splits the borrow so we can pass `&mut ctx` to the
-        //    user's builder while `&mut self.ui_builder` is also
-        //    live.
+        // ─── Phase 3: tree rebuild / incremental update ──────────
         if self.needs_rebuild {
             let builder = match self.ui_builder.as_mut() {
                 Some(b) => b,
-                None => {
-                    // No builder yet — nothing to render. Not an error;
-                    // the user just hasn't called `set_ui_builder`.
-                    return Ok(());
-                }
+                None => return Ok(()),
             };
 
-            // Reset per-call-site index counters so `InstanceKey::new`
-            // (and everything that builds on it — `scroll()`, the
-            // stateful registry, the auto-persisted scroll-physics
-            // store) can map a call site at the same source location
-            // to the same key across rebuilds. Mirrors
-            // `windowed.rs:3655` exactly. Without this, every rebuild
-            // would assign fresh InstanceKeys → fresh physics →
-            // scroll position resets on every resize.
             blinc_layout::reset_call_counters();
-            // Same lifecycle hooks the desktop runner clears at
-            // `windowed.rs:3657-3658` — stale Stateful base-prop
-            // updaters and click-outside handlers from the previous
-            // tree have to be dropped before the new builder runs.
             blinc_layout::clear_stateful_base_updaters();
             blinc_layout::click_outside::clear_click_outside_handlers();
 
-            // `needs_full_rebuild` is the resize escape hatch — see
-            // `handle_resize`. Viewport-size changes don't propagate
-            // parent constraints cleanly through `incremental_update`,
-            // so we throw away the existing tree and build fresh.
-            // Desktop does the same at
-            // [`windowed.rs:3684-3738`](crate::windowed).
             if self.needs_full_rebuild {
                 self.current_tree = None;
                 self.needs_full_rebuild = false;
             }
 
             if let Some(ref mut existing_tree) = self.current_tree {
-                // Incremental update path. The framework hashes the
-                // new element tree against the stored
-                // per-node hashes and applies the minimal possible
-                // change set:
-                //
-                //   NoChanges      → nothing — early-out, render the
-                //                    existing tree as-is.
-                //   VisualOnly     → render-prop updates were applied
-                //                    in place; no relayout needed.
-                //   LayoutChanged  → render-prop updates applied in
-                //                    place, but layout dimensions
-                //                    moved → recompute layout.
-                //   ChildrenChanged → subtrees were rebuilt in place,
-                //                    layout must be recomputed.
-                //
-                // This is the same match the desktop runner does at
-                // [`windowed.rs:3748-3795`](crate::windowed). Doing
-                // a full `RenderTree::from_element_with_registry`
-                // here instead would throw away all the live tree
-                // state (scroll_physics, node_states, motion bindings,
-                // dirty tracker, …) on every dirty trigger — that's
-                // why scroll position used to snap back on click.
                 use blinc_layout::UpdateResult;
                 match builder.build_and_update(&mut self.ctx, existing_tree) {
-                    UpdateResult::NoChanges | UpdateResult::VisualOnly => {
-                        // Nothing to relayout; render path picks up
-                        // the in-place prop updates.
-                    }
+                    UpdateResult::NoChanges | UpdateResult::VisualOnly => {}
                     UpdateResult::LayoutChanged | UpdateResult::ChildrenChanged => {
+                        // Post-children-changed wiring (mirrors windowed.rs:3812-3834)
+                        existing_tree.apply_stylesheet_base_styles();
+                        existing_tree.apply_stylesheet_layout_overrides();
                         existing_tree.compute_layout(self.ctx.width, self.ctx.height);
+                        existing_tree.apply_flip_transitions();
+                        existing_tree.update_flip_bounds();
+                        if let Some(ref stylesheet) = self.ctx.stylesheet {
+                            self.ctx.pointer_query.register_from_stylesheet(stylesheet);
+                        }
+                        existing_tree.initialize_motion_animations(&mut self.render_state);
+                        self.render_state.end_stable_motion_frame();
+                        self.render_state.process_global_motion_replays();
+                        existing_tree.start_all_css_animations();
                     }
                 }
-                // Clear the dirty tracker now that we've consumed
-                // its signal — without this, the next frame's
-                // `tree.needs_rebuild()` poll would still return
-                // `true` and we'd loop forever.
                 existing_tree.clear_dirty();
             } else {
-                // First-frame build path. No tree to update yet, so
-                // construct a fresh one and wire all the per-tree
-                // services (scheduler weak ref for scroll-bounce
-                // springs, DPI scale, layout) before stashing it in
-                // `current_tree`.
+                // First-frame build
                 let registry = Arc::clone(self.ctx.element_registry());
                 let mut tree = builder.build_from_scratch(&mut self.ctx, registry);
 
-                // Wire the AnimationScheduler weak ref into the tree.
-                // Internally `set_animations` walks the existing
-                // `scroll_physics` map and calls `set_scheduler` on
-                // each entry, which is what gives the bounce-spring
-                // path a live `Weak<Mutex<AnimationScheduler>>` to
-                // upgrade inside `ScrollPhysics::tick`. The desktop
-                // runner makes the same call at
-                // [`windowed.rs:3700`](crate::windowed).
                 tree.set_animations(&self.ctx.animations);
-
-                // CRITICAL: tell the tree about the device pixel
-                // ratio BEFORE computing layout. The renderer
-                // multiplies layout coordinates by
-                // `tree.scale_factor()` to convert logical→physical
-                // pixels inside the GPU paint context. Without this
-                // call, layout coords go straight to physical 1:1 —
-                // on a Retina display the entire UI ends up rendered
-                // into the top-left quadrant of a 2× canvas. Same
-                // call as `windowed.rs:3706`.
                 tree.set_scale_factor(self.ctx.scale_factor as f32);
+                tree.set_css_anim_store(Arc::clone(&self.css_anim_store));
 
-                // Layout is computed in *logical* coordinates — that's
-                // what the user's UI builder thinks in. The scale
-                // factor above is what scales the result up to
-                // physical pixels at render time.
+                if let Some(ref stylesheet) = self.ctx.stylesheet {
+                    tree.set_stylesheet_arc(stylesheet.clone());
+                }
+                tree.apply_all_stylesheet_styles();
+                if let Some(ref stylesheet) = self.ctx.stylesheet {
+                    self.ctx.pointer_query.register_from_stylesheet(stylesheet);
+                }
+
                 tree.compute_layout(self.ctx.width, self.ctx.height);
+                tree.update_flip_bounds();
+                tree.initialize_motion_animations(&mut self.render_state);
+                self.render_state.end_stable_motion_frame();
+                self.render_state.process_global_motion_replays();
+                tree.start_all_css_animations();
 
                 self.current_tree = Some(tree);
             }
@@ -2425,8 +2266,94 @@ impl WebApp {
             self.ctx.rebuild_count = self.ctx.rebuild_count.saturating_add(1);
         }
 
-        // 5. Render the tree to the next surface texture. If we don't
-        //    have a tree yet (no builder set), bail out gracefully.
+        // ─── Phase 4: animation tick ─────────────────────────────
+        self.render_state.process_global_motion_exit_cancels();
+        self.render_state.process_global_motion_exit_starts();
+        self.render_state.process_global_motion_starts();
+        let _animations_active = self.render_state.tick(now);
+
+        let dt_ms = if self.last_frame_time_ms > 0 {
+            now.saturating_sub(self.last_frame_time_ms) as f32
+        } else {
+            16.0
+        };
+        let css_active = if let Some(ref mut tree) = self.current_tree {
+            let store = tree.css_anim_store();
+            let (anim, trans) = store.lock().unwrap().tick(dt_ms);
+            let flip = tree.tick_flip_animations(dt_ms);
+            anim || trans || flip || tree.css_has_active()
+        } else {
+            false
+        };
+        self.last_frame_time_ms = now;
+
+        self.render_state.sync_shared_motion_states();
+        let _theme_animating = blinc_theme::ThemeState::get().tick();
+
+        // ─── Phase 5: pre-render CSS + pointer-query ─────────────
+        // Focus sync so :focus selectors work
+        {
+            let text_focus = blinc_layout::widgets::text_input::focused_text_input_node_id()
+                .or_else(blinc_layout::widgets::text_input::focused_text_area_node_id);
+            let current_focus = self.ctx.event_router.focused();
+            if text_focus != current_focus {
+                self.ctx.event_router.set_focus(text_focus);
+            }
+        }
+
+        // CSS state styles (:hover, :active, :focus)
+        if let Some(ref mut tree) = self.current_tree {
+            if tree.stylesheet().is_some() {
+                let state_changed = tree.apply_stylesheet_state_styles(&self.ctx.event_router);
+                if state_changed {
+                    tree.compute_layout(self.ctx.width, self.ctx.height);
+                    tree.update_flip_bounds();
+                }
+            }
+        }
+
+        // Apply animated CSS property values
+        if css_active
+            || !self
+                .current_tree
+                .as_ref()
+                .map_or(true, |t| t.css_transitions_empty())
+        {
+            if let Some(ref mut tree) = self.current_tree {
+                tree.apply_all_css_animation_props();
+                tree.apply_all_css_transition_props();
+                tree.apply_flip_animation_props();
+                if tree.apply_animated_layout_props() {
+                    tree.compute_layout(self.ctx.width, self.ctx.height);
+                    tree.update_flip_bounds();
+                }
+            }
+        }
+
+        // Pointer query (calc(env(pointer-x)) etc.)
+        if !self.ctx.pointer_query.is_empty() {
+            let (mx, my) = self.ctx.event_router.mouse_position();
+            let is_pressed = self.ctx.event_router.pressed_target().is_some();
+            let dt_sec = dt_ms / 1000.0;
+            let time_sec = now as f64 / 1000.0;
+            let registry = Arc::clone(self.ctx.element_registry());
+            let router = &self.ctx.event_router;
+            self.ctx
+                .pointer_query
+                .update(mx, my, is_pressed, dt_sec, time_sec, |id| {
+                    let node = registry.get(id)?;
+                    if router.is_hovered(node) {
+                        router.get_node_bounds(node)
+                    } else {
+                        None
+                    }
+                });
+            if let Some(ref mut tree) = self.current_tree {
+                tree.apply_pointer_styles(&self.ctx.pointer_query, &self.ctx.event_router);
+            }
+        }
+
+        // ─── Phase 6: render ─────────────────────────────────────
         let tree = match self.current_tree.as_ref() {
             Some(t) => t,
             None => return Ok(()),
@@ -2443,20 +2370,12 @@ impl WebApp {
         let physical_w = self.surface_config.width;
         let physical_h = self.surface_config.height;
 
-        // Update cursor position for @flow pointer uniforms before
-        // rendering. The desktop runner does this at windowed.rs:4033.
         let (mx, my) = self.ctx.event_router.mouse_position();
         let sf = self.ctx.scale_factor as f32;
         self.blinc_app.set_cursor_position(mx * sf, my * sf);
-
-        // Update viewport size on the RenderState so visibility
-        // culling works correctly.
         self.render_state
             .set_viewport_size(self.ctx.width, self.ctx.height);
 
-        // Use the full render path that supports @flow shaders,
-        // motion containers, blend modes, and overlays — the
-        // stripped-down `render_tree` skips all of those.
         self.blinc_app.render_tree_with_motion(
             tree,
             &self.render_state,
@@ -2466,6 +2385,12 @@ impl WebApp {
         )?;
 
         frame.present();
+
+        // ─── Phase 7: post-render cleanup ────────────────────────
+        let _content_dirty = self.ctx.overlay_manager.take_dirty();
+        let _animation_dirty = self.ctx.overlay_manager.take_animation_dirty();
+        self.ctx.had_visible_overlays = self.ctx.overlay_manager.has_visible_overlays();
+
         Ok(())
     }
 

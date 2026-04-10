@@ -683,12 +683,13 @@ use blinc_app::web::WebApp;
 use example::build_ui;
 use wasm_bindgen::prelude::*;
 
-/// Bundled font shared with the other web examples in this repo.
+/// Bundled fonts shared with the other web examples in this repo.
 /// Browsers can't hand wgpu their system fonts (those live in the
 /// compositor's 2D pipeline, not in WebGPU), so the font bytes have
-/// to live on the wasm side. Reusing `web_hello/fonts/Arial.ttf`
-/// keeps every example's wasm artifact pulling from the same source.
+/// to live on the wasm side. Reusing `web_hello/fonts/` keeps every
+/// example's wasm artifact pulling from the same source.
 const ARIAL_TTF: &[u8] = include_bytes!("../../../web_hello/fonts/Arial.ttf");
+const FIRA_CODE_TTF: &[u8] = include_bytes!("../../../web_hello/fonts/FiraCode-Regular.ttf");
 
 #[wasm_bindgen(start)]
 pub fn _start() {{
@@ -708,6 +709,13 @@ pub fn _start() {{
                 web_sys::console::log_1(
                     &format!(
                         "{crate_name}: registered {{faces}} font face(s) from Arial.ttf"
+                    )
+                    .into(),
+                );
+                let mono_faces = app.load_font_data(FIRA_CODE_TTF.to_vec());
+                web_sys::console::log_1(
+                    &format!(
+                        "{crate_name}: registered {{mono_faces}} font face(s) from FiraCode-Regular.ttf"
                     )
                     .into(),
                 );
