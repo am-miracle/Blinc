@@ -528,6 +528,19 @@ impl WebApp {
         //    rebuild + render callback.
         let scheduler = AnimationScheduler::new();
         let animations: SharedAnimationScheduler = Arc::new(Mutex::new(scheduler));
+
+        // Register the global animation scheduler handle so
+        // `blinc_animation::get_scheduler()` works for components
+        // that create `AnimatedValue`, `AnimatedKeyframe`, etc.
+        // Desktop runner does the same at windowed.rs:2166. Use
+        // `try_set` (OnceLock) indirectly — `set_global_scheduler`
+        // panics on double-init, but `WebApp::new` can only be
+        // called once per page load anyway.
+        {
+            let handle = animations.lock().unwrap().handle();
+            blinc_animation::set_global_scheduler(handle);
+        }
+
         let ref_dirty_flag: RefDirtyFlag = Arc::new(AtomicBool::new(false));
         let reactive: SharedReactiveGraph = Arc::new(Mutex::new(ReactiveGraph::new()));
         let hooks = Arc::new(Mutex::new(HookState::new()));
@@ -2084,6 +2097,13 @@ impl WebApp {
 
         if let Some(ref mut tree) = self.current_tree {
             tree.tick_scroll_physics(now);
+
+            // Drain pending ScrollRef commands (scroll_to,
+            // scroll_to_with_options). Desktop runner does this at
+            // windowed.rs:3534. Without it, PendingScroll commands
+            // written by ScrollRef::scroll_to_with_options sit in the
+            // ScrollRefInner forever and never reach ScrollPhysics.
+            tree.process_pending_scroll_refs();
 
             // Synthesize the missing `ScrollPhase::Ended` signal that
             // the desktop runner gets from winit but the DOM doesn't
