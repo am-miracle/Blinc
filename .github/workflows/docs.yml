@@ -6,19 +6,23 @@ on:
     paths:
       - 'docs/book/**'
       - '.github/workflows/docs.yml'
+      - 'crates/*/src/**'
       - 'crates/blinc_app/examples/**'
-      - 'crates/blinc_app/src/web.rs'
-      - 'crates/blinc_layout/src/**'
+      - 'extensions/*/src/**'
       - 'tools/build-web-examples/**'
+      - 'assets/**'
+      - 'Cargo.lock'
   pull_request:
     branches: [main]
     paths:
       - 'docs/book/**'
       - '.github/workflows/docs.yml'
+      - 'crates/*/src/**'
       - 'crates/blinc_app/examples/**'
-      - 'crates/blinc_app/src/web.rs'
-      - 'crates/blinc_layout/src/**'
+      - 'extensions/*/src/**'
       - 'tools/build-web-examples/**'
+      - 'assets/**'
+      - 'Cargo.lock'
   workflow_dispatch:
 
 permissions:
@@ -35,17 +39,7 @@ jobs:
     name: Build Book
     runs-on: ubuntu-latest
     steps:
-      # `fetch-depth: 100` so the `blinc-build-web-examples`
-      # incremental planner can `git diff` against the SHA stamped
-      # in `examples/_generated/.last-build-sha` (restored from the
-      # `actions/cache` step below). With the default depth of 1
-      # the diff fails for any cache older than HEAD~1, and the
-      # planner falls back to a full rebuild — correct, but
-      # defeats the cache. 100 commits is enough headroom that the
-      # cache stays useful even when CI hasn't run for a few days.
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 100
 
       # The codegen tool + wasm-pack invocations need a working
       # Rust toolchain with the wasm32 target. Cached between runs
@@ -89,24 +83,23 @@ jobs:
           sudo apt-get install -y binaryen
           wasm-opt --version || true
 
-      # Cache the per-example wasm-pack outputs so the
-      # `blinc-build-web-examples` incremental planner can skip
-      # wrappers whose inputs haven't changed since the last
-      # successful run. The cache key uses the lockfile + the
-      # codegen tool's source so dep bumps and tool changes
-      # invalidate everything; the planner's per-example git diff
-      # then handles fine-grained invalidation on top of that
-      # baseline. The `.last-build-sha` stamp lives alongside the
-      # pkg/ directories so it travels with the cache.
-      - name: Cache generated example pkg/ directories
-        uses: actions/cache@v4
-        with:
-          path: |
-            examples/_generated/**/pkg
-            examples/_generated/.last-build-sha
-          key: web-examples-pkg-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'tools/build-web-examples/src/**') }}
-          restore-keys: |
-            web-examples-pkg-v1-${{ runner.os }}-
+      # No separate cache for `examples/_generated/*/pkg/`. The
+      # `Swatinem/rust-cache` above already caches the cargo
+      # `target/` directory (the expensive part — full crate
+      # compilation). Each wasm-pack invocation on a warm cargo
+      # cache only runs wasm-bindgen + wasm-opt (~60-80s per
+      # example) — there's no compilation to redo. Caching the
+      # `pkg/` outputs separately created a fragile two-layer
+      # cache whose key (`Cargo.lock` + codegen tool source) was
+      # too narrow and didn't invalidate when crate sources
+      # changed, causing stale wasm artifacts to leak into the
+      # deployed pages. Rebuilding all wasm-pack outputs from
+      # scratch on every CI run is correct by construction and
+      # avoids that class of bug entirely. The `blinc-build-web-
+      # examples` incremental planner still works for local dev
+      # (where `.last-build-sha` persists across runs), but in CI
+      # the stamp doesn't exist → the planner falls back to
+      # "rebuild all" → predictable behavior.
 
       # Regenerates `examples/_generated/<name>/` wrapper crates
       # from the cross-target source in `crates/blinc_app/examples/`,
