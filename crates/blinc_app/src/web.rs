@@ -2290,6 +2290,51 @@ impl WebApp {
         self.render_state.sync_shared_motion_states();
         let _theme_animating = blinc_theme::ThemeState::get().tick();
 
+        // ─── Phase 4b: animation-driven rebuilds ─────────────────
+        // When the scheduler has active animations (springs,
+        // keyframes, timelines) it sets a `needs_redraw` flag each
+        // tick. Stateful elements that hold AnimatedValue /
+        // AnimatedTimeline handles need their `on_state` callbacks
+        // re-invoked so the new interpolated values make it into
+        // the render props. `check_stateful_animations()` does
+        // exactly that — it iterates every registered stateful
+        // element, checks if its springs/timelines are still
+        // active, and re-runs the callback, pushing the result into
+        // the pending-prop-update and pending-subtree-rebuild
+        // queues. Without this call, timeline animations appear
+        // frozen — the scheduler ticks the timeline internally but
+        // nothing reads the new value because `build_ui` isn't
+        // re-invoked. Desktop does this at windowed.rs:4084.
+        {
+            let needs_animation_redraw = self.ctx.animations.lock().unwrap().take_needs_redraw();
+            if needs_animation_redraw && blinc_layout::has_animating_statefuls() {
+                blinc_layout::check_stateful_animations();
+            }
+        }
+
+        // Drain any prop/subtree updates produced by
+        // `check_stateful_animations` above — they need to land
+        // on the current tree before we render this frame.
+        {
+            let prop_updates = blinc_layout::take_pending_prop_updates();
+            if let Some(ref mut tree) = self.current_tree {
+                for (node_id, props) in &prop_updates {
+                    tree.update_render_props(*node_id, |p| *p = props.clone());
+                }
+            }
+            if blinc_layout::has_pending_subtree_rebuilds() {
+                let mut needs_relayout = false;
+                if let Some(ref mut tree) = self.current_tree {
+                    needs_relayout = tree.process_pending_subtree_rebuilds();
+                }
+                if needs_relayout {
+                    if let Some(ref mut tree) = self.current_tree {
+                        tree.compute_layout(self.ctx.width, self.ctx.height);
+                    }
+                }
+            }
+        }
+
         // ─── Phase 5: pre-render CSS + pointer-query ─────────────
         // Focus sync so :focus selectors work
         {
