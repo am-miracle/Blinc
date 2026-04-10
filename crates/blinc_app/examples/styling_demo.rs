@@ -635,7 +635,7 @@ const STYLESHEET: &str = r#"
                 animation: blur-pulse 3000ms ease-in-out infinite;
             }
 
-            /* --- Backdrop-filter animation demos (Phase 9) --- */
+            /* --- Backdrop-filter animation demos --- */
 
             /* Static backdrop blur */
             #backdrop-static {
@@ -723,7 +723,7 @@ const STYLESHEET: &str = r#"
                 animation: grow-shrink 3000ms ease-in-out infinite;
             }
 
-            /* --- Phase 1: Constraint & Position Animation demos --- */
+            /* --- Constraint & Position Animation demos --- */
 
             /* min-width transition */
             #constraint-minw {
@@ -799,7 +799,7 @@ const STYLESHEET: &str = r#"
                 animation: constraint-pulse 2500ms ease-in-out infinite;
             }
 
-            /* --- Phase 2: Text Color Animation demos --- */
+            /* --- Text Color Animation demos --- */
 
             /* Text color transition on hover */
             #text-color-hover {
@@ -838,7 +838,7 @@ const STYLESHEET: &str = r#"
                 animation: color-cycle 3000ms linear infinite;
             }
 
-            /* --- Phase 3: Transform Extensions demos --- */
+            /* --- Transform Extensions demos --- */
 
             /* SkewX on hover */
             #skew-x-demo {
@@ -896,7 +896,7 @@ const STYLESHEET: &str = r#"
                 animation: skew-wobble 2000ms ease-in-out infinite;
             }
 
-            /* --- Phase 4: Font Size Animation demos --- */
+            /* --- Font Size Animation demos --- */
 
             /* Font size transition on hover */
             #font-size-hover {
@@ -920,7 +920,7 @@ const STYLESHEET: &str = r#"
                 animation: font-pulse 2000ms ease-in-out infinite;
             }
 
-            /* --- Outline demos (Phase 5) --- */
+            /* --- Outline demos --- */
 
             /* Static outline */
             #outline-static {
@@ -974,7 +974,7 @@ const STYLESHEET: &str = r#"
                 animation: outline-pulse 2500ms ease-in-out infinite;
             }
 
-            /* --- Form Input Styling (Phase 6) --- */
+            /* --- Form Input Styling --- */
 
             /* Base input style */
             #demo-input {
@@ -1118,7 +1118,7 @@ const STYLESHEET: &str = r#"
             }
 
             /* ============================================================ */
-            /* Global tag-name selectors (Phase 7: CSS for all widgets)     */
+            /* Global tag-name selectors (CSS for all widgets)     */
             /* ============================================================ */
 
             /* Style ALL h1 headings globally — uses theme CSS variables */
@@ -1211,13 +1211,13 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                     .gap(theme.spacing().space_8)
                     // Layout property animation
                     .child(layout_animation_section())
-                    // Constraint & position animation (Phase 1)
+                    // Constraint & position animation
                     .child(constraint_position_animation_section())
-                    // Text color animation (Phase 2)
+                    // Text color animation
                     .child(text_color_animation_section())
-                    // Transform extensions (Phase 3)
+                    // Transform extensions
                     .child(transform_extensions_section())
-                    // Font size animation (Phase 4)
+                    // Font size animation
                     .child(font_size_animation_section())
                     // CSS Selector Hierarchy
                     .child(selector_hierarchy_section())
@@ -1225,17 +1225,17 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                     .child(advanced_selectors_section())
                     // :is()/:where() and *-of-type selectors
                     .child(is_where_of_type_section())
-                    // Filter blur & drop-shadow (Phase 8)
+                    // Filter blur & drop-shadow
                     .child(filter_blur_section())
-                    // Backdrop-filter animation (Phase 9)
+                    // Backdrop-filter animation
                     .child(backdrop_filter_section())
-                    // Gradient animation (Phase 6)
+                    // Gradient animation
                     .child(gradient_animation_section())
-                    // Text shadow (Phase 7)
+                    // Text shadow
                     .child(text_shadow_section())
-                    // Outline (Phase 5)
+                    // Outline
                     .child(outline_section())
-                    // Form Input CSS Styling (Phase 6)
+                    // Form Input CSS Styling
                     .child(form_input_section())
                     // Checkbox & Radio CSS Styling
                     .child(form_controls_section(ctx))
@@ -1426,7 +1426,7 @@ fn layout_animation_section() -> impl ElementBuilder {
 }
 
 // ============================================================================
-// CONSTRAINT & POSITION ANIMATION SECTION (Phase 1 properties)
+// CONSTRAINT & POSITION ANIMATION SECTION
 // ============================================================================
 
 fn constraint_position_animation_section() -> impl ElementBuilder {
@@ -1545,7 +1545,7 @@ fn constraint_position_animation_section() -> impl ElementBuilder {
 }
 
 // ============================================================================
-// TEXT COLOR ANIMATION SECTION (Phase 2)
+// TEXT COLOR ANIMATION SECTION
 // ============================================================================
 
 fn text_color_animation_section() -> impl ElementBuilder {
@@ -1631,7 +1631,7 @@ fn text_color_animation_section() -> impl ElementBuilder {
 }
 
 // ============================================================================
-// FONT SIZE ANIMATION SECTION (Phase 4)
+// FONT SIZE ANIMATION SECTION
 // ============================================================================
 
 fn font_size_animation_section() -> impl ElementBuilder {
@@ -1692,7 +1692,7 @@ fn font_size_animation_section() -> impl ElementBuilder {
 }
 
 // ============================================================================
-// TRANSFORM EXTENSIONS SECTION (Phase 3)
+// TRANSFORM EXTENSIONS SECTION
 // ============================================================================
 
 fn transform_extensions_section() -> impl ElementBuilder {
@@ -2370,7 +2370,7 @@ fn is_where_of_type_section() -> impl ElementBuilder {
 }
 
 // ============================================================================
-// FILTER BLUR & DROP-SHADOW SECTION (Phase 8)
+// FILTER BLUR & DROP-SHADOW SECTION
 // ============================================================================
 
 fn filter_blur_section() -> impl ElementBuilder {
@@ -2472,7 +2472,7 @@ fn filter_blur_section() -> impl ElementBuilder {
 }
 
 // ============================================================================
-// BACKDROP-FILTER ANIMATION SECTION (Phase 9)
+// BACKDROP-FILTER ANIMATION SECTION
 // ============================================================================
 
 fn backdrop_filter_section() -> impl ElementBuilder {
@@ -2603,7 +2603,7 @@ fn backdrop_filter_section() -> impl ElementBuilder {
 }
 
 // ============================================================================
-// GRADIENT ANIMATION SECTION (Phase 6)
+// GRADIENT ANIMATION SECTION
 // ============================================================================
 
 fn gradient_animation_section() -> impl ElementBuilder {
@@ -2675,7 +2675,7 @@ fn gradient_animation_section() -> impl ElementBuilder {
 }
 
 // ============================================================================
-// TEXT SHADOW SECTION (Phase 7)
+// TEXT SHADOW SECTION
 // ============================================================================
 
 fn text_shadow_section() -> impl ElementBuilder {
@@ -2759,7 +2759,7 @@ fn text_shadow_section() -> impl ElementBuilder {
 }
 
 // ============================================================================
-// OUTLINE SECTION (Phase 5)
+// OUTLINE SECTION
 // ============================================================================
 
 fn outline_section() -> impl ElementBuilder {

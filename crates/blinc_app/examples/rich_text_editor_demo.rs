@@ -89,7 +89,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                         .color(Color::WHITE),
                 )
                 .child(
-                    text("Phase 4 · editing + undo")
+                    text("editing + undo")
                         .size(12.0)
                         .color(Color::rgba(0.55, 0.55, 0.65, 1.0)),
                 ),

@@ -1,10 +1,10 @@
 //! SVG Animation Demo
 //!
 //! Demonstrates SVG animation capabilities:
-//! - Phase 0: CSS transforms on SVG elements (rotate, scale)
-//! - Phase 1: fill/stroke color animation via @keyframes
-//! - Phase 3: stroke-dasharray/dashoffset line-drawing effect
-//! - Phase 4: Path morphing (d-attribute animation)
+//! - CSS transforms on SVG elements (rotate, scale)
+//! - Fill/stroke color animation via @keyframes
+//! - stroke-dasharray/dashoffset line-drawing effect
+//! - Path morphing (d-attribute animation)
 //! - Hamburger Menus: 9 food-themed icons (morph, dash, pulse, orbit)
 //!
 //! Run with: cargo run -p blinc_app --example svg_animation_demo --features windowed
@@ -118,7 +118,7 @@ fn main() -> Result<()> {
 }
 
 const SVG_CSS: &str = r#"
-/* Phase 0: CSS Transform Animation */
+/* CSS Transform Animation */
 @keyframes spin {
     0%   { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
@@ -136,7 +136,7 @@ const SVG_CSS: &str = r#"
     animation: pulse-scale 2s ease-in-out infinite;
 }
 
-/* Phase 1: Fill/Stroke Color Animation */
+/* Fill/Stroke Color Animation */
 @keyframes color-cycle {
     0%   { fill: #ef4444; stroke: #dc2626; }
     33%  { fill: #3b82f6; stroke: #2563eb; }
@@ -156,7 +156,7 @@ const SVG_CSS: &str = r#"
     animation: glow-stroke 2s ease-in-out infinite;
 }
 
-/* Phase 3: Stroke Dash Animation (Line Drawing) */
+/* Stroke Dash Animation (Line Drawing) */
 @keyframes draw-circle {
     0%   { stroke-dashoffset: 251; }
     100% { stroke-dashoffset: 0; }
@@ -175,7 +175,7 @@ const SVG_CSS: &str = r#"
     animation: draw-check 2s ease-out infinite alternate;
 }
 
-/* Phase 4: Path Morphing — both shapes must have the same number of segments */
+/* Path Morphing — both shapes must have the same number of segments */
 @keyframes morph-shape {
     0%   { d: path("M20,20 L80,20 L80,80 L50,80 L20,80 Z"); }
     50%  { d: path("M50,10 L90,40 L75,85 L25,85 L10,40 Z"); }
@@ -420,10 +420,10 @@ fn demo_cell(label: &str, svg_content: &str, id: &str, size: f32) -> Div {
         )
 }
 
-/// Phase 0: CSS transforms on SVGs
+/// CSS transforms on SVGs
 fn transform_section() -> Div {
     section_card(
-        "Phase 0: CSS Transforms",
+        "CSS Transforms",
         "rotate() and scale() animations applied directly to SVG elements",
     )
     .child(
@@ -436,10 +436,10 @@ fn transform_section() -> Div {
     )
 }
 
-/// Phase 1: Fill/stroke color animation
+/// Fill/stroke color animation
 fn color_section() -> Div {
     section_card(
-        "Phase 1: Fill & Stroke Animation",
+        "Fill & Stroke Animation",
         "fill and stroke colors animated via @keyframes",
     )
     .child(
@@ -452,10 +452,10 @@ fn color_section() -> Div {
     )
 }
 
-/// Phase 3: Stroke dash animation (line drawing)
+/// Stroke dash animation (line drawing)
 fn line_drawing_section() -> Div {
     section_card(
-        "Phase 3: Line Drawing Effect",
+        "Line Drawing Effect",
         "stroke-dasharray + stroke-dashoffset animation for SVG line drawing",
     )
     .child(
@@ -473,10 +473,10 @@ fn line_drawing_section() -> Div {
     )
 }
 
-/// Phase 4: Path morphing
+/// Path morphing
 fn morph_section() -> Div {
     section_card(
-        "Phase 4: Path Morphing",
+        "Path Morphing",
         "d: path() animation morphs between shapes via cubic bezier interpolation",
     )
     .child(div().flex_row().gap(48.0).justify_center().child(demo_cell(
