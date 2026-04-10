@@ -29,30 +29,21 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let mut cn_styles_loaded = false;
-    WindowedApp::run(config, move |ctx| {
-        if !cn_styles_loaded {
-            // Register default component CSS styles (uses var() for theme token references)
-            ctx.add_css(blinc_cn::cn_styles::CN_STYLES);
-
-            // User CSS overrides — loaded AFTER defaults, so they take priority
-            // Scoped to #css-overrides so they don't affect other sections
-            ctx.add_css(
-                r#"
-                #css-overrides .cn-button--primary { border-radius: 0; }
-                #css-overrides .cn-button--destructive:hover { background: var(--primary); }
-                #css-overrides .cn-badge--success { background: #00cc66; }
-                #css-demo-card { border-width: 2px; border-color: var(--primary); }
-            "#,
-            );
-
-            cn_styles_loaded = true;
-        }
-        build_ui(ctx)
-    })
+    WindowedApp::run(config, build_ui)
 }
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+    if ctx.rebuild_count == 0 {
+        ctx.add_css(blinc_cn::cn_styles::CN_STYLES);
+        ctx.add_css(
+            r#"
+            #css-overrides .cn-button--primary { border-radius: 0; }
+            #css-overrides .cn-button--destructive:hover { background: var(--primary); }
+            #css-overrides .cn-badge--success { background: #00cc66; }
+            #css-demo-card { border-width: 2px; border-color: var(--primary); }
+        "#,
+        );
+    }
     eprintln!("build_ui called");
     let theme = ThemeState::get();
 

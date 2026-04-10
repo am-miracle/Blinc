@@ -2213,7 +2213,24 @@ impl WebApp {
             }
             if needs_relayout {
                 if let Some(ref mut tree) = self.current_tree {
+                    // Mirror windowed.rs:3660-3676: after subtree
+                    // rebuilds, the new children need CSS layout
+                    // overrides (padding, gap, etc.) applied before
+                    // compute_layout, and all the post-layout wiring
+                    // (FLIP, motions, CSS animations) for the new
+                    // nodes. Without this, new subtree nodes render
+                    // with default layout — the visible symptom is
+                    // CSS styling "disappearing" after the first
+                    // stateful interaction (accordion open, checkbox
+                    // toggle, etc.).
+                    tree.apply_stylesheet_layout_overrides();
                     tree.compute_layout(self.ctx.width, self.ctx.height);
+                    tree.apply_flip_transitions();
+                    tree.update_flip_bounds();
+                    tree.initialize_motion_animations(&mut self.render_state);
+                    self.render_state.end_stable_motion_frame();
+                    self.render_state.process_global_motion_replays();
+                    tree.start_all_css_animations();
                 }
             }
         }
