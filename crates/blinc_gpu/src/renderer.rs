@@ -60,17 +60,14 @@ fn device_required_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
     // The value is clamped to the adapter-supported maximum.
     let supported = adapter.limits();
 
-    // On wasm32, start from `downlevel_defaults()` which sets compute
-    // limits to 0. Safari and Firefox's WebGPU implementations don't
-    // support compute shaders yet — their
-    // `max_compute_workgroups_per_dimension` is 0. Using
-    // `Limits::default()` (which requests 65535) causes device
-    // creation to fail on those browsers with "Limit … value 65535
-    // is better than allowed 0". The downlevel base avoids requesting
-    // features the browser can't provide, while still getting full
-    // render pipeline support.
+    // On wasm32, use the adapter's own supported limits directly
+    // instead of requesting wgpu defaults. Different browsers support
+    // different subsets of WebGPU — Safari/Firefox may report 0 for
+    // compute workgroups or storage buffer binding size. Requesting
+    // any limit above what the adapter supports causes device creation
+    // to fail. Using the adapter's limits verbatim is always safe.
     #[cfg(target_arch = "wasm32")]
-    let mut limits = wgpu::Limits::downlevel_defaults();
+    let mut limits = supported.clone();
     #[cfg(not(target_arch = "wasm32"))]
     let mut limits = wgpu::Limits::default();
 
@@ -1318,6 +1315,24 @@ impl GpuRenderer {
             })
             .await
             .map_err(|_| RendererError::AdapterNotFound)?;
+
+        // Check that the adapter supports storage buffers in vertex
+        // shaders — Blinc's SDF pipeline requires this (the primitives
+        // buffer is `var<storage, read>` accessed from both vertex and
+        // fragment stages). Early WebGPU implementations (Safari TP,
+        // some Firefox builds) may not have VERTEX_STORAGE.
+        let downlevel = adapter.get_downlevel_capabilities();
+        if !downlevel
+            .flags
+            .contains(wgpu::DownlevelFlags::VERTEX_STORAGE)
+        {
+            return Err(RendererError::ShaderError(
+                "This browser's WebGPU implementation does not support storage buffers \
+                 in vertex shaders (VERTEX_STORAGE). Blinc requires this feature for \
+                 its SDF rendering pipeline. Try Chrome 113+ or Edge 113+."
+                    .to_string(),
+            ));
+        }
 
         let required_limits = device_required_limits(&adapter);
         let config = apply_renderer_config_overrides(config, &required_limits);
