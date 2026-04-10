@@ -53,10 +53,10 @@ use blinc_layout::text::text;
 use blinc_layout::FontWeight;
 use wasm_bindgen::prelude::*;
 
-/// Bundled font shared with `web_hello`. Browsers can't hand wgpu
-/// their system fonts (those live in the compositor's 2D pipeline,
-/// not in WebGPU), so the font bytes have to live on the wasm side.
-const ARIAL_TTF: &[u8] = include_bytes!("../../web_hello/fonts/Arial.ttf");
+/// Bundled font from `assets/fonts/` at the workspace root.
+/// Browsers can't hand wgpu their system fonts, so the font bytes
+/// are included in the wasm binary via `include_bytes!`.
+const ARIAL_TTF: &[u8] = include_bytes!("../../../assets/fonts/Arial.ttf");
 
 /// FSM for the drag container. Identical shape to the
 /// `DragFSM` in [`sortable_demo.rs`](../../crates/blinc_app/examples/sortable_demo.rs)

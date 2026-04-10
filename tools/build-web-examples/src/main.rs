@@ -683,13 +683,12 @@ use blinc_app::web::WebApp;
 use example::build_ui;
 use wasm_bindgen::prelude::*;
 
-/// Bundled fonts shared with the other web examples in this repo.
+/// Bundled fonts from `assets/fonts/` at the workspace root.
 /// Browsers can't hand wgpu their system fonts (those live in the
 /// compositor's 2D pipeline, not in WebGPU), so the font bytes have
-/// to live on the wasm side. Reusing `web_hello/fonts/` keeps every
-/// example's wasm artifact pulling from the same source.
-const ARIAL_TTF: &[u8] = include_bytes!("../../../web_hello/fonts/Arial.ttf");
-const FIRA_CODE_TTF: &[u8] = include_bytes!("../../../web_hello/fonts/FiraCode-Regular.ttf");
+/// to be included in the wasm binary via `include_bytes!`.
+const ARIAL_TTF: &[u8] = include_bytes!("../../../../assets/fonts/Arial.ttf");
+const FIRA_CODE_TTF: &[u8] = include_bytes!("../../../../assets/fonts/FiraCode-Regular.ttf");
 
 #[wasm_bindgen(start)]
 pub fn _start() {{

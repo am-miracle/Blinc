@@ -51,13 +51,10 @@ use blinc_layout::div::{div, Div};
 use blinc_layout::text::text;
 use wasm_bindgen::prelude::*;
 
-/// Bundled font. Browsers can't hand wgpu their system fonts (those
-/// live in the compositor's 2D pipeline, not in WebGPU), so the font
-/// bytes have to live on the wasm side. We `include_bytes!` Arial here
-/// for proof-of-life. Real apps should fetch fonts on demand via
-/// `WebAssetLoader::preload` (Phase 6) instead of bundling them — at
-/// 755 KB, Arial alone roughly doubles the wasm payload.
-const ARIAL_TTF: &[u8] = include_bytes!("../fonts/Arial.ttf");
+/// Bundled font from `assets/fonts/` at the workspace root.
+/// Browsers can't hand wgpu their system fonts, so font bytes are
+/// included in the wasm binary via `include_bytes!`.
+const ARIAL_TTF: &[u8] = include_bytes!("../../../assets/fonts/Arial.ttf");
 
 /// wasm-bindgen entry point. The `start` attribute makes this run
 /// automatically when the browser loads the generated `.js` shim.

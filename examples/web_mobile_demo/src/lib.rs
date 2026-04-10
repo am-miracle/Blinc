@@ -42,13 +42,10 @@ use std::f32::consts::PI;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
-/// Bundled font shared with the other web examples. The browser
-/// can't hand wgpu its system fonts (they live in the compositor's
-/// 2D pipeline, not in WebGPU), so the font bytes have to live on
-/// the wasm side. Reusing `web_hello/fonts/Arial.ttf` keeps every
-/// example's wasm artifact pulling from the same source so a
-/// `cargo update` doesn't pin two different font versions.
-const ARIAL_TTF: &[u8] = include_bytes!("../../web_hello/fonts/Arial.ttf");
+/// Bundled font from `assets/fonts/` at the workspace root.
+/// Browsers can't hand wgpu their system fonts, so the font bytes
+/// are included in the wasm binary via `include_bytes!`.
+const ARIAL_TTF: &[u8] = include_bytes!("../../../assets/fonts/Arial.ttf");
 
 /// Counter button with stateful hover/press states. Identical to
 /// the mobile example version.

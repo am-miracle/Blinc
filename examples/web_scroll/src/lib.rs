@@ -52,10 +52,8 @@ use wasm_bindgen::prelude::*;
 
 /// Bundled font. Browsers can't hand wgpu their system fonts (those
 /// live in the compositor's 2D pipeline, not in WebGPU), so the font
-/// bytes have to live on the wasm side. We share Arial with `web_hello`
-/// for now — Phase 6 will introduce the asset-preload helper for
-/// fonts that don't ship inside the wasm artifact.
-const ARIAL_TTF: &[u8] = include_bytes!("../../web_hello/fonts/Arial.ttf");
+/// bytes have to live on the wasm side. Bundled from `assets/fonts/`.
+const ARIAL_TTF: &[u8] = include_bytes!("../../../assets/fonts/Arial.ttf");
 
 /// wasm-bindgen entry point. The `start` attribute makes this run
 /// automatically when the browser loads the generated `.js` shim.
