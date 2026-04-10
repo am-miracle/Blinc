@@ -438,6 +438,12 @@ pub struct WebApp {
     /// compute `dt_ms` for CSS animation/transition ticking. `0`
     /// on the first frame (the tick code treats that as 16 ms).
     last_frame_time_ms: u64,
+    /// Web asset loader. A clone is registered as the global
+    /// `AssetLoader` (via `set_global_asset_loader`) so
+    /// `ImageData::load` → `global_asset_loader()` finds it. This
+    /// clone is kept so the app can insert additional assets at
+    /// runtime via `preload_asset` / `insert_asset`.
+    asset_loader: std::sync::Arc<blinc_platform_web::WebAssetLoader>,
 }
 
 impl WebApp {
@@ -634,6 +640,15 @@ impl WebApp {
         // scheme from `window.matchMedia('(prefers-color-scheme: dark)')`.
         Self::init_theme();
 
+        // Register the web asset loader so `ImageData::load` →
+        // `global_asset_loader()` finds it. The `Arc` clone kept on
+        // `WebApp` lets the user add assets at runtime via
+        // `insert_asset` / async `preload_assets`. Mirrors the
+        // desktop's `init_asset_loader()` at windowed.rs:1962.
+        let asset_loader = std::sync::Arc::new(blinc_platform_web::WebAssetLoader::new());
+        let shared = blinc_platform_web::assets::SharedWebAssetLoader(asset_loader.clone());
+        let _ = blinc_platform::assets::set_global_asset_loader(Box::new(shared));
+
         let overlay_mgr = overlay_manager();
         let element_registry: SharedElementRegistry = Arc::new(ElementRegistry::new());
         let ready_callbacks: SharedReadyCallbacks = Arc::new(Mutex::new(Vec::new()));
@@ -683,6 +698,7 @@ impl WebApp {
             render_state,
             css_anim_store,
             last_frame_time_ms: 0,
+            asset_loader,
         })
     }
 
@@ -914,6 +930,49 @@ impl WebApp {
     /// font situation.
     pub fn load_font_data(&mut self, bytes: Vec<u8>) -> usize {
         self.blinc_app.load_font_data_to_registry(bytes)
+    }
+
+    /// Insert an asset into the web asset loader's cache so it's
+    /// available to `img("key")`, `svg(include_str!(...))`, and any
+    /// other API that routes through `ImageData::load` →
+    /// `global_asset_loader().load()`.
+    ///
+    /// `key` is the same string you'd pass to `img()`. For example:
+    ///
+    /// ```ignore
+    /// app.insert_asset("assets/images/logo.png", include_bytes!("../../assets/images/logo.png").to_vec());
+    /// // Then in build_ui:
+    /// img("assets/images/logo.png").w(200.0).h(100.0)
+    /// ```
+    ///
+    /// For runtime-fetched assets (not `include_bytes!`), use
+    /// [`preload_assets`](Self::preload_assets) instead.
+    pub fn insert_asset(&self, key: impl Into<String>, bytes: Vec<u8>) {
+        self.asset_loader.insert_raw(key, bytes);
+    }
+
+    /// Fetch one or more asset URLs via the browser `fetch()` API and
+    /// insert them into the asset loader's cache. Call this from a
+    /// [`run_with_async_setup`](Self::run_with_async_setup) closure
+    /// before the first frame so `img("path")` elements can find
+    /// the bytes at render time.
+    ///
+    /// ```ignore
+    /// WebApp::run_with_async_setup(
+    ///     "blinc-canvas",
+    ///     |app| Box::pin(async move {
+    ///         app.preload_assets(&["images/hero.png", "images/icon.svg"]).await?;
+    ///         Ok(())
+    ///     }),
+    ///     build_ui,
+    /// ).await
+    /// ```
+    #[cfg(target_arch = "wasm32")]
+    pub async fn preload_assets(&self, urls: &[&str]) -> crate::error::Result<()> {
+        self.asset_loader
+            .preload(urls)
+            .await
+            .map_err(|e| crate::error::BlincError::Platform(format!("preload_assets: {e}")))
     }
 
     /// Install browser DOM event listeners that route input through the

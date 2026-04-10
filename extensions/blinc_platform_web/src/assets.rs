@@ -121,6 +121,25 @@ impl WebAssetLoader {
     }
 }
 
+/// Newtype wrapper around `Arc<WebAssetLoader>` that implements
+/// `AssetLoader`. Needed so one `Arc` clone can be registered via
+/// `set_global_asset_loader(Box::new(SharedWebAssetLoader(…)))` while
+/// another clone is kept for `insert_raw` / `preload`.
+#[derive(Clone)]
+pub struct SharedWebAssetLoader(pub std::sync::Arc<WebAssetLoader>);
+
+impl AssetLoader for SharedWebAssetLoader {
+    fn load(&self, path: &AssetPath) -> Result<Vec<u8>> {
+        self.0.load(path)
+    }
+    fn exists(&self, path: &AssetPath) -> bool {
+        self.0.exists(path)
+    }
+    fn platform_name(&self) -> &'static str {
+        "web"
+    }
+}
+
 impl AssetLoader for WebAssetLoader {
     fn load(&self, path: &AssetPath) -> Result<Vec<u8>> {
         let key = Self::key_for(path);
