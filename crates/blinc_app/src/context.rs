@@ -2368,6 +2368,7 @@ impl RenderContext {
                 continue;
             };
             let src_uv = region.uv_bounds(self.svg_atlas.width(), self.svg_atlas.height());
+            self.svg_atlas.mark_used(cache_key);
 
             // Apply CSS affine transform to SVG bounds if present.
             // Pass full 2x2 affine to shader for rotation, scale, and skew support.
@@ -2426,6 +2427,11 @@ impl RenderContext {
             self.renderer
                 .render_images(target, self.svg_atlas.view(), &instances);
         }
+
+        // Mark the end of this frame for the atlas's used-this-frame
+        // tracking. Entries not accessed next frame become eviction
+        // candidates if the atlas runs out of space.
+        self.svg_atlas.end_frame();
     }
 
     /// Collect text, SVG, and image elements from the render tree
