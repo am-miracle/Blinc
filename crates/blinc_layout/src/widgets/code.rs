@@ -1559,8 +1559,8 @@ impl CodeEditor {
                         d.cursor_from_click(adjusted_x, adjusted_y);
 
                         // Double-click detection: select word
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
+                        let now = web_time::SystemTime::now()
+                            .duration_since(web_time::UNIX_EPOCH)
                             .map(|t| t.as_secs_f64() * 1000.0)
                             .unwrap_or(0.0);
                         let is_double_click =

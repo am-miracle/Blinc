@@ -25,7 +25,7 @@ use blinc_layout::widgets::overlay::overlay_manager;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 
-use crate::app::BlincApp;
+use crate::app::{BlincApp, BlincConfig};
 use crate::error::{BlincError, Result};
 use crate::windowed::{
     RefDirtyFlag, SharedAnimationScheduler, SharedElementRegistry, SharedReactiveGraph,
@@ -401,6 +401,13 @@ pub struct WebApp {
     /// dispatch on the next frame, instead of stacking up at the
     /// scroll widget without bound.
     pending_wheel_delta: (f32, f32),
+    /// Dynamic per-frame state: motion animations, cursor blink,
+    /// overlays. The desktop runner creates this via
+    /// `RenderState::new(animations)` — the web runner needs it so
+    /// it can call `render_tree_with_motion` (the full render path)
+    /// instead of the stripped-down `render_tree` (which skips
+    /// @flow shaders, motion containers, blend modes, and overlays).
+    render_state: blinc_layout::RenderState,
 }
 
 impl WebApp {
@@ -488,7 +495,21 @@ impl WebApp {
         canvas.set_height(physical_height as u32);
 
         // 3. Build the GPU renderer from the canvas.
-        let (blinc_app, surface) = BlincApp::with_canvas(canvas.clone(), None).await?;
+        //
+        // Raise `max_primitives` from the default 10,000 to 20,000.
+        // Desktop examples that are heavy on styled divs (styling_demo
+        // generates ~10,300 primitives) overflow the 10k buffer on
+        // wasm — the desktop runner can override via the
+        // `BLINC_GPU_MAX_PRIMITIVES` env var, but `std::env::var` is
+        // a no-op on wasm32.  20k covers every current example with
+        // comfortable headroom and adds ~3.7 MB to GPU memory
+        // (20,000 × 368 bytes per GpuPrimitive ≈ 7.2 MB total).
+        let config = BlincConfig {
+            max_primitives: 20_000,
+            sample_count: 1, // No MSAA on web — SDF AA handles edges
+            ..Default::default()
+        };
+        let (blinc_app, surface) = BlincApp::with_canvas(canvas.clone(), Some(config)).await?;
 
         // 3a. Wire the global text measurer to the BlincApp's font
         // registry. Without this, the layout system falls back to
@@ -603,6 +624,14 @@ impl WebApp {
             ready_callbacks,
         );
 
+        // Build the RenderState that the full render path
+        // (`render_tree_with_motion`) needs. Mirrors
+        // windowed.rs:2590 where the desktop runner creates one.
+        // Must clone the animations Arc before it moves into
+        // WindowedContext above — both hold a reference to the
+        // same scheduler.
+        let render_state = blinc_layout::RenderState::new(Arc::clone(&ctx.animations));
+
         Ok(Self {
             canvas,
             surface,
@@ -618,6 +647,7 @@ impl WebApp {
             last_cursor: "default",
             last_wheel_time_ms: None,
             pending_wheel_delta: (0.0, 0.0),
+            render_state,
         })
     }
 
@@ -2412,8 +2442,28 @@ impl WebApp {
 
         let physical_w = self.surface_config.width;
         let physical_h = self.surface_config.height;
-        self.blinc_app
-            .render_tree(tree, &view, physical_w, physical_h)?;
+
+        // Update cursor position for @flow pointer uniforms before
+        // rendering. The desktop runner does this at windowed.rs:4033.
+        let (mx, my) = self.ctx.event_router.mouse_position();
+        let sf = self.ctx.scale_factor as f32;
+        self.blinc_app.set_cursor_position(mx * sf, my * sf);
+
+        // Update viewport size on the RenderState so visibility
+        // culling works correctly.
+        self.render_state
+            .set_viewport_size(self.ctx.width, self.ctx.height);
+
+        // Use the full render path that supports @flow shaders,
+        // motion containers, blend modes, and overlays — the
+        // stripped-down `render_tree` skips all of those.
+        self.blinc_app.render_tree_with_motion(
+            tree,
+            &self.render_state,
+            &view,
+            physical_w,
+            physical_h,
+        )?;
 
         frame.present();
         Ok(())
