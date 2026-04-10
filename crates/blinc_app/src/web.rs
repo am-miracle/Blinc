@@ -522,9 +522,26 @@ impl WebApp {
         //    the canonical "resize the canvas to match its CSS size"
         //    pattern from the wgpu web examples — without it, the
         //    canvas defaults to 300×150 regardless of CSS.
-        let logical_width = canvas.client_width() as f32;
-        let logical_height = canvas.client_height() as f32;
-        let scale_factor = window.device_pixel_ratio();
+        //
+        //    Optional overrides via `data-` attributes on the canvas:
+        //      <canvas data-width="800" data-height="600" data-dpr="1">
+        //    When present, these lock the logical viewport and DPR to
+        //    fixed values regardless of the browser's actual CSS layout
+        //    or display scaling. This gives docs/book iframe demos a
+        //    consistent rendering across all devices (no layout reflow
+        //    on resize, no DPR-dependent visual differences).
+        let data_attr = |name: &str| -> Option<f64> {
+            canvas
+                .get_attribute(name)
+                .and_then(|v| v.parse::<f64>().ok())
+        };
+        let logical_width = data_attr("data-width")
+            .map(|v| v as f32)
+            .unwrap_or_else(|| canvas.client_width() as f32);
+        let logical_height = data_attr("data-height")
+            .map(|v| v as f32)
+            .unwrap_or_else(|| canvas.client_height() as f32);
+        let scale_factor = data_attr("data-dpr").unwrap_or_else(|| window.device_pixel_ratio());
         let physical_width = (logical_width * scale_factor as f32).round().max(1.0);
         let physical_height = (logical_height * scale_factor as f32).round().max(1.0);
         canvas.set_width(physical_width as u32);
@@ -2095,15 +2112,26 @@ impl WebApp {
             None => return,
         };
 
+        // Respect data-width/data-height/data-dpr overrides — when
+        // these are set, the canvas viewport is locked and resize
+        // events are ignored (the fixed dimensions take precedence
+        // over the browser's CSS layout).
+        if app.canvas.get_attribute("data-width").is_some()
+            || app.canvas.get_attribute("data-height").is_some()
+        {
+            return;
+        }
+
         let logical_width = app.canvas.client_width() as f32;
         let logical_height = app.canvas.client_height() as f32;
         if logical_width <= 0.0 || logical_height <= 0.0 {
-            // Canvas is currently zero-sized — typical during fullscreen
-            // transitions or before initial layout. Skip until a real
-            // resize event lands.
             return;
         }
-        let scale_factor = window.device_pixel_ratio();
+        let scale_factor = app
+            .canvas
+            .get_attribute("data-dpr")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or_else(|| window.device_pixel_ratio());
 
         // Skip if nothing actually changed. `window.resize` fires for
         // many non-resize events (devtools toggle, focus changes…).

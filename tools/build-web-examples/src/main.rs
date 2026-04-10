@@ -192,6 +192,11 @@ struct ExampleMeta {
     /// are fetched via `preload_assets` at startup (the browser
     /// serves them from the same origin as the wasm).
     image_assets: Vec<String>,
+    /// Window width/height from `WindowConfig { width: N, height: M }`
+    /// in the example's `fn main`. Extracted so the generated
+    /// `index.html` can set `data-width`/`data-height` on the canvas
+    /// for consistent rendering in docs/book iframes.
+    window_size: Option<(u32, u32)>,
 }
 
 /// Walk `EXAMPLES_DIR`, parse each `.rs`, and return metadata for
@@ -259,6 +264,7 @@ fn discover_examples(workspace_root: &Path) -> Vec<ExampleMeta> {
         let description = extract_description(&source);
         let extra_deps = infer_extra_deps(&source);
         let image_assets = detect_image_assets(&source);
+        let window_size = extract_window_size(&source);
 
         let relative_path = path
             .strip_prefix(workspace_root)
@@ -280,6 +286,7 @@ fn discover_examples(workspace_root: &Path) -> Vec<ExampleMeta> {
             description,
             extra_deps,
             image_assets,
+            window_size,
         });
     }
 
@@ -409,6 +416,48 @@ fn format_fallback_title(stem: &str) -> String {
 /// strings containing `crates/blinc_app/examples/assets/` — the
 /// convention all desktop examples use for bundled images. Returns
 /// deduplicated, sorted paths.
+/// Extract `width` and `height` from a `WindowConfig { ... }` block
+/// in the example source. Looks for `width: N` and `height: N` lines
+/// near a `WindowConfig` struct literal.
+/// Extract `width`, `height`, and `resizable` from a `WindowConfig { ... }`
+/// block in the example source. Only returns a fixed size when
+/// `resizable` is explicitly `false` — when `true` (or defaulted),
+/// the canvas should fill the viewport like a normal web page.
+fn extract_window_size(source: &str) -> Option<(u32, u32)> {
+    // Find the WindowConfig block
+    let config_start = source.find("WindowConfig")?;
+    let block = &source[config_start..];
+    let brace_start = block.find('{')?;
+    let brace_end = block.find('}')?;
+    let block = &block[brace_start..=brace_end];
+
+    let mut width: Option<u32> = None;
+    let mut height: Option<u32> = None;
+    let mut resizable = true; // default
+
+    for line in block.lines() {
+        let trimmed = line.trim().trim_end_matches(',');
+        if let Some(rest) = trimmed.strip_prefix("width:") {
+            width = rest.trim().parse().ok();
+        } else if let Some(rest) = trimmed.strip_prefix("height:") {
+            height = rest.trim().parse().ok();
+        } else if let Some(rest) = trimmed.strip_prefix("resizable:") {
+            resizable = rest.trim() != "false";
+        }
+    }
+
+    // Only lock to fixed size when resizable is explicitly false.
+    // Resizable demos should fill the viewport on web.
+    if resizable {
+        return None;
+    }
+
+    match (width, height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
+        _ => None,
+    }
+}
+
 fn detect_image_assets(source: &str) -> Vec<String> {
     let mut out = std::collections::BTreeSet::new();
     let asset_prefix = "crates/blinc_app/examples/assets/";
@@ -483,7 +532,7 @@ fn generate_wrapper(workspace_root: &Path, meta: &ExampleMeta) -> std::io::Resul
     )?;
     fs::write(
         wrapper_dir.join("index.html"),
-        render_index_html(&meta.title, &crate_name),
+        render_index_html(&meta.title, &crate_name, meta.window_size),
     )?;
 
     let serve_sh_path = wrapper_dir.join("serve.sh");
@@ -782,10 +831,20 @@ pub fn _start() {{
     )
 }
 
-fn render_index_html(title: &str, crate_name: &str) -> String {
+fn render_index_html(title: &str, crate_name: &str, window_size: Option<(u32, u32)>) -> String {
     // Convert crate name back to the JS import shim filename. wasm-pack
     // emits `<package_name_with_underscores>.js`, not hyphens.
     let js_name = crate_name.replace('-', "_");
+    let canvas_attrs = match window_size {
+        Some((w, h)) => format!(
+            r#" data-width="{w}" data-height="{h}" data-dpr="1" style="width:{w}px;height:{h}px""#
+        ),
+        None => String::new(),
+    };
+    let canvas_css = match window_size {
+        Some(_) => "display: block; /* fixed size via data- attrs */",
+        None => "display: block; width: 100vw; height: 100vh;",
+    };
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -809,9 +868,7 @@ fn render_index_html(title: &str, crate_name: &str) -> String {
         justify-content: stretch;
       }}
       #blinc-canvas {{
-        display: block;
-        width: 100vw;
-        height: 100vh;
+        {canvas_css}
       }}
       #unsupported {{
         display: none;
@@ -832,7 +889,7 @@ fn render_index_html(title: &str, crate_name: &str) -> String {
     </style>
   </head>
   <body>
-    <canvas id="blinc-canvas"></canvas>
+    <canvas id="blinc-canvas"{canvas_attrs}></canvas>
 
     <div id="unsupported">
       <strong>WebGPU not available</strong>
@@ -860,6 +917,8 @@ fn render_index_html(title: &str, crate_name: &str) -> String {
 "#,
         title = title,
         js_name = js_name,
+        canvas_css = canvas_css,
+        canvas_attrs = canvas_attrs,
     )
 }
 
