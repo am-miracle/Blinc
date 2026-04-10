@@ -128,8 +128,16 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     }
 
     let bg = Color::rgba(0.12, 0.12, 0.14, 1.0);
-    let card_w = 280.0;
-    let card_h = 280.0;
+    // Scale cards to fit: 2 columns on narrow screens, up to 4 on wide.
+    // Available width = viewport - padding (16px each side)
+    let available = ctx.width - 32.0;
+    let cols = if available >= 4.0 * 200.0 + 3.0 * 16.0 {
+        4.0
+    } else {
+        2.0
+    };
+    let card_w = ((available - (cols - 1.0) * 16.0) / cols).min(280.0);
+    let card_h = card_w;
     let label_color = Color::rgba(0.85, 0.85, 0.90, 1.0);
     let sub_color = Color::rgba(0.55, 0.55, 0.60, 1.0);
     let default_bg = Color::WHITE;
