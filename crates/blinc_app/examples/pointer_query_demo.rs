@@ -171,36 +171,20 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                         .color(Color::rgba(0.6, 0.6, 0.7, 1.0)),
                 )
                 .child(
-                    // Cards grid
+                    // Cards grid — flex_wrap so cards reflow on narrow
+                    // viewports (docs/book iframes, mobile browsers)
                     div()
                         .w_full()
-                        .flex_col()
+                        .flex_row()
+                        .flex_wrap()
                         .gap(20.0)
-                        .child(
-                            div()
-                                .w_full()
-                                .flex_row()
-                                .gap(20.0)
-                                .child(card("tilt-card", "3D Tilt", "perspective + rotate-x/y follow cursor"))
-                                .child(card("reveal-card", "Hover Reveal", "opacity: mix(0.3, 1.0, pointer-inside)"))
-                                .child(card("distance-card", "Distance Fade", "opacity: smoothstep(1.8, 0, distance)")),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .flex_row()
-                                .gap(20.0)
-                                .child(card("corners-card", "Dynamic Corners", "border-radius: mix(4, 48, smoothstep(distance))"))
-                                .child(card("border-card", "Border Glow", "border-width: mix(0, 4, smoothstep(distance))"))
-                                .child(card("rotate-card", "Subtle Rotation", "rotate: pointer-x * 5deg")),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .flex_row()
-                                .gap(20.0)
-                                .child(card("combo-card", "Combined", "radius + border + opacity + rotate")),
-                        ),
+                        .child(card("tilt-card", "3D Tilt", "perspective + rotate-x/y follow cursor"))
+                        .child(card("reveal-card", "Hover Reveal", "opacity: mix(0.3, 1.0, pointer-inside)"))
+                        .child(card("distance-card", "Distance Fade", "opacity: smoothstep(1.8, 0, distance)"))
+                        .child(card("corners-card", "Dynamic Corners", "border-radius: mix(4, 48, smoothstep(distance))"))
+                        .child(card("border-card", "Border Glow", "border-width: mix(0, 4, smoothstep(distance))"))
+                        .child(card("rotate-card", "Subtle Rotation", "rotate: pointer-x * 5deg"))
+                        .child(card("combo-card", "Combined", "radius + border + opacity + rotate")),
                 ),
         )
 }
