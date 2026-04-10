@@ -3923,7 +3923,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 // This preserves the shape (including rounded corners) unlike blur-based approaches
 fn sample_min_distance(uv: vec2<f32>, radius: f32, texel_size: vec2<f32>) -> f32 {
     // Check center first - if opaque, distance is 0
-    let center = textureSample(original_texture, input_sampler, uv);
+    let center = textureSampleLevel(original_texture, input_sampler, uv, 0.0);
     if (center.a > 0.5) {
         return 0.0;
     }
@@ -3945,7 +3945,7 @@ fn sample_min_distance(uv: vec2<f32>, radius: f32, texel_size: vec2<f32>) -> f32
             let angle = f32(i) * 6.28318530718 / f32(num_angles);
             let offset = vec2<f32>(cos(angle), sin(angle)) * pixel_dist * texel_size;
             let sample_uv = clamp(uv + offset, vec2<f32>(0.0), vec2<f32>(1.0));
-            let s = textureSample(original_texture, input_sampler, sample_uv);
+            let s = textureSampleLevel(original_texture, input_sampler, sample_uv, 0.0);
 
             if (s.a > 0.5) {
                 min_dist = min(min_dist, dist);
@@ -3985,7 +3985,7 @@ fn fs_drop_shadow(in: VertexOutput) -> @location(0) vec4<f32> {
     let shadow_rgb = uniforms.color.rgb;
 
     // Sample original (unblurred) content at current position
-    let original = textureSample(original_texture, input_sampler, in.uv);
+    let original = textureSampleLevel(original_texture, input_sampler, in.uv, 0.0);
 
     // Composite shadow behind original using porter-duff "over" for non-premultiplied colors
     let result_a = original.a + shadow_a * (1.0 - original.a);
@@ -4072,7 +4072,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 // Find minimum distance to an opaque pixel within search_radius
 fn find_edge_distance(uv: vec2<f32>, search_radius: f32, texel_size: vec2<f32>) -> f32 {
     // Check center first - if opaque, distance is 0
-    let center = textureSample(source_texture, source_sampler, uv);
+    let center = textureSampleLevel(source_texture, source_sampler, uv, 0.0);
     if (center.a > 0.5) {
         return 0.0;
     }
@@ -4093,7 +4093,7 @@ fn find_edge_distance(uv: vec2<f32>, search_radius: f32, texel_size: vec2<f32>) 
             let angle = f32(i) * 6.28318530718 / f32(num_angles);
             let offset = vec2<f32>(cos(angle), sin(angle)) * pixel_dist * texel_size;
             let sample_uv = clamp(uv + offset, vec2<f32>(0.0), vec2<f32>(1.0));
-            let s = textureSample(source_texture, source_sampler, sample_uv);
+            let s = textureSampleLevel(source_texture, source_sampler, sample_uv, 0.0);
 
             if (s.a > 0.5) {
                 min_dist = min(min_dist, dist);
@@ -4143,7 +4143,7 @@ fn fs_glow(in: VertexOutput) -> @location(0) vec4<f32> {
     glow_alpha *= uniforms.opacity * uniforms.color.a;
 
     // Sample original content
-    let original = textureSample(source_texture, source_sampler, in.uv);
+    let original = textureSampleLevel(source_texture, source_sampler, in.uv, 0.0);
 
     // Glow color (premultiplied)
     let glow_rgb = uniforms.color.rgb;
