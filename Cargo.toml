@@ -34,6 +34,9 @@ members = [
     "examples/web_drag",
     "examples/web_assets",
     "examples/web_mobile_demo",
+    "examples/web_typography",
+    "examples/web_text_widgets",
+    "examples/web_text_position",
     # Auto-generated wasm wrapper crates produced by
     # `tools/build-web-examples` from the cross-target examples in
     # `crates/blinc_app/examples/`. The directory is gitignored except

@@ -726,11 +726,12 @@ use example::build_ui;
 use wasm_bindgen::prelude::*;
 
 /// Bundled fonts from `assets/fonts/` at the workspace root.
-/// Browsers can't hand wgpu their system fonts (those live in the
-/// compositor's 2D pipeline, not in WebGPU), so the font bytes have
-/// to be included in the wasm binary via `include_bytes!`.
+/// Browsers can't hand wgpu their system fonts, so font bytes are
+/// included in the wasm binary. These match the fonts the desktop
+/// runner preloads via `preload_fonts` at app.rs:110-121.
 const ARIAL_TTF: &[u8] = include_bytes!("../../../../assets/fonts/Arial.ttf");
 const FIRA_CODE_TTF: &[u8] = include_bytes!("../../../../assets/fonts/FiraCode-Regular.ttf");
+const JETBRAINS_MONO_TTF: &[u8] = include_bytes!("../../../../assets/fonts/JetBrainsMono-Regular.ttf");
 
 #[wasm_bindgen(start)]
 pub fn _start() {{
@@ -748,6 +749,7 @@ pub fn _start() {{
             |app| Box::pin(async move {{
                 app.load_font_data(ARIAL_TTF.to_vec());
                 app.load_font_data(FIRA_CODE_TTF.to_vec());
+                app.load_font_data(JETBRAINS_MONO_TTF.to_vec());
 {preload_block}
                 Ok(())
             }}),

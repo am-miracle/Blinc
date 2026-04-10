@@ -379,6 +379,8 @@ impl FontRegistry {
             ],
             Family::Serif => &["Noto Serif", "Times New Roman", "Georgia", "DejaVu Serif"],
             Family::Monospace => &[
+                "JetBrains Mono",
+                "Fira Code",
                 "Roboto Mono",
                 "Droid Sans Mono",
                 "SF Mono",
@@ -676,6 +678,16 @@ impl FontRegistry {
         self.faces.insert(cache_key, Some(Arc::clone(&face)));
 
         Ok(face)
+    }
+
+    /// Clear cached negative lookups for generic fonts so the next
+    /// `load_generic_with_style` call retries font resolution. Call
+    /// this after loading new font data into the registry — cached
+    /// `None` entries from before the font was loaded would otherwise
+    /// prevent the newly-loaded font from being found.
+    pub fn invalidate_generic_cache(&mut self) {
+        self.faces
+            .retain(|key, val| !key.starts_with("__generic_") || val.is_some());
     }
 
     /// Load a font with fallback to generic category

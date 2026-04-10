@@ -135,6 +135,18 @@ impl TextRenderingContext {
             .preload_generic_styles(generic, weights, italic);
     }
 
+    /// Clear cached negative lookups for generic fonts so the next
+    /// `preload_generic_styles` retries resolution against newly-
+    /// loaded font data. Without this, fonts loaded after the first
+    /// preload are invisible to the generic family resolver.
+    pub fn invalidate_generic_font_cache(&mut self) {
+        self.renderer
+            .font_registry()
+            .lock()
+            .unwrap()
+            .invalidate_generic_cache();
+    }
+
     /// Load the default font from data
     pub fn load_font_data(&mut self, data: Vec<u8>) -> Result<(), blinc_text::TextError> {
         self.renderer.load_default_font_data(data)

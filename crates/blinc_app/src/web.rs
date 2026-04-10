@@ -936,7 +936,20 @@ impl WebApp {
     /// This is symmetric with how `BlincApp::with_canvas` documents the
     /// font situation.
     pub fn load_font_data(&mut self, bytes: Vec<u8>) -> usize {
-        self.blinc_app.load_font_data_to_registry(bytes)
+        let faces = self.blinc_app.load_font_data_to_registry(bytes);
+
+        // Re-run generic-family preloading after every font load so
+        // the family→weight mapping binds to the newly-loaded bytes.
+        // `preload_generic_styles` is called once in `with_canvas`
+        // (during `WebApp::new`), but at that point the font registry
+        // is empty — no bytes have been loaded yet. Fonts are loaded
+        // later via this method in the setup closure. Without re-
+        // running the preload, `GenericFont::Monospace` never resolves
+        // to FiraCode and every `.monospace()` / `inline_code()` text
+        // element fails with "No fonts available".
+        self.blinc_app.refresh_generic_font_styles();
+
+        faces
     }
 
     /// Insert an asset into the web asset loader's cache so it's

@@ -255,6 +255,38 @@ impl BlincApp {
         &mut self.ctx
     }
 
+    /// Re-run generic font family preloading (sans-serif, monospace)
+    /// so the family→weight mapping binds to any fonts loaded since
+    /// the last call. On web, fonts are loaded after `with_canvas`
+    /// creates the text context, so the initial `preload_generic_styles`
+    /// runs against an empty registry. This method re-runs the same
+    /// calls so `.monospace()` / `.serif()` / `.sans_serif()` resolve
+    /// to the correct loaded font bytes.
+    pub fn refresh_generic_font_styles(&mut self) {
+        // Clear cached negative lookups from before fonts were loaded.
+        // Without this, the first preload attempt (which ran against an
+        // empty registry in `with_canvas`) caches "not found" for every
+        // generic family+weight combo, and subsequent preload calls hit
+        // the cache and return the stale "not found" without retrying.
+        self.ctx.text_ctx.invalidate_generic_font_cache();
+
+        self.ctx.text_ctx.preload_generic_styles(
+            blinc_gpu::GenericFont::SansSerif,
+            &[100, 200, 300, 400, 500, 600, 700, 800, 900],
+            false,
+        );
+        self.ctx.text_ctx.preload_generic_styles(
+            blinc_gpu::GenericFont::SansSerif,
+            &[100, 200, 300, 400, 500, 600, 700, 800, 900],
+            true,
+        );
+        self.ctx.text_ctx.preload_generic_styles(
+            blinc_gpu::GenericFont::Monospace,
+            &[400, 700],
+            false,
+        );
+    }
+
     /// Update the current cursor position in physical pixels (for @flow pointer input)
     pub fn set_cursor_position(&mut self, x: f32, y: f32) {
         self.ctx.set_cursor_position(x, y);

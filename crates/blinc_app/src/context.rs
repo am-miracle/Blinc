@@ -66,7 +66,7 @@ fn effective_single_clip(primary: Option<[f32; 4]>, scroll: Option<[f32; 4]>) ->
 /// Internal render context that manages GPU resources and rendering
 pub struct RenderContext {
     renderer: GpuRenderer,
-    text_ctx: TextRenderingContext,
+    pub(crate) text_ctx: TextRenderingContext,
     image_ctx: ImageRenderingContext,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
