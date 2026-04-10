@@ -650,6 +650,13 @@ impl WebApp {
         let _ = blinc_platform::assets::set_global_asset_loader(Box::new(shared));
 
         let overlay_mgr = overlay_manager();
+        // Initialize the global OverlayContext singleton so components
+        // that call `get_overlay_manager()` (blinc_cn dropdowns,
+        // dialogs, tooltips, etc.) find it. Desktop does this at
+        // windowed.rs:2258, Android at android.rs:238, iOS at ios.rs:296.
+        if !blinc_layout::overlay_state::OverlayContext::is_initialized() {
+            blinc_layout::overlay_state::OverlayContext::init(Arc::clone(&overlay_mgr));
+        }
         let element_registry: SharedElementRegistry = Arc::new(ElementRegistry::new());
         let ready_callbacks: SharedReadyCallbacks = Arc::new(Mutex::new(Vec::new()));
 
