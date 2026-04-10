@@ -133,15 +133,17 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                 .color(Color::rgba(0.6, 0.6, 0.7, 1.0)),
         )
         .child(
-            div()
-                .flex_row()
-                .flex_wrap()
-                .justify_center()
-                .gap(20.0)
-                .child(flow_card("ripple-box", "Ripple", "Concentric ring waves"))
-                .child(flow_card("plasma-box", "Plasma", "Classic plasma effect"))
-                .child(flow_card("pulse-box", "Pulse", "Breathing radial gradient"))
-                .child(flow_card("sdf-box", "SDF Circle", "Distance field ring")),
+            scroll().h_full().w_full().child(
+                div()
+                    .flex_row()
+                    
+                    .justify_center()
+                    .gap_px(20.0)
+                    .child(flow_card("ripple-box", "Ripple", "Concentric ring waves"))
+                    .child(flow_card("plasma-box", "Plasma", "Classic plasma effect"))
+                    .child(flow_card("pulse-box", "Pulse", "Breathing radial gradient"))
+                    .child(flow_card("sdf-box", "SDF Circle", "Distance field ring")),
+            ),
         )
 }
 
