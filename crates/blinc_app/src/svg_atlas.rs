@@ -119,51 +119,25 @@ impl SvgAtlas {
         rgba_pixels: &[u8],
         device: &wgpu::Device,
     ) -> Option<SvgAtlasRegion> {
-        // Try to allocate
+        // Try to allocate — grow if needed, but never repack mid-frame.
+        // Eviction runs in `begin_frame()` at the top of the render
+        // pass so UV coordinates stay stable for the entire loop.
         let region = match self.allocate(width, height) {
             Some(r) => r,
             None => {
-                // Try growing — succeeds until we hit MAX_SIZE
                 if self.grow(device) {
-                    if let Some(r) = self.allocate(width, height) {
-                        r
-                    } else {
-                        // Grew but still can't fit — try eviction
-                        if self.evict_unused(device) {
-                            self.allocate(width, height)?
-                        } else {
-                            return None;
-                        }
-                    }
+                    self.allocate(width, height)?
                 } else {
-                    // At max size — evict stale entries and repack
-                    if self.evict_unused(device) {
-                        if let Some(r) = self.allocate(width, height) {
-                            r
-                        } else {
-                            tracing::warn!(
-                                "SVG atlas at max size {}x{} could not fit {}x{} even after eviction ({} entries, {:.1}% used)",
-                                self.width,
-                                self.height,
-                                width,
-                                height,
-                                self.entries.len(),
-                                self.utilization() * 100.0,
-                            );
-                            return None;
-                        }
-                    } else {
-                        tracing::warn!(
-                            "SVG atlas at max size {}x{} could not fit {}x{} ({} entries, {:.1}% used, nothing to evict)",
-                            self.width,
-                            self.height,
-                            width,
-                            height,
-                            self.entries.len(),
-                            self.utilization() * 100.0,
-                        );
-                        return None;
-                    }
+                    tracing::warn!(
+                        "SVG atlas at max size {}x{} could not fit {}x{} ({} entries, {:.1}% used) — skipping insertion",
+                        self.width,
+                        self.height,
+                        width,
+                        height,
+                        self.entries.len(),
+                        self.utilization() * 100.0,
+                    );
+                    return None;
                 }
             }
         };
@@ -210,9 +184,29 @@ impl SvgAtlas {
         self.dirty = true;
     }
 
-    /// Call at the end of each frame to reset the used-this-frame set.
-    /// The set is consumed by `evict_unused` when the atlas is full.
-    pub fn end_frame(&mut self) {
+    /// Call at the **start** of each SVG render pass, before any
+    /// `get()` / `insert()` calls. Evicts entries from the previous
+    /// frame that won't be needed, then resets the tracking set for
+    /// the new frame.
+    ///
+    /// Eviction runs here — not reactively inside `insert()` — so
+    /// that all UV coordinates computed during the frame stay stable.
+    /// A mid-loop repack would move surviving entries to new shelf
+    /// positions, invalidating UVs already pushed into the instance
+    /// buffer and producing a visible blink.
+    pub fn begin_frame(&mut self, device: &wgpu::Device) {
+        // Only evict if the atlas is ≥75% full and there are entries
+        // from the previous frame that weren't used.
+        if self.utilization() >= 0.75 {
+            let stale_count = self
+                .entries
+                .keys()
+                .filter(|k| !self.used_this_frame.contains(k))
+                .count();
+            if stale_count > 0 {
+                self.evict_unused(device);
+            }
+        }
         self.used_this_frame.clear();
     }
 

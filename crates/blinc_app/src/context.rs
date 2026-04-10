@@ -1899,6 +1899,14 @@ impl RenderContext {
         svgs: &[SvgElement],
         scale_factor: f32,
     ) {
+        // Evict stale atlas entries from the previous frame BEFORE
+        // the loop so every UV coordinate computed below stays valid
+        // for the entire render pass. Doing this mid-loop (inside
+        // `insert`) would repack surviving entries to new shelf
+        // positions, invalidating UVs already pushed into the
+        // instance buffer → visible blink on animated SVGs.
+        self.svg_atlas.begin_frame(&self.device);
+
         // Collect all instances for a single batched draw call
         let mut instances: Vec<GpuImageInstance> = Vec::with_capacity(svgs.len());
 
@@ -2427,11 +2435,6 @@ impl RenderContext {
             self.renderer
                 .render_images(target, self.svg_atlas.view(), &instances);
         }
-
-        // Mark the end of this frame for the atlas's used-this-frame
-        // tracking. Entries not accessed next frame become eviction
-        // candidates if the atlas runs out of space.
-        self.svg_atlas.end_frame();
     }
 
     /// Collect text, SVG, and image elements from the render tree
