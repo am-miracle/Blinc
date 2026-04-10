@@ -337,7 +337,7 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | Android | Stable | wgpu (Vulkan) |
 | iOS | Stable | wgpu (Metal) |
 | HarmonyOS | In progress | wgpu (Vulkan/OpenGL ES) |
-| Web (WASM) | **Preview (Tier 2)** | wgpu WebGPU. Full render pipeline: SDF, glass, @flow, motion, overlays, CSS animations/transitions, blend modes, layer effects. Text: Arial + FiraCode + JetBrains Mono bundled, monospace/generic resolution working. Asset preload via `fetch()`. See [`docs/web.md`](docs/web.md). Touch input, IME, file dialogs, and a11y are pending. |
+| Web (WASM) | **Preview (Tier 2)** | wgpu WebGPU. Full render pipeline: SDF, glass, @flow, motion, overlays, CSS animations/transitions, blend modes, layer effects. Chrome 113+, Edge 113+, Firefox 141+, Safari 18+ (macOS Tahoe), iPhone Safari (iOS 18+). Text: Arial + FiraCode + JetBrains Mono bundled. Asset preload via `fetch()`. See [`docs/web.md`](docs/web.md). |
 | Embedded (RPi) | Future | Framebuffer or Vulkan |
 
 ---

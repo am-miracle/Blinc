@@ -47,7 +47,7 @@ The same `build_ui` function runs on desktop and web — no separate codebase.
 | Linux | Stable | wgpu (Vulkan) |
 | Android | Stable | wgpu (Vulkan) |
 | iOS | Stable | wgpu (Metal) |
-| **Web (WASM)** | **Preview** | wgpu (WebGPU) — Chrome 113+, Edge 113+, Firefox 141+ |
+| **Web (WASM)** | **Preview** | wgpu (WebGPU) — Chrome 113+, Edge 113+, Firefox 141+, Safari 18+ (macOS Tahoe) |
 | HarmonyOS | In progress | wgpu (Vulkan/OpenGL ES) |
 
 ## Documentation
