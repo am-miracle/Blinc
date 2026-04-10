@@ -114,15 +114,7 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let mut css_loaded = false;
-
-    WindowedApp::run(config, move |ctx| {
-        if !css_loaded {
-            ctx.add_css(SVG_CSS);
-            css_loaded = true;
-        }
-        build_ui(ctx)
-    })
+    WindowedApp::run(config, build_ui)
 }
 
 const SVG_CSS: &str = r#"
@@ -323,6 +315,13 @@ const SVG_CSS: &str = r#"
 "#;
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+    // Register CSS on the first frame. `add_css` is idempotent for
+    // identical sources (the stylesheet deduplicates), but guard with
+    // `rebuild_count` to avoid re-parsing every frame.
+    if ctx.rebuild_count == 0 {
+        ctx.add_css(SVG_CSS);
+    }
+
     let theme = ThemeState::get();
     let bg = theme.color(ColorToken::Background);
 

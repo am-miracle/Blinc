@@ -105,18 +105,14 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let mut css_loaded = false;
-
-    WindowedApp::run(config, move |ctx| {
-        if !css_loaded {
-            ctx.add_css(STYLESHEET);
-            css_loaded = true;
-        }
-        build_ui(ctx)
-    })
+    WindowedApp::run(config, build_ui)
 }
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+    if ctx.rebuild_count == 0 {
+        ctx.add_css(STYLESHEET);
+    }
+
     div()
         .w(ctx.width)
         .h(ctx.height)

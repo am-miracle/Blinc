@@ -36,14 +36,10 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let mut css_loaded = false;
+    WindowedApp::run(config, build_ui)
+}
 
-    WindowedApp::run(config, move |ctx| {
-        // Load CSS stylesheet once — base styles, hover states, and animations
-        // are applied automatically to elements with matching IDs.
-        if !css_loaded {
-            ctx.add_css(
-                r#"
+const STYLESHEET: &str = r#"
             #css-card {
                 background: #3b82f6;
                 border-radius: 12px;
@@ -1190,16 +1186,13 @@ fn main() -> Result<()> {
                 animation: cs-morph 4000ms ease-in-out infinite;
             }
 
-            "#,
-            );
-            css_loaded = true;
-        }
-
-        build_ui(ctx)
-    })
-}
+            "#;
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+    if ctx.rebuild_count == 0 {
+        ctx.add_css(STYLESHEET);
+    }
+
     let theme = ThemeState::get();
     let bg = theme.color(ColorToken::Background);
 

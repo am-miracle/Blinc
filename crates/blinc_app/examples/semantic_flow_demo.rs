@@ -119,18 +119,14 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let mut css_loaded = false;
-
-    WindowedApp::run(config, move |ctx| {
-        if !css_loaded {
-            ctx.add_css(STYLESHEET);
-            css_loaded = true;
-        }
-        build_ui(ctx)
-    })
+    WindowedApp::run(config, build_ui)
 }
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+    if ctx.rebuild_count == 0 {
+        ctx.add_css(STYLESHEET);
+    }
+
     let bg = Color::rgba(0.12, 0.12, 0.14, 1.0);
     let card_w = 280.0;
     let card_h = 280.0;

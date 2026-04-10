@@ -18,6 +18,31 @@ use blinc_app::windowed::WindowedContext;
 use blinc_core::Color;
 use blinc_theme::{ColorToken, ThemeState};
 
+const STYLESHEET: &str = r#"
+    /* Fade transition on hover */
+    #fade-hover-container {
+        overflow: clip;
+        overflow-fade: 0px;
+        border-radius: 12px;
+        transition: overflow-fade 500ms ease;
+    }
+    #fade-hover-container:hover {
+        overflow-fade: 32px;
+    }
+
+    /* Animated fade via @keyframes */
+    @keyframes fade-breathe {
+        0% { overflow-fade: 0px; }
+        50% { overflow-fade: 40px; }
+        100% { overflow-fade: 0px; }
+    }
+    #fade-anim-container {
+        overflow: clip;
+        border-radius: 12px;
+        animation: fade-breathe 3000ms ease-in-out infinite;
+    }
+"#;
+
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -33,43 +58,14 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let mut css_loaded = false;
-
-    WindowedApp::run(config, move |ctx| {
-        if !css_loaded {
-            ctx.add_css(
-                r#"
-            /* Fade transition on hover */
-            #fade-hover-container {
-                overflow: clip;
-                overflow-fade: 0px;
-                border-radius: 12px;
-                transition: overflow-fade 500ms ease;
-            }
-            #fade-hover-container:hover {
-                overflow-fade: 32px;
-            }
-
-            /* Animated fade via @keyframes */
-            @keyframes fade-breathe {
-                0% { overflow-fade: 0px; }
-                50% { overflow-fade: 40px; }
-                100% { overflow-fade: 0px; }
-            }
-            #fade-anim-container {
-                overflow: clip;
-                border-radius: 12px;
-                animation: fade-breathe 3000ms ease-in-out infinite;
-            }
-            "#,
-            );
-            css_loaded = true;
-        }
-        build_ui(ctx)
-    })
+    WindowedApp::run(config, build_ui)
 }
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+    if ctx.rebuild_count == 0 {
+        ctx.add_css(STYLESHEET);
+    }
+
     let theme = ThemeState::get();
     let bg = theme.color(ColorToken::Background);
 
