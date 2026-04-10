@@ -112,7 +112,6 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                                 tracing::info!("Opening dialog...");
                                 let mgr_for_content = mgr.clone();
                                 mgr.dialog()
-                                    .size(350.0, 180.0)
                                     .content(move || dialog_content(mgr_for_content.clone()))
                                     .show();
                             }
@@ -256,13 +255,14 @@ fn toast_content() -> Div {
 
 fn dialog_content(mgr: OverlayManager) -> Div {
     div()
-        .w(350.0)
-        .p(28.0)
+        .w(400.0)
+        .h_fit()
+        .p_px(16.0)
         .rounded(12.0)
         .bg(Color::rgba(0.15, 0.15, 0.2, 1.0))
         .shadow_xl()
         .flex_col()
-        .gap(16.0)
+        .gap_px(16.0)
         .child(
             text("Confirm Action")
                 .size(24.0)
@@ -276,10 +276,12 @@ fn dialog_content(mgr: OverlayManager) -> Div {
         )
         .child(
             div()
+                .w_full()
                 .mt(8.0)
                 .flex_row()
-                .gap(12.0)
-                .justify_end()
+                .gap_px(4.0)
+                .justify_between()
+                .content_center()
                 .child(
                     overlay_button("Cancel")
                         .bg_color(Color::rgba(1.0, 1.0, 1.0, 0.1))
