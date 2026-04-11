@@ -36,26 +36,42 @@ Blinc supports building native mobile applications for both Android and iOS. The
 
 ## Project Structure
 
+A typical Blinc mobile project (matches `mobile/example/` in this repo):
+
 ```text
 my-app/
-├── Cargo.toml           # Rust dependencies
-├── blinc.toml           # Blinc project config
+├── Cargo.toml              # Rust workspace + cdylib/staticlib config
+├── blinc.toml              # Blinc project config
+├── .cargo/                 # Per-target cargo config (linker, flags)
+├── .env                    # SDK / NDK / signing paths (gitignored)
+├── .env.example            # Template for .env
 ├── src/
-│   └── main.rs          # Shared UI code
+│   └── main.rs             # Shared Rust UI code
 ├── platforms/
-│   ├── android/         # Android-specific files
+│   ├── android/            # Android Gradle project
 │   │   ├── app/
+│   │   │   ├── build.gradle.kts
 │   │   │   └── src/main/
 │   │   │       ├── AndroidManifest.xml
-│   │   │       └── kotlin/.../MainActivity.kt
-│   │   └── build.gradle.kts
-│   └── ios/             # iOS-specific files
-│       ├── BlincApp/
-│       │   ├── AppDelegate.swift
-│       │   ├── BlincViewController.swift
-│       │   └── Info.plist
-│       └── BlincApp.xcodeproj/
-└── build-android.sh     # Build scripts
+│   │   │       └── kotlin/com/blinc/
+│   │   │           ├── MainActivity.kt
+│   │   │           └── BlincNativeBridge.kt
+│   │   ├── build.gradle.kts
+│   │   └── settings.gradle.kts
+│   ├── ios/                # iOS Xcode project
+│   │   ├── BlincApp/
+│   │   │   ├── AppDelegate.swift
+│   │   │   ├── BlincViewController.swift
+│   │   │   ├── BlincMetalView.swift
+│   │   │   ├── BlincNativeBridge.swift
+│   │   │   ├── Blinc-Bridging-Header.h
+│   │   │   ├── Info.plist
+│   │   │   └── Fonts/
+│   │   └── BlincApp.xcodeproj/
+│   └── harmony/            # HarmonyOS (in progress)
+├── build-android.sh        # Cross-compile + copy .so → jniLibs
+├── build-ios.sh            # Cross-compile + copy .a → libs/{device,simulator}
+└── build-ohos.sh           # HarmonyOS build script
 ```
 
 ## Quick Start
@@ -90,6 +106,8 @@ fn app(ctx: &mut WindowedContext) -> impl ElementBuilder {
 
 Blinc's native bridge provides a typed function-call protocol between Rust and Kotlin/Swift. Use it for any platform feature not in the framework core: camera, biometrics, push notifications, native dialogs, etc.
 
+> **Setup required.** The bridge does NOT work out of the box — you must wire it up at app startup on each platform. The example project (`mobile/example/`) shows the canonical wiring; copy the relevant bits into your own `MainActivity.kt` and `AppDelegate.swift`. Without this, every `native_call` will fail with "handler not found".
+
 ### Rust side — call into native
 
 ```rust
@@ -109,51 +127,76 @@ native_call::<(), _>("haptics", "success", ())?;
 
 ### Kotlin side — register handlers
 
-```kotlin
-// MainActivity.kt — call once during onCreate
-BlincNativeBridge.init(this)
-BlincNativeBridge.registerDefaults(context)  // built-in: haptics, device info
+Copy `BlincNativeBridge.kt` from `mobile/example/platforms/android/app/src/main/kotlin/com/blinc/` into your project — it's the JNI shim that Rust calls into.
 
-// Custom handler returning a string
-BlincNativeBridge.registerString("device", "get_battery_level") {
-    val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-    bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).toString()
+```kotlin
+// MainActivity.kt — companion object init block:
+companion object {
+    init {
+        System.loadLibrary("my_app")
+    }
 }
 
-// Handler returning Unit
-BlincNativeBridge.registerVoid("notify", "show") { args ->
-    val title = args.getString(0)
-    val body = args.getString(1)
-    NotificationHelper.show(context, title, body)
+// In onCreate:
+override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+
+    // REQUIRED: register the built-in handlers (haptics, device info,
+    // keyboard show/hide, clipboard) before the Rust frame loop starts.
+    BlincNativeBridge.registerDefaults(this)
+
+    // Optional: register your own custom handlers
+    BlincNativeBridge.registerString("device", "get_battery_level") {
+        val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+        bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).toString()
+    }
+
+    BlincNativeBridge.registerVoid("notify", "show") { args ->
+        val title = args.getString(0)
+        val body = args.getString(1)
+        NotificationHelper.show(this, title, body)
+    }
 }
 ```
 
 ### Swift side — register handlers
 
+Copy `BlincNativeBridge.swift` from `mobile/example/platforms/ios/BlincApp/` into your project — it's the C-FFI shim that Rust calls into.
+
 ```swift
-// AppDelegate.swift — call once during app launch
-BlincNativeBridge.shared.connectToRust()
-BlincNativeBridge.shared.registerDefaults()
+// AppDelegate.swift — application(_:didFinishLaunchingWithOptions:)
+func application(
+    _ application: UIApplication,
+    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+) -> Bool {
+    // REQUIRED: register defaults BEFORE connectToRust so the
+    // function pointer table is populated when Rust starts calling.
+    BlincNativeBridge.shared.registerDefaults()
+    BlincNativeBridge.shared.connectToRust()
 
-// Custom handler returning a string
-BlincNativeBridge.shared.registerString(
-    namespace: "device",
-    name: "get_battery_level"
-) { _ in
-    UIDevice.current.isBatteryMonitoringEnabled = true
-    return String(Int(UIDevice.current.batteryLevel * 100))
-}
+    // Optional: register your own custom handlers
+    BlincNativeBridge.shared.registerString(
+        namespace: "device",
+        name: "get_battery_level"
+    ) { _ in
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        return String(Int(UIDevice.current.batteryLevel * 100))
+    }
 
-// Handler returning Void
-BlincNativeBridge.shared.registerVoid(
-    namespace: "notify",
-    name: "show"
-) { args in
-    let title = args[0] as? String ?? ""
-    let body = args[1] as? String ?? ""
-    NotificationHelper.show(title: title, body: body)
+    BlincNativeBridge.shared.registerVoid(
+        namespace: "notify",
+        name: "show"
+    ) { args in
+        let title = args[0] as? String ?? ""
+        let body = args[1] as? String ?? ""
+        NotificationHelper.show(title: title, body: body)
+    }
+
+    return true
 }
 ```
+
+> **Order matters**: `registerDefaults()` must be called BEFORE `connectToRust()` so the Swift-side handler table is populated when Rust starts dispatching calls.
 
 ---
 
