@@ -28,7 +28,7 @@ cd "$WORKSPACE_ROOT"
 SOURCE_URL="https://raw.githubusercontent.com/googlefonts/noto-emoji/main/fonts/NotoColorEmoji.ttf"
 SOURCE_CACHE="$WORKSPACE_ROOT/target/noto-emoji/NotoColorEmoji.ttf"
 CODEPOINTS="$WORKSPACE_ROOT/target/noto-emoji/codepoints.txt"
-SUBSET_OUT="$WORKSPACE_ROOT/crates/blinc_text/assets/fonts/NotoColorEmoji-subset.ttf"
+SUBSET_OUT="$WORKSPACE_ROOT/crates/blinc_noto_emoji/assets/NotoColorEmoji-subset.ttf"
 
 # The scan input. By default we harvest from every example in the
 # workspace so the bundled subset covers the entire gallery. Pass a

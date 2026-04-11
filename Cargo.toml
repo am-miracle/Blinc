@@ -53,6 +53,13 @@ members = [
     # bundles glyphs the application actually uses. Not in
     # `default-members`. Run with `cargo run -p blinc-emoji-scan`.
     "tools/emoji-scan",
+    # First entry in the `blinc_<font>_emoji` add-on family: a
+    # drop-in NotoColorEmoji fallback that auto-registers with
+    # `blinc_text`'s global font registry via `#[ctor]`. Users add
+    # it to their own Cargo.toml and get color emoji on wasm / Linux
+    # / headless hosts with zero source changes. Keeps `blinc_text`
+    # itself lean — apps that don't need emoji pay nothing.
+    "crates/blinc_noto_emoji",
 ]
 
 # Platform-specific crates are included but have target-gated dependencies

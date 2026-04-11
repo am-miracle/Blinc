@@ -1,0 +1,45 @@
+[package]
+name = "blinc_noto_emoji"
+description = "Drop-in NotoColorEmoji fallback for blinc_text. Add to your Cargo.toml and the bundled subset auto-registers at binary init via a `#[ctor]` function — no source changes required. Part of the `blinc_<font>_emoji` add-on family (Twemoji, Fluent Emoji, etc. can publish their own crates with the same auto-register shape)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# The bundled NotoColorEmoji subset is SIL OFL 1.1 licensed. The
+# license text lives at `assets/NotoColorEmoji-OFL.txt`; anyone
+# redistributing this crate (or a binary that depends on it) should
+# keep that file alongside the distribution to honour the attribution
+# requirement of OFL 1.1.
+include = ["src/**", "assets/**", "README.md"]
+
+[dependencies]
+# Target crate — the whole point of this plugin is to register a
+# font face with blinc_text's global registry.
+blinc_text = { path = "../blinc_text", version = "0.5.0" }
+
+# Pulled in so we can log a one-line debug message when the
+# subset is registered. Version-matched to what blinc_text uses.
+tracing = { workspace = true }
+
+# Native targets: `ctor` runs code during binary init (before
+# `main`) across Linux, macOS, iOS, Android, Windows, and the
+# BSDs via platform-specific init-array / mod_init_func / TLS
+# callback mechanisms. The presence of `#[used]` in the crate's
+# generated symbol keeps linker dead-code elimination from
+# stripping the init function even when the user's source never
+# names `blinc_noto_emoji`.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ctor = "0.2"
+
+# Wasm target: `ctor` doesn't support wasm32, so the auto-init
+# hook is a `#[wasm_bindgen(start)]` function instead. wasm-bindgen
+# walks the entire dependency graph during `wasm-pack build` and
+# runs every discovered `start` function when the wasm module is
+# instantiated, which is effectively equivalent to `ctor` for our
+# purposes. `blinc_platform_web` already brings wasm-bindgen into
+# the wasm build, so this dep adds nothing to the wasm bundle that
+# wasn't already there.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
