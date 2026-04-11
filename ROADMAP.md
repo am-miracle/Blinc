@@ -274,6 +274,12 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | Render region culling | **Done** | AABB visibility test before GPU upload, shadow/rotation/affine-aware |
 | GPU memory budget | **Done** | `GpuMemoryBudget` with LRU eviction, 128 MB default, env var override |
 
+### 4.4 Text & Fonts (P2)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Lazy per-codepoint emoji loader | Planned | Network-fetched glyph loader for dynamic text — similar to Google Fonts' CSS2 API. Covers runtime strings (user input, fetched content, chat messages) whose codepoints weren't in the build-time emoji subset. Targets web/wasm and non-Apple platforms that don't ship a bundled Color Emoji font. Requires: (1) async `FontRegistry::load_glyph_async(codepoint)` entry point, (2) a hosted glyph service or a per-codepoint chunked font asset, (3) a pending-glyph placeholder in the shaper so layout doesn't shift when glyphs arrive. Escape hatch for the build-time emoji subsetter (which covers statically-known strings). |
+
 ---
 
 ## Phase 5: Developer Experience

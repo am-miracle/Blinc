@@ -1,0 +1,26 @@
+[package]
+name = "blinc-emoji-scan"
+description = "AST-based scanner that walks Rust sources and emits the set of non-ASCII codepoints used in string literals — input for the emoji font subsetter."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Intentionally NOT in `default-members`. Developers run this tool
+# explicitly via `cargo run -p blinc-emoji-scan`; regular `cargo build`
+# does not pull it.
+[[bin]]
+name = "blinc-emoji-scan"
+path = "src/main.rs"
+
+[dependencies]
+# Parse Rust sources so we only pick up string / char / byte-string
+# literals and ignore identifiers, doc comments, and attribute text
+# that would otherwise pollute the codepoint set with incidental
+# non-ASCII characters (e.g. names of contributors in comments).
+syn = { version = "2", features = ["full", "parsing", "extra-traits", "visit"] }
+# `span-locations` enables `Span::start()` / `Span::end()` on stable
+# Rust; we need the line number of each literal for the first-occurrence
+# report. This only costs binary size for the scanner itself (which is
+# a dev-time tool, not shipped).
+proc-macro2 = { version = "1", features = ["span-locations"] }
