@@ -208,7 +208,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                     // cut off at the stack's bottom edge. 28 px is
                     // the shadow's `offset_y + blur` plus a small
                     // safety margin.
-                    .h(MENU_BAR_HEIGHT + DROPDOWN_HEIGHT + NOTCH_RADIUS + 28.0)
+                    .h(MENU_BAR_HEIGHT + DROPDOWN_HEIGHT + NOTCH_RADIUS + 10.0)
                     .child(menu_bar(&dropdown_state, menu_bar_bg))
                     .when(dropdown_height > 0.6, |s| {
                         s.child(notched_dropdown(
