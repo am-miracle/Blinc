@@ -1,6 +1,8 @@
-# Android Development
+# Android Project Setup
 
-This guide covers building Blinc apps for Android — toolchain setup, native bridge, camera/audio streams, deep linking, lifecycle, and platform integration.
+This guide covers setting up an Android Blinc project — toolchain, build commands, and the platform-specific files (`AndroidManifest.xml`, Gradle config, debugging).
+
+For the cross-platform Blinc API (native bridge, camera, deep linking, lifecycle, etc.), see the [Mobile Development overview](./overview.md).
 
 ## Prerequisites
 
@@ -37,6 +39,8 @@ cargo ndk -t arm64-v8a -t armeabi-v7a build --release
 ./gradlew assembleDebug
 ```
 
+The APK lands in `app/build/outputs/apk/debug/app-debug.apk`.
+
 ## Project Configuration
 
 ### Cargo.toml
@@ -59,9 +63,12 @@ android_logger = "0.14"
 ```xml
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+
+    <!-- Permissions for native bridge features -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:label="My App"
@@ -74,7 +81,9 @@ android_logger = "0.14"
             android:exported="true"
             android:launchMode="singleTask">
 
-            <meta-data android:name="android.app.lib_name" android:value="my_app" />
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="my_app" />
 
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -93,220 +102,6 @@ android_logger = "0.14"
 </manifest>
 ```
 
-## Native Bridge
-
-Blinc's native bridge lets Rust call into Kotlin (and vice versa) via a typed function-call protocol. Use it for any platform feature that's not in the framework core: camera, biometrics, push notifications, native dialogs, etc.
-
-### Kotlin side — register handlers
-
-```kotlin
-// MainActivity.kt — call once during onCreate after BlincNativeBridge.init(this)
-BlincNativeBridge.init(this)
-BlincNativeBridge.registerDefaults(context)  // built-in handlers (haptics, device info, etc.)
-
-// Custom handler returning a string
-BlincNativeBridge.registerString("device", "get_battery_level") {
-    val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-    bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).toString()
-}
-
-// Handler returning Unit
-BlincNativeBridge.registerVoid("notify", "show") { args ->
-    val title = args.getString(0)
-    val body = args.getString(1)
-    NotificationHelper.show(context, title, body)
-}
-```
-
-### Rust side — call into native
-
-```rust
-use blinc_core::native_bridge::{native_call, NativeValue};
-
-// Synchronous call
-let level: String = native_call("device", "get_battery_level", ())?;
-println!("Battery: {}%", level);
-
-// Pass arguments
-native_call::<(), _>("notify", "show", ("Hello", "World"))?;
-
-// Built-in haptic helpers
-native_call::<(), _>("haptics", "selection", ())?;
-native_call::<(), _>("haptics", "impact", (1i32,))?; // 0=light, 1=medium, 2=heavy
-native_call::<(), _>("haptics", "success", ())?;
-```
-
-### Streams (camera, audio, sensors)
-
-Streams deliver continuous data (frames, samples, sensor readings) from the platform back to Rust without polling. The platform pushes data via `dispatch_stream_data`, which fires the registered callback.
-
-```rust
-use blinc_core::native_bridge::{native_stream, NativeValue};
-
-// Open a stream — keep the handle alive; drop stops the stream
-let stream = native_stream(
-    "sensors",
-    "accelerometer",
-    NativeValue::Null,
-    |data| {
-        if let Some(arr) = data.as_array() {
-            let x = arr[0].as_f32().unwrap_or(0.0);
-            let y = arr[1].as_f32().unwrap_or(0.0);
-            let z = arr[2].as_f32().unwrap_or(0.0);
-            println!("accel: {x}, {y}, {z}");
-        }
-    },
-)?;
-// drop(stream) → stream stops
-```
-
-## Camera Capture
-
-`CameraStream` from `blinc_media` wraps the native bridge stream API in a typed reactive interface:
-
-```rust
-use blinc_media::{CameraStream, CameraConfig, CameraFacing};
-
-let camera = CameraStream::open(CameraConfig {
-    width: 640,
-    height: 480,
-    fps: 30,
-    facing: CameraFacing::Front,
-});
-
-// Read latest frame in build_ui
-if let Some(frame) = camera.latest_frame() {
-    canvas(move |ctx, bounds| {
-        ctx.draw_rgba_pixels(frame.as_rgba(), frame.width, frame.height, bounds);
-    })
-}
-
-// drop(camera) stops capture and releases the device
-```
-
-The camera frames flow through the native bridge stream protocol: Kotlin's `Camera2` API delivers `Image` buffers, the bridge converts them to RGBA, and `JNIEnv::nativeDispatchStreamData(streamId, byteArray)` ferries the bytes into Rust.
-
-See `crates/blinc_app/examples/notch_demo.rs` for a production camera example.
-
-## Audio Recording
-
-```rust
-use blinc_media::{AudioRecorder, AudioRecorderConfig};
-
-let recorder = AudioRecorder::open(AudioRecorderConfig {
-    sample_rate: 44100,
-    channels: 1,
-});
-
-if let Some(samples) = recorder.latest_samples() {
-    process_audio(samples.as_f32());
-}
-```
-
-The Kotlin side uses `AudioRecord` and pushes 16-bit PCM through the same stream protocol.
-
-## Deep Linking
-
-Blinc Router auto-handles deep links — no manual wiring required after `RouterBuilder::build()`.
-
-### Kotlin — forward intents to Rust
-
-```kotlin
-// MainActivity.kt
-override fun onNewIntent(intent: Intent) {
-    super.onNewIntent(intent)
-    intent.data?.toString()?.let { uri ->
-        nativeDispatchDeepLink(uri)
-    }
-}
-
-// External JNI declaration
-external fun nativeDispatchDeepLink(uri: String)
-```
-
-### Rust — define routes
-
-```rust
-use blinc_router::{Router, RouterBuilder};
-
-let router = RouterBuilder::new()
-    .route("/", home_page)
-    .route("/users/:id", user_detail)
-    .route("/products/:slug", product_page)
-    .build();
-
-// router is now wired to handle blinc_router::dispatch_deep_link(uri)
-// A URL like myapp://users/42 → router.push("/users/42") → user_detail({id: "42"})
-```
-
-The system back button is also auto-registered: `Key::Back` events route through `router.back()`.
-
-## App Lifecycle
-
-```rust
-use blinc_platform::event::{Event, LifecycleEvent};
-
-// In your event handler:
-match event {
-    Event::Lifecycle(LifecycleEvent::Resumed) => {
-        camera.resume();
-        analytics.session_start();
-    }
-    Event::Lifecycle(LifecycleEvent::Suspended) => {
-        camera.pause();
-        save_state();
-    }
-    Event::Lifecycle(LifecycleEvent::LowMemory) => {
-        clear_image_cache();
-    }
-    _ => {}
-}
-```
-
-Mapping:
-- `MainEvent::Resume` → `LifecycleEvent::Resumed`
-- `MainEvent::Pause` → `LifecycleEvent::Suspended`
-- `MainEvent::LowMemory` → `LifecycleEvent::LowMemory`
-
-## Soft Keyboard
-
-Text input widgets (`text_input()`, `text_area()`) automatically show/hide the soft keyboard on focus. The keyboard inset is reported back via `WindowedContext.safe_bottom()` so your layout can adjust.
-
-```rust
-text_input(state)
-    .placeholder("Type something...")
-    .on_focus(|| println!("keyboard shown"))
-```
-
-The keyboard show/hide commands are dispatched via the native bridge under `keyboard.show` / `keyboard.hide`. The default implementations (registered by `BlincNativeBridge.registerDefaults`) call `InputMethodManager.showSoftInput` / `hideSoftInputFromWindow`.
-
-## Safe Area Insets
-
-```rust
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
-    div()
-        .w(ctx.width).h(ctx.height)
-        .pt(ctx.safe_top())     // status bar
-        .pb(ctx.safe_bottom())  // gesture bar / nav buttons
-        .pl(ctx.safe_left())    // landscape notch
-        .pr(ctx.safe_right())
-        .child(/* ... */)
-}
-```
-
-## Touch Event Handling
-
-Touch events are automatically routed:
-
-| Android Action | Blinc Event |
-|---|---|
-| `ACTION_DOWN` | `pointer_down` |
-| `ACTION_MOVE` | `pointer_move` |
-| `ACTION_UP` | `pointer_up` + `pointer_leave` |
-| `ACTION_CANCEL` | `pointer_leave` |
-
-Two-finger pinch gestures emit `PINCH` events with center + scale delta. Use `.on_pinch()` on a `Div` to receive them.
-
 ## Debugging
 
 ```bash
@@ -319,13 +114,27 @@ adb logcat | grep BlincNativeBridge
 
 ### Common Issues
 
-**"Library not found"** — ensure the native library is in `app/src/main/jniLibs/<arch>/`. `cargo ndk` writes to `target/<rust-target>/`; copy to jniLibs or use the Gradle plugin.
+**"Library not found"** — ensure the native library is built and copied to `app/src/main/jniLibs/<arch>/`:
 
-**"Vulkan not supported"** — check device capability with `adb shell getprop ro.hardware.vulkan`. API 24+ devices generally support Vulkan, but emulators may not.
+```bash
+cargo ndk -t arm64-v8a build
+cp target/aarch64-linux-android/debug/libmy_app.so \
+   platforms/android/app/src/main/jniLibs/arm64-v8a/
+```
 
-**"Native call failed"** — verify the namespace+name matches between Kotlin and Rust. Check logcat for `BlincNativeBridge: handler not found for X.Y`.
+**"Vulkan not supported"** — check device capability:
 
-## Performance Tips
+```bash
+adb shell getprop ro.hardware.vulkan
+```
+
+API 24+ devices generally support Vulkan, but some emulators may not.
+
+**"Native call failed"** — verify the namespace+name matches between Kotlin and Rust handlers. Check logcat for `BlincNativeBridge: handler not found for X.Y`.
+
+**Touch events not working** — verify the render context is created successfully and `android.app.lib_name` in the manifest matches your library name.
+
+## Performance
 
 ```toml
 [profile.release]
@@ -337,5 +146,11 @@ codegen-units = 1
 ```
 
 - **Test on real devices** — emulators have different GPU characteristics
-- **Profile with `Android Studio Profiler`** for CPU/GPU/memory
+- **Profile with Android Studio Profiler** for CPU/GPU/memory
 - **Bundle assets via `assets/`** — `AndroidAssetLoader` auto-resolves them through the platform `AssetLoader` trait
+
+## Next Steps
+
+- [Mobile Development overview](./overview.md) — native bridge, camera, deep linking, lifecycle, safe area APIs
+- [iOS Project Setup](./ios.md) — build the iOS counterpart
+- [CLI Reference](./cli.md)
