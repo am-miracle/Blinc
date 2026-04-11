@@ -55,13 +55,13 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         .items_center()
         .justify_center()
         .p(10.0)
-        .gap(8.0)
+        .gap_px(8.0)
         // Title
         .child(
             div()
                 .flex_col()
                 .items_center()
-                .gap(4.0)
+                .gap_px(4.0)
                 .child(
                     h1("Carousel Demo")
                         .size(36.0)
@@ -84,7 +84,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                         .w_full()
                         .h_fit()
                         .flex_col()
-                        .gap(10.0)
+                        .gap_px(12.0)
                         .justify_center()
                         .child(build_carousel(ctx, &scroll_ref, &current_index))
                         .child(build_carousel_dots(ctx, &scroll_ref, &current_index))
@@ -133,25 +133,26 @@ fn build_carousel(
     div()
         .flex_col()
         .items_center()
-        .gap(12.0)
+        .gap_px(12.0)
         // Carousel container with rounded corners and shadow
         .child(
             div()
                 .w(VIEWPORT_WIDTH)
-                .h(CARD_HEIGHT + 40.0)
+                .h_fit()
                 .bg(Color::rgba(0.12, 0.12, 0.16, 1.0))
                 .rounded(20.0)
                 .shadow_lg()
                 .overflow_clip()
                 .items_center()
                 .justify_center()
+                .padding_y_px(16.0)
                 .child(
                     // Horizontal scroll container - cards are STATIC inside
                     scroll()
                         .bind(scroll_ref)
                         .direction(ScrollDirection::Horizontal)
                         .w(VIEWPORT_WIDTH)
-                        .h(CARD_HEIGHT + 20.0)
+                        .h_fit()
                         .items_start()
                         .justify_start() // Ensure content starts at beginning
                         .child(
@@ -195,7 +196,7 @@ fn build_card(index: usize, title: &str, description: &str, accent: Color) -> im
         // Set element ID for this card - key for the selector API!
         .id(format!("card-{}", index))
         .w(CARD_WIDTH)
-        .h(CARD_HEIGHT)
+        .h_fit()
         .bg(Color::rgba(0.18, 0.18, 0.22, 1.0))
         .rounded(16.0)
         .shadow_md()
@@ -234,8 +235,6 @@ fn build_card(index: usize, title: &str, description: &str, accent: Color) -> im
                 .color(Color::rgba(0.7, 0.7, 0.75, 1.0))
                 .line_height(1.5),
         )
-        // Spacer
-        .child(div().flex_grow())
         // ID display
         .child(
             div()
@@ -307,7 +306,7 @@ fn build_dot(
             let transform = if state == ButtonState::Hovered && !is_current {
                 Transform::scale(1.1, 1.1)
             } else if is_current {
-                Transform::scale(2.0, 1.0)
+                Transform::scale(1.5, 1.5)
             } else {
                 Transform::scale(1.0, 1.0)
             };
@@ -318,6 +317,7 @@ fn build_dot(
                 .w(12.0)
                 .bg(color)
                 .transform(transform)
+                .cursor_pointer()
         })
         .on_click(move |_| {
             // Use the selector API to scroll to the card by ID!
@@ -337,6 +337,7 @@ fn build_dot(
                 },
             );
         })
+        .cursor_pointer()
 }
 
 fn build_info_section() -> impl ElementBuilder {
