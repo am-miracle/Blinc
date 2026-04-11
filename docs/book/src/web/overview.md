@@ -44,12 +44,11 @@ The driver is a `requestAnimationFrame` chain that fires every browser frame.
 
 | Browser | Status | Notes |
 |---------|--------|-------|
-| Chrome / Chromium ≥ 113 | Supported | WebGPU enabled by default since May 2023 |
+| Chrome / Chromium ≥ 113 | Supported | WebGPU enabled by default|
 | Edge ≥ 113 | Supported | Same Chromium engine |
-| Safari Technology Preview | Supported (flagged) | `Develop → Feature Flags → WebGPU` |
-| Safari (stable) | Coming | WebKit's WebGPU is in progress |
-| Firefox Nightly | Supported (flagged) | `about:config → dom.webgpu.enabled = true` |
-| Firefox (stable) | Coming | Tracking [Bug 1602129](https://bugzilla.mozilla.org/show_bug.cgi?id=1602129) |
+| Safari Technology Preview (pre Tahoe)| Partial (flagged) | `Develop → Feature Flags → WebGPU` . Pre-sequoia does not support Vertex Storage|
+| Safari stable (Tahoe) | Supported | WebGPU enabled by default |
+| Firefox (≥ 141 on windows, ≥ 145 on MacOs) | Supported | WebGPU enabled by default |
 
 The runtime falls back to WebGL2 where WebGPU is unavailable, but **storage-buffer-dependent pipelines need WebGPU** — specifically the SDF aux buffer and any future compute shaders. Plain rendering, text, and SVG work on WebGL2; advanced 3D and particles do not.
 

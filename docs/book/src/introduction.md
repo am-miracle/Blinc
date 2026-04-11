@@ -12,7 +12,7 @@
 
 - **Spring Physics** - Natural, physics-based animations using spring dynamics instead of fixed durations.
 
-- **Cross-Platform** - Runs on macOS, Windows, Linux, and Android (iOS coming soon).
+- **Cross-Platform** - Runs on macOS, Windows, Linux, Android, iOS and Web (WASM + WebGPU).
 
 ## Key Features
 
