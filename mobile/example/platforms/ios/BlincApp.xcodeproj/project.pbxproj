@@ -16,6 +16,7 @@
 		A1000007 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000007 /* QuartzCore.framework */; };
 		A1000010 /* Arial.ttf in Resources */ = {isa = PBXBuildFile; fileRef = A2000010 /* Arial.ttf */; };
 		A1000011 /* BlincNativeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000011 /* BlincNativeBridge.swift */; };
+		A1000012 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000012 /* SceneDelegate.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +31,7 @@
 		A2000009 /* Blinc-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Blinc-Bridging-Header.h"; sourceTree = "<group>"; };
 		A2000010 /* Arial.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = Arial.ttf; sourceTree = "<group>"; };
 		A2000011 /* BlincNativeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlincNativeBridge.swift; sourceTree = "<group>"; };
+		A2000012 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		A3000001 /* BlincApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BlincApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -61,6 +63,7 @@
 			isa = PBXGroup;
 			children = (
 				A2000001 /* AppDelegate.swift */,
+				A2000012 /* SceneDelegate.swift */,
 				A2000002 /* BlincViewController.swift */,
 				A2000003 /* BlincMetalView.swift */,
 				A2000011 /* BlincNativeBridge.swift */,
@@ -168,6 +171,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1000001 /* AppDelegate.swift in Sources */,
+				A1000012 /* SceneDelegate.swift in Sources */,
 				A1000002 /* BlincViewController.swift in Sources */,
 				A1000003 /* BlincMetalView.swift in Sources */,
 				A1000011 /* BlincNativeBridge.swift in Sources */,
