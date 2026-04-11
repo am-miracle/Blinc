@@ -559,15 +559,7 @@ impl WebApp {
         // (20,000 × 368 bytes per GpuPrimitive ≈ 7.2 MB total).
         let config = BlincConfig {
             max_primitives: 20_000,
-            // 4x MSAA: the SDF primitive pipeline does its own shader
-            // AA, so the surface itself stays single-sampled, but the
-            // tessellated-path pipeline (notch, SVG, custom paths) has
-            // no shader-level AA and relies on MSAA for smooth edges.
-            // `render_overlay_msaa` creates a dedicated multisampled
-            // texture internally; passing `sample_count=1` here
-            // silently disables that path and tessellated geometry
-            // renders with 1:1 pixel stairstepping.
-            sample_count: 4,
+            sample_count: 1, // SDF pipelines do their own shader-level AA
             ..Default::default()
         };
         let (blinc_app, surface) = BlincApp::with_canvas(canvas.clone(), Some(config)).await?;

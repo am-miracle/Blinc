@@ -5554,18 +5554,45 @@ impl GpuRenderer {
                 label: Some("Overlay MSAA Render Encoder"),
             });
 
-        // Pass 1: Render to MSAA texture with resolve
-        // Use cached MSAA pipelines for sample_count > 1, otherwise fall back to base pipelines
+        // Pass 1: Render paths + SDF primitives to an offscreen texture.
+        //
+        // WebGPU spec: `resolveTarget` MUST be None when the color
+        // attachment's sample_count is 1. Chrome/Dawn silently accept
+        // a stray `resolve_target: Some(...)` on a single-sampled
+        // view, but Safari/WebKit rejects the render pass entirely —
+        // which is why every path draw (notches, SVG strokes, custom
+        // paths) was invisible on Safari.
+        //
+        // Fix: when sample_count == 1, render directly into
+        // `resolve_view` (a single-sampled texture with both
+        // RENDER_ATTACHMENT and TEXTURE_BINDING usage) and pass
+        // `resolve_target: None`. When sample_count > 1, use the
+        // multisampled `msaa_view` with a resolve into `resolve_view`
+        // as before.
+        let (pass1_view, pass1_resolve, pass1_store) = if sample_count > 1 {
+            // Multisampled: keep the resolved single-sample texture,
+            // discard the MSAA texture (we only wanted its resolved
+            // output, not the per-sample content).
+            (
+                &cached.msaa_view,
+                Some(&cached.resolve_view),
+                wgpu::StoreOp::Discard,
+            )
+        } else {
+            // Single-sampled: render directly into the resolve_view
+            // and keep the content so pass 2 can sample from it.
+            (&cached.resolve_view, None, wgpu::StoreOp::Store)
+        };
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Overlay MSAA Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &cached.msaa_view,
-                    resolve_target: Some(&cached.resolve_view),
+                    view: pass1_view,
+                    resolve_target: pass1_resolve,
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Discard, // MSAA texture discarded after resolve
+                        store: pass1_store,
                     },
                 })],
                 depth_stencil_attachment: None,
@@ -5791,17 +5818,31 @@ impl GpuRenderer {
                 label: Some("Path MSAA Render Encoder"),
             });
 
-        // Pass 1: Render paths to MSAA texture with resolve
+        // Pass 1: Render paths to an offscreen texture.
+        //
+        // See the longer comment in `render_overlay_msaa` — the key
+        // constraint is that `resolveTarget` must be None when the
+        // color attachment is single-sampled (WebGPU spec). Safari
+        // enforces this; Chrome accepts a stray `Some(...)` silently.
+        let (pass1_view, pass1_resolve, pass1_store) = if sample_count > 1 {
+            (
+                &cached.msaa_view,
+                Some(&cached.resolve_view),
+                wgpu::StoreOp::Discard,
+            )
+        } else {
+            (&cached.resolve_view, None, wgpu::StoreOp::Store)
+        };
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Path MSAA Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &cached.msaa_view,
-                    resolve_target: Some(&cached.resolve_view),
+                    view: pass1_view,
+                    resolve_target: pass1_resolve,
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Discard,
+                        store: pass1_store,
                     },
                 })],
                 depth_stencil_attachment: None,
