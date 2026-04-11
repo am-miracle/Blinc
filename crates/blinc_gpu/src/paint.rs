@@ -1828,8 +1828,13 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             gradient_params
         };
 
-        // Shadow (DPI-scaled) — reuses the main SDF shadow slot because the
-        // PRIM_NOTCH case in the shader runs the same shadow pass as rects.
+        // Shadow (DPI-scaled). The shader's PRIM_NOTCH shadow path
+        // traces the notch's actual outline via `sd_notch` so the
+        // drop shadow follows the shape's outer edge (including
+        // concave arcs, bulges, scoops, cuts, peaks) rather than the
+        // rectangular bbox. The notch's element-level canvas clip is
+        // now opt-in (via `overflow_clip`), so the shadow's blur
+        // expansion can render past the element's layout box.
         let shadow_vec = if let Some(sh) = shadow {
             [
                 sh.offset_x * dpi_scale,

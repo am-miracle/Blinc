@@ -187,13 +187,29 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             .bg(bg)
             .flex_col()
             .child(
-                // Menu bar + dropdown container with hover tracking
+                // Menu bar + dropdown container with hover tracking.
+                //
+                // Shadow strategy: ONLY the menu bar carries a shadow.
+                // Draw order is menu bar FIRST, dropdown SECOND (on
+                // top). The menu bar's downward shadow renders beneath
+                // the menu bar everywhere; where the dropdown sits
+                // (centered below the active icon), the dropdown's
+                // opaque fill — drawn on top — covers the shadow, so
+                // the shadow flows naturally AROUND the dropdown body
+                // without double-shadowing the merge region. The
+                // dropdown gets its visual depth for free from the
+                // menu bar's shadow wrapping around its sides.
                 stack()
                     .w_full()
-                    .h(MENU_BAR_HEIGHT + DROPDOWN_HEIGHT + NOTCH_RADIUS)
-                    // Menu bar layer
+                    // Stack clips children to its bounds by default
+                    // (see `Stack::new` in blinc_layout), so the
+                    // height must include space for the dropdown's
+                    // drop-shadow bleed — otherwise the shadow is
+                    // cut off at the stack's bottom edge. 28 px is
+                    // the shadow's `offset_y + blur` plus a small
+                    // safety margin.
+                    .h(MENU_BAR_HEIGHT + DROPDOWN_HEIGHT + NOTCH_RADIUS + 28.0)
                     .child(menu_bar(&dropdown_state, menu_bar_bg))
-                    // Dropdown layer - render until completely collapsed
                     .when(dropdown_height > 0.6, |s| {
                         s.child(notched_dropdown(
                             state.item,
@@ -266,6 +282,13 @@ fn menu_bar(dropdown_state: &blinc_core::State<DropdownState>, bg: Color) -> Div
         .w_full()
         .h(MENU_BAR_HEIGHT)
         .bg(bg)
+        .shadow(blinc_core::Shadow {
+            offset_x: 0.0,
+            offset_y: 4.0,
+            blur: 12.0,
+            spread: 0.0,
+            color: Color::BLACK.with_alpha(0.35),
+        })
         .flex_row()
         .items_center()
         .justify_center()
@@ -362,14 +385,32 @@ fn notched_dropdown(
     let height_ratio = (height / full_height).clamp(0.0, 1.0);
 
     // Top concave radius stays full, bottom shrinks with height
-    // Position at MENU_BAR_HEIGHT - top_radius so concave curves connect to menu bar
+    // Position at MENU_BAR_HEIGHT - top_radius so concave curves connect to menu bar.
+    //
+    // Shadow trick: `offset_y >= blur` makes the Gaussian shadow sit
+    // ENTIRELY below the shape's top edge. The erf-based shadow alpha
+    // is centered at y = shape_y + offset_y and falls off symmetrically
+    // over `blur` px, so the top of the shadow lands at
+    // y = shape_y + offset_y − blur ≥ shape_y. That means the
+    // dropdown's top-edge shadow never bleeds upward into the menu bar
+    // area at the concave merge. The trade-off is a slightly
+    // offset-looking shadow (all the blur is below the shape), but
+    // it's the simplest way to avoid the double-shadow at the merge.
     notch()
         .concave_top(top_radius)
         .rounded_bottom(bottom_radius)
         .bg(menu_bar_bg)
+        .shadow(blinc_core::Shadow {
+            offset_x: 0.0,
+            offset_y: 6.0,
+            blur: 8.0,
+            spread: 0.0,
+            color: Color::BLACK.with_alpha(0.12),
+        })
         .opacity(opacity)
         .absolute()
         .top(MENU_BAR_HEIGHT - top_radius)
+        .bottom(12.0)
         .left(left)
         .w(width)
         .h(height) // Animated height for collapse effect

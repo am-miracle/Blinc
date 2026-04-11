@@ -10970,13 +10970,24 @@ impl RenderTree {
                 ctx.set_foreground_layer(false);
             }
 
-            // Handle canvas elements
-            // Push clip to ensure canvas content respects parent bounds (e.g., scroll containers)
+            // Handle canvas elements.
+            //
+            // Only push a clip if the element explicitly opts into
+            // overflow clipping (via `overflow_clip`). Unconditionally
+            // clipping to the element's bbox breaks elements like the
+            // notch, whose custom render emits primitives whose vertex
+            // bounds LEGITIMATELY extend past the layout box (concave
+            // corner expansion for the flares, blur expansion for a
+            // drop shadow, etc.). Parent clips (e.g. scroll containers)
+            // still apply via the clip stack, so honouring the
+            // element's own overflow setting is enough.
             if let ElementType::Canvas(canvas_data) = &render_node.element_type {
                 if let Some(render_fn) = &canvas_data.render_fn {
-                    // Push clip for canvas bounds - this ensures content doesn't render outside
-                    let clip_rect = Rect::new(0.0, 0.0, bounds.width, bounds.height);
-                    ctx.push_clip(ClipShape::rect(clip_rect));
+                    let should_clip = render_node.props.clips_content;
+                    if should_clip {
+                        let clip_rect = Rect::new(0.0, 0.0, bounds.width, bounds.height);
+                        ctx.push_clip(ClipShape::rect(clip_rect));
+                    }
 
                     let canvas_bounds = crate::canvas::CanvasBounds {
                         width: bounds.width,
@@ -10984,7 +10995,9 @@ impl RenderTree {
                     };
                     render_fn(ctx, canvas_bounds);
 
-                    ctx.pop_clip();
+                    if should_clip {
+                        ctx.pop_clip();
+                    }
                 }
             }
         }

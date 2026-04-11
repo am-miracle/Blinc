@@ -1679,8 +1679,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Adjust corner radii for spread (expand corners proportionally)
         let shadow_radii = prim.corner_radius + vec4<f32>(spread);
 
-        // Use shaped rect SDF (respects squircle corner-shape) instead of plain rounded rect
-        let shadow_sdf_dist = sd_shaped_rect(sp, shadow_origin, shadow_size, shadow_radii, prim.corner_shape);
+        // For PRIM_NOTCH the shadow traces the actual notch outline
+        // via `sd_notch` — so concave arcs, bulges, scoops, cuts and
+        // peaks all cast shadows from their real visible edges instead
+        // of from the rectangular bounding box. Other primitives use
+        // the rounded-rect shadow path.
+        var shadow_sdf_dist: f32;
+        if prim_type == 8u /* PRIM_NOTCH */ {
+            shadow_sdf_dist = sd_notch(
+                sp, shadow_origin, shadow_size,
+                shadow_radii,
+                prim.light,
+                prim.perspective,
+                prim.sdf_3d
+            );
+        } else {
+            shadow_sdf_dist = sd_shaped_rect(sp, shadow_origin, shadow_size, shadow_radii, prim.corner_shape);
+        }
         var shadow_alpha: f32;
         if blur < 0.001 {
             shadow_alpha = select(0.0, 1.0, shadow_sdf_dist < 0.0);
@@ -1688,6 +1703,53 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let sigma_d = 0.5 * sqrt(2.0) * blur;
             shadow_alpha = 0.5 * (1.0 + erf(-shadow_sdf_dist / sigma_d));
         }
+
+        // Thin out the shadow at the "ending" of a concave arc. The
+        // concave boundary has its outward normal pointing AWAY from
+        // the shape (into the wedge region), and at the two points
+        // where the arc touches the outer bounds the normal becomes
+        // axis-aligned: at the `inner_top` end of a concave TOP arc
+        // it points straight up, at `inner_bottom` it points straight
+        // down, etc. Tracing `sd_notch` fully means those attachment
+        // points cast a full-strength shadow outward, which reads as
+        // a thick dark band bleeding past the concave edge.
+        //
+        // For each edge that has BOTH adjacent corners concave, fade
+        // the shadow to zero as the pixel approaches the attachment
+        // line on the "outside" side of the shape. The fade width is
+        // the shadow blur so it tapers smoothly.
+        if prim_type == 8u /* PRIM_NOTCH */ && blur > 0.001 {
+            let tl_c = prim.light.x > 0.5;
+            let tr_c = prim.light.y > 0.5;
+            let br_c = prim.light.z > 0.5;
+            let bl_c = prim.light.w > 0.5;
+            let fade_dist = blur;
+            if tl_c && tr_c {
+                let top_off = max(shadow_radii.x, shadow_radii.y);
+                let inner_top = shadow_origin.y + top_off;
+                let top_fade = smoothstep(inner_top - fade_dist, inner_top, sp.y);
+                shadow_alpha *= top_fade;
+            }
+            if bl_c && br_c {
+                let bottom_off = max(shadow_radii.w, shadow_radii.z);
+                let inner_bottom = shadow_origin.y + shadow_size.y - bottom_off;
+                let bot_fade = smoothstep(inner_bottom + fade_dist, inner_bottom, sp.y);
+                shadow_alpha *= bot_fade;
+            }
+            if tl_c && bl_c {
+                let left_off = max(shadow_radii.x, shadow_radii.w);
+                let inner_left = shadow_origin.x + left_off;
+                let left_fade = smoothstep(inner_left - fade_dist, inner_left, sp.x);
+                shadow_alpha *= left_fade;
+            }
+            if tr_c && br_c {
+                let right_off = max(shadow_radii.y, shadow_radii.z);
+                let inner_right = shadow_origin.x + shadow_size.x - right_off;
+                let right_fade = smoothstep(inner_right + fade_dist, inner_right, sp.x);
+                shadow_alpha *= right_fade;
+            }
+        }
+
         let shadow_color = prim.shadow_color * shadow_alpha;
 
         // Premultiply and blend
@@ -2026,8 +2088,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let is_within_inner_straight = straight_border_inner.x < -border_aa &&
                                        straight_border_inner.y < -border_aa;
 
-        // Fast path: clearly inside inner area, not near rounded corner
-        if is_within_inner_straight && !is_near_rounded_corner {
+        // Fast path: clearly inside inner area, not near rounded corner.
+        // Disabled for PRIM_NOTCH because the quadrant-based geometry
+        // above is derived from the rect bounding box and doesn't
+        // account for concave corners / top-bottom modifiers — a point
+        // deep inside the bbox can still be near a concave flare or a
+        // bulge edge and must go through the SDF-based `inner_sdf`
+        // branch below to pick up the border ring correctly.
+        if is_within_inner_straight && !is_near_rounded_corner && prim_type != 8u {
             // No border here, keep fill_color as-is
         } else {
             // Calculate inner SDF based on context

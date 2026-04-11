@@ -2375,8 +2375,16 @@ impl ElementBuilder for Notch {
             || has_center_peak;
 
         if needs_custom {
-            // For shapes with custom corners/scoops, we'll set background to None here
-            // and render via canvas. The canvas data is passed separately.
+            // Shape fill AND drop shadow are both rendered via the
+            // canvas path (`fill_notch`). The shadow is carried on
+            // the PRIM_NOTCH primitive itself so the shader can trace
+            // the notch's actual outer outline via `sd_notch` — a
+            // standard `draw_shadow` would use a rect SDF and miss
+            // the concave arcs / modifiers.
+            //
+            // The renderer's canvas clip is opt-in (only when the
+            // element sets `overflow_clip`), so the shadow's blur
+            // expansion can render past the element's layout box.
             RenderProps {
                 background: None, // Rendered via canvas
                 border_radius: CornerRadius::ZERO,
