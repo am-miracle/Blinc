@@ -603,16 +603,19 @@ crate-type = ["cdylib", "rlib"]
 # binaryen via apt so wasm-pack picks the system binary up
 # instead of the bundled crashy one.
 #
-# `-Oz` is size-focused (roughly equivalent to clang's `-Oz`);
-# `-O` is `-O2` which optimizes for speed and leaves a lot of
-# dead code / debug-adjacent metadata behind. For a UI runtime
-# the browser doesn't care about wasm-opt's runtime performance
-# difference between the two — `-Oz` just ships a smaller
-# download. `--strip-debug` drops DWARF debug sections that the
-# browser never consults; `--strip-producers` drops the "which
-# tool produced this module" metadata that bloats every wasm
-# compiled through `wasm-bindgen` → `wasm-opt` by a few KB.
-wasm-opt = ['-Oz', '--strip-debug', '--strip-producers', '--all-features']
+# TODO(wasm-size): size-focused flags (`-Oz`, `--strip-debug`,
+# `--strip-producers`) combined with rustc-side `opt-level = "z"` +
+# `lto = "fat"` + `panic = "abort"` produced a ~22% smaller wasm
+# locally but corrupted the binary on CI — the deployed file had
+# an invalid value-type byte near offset 201 and the browser
+# refused it with `invalid value type 0x0 @+201`. Suspect
+# interaction between apt-installed binaryen on the Ubuntu runner
+# and one of the new flags. Before retrying: pin a specific
+# binaryen version in CI, bisect which of the flags causes the
+# corruption (likely `--strip-producers` or the fat-LTO output),
+# and add a wasm-validate post-step so the CI build fails loudly
+# instead of shipping broken bytes to Pages.
+wasm-opt = ['-O', '--all-features']
 
 [package.metadata.wasm-pack.profile.dev]
 wasm-opt = false
@@ -1541,43 +1544,9 @@ fn build_wrappers_with_wasm_pack(
         }
 
         println!("  wasm-pack build {}", meta.name);
-        // Size-focused release profile overrides, scoped to this
-        // wasm-pack invocation only. Cargo honours
-        // `CARGO_PROFILE_<PROFILE>_<KEY>` env vars by overlaying
-        // them on top of whatever the workspace's `[profile.release]`
-        // declared, which means contributors running
-        // `cargo build --release` by hand still get the fast-but-big
-        // workspace profile — only wrapper builds routed through
-        // this tool pay the `-Oz` / `fat LTO` / `panic = "abort"`
-        // hit. Measured impact on emoji_demo: 9.1 MB → 7.1 MB
-        // (22% reduction) at the cost of ~3× longer wasm-pack
-        // runtime (25s → 78s). On the wire, GitHub Pages gzips
-        // the wasm at the edge, so visitors see an even smaller
-        // download than the on-disk size.
-        //
-        // `panic = "abort"` drops the ~200-500 KB of panic
-        // unwinding tables that every wasm-bindgen module
-        // otherwise carries. It is safe here because the wrappers
-        // don't use `std::panic::catch_unwind`, and a panic in the
-        // wasm runtime can only surface as a console error anyway.
-        //
-        // `lto = "fat"` enables cross-crate dead-code elimination,
-        // which is where most of the framework's unused widgets
-        // fall out of the binary.
-        //
-        // `opt-level = "z"` tells LLVM to prioritize size over
-        // speed at the codegen stage — notably different from
-        // wasm-opt's post-processing `-Oz`, which can only work
-        // with code rustc already emitted.
-        //
-        // `codegen-units = 1` is already set by the workspace
-        // profile; we don't override it here.
         let status = std::process::Command::new("wasm-pack")
             .args(["build", "--target", "web", "--release"])
             .current_dir(&wrapper_dir)
-            .env("CARGO_PROFILE_RELEASE_OPT_LEVEL", "z")
-            .env("CARGO_PROFILE_RELEASE_LTO", "fat")
-            .env("CARGO_PROFILE_RELEASE_PANIC", "abort")
             .status();
         match status {
             Ok(s) if s.success() => {
