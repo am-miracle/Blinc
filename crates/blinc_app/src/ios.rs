@@ -322,6 +322,11 @@ impl IOSApp {
         // Set viewport size
         BlincContextState::get().set_viewport_size(logical_width, logical_height);
 
+        // Fetch UIKit safe area insets (notch, status bar, home indicator).
+        // Must happen on the main thread — the runner already is by the
+        // time the UIApplicationDelegate triggers context creation.
+        let safe_area = blinc_platform_ios::app::get_safe_area_insets();
+
         // Create windowed context
         let windowed_ctx = WindowedContext::new_ios(
             logical_width,
@@ -330,6 +335,7 @@ impl IOSApp {
             width as f32,
             height as f32,
             true, // focused
+            safe_area,
             Arc::clone(&animations),
             Arc::clone(&ref_dirty_flag),
             Arc::clone(&reactive),

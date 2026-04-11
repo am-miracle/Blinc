@@ -382,6 +382,8 @@ Text input widgets automatically integrate with `UIEditMenuInteraction` on iOS 1
 
 ## Safe Area Insets
 
+`WindowedContext` exposes the OS-reported safe-area insets — notch, status bar, nav bar, home indicator, gesture bar, landscape camera cutouts — in **logical pixels**, matching `ctx.width` / `ctx.height`:
+
 ```rust
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     div()
@@ -394,7 +396,11 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 }
 ```
 
-`safe_area` is populated at context creation by calling `window.safe_area_insets()`. On desktop this returns zeros; on mobile, the platform's window implementation supplies real values from the platform API.
+- **iOS**: read from `UIWindow.safeAreaInsets` via `objc2` at context-creation time. Fetched from the first key window of the first foreground-active `UIWindowScene`.
+- **Android**: delivered by `BlincNativeBridge`'s `setOnApplyWindowInsetsListener` on the decor view. On API 30+ it merges `WindowInsets.Type.systemBars()` with `WindowInsets.Type.displayCutout()` so landscape notches are covered; on API 24–29 it falls back to the (deprecated but functional) `systemWindowInset*` accessors. The four values are pushed into Rust via the `nativeDispatchSafeArea` JNI export; the `android_main` poll loop copies them into `WindowedContext.safe_area` whenever an edge changes (rotation, split-screen, PiP exit, immersive-mode toggle).
+- **Desktop / Web / Fuchsia**: always `(0, 0, 0, 0)`.
+
+`safe_width()` / `safe_height()` return the content rect with both horizontal or both vertical insets subtracted, for when you want the full safe content area as a single number.
 
 ---
 

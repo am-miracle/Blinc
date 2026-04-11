@@ -43,6 +43,26 @@ use std::sync::{
 /// notification). The android_main loop converts `-1` to `0.0`.
 static PENDING_IME_INSET_PX: AtomicI32 = AtomicI32::new(-1);
 
+/// Latest system-bar safe-area insets (notch, status bar, navigation bar,
+/// gesture bar) reported by `WindowInsets` in **logical pixels**.
+///
+/// Set from Kotlin via `Java_com_blinc_BlincNativeBridge_nativeDispatchSafeArea`,
+/// which `BlincNativeBridge` invokes from its shared
+/// `setOnApplyWindowInsetsListener`. The Kotlin side reads
+/// `WindowInsets.Type.systemBars()` (API 30+) or
+/// `WindowInsets.systemWindowInset{Top,Right,Bottom,Left}` (API 24–29),
+/// divides by display density, and pushes the four logical-pixel values
+/// here.
+///
+/// `-1` is the sentinel meaning "no value pushed yet". The android_main
+/// loop diffs these atomics against `last_applied_safe_area_*` on every
+/// tick and, if any value changed, writes the new tuple into
+/// `WindowedContext.safe_area`.
+static PENDING_SAFE_AREA_TOP_PX: AtomicI32 = AtomicI32::new(-1);
+static PENDING_SAFE_AREA_RIGHT_PX: AtomicI32 = AtomicI32::new(-1);
+static PENDING_SAFE_AREA_BOTTOM_PX: AtomicI32 = AtomicI32::new(-1);
+static PENDING_SAFE_AREA_LEFT_PX: AtomicI32 = AtomicI32::new(-1);
+
 /// Queue of synthesized key-down events waiting to be dispatched on
 /// the next android_main poll loop tick.
 ///
@@ -278,6 +298,14 @@ impl AndroidApp {
         // input's container scroll offset every vsync tick and fight the
         // user trying to pan around.
         let mut last_applied_keyboard_inset_px: i32 = -1;
+        // Last system-bar safe-area insets we copied into `WindowedContext.safe_area`.
+        // Diffed against `PENDING_SAFE_AREA_*_PX` every tick; when any
+        // edge changes we push the full tuple into the context. `-1`
+        // until the first dispatch from Kotlin arrives.
+        let mut last_applied_safe_area_top_px: i32 = -1;
+        let mut last_applied_safe_area_right_px: i32 = -1;
+        let mut last_applied_safe_area_bottom_px: i32 = -1;
+        let mut last_applied_safe_area_left_px: i32 = -1;
         // Last value of `text_input::focus_tap_generation()` we processed.
         // The widget bumps that counter on every `on_mouse_down` that
         // lands on a text input — that's the signal we use to detect
@@ -387,6 +415,12 @@ impl AndroidApp {
                                         let logical_width = width as f32 / scale_factor as f32;
                                         let logical_height = height as f32 / scale_factor as f32;
 
+                                        // Initial safe_area = zeros; Kotlin's
+                                        // setOnApplyWindowInsetsListener will push
+                                        // the real values within the first vsync
+                                        // via `nativeDispatchSafeArea`, and the
+                                        // poll loop below copies them into the
+                                        // context on the next tick.
                                         ctx = Some(WindowedContext::new_android(
                                             logical_width,
                                             logical_height,
@@ -394,6 +428,7 @@ impl AndroidApp {
                                             width as f32,
                                             height as f32,
                                             focused,
+                                            (0.0, 0.0, 0.0, 0.0),
                                             Arc::clone(&animations),
                                             Arc::clone(&ref_dirty_flag),
                                             Arc::clone(&reactive),
@@ -1062,6 +1097,58 @@ impl AndroidApp {
             }
 
             // =========================================================
+            // System-bar safe-area insets → WindowedContext.safe_area
+            //
+            // Driven by `PENDING_SAFE_AREA_*_PX`, set from Kotlin via the
+            // `Java_com_blinc_BlincNativeBridge_nativeDispatchSafeArea`
+            // JNI export. Kotlin reads `WindowInsets.Type.systemBars()`
+            // (API 30+) or `WindowInsets.systemWindowInset{Top,Right,
+            // Bottom,Left}` (API 24–29), divides by display density, and
+            // pushes the four logical-pixel values here.
+            //
+            // We diff every tick and copy into the context only when
+            // something changed — safe-area updates are rare (rotation,
+            // split-screen, PiP), but the read is cheap. The sentinel
+            // `-1` is ignored so we don't clobber the context with a
+            // zero tuple before the first dispatch arrives.
+            // =========================================================
+            let pending_sa_top = PENDING_SAFE_AREA_TOP_PX.load(Ordering::Relaxed);
+            let pending_sa_right = PENDING_SAFE_AREA_RIGHT_PX.load(Ordering::Relaxed);
+            let pending_sa_bottom = PENDING_SAFE_AREA_BOTTOM_PX.load(Ordering::Relaxed);
+            let pending_sa_left = PENDING_SAFE_AREA_LEFT_PX.load(Ordering::Relaxed);
+            let safe_area_ready = pending_sa_top >= 0
+                && pending_sa_right >= 0
+                && pending_sa_bottom >= 0
+                && pending_sa_left >= 0;
+            let safe_area_changed = safe_area_ready
+                && (pending_sa_top != last_applied_safe_area_top_px
+                    || pending_sa_right != last_applied_safe_area_right_px
+                    || pending_sa_bottom != last_applied_safe_area_bottom_px
+                    || pending_sa_left != last_applied_safe_area_left_px);
+            if safe_area_changed {
+                if let Some(ref mut windowed_ctx) = ctx {
+                    windowed_ctx.safe_area = (
+                        pending_sa_top as f32,
+                        pending_sa_right as f32,
+                        pending_sa_bottom as f32,
+                        pending_sa_left as f32,
+                    );
+                    needs_redraw_next_frame = true;
+                    tracing::debug!(
+                        "Android safe area updated: top={} right={} bottom={} left={}",
+                        pending_sa_top,
+                        pending_sa_right,
+                        pending_sa_bottom,
+                        pending_sa_left,
+                    );
+                }
+                last_applied_safe_area_top_px = pending_sa_top;
+                last_applied_safe_area_right_px = pending_sa_right;
+                last_applied_safe_area_bottom_px = pending_sa_bottom;
+                last_applied_safe_area_left_px = pending_sa_left;
+            }
+
+            // =========================================================
             // Soft-keyboard inset → scroll the focused text input above the
             // keyboard.
             //
@@ -1689,6 +1776,44 @@ pub extern "system" fn Java_com_blinc_BlincNativeBridge_nativeDispatchKeyboardIn
     // a real keyboard-inset update.
     let clamped = inset_logical_px.max(0);
     PENDING_IME_INSET_PX.store(clamped, Ordering::Relaxed);
+}
+
+/// JNI export — receive a system-bar safe-area inset update from Kotlin.
+///
+/// Called from `BlincNativeBridge`'s `setOnApplyWindowInsetsListener`
+/// whenever the status bar, navigation bar, notch cutout, or gesture
+/// bar inset changes (rotation, split-screen, picture-in-picture exit,
+/// immersive-mode toggle, etc.).
+///
+/// The Kotlin side converts each edge's raw pixel value to **logical
+/// pixels** by dividing by display density before pushing, so the
+/// values stored in `PENDING_SAFE_AREA_*_PX` are directly comparable
+/// to `WindowedContext.width` / `height`.
+///
+/// All four edges are pushed together — a partial dispatch could leave
+/// the context in an inconsistent state for a frame.
+///
+/// # Kotlin declaration
+/// ```kotlin
+/// external fun nativeDispatchSafeArea(top: Int, right: Int, bottom: Int, left: Int)
+/// ```
+///
+/// # JNI signature
+/// `(IIII)V`
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_blinc_BlincNativeBridge_nativeDispatchSafeArea(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    top_logical_px: jni::sys::jint,
+    right_logical_px: jni::sys::jint,
+    bottom_logical_px: jni::sys::jint,
+    left_logical_px: jni::sys::jint,
+) {
+    PENDING_SAFE_AREA_TOP_PX.store(top_logical_px.max(0), Ordering::Relaxed);
+    PENDING_SAFE_AREA_RIGHT_PX.store(right_logical_px.max(0), Ordering::Relaxed);
+    PENDING_SAFE_AREA_BOTTOM_PX.store(bottom_logical_px.max(0), Ordering::Relaxed);
+    PENDING_SAFE_AREA_LEFT_PX.store(left_logical_px.max(0), Ordering::Relaxed);
 }
 
 /// JNI export — receive a synthesized key-down event from Kotlin.

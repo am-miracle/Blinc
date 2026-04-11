@@ -57,6 +57,16 @@ object BlincNativeBridge {
     // about the keyboard has actually changed.
     private var lastDispatchedImeInsetPx: Int = -1
 
+    // Last system-bar safe-area insets (in logical pixels) pushed to Rust.
+    // The single `setOnApplyWindowInsetsListener` on the decor view fires
+    // for every inset type, so we share it between the IME path and the
+    // notch / status-bar / nav-bar / gesture-bar path and dedupe each
+    // stream independently.
+    private var lastDispatchedSafeAreaTopPx: Int = -1
+    private var lastDispatchedSafeAreaRightPx: Int = -1
+    private var lastDispatchedSafeAreaBottomPx: Int = -1
+    private var lastDispatchedSafeAreaLeftPx: Int = -1
+
     /**
      * Initialize with application context
      */
@@ -64,46 +74,59 @@ object BlincNativeBridge {
         appContext = context.applicationContext
         if (context is android.app.Activity) {
             activityRef = java.lang.ref.WeakReference(context)
-            attachKeyboardInsetListener(context)
+            attachWindowInsetsListener(context)
         }
     }
 
     private fun currentActivity(): android.app.Activity? = activityRef?.get()
 
     /**
-     * Wire up an IME inset listener on the activity's decor view.
+     * Wire up a shared window-insets listener on the activity's decor view.
      *
-     * Mirrors the iOS `UIKeyboardWillChangeFrameNotification` path. Whenever
-     * the soft keyboard's bottom inset changes (show, hide, hardware-keyboard
-     * attach, split-keyboard mode change, IME swap, etc.) the listener
-     * computes the inset height in **logical pixels** and pushes it to
-     * the Rust runtime via the [nativeDispatchKeyboardInset] JNI export.
+     * A single [View.setOnApplyWindowInsetsListener] callback carries every
+     * kind of inset (IME, status bar, navigation bar, gesture bar, display
+     * cutout, ...). We dispatch two streams from it:
      *
-     * The Rust side stores the value in a global atomic that the
-     * `android_main` poll loop reads on every tick to drive the
-     * "scroll focused text input above the keyboard" behavior.
+     *  1. **Soft-keyboard / IME inset** → mirrors iOS'
+     *     `UIKeyboardWillChangeFrameNotification`. Whenever the keyboard
+     *     bottom inset changes (show, hide, hardware-keyboard attach,
+     *     split-keyboard mode, IME swap, ...) the listener computes the
+     *     bottom inset in **logical pixels** and pushes it via
+     *     [nativeDispatchKeyboardInset].
      *
-     * Implementation note — `WindowInsets.Type.ime()` requires API 30+.
-     * On older devices we fall back to a global-layout listener that
-     * diffs `decorView.getWindowVisibleDisplayFrame().bottom` against
-     * `decorView.height` — less precise, no animation tracking, but
-     * gives us SOMETHING on API 24-29.
+     *  2. **System-bar safe-area insets** → mirrors iOS'
+     *     `UIWindow.safeAreaInsets`. Whenever the status bar / nav bar /
+     *     notch cutout / gesture bar insets change (rotation, split-screen,
+     *     PiP exit, immersive-mode toggle, display cutout mode, ...) the
+     *     listener converts the four edges to logical pixels and pushes
+     *     them via [nativeDispatchSafeArea].
+     *
+     * Both streams dedupe against their respective `lastDispatched*Px`
+     * fields so unrelated inset changes don't thrash the Rust side.
+     *
+     * Implementation notes:
+     * - `WindowInsets.Type.ime()` and `WindowInsets.Type.systemBars()`
+     *   both require API 30+. On older devices we fall back to the
+     *   `systemWindowInset*` accessors (deprecated but functional on
+     *   API 24–29) plus a global-layout listener for the IME path.
      */
-    private fun attachKeyboardInsetListener(activity: android.app.Activity) {
+    private fun attachWindowInsetsListener(activity: android.app.Activity) {
         val decorView = activity.window?.decorView ?: return
         val density = activity.resources.displayMetrics.density.coerceAtLeast(0.001f)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Modern path (API 30+): WindowInsets.Type.ime() reports the
-            // exact IME inset in physical pixels and gets called for
-            // every animation frame as the keyboard slides in / out.
+            // Modern path (API 30+): WindowInsets.Type reports per-type
+            // insets in physical pixels. The listener fires for every
+            // animation frame as the keyboard slides in / out, and
+            // again on rotation / split-screen transitions.
             decorView.setOnApplyWindowInsetsListener { v, insets ->
+                // --- IME ---
                 val imeBottomPx = insets.getInsets(android.view.WindowInsets.Type.ime()).bottom
-                val logicalPx = (imeBottomPx.toFloat() / density).toInt()
-                if (logicalPx != lastDispatchedImeInsetPx) {
-                    lastDispatchedImeInsetPx = logicalPx
+                val imeLogicalPx = (imeBottomPx.toFloat() / density).toInt()
+                if (imeLogicalPx != lastDispatchedImeInsetPx) {
+                    lastDispatchedImeInsetPx = imeLogicalPx
                     try {
-                        nativeDispatchKeyboardInset(logicalPx)
+                        nativeDispatchKeyboardInset(imeLogicalPx)
                     } catch (e: UnsatisfiedLinkError) {
                         // Native side hasn't loaded the symbol yet — most
                         // likely because the user app isn't using
@@ -111,16 +134,73 @@ object BlincNativeBridge {
                         // silently; the inset just won't propagate.
                     }
                 }
+
+                // --- System bars (status / nav / cutout / gesture) ---
+                val sys = insets.getInsets(android.view.WindowInsets.Type.systemBars())
+                val cutout = insets.getInsets(android.view.WindowInsets.Type.displayCutout())
+                // Merge system bars with the display cutout — the cutout
+                // can extend past the status bar on landscape phones
+                // with a camera notch.
+                val topLogical = (maxOf(sys.top, cutout.top).toFloat() / density).toInt()
+                val rightLogical = (maxOf(sys.right, cutout.right).toFloat() / density).toInt()
+                val bottomLogical = (maxOf(sys.bottom, cutout.bottom).toFloat() / density).toInt()
+                val leftLogical = (maxOf(sys.left, cutout.left).toFloat() / density).toInt()
+                if (topLogical != lastDispatchedSafeAreaTopPx
+                    || rightLogical != lastDispatchedSafeAreaRightPx
+                    || bottomLogical != lastDispatchedSafeAreaBottomPx
+                    || leftLogical != lastDispatchedSafeAreaLeftPx
+                ) {
+                    lastDispatchedSafeAreaTopPx = topLogical
+                    lastDispatchedSafeAreaRightPx = rightLogical
+                    lastDispatchedSafeAreaBottomPx = bottomLogical
+                    lastDispatchedSafeAreaLeftPx = leftLogical
+                    try {
+                        nativeDispatchSafeArea(topLogical, rightLogical, bottomLogical, leftLogical)
+                    } catch (e: UnsatisfiedLinkError) {
+                        // see IME branch
+                    }
+                }
+
                 v.onApplyWindowInsets(insets)
             }
             // Force an initial dispatch so we have a baseline (otherwise
             // the very first frame after activity launch sees a stale
-            // sentinel and doesn't update until the user taps a field).
+            // sentinel and doesn't update until the next inset change).
             decorView.requestApplyInsets()
         } else {
-            // Legacy path (API 24-29): use the visible-display-frame
-            // diff. This catches show / hide but not the per-frame
-            // animation steps.
+            // Legacy path (API 24-29): use the deprecated
+            // `systemWindowInset*` accessors for safe area, and a
+            // global-layout listener with visible-display-frame diff
+            // for the IME path. The legacy IME path catches show /
+            // hide but not the per-frame animation steps.
+            decorView.setOnApplyWindowInsetsListener { v, insets ->
+                @Suppress("DEPRECATION")
+                val topLogical = (insets.systemWindowInsetTop.toFloat() / density).toInt()
+                @Suppress("DEPRECATION")
+                val rightLogical = (insets.systemWindowInsetRight.toFloat() / density).toInt()
+                @Suppress("DEPRECATION")
+                val bottomLogical = (insets.systemWindowInsetBottom.toFloat() / density).toInt()
+                @Suppress("DEPRECATION")
+                val leftLogical = (insets.systemWindowInsetLeft.toFloat() / density).toInt()
+                if (topLogical != lastDispatchedSafeAreaTopPx
+                    || rightLogical != lastDispatchedSafeAreaRightPx
+                    || bottomLogical != lastDispatchedSafeAreaBottomPx
+                    || leftLogical != lastDispatchedSafeAreaLeftPx
+                ) {
+                    lastDispatchedSafeAreaTopPx = topLogical
+                    lastDispatchedSafeAreaRightPx = rightLogical
+                    lastDispatchedSafeAreaBottomPx = bottomLogical
+                    lastDispatchedSafeAreaLeftPx = leftLogical
+                    try {
+                        nativeDispatchSafeArea(topLogical, rightLogical, bottomLogical, leftLogical)
+                    } catch (e: UnsatisfiedLinkError) {
+                        // see modern branch
+                    }
+                }
+                v.onApplyWindowInsets(insets)
+            }
+            decorView.requestApplyInsets()
+
             val rect = android.graphics.Rect()
             decorView.viewTreeObserver.addOnGlobalLayoutListener {
                 decorView.getWindowVisibleDisplayFrame(rect)
@@ -132,7 +212,7 @@ object BlincNativeBridge {
                     try {
                         nativeDispatchKeyboardInset(logicalPx)
                     } catch (e: UnsatisfiedLinkError) {
-                        // see modern-path branch
+                        // see modern branch
                     }
                 }
             }
@@ -670,7 +750,7 @@ object BlincNativeBridge {
 
     // JNI bridge for soft-keyboard inset updates.
     //
-    // Called from `attachKeyboardInsetListener` whenever
+    // Called from `attachWindowInsetsListener` whenever
     // `WindowInsets.Type.ime().bottom` changes. The Rust runtime
     // (`Java_com_blinc_BlincNativeBridge_nativeDispatchKeyboardInset` in
     // `crates/blinc_app/src/android.rs`) stores the value in a global
@@ -683,6 +763,22 @@ object BlincNativeBridge {
     // to `WindowedContext.height`.
     @JvmStatic
     external fun nativeDispatchKeyboardInset(insetLogicalPx: Int)
+
+    // JNI bridge for system-bar safe-area inset updates.
+    //
+    // Called from `attachWindowInsetsListener` whenever the status bar,
+    // navigation bar, notch cutout, or gesture bar inset changes. The
+    // Rust runtime (`Java_com_blinc_BlincNativeBridge_nativeDispatchSafeArea`
+    // in `crates/blinc_app/src/android.rs`) stores the four values in
+    // global atomics; the `android_main` poll loop copies them into
+    // `WindowedContext.safe_area` when any edge changes.
+    //
+    // All four values are logical pixels (already divided by display
+    // density), matching `WindowedContext.width` / `height`. The tuple
+    // order is `(top, right, bottom, left)` — the same order the blinc
+    // `Window::safe_area_insets` trait method uses.
+    @JvmStatic
+    external fun nativeDispatchSafeArea(top: Int, right: Int, bottom: Int, left: Int)
 
     // JNI bridge for synthesized key-down events with modifier flags.
     //
