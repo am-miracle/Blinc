@@ -100,6 +100,25 @@ blinc_platform_ios = { path = "../../extensions/blinc_platform_ios", version = "
 # completely free of `web-sys`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 blinc_platform_web = { path = "../../extensions/blinc_platform_web", version = "0.5.0", optional = true }
+# Drop-in NotoColorEmoji fallback — `WebApp::new` calls its
+# `register()` explicitly, before any text-shaping path runs, so
+# the browser (which exposes zero system fonts) still has a color
+# emoji face available by the time the first frame renders. Without
+# this, every emoji renders as `.notdef`. Pulled in unconditionally
+# by the `web` feature. Applications that want a different emoji
+# font (Twemoji, Fluent, OpenMoji) can publish their own
+# `blinc_<font>_emoji` add-on following the same register() shape
+# and patch this one out via a workspace patch.
+blinc_noto_emoji = { path = "../blinc_noto_emoji", version = "0.5.0", optional = true }
+# Sibling of `blinc_noto_emoji`: drop-in NotoSans + NotoSansMath
+# subsets covering the monochrome text characters that the emoji
+# font doesn't carry — math operators, double arrows, currency
+# symbols, Latin-1 Supplement punctuation. Same register() shape,
+# same wiring in `WebApp::new`. Pulled in unconditionally by `web`
+# because the same "browser has zero system fonts" constraint that
+# makes emoji broken also makes math / currency / arrow glyphs
+# broken.
+blinc_noto_symbols = { path = "../blinc_noto_symbols", version = "0.5.0", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", optional = true, features = [
@@ -145,8 +164,22 @@ ios = ["blinc_platform_ios", "blinc_gpu/ios"]
 harmony = ["blinc_gpu/harmony"]  # blinc_platform_harmony when target is available
 fuchsia = []
 # Web (wasm32) — `wasm-pack build --target web` against this feature.
+#
+# `blinc_noto_emoji` + `blinc_noto_symbols` are pulled in
+# unconditionally by the web feature: browsers expose zero system
+# fonts and without a bundled fallback every emoji (and every
+# math / arrow / currency / Latin-1 supplement glyph) renders as
+# `.notdef`. The two crates are complementary — `blinc_noto_emoji`
+# carries the color pictograph glyphs while `blinc_noto_symbols`
+# carries the monochrome text glyphs. Together they cover the full
+# non-ASCII set the scanner picks up from workspace examples. Apps
+# that want to swap either font can depend on their own
+# `blinc_<font>_*` add-on and patch the default out via a workspace
+# patch.
 web = [
     "blinc_platform_web",
+    "blinc_noto_emoji",
+    "blinc_noto_symbols",
     "wasm-bindgen",
     "wasm-bindgen-futures",
     "web-sys",

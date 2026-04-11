@@ -100,7 +100,18 @@ impl<'a> Visit<'_> for LiteralVisitor<'a> {
         };
         match lit {
             Lit::Str(s) => {
-                for c in s.value().chars() {
+                // Blinc's text renderer decodes HTML entities at
+                // render time via `html_escape::decode_html_entities`
+                // so authors can write `&nabla;` / `&#8377;` in their
+                // Rust source and have them render as the actual
+                // Unicode glyph. The raw literal is ASCII; the
+                // decoded form is what reaches the font subsetter.
+                // Run the same decoder over every literal so the
+                // harvested codepoint set matches what the renderer
+                // will ask the font for.
+                let raw = s.value();
+                let decoded = html_escape::decode_html_entities(&raw);
+                for c in decoded.chars() {
                     self.harvest.record(c, self.file, line);
                 }
             }

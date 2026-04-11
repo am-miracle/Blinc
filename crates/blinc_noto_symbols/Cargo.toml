@@ -1,14 +1,14 @@
 [package]
-name = "blinc_noto_emoji"
-description = "Drop-in NotoColorEmoji fallback for blinc_text. Add to your Cargo.toml and the bundled subset auto-registers at binary init via a `#[ctor]` function — no source changes required. Part of the `blinc_<font>_emoji` add-on family (Twemoji, Fluent Emoji, etc. can publish their own crates with the same auto-register shape)."
+name = "blinc_noto_symbols"
+description = "Drop-in Noto Sans text/symbol fallback for blinc_text. Bundles a subset of Noto Sans Regular that covers math operators, arrows, currency symbols, Latin-1 supplement punctuation, and miscellaneous technical glyphs — the non-emoji special characters that `blinc_noto_emoji` doesn't carry. Sibling of `blinc_noto_emoji` in the `blinc_<font>_*` add-on family."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-# The bundled NotoColorEmoji subset is SIL OFL 1.1 licensed. The
-# license text lives at `assets/NotoColorEmoji-OFL.txt`; anyone
+# The bundled NotoSans subset is SIL OFL 1.1 licensed. The
+# license text lives at `assets/NotoSans-OFL.txt`; anyone
 # redistributing this crate (or a binary that depends on it) should
 # keep that file alongside the distribution to honour the attribution
 # requirement of OFL 1.1.

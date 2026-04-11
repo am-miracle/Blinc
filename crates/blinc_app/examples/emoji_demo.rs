@@ -42,6 +42,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                 .w_full()
                 .bg(Color::rgba(0.08, 0.08, 0.1, 1.0))
                 .flex_col()
+                .items_center()
                 .gap(5.0)
                 .p(24.0)
                 // Title

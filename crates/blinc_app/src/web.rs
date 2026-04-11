@@ -10,6 +10,27 @@
 //! - **ios**: `CADisplayLink` callback → render
 //! - **web**: `window.requestAnimationFrame` → render → schedule next
 //!
+//! # Bundled emoji + symbol fallbacks
+//!
+//! The `web` feature pulls in two complementary font add-ons that
+//! [`WebApp::new`] registers before the first `BlincApp::with_canvas`
+//! await point:
+//!
+//! - [`blinc_noto_emoji`] — a ~148 KB NotoColorEmoji subset covering
+//!   the color pictograph glyphs (emoji, dingbats, misc symbols).
+//! - [`blinc_noto_symbols`] — a ~24 KB NotoSans / NotoSansMath pair
+//!   covering the monochrome text glyphs that NotoColorEmoji doesn't
+//!   carry (math operators, double arrows, currency symbols,
+//!   Latin-1 Supplement punctuation).
+//!
+//! `WebApp::new` calls each crate's `register` function in turn,
+//! pushing both bundles into `blinc_text`'s global font registry.
+//! From that point on, any text-shaping pass finds a glyph via the
+//! existing `FontRegistry::load_emoji_font` fallback chain instead
+//! of rendering `.notdef` — regardless of whether the codepoint is
+//! a color emoji, a math operator, or a currency symbol. End-users
+//! see no extra configuration — enabling the `web` feature is all
+//! that's required.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -500,6 +521,25 @@ impl WebApp {
     /// `client_width * dpr` × `client_height * dpr` so the GPU surface
     /// is sized to actual device pixels rather than CSS pixels.
     pub async fn new(canvas_id: &str) -> Result<Self> {
+        // 0. Install the bundled font fallbacks into the global
+        //    font registry. `TextRenderer::new` uses
+        //    `blinc_text::global_font_registry()` as its shared
+        //    registry, so priming it here means every subsequent
+        //    text-shaping pass — including ones that happen before
+        //    the user's `setup` closure runs — sees both the emoji
+        //    and symbol faces as part of the non-Apple fallback
+        //    chain inside `FontRegistry::load_emoji_font`. The two
+        //    subsets are complementary: NotoColorEmoji carries
+        //    color pictographs while NotoSans + NotoSansMath cover
+        //    the monochrome text glyphs (math operators, double
+        //    arrows, currency symbols, Latin-1 Supplement
+        //    punctuation) that a pure emoji font doesn't own.
+        //    Safe to call multiple times (fontdb de-duplicates),
+        //    so this is idempotent if the user's setup explicitly
+        //    calls either `register` again.
+        blinc_noto_emoji::register();
+        blinc_noto_symbols::register();
+
         // 1. Locate the canvas in the DOM.
         let window = web_sys::window().ok_or_else(|| {
             BlincError::Platform("WebApp::new called without a global `window` object".to_string())

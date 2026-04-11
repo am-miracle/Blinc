@@ -510,9 +510,25 @@ impl FontRegistry {
             });
         }
 
-        // Platform-specific symbol font names to try
-        // Priority: fonts with good dingbat/symbol coverage (✓, ✗, etc.) first
-        let symbol_fonts = if cfg!(target_os = "macos") {
+        // Platform-specific symbol font names to try.
+        // Priority: fonts with good dingbat/symbol coverage (✓, ✗, etc.) first.
+        //
+        // The first entry is platform-agnostic — it points at the
+        // merged NotoSans+NotoSansMath subset shipped by the
+        // `blinc_noto_symbols` plugin crate. The subset registers
+        // under the blinc-specific family name "Blinc Noto Symbols"
+        // (NOT "Noto Sans" / "Noto Sans Math") so `find_generic_font_id`'s
+        // generic sans-serif fallback chain doesn't accidentally
+        // pick it as the *primary* text font — that would break
+        // all Latin text because the subset only carries the
+        // non-ASCII codepoints harvested by the scanner. Listing
+        // it here (and only here) means the renderer consults it
+        // for actual-missing-glyph fallback, which is exactly what
+        // we want. If the plugin isn't in the dependency tree,
+        // `load_font` silently falls through to the platform
+        // entries below and the chain behaves exactly as before.
+        let mut symbol_fonts: Vec<&str> = vec!["Blinc Noto Symbols"];
+        symbol_fonts.extend(if cfg!(target_os = "macos") {
             vec![
                 "Menlo",         // Has ✓ ✗ ✔ ✖ and other dingbats
                 "Lucida Grande", // Has ✓ and many symbols
@@ -532,7 +548,7 @@ impl FontRegistry {
                 "Noto Sans Symbols2", // Additional symbols
                 "FreeSans",
             ]
-        };
+        });
 
         for font_name in symbol_fonts {
             if let Ok(face) = self.load_font(font_name) {

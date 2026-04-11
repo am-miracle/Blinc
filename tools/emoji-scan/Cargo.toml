@@ -24,3 +24,10 @@ syn = { version = "2", features = ["full", "parsing", "extra-traits", "visit"] }
 # report. This only costs binary size for the scanner itself (which is
 # a dev-time tool, not shipped).
 proc-macro2 = { version = "1", features = ["span-locations"] }
+# HTML entity decoding. Blinc's text renderer runs user strings
+# through `html_escape::decode_html_entities` so authors can write
+# `&nabla;` / `&#8377;` and have them render as `∇` / `₹` at
+# runtime. The raw source literal is ASCII-only, so a naive scanner
+# misses the decoded codepoints entirely — we decode each literal
+# here to catch them before handing the set to the font subsetter.
+html-escape = "0.2"
