@@ -18,7 +18,38 @@ pub enum PrimitiveType {
     CircleInnerShadow = 6,
     /// Text glyph - samples from atlas texture using gradient_params as UV bounds
     Text = 7,
+    /// Notch: rounded rect with concave corners and optional top/bottom edge
+    /// modifiers (scoop, bulge, v-cut, v-peak). SDF-composed in the fragment
+    /// shader so notches inherit free AA, transforms, layer clipping, and
+    /// shadow from the primary pipeline — no tessellation required.
+    ///
+    /// Repurposed fields (only valid when prim_type == Notch):
+    ///
+    /// - `perspective` → top modifier [type, width, height_or_depth, corner_radius]
+    /// - `sdf_3d`      → bottom modifier [type, width, height_or_depth, corner_radius]
+    /// - `light`       → per-corner type flags [TL, TR, BR, BL]
+    ///   (0.0 = sharp/convex, 1.0 = concave)
+    ///
+    /// Modifier type codes (stored in the `type` slot as f32):
+    ///   0 = none   1 = scoop   2 = bulge   3 = v-cut   4 = v-peak
+    ///
+    /// Notches cannot use the 3D pipeline (they reuse those slots); if you
+    /// need 3D rotation on a notched shape, fall back to `Path` for that
+    /// draw call.
+    Notch = 8,
 }
+
+/// Corner style for notch primitives — matches `blinc_layout::notch::CornerStyle`
+/// but lives here so the GPU side can encode it without depending on layout.
+pub const NOTCH_CORNER_SHARP_OR_CONVEX: f32 = 0.0;
+pub const NOTCH_CORNER_CONCAVE: f32 = 1.0;
+
+/// Top/bottom edge modifier codes for notch primitives.
+pub const NOTCH_MOD_NONE: f32 = 0.0;
+pub const NOTCH_MOD_SCOOP: f32 = 1.0;
+pub const NOTCH_MOD_BULGE: f32 = 2.0;
+pub const NOTCH_MOD_CUT: f32 = 3.0;
+pub const NOTCH_MOD_PEAK: f32 = 4.0;
 
 /// Fill types (must match shader constants)
 #[repr(u32)]

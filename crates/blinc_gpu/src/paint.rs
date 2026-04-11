@@ -1774,6 +1774,131 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         }
     }
 
+    fn fill_notch(
+        &mut self,
+        rect: Rect,
+        corner_radii: [f32; 4],
+        corner_types: [f32; 4],
+        top_mod: [f32; 4],
+        bottom_mod: [f32; 4],
+        border: Option<(f32, Color)>,
+        shadow: Option<Shadow>,
+        brush: Brush,
+    ) {
+        let transformed = self.transform_rect(rect);
+
+        // DPI-scale the per-corner radii. `scale_corner_radius` wants a
+        // `CornerRadius` struct, so we route through that — the magnitudes
+        // match field-for-field.
+        let scaled_radii = self.scale_corner_radius(CornerRadius {
+            top_left: corner_radii[0],
+            top_right: corner_radii[1],
+            bottom_right: corner_radii[2],
+            bottom_left: corner_radii[3],
+        });
+        let scaled_radii_arr = [
+            scaled_radii.top_left,
+            scaled_radii.top_right,
+            scaled_radii.bottom_right,
+            scaled_radii.bottom_left,
+        ];
+
+        // Top/bottom edge modifiers: (type, width, height_or_depth, corner_r).
+        // Scale the geometric dimensions uniformly by the current DPI +
+        // element scale, leaving the modifier type untouched. Non-uniform
+        // scale / rotation / skew is already applied via `local_affine` in
+        // the fragment shader, so we only need the isotropic scale here.
+        let dpi_scale = self.current_dpi_scale();
+        let scale_mod = |m: [f32; 4]| -> [f32; 4] {
+            [m[0], m[1] * dpi_scale, m[2] * dpi_scale, m[3] * dpi_scale]
+        };
+        let scaled_top_mod = scale_mod(top_mod);
+        let scaled_bottom_mod = scale_mod(bottom_mod);
+
+        let (color, color2, gradient_params, fill_type) = self.brush_to_colors(&brush);
+        let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+
+        // Transform gradient params into rect-local then screen space, just
+        // like `fill_rect` does.
+        let gradient_params = Self::obb_to_rect_coords(&brush, gradient_params, rect, fill_type);
+        let is_radial = fill_type == FillType::RadialGradient;
+        let transformed_gradient_params = if fill_type != FillType::Solid {
+            self.transform_gradient_params(gradient_params, is_radial)
+        } else {
+            gradient_params
+        };
+
+        // Shadow (DPI-scaled) — reuses the main SDF shadow slot because the
+        // PRIM_NOTCH case in the shader runs the same shadow pass as rects.
+        let shadow_vec = if let Some(sh) = shadow {
+            [
+                sh.offset_x * dpi_scale,
+                sh.offset_y * dpi_scale,
+                sh.blur * dpi_scale,
+                sh.spread * dpi_scale,
+            ]
+        } else {
+            [0.0; 4]
+        };
+        let shadow_color_vec = shadow
+            .map(|s| [s.color.r, s.color.g, s.color.b, s.color.a])
+            .unwrap_or([0.0; 4]);
+
+        // Border (DPI-scaled).
+        let (border_vec, border_color_vec) = if let Some((width, color)) = border {
+            (
+                [width * dpi_scale, 0.0, 0.0, 0.0],
+                [color.r, color.g, color.b, color.a],
+            )
+        } else {
+            ([0.0; 4], [0.0; 4])
+        };
+
+        let primitive = GpuPrimitive {
+            bounds: [
+                transformed.x(),
+                transformed.y(),
+                transformed.width(),
+                transformed.height(),
+            ],
+            corner_radius: scaled_radii_arr,
+            color,
+            color2,
+            border: border_vec,
+            border_color: border_color_vec,
+            shadow: shadow_vec,
+            shadow_color: shadow_color_vec,
+            clip_bounds,
+            clip_radius,
+            gradient_params: transformed_gradient_params,
+            rotation: self.current_rotation_sincos(),
+            local_affine: self.current_local_affine(),
+            // 3D slots repurposed for notch parameters — see `PrimitiveType::Notch`
+            // doc comment in blinc_gpu::primitives for the contract.
+            perspective: scaled_top_mod,
+            sdf_3d: scaled_bottom_mod,
+            light: corner_types,
+            filter_a: self.current_filter_a,
+            filter_b: self.current_filter_b,
+            mask_params: self.current_mask_params,
+            mask_info: self.current_mask_info,
+            corner_shape: self.current_corner_shape,
+            clip_fade: self.get_clip_fade(),
+            type_info: [
+                PrimitiveType::Notch as u32,
+                fill_type as u32,
+                clip_type as u32,
+                self.z_layer,
+            ],
+        };
+
+        if self.is_foreground {
+            self.batch.push_foreground(primitive);
+        } else {
+            self.batch.push(primitive);
+        }
+    }
+
     fn fill_rect_with_per_side_border(
         &mut self,
         rect: Rect,

@@ -488,15 +488,21 @@ fn active_nav_bar() -> impl ElementBuilder {
     let active_bg = Color::from_hex(0x3b82f6); // Blue-500
     let icon_color = Color::WHITE.with_alpha(0.7);
     let active_icon_color = Color::WHITE;
-    let bulge_height = 8.0;
-    // let bulge_corner_radius = 0.0;
+    // The bulge should match the *roundness of the active button*:
+    // button is 44×44 (radius 22), so we size the circular-arc cap so
+    // its apex curvature radius = (half_w² + h²) / (2·h) is near 22.
+    // (20² + 8.5²) / 17 ≈ 27.8 → close match. `bulge_corner_radius`
+    // is the ear fillet where the arc joins the baseline.
+    let bulge_height = 8.5;
+    let bulge_width = 40.0;
+    let bulge_corner_radius = 6.0;
 
     // Container for the nav bar
     div().flex_row().justify_center().child(
         // Navigation bar with bulge for active item
         notch()
             // Bulge protrudes top to highlight the active center item
-            .center_bulge_top(58.0, bulge_height)
+            .center_bulge_top_rounded(bulge_width, bulge_height, bulge_corner_radius)
             .rounded(16.0)
             .bg(nav_bg)
             .h(56.0 + bulge_height) // Extra height for bulge
@@ -658,29 +664,28 @@ fn sharp_angle_demo() -> impl ElementBuilder {
 fn bottom_dock_bar(_width: f32) -> impl ElementBuilder {
     let dock_bg = Color::rgba(0.1, 0.1, 0.1, 0.95);
     let icon_color = Color::rgba(1.0, 1.0, 1.0, 0.8);
-    let scoop_depth = 44.0;
-    let scoop_corner_radius = 6.0; // Smooth corner transitions at scoop edges
-
-    let circle_gap = 6.0;
-    let _diameter = (scoop_depth * 2.0) - circle_gap;
+    // Scoop geometry tuned for the 64×64 FAB below. The FAB is positioned
+    // at top(-28) so its bottom edge lands at y=36 inside the dock. The
+    // scoop carves a stadium pouch that leaves ~6 px of visible padding
+    // between the button circle and the dock fill on all sides:
+    //   width 80   →  8 px horizontal padding per side of the 64 px button
+    //   depth 42   →  6 px below the button bottom (button y=36 → floor y=42)
+    //   cr 8       → small ears at the top corners of the hollow
+    // Bottom corner radius = depth/2 = 21, so the hollow reads as a
+    // Dynamic-Island pill with a semicircular floor.
+    let scoop_width = 80.0;
+    let scoop_depth = 42.0;
+    let scoop_corner_radius = 8.0;
 
     // Container with bottom margin
     div().w_full().flex_row().justify_center().child(
         notch()
             // Use rounded scoop for smoother aesthetic transitions
-            .center_scoop_top_rounded(90.0, scoop_depth, scoop_corner_radius)
+            .center_scoop_top_rounded(scoop_width, scoop_depth, scoop_corner_radius)
             .rounded_top(24.0)
             .bg(dock_bg)
             .w_fit()
             .h(50.0 + scoop_depth)
-            // Path-based shadow that follows the curved shape
-            .shadow(blinc_core::Shadow {
-                offset_x: 0.0,
-                offset_y: -1.0,
-                blur: 8.0,
-                spread: 2.0,
-                color: Color::BLACK.with_alpha(0.2),
-            })
             // Padding for scoop is automatically applied by the notch implementation
             .child(
                 div()

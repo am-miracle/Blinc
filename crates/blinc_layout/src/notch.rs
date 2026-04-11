@@ -1458,6 +1458,76 @@ impl Default for Notch {
 /// This handles convex (standard rounding), concave curves, step notches,
 /// center scoops (Dynamic Island-style centered indentations),
 /// center bulges (outward protrusions for active menu highlighting),
+/// Apply a uniform opacity multiplier to a brush.
+///
+/// Solid brushes get their alpha scaled directly; gradient brushes get a
+/// new `Gradient` with every stop's alpha scaled. Non-color brushes (glass,
+/// blur, image) pass through unchanged — their opacity is handled
+/// elsewhere in the pipeline.
+fn apply_brush_opacity(brush: Brush, opacity: f32) -> Brush {
+    if opacity >= 1.0 {
+        return brush;
+    }
+    match brush {
+        Brush::Solid(color) => Brush::Solid(color.with_alpha(color.a * opacity)),
+        Brush::Gradient(g) => {
+            let new_stops: Vec<_> = g
+                .stops()
+                .iter()
+                .map(|stop| {
+                    blinc_core::GradientStop::new(
+                        stop.offset,
+                        stop.color.with_alpha(stop.color.a * opacity),
+                    )
+                })
+                .collect();
+            let new_gradient = match g {
+                Gradient::Linear {
+                    start,
+                    end,
+                    space,
+                    spread,
+                    ..
+                } => Gradient::Linear {
+                    start,
+                    end,
+                    stops: new_stops,
+                    space,
+                    spread,
+                },
+                Gradient::Radial {
+                    center,
+                    radius,
+                    focal,
+                    space,
+                    spread,
+                    ..
+                } => Gradient::Radial {
+                    center,
+                    radius,
+                    focal,
+                    stops: new_stops,
+                    space,
+                    spread,
+                },
+                Gradient::Conic {
+                    center,
+                    start_angle,
+                    space,
+                    ..
+                } => Gradient::Conic {
+                    center,
+                    start_angle,
+                    stops: new_stops,
+                    space,
+                },
+            };
+            Brush::Gradient(new_gradient)
+        }
+        other => other,
+    }
+}
+
 /// center cuts (sharp V-shaped inward notches), and
 /// center peaks (sharp V-shaped outward points).
 /// The path is built clockwise starting from the top-left corner.
@@ -2395,169 +2465,109 @@ impl ElementBuilder for Notch {
 
         Some(Rc::new(
             move |ctx: &mut dyn DrawContext, bounds: CanvasBounds| {
-                // For concave corners, we need to offset the rect inward so the concave
-                // portions (which extend outward) stay within the canvas bounds
-                let tl_r = corners.top_left.radius;
-                let tr_r = corners.top_right.radius;
-                let bl_r = corners.bottom_left.radius;
-                let br_r = corners.bottom_right.radius;
-
-                // Calculate offsets for concave corners
-                let left_offset =
-                    if corners.top_left.is_concave() || corners.bottom_left.is_concave() {
-                        tl_r.max(bl_r)
+                // Every notch variant — concave corners, bulge, peak, cut,
+                // scoop, plus step corners (treated as sharp until the SDF
+                // gains a dedicated step case) — runs entirely through the
+                // SDF pipeline via `ctx.fill_notch`. No CPU tessellation,
+                // no separate vertex buffer, no layer-composition detour:
+                // the fragment shader's PRIM_NOTCH branch evaluates every
+                // shape via unions and subtractions of existing 2D SDFs.
+                let corner_types_arr = [
+                    if corners.top_left.is_concave() {
+                        1.0
                     } else {
                         0.0
-                    };
-                let right_offset =
-                    if corners.top_right.is_concave() || corners.bottom_right.is_concave() {
-                        tr_r.max(br_r)
+                    },
+                    if corners.top_right.is_concave() {
+                        1.0
                     } else {
                         0.0
-                    };
-                // Top offset: concave corners extend upward, bulges and peaks also protrude upward
-                let top_offset = {
-                    let corner_offset =
-                        if corners.top_left.is_concave() || corners.top_right.is_concave() {
-                            tl_r.max(tr_r)
-                        } else {
-                            0.0
-                        };
-                    let bulge_offset = top_center_bulge.map(|b| b.height).unwrap_or(0.0);
-                    let peak_offset = top_center_peak.map(|p| p.height).unwrap_or(0.0);
-                    corner_offset.max(bulge_offset).max(peak_offset)
-                };
-
-                // Bottom offset: concave corners extend downward, bulges and peaks also protrude downward
-                let bottom_offset = {
-                    let corner_offset =
-                        if corners.bottom_left.is_concave() || corners.bottom_right.is_concave() {
-                            bl_r.max(br_r)
-                        } else {
-                            0.0
-                        };
-                    let bulge_offset = bottom_center_bulge.map(|b| b.height).unwrap_or(0.0);
-                    let peak_offset = bottom_center_peak.map(|p| p.height).unwrap_or(0.0);
-                    corner_offset.max(bulge_offset).max(peak_offset)
-                };
-
-                // NOTE: Center scoops and cuts do NOT add to the rect offset - they go INWARD.
-                // Bulges and peaks DO protrude outward and need offset space.
-
-                // Create the rect with offsets so concave curves, bulges, and peaks stay within bounds
-                let rect = Rect::new(
-                    left_offset,
-                    top_offset,
-                    bounds.width - left_offset - right_offset,
-                    bounds.height - top_offset - bottom_offset,
-                );
-
-                // Build the path for any combination of corner types, scoops, bulges, cuts, and peaks
-                let path = build_shape_path(
-                    rect,
-                    &corners,
-                    top_center_scoop.as_ref(),
-                    bottom_center_scoop.as_ref(),
-                    top_center_bulge.as_ref(),
-                    bottom_center_bulge.as_ref(),
-                    top_center_cut.as_ref(),
-                    bottom_center_cut.as_ref(),
-                    top_center_peak.as_ref(),
-                    bottom_center_peak.as_ref(),
-                );
-
-                // Draw shadow first (behind the fill)
-                if let Some(shadow) = shadow {
-                    // Use path-based shadow for accurate curved shadow rendering
-                    draw_path_shadow(ctx, &path, rect, &shadow);
-                }
-
-                // Fill the path (with opacity applied)
-                if let Some(ref brush) = background {
-                    let brush_with_opacity = if opacity < 1.0 {
-                        match brush.clone() {
-                            Brush::Solid(color) => {
-                                Brush::Solid(color.with_alpha(color.a * opacity))
-                            }
-                            Brush::Gradient(g) => {
-                                // Apply opacity to all gradient stops
-                                let new_stops: Vec<_> = g
-                                    .stops()
-                                    .iter()
-                                    .map(|stop| {
-                                        blinc_core::GradientStop::new(
-                                            stop.offset,
-                                            stop.color.with_alpha(stop.color.a * opacity),
-                                        )
-                                    })
-                                    .collect();
-                                // Recreate gradient with modified stops
-                                let new_gradient = match g {
-                                    Gradient::Linear {
-                                        start,
-                                        end,
-                                        space,
-                                        spread,
-                                        ..
-                                    } => Gradient::Linear {
-                                        start,
-                                        end,
-                                        stops: new_stops,
-                                        space,
-                                        spread,
-                                    },
-                                    Gradient::Radial {
-                                        center,
-                                        radius,
-                                        focal,
-                                        space,
-                                        spread,
-                                        ..
-                                    } => Gradient::Radial {
-                                        center,
-                                        radius,
-                                        focal,
-                                        stops: new_stops,
-                                        space,
-                                        spread,
-                                    },
-                                    Gradient::Conic {
-                                        center,
-                                        start_angle,
-                                        space,
-                                        ..
-                                    } => Gradient::Conic {
-                                        center,
-                                        start_angle,
-                                        stops: new_stops,
-                                        space,
-                                    },
-                                };
-                                Brush::Gradient(new_gradient)
-                            }
-                            other => other,
-                        }
+                    },
+                    if corners.bottom_right.is_concave() {
+                        1.0
                     } else {
-                        brush.clone()
-                    };
-                    ctx.fill_path(&path, brush_with_opacity);
-                }
+                        0.0
+                    },
+                    if corners.bottom_left.is_concave() {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                ];
+                let corner_radii_arr = [
+                    corners.top_left.radius,
+                    corners.top_right.radius,
+                    corners.bottom_right.radius,
+                    corners.bottom_left.radius,
+                ];
 
-                // Stroke the path (with opacity applied)
-                if let (Some(color), width) = (border_color, border_width) {
-                    if width > 0.0 {
-                        let stroke_color = if opacity < 1.0 {
-                            color.with_alpha(color.a * opacity)
+                // Pack top/bottom edge modifiers. Each slot carries
+                // (type, width, height_or_depth, corner_radius).
+                //
+                // Modifier precedence (top edge): scoop > bulge > cut > peak.
+                // Only one modifier applies per edge — matches the `if ...
+                // else if ...` chain in `build_shape_path` so mixed-config
+                // notches behave identically to the legacy renderer.
+                let top_mod = if let Some(s) = &top_center_scoop {
+                    [1.0, s.width, s.depth, s.corner_radius]
+                } else if let Some(b) = &top_center_bulge {
+                    [2.0, b.width, b.height, b.corner_radius]
+                } else if let Some(c) = &top_center_cut {
+                    [3.0, c.width, c.depth, 0.0]
+                } else if let Some(p) = &top_center_peak {
+                    [4.0, p.width, p.height, 0.0]
+                } else {
+                    [0.0; 4]
+                };
+                let bottom_mod = if let Some(s) = &bottom_center_scoop {
+                    [1.0, s.width, s.depth, s.corner_radius]
+                } else if let Some(b) = &bottom_center_bulge {
+                    [2.0, b.width, b.height, b.corner_radius]
+                } else if let Some(c) = &bottom_center_cut {
+                    [3.0, c.width, c.depth, 0.0]
+                } else if let Some(p) = &bottom_center_peak {
+                    [4.0, p.width, p.height, 0.0]
+                } else {
+                    [0.0; 4]
+                };
+
+                let outer_rect = Rect::new(0.0, 0.0, bounds.width, bounds.height);
+
+                let fill_brush = if opacity < 1.0 {
+                    background.clone().map(|b| apply_brush_opacity(b, opacity))
+                } else {
+                    background.clone()
+                };
+
+                let border_arg = if let (Some(c), w) = (border_color, border_width) {
+                    if w > 0.0 {
+                        let stroked_color = if opacity < 1.0 {
+                            c.with_alpha(c.a * opacity)
                         } else {
-                            color
+                            c
                         };
-                        ctx.stroke_path(
-                            &path,
-                            &blinc_core::Stroke::new(width),
-                            Brush::Solid(stroke_color),
-                        );
+                        Some((w, stroked_color))
+                    } else {
+                        None
                     }
-                }
+                } else {
+                    None
+                };
+
+                // Always emit via the SDF pipeline. Border-only notches go
+                // out as a fully transparent fill so the fragment shader
+                // still evaluates the shape for the stroke.
+                let brush = fill_brush.unwrap_or(Brush::Solid(Color::rgba(0.0, 0.0, 0.0, 0.0)));
+                ctx.fill_notch(
+                    outer_rect,
+                    corner_radii_arr,
+                    corner_types_arr,
+                    top_mod,
+                    bottom_mod,
+                    border_arg,
+                    shadow,
+                    brush,
+                );
             },
         ))
     }

@@ -46,7 +46,9 @@ pub use primitives::{
     BlurUniforms, ClipType, ColorMatrixUniforms, CompositeUniforms, DropShadowUniforms, FillType,
     GlassType, GlassUniforms, GlowUniforms, GpuGlassPrimitive, GpuGlyph, GpuPrimitive,
     LayerCommand, LayerCommandEntry, LayerCompositeUniforms, ParticleViewport3D, PathBatch,
-    PathUniforms, PrimitiveBatch, PrimitiveType, Uniforms,
+    PathUniforms, PrimitiveBatch, PrimitiveType, Uniforms, NOTCH_CORNER_CONCAVE,
+    NOTCH_CORNER_SHARP_OR_CONVEX, NOTCH_MOD_BULGE, NOTCH_MOD_CUT, NOTCH_MOD_NONE, NOTCH_MOD_PEAK,
+    NOTCH_MOD_SCOOP,
 };
 pub use renderer::{
     GpuMemoryBudget, GpuRenderer, LayerTexture, LayerTextureCache, RendererConfig, RendererError,

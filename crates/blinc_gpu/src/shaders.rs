@@ -130,16 +130,23 @@ fn vs_main(
     // Expand bounds for shadow blur
     let blur_expand = prim.shadow.z * 3.0 + abs(prim.shadow.x) + abs(prim.shadow.y);
 
-    // Check for rotation, skew, and 3D transforms
+    // Check for rotation, skew, and 3D transforms. PRIM_NOTCH repurposes
+    // `prim.perspective` / `prim.sdf_3d` / `prim.light` for 2D notch
+    // parameters, so extracting 3D values from those slots would alias the
+    // notch modifier type as `sin_rx`, flip `has_3d` on, and expand the
+    // vertex bounding rect via the 3D projection loop below — producing a
+    // quad that doesn't cover the notch. Treat notches as strictly 2D.
+    let is_notch_vs = prim.type_info.x == 8u;
     let sin_rz = prim.rotation.x;
     let cos_rz = prim.rotation.y;
     let sin_ry = prim.rotation.z;
     let cos_ry = prim.rotation.w;
-    let sin_rx = prim.perspective.x;
-    let cos_rx = prim.perspective.y;
-    let persp_d = prim.perspective.z;
+    let sin_rx = select(prim.perspective.x, 0.0, is_notch_vs);
+    let cos_rx = select(prim.perspective.y, 1.0, is_notch_vs);
+    let persp_d = select(prim.perspective.z, 0.0, is_notch_vs);
     let la = prim.local_affine; // [a, b, c, d] of normalized 2x2 affine
-    let has_3d = abs(sin_ry) > 0.0001 || abs(sin_rx) > 0.0001 || persp_d > 0.001;
+    let has_3d = !is_notch_vs
+        && (abs(sin_ry) > 0.0001 || abs(sin_rx) > 0.0001 || persp_d > 0.001);
     // Check if local_affine is non-identity (rotation, skew, or non-uniform scale)
     let has_local_affine = abs(la.x - 1.0) > 0.0001 || abs(la.y) > 0.0001
                         || abs(la.z) > 0.0001 || abs(la.w - 1.0) > 0.0001;
@@ -200,12 +207,59 @@ fn vs_main(
         let aabb_hh = max(abs(c0y), abs(c1y)) + blur_expand;
         bounds = vec4<f32>(center.x - aabb_hw, center.y - aabb_hh, aabb_hw * 2.0, aabb_hh * 2.0);
     } else {
-        // Original non-rotated, non-skewed path
+        // Notches can reach outside `prim.bounds` via concave corners,
+        // top/bottom bulge, or top/bottom peak modifiers. The SDF in fs_main
+        // returns negative for those exterior pixels, but the fragment shader
+        // only runs on pixels covered by this vertex quad — so if we don't
+        // expand the quad, the protrusion is invisible (every pixel outside
+        // `prim.bounds` is never rasterized in the first place). Compute the
+        // per-edge outward expansion from the notch parameters and fold it
+        // into the quad size here. Scoop/cut modifiers go INWARD so they
+        // don't need any expansion.
+        var notch_left = 0.0;
+        var notch_top = 0.0;
+        var notch_right = 0.0;
+        var notch_bottom = 0.0;
+        if is_notch_vs {
+            let ct = prim.light; // (TL, TR, BR, BL) corner type flags
+            let cr = prim.corner_radius;
+            // Concave corners extend the shape outward by `radius` along the
+            // two edges they touch.
+            if ct.x > 0.5 { // TL concave
+                notch_left = max(notch_left, cr.x);
+                notch_top = max(notch_top, cr.x);
+            }
+            if ct.y > 0.5 { // TR concave
+                notch_right = max(notch_right, cr.y);
+                notch_top = max(notch_top, cr.y);
+            }
+            if ct.z > 0.5 { // BR concave
+                notch_right = max(notch_right, cr.z);
+                notch_bottom = max(notch_bottom, cr.z);
+            }
+            if ct.w > 0.5 { // BL concave
+                notch_left = max(notch_left, cr.w);
+                notch_bottom = max(notch_bottom, cr.w);
+            }
+            // Top / bottom modifiers: bulge (2) and peak (4) both extend the
+            // shape by `height` past the base edge.
+            let top_type = prim.perspective.x;
+            let top_height = prim.perspective.z;
+            if (top_type > 1.5 && top_type < 2.5) || (top_type > 3.5 && top_type < 4.5) {
+                notch_top = max(notch_top, top_height);
+            }
+            let bot_type = prim.sdf_3d.x;
+            let bot_height = prim.sdf_3d.z;
+            if (bot_type > 1.5 && bot_type < 2.5) || (bot_type > 3.5 && bot_type < 4.5) {
+                notch_bottom = max(notch_bottom, bot_height);
+            }
+        }
+
         bounds = vec4<f32>(
-            prim.bounds.x - blur_expand,
-            prim.bounds.y - blur_expand,
-            prim.bounds.z + blur_expand * 2.0,
-            prim.bounds.w + blur_expand * 2.0
+            prim.bounds.x - blur_expand - notch_left,
+            prim.bounds.y - blur_expand - notch_top,
+            prim.bounds.z + blur_expand * 2.0 + notch_left + notch_right,
+            prim.bounds.w + blur_expand * 2.0 + notch_top + notch_bottom
         );
     }
 
@@ -369,6 +423,436 @@ fn sd_ellipse(p: vec2<f32>, center: vec2<f32>, radii: vec2<f32>) -> f32 {
     let p_norm = p_centered / radii;
     let dist = length(p_norm);
     return (dist - 1.0) * min(radii.x, radii.y);
+}
+
+// ============================================================================
+// Notch SDF helpers
+//
+// Used by `case 8u /* PRIM_NOTCH */` in fs_main to compose rounded rects with
+// concave corners and optional top/bottom edge modifiers (scoop, bulge,
+// v-cut, v-peak). The goal is to approximate blinc_layout's path-based
+// `build_shape_path` output well enough that the notch_demo matches its
+// tessellated counterpart visually, while keeping every notch on the main
+// SDF pipeline (free AA, layer-clip, transforms, shadows).
+//
+// Coordinate convention throughout: `p` is the fragment's position in
+// shader-space pixels; `origin`/`size` describe the outer bounds rect
+// (x, y, width, height) in the same coordinate space.
+// ============================================================================
+
+// Polynomial smooth min (Inigo Quilez). Blends two SDFs over a `k`-pixel
+// transition zone so their union doesn't produce a visible crease at the
+// point where both SDFs are zero. At that point, `smin(0, 0, k) = -k/4`
+// — the crease is pushed into the interior far enough that the pipeline's
+// AA pass (which smoothsteps at `|d| < aa_width`) sees the surface as
+// "solidly inside" there and no hairline surfaces.
+//
+// Returns the min for points far from both surfaces (`|a - b| ≥ k`), so
+// points well inside or well outside either shape are unaffected — only
+// the transition zone near the crease is altered.
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+// Polynomial smooth max — the dual of `smin`. Used for smooth subtraction
+// (`smax(d, -carve, k)`), which keeps the union of edges where a carve
+// meets the base shape from developing a visible crease line.
+fn smax(a: f32, b: f32, k: f32) -> f32 {
+    return -smin(-a, -b, k);
+}
+
+// 2D triangle SDF (Inigo Quilez's standard formulation).
+// `a`, `b`, `c` are the three vertices; winding doesn't matter — the helper
+// normalizes via `sign(e0 × e2)` so the result is always negative inside.
+fn sd_triangle(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> f32 {
+    let e0 = b - a; let e1 = c - b; let e2 = a - c;
+    let v0 = p - a; let v1 = p - b; let v2 = p - c;
+    let pq0 = v0 - e0 * clamp(dot(v0, e0) / max(dot(e0, e0), 1e-6), 0.0, 1.0);
+    let pq1 = v1 - e1 * clamp(dot(v1, e1) / max(dot(e1, e1), 1e-6), 0.0, 1.0);
+    let pq2 = v2 - e2 * clamp(dot(v2, e2) / max(dot(e2, e2), 1e-6), 0.0, 1.0);
+    let s = sign(e0.x * e2.y - e0.y * e2.x);
+    let d = min(
+        min(
+            vec2<f32>(dot(pq0, pq0), s * (v0.x * e0.y - v0.y * e0.x)),
+            vec2<f32>(dot(pq1, pq1), s * (v1.x * e1.y - v1.y * e1.x))
+        ),
+        vec2<f32>(dot(pq2, pq2), s * (v2.x * e2.y - v2.y * e2.x))
+    );
+    return -sqrt(d.x) * sign(d.y);
+}
+
+// Corner type codes (stored as f32 in `prim.light` for PRIM_NOTCH).
+//   0.0 = sharp or convex (distinguished by corner_radius magnitude)
+//   1.0 = concave
+//
+// Modifier type codes (stored as f32 in `prim.perspective.x` / `prim.sdf_3d.x`).
+//   0.0 = none   1.0 = scoop   2.0 = bulge   3.0 = cut   4.0 = peak
+//
+// All notch geometry is composed via SDF union (`min`) and subtraction
+// (`max(d, -d_sub)`); no CPU tessellation is involved at any point.
+
+// Complete notch SDF — one call, all geometry in the shader.
+//
+// Mirrors `blinc_layout::notch::build_shape_path`: starts from an inner
+// rounded rect that's inset from the outer bounds by the maximum of
+// (concave corner radius, top/bottom modifier height) on each edge, then
+// composes the concave corner quarter-discs and the top/bottom edge
+// modifiers on top of it. The result is a single signed distance — negative
+// inside the shape, positive outside — that the main SDF pipeline can treat
+// exactly like any other primitive for shading, AA, shadows, borders, and
+// layer composition.
+//
+// Parameter pack:
+//   outer_origin, outer_size — the caller's bounds (what the element reserved)
+//   radii                    — per-corner magnitudes (TL, TR, BR, BL)
+//   corner_types             — per-corner flags (0 = sharp/convex, 1 = concave)
+//   top_mod                  — (type, width, height, corner_radius) for the
+//                              top-edge modifier; type 0 = none
+//   bottom_mod               — same layout for the bottom edge
+fn sd_notch(
+    p: vec2<f32>,
+    outer_origin: vec2<f32>,
+    outer_size: vec2<f32>,
+    radii: vec4<f32>,
+    corner_types: vec4<f32>,
+    top_mod: vec4<f32>,
+    bottom_mod: vec4<f32>
+) -> f32 {
+    let tl_concave = corner_types.x > 0.5;
+    let tr_concave = corner_types.y > 0.5;
+    let br_concave = corner_types.z > 0.5;
+    let bl_concave = corner_types.w > 0.5;
+
+    let tl_r = radii.x;
+    let tr_r = radii.y;
+    let br_r = radii.z;
+    let bl_r = radii.w;
+
+    // Modifier height on each edge (only bulge and peak protrude outward;
+    // scoop and cut go inward so they don't reserve space).
+    let top_type = top_mod.x;
+    let top_protrudes = (top_type > 1.5 && top_type < 2.5) || (top_type > 3.5 && top_type < 4.5);
+    let top_mod_h = select(0.0, top_mod.z, top_protrudes);
+    let bot_type = bottom_mod.x;
+    let bot_protrudes = (bot_type > 1.5 && bot_type < 2.5) || (bot_type > 3.5 && bot_type < 4.5);
+    let bot_mod_h = select(0.0, bottom_mod.z, bot_protrudes);
+
+    // Edge offsets — the inner rect is inset on each edge by the max of
+    // (concave radius on adjacent corners, outward modifier height on that
+    // edge). Matches `build_shape_path`'s left/right/top/bottom_offset math.
+    let left_offset = select(
+        0.0,
+        max(select(0.0, tl_r, tl_concave), select(0.0, bl_r, bl_concave)),
+        tl_concave || bl_concave
+    );
+    let right_offset = select(
+        0.0,
+        max(select(0.0, tr_r, tr_concave), select(0.0, br_r, br_concave)),
+        tr_concave || br_concave
+    );
+    let top_offset = max(
+        select(
+            0.0,
+            max(select(0.0, tl_r, tl_concave), select(0.0, tr_r, tr_concave)),
+            tl_concave || tr_concave
+        ),
+        top_mod_h
+    );
+    let bottom_offset = max(
+        select(
+            0.0,
+            max(select(0.0, bl_r, bl_concave), select(0.0, br_r, br_concave)),
+            bl_concave || br_concave
+        ),
+        bot_mod_h
+    );
+
+    // Inner body rect: inset from outer bounds by `left_offset` /
+    // `right_offset` / `top_offset` / `bottom_offset`. For the
+    // `notch_demo` dropdown (`.w(340).concave_top(32).rounded_bottom(16)`),
+    // `left_offset = right_offset = max(tl_r=32, bl_r=16) = 32` and
+    // `top_offset = 32`, so the inner body is `(32, 32)` to `(308, h)` —
+    // 276 wide, matching `build_shape_path`'s shape BELOW the concave
+    // region.
+    //
+    // Concave corners get radius 0 on the inner rect: their curvature
+    // lives in the flare regions added below. Convex and sharp corners
+    // keep their radii so the main body has proper rounded bottom
+    // corners etc.
+    let inner_origin = outer_origin + vec2<f32>(left_offset, top_offset);
+    let inner_size = vec2<f32>(
+        max(outer_size.x - left_offset - right_offset, 0.001),
+        max(outer_size.y - top_offset - bottom_offset, 0.001)
+    );
+    let inner_radii = vec4<f32>(
+        select(tl_r, 0.0, tl_concave),
+        select(tr_r, 0.0, tr_concave),
+        select(br_r, 0.0, br_concave),
+        select(bl_r, 0.0, bl_concave)
+    );
+
+    var d = sd_rounded_rect(p, inner_origin, inner_size, inner_radii);
+
+    // ------------------------------------------------------------------
+    // Concave corner flares.
+    //
+    // Each flare is the region "inside the concave corner box AND OUTSIDE
+    // the concave arc disc". The corner box is an axis-aligned rectangle
+    // that spans from the outer canvas edge to the inner body edge:
+    //
+    //   TL box: (outer.x,           inner_top)    → (inner_left,  inner_top + tl_r)
+    //   TR box: (inner_right,       inner_top)    → (outer.x+w,   inner_top + tr_r)
+    //   BR box: (inner_right,       inner_bottom - br_r) → (outer.x+w, inner_bottom)
+    //   BL box: (outer.x,           inner_bottom - bl_r) → (inner_left, inner_bottom)
+    //
+    // The concave arc is a quarter circle whose center sits on the outer
+    // canvas edge, aligned so the arc meets the top edge with a horizontal
+    // tangent and the inner body's side edge with a vertical tangent. For
+    // the top-left corner that center is `(outer.x, inner_top + tl_r)`,
+    // radius `tl_r`. The arc carves the concave "bite" out of the flare
+    // box — the flare FILLED region is "box AND NOT disc".
+    //
+    // SDF: `flare = max(box_sd, -disc_sd)` gives negative when a point is
+    // inside the box AND outside the disc. The flare is then `min`-unioned
+    // into the overall distance so the inner body and flares combine into
+    // one shape.
+    //
+    // The shape at each y is therefore:
+    //   y < inner_top                      → empty (above top edge)
+    //   y = inner_top                      → only the top edge point of the
+    //                                        flare is tangent; the shape
+    //                                        spans x ∈ [outer.x, outer.x+w]
+    //                                        (full canvas width) as the AA
+    //                                        kernel rounds off the corner
+    //   inner_top < y < inner_top + tl_r   → taper from full canvas width
+    //                                        to inner body width
+    //   y ≥ inner_top + tl_r                → inner body width
+    // ------------------------------------------------------------------
+    let inner_right = inner_origin.x + inner_size.x;
+    let inner_bottom = inner_origin.y + inner_size.y;
+
+    // `k` controls how wide the `smin` blend zone is. Keep it below `2 *
+    // aa_width + 1` (~2 px) — too large and smin's blend region inflates
+    // pixels that are actually just outside both sub-shapes, producing a
+    // visible "halo" along the crease where the concave flare meets the
+    // inner body's side edge. At k=1.5 the crease value drops to -0.375
+    // (≈ 96% alpha after smoothstep, imperceptible seam) while points
+    // one pixel outside both shapes stay on the outside.
+    let smin_k = 1.5;
+
+    // Effective vertical radius for each concave corner. Scales down when
+    // the canvas can't fit the user-requested `tl_r` (or `tr_r`, etc.) on
+    // top of the body — i.e. when the element is mid-animation growing
+    // out from under a parent. At low heights the corner collapses to
+    // just the available space so it "follows" the element's growth
+    // naturally instead of staying at full size and clipping against the
+    // canvas edge.
+    //
+    // Horizontal radius (left_offset / right_offset) stays at the
+    // user's value — the concave curve becomes an ellipse rather than
+    // a quarter circle. At `eff_vertical_r == tl_r` the ellipse
+    // degenerates back to a circle, which is the steady-state shape.
+    let tb_available = max(outer_size.y - top_offset - bottom_offset, 0.0);
+    let eff_tl_ry = select(tl_r, min(tl_r, tb_available), tl_concave);
+    let eff_tr_ry = select(tr_r, min(tr_r, tb_available), tr_concave);
+    let eff_br_ry = select(br_r, min(br_r, tb_available), br_concave);
+    let eff_bl_ry = select(bl_r, min(bl_r, tb_available), bl_concave);
+
+    if tl_concave {
+        let box_origin = vec2<f32>(outer_origin.x, inner_origin.y);
+        let box_size = vec2<f32>(left_offset, eff_tl_ry);
+        let box_sd = sd_rounded_rect(p, box_origin, box_size, vec4<f32>(0.0));
+        // Elliptical arc: center on outer canvas edge, horizontal radius
+        // stays at `left_offset`, vertical radius scales with available
+        // height. At `eff_tl_ry == tl_r` this is the same circle as
+        // before; at smaller `eff_tl_ry` it squishes vertically so the
+        // arc still meets the top edge and inner body tangentially but
+        // over a shorter vertical span.
+        let c = vec2<f32>(outer_origin.x, inner_origin.y + eff_tl_ry);
+        let ell_sd = sd_ellipse(p, c, vec2<f32>(left_offset, eff_tl_ry));
+        let flare = max(box_sd, -ell_sd);
+        d = smin(d, flare, smin_k);
+    }
+    if tr_concave {
+        let right_width = outer_origin.x + outer_size.x - inner_right;
+        let box_origin = vec2<f32>(inner_right, inner_origin.y);
+        let box_size = vec2<f32>(right_width, eff_tr_ry);
+        let box_sd = sd_rounded_rect(p, box_origin, box_size, vec4<f32>(0.0));
+        let c = vec2<f32>(outer_origin.x + outer_size.x, inner_origin.y + eff_tr_ry);
+        let ell_sd = sd_ellipse(p, c, vec2<f32>(right_width, eff_tr_ry));
+        let flare = max(box_sd, -ell_sd);
+        d = smin(d, flare, smin_k);
+    }
+    if br_concave {
+        let right_width = outer_origin.x + outer_size.x - inner_right;
+        let box_origin = vec2<f32>(inner_right, inner_bottom - eff_br_ry);
+        let box_size = vec2<f32>(right_width, eff_br_ry);
+        let box_sd = sd_rounded_rect(p, box_origin, box_size, vec4<f32>(0.0));
+        let c = vec2<f32>(outer_origin.x + outer_size.x, inner_bottom - eff_br_ry);
+        let ell_sd = sd_ellipse(p, c, vec2<f32>(right_width, eff_br_ry));
+        let flare = max(box_sd, -ell_sd);
+        d = smin(d, flare, smin_k);
+    }
+    if bl_concave {
+        let box_origin = vec2<f32>(outer_origin.x, inner_bottom - eff_bl_ry);
+        let box_size = vec2<f32>(left_offset, eff_bl_ry);
+        let box_sd = sd_rounded_rect(p, box_origin, box_size, vec4<f32>(0.0));
+        let c = vec2<f32>(outer_origin.x, inner_bottom - eff_bl_ry);
+        let ell_sd = sd_ellipse(p, c, vec2<f32>(left_offset, eff_bl_ry));
+        let flare = max(box_sd, -ell_sd);
+        d = smin(d, flare, smin_k);
+    }
+
+    // ------------------------------------------------------------------
+    // Top-edge modifier.
+    //
+    // Base line is `inner_origin.y` — the inner rect's top edge, which is
+    // where `build_shape_path` anchors the modifier. Scoop and cut carve
+    // INTO the rect (subtraction); bulge and peak protrude UPWARD out of
+    // the rect (union). The base of bulge/peak sits on the inner edge and
+    // their apex reaches up to `inner_origin.y - height`, which is exactly
+    // `outer_origin.y + top_offset - top_mod_h` — by construction, ≥ the
+    // outer top edge, so the protrusion never leaks outside the caller's
+    // bounds (and outside the canvas clip).
+    // ------------------------------------------------------------------
+    // Scoop / bulge modifiers.
+    //
+    // Bulge uses a (1 − u²)^1.5 dome curve — like the legacy cubic bezier
+    // it has zero slope at u=±1 and u=0 (horizontal tangents at both the
+    // baseline endpoints and the apex), so the "gentle wrap" join is
+    // intentional. Apex curvature radius rx²/(3·h) is noticeably rounder
+    // than a pure cosine, so a shallow bulge reads as a dome rather than
+    // a curvy triangle.
+    //
+    // Scoop uses a half-ellipse bowl (radii half_w × depth) subtracted
+    // from the body via `smax(−ell, k)`. The ellipse has a *vertical*
+    // tangent where it meets the baseline (the 90° corner at the entry),
+    // and the smooth-max rounds that corner into the Dynamic-Island-style
+    // "ears" — fillet size is driven by the user's `corner_radius` param
+    // (`top_mod.w`), so `.center_scoop_top_rounded(w, depth, cr)` behaves
+    // like the legacy path renderer.
+    //
+    // All params come from the user's
+    // `.center_bulge_top(w,h)` / `.center_scoop_top_rounded(w,depth,cr)`
+    // call via `top_mod.{y,z,w}`.
+    let top_w = top_mod.y;
+    let top_h = top_mod.z;
+    let top_cr = top_mod.w;
+    if top_type > 0.5 && top_w > 0.001 && top_h > 0.001 {
+        let cx = outer_origin.x + outer_size.x * 0.5;
+        let base_y = inner_origin.y;
+        let half_w = top_w * 0.5;
+        let rel_x = p.x - cx;
+        let u = clamp(rel_x / half_w, -1.0, 1.0);
+        let dx_col = abs(rel_x) - half_w;
+        let one_minus_u_sq = max(1.0 - u * u, 0.0);
+        let dome = one_minus_u_sq * sqrt(one_minus_u_sq); // (1 − u²)^1.5
+        if top_type < 1.5 { // scoop — rect + half-disk, smooth-max ears
+            // The hollow is a thin rect from the baseline down to the top
+            // of a half-disk, unioned with the half-disk itself. The
+            // half-disk's radius is `min(half_w, depth)` — for depth ≥
+            // half_w we get a true semicircular floor (no flat section),
+            // for shallower scoops the disk shrinks and a residual rect
+            // fills the remaining height.
+            //
+            // The rect has SHARP top corners so the body's 90° convex
+            // corner at the scoop entry gets rounded OUTWARD by
+            // `smax(−hollow, k=cr)` — that produces the Dynamic-Island
+            // "ears" (body edge dipping smoothly from the baseline into
+            // the vertical scoop wall). Hard `max()` would leave visible
+            // 90° corners poking inward; smax's fillet bows outward,
+            // matching the legacy cubic-bezier ear shape.
+            let disk_r = min(half_w, top_h);
+            let disk_cy = base_y + top_h - disk_r;
+            let disk_sd = length(p - vec2<f32>(cx, disk_cy)) - disk_r;
+            let disk_lower = max(disk_sd, disk_cy - p.y);
+            let rect_origin = vec2<f32>(cx - half_w, base_y);
+            let rect_h = max(disk_cy - base_y, 0.001);
+            let rect_sd = sd_rounded_rect(p, rect_origin, vec2<f32>(top_w, rect_h), vec4<f32>(0.0));
+            let hollow_sd = min(rect_sd, disk_lower);
+            d = smax(d, -hollow_sd, max(top_cr, 0.001));
+        } else if top_type < 2.5 { // bulge — circular arc cap with smooth ears
+            // The cap is the segment of a disk passing through
+            // (cx ± half_w, base_y) and (cx, base_y − top_h). Formula:
+            //   r = (half_w² + h²) / (2·h)
+            //   y_c = base_y − h + r   (center below the apex)
+            // The circle meets the baseline at a nonzero angle (not a
+            // horizontal tangent), so the union with the body has a
+            // concave notch on the outside at each endpoint. `smin` adds
+            // a fillet into the notch whose size is the user's
+            // `corner_radius`, producing Dynamic-Island-style ears at
+            // the bulge base.
+            let r_bulge = (half_w * half_w + top_h * top_h) / max(2.0 * top_h, 0.001);
+            let y_c = base_y - top_h + r_bulge;
+            let disk_sd = length(p - vec2<f32>(cx, y_c)) - r_bulge;
+            let bulge_sd = max(disk_sd, p.y - base_y);
+            d = smin(d, bulge_sd, max(top_cr, 0.001));
+        } else if top_type < 3.5 { // cut — subtract a V-triangle
+            d = smax(d, -sd_triangle(
+                p,
+                vec2<f32>(cx - top_w * 0.5, base_y),
+                vec2<f32>(cx, base_y + top_h),
+                vec2<f32>(cx + top_w * 0.5, base_y)
+            ), smin_k);
+        } else { // peak — union a V-triangle protrusion
+            d = smin(d, sd_triangle(
+                p,
+                vec2<f32>(cx - top_w * 0.5, base_y),
+                vec2<f32>(cx, base_y - top_h),
+                vec2<f32>(cx + top_w * 0.5, base_y)
+            ), smin_k);
+        }
+    }
+
+    // Bottom-edge modifier — mirror of top, anchored at
+    // `inner_origin.y + inner_size.y`.
+    let bot_w = bottom_mod.y;
+    let bot_h = bottom_mod.z;
+    let bot_cr = bottom_mod.w;
+    if bot_type > 0.5 && bot_w > 0.001 && bot_h > 0.001 {
+        let cx = outer_origin.x + outer_size.x * 0.5;
+        let base_y = inner_origin.y + inner_size.y;
+        let half_w = bot_w * 0.5;
+        let rel_x = p.x - cx;
+        let u = clamp(rel_x / half_w, -1.0, 1.0);
+        let dx_col = abs(rel_x) - half_w;
+        let one_minus_u_sq = max(1.0 - u * u, 0.0);
+        let dome = one_minus_u_sq * sqrt(one_minus_u_sq);
+        if bot_type < 1.5 { // scoop — mirror of top: rect + half-disk above bottom baseline
+            let disk_r = min(half_w, bot_h);
+            let disk_cy = base_y - bot_h + disk_r;
+            let disk_sd = length(p - vec2<f32>(cx, disk_cy)) - disk_r;
+            let disk_upper = max(disk_sd, p.y - disk_cy);
+            let rect_h = max(base_y - disk_cy, 0.001);
+            let rect_origin = vec2<f32>(cx - half_w, disk_cy);
+            let rect_sd = sd_rounded_rect(p, rect_origin, vec2<f32>(bot_w, rect_h), vec4<f32>(0.0));
+            let hollow_sd = min(rect_sd, disk_upper);
+            d = smax(d, -hollow_sd, max(bot_cr, 0.001));
+        } else if bot_type < 2.5 { // bulge — circular arc cap with smooth ears
+            let r_bulge = (half_w * half_w + bot_h * bot_h) / max(2.0 * bot_h, 0.001);
+            let y_c = base_y + bot_h - r_bulge;
+            let disk_sd = length(p - vec2<f32>(cx, y_c)) - r_bulge;
+            let bulge_sd = max(disk_sd, base_y - p.y);
+            d = smin(d, bulge_sd, max(bot_cr, 0.001));
+        } else if bot_type < 3.5 { // cut
+            d = smax(d, -sd_triangle(
+                p,
+                vec2<f32>(cx - bot_w * 0.5, base_y),
+                vec2<f32>(cx, base_y - bot_h),
+                vec2<f32>(cx + bot_w * 0.5, base_y)
+            ), smin_k);
+        } else { // peak
+            d = smin(d, sd_triangle(
+                p,
+                vec2<f32>(cx - bot_w * 0.5, base_y),
+                vec2<f32>(cx, base_y + bot_h),
+                vec2<f32>(cx + bot_w * 0.5, base_y)
+            ), smin_k);
+        }
+    }
+
+    return d;
 }
 
 // Quarter ellipse SDF for inner corners with asymmetric borders (GPUI approach)
@@ -923,13 +1407,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let cos_rz = prim.rotation.y;
     let sin_ry = prim.rotation.z;
     let cos_ry = prim.rotation.w;
-    let sin_rx = prim.perspective.x;
-    let cos_rx = prim.perspective.y;
-    let persp_d = prim.perspective.z;
-    let shape_type = u32(prim.perspective.w);
-    let depth = prim.sdf_3d.x;
+    // PRIM_NOTCH repurposes `prim.perspective`, `prim.sdf_3d`, and `prim.light`
+    // for 2D notch parameters (see the PRIM_NOTCH case below and the
+    // `PrimitiveType::Notch` doc comment in blinc_gpu::primitives). Extracting
+    // them as 3D data here would alias the modifier type code as `sin_rx` and
+    // flip `has_3d` on, which then runs the 3D perspective-unprojection branch
+    // and corrupts `sp` for every notch fragment. Force-zero those slots when
+    // prim_type == Notch so the 3D path never fires.
+    let is_notch = prim_type == 8u;
+    let sin_rx = select(prim.perspective.x, 0.0, is_notch);
+    let cos_rx = select(prim.perspective.y, 1.0, is_notch);
+    let persp_d = select(prim.perspective.z, 0.0, is_notch);
+    let shape_type = select(u32(prim.perspective.w), 0u, is_notch);
+    let depth = select(prim.sdf_3d.x, 0.0, is_notch);
 
-    let has_3d = abs(sin_ry) > 0.0001 || abs(sin_rx) > 0.0001 || persp_d > 0.001;
+    // Notches never go through the 3D perspective-unprojection branch below
+    // — their `sp` must be whatever the 2D local_affine path produces so the
+    // SDF evaluates against fragment positions directly.
+    let has_3d = !is_notch && (abs(sin_ry) > 0.0001 || abs(sin_rx) > 0.0001 || persp_d > 0.001);
 
     // ── 3D SDF Raymarching Path ──
     if shape_type > 0u && shape_type != 6u && depth > 0.001 {
@@ -1367,28 +1862,61 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
             return text_result;
         }
+        case 8u /* PRIM_NOTCH */: {
+            // Rounded rect with optional concave corners + optional top/bottom
+            // edge modifiers (scoop/bulge/cut/peak) — everything is SDF-
+            // composed in `sd_notch`, no CPU tessellation. See the
+            // `PrimitiveType::Notch` doc comment in `blinc_gpu::primitives`
+            // for which GpuPrimitive slots carry the notch parameters.
+            d = sd_notch(
+                sp, origin, size,
+                prim.corner_radius,
+                prim.light,       // per-corner type flags (TL, TR, BR, BL)
+                prim.perspective, // top modifier    (type, width, height, corner_r)
+                prim.sdf_3d       // bottom modifier (type, width, height, corner_r)
+            );
+        }
         default: {
             d = sd_shaped_rect(sp, origin, size, prim.corner_radius, prim.corner_shape);
         }
     }
 
-    // Anti-aliasing: smooth transition at edge using screen-space adaptive width.
+    // Anti-aliasing: smooth transition at edge over ~1 pixel total.
     //
-    // We reuse `d_fw_screen`, which was computed at the top of fs_main
-    // from `fwidth(p.x) + fwidth(p.y)` on the uniformly-interpolated
-    // input position. For an axis-aligned screen-space SDF (which `d`
-    // is, after the prim_type switch above), this is mathematically
-    // identical to `fwidth(d)` because `d` is locally 1-Lipschitz in
-    // pixel space:
+    // `aa_width = 0.5` means the `smoothstep` range is `[-0.5, 0.5]` —
+    // one pixel wide, centered on the shape boundary. The fragment
+    // shader is evaluated at pixel CENTERS (integer + 0.5), so for an
+    // axis-aligned edge at integer y, pixels at `y ± 0.5` end up at
+    // `d = ∓0.5`, which `smoothstep(-0.5, 0.5, ±0.5)` saturates to 1
+    // and 0 respectively. That matters for two reasons:
     //
-    //   - Axis-aligned edges: d_fw_screen ≈ 1.0 → AA width ≈ 0.75px
-    //   - 45° corner curves:  d_fw_screen ≈ 1.41 → AA width ≈ 1.06px
+    //   1. **No seams between adjacent same-colored elements.** When
+    //      two fills meet at an integer-pixel line (e.g. menu bar
+    //      bottom + notch dropdown top), both sides of the boundary
+    //      now reach full alpha at their own pixel-center and don't
+    //      double-composite with partial alpha — the old wider AA
+    //      (`d_fw * 0.75 ≈ 1.06`) left them at `alpha ≈ 0.83`, which
+    //      let ~14% of the background bleed through at the shared
+    //      edge as a hairline seam.
     //
-    // The hoist is required for WGSL strict mode (Dawn/Chrome) — the
-    // direct `fwidth(d)` would be "called from non-uniform control
-    // flow" because `d` was assigned inside the prim_type switch.
-    let d_fw = d_fw_screen;
-    let aa_width = max(d_fw * 0.75, 0.5);
+    //   2. **Pixel-accurate rect bounds.** A rect with integer pixel
+    //      bounds now covers exactly the right pixels with alpha 1,
+    //      matching what a non-AA rasterizer would produce. Previously
+    //      the AA zone extended half a pixel into each neighboring
+    //      row/column.
+    //
+    // The trade-off is that diagonal edges lose a fraction of a pixel
+    // of AA softness — they still transition over ~1 pixel in the
+    // gradient direction but the transition is a touch tighter than
+    // the old 2.12-pixel zone. Subpixel accuracy is preserved because
+    // the SDF is Euclidean (|∇d| = 1) so the 1-pixel smoothstep range
+    // matches the true distance-to-edge for every orientation.
+    //
+    // `d_fw_screen` (=`length(fwidth(p))`) isn't used for the width
+    // computation anymore — it's still computed at the top of fs_main
+    // because some upstream branches (shadow blur, etc.) read it.
+    _ = d_fw_screen;
+    let aa_width = 0.5;
     let fill_alpha = 1.0 - smoothstep(-aa_width, aa_width, d);
 
     if fill_alpha < 0.001 {
@@ -1453,8 +1981,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let half_size = size * 0.5;
         let rel = sp - center;  // Position relative to center (signed, in unrotated space)
 
-        // Use same AA width as outer edge for consistent anti-aliasing quality
-        let border_aa = aa_width;  // 0.75 — matches outer edge smoothstep
+        // Use the same AA width as the outer edge smoothstep so the
+        // border's inner transition matches the fill's outer transition
+        // pixel-for-pixel. Currently 0.5 (tight 1-pixel AA — see the
+        // longer rationale above `aa_width`).
+        let border_aa = aa_width;
 
         // Select corner radius and corner shape based on quadrant
         var corner_radius: f32;
@@ -1533,13 +2064,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 }
             }
 
-            // Use screen-space adaptive AA for the inner border edge.
-            // fwidth(d) = |dpdx(d)| + |dpdy(d)| adapts to the local SDF gradient direction:
-            //   - Straight edges (axis-aligned): fwidth ≈ 1.0 → AA width ≈ 0.75px
-            //   - 45° diagonal (corner curves): fwidth ≈ 1.414 → AA width ≈ 1.06px
-            // The wider AA at diagonal angles compensates for pixel grid alignment,
-            // producing smoother inner border curves on opaque fills.
-            let inner_aa = max(d_fw * 0.75, 0.5);
+            // Match the main fill's tight 1-pixel AA (see `aa_width`
+            // above) so the inner border edge shares the same
+            // transition width as the outer shape edge. Wider AA here
+            // would create a visible gap between the border fill and
+            // the main fill at pixel boundaries.
+            let inner_aa = aa_width;
             let border_blend = smoothstep(-inner_aa, inner_aa, -inner_sdf);
 
             // Only apply border color where we're inside the shape

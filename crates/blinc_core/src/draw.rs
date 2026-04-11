@@ -1438,6 +1438,71 @@ pub trait DrawContext {
     /// Fill a rectangle (convenience method)
     fn fill_rect(&mut self, rect: Rect, corner_radius: CornerRadius, brush: Brush);
 
+    /// Fill a notched rect using the SDF pipeline.
+    ///
+    /// A notch is a rounded rect with:
+    /// - Optional per-corner concave curves (indicated by the `corner_types`
+    ///   slot: 0.0 = sharp/convex, 1.0 = concave).
+    /// - Optional top and/or bottom edge modifier — scoop (1), bulge (2),
+    ///   v-cut (3), or v-peak (4) — described by the `top_mod` / `bottom_mod`
+    ///   tuples as `(type, width, height_or_depth, corner_radius)`. Pass
+    ///   `(0, 0, 0, 0)` for no modifier on a given edge.
+    ///
+    /// All geometry is evaluated per-pixel in the SDF fragment shader so
+    /// notches inherit the main pipeline's antialiasing, clip/layer
+    /// composition, transform stack, and border/shadow support — no CPU
+    /// path tessellation and no dependency on the separate tessellated-
+    /// path pipeline (which had portability issues on some WebGPU
+    /// implementations).
+    ///
+    /// The default implementation falls back to `fill_rect` so non-GPU
+    /// renderers (hit-testing, headless unit tests, etc.) don't have to
+    /// reimplement the full SDF composition.
+    ///
+    /// # Parameters
+    /// - `rect` — outer bounds in layout coordinates.
+    /// - `corner_radii` — per-corner radii (top-left, top-right,
+    ///   bottom-right, bottom-left). Magnitude only; sign is ignored.
+    /// - `corner_types` — per-corner type flags in the same order
+    ///   (0.0 = sharp or convex, 1.0 = concave).
+    /// - `top_mod` — top edge modifier `(type, width, height, corner_radius)`.
+    /// - `bottom_mod` — bottom edge modifier, same layout as `top_mod`.
+    /// - `border` — optional `(width, color)` to stroke the notch with.
+    /// - `shadow` — optional drop shadow.
+    /// - `brush` — fill brush.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_notch(
+        &mut self,
+        rect: Rect,
+        corner_radii: [f32; 4],
+        corner_types: [f32; 4],
+        top_mod: [f32; 4],
+        bottom_mod: [f32; 4],
+        border: Option<(f32, Color)>,
+        shadow: Option<Shadow>,
+        brush: Brush,
+    ) {
+        // Default: drop every notch feature and draw a plain rounded rect.
+        // The sign-less max() keeps concave radii from bleeding a rect
+        // larger than the caller's bounds on fallback backends.
+        let _ = (corner_types, top_mod, bottom_mod);
+        let cr = CornerRadius {
+            top_left: corner_radii[0].max(0.0),
+            top_right: corner_radii[1].max(0.0),
+            bottom_right: corner_radii[2].max(0.0),
+            bottom_left: corner_radii[3].max(0.0),
+        };
+        if let Some(sh) = shadow {
+            self.draw_shadow(rect, cr, sh);
+        }
+        self.fill_rect(rect, cr, brush);
+        if let Some((width, color)) = border {
+            if width > 0.0 {
+                self.stroke_rect(rect, cr, &Stroke::new(width), Brush::Solid(color));
+            }
+        }
+    }
+
     /// Fill a rectangle with per-side borders (all same color)
     /// Border format: [top, right, bottom, left]
     /// Default implementation draws fill then strokes with max border width
