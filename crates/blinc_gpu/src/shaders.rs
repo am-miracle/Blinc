@@ -30,27 +30,25 @@ struct Uniforms {
     _padding: vec2<f32>,
 }
 
-// Primitive types
-const PRIM_RECT: u32 = 0u;
-const PRIM_CIRCLE: u32 = 1u;
-const PRIM_ELLIPSE: u32 = 2u;
-const PRIM_SHADOW: u32 = 3u;
-const PRIM_INNER_SHADOW: u32 = 4u;
-const PRIM_CIRCLE_SHADOW: u32 = 5u;
-const PRIM_CIRCLE_INNER_SHADOW: u32 = 6u;
-const PRIM_TEXT: u32 = 7u;  // Text glyph - samples from atlas texture
-
-// Fill types
-const FILL_SOLID: u32 = 0u;
-const FILL_LINEAR_GRADIENT: u32 = 1u;
-const FILL_RADIAL_GRADIENT: u32 = 2u;
-
-// Clip types
-const CLIP_NONE: u32 = 0u;
-const CLIP_RECT: u32 = 1u;
-const CLIP_CIRCLE: u32 = 2u;
-const CLIP_ELLIPSE: u32 = 3u;
-const CLIP_POLYGON: u32 = 4u;
+// Enum values used throughout this shader. They're inlined as
+// literals at every use site rather than declared as `const` at
+// module scope so naga's WGSL→MSL backend doesn't emit orphaned
+// `constant uint NAME = <value>;` declarations that trip the Metal
+// shader compiler's `-Wunused-const-variable` pass at runtime.
+// naga constant-folds every reference, so the const symbols would
+// have no surviving users in the generated MSL source.
+//
+// Primitive types (field: type_info.x, variable: prim_type)
+//   0u = RECT                 1u = CIRCLE              2u = ELLIPSE
+//   3u = SHADOW               4u = INNER_SHADOW        5u = CIRCLE_SHADOW
+//   6u = CIRCLE_INNER_SHADOW  7u = TEXT (glyph atlas)
+//
+// Fill types (field: type_info.y, variable: fill_type)
+//   0u = SOLID                1u = LINEAR_GRADIENT     2u = RADIAL_GRADIENT
+//
+// Clip types (field: type_info.z, variable: clip_type)
+//   0u = NONE                 1u = RECT                2u = CIRCLE
+//   3u = ELLIPSE              4u = POLYGON
 
 struct Primitive {
     // Bounds (x, y, width, height)
@@ -454,16 +452,16 @@ fn shadow_circle(p: vec2<f32>, center: vec2<f32>, radius: f32, sigma: f32) -> f3
 fn calculate_clip_alpha(p: vec2<f32>, clip_bounds: vec4<f32>, clip_radius: vec4<f32>, clip_type: u32, clip_fade: vec4<f32>) -> f32 {
     var alpha: f32 = 1.0;
 
-    if clip_type != CLIP_NONE {
+    if clip_type != 0u {
         let aa_width = 0.75;
         switch clip_type {
-            case CLIP_RECT: {
+            case 1u /* CLIP_RECT */: {
                 let clip_origin = clip_bounds.xy;
                 let clip_size = clip_bounds.zw;
                 let clip_d = sd_rounded_rect(p, clip_origin, clip_size, clip_radius);
                 alpha = 1.0 - smoothstep(-aa_width, aa_width, clip_d);
             }
-            case CLIP_CIRCLE: {
+            case 2u /* CLIP_CIRCLE */: {
                 let scissor_d = sd_rounded_rect(p, clip_bounds.xy, clip_bounds.zw, vec4<f32>(0.0));
                 let scissor_alpha = 1.0 - smoothstep(-aa_width, aa_width, scissor_d);
                 let center = clip_radius.xy;
@@ -472,7 +470,7 @@ fn calculate_clip_alpha(p: vec2<f32>, clip_bounds: vec4<f32>, clip_radius: vec4<
                 let shape_alpha = 1.0 - smoothstep(-aa_width, aa_width, clip_d);
                 alpha = scissor_alpha * shape_alpha;
             }
-            case CLIP_ELLIPSE: {
+            case 3u /* CLIP_ELLIPSE */: {
                 let scissor_d = sd_rounded_rect(p, clip_bounds.xy, clip_bounds.zw, vec4<f32>(0.0));
                 let scissor_alpha = 1.0 - smoothstep(-aa_width, aa_width, scissor_d);
                 let center = clip_radius.xy;
@@ -481,7 +479,7 @@ fn calculate_clip_alpha(p: vec2<f32>, clip_bounds: vec4<f32>, clip_radius: vec4<
                 let shape_alpha = 1.0 - smoothstep(-aa_width, aa_width, clip_d);
                 alpha = scissor_alpha * shape_alpha;
             }
-            case CLIP_POLYGON: {
+            case 4u /* CLIP_POLYGON */: {
                 let scissor_d = sd_rounded_rect(p, clip_bounds.xy, clip_bounds.zw, vec4<f32>(0.0));
                 let scissor_alpha = 1.0 - smoothstep(-aa_width, aa_width, scissor_d);
                 let vertex_count = u32(clip_radius.z);
@@ -660,13 +658,14 @@ fn apply_css_filter(color: vec4<f32>, filter_a: vec4<f32>, filter_b: vec4<f32>) 
 // 3D SDF Functions
 // ============================================================================
 
-const SHAPE_NONE: u32 = 0u;
-const SHAPE_BOX: u32 = 1u;
-const SHAPE_SPHERE: u32 = 2u;
-const SHAPE_CYLINDER: u32 = 3u;
-const SHAPE_TORUS: u32 = 4u;
-const SHAPE_CAPSULE: u32 = 5u;
-const SHAPE_GROUP: u32 = 6u;
+// 3D shape types (field: perspective.w, variable: shape_type)
+//   0u = NONE    1u = BOX    2u = SPHERE    3u = CYLINDER
+//   4u = TORUS   5u = CAPSULE    6u = GROUP
+//
+// Inlined as literals rather than `const` at module scope so the
+// generated Metal source doesn't carry orphaned `constant uint`
+// declarations — see the longer comment next to the 2D enum block
+// above for why.
 
 fn sd_box_3d(p: vec3<f32>, half_ext: vec3<f32>, r: f32) -> f32 {
     let q = abs(p) - half_ext + vec3<f32>(r);
@@ -933,7 +932,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let has_3d = abs(sin_ry) > 0.0001 || abs(sin_rx) > 0.0001 || persp_d > 0.001;
 
     // ── 3D SDF Raymarching Path ──
-    if shape_type > 0u && shape_type != SHAPE_GROUP && depth > 0.001 {
+    if shape_type > 0u && shape_type != 6u && depth > 0.001 {
         let translate_z = prim.sdf_3d.w;
         let pd = select(800.0, persp_d, persp_d > 0.001);
         let rel = p - center;
@@ -1051,7 +1050,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // ── 3D Group SDF Raymarching Path ──
     // border[1] = shape_count, border[2] = aux_data offset
-    if shape_type == SHAPE_GROUP && prim.border.y > 0.5 {
+    if shape_type == 6u && prim.border.y > 0.5 {
         let group_shape_count = u32(prim.border.y);
         let group_aux_offset = u32(prim.border.z);
 
@@ -1174,7 +1173,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Calculate shadow first (rendered behind) - but NOT for inner shadow primitives
     // InnerShadow primitives handle their own shadow rendering differently
-    if (prim.shadow.z > 0.0 || prim.shadow.w != 0.0) && prim_type != PRIM_INNER_SHADOW {
+    if (prim.shadow.z > 0.0 || prim.shadow.w != 0.0) && prim_type != 4u {
         let shadow_offset = prim.shadow.xy;
         let blur = prim.shadow.z;
         let spread = prim.shadow.w;
@@ -1203,17 +1202,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Calculate main shape SDF
     var d: f32;
     switch prim_type {
-        case PRIM_RECT: {
+        case 0u /* PRIM_RECT */: {
             d = sd_shaped_rect(sp, origin, size, prim.corner_radius, prim.corner_shape);
         }
-        case PRIM_CIRCLE: {
+        case 1u /* PRIM_CIRCLE */: {
             let radius = min(size.x, size.y) * 0.5;
             d = sd_circle(sp, center, radius);
         }
-        case PRIM_ELLIPSE: {
+        case 2u /* PRIM_ELLIPSE */: {
             d = sd_ellipse(sp, center, size * 0.5);
         }
-        case PRIM_SHADOW: {
+        case 3u /* PRIM_SHADOW */: {
             // Shadow-only primitive - mask out the shape interior
             // Shadow should be visible starting from the shape boundary (d >= 0)
             // Use constant AA width to avoid discontinuities at triangle seams on Vulkan
@@ -1224,7 +1223,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             result.a *= clip_alpha;
             return result;
         }
-        case PRIM_INNER_SHADOW: {
+        case 4u /* PRIM_INNER_SHADOW */: {
             // Inner shadow - renders INSIDE the shape only
             let shape_d = sd_shaped_rect(sp, origin, size, prim.corner_radius, prim.corner_shape);
 
@@ -1257,7 +1256,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             inner_result.a *= clamp(biased_alpha, 0.0, 1.0) * clip_alpha;
             return inner_result;
         }
-        case PRIM_CIRCLE_SHADOW: {
+        case 5u /* PRIM_CIRCLE_SHADOW */: {
             // Circle shadow - radially symmetric Gaussian blur
             let radius = min(size.x, size.y) * 0.5;
             let blur = prim.shadow.z;
@@ -1279,7 +1278,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             circle_result.a *= shape_mask * clip_alpha;
             return circle_result;
         }
-        case PRIM_CIRCLE_INNER_SHADOW: {
+        case 6u /* PRIM_CIRCLE_INNER_SHADOW */: {
             // Circle inner shadow - renders INSIDE the circle only
             let radius = min(size.x, size.y) * 0.5;
             let circle_d = sd_circle(sp, center, radius);
@@ -1309,7 +1308,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             inner_result.a *= clamp(biased_alpha, 0.0, 1.0) * clip_alpha;
             return inner_result;
         }
-        case PRIM_TEXT: {
+        case 7u /* PRIM_TEXT */: {
             // Text glyph - sample from glyph atlas.
             // UV bounds are stored in gradient_params: (u_min, v_min, u_max, v_max)
             // fill_type stores is_color flag (1 = color emoji, 0 = grayscale)
@@ -1328,7 +1327,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // *implicit-LOD* sampling — `textureSample` derives mip
             // level from quad derivatives, which require all four
             // pixels in the 2x2 derivative quad to take the same code
-            // path. We're inside `switch prim_type { case PRIM_TEXT: }`
+            // path. We're inside `switch prim_type { case 7u /* PRIM_TEXT */ }`
             // and `prim_type` comes from a per-instance buffer lookup
             // (`primitives[in.instance_index]`), which Dawn classifies
             // as non-uniform — so any implicit-LOD sample inside ANY
@@ -1399,10 +1398,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Determine fill color
     var fill_color: vec4<f32>;
     switch fill_type {
-        case FILL_SOLID: {
+        case 0u /* FILL_SOLID */: {
             fill_color = prim.color;
         }
-        case FILL_LINEAR_GRADIENT: {
+        case 1u /* FILL_LINEAR_GRADIENT */: {
             // Linear gradient using gradient_params (x1, y1, x2, y2) in user space
             let g_start = prim.gradient_params.xy;
             let g_end = prim.gradient_params.zw;
@@ -1419,7 +1418,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }
             fill_color = mix(prim.color, prim.color2, t);
         }
-        case FILL_RADIAL_GRADIENT: {
+        case 2u /* FILL_RADIAL_GRADIENT */: {
             // Radial gradient using gradient_params (cx, cy, radius, 0) in user space
             let g_center = prim.gradient_params.xy;
             let g_radius = prim.gradient_params.z;
@@ -2822,12 +2821,13 @@ pub const PATH_SHADER: &str = r#"
 // Supports multi-stop gradients via 1D texture lookup.
 // Supports clipping via rect/circle/ellipse shapes.
 
-// Clip type constants
-const CLIP_NONE: u32 = 0u;
-const CLIP_RECT: u32 = 1u;
-const CLIP_CIRCLE: u32 = 2u;
-const CLIP_ELLIPSE: u32 = 3u;
-const CLIP_POLYGON: u32 = 4u;
+// Clip type values (variable: clip_type)
+//   0u = NONE    1u = RECT    2u = CIRCLE    3u = ELLIPSE    4u = POLYGON
+//
+// Inlined as literals rather than `const` to prevent naga from
+// emitting orphaned `constant uint CLIP_* = ...;` declarations into
+// the generated Metal source (which trip
+// `-Wunused-const-variable` at runtime shader compile time).
 
 struct Uniforms {
     // viewport_size (vec2) + padding (vec2) = 16 bytes, offset 0
@@ -2941,20 +2941,20 @@ fn sd_ellipse(p: vec2<f32>, center: vec2<f32>, radii: vec2<f32>) -> f32 {
 // Calculate clip alpha (1.0 = inside clip, 0.0 = outside)
 // For non-rect clips: clip_bounds = rect scissor, clip_radius = shape data
 fn calculate_clip_alpha(p: vec2<f32>, clip_bounds: vec4<f32>, clip_radius: vec4<f32>, clip_type: u32) -> f32 {
-    if clip_type == CLIP_NONE {
+    if clip_type == 0u {
         return 1.0;
     }
 
     let aa_width = 0.75;
 
     switch clip_type {
-        case CLIP_RECT: {
+        case 1u /* CLIP_RECT */: {
             let clip_origin = clip_bounds.xy;
             let clip_size = clip_bounds.zw;
             let clip_d = sd_rounded_rect(p, clip_origin, clip_size, clip_radius);
             return 1.0 - smoothstep(-aa_width, aa_width, clip_d);
         }
-        case CLIP_CIRCLE: {
+        case 2u /* CLIP_CIRCLE */: {
             let scissor_d = sd_rounded_rect(p, clip_bounds.xy, clip_bounds.zw, vec4<f32>(0.0));
             let scissor_alpha = 1.0 - smoothstep(-aa_width, aa_width, scissor_d);
             let center = clip_radius.xy;
@@ -2963,7 +2963,7 @@ fn calculate_clip_alpha(p: vec2<f32>, clip_bounds: vec4<f32>, clip_radius: vec4<
             let shape_alpha = 1.0 - smoothstep(-aa_width, aa_width, clip_d);
             return scissor_alpha * shape_alpha;
         }
-        case CLIP_ELLIPSE: {
+        case 3u /* CLIP_ELLIPSE */: {
             let scissor_d = sd_rounded_rect(p, clip_bounds.xy, clip_bounds.zw, vec4<f32>(0.0));
             let scissor_alpha = 1.0 - smoothstep(-aa_width, aa_width, scissor_d);
             let center = clip_radius.xy;
@@ -4161,3 +4161,79 @@ fn fs_glow(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(result_rgb, result_a);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_wgsl(source: &str) -> Result<(), String> {
+        naga::front::wgsl::parse_str(source).map_err(|e| e.emit_to_string(source))?;
+        Ok(())
+    }
+
+    /// Runtime shader compilation is the only thing that parses these WGSL
+    /// strings — if a case label or a const declaration is malformed, the
+    /// error only surfaces when the app actually tries to build a pipeline
+    /// on device. These tests invoke naga directly so the workspace test
+    /// suite catches syntax regressions (e.g. a stray `// comment {`
+    /// swallowing a case-body brace) before they ship.
+    #[test]
+    fn sdf_shader_parses() {
+        parse_wgsl(SDF_SHADER).expect("SDF_SHADER");
+    }
+
+    #[test]
+    fn path_shader_parses() {
+        parse_wgsl(PATH_SHADER).expect("PATH_SHADER");
+    }
+
+    #[test]
+    fn text_shader_parses() {
+        parse_wgsl(TEXT_SHADER).expect("TEXT_SHADER");
+    }
+
+    #[test]
+    fn glass_shader_parses() {
+        parse_wgsl(GLASS_SHADER).expect("GLASS_SHADER");
+    }
+
+    #[test]
+    fn simple_glass_shader_parses() {
+        parse_wgsl(SIMPLE_GLASS_SHADER).expect("SIMPLE_GLASS_SHADER");
+    }
+
+    #[test]
+    fn composite_shader_parses() {
+        parse_wgsl(COMPOSITE_SHADER).expect("COMPOSITE_SHADER");
+    }
+
+    #[test]
+    fn layer_composite_shader_parses() {
+        parse_wgsl(LAYER_COMPOSITE_SHADER).expect("LAYER_COMPOSITE_SHADER");
+    }
+
+    #[test]
+    fn blur_shader_parses() {
+        parse_wgsl(BLUR_SHADER).expect("BLUR_SHADER");
+    }
+
+    #[test]
+    fn drop_shadow_shader_parses() {
+        parse_wgsl(DROP_SHADOW_SHADER).expect("DROP_SHADOW_SHADER");
+    }
+
+    #[test]
+    fn glow_shader_parses() {
+        parse_wgsl(GLOW_SHADER).expect("GLOW_SHADER");
+    }
+
+    #[test]
+    fn color_matrix_shader_parses() {
+        parse_wgsl(COLOR_MATRIX_SHADER).expect("COLOR_MATRIX_SHADER");
+    }
+
+    #[test]
+    fn mask_image_shader_parses() {
+        parse_wgsl(MASK_IMAGE_SHADER).expect("MASK_IMAGE_SHADER");
+    }
+}
