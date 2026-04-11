@@ -15,4 +15,6 @@ Demonstrates keyframe animations with the canvas element for:
   title="Blinc keyframe_canvas example"
 ></iframe>
 
+> **Tip:** Some demos are best viewed in a full browser window. Click "Open in a new tab" below for the full experience.
+
 [Open in a new tab](../../examples/keyframe_canvas/index.html) · [View source on GitHub](https://github.com/project-blinc/Blinc/blob/main/crates/blinc_app/examples/keyframe_canvas.rs)

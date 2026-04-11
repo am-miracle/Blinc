@@ -17,4 +17,6 @@ This example demonstrates the Blinc theming system capabilities:
   title="Blinc theme_demo example"
 ></iframe>
 
+> **Tip:** Some demos are best viewed in a full browser window. Click "Open in a new tab" below for the full experience.
+
 [Open in a new tab](../../examples/theme_demo/index.html) · [View source on GitHub](https://github.com/project-blinc/Blinc/blob/main/crates/blinc_app/examples/theme_demo.rs)

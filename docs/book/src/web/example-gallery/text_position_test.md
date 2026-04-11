@@ -11,4 +11,6 @@ Tests that text is correctly centered within parent containers.
   title="Blinc text_position_test example"
 ></iframe>
 
+> **Tip:** Some demos are best viewed in a full browser window. Click "Open in a new tab" below for the full experience.
+
 [Open in a new tab](../../examples/text_position_test/index.html) · [View source on GitHub](https://github.com/project-blinc/Blinc/blob/main/crates/blinc_app/examples/text_position_test.rs)

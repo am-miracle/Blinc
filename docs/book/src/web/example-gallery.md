@@ -19,9 +19,9 @@ manageable.
 - [**Canvas Element**](./example-gallery/canvas_demo.md) — This example demonstrates the canvas element for custom GPU drawing
 - [**Canvas Kit Interactive**](./example-gallery/canvas_kit_demo.md) — Demonstrates `blinc_canvas_kit` features:
 - [**Carousel Demo - Selector API Showcase**](./example-gallery/carousel_demo.md) — Demonstrates the new selector API features:
+- [**Chrome-Style Tabs**](./example-gallery/chrome_tabs_demo.md) — Demonstrates the notch element in "reverse" mode: instead of a dropdown
 - [**blinc_cn Components**](./example-gallery/cn_demo.md) — Showcases all available blinc_cn components in a scrollable grid layout.
 - [**Code Element**](./example-gallery/code_demo.md) — Demonstrates both read-only code display and editable code editor.
-- [**Minimal Code Element Test**](./example-gallery/code_test.md) — Auto-built from the cross-target source.
 - [**Complex SVG**](./example-gallery/complex_svg_demo.md) — Displays an SVG at various sizes to test rasterization quality,
 - [**CSS Debug**](./example-gallery/css_debug.md) — Tests three known CSS issues:
 - [**CSS Visual Features**](./example-gallery/css_features_demo.md) — Showcases newly added CSS visual features:
@@ -51,7 +51,6 @@ manageable.
 - [**Tabler Icons**](./example-gallery/tabler_icons_demo.md) — Showcases outline and filled icons from the blinc_tabler_icons crate.
 - [**Minimal text positioning test**](./example-gallery/text_position_test.md) — Tests that text is correctly centered within parent containers.
 - [**Text Input Widgets**](./example-gallery/text_widgets.md) — Demonstrates ready-to-use text input and text area elements using the layout API.
-- [**Text Wrapping Test**](./example-gallery/text_wrap_test.md) — Verifies that:
 - [**Theme System**](./example-gallery/theme_demo.md) — This example demonstrates the Blinc theming system capabilities:
 - [**Timeline Animation**](./example-gallery/timeline_demo.md) — This example demonstrates timeline-based animations using the stateful API:
 - [**Typography**](./example-gallery/typography_demo.md) — This example demonstrates typography helpers:

@@ -11,4 +11,6 @@ This example is auto-generated from the cross-target source in `crates/blinc_app
   title="Blinc motion_demo example"
 ></iframe>
 
+> **Tip:** Some demos are best viewed in a full browser window. Click "Open in a new tab" below for the full experience.
+
 [Open in a new tab](../../examples/motion_demo/index.html) · [View source on GitHub](https://github.com/project-blinc/Blinc/blob/main/crates/blinc_app/examples/motion_demo.rs)
