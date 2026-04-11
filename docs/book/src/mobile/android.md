@@ -1,70 +1,41 @@
 # Android Development
 
-This guide covers setting up your environment and building Blinc apps for Android.
+This guide covers building Blinc apps for Android — toolchain setup, native bridge, camera/audio streams, deep linking, lifecycle, and platform integration.
 
 ## Prerequisites
 
 ### 1. Android SDK & NDK
 
-Install Android Studio or the standalone SDK:
-
 ```bash
-# macOS (via Homebrew)
+# macOS
 brew install --cask android-studio
 
-# Or download from https://developer.android.com/studio
-```
-
-Set up environment variables:
-
-```bash
 export ANDROID_HOME=$HOME/Library/Android/sdk
 export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125
 export PATH=$PATH:$ANDROID_HOME/platform-tools
 ```
 
-### 2. Rust Android Targets
+### 2. Rust Targets
 
 ```bash
 rustup target add aarch64-linux-android
 rustup target add armv7-linux-androideabi
 rustup target add x86_64-linux-android
-rustup target add i686-linux-android
-```
-
-### 3. cargo-ndk
-
-```bash
 cargo install cargo-ndk
 ```
 
 ## Building
 
-### Debug Build
-
 ```bash
-# Build for arm64 (most modern devices)
+# Debug — single arch
 cargo ndk -t arm64-v8a build
 
-# Build for multiple architectures
-cargo ndk -t arm64-v8a -t armeabi-v7a build
-```
+# Release — multi-arch
+cargo ndk -t arm64-v8a -t armeabi-v7a build --release
 
-### Release Build
-
-```bash
-cargo ndk -t arm64-v8a build --release
-```
-
-### Using Gradle
-
-From the `platforms/android` directory:
-
-```bash
+# Or via Gradle (from platforms/android/)
 ./gradlew assembleDebug
 ```
-
-The APK will be at `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Project Configuration
 
@@ -76,8 +47,8 @@ name = "my_app"
 crate-type = ["cdylib", "staticlib"]
 
 [target.'cfg(target_os = "android")'.dependencies]
-blinc_app = { version = "0.1", features = ["android"] }
-blinc_platform_android = "0.1"
+blinc_app = { version = "0.5", features = ["android"] }
+blinc_platform_android = "0.5"
 android-activity = { version = "0.6", features = ["native-activity"] }
 log = "0.4"
 android_logger = "0.14"
@@ -86,9 +57,11 @@ android_logger = "0.14"
 ### AndroidManifest.xml
 
 ```xml
-<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <application
         android:label="My App"
@@ -98,78 +71,271 @@ android_logger = "0.14"
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTask">
 
-            <meta-data
-                android:name="android.app.lib_name"
-                android:value="my_app" />
+            <meta-data android:name="android.app.lib_name" android:value="my_app" />
 
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Deep link: myapp://path/to/route -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="myapp" />
             </intent-filter>
         </activity>
     </application>
 </manifest>
 ```
 
+## Native Bridge
+
+Blinc's native bridge lets Rust call into Kotlin (and vice versa) via a typed function-call protocol. Use it for any platform feature that's not in the framework core: camera, biometrics, push notifications, native dialogs, etc.
+
+### Kotlin side — register handlers
+
+```kotlin
+// MainActivity.kt — call once during onCreate after BlincNativeBridge.init(this)
+BlincNativeBridge.init(this)
+BlincNativeBridge.registerDefaults(context)  // built-in handlers (haptics, device info, etc.)
+
+// Custom handler returning a string
+BlincNativeBridge.registerString("device", "get_battery_level") {
+    val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+    bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).toString()
+}
+
+// Handler returning Unit
+BlincNativeBridge.registerVoid("notify", "show") { args ->
+    val title = args.getString(0)
+    val body = args.getString(1)
+    NotificationHelper.show(context, title, body)
+}
+```
+
+### Rust side — call into native
+
+```rust
+use blinc_core::native_bridge::{native_call, NativeValue};
+
+// Synchronous call
+let level: String = native_call("device", "get_battery_level", ())?;
+println!("Battery: {}%", level);
+
+// Pass arguments
+native_call::<(), _>("notify", "show", ("Hello", "World"))?;
+
+// Built-in haptic helpers
+native_call::<(), _>("haptics", "selection", ())?;
+native_call::<(), _>("haptics", "impact", (1i32,))?; // 0=light, 1=medium, 2=heavy
+native_call::<(), _>("haptics", "success", ())?;
+```
+
+### Streams (camera, audio, sensors)
+
+Streams deliver continuous data (frames, samples, sensor readings) from the platform back to Rust without polling. The platform pushes data via `dispatch_stream_data`, which fires the registered callback.
+
+```rust
+use blinc_core::native_bridge::{native_stream, NativeValue};
+
+// Open a stream — keep the handle alive; drop stops the stream
+let stream = native_stream(
+    "sensors",
+    "accelerometer",
+    NativeValue::Null,
+    |data| {
+        if let Some(arr) = data.as_array() {
+            let x = arr[0].as_f32().unwrap_or(0.0);
+            let y = arr[1].as_f32().unwrap_or(0.0);
+            let z = arr[2].as_f32().unwrap_or(0.0);
+            println!("accel: {x}, {y}, {z}");
+        }
+    },
+)?;
+// drop(stream) → stream stops
+```
+
+## Camera Capture
+
+`CameraStream` from `blinc_media` wraps the native bridge stream API in a typed reactive interface:
+
+```rust
+use blinc_media::{CameraStream, CameraConfig, CameraFacing};
+
+let camera = CameraStream::open(CameraConfig {
+    width: 640,
+    height: 480,
+    fps: 30,
+    facing: CameraFacing::Front,
+});
+
+// Read latest frame in build_ui
+if let Some(frame) = camera.latest_frame() {
+    canvas(move |ctx, bounds| {
+        ctx.draw_rgba_pixels(frame.as_rgba(), frame.width, frame.height, bounds);
+    })
+}
+
+// drop(camera) stops capture and releases the device
+```
+
+The camera frames flow through the native bridge stream protocol: Kotlin's `Camera2` API delivers `Image` buffers, the bridge converts them to RGBA, and `JNIEnv::nativeDispatchStreamData(streamId, byteArray)` ferries the bytes into Rust.
+
+See `crates/blinc_app/examples/notch_demo.rs` for a production camera example.
+
+## Audio Recording
+
+```rust
+use blinc_media::{AudioRecorder, AudioRecorderConfig};
+
+let recorder = AudioRecorder::open(AudioRecorderConfig {
+    sample_rate: 44100,
+    channels: 1,
+});
+
+if let Some(samples) = recorder.latest_samples() {
+    process_audio(samples.as_f32());
+}
+```
+
+The Kotlin side uses `AudioRecord` and pushes 16-bit PCM through the same stream protocol.
+
+## Deep Linking
+
+Blinc Router auto-handles deep links — no manual wiring required after `RouterBuilder::build()`.
+
+### Kotlin — forward intents to Rust
+
+```kotlin
+// MainActivity.kt
+override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    intent.data?.toString()?.let { uri ->
+        nativeDispatchDeepLink(uri)
+    }
+}
+
+// External JNI declaration
+external fun nativeDispatchDeepLink(uri: String)
+```
+
+### Rust — define routes
+
+```rust
+use blinc_router::{Router, RouterBuilder};
+
+let router = RouterBuilder::new()
+    .route("/", home_page)
+    .route("/users/:id", user_detail)
+    .route("/products/:slug", product_page)
+    .build();
+
+// router is now wired to handle blinc_router::dispatch_deep_link(uri)
+// A URL like myapp://users/42 → router.push("/users/42") → user_detail({id: "42"})
+```
+
+The system back button is also auto-registered: `Key::Back` events route through `router.back()`.
+
+## App Lifecycle
+
+```rust
+use blinc_platform::event::{Event, LifecycleEvent};
+
+// In your event handler:
+match event {
+    Event::Lifecycle(LifecycleEvent::Resumed) => {
+        camera.resume();
+        analytics.session_start();
+    }
+    Event::Lifecycle(LifecycleEvent::Suspended) => {
+        camera.pause();
+        save_state();
+    }
+    Event::Lifecycle(LifecycleEvent::LowMemory) => {
+        clear_image_cache();
+    }
+    _ => {}
+}
+```
+
+Mapping:
+- `MainEvent::Resume` → `LifecycleEvent::Resumed`
+- `MainEvent::Pause` → `LifecycleEvent::Suspended`
+- `MainEvent::LowMemory` → `LifecycleEvent::LowMemory`
+
+## Soft Keyboard
+
+Text input widgets (`text_input()`, `text_area()`) automatically show/hide the soft keyboard on focus. The keyboard inset is reported back via `WindowedContext.safe_bottom()` so your layout can adjust.
+
+```rust
+text_input(state)
+    .placeholder("Type something...")
+    .on_focus(|| println!("keyboard shown"))
+```
+
+The keyboard show/hide commands are dispatched via the native bridge under `keyboard.show` / `keyboard.hide`. The default implementations (registered by `BlincNativeBridge.registerDefaults`) call `InputMethodManager.showSoftInput` / `hideSoftInputFromWindow`.
+
+## Safe Area Insets
+
+```rust
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+    div()
+        .w(ctx.width).h(ctx.height)
+        .pt(ctx.safe_top())     // status bar
+        .pb(ctx.safe_bottom())  // gesture bar / nav buttons
+        .pl(ctx.safe_left())    // landscape notch
+        .pr(ctx.safe_right())
+        .child(/* ... */)
+}
+```
+
 ## Touch Event Handling
 
-Android touch events are automatically routed to your UI. The touch phases map as follows:
+Touch events are automatically routed:
 
 | Android Action | Blinc Event |
-|---------------|-------------|
-| ACTION_DOWN   | pointer_down |
-| ACTION_MOVE   | pointer_move |
-| ACTION_UP     | pointer_up + pointer_leave |
-| ACTION_CANCEL | pointer_leave |
+|---|---|
+| `ACTION_DOWN` | `pointer_down` |
+| `ACTION_MOVE` | `pointer_move` |
+| `ACTION_UP` | `pointer_up` + `pointer_leave` |
+| `ACTION_CANCEL` | `pointer_leave` |
 
-Two-finger pinch gestures emit the layout `PINCH` event with the gesture center
-and per-frame scale delta. One-finger drag scrolling is unchanged.
+Two-finger pinch gestures emit `PINCH` events with center + scale delta. Use `.on_pinch()` on a `Div` to receive them.
 
 ## Debugging
 
-### View Logs
-
 ```bash
+# View Rust logs
 adb logcat | grep -E "(blinc|BlincApp)"
+
+# Filter for native bridge calls
+adb logcat | grep BlincNativeBridge
 ```
 
 ### Common Issues
 
-**"Library not found"**
+**"Library not found"** — ensure the native library is in `app/src/main/jniLibs/<arch>/`. `cargo ndk` writes to `target/<rust-target>/`; copy to jniLibs or use the Gradle plugin.
 
-Ensure the native library is built and copied to `app/src/main/jniLibs/`:
+**"Vulkan not supported"** — check device capability with `adb shell getprop ro.hardware.vulkan`. API 24+ devices generally support Vulkan, but emulators may not.
 
-```bash
-cargo ndk -t arm64-v8a build
-cp target/aarch64-linux-android/debug/libmy_app.so \
-   platforms/android/app/src/main/jniLibs/arm64-v8a/
-```
-
-**"Vulkan not supported"**
-
-Check device compatibility:
-
-```bash
-adb shell getprop ro.hardware.vulkan
-```
-
-Most devices with API 24+ support Vulkan, but some older devices may not.
-
-**Touch events not working**
-
-1. Verify the render context is created successfully
-2. Check that `android.app.lib_name` in manifest matches your library name
-3. Look for errors in logcat
+**"Native call failed"** — verify the namespace+name matches between Kotlin and Rust. Check logcat for `BlincNativeBridge: handler not found for X.Y`.
 
 ## Performance Tips
 
-1. **Use release builds** for performance testing
-2. **Enable LTO** in Cargo.toml:
-   ```toml
-   [profile.release]
-   lto = "thin"
-   opt-level = "z"
-   ```
-3. **Test on real devices** - emulators have different GPU characteristics
+```toml
+[profile.release]
+lto = "fat"
+opt-level = "z"      # optimize for size on mobile
+panic = "abort"
+strip = true
+codegen-units = 1
+```
+
+- **Test on real devices** — emulators have different GPU characteristics
+- **Profile with `Android Studio Profiler`** for CPU/GPU/memory
+- **Bundle assets via `assets/`** — `AndroidAssetLoader` auto-resolves them through the platform `AssetLoader` trait
