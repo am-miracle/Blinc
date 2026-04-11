@@ -23,6 +23,11 @@ use blinc_layout::prelude::stateful_from_handle;
 use blinc_layout::widgets::scroll::Scroll;
 use std::sync::{Arc, Mutex};
 
+/// Refresh / reload icon — used by the pull-to-refresh demo. The
+/// previous version used the `↻` unicode character, but it needs a
+/// font that isn't available in the browser build of this example.
+const REFRESH_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>"#;
+
 /// Component for the pull-to-refresh demo.
 /// The BlincComponent derive generates type-safe animation hooks.
 /// Fields marked with #[animation] generate SharedAnimatedValue accessors.
@@ -66,7 +71,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     div()
         .w(ctx.width)
         .h(ctx.height)
-        .bg(theme.color(ColorToken::Background).with_alpha(0.8))
+        .bg(theme.color(ColorToken::Background))
         .flex_col()
         .items_center()
         .gap(10.0)
@@ -75,12 +80,12 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             text("Motion Container Demo")
                 .size(28.0)
                 .weight(FontWeight::Bold)
-                .color(Color::WHITE),
+                .color(theme.color(ColorToken::TextPrimary)),
         )
         .child(
             text("Declarative enter/exit animations with stagger support")
                 .size(14.0)
-                .color(Color::rgba(0.6, 0.6, 0.7, 1.0)),
+                .color(theme.color(ColorToken::TextSecondary)),
         )
         .child(
             scroll().w_full().h(ctx.height).justify_center().child(
@@ -134,7 +139,8 @@ fn stagger_forward_demo() -> Div {
 
     demo_card("Stagger Forward", "delay: 300ms").child(
         motion()
-            .gap(4.0) // Add gap between staggered items
+            .gap(4.0)
+            .items_center() // Add gap between staggered items
             .stagger(StaggerConfig::new(300, AnimationPreset::fade_in(800)))
             .children(items.iter().map(|item| list_item(item))),
     )
@@ -146,7 +152,8 @@ fn stagger_reverse_demo() -> Div {
 
     demo_card("Stagger Reverse", "delay: 300ms").child(
         motion()
-            .gap(4.0) // Add gap between staggered items
+            .gap(4.0)
+            .items_center() // Add gap between staggered items
             .stagger(StaggerConfig::new(300, AnimationPreset::fade_in(800)).reverse())
             .children(items.iter().map(|item| list_item(item))),
     )
@@ -158,7 +165,8 @@ fn stagger_center_demo() -> Div {
 
     demo_card("Stagger Center", "delay: 300ms").child(
         motion()
-            .gap(4.0) // Add gap between staggered items
+            .gap(4.0)
+            .items_center() // Add gap between staggered items
             .stagger(StaggerConfig::new(300, AnimationPreset::fade_in(800)).from_center())
             .children(items.iter().map(|item| list_item(item))),
     )
@@ -317,7 +325,9 @@ fn pull_to_refresh_demo(ctx: &WindowedContext) -> Div {
                                             .bg(Color::rgba(0.3, 0.6, 1.0, 1.0))
                                             .items_center()
                                             .justify_center()
-                                            .child(text("↻").size(18.0).color(Color::WHITE)),
+                                            .child(
+                                                svg(REFRESH_SVG).square(18.0).color(Color::WHITE),
+                                            ),
                                     ),
                             ),
                     )
@@ -463,24 +473,25 @@ motion()
 }
 
 fn demo_card(title: &str, subtitle: &str) -> Div {
+    let theme = ThemeState::get();
     div()
         .w(180.0)
         .flex_col()
         .gap(8.0)
         .px(4.0)
         .py(10.0)
-        .bg(Color::rgba(0.14, 0.14, 0.18, 1.0))
+        .bg(theme.color(ColorToken::SurfaceOverlay))
         .rounded(12.0)
         .items_center()
         .child(
             text(title)
                 .size(14.0)
                 .weight(FontWeight::SemiBold)
-                .color(Color::WHITE),
+                .color(theme.color(ColorToken::TextPrimary)),
         )
         .child(
             text(subtitle)
                 .size(10.0)
-                .color(Color::rgba(0.5, 0.5, 0.6, 1.0)),
+                .color(theme.color(ColorToken::TextSecondary)),
         )
 }
