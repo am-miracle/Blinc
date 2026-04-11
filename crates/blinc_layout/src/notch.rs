@@ -2341,7 +2341,13 @@ impl ElementBuilder for Notch {
             style.padding.bottom = LengthPercentage::Length(current_bottom + scoop.depth);
         }
 
-        // Create the layout node with adjusted style
+        // NOTE: concave corner padding is intentionally NOT auto-added
+        // here. Existing callers (e.g. the notch_demo dropdown) already
+        // set explicit `.pt(top_radius + …)` padding on notches with
+        // concave top corners, and auto-adding would double up the
+        // inset. Callers that want the inner-body inset reserved for
+        // children should set padding manually (or wrap their children
+        // in a div sized to the inner body).
         let node = tree.create_node(style);
 
         // Build and add children
