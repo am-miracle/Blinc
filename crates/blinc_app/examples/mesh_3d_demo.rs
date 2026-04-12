@@ -13,6 +13,7 @@
 //!   f32 attributes at known bufferView offsets, u16 indices), so
 //!   parsing is a handful of offset reads plus a `blinc_image::ImageData`
 //!   call for the albedo texture.
+//! 
 //!
 //! Run with:
 //!
@@ -21,6 +22,18 @@
 //! ```
 //!
 //! Controls: drag the viewport to orbit, scroll to zoom.
+//!
+//! # Damaged Helmet
+//!
+//! <https://github.com/KhronosGroup/glTF-Sample-Models/tree/master/2.0/DamagedHelmet>
+//!
+//! ## License Information
+//!
+//! Battle Damaged Sci-fi Helmet - PBR by
+//! [theblueturtle_](https://sketchfab.com/theblueturtle_), published
+//! under a Creative Commons Attribution-NonCommercial license.
+//!
+//! <https://sketchfab.com/models/b81008d513954189a063ff901f7abfe4>
 
 use std::sync::Arc;
 
