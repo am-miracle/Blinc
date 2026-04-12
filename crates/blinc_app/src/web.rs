@@ -2266,6 +2266,26 @@ impl WebApp {
         // ─── Phase 0: clear per-frame state ──────────────────────
         self.render_state.clear_overlays();
 
+        // Drain any custom passes queued via BlincContextState.
+        // On wasm32, SceneKit3D wraps passes in WasmPassWrapper
+        // (a Send shim) — we need to unwrap before registering.
+        // The wrapper is a private type, so we use a known-layout
+        // transmute: WasmPassWrapper is repr(Rust) with a single
+        // Box<dyn CustomRenderPass> field.
+        //
+        // On native this path also exists but uses the direct
+        // Box<dyn CustomRenderPass> downcast (no wrapper needed).
+        {
+            let ctx_state = blinc_core::BlincContextState::get();
+            for pass in ctx_state.drain_custom_passes() {
+                if let Ok(typed) =
+                    pass.downcast::<Box<dyn blinc_gpu::custom_pass::CustomRenderPass>>()
+                {
+                    self.blinc_app.context().register_custom_pass(*typed);
+                }
+            }
+        }
+
         // ─── Phase 0b: drain accumulated wheel delta ─────────────
         let (pending_dx, pending_dy) = self.pending_wheel_delta;
         self.pending_wheel_delta = (0.0, 0.0);

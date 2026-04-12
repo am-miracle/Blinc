@@ -343,8 +343,9 @@ pub struct BlincContextState {
 
     /// Pending custom render passes queued by components (e.g. SceneKit3D)
     /// for registration with the GPU renderer. Type-erased as
-    /// `Box<dyn Any + Send>` because blinc_core can't depend on
-    /// blinc_gpu. The windowed runner downcasts and drains each frame.
+    /// `Box<dyn Any + Send>` because blinc_core can't depend on blinc_gpu.
+    /// On wasm32, callers wrap `!Send` types in an unsafe Send shim
+    /// before pushing — safe because wasm is single-threaded.
     pending_custom_passes: Mutex<Vec<Box<dyn std::any::Any + Send>>>,
 }
 
@@ -872,8 +873,6 @@ impl BlincContextState {
         self.pending_custom_passes.lock().unwrap().push(pass);
     }
 
-    /// Drain all pending custom passes. Called by the windowed runner
-    /// each frame to forward queued passes to the GPU renderer.
     pub fn drain_custom_passes(&self) -> Vec<Box<dyn std::any::Any + Send>> {
         std::mem::take(&mut *self.pending_custom_passes.lock().unwrap())
     }
