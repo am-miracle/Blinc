@@ -340,8 +340,25 @@ impl SceneKit3D {
     pub fn with_grid(self) -> Self {
         let grid = crate::grid_pass::GridPass::new();
         let boxed: Box<dyn blinc_gpu::custom_pass::CustomRenderPass> = Box::new(grid);
-        let type_erased: Box<dyn std::any::Any + Send> = Box::new(boxed);
-        BlincContextState::get().register_custom_pass(type_erased);
+        // On wasm32, CustomRenderPass is !Send (wgpu types are !Send
+        // on the browser main thread). Wrapping in a Send shim is safe
+        // because wasm is single-threaded — there's no other thread to
+        // send to. On native, CustomRenderPass: Send so no shim needed.
+        #[cfg(target_arch = "wasm32")]
+        {
+            #[allow(dead_code)]
+            struct SendWrapper(Box<dyn blinc_gpu::custom_pass::CustomRenderPass>);
+            // SAFETY: wasm32 is single-threaded; Send is vacuously safe.
+            unsafe impl Send for SendWrapper {}
+            let wrapper = SendWrapper(boxed);
+            let type_erased: Box<dyn std::any::Any + Send> = Box::new(wrapper);
+            BlincContextState::get().register_custom_pass(type_erased);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let type_erased: Box<dyn std::any::Any + Send> = Box::new(boxed);
+            BlincContextState::get().register_custom_pass(type_erased);
+        }
         self
     }
 
