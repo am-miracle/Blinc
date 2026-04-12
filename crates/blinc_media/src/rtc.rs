@@ -105,9 +105,9 @@ type SharedSamples = Arc<Mutex<Option<AudioSamples>>>;
 /// Drop to stop capture.
 pub struct CameraStream {
     latest: SharedFrame,
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     _handle: Option<std::thread::JoinHandle<()>>,
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
     _bridge_stream: Option<blinc_core::native_bridge::NativeStream>,
     active: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -118,7 +118,7 @@ impl CameraStream {
         let latest: SharedFrame = Arc::new(Mutex::new(None));
         let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         {
             // Desktop: no built-in camera API — use native bridge or placeholder
             tracing::info!(
@@ -134,7 +134,7 @@ impl CameraStream {
             }
         }
 
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
         {
             // Mobile: open camera via native bridge stream
             let latest_for_stream = Arc::clone(&latest);
@@ -203,9 +203,9 @@ impl Drop for CameraStream {
 /// Drop to stop recording.
 pub struct AudioRecorder {
     latest: SharedSamples,
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     _stream: Option<cpal::Stream>,
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
     _bridge_stream: Option<blinc_core::native_bridge::NativeStream>,
     active: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -216,7 +216,7 @@ impl AudioRecorder {
         let latest: SharedSamples = Arc::new(Mutex::new(None));
         let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         {
             use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -259,7 +259,7 @@ impl AudioRecorder {
             }
         }
 
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
         {
             let latest_for_stream = Arc::clone(&latest);
             let channels = config.channels;

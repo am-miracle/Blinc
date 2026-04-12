@@ -1,5 +1,7 @@
 //! Video Player Demo
 //!
+//! Demonstrates the video_player widget with `blinc_media::VideoPlayer` instance and controls.
+//!
 //! Run with:
 //! ```sh
 //! cargo run -p blinc_app --example video_demo --features windowed
@@ -13,6 +15,8 @@ use blinc_app::windowed::WindowedContext;
 use blinc_core::Color;
 use blinc_layout::widgets::media::video_player;
 use blinc_media::VideoPlayer;
+#[cfg(target_arch = "wasm32")]
+use blinc_platform::assets::load_asset;
 
 const VIDEO_PATH: &str = "crates/blinc_app/examples/assets/german-shepherd-hd_1920_1080_25fps.mp4";
 
@@ -22,7 +26,15 @@ fn shared_player() -> VideoPlayer {
     PLAYER
         .get_or_init(|| {
             let p = VideoPlayer::new();
+
+            #[cfg(not(target_arch = "wasm32"))]
             p.load_file(VIDEO_PATH);
+
+            #[cfg(target_arch = "wasm32")]
+            if let Ok(bytes) = load_asset(VIDEO_PATH) {
+                p.load_bytes(bytes);
+            }
+
             p
         })
         .clone()

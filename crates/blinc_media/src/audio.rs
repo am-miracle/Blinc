@@ -66,18 +66,18 @@ struct AudioPlayerInner {
     play_start: Option<std::time::Instant>,
     /// Position offset (from seek or pause)
     position_offset_ms: u64,
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     sink: Option<rodio::Sink>,
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     _stream: Option<rodio::OutputStream>,
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     stream_handle: Option<rodio::OutputStreamHandle>,
 }
 
 impl AudioPlayer {
     /// Create a new audio player
     pub fn new() -> Self {
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         {
             let (stream, handle) = rodio::OutputStream::try_default()
                 .map(|(s, h)| (Some(s), Some(h)))
@@ -97,7 +97,7 @@ impl AudioPlayer {
             }
         }
 
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
         {
             Self {
                 inner: Rc::new(RefCell::new(AudioPlayerInner {
@@ -115,7 +115,7 @@ impl AudioPlayer {
     pub fn play(&self, source: AudioSource) {
         let mut inner = self.inner.borrow_mut();
 
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         {
             if let Some(ref handle) = inner.stream_handle {
                 let sink = rodio::Sink::try_new(handle).ok();
@@ -151,7 +151,7 @@ impl AudioPlayer {
             }
         }
 
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
         {
             // Mobile: use native bridge
             match &source {
@@ -175,11 +175,11 @@ impl AudioPlayer {
     /// Pause playback
     pub fn pause(&self) {
         let mut inner = self.inner.borrow_mut();
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         if let Some(ref sink) = inner.sink {
             sink.pause();
         }
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("audio", "pause", ());
         }
@@ -193,11 +193,11 @@ impl AudioPlayer {
     /// Resume playback
     pub fn resume(&self) {
         let mut inner = self.inner.borrow_mut();
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         if let Some(ref sink) = inner.sink {
             sink.play();
         }
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("audio", "resume", ());
         }
@@ -208,11 +208,11 @@ impl AudioPlayer {
     /// Stop playback
     pub fn stop(&self) {
         let mut inner = self.inner.borrow_mut();
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         {
             inner.sink = None;
         }
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("audio", "stop", ());
         }
@@ -244,7 +244,7 @@ impl AudioPlayer {
             None
         };
 
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>(
                 "audio",
@@ -260,11 +260,11 @@ impl AudioPlayer {
     pub fn set_volume(&self, volume: f32) {
         let mut inner = self.inner.borrow_mut();
         inner.volume = volume.clamp(0.0, 1.0);
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         if let Some(ref sink) = inner.sink {
             sink.set_volume(inner.volume);
         }
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>(
                 "audio",
@@ -280,7 +280,7 @@ impl AudioPlayer {
     pub fn state(&self) -> PlaybackState {
         let inner = self.inner.borrow_mut();
 
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         {
             if let Some(ref sink) = inner.sink {
                 if sink.empty() {

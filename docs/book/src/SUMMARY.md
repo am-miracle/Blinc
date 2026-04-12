@@ -58,6 +58,7 @@
   - [Theme System](./web/example-gallery/theme_demo.md)
   - [Timeline Animation](./web/example-gallery/timeline_demo.md)
   - [Typography](./web/example-gallery/typography_demo.md)
+  - [Video Player](./web/example-gallery/video_demo.md)
   - [Wet Glass](./web/example-gallery/wet_glass_demo.md)
   - [Windowed Application](./web/example-gallery/windowed.md)
 <!-- end:web-examples -->

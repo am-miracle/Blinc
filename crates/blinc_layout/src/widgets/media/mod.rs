@@ -297,36 +297,57 @@ impl VideoControlsBuilder {
                     let seek_id = format!("vp-seek-{}", key);
                     let player_seek = player.clone();
 
-                    let pos_sig2 = player.position_signal.clone();
-                    let dur_sig2 = player.duration_signal.clone();
-                    let seek_track_color = surface;
-                    let seek_fill_color = accent;
-                    let seek_canvas = crate::canvas::canvas(
-                        move |ctx: &mut dyn blinc_core::DrawContext, bounds| {
-                            let pos = pos_sig2.get();
-                            let dur = dur_sig2.get();
+                    let seek_key = format!("vp-seek-canvas-{}", key);
+                    let seek_player = player.clone();
+                    let seek_surface = surface;
+                    let seek_accent = accent;
+                    let seek_stateful = stateful_with_key::<NoState>(&seek_key)
+                        .deps([
+                            seek_player.position_signal.signal_id(),
+                            seek_player.duration_signal.signal_id(),
+                        ])
+                        .on_state(move |_ctx| {
+                            let pos = seek_player.position_signal.get();
+                            let dur = seek_player.duration_signal.get();
                             let progress = if dur > 0 {
                                 (pos as f32 / dur as f32).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             };
-                            let track_y = (bounds.height - 4.0) / 2.0;
-                            ctx.fill_rect(
-                                blinc_core::Rect::new(0.0, track_y, bounds.width, 4.0),
-                                2.0.into(),
-                                blinc_core::Brush::Solid(seek_track_color),
-                            );
-                            if progress > 0.0 {
-                                ctx.fill_rect(
-                                    blinc_core::Rect::new(0.0, track_y, bounds.width * progress, 4.0),
-                                    2.0.into(),
-                                    blinc_core::Brush::Solid(seek_fill_color),
-                                );
-                            }
-                        },
-                    )
-                    .flex_grow()
-                    .h(12.0);
+                            let track_color = seek_surface;
+                            let fill_color = seek_accent;
+                            div().flex_grow().h(12.0).child(
+                                crate::canvas::canvas(
+                                    move |ctx: &mut dyn blinc_core::DrawContext, bounds| {
+                                        let track_y = (bounds.height - 4.0) / 2.0;
+                                        ctx.fill_rect(
+                                            blinc_core::Rect::new(
+                                                0.0,
+                                                track_y,
+                                                bounds.width,
+                                                4.0,
+                                            ),
+                                            2.0.into(),
+                                            blinc_core::Brush::Solid(track_color),
+                                        );
+                                        if progress > 0.0 {
+                                            ctx.fill_rect(
+                                                blinc_core::Rect::new(
+                                                    0.0,
+                                                    track_y,
+                                                    bounds.width * progress,
+                                                    4.0,
+                                                ),
+                                                2.0.into(),
+                                                blinc_core::Brush::Solid(fill_color),
+                                            );
+                                        }
+                                    },
+                                )
+                                .flex_grow()
+                                .h(12.0),
+                            )
+                        });
 
                     let vol_icon = if volume < 0.01 {
                         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>"#
@@ -358,8 +379,8 @@ impl VideoControlsBuilder {
                     let vol_slider_id = format!("vp-vol-sl-{}", key);
                     let player_vol = player.clone();
                     let vol_sig = player.volume_signal.clone();
-                    let vol_active = fg_secondary;
-                    let vol_inactive = surface;
+                    let vol_active = surface;
+                    let vol_inactive = fg_secondary;
                     let vol_canvas = crate::canvas::canvas(
                         move |ctx: &mut dyn blinc_core::DrawContext, bounds| {
                             let v = vol_sig.get();
@@ -431,7 +452,7 @@ impl VideoControlsBuilder {
                                         player_seek.seek(target_ms);
                                     }
                                 })
-                                .child(seek_canvas),
+                                .child(seek_stateful),
                         )
                         .child(
                             div()

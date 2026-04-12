@@ -29,6 +29,8 @@ pub mod frame;
 pub mod player;
 pub mod rtc;
 pub mod video;
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod web_video;
 
 pub use audio::{AudioPlayer, AudioSource, PlaybackState};
 pub use frame::{AudioSamples, Frame, PixelFormat, SampleFormat};

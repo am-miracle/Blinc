@@ -31,14 +31,14 @@ pub type VideoFrame = Frame;
 
 /// Video decoder — extracts RGBA frames from H.264 NAL units
 pub struct VideoDecoder {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     decoder: Option<openh264::decoder::Decoder>,
     state: VideoState,
 }
 
 impl VideoDecoder {
     pub fn new() -> Self {
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         {
             use openh264::decoder::{DecoderConfig, Flush};
             let config = DecoderConfig::new().flush_after_decode(Flush::NoFlush);
@@ -50,7 +50,7 @@ impl VideoDecoder {
             }
         }
 
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
         {
             Self {
                 state: VideoState::Idle,
@@ -59,7 +59,7 @@ impl VideoDecoder {
     }
 
     /// Decode a single H.264 NAL unit and return an RGBA frame if available
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     pub fn decode_nal(&mut self, nal_data: &[u8]) -> Option<Frame> {
         let decoder = self.decoder.as_mut()?;
         match decoder.decode(nal_data) {
@@ -80,7 +80,7 @@ impl VideoDecoder {
         }
     }
 
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
     pub fn decode_nal(&mut self, _nal_data: &[u8]) -> Option<Frame> {
         tracing::warn!("Use native_stream for mobile video decoding");
         None
@@ -110,6 +110,8 @@ impl Default for VideoDecoder {
 #[derive(Clone)]
 pub struct VideoPlayer {
     state: std::sync::Arc<std::sync::Mutex<VideoPlayerInner>>,
+    #[allow(dead_code)]
+    player_id: u64,
     pub playing_signal: blinc_core::State<bool>,
     pub position_signal: blinc_core::State<u64>,
     pub duration_signal: blinc_core::State<u64>,
@@ -124,7 +126,7 @@ struct VideoPlayerInner {
     position_ms: u64,
     duration_ms: u64,
     generation: u64,
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     source_bytes: Option<std::sync::Arc<Vec<u8>>>,
 }
 
@@ -146,25 +148,68 @@ impl VideoPlayer {
             position_ms: 0,
             duration_ms: 0,
             generation: 0,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
             source_bytes: None,
         }));
 
         let state_for_tick = state.clone();
         let pos_for_tick = position_signal.clone();
+        #[cfg(target_arch = "wasm32")]
+        let dur_for_tick = duration_signal.clone();
+        #[cfg(target_arch = "wasm32")]
+        let playing_for_tick = playing_signal.clone();
+        let _tick_id = id;
         if let Some(handle) = blinc_animation::try_get_scheduler() {
+            let redraw_handle = handle.clone();
             handle.register_tick_callback(move |_dt| {
-                let inner = state_for_tick.lock().unwrap();
-                if inner.playback_state == VideoState::Playing {
-                    let pos = inner.position_ms;
-                    drop(inner);
-                    pos_for_tick.set(pos);
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let mut inner = state_for_tick.lock().unwrap();
+                    if inner.playback_state == VideoState::Playing {
+                        inner.position_ms = crate::web_video::position_ms(_tick_id);
+                        let new_dur = crate::web_video::duration_ms(_tick_id);
+                        let dur_changed = inner.duration_ms != new_dur;
+                        inner.duration_ms = new_dur;
+                        let pos = inner.position_ms;
+                        drop(inner);
+
+                        if let Some(frame) = crate::web_video::capture_frame(_tick_id) {
+                            state_for_tick.lock().unwrap().current_frame =
+                                Some(std::sync::Arc::new(frame));
+                        }
+
+                        pos_for_tick.set(pos);
+                        if dur_changed {
+                            dur_for_tick.set(new_dur);
+                        }
+                        redraw_handle.request_redraw();
+
+                        if crate::web_video::is_ended(_tick_id) {
+                            state_for_tick.lock().unwrap().playback_state = VideoState::Ended;
+                            playing_for_tick.set(false);
+                        }
+                    }
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let inner = state_for_tick.lock().unwrap();
+                    if inner.playback_state == VideoState::Playing {
+                        let pos = inner.position_ms;
+                        drop(inner);
+                        pos_for_tick.set(pos);
+                        redraw_handle.request_redraw();
+                    }
                 }
             });
         }
 
+        #[cfg(target_arch = "wasm32")]
+        crate::web_video::create(id);
+
         Self {
             state,
+            player_id: id,
             playing_signal,
             position_signal,
             duration_signal,
@@ -225,6 +270,8 @@ impl VideoPlayer {
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("video", "play", ());
         }
+        #[cfg(target_arch = "wasm32")]
+        crate::web_video::play(self.player_id);
     }
 
     /// Pause playback
@@ -239,6 +286,8 @@ impl VideoPlayer {
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("video", "pause", ());
         }
+        #[cfg(target_arch = "wasm32")]
+        crate::web_video::pause(self.player_id);
     }
 
     /// Stop playback and reset position
@@ -255,11 +304,12 @@ impl VideoPlayer {
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("video", "stop", ());
         }
+        #[cfg(target_arch = "wasm32")]
+        crate::web_video::pause(self.player_id);
     }
 
     /// Seek to a position in milliseconds.
-    /// Stops the current decode thread, restarts from nearest keyframe.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     pub fn seek(&self, position_ms: u64) {
         let bytes = {
             let mut inner = self.state.lock().unwrap();
@@ -275,21 +325,24 @@ impl VideoPlayer {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn seek(&self, position_ms: u64) {
+        self.state.lock().unwrap().position_ms = position_ms;
+        self.position_signal.set(position_ms);
+        crate::web_video::seek(self.player_id, position_ms);
+    }
+
     #[cfg(any(target_os = "android", target_os = "ios"))]
     pub fn seek(&self, position_ms: u64) {
         self.state.lock().unwrap().position_ms = position_ms;
         self.sync_signals();
-
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        {
-            let _ = blinc_core::native_bridge::native_call::<(), _>(
-                "video",
-                "seek",
-                vec![blinc_core::native_bridge::NativeValue::Int64(
-                    position_ms as i64,
-                )],
-            );
-        }
+        let _ = blinc_core::native_bridge::native_call::<(), _>(
+            "video",
+            "seek",
+            vec![blinc_core::native_bridge::NativeValue::Int64(
+                position_ms as i64,
+            )],
+        );
     }
 
     /// Set volume (0.0 to 1.0)
@@ -305,6 +358,8 @@ impl VideoPlayer {
                 vec![blinc_core::native_bridge::NativeValue::Float32(volume)],
             );
         }
+        #[cfg(target_arch = "wasm32")]
+        crate::web_video::set_volume(self.player_id, volume);
     }
 
     /// Get the current decoded frame (cheap Arc clone)
@@ -344,7 +399,7 @@ impl VideoPlayer {
     }
 
     /// Load and play an MP4 file from disk.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     pub fn load_file(&self, path: &str) {
         let bytes =
             std::fs::read(path).unwrap_or_else(|e| panic!("failed to read video: {path}: {e}"));
@@ -352,7 +407,7 @@ impl VideoPlayer {
     }
 
     /// Replay from the beginning using stored source bytes.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     pub fn replay(&self) {
         let bytes = {
             let mut inner = self.state.lock().unwrap();
@@ -368,25 +423,42 @@ impl VideoPlayer {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn replay(&self) {
+        {
+            let mut inner = self.state.lock().unwrap();
+            inner.playback_state = VideoState::Idle;
+            inner.position_ms = 0;
+            inner.current_frame = None;
+        }
+        crate::web_video::seek(self.player_id, 0);
+        self.play();
+    }
+
     #[cfg(any(target_os = "android", target_os = "ios"))]
     pub fn replay(&self) {
         let _ = blinc_core::native_bridge::native_call::<(), _>("video", "replay", ());
     }
 
     /// Load and play an MP4 from in-memory bytes.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     pub fn load_bytes(&self, bytes: Vec<u8>) {
         let bytes = std::sync::Arc::new(bytes);
         self.state.lock().unwrap().source_bytes = Some(std::sync::Arc::clone(&bytes));
         self.start_decode_thread(bytes);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(target_arch = "wasm32")]
+    pub fn load_bytes(&self, bytes: Vec<u8>) {
+        crate::web_video::load_bytes(self.player_id, &bytes);
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     fn start_decode_thread(&self, bytes: std::sync::Arc<Vec<u8>>) {
         self.start_decode_thread_from(bytes, 0);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     fn start_decode_thread_from(&self, bytes: std::sync::Arc<Vec<u8>>, start_ms: u64) {
         let file_size = bytes.len() as u64;
 
