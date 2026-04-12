@@ -40,7 +40,10 @@ impl VideoDecoder {
     pub fn new() -> Self {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
-            let decoder = openh264::decoder::Decoder::new().ok();
+            use openh264::decoder::{DecoderConfig, Flush};
+            let config = DecoderConfig::new().flush_after_decode(Flush::NoFlush);
+            let api = openh264::OpenH264API::from_source();
+            let decoder = openh264::decoder::Decoder::with_api_config(api, config).ok();
             Self {
                 decoder,
                 state: VideoState::Idle,
@@ -59,17 +62,22 @@ impl VideoDecoder {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn decode_nal(&mut self, nal_data: &[u8]) -> Option<Frame> {
         let decoder = self.decoder.as_mut()?;
-        let yuv = decoder.decode(nal_data).ok()??;
-
-        // UV dimensions are half of full dimensions in I420
-        let (uv_w, uv_h) = yuv.dimensions_uv();
-        let w = uv_w * 2;
-        let h = uv_h * 2;
-        let mut rgba = vec![0u8; w * h * 4];
-        yuv.write_rgba8(&mut rgba);
-
-        self.state = VideoState::Playing;
-        Some(Frame::from_rgba(rgba, w as u32, h as u32))
+        match decoder.decode(nal_data) {
+            Ok(Some(yuv)) => {
+                let (uv_w, uv_h) = yuv.dimensions_uv();
+                let w = uv_w * 2;
+                let h = uv_h * 2;
+                let mut rgba = vec![0u8; w * h * 4];
+                yuv.write_rgba8(&mut rgba);
+                self.state = VideoState::Playing;
+                Some(Frame::from_rgba(rgba, w as u32, h as u32))
+            }
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!("decode error: {e:?}");
+                None
+            }
+        }
     }
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -97,39 +105,39 @@ impl Default for VideoDecoder {
 /// Desktop: decodes locally via OpenH264
 /// Mobile: delegates to platform player via native bridge
 ///
-/// # Example
-///
-/// ```ignore
-/// use blinc_media::video::VideoPlayer;
-///
-/// let player = VideoPlayer::new();
-/// player.load("video.h264");
-/// player.play();
-/// player.set_volume(0.8);
-///
-/// // In render loop
-/// if let Some(frame) = player.current_frame() {
-///     canvas_render(&frame.as_rgba(), frame.width, frame.height);
-/// }
-/// ```
 /// Cloning shares the same playback state — all clones see the same
 /// frames, position, and play/pause state via the inner `Arc<Mutex>`.
 #[derive(Clone)]
 pub struct VideoPlayer {
     state: std::sync::Arc<std::sync::Mutex<VideoPlayerInner>>,
+    pub playing_signal: blinc_core::State<bool>,
+    pub position_signal: blinc_core::State<u64>,
+    pub duration_signal: blinc_core::State<u64>,
+    pub volume_signal: blinc_core::State<f32>,
 }
 
 struct VideoPlayerInner {
     playback_state: VideoState,
     volume: f32,
-    current_frame: Option<Frame>,
+    current_frame: Option<std::sync::Arc<Frame>>,
     source: Option<String>,
     position_ms: u64,
     duration_ms: u64,
+    generation: u64,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    source_bytes: Option<std::sync::Arc<Vec<u8>>>,
 }
+
+static PLAYER_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl VideoPlayer {
     pub fn new() -> Self {
+        let id = PLAYER_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let playing_signal = blinc_core::use_state_keyed(&format!("vp:{id}:playing"), || false);
+        let position_signal = blinc_core::use_state_keyed(&format!("vp:{id}:position"), || 0u64);
+        let duration_signal = blinc_core::use_state_keyed(&format!("vp:{id}:duration"), || 0u64);
+        let volume_signal = blinc_core::use_state_keyed(&format!("vp:{id}:volume"), || 1.0f32);
+
         let state = std::sync::Arc::new(std::sync::Mutex::new(VideoPlayerInner {
             playback_state: VideoState::Idle,
             volume: 1.0,
@@ -137,32 +145,53 @@ impl VideoPlayer {
             source: None,
             position_ms: 0,
             duration_ms: 0,
+            generation: 0,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            source_bytes: None,
         }));
 
-        // Register a tick callback with the animation scheduler that
-        // requests a redraw every tick while the video is playing.
-        // This drives the canvas repaint loop — the canvas callback
-        // picks up `current_frame()` on each repaint.
         let state_for_tick = state.clone();
+        let pos_for_tick = position_signal.clone();
         if let Some(handle) = blinc_animation::try_get_scheduler() {
-            let redraw_handle = handle.clone();
             handle.register_tick_callback(move |_dt| {
-                let ps = state_for_tick.lock().unwrap().playback_state;
-                if ps == VideoState::Playing {
-                    redraw_handle.request_redraw();
+                let inner = state_for_tick.lock().unwrap();
+                if inner.playback_state == VideoState::Playing {
+                    let pos = inner.position_ms;
+                    drop(inner);
+                    pos_for_tick.set(pos);
                 }
             });
         }
 
-        Self { state }
+        Self {
+            state,
+            playing_signal,
+            position_signal,
+            duration_signal,
+            volume_signal,
+        }
+    }
+
+    fn sync_signals(&self) {
+        let inner = self.state.lock().unwrap();
+        let pos = inner.position_ms;
+        let dur = inner.duration_ms;
+        let vol = inner.volume;
+        drop(inner);
+        self.position_signal.set(pos);
+        self.duration_signal.set(dur);
+        self.volume_signal.set(vol);
     }
 
     /// Load a video source
     pub fn load(&self, path: &str) {
-        let mut inner = self.state.lock().unwrap();
-        inner.source = Some(path.to_string());
-        inner.playback_state = VideoState::Idle;
-        inner.position_ms = 0;
+        {
+            let mut inner = self.state.lock().unwrap();
+            inner.source = Some(path.to_string());
+            inner.playback_state = VideoState::Idle;
+            inner.position_ms = 0;
+        }
+        self.sync_signals();
 
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
@@ -178,7 +207,20 @@ impl VideoPlayer {
 
     /// Start or resume playback
     pub fn play(&self) {
-        self.state.lock().unwrap().playback_state = VideoState::Playing;
+        {
+            let mut inner = self.state.lock().unwrap();
+            if inner.playback_state == VideoState::Ended {
+                drop(inner);
+                self.replay();
+                return;
+            }
+            inner.playback_state = VideoState::Playing;
+        }
+        self.playing_signal.set(true);
+        if let Some(handle) = blinc_animation::try_get_scheduler() {
+            handle.request_redraw();
+        }
+
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("video", "play", ());
@@ -188,6 +230,11 @@ impl VideoPlayer {
     /// Pause playback
     pub fn pause(&self) {
         self.state.lock().unwrap().playback_state = VideoState::Paused;
+        self.playing_signal.set(false);
+        if let Some(handle) = blinc_animation::try_get_scheduler() {
+            handle.request_redraw();
+        }
+
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("video", "pause", ());
@@ -202,15 +249,37 @@ impl VideoPlayer {
             inner.position_ms = 0;
             inner.current_frame = None;
         }
+        self.sync_signals();
+
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("video", "stop", ());
         }
     }
 
-    /// Seek to a position in milliseconds
+    /// Seek to a position in milliseconds.
+    /// Stops the current decode thread, restarts from nearest keyframe.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn seek(&self, position_ms: u64) {
+        let bytes = {
+            let mut inner = self.state.lock().unwrap();
+            inner.playback_state = VideoState::Idle;
+            inner.position_ms = position_ms;
+            inner.generation += 1;
+            inner.source_bytes.clone()
+        };
+        self.position_signal.set(position_ms);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        if let Some(bytes) = bytes {
+            self.start_decode_thread_from(bytes, position_ms);
+        }
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     pub fn seek(&self, position_ms: u64) {
         self.state.lock().unwrap().position_ms = position_ms;
+        self.sync_signals();
+
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>(
@@ -226,6 +295,8 @@ impl VideoPlayer {
     /// Set volume (0.0 to 1.0)
     pub fn set_volume(&self, volume: f32) {
         self.state.lock().unwrap().volume = volume.clamp(0.0, 1.0);
+        self.sync_signals();
+
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>(
@@ -236,14 +307,15 @@ impl VideoPlayer {
         }
     }
 
-    /// Get the current decoded frame
-    pub fn current_frame(&self) -> Option<Frame> {
+    /// Get the current decoded frame (cheap Arc clone)
+    pub fn current_frame(&self) -> Option<std::sync::Arc<Frame>> {
         self.state.lock().unwrap().current_frame.clone()
     }
 
     /// Push a decoded frame (called by decoder thread or native bridge)
     pub fn push_frame(&self, frame: Frame) {
-        self.state.lock().unwrap().current_frame = Some(frame);
+        self.state.lock().unwrap().current_frame = Some(std::sync::Arc::new(frame));
+        self.sync_signals();
     }
 
     /// Get playback state
@@ -272,23 +344,6 @@ impl VideoPlayer {
     }
 
     /// Load and play an MP4 file from disk.
-    ///
-    /// Spawns a background thread that demuxes the MP4 container,
-    /// extracts H.264 NAL units from the video track, decodes each
-    /// frame via OpenH264, and pushes the resulting RGBA frames at the
-    /// video's native framerate. The `video_player` widget displays
-    /// whatever `current_frame()` returns each render tick.
-    ///
-    /// Playback can be paused/resumed/stopped via the `Player` trait
-    /// methods — the background thread checks `playback_state` each
-    /// frame and sleeps when paused.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the file can't be read or doesn't contain an H.264
-    /// video track.
-    /// Load and play an MP4 file from disk. Convenience wrapper around
-    /// [`Self::load_bytes`] that reads the file first.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn load_file(&self, path: &str) {
         let bytes =
@@ -296,21 +351,46 @@ impl VideoPlayer {
         self.load_bytes(bytes);
     }
 
+    /// Replay from the beginning using stored source bytes.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn replay(&self) {
+        let bytes = {
+            let mut inner = self.state.lock().unwrap();
+            inner.playback_state = VideoState::Idle;
+            inner.position_ms = 0;
+            inner.current_frame = None;
+            inner.source_bytes.clone()
+        };
+        self.sync_signals();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        if let Some(bytes) = bytes {
+            self.start_decode_thread(bytes);
+        }
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub fn replay(&self) {
+        let _ = blinc_core::native_bridge::native_call::<(), _>("video", "replay", ());
+    }
+
     /// Load and play an MP4 from in-memory bytes.
-    ///
-    /// Works cross-platform — on wasm, fetch the MP4 via the asset
-    /// loader or `fetch()` and pass the bytes here. On desktop, use
-    /// [`Self::load_file`] for convenience or read the bytes yourself.
-    ///
-    /// Spawns a background thread that demuxes the container, extracts
-    /// H.264 NAL units, decodes via OpenH264, and pushes RGBA frames
-    /// at the video's native framerate.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn load_bytes(&self, bytes: Vec<u8>) {
+        let bytes = std::sync::Arc::new(bytes);
+        self.state.lock().unwrap().source_bytes = Some(std::sync::Arc::clone(&bytes));
+        self.start_decode_thread(bytes);
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn start_decode_thread(&self, bytes: std::sync::Arc<Vec<u8>>) {
+        self.start_decode_thread_from(bytes, 0);
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn start_decode_thread_from(&self, bytes: std::sync::Arc<Vec<u8>>, start_ms: u64) {
         let file_size = bytes.len() as u64;
 
-        // First pass: extract metadata + SPS/PPS from the header
-        let mp4 = mp4::Mp4Reader::read_header(std::io::Cursor::new(&bytes), file_size)
+        let mp4 = mp4::Mp4Reader::read_header(std::io::Cursor::new(bytes.as_ref()), file_size)
             .unwrap_or_else(|e| panic!("failed to parse MP4: {e}"));
 
         let video_track_id = mp4
@@ -324,46 +404,60 @@ impl VideoPlayer {
         let sample_count = track.sample_count();
         let duration_ms = track.duration().as_millis() as u64;
 
+        let my_generation;
         {
             let mut inner = self.state.lock().unwrap();
             inner.duration_ms = duration_ms;
             inner.playback_state = VideoState::Playing;
+            my_generation = inner.generation;
         }
+        self.playing_signal.set(true);
+        self.sync_signals();
 
-        let mut parameter_sets: Vec<Vec<u8>> = Vec::new();
-        if let Some(ref avc1) = track.trak.mdia.minf.stbl.stsd.avc1 {
-            for sps in &avc1.avcc.sequence_parameter_sets {
-                let mut nal = vec![0x00, 0x00, 0x00, 0x01];
-                nal.extend_from_slice(&sps.bytes);
-                parameter_sets.push(nal);
-            }
-            for pps in &avc1.avcc.picture_parameter_sets {
-                let mut nal = vec![0x00, 0x00, 0x00, 0x01];
-                nal.extend_from_slice(&pps.bytes);
-                parameter_sets.push(nal);
-            }
-        }
+        // Build the bitstream converter (MP4 length-prefixed → Annex B)
+        // following the openh264 crate's official Mp4BitstreamConverter pattern
+        let avc1 = track
+            .trak
+            .mdia
+            .minf
+            .stbl
+            .stsd
+            .avc1
+            .as_ref()
+            .expect("no AVC1 config in video track");
+        let avcc = &avc1.avcc;
+        let length_size = avcc.length_size_minus_one + 1;
+        let sps_list: Vec<Vec<u8>> = avcc
+            .sequence_parameter_sets
+            .iter()
+            .map(|n| n.bytes.clone())
+            .collect();
+        let pps_list: Vec<Vec<u8>> = avcc
+            .picture_parameter_sets
+            .iter()
+            .map(|n| n.bytes.clone())
+            .collect();
 
         let state = self.state.clone();
+        let playing_sig = self.playing_signal.clone();
+        let position_sig = self.position_signal.clone();
 
         std::thread::spawn(move || {
             let mut decoder = VideoDecoder::new();
 
             tracing::info!(
-                "video: starting decode thread, {} SPS/PPS sets, {} samples, {}ms duration",
-                parameter_sets.len(),
+                "video: decode start — {} SPS, {} PPS, {} samples, {}ms, length_size={}",
+                sps_list.len(),
+                pps_list.len(),
                 sample_count,
-                duration_ms
+                duration_ms,
+                length_size,
             );
 
-            for (i, ps) in parameter_sets.iter().enumerate() {
-                tracing::debug!("video: feeding parameter set {} ({} bytes)", i, ps.len());
-                decoder.decode_nal(ps);
-            }
-
-            // Second pass: re-parse from the same bytes for sample reading
-            let mut mp4 = match mp4::Mp4Reader::read_header(std::io::Cursor::new(&bytes), file_size)
-            {
+            let mut mp4 = match mp4::Mp4Reader::read_header(
+                std::io::Cursor::new(bytes.as_ref()),
+                file_size,
+            ) {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!("failed to re-parse MP4: {e}");
@@ -377,9 +471,65 @@ impl VideoPlayer {
                 std::time::Duration::from_millis(33)
             };
 
-            for sample_idx in 1..=sample_count {
+            let mut decoded_count: u32 = 0;
+
+            // Calculate starting sample from seek position, snap to nearest keyframe
+            let target_sample = if start_ms > 0 && duration_ms > 0 {
+                let s = ((start_ms as f64 / duration_ms as f64) * sample_count as f64) as u32;
+                s.min(sample_count).max(1)
+            } else {
+                1
+            };
+
+            // Find nearest sync sample (keyframe) at or before target
+            let track_ref = &mp4.tracks()[&video_track_id];
+            let start_sample = if let Some(ref stss) = track_ref.trak.mdia.minf.stbl.stss {
+                let mut best = 1u32;
+                for &sync_id in &stss.entries {
+                    if sync_id <= target_sample {
+                        best = sync_id;
+                    } else {
+                        break;
+                    }
+                }
+                best
+            } else {
+                target_sample
+            };
+
+            tracing::info!(
+                "video: seek to {}ms → target sample {}, keyframe {}",
+                start_ms,
+                target_sample,
+                start_sample
+            );
+            let mut annex_b = Vec::new();
+
+            // Feed SPS/PPS to decoder so it can decode from any position
+            for sps in &sps_list {
+                let mut buf = vec![0u8, 0, 0, 1];
+                buf.extend_from_slice(sps);
+                decoder.decode_nal(&buf);
+            }
+            for pps in &pps_list {
+                let mut buf = vec![0u8, 0, 0, 1];
+                buf.extend_from_slice(pps);
+                decoder.decode_nal(&buf);
+            }
+
+            // Bitstream converter state (mirrors openh264 example)
+            let mut new_idr = true;
+            let mut sps_seen = false;
+            let mut pps_seen = false;
+
+            for sample_idx in start_sample..=sample_count {
                 loop {
-                    let ps = state.lock().unwrap().playback_state;
+                    let inner = state.lock().unwrap();
+                    if inner.generation != my_generation {
+                        return;
+                    }
+                    let ps = inner.playback_state;
+                    drop(inner);
                     match ps {
                         VideoState::Playing => break,
                         VideoState::Paused => {
@@ -399,53 +549,108 @@ impl VideoPlayer {
                     }
                 };
 
-                if sample_idx <= 3 {
-                    tracing::info!(
-                        "video: sample {} size={} bytes",
-                        sample_idx,
-                        sample.bytes.len()
-                    );
-                }
+                // Convert MP4 length-prefixed NALUs → Annex B with SPS/PPS injection
+                annex_b.clear();
+                let mut stream = sample.bytes.as_ref();
 
-                // Convert length-prefixed NALUs to Annex B for OpenH264
-                let sample_bytes = &sample.bytes;
-                let mut offset = 0;
-                while offset + 4 <= sample_bytes.len() {
-                    let nal_len = u32::from_be_bytes([
-                        sample_bytes[offset],
-                        sample_bytes[offset + 1],
-                        sample_bytes[offset + 2],
-                        sample_bytes[offset + 3],
-                    ]) as usize;
-                    offset += 4;
-                    if offset + nal_len > sample_bytes.len() {
+                while !stream.is_empty() {
+                    if stream.len() < length_size as usize {
                         break;
                     }
-                    let mut annex_b = vec![0x00, 0x00, 0x00, 0x01];
-                    annex_b.extend_from_slice(&sample_bytes[offset..offset + nal_len]);
-                    offset += nal_len;
-
-                    let result = decoder.decode_nal(&annex_b);
-                    if sample_idx <= 3 {
-                        tracing::info!(
-                            "video: NAL {} bytes, nal_type={}, decoded={}",
-                            annex_b.len(),
-                            annex_b.get(4).map(|b| b & 0x1f).unwrap_or(0),
-                            result.is_some()
-                        );
+                    let mut nal_size: u32 = 0;
+                    for &byte in stream.iter().take(length_size as usize) {
+                        nal_size = (nal_size << 8) | byte as u32;
                     }
-                    if let Some(frame) = result {
-                        let mut inner = state.lock().unwrap();
-                        inner.current_frame = Some(frame);
-                        inner.position_ms = (sample_idx as u64 * duration_ms) / sample_count as u64;
-                        drop(inner);
+                    stream = &stream[length_size as usize..];
+
+                    if nal_size == 0 || nal_size as usize > stream.len() {
+                        break;
+                    }
+
+                    let nal_data = &stream[..nal_size as usize];
+                    let nal_type = nal_data[0] & 0x1F;
+                    stream = &stream[nal_size as usize..];
+
+                    match nal_type {
+                        7 => sps_seen = true, // SPS
+                        8 => pps_seen = true, // PPS
+                        5 => {
+                            // IDR slice — inject SPS/PPS if not already in-stream
+                            if !new_idr && nal_data.len() > 1 && nal_data[1] & 0x80 != 0 {
+                                new_idr = true;
+                            }
+                            if new_idr && !sps_seen && !pps_seen {
+                                new_idr = false;
+                                for sps in &sps_list {
+                                    annex_b.extend_from_slice(&[0, 0, 1]);
+                                    annex_b.extend_from_slice(sps);
+                                }
+                                for pps in &pps_list {
+                                    annex_b.extend_from_slice(&[0, 0, 1]);
+                                    annex_b.extend_from_slice(pps);
+                                }
+                            }
+                            if new_idr && sps_seen && !pps_seen {
+                                for pps in &pps_list {
+                                    annex_b.extend_from_slice(&[0, 0, 1]);
+                                    annex_b.extend_from_slice(pps);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    annex_b.extend_from_slice(&[0, 0, 1]);
+                    annex_b.extend_from_slice(nal_data);
+
+                    if !new_idr && nal_type == 1 {
+                        // Non-IDR slice — reset for next IDR
+                        new_idr = true;
+                        sps_seen = false;
+                        pps_seen = false;
                     }
                 }
 
-                std::thread::sleep(frame_duration);
+                if let Some(frame) = decoder.decode_nal(&annex_b) {
+                    decoded_count += 1;
+                    // Skip display for samples before the seek target (decoder warmup)
+                    if sample_idx >= target_sample {
+                        let mut inner = state.lock().unwrap();
+                        inner.current_frame = Some(std::sync::Arc::new(frame));
+                        inner.position_ms = (sample_idx as u64 * duration_ms) / sample_count as u64;
+                    }
+                }
+
+                // Don't sleep while catching up to seek target
+                if sample_idx >= target_sample {
+                    std::thread::sleep(frame_duration);
+                }
             }
 
+            // Flush remaining buffered frames
+            if let Some(ref mut raw_decoder) = decoder.decoder {
+                if let Ok(remaining) = raw_decoder.flush_remaining() {
+                    for yuv in remaining {
+                        let (uv_w, uv_h) = yuv.dimensions_uv();
+                        let w = uv_w * 2;
+                        let h = uv_h * 2;
+                        let mut rgba = vec![0u8; w * h * 4];
+                        yuv.write_rgba8(&mut rgba);
+                        decoded_count += 1;
+                        let mut inner = state.lock().unwrap();
+                        inner.current_frame = Some(std::sync::Arc::new(Frame::from_rgba(
+                            rgba, w as u32, h as u32,
+                        )));
+                        inner.position_ms = duration_ms;
+                    }
+                }
+            }
+
+            tracing::info!("video: decode complete — {decoded_count}/{sample_count} frames");
+
             state.lock().unwrap().playback_state = VideoState::Ended;
+            playing_sig.set(false);
+            position_sig.set(duration_ms);
         });
     }
 }

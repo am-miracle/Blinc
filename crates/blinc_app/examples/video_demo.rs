@@ -1,4 +1,4 @@
-//! Video Player Demo — minimal test
+//! Video Player Demo
 //!
 //! Run with:
 //! ```sh
@@ -10,7 +10,8 @@ use std::sync::OnceLock;
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
-use blinc_core::{Brush, Color, DrawContext, Rect};
+use blinc_core::Color;
+use blinc_layout::widgets::media::video_player;
 use blinc_media::VideoPlayer;
 
 const VIDEO_PATH: &str = "crates/blinc_app/examples/assets/german-shepherd-hd_1920_1080_25fps.mp4";
@@ -47,40 +48,20 @@ fn main() -> Result<()> {
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     let player = shared_player();
 
-    let player_for_canvas = player.clone();
-
     div()
         .w(ctx.width)
         .h(ctx.height)
         .bg(Color::rgba(0.05, 0.06, 0.10, 1.0))
         .flex_col()
         .items_center()
+        .justify_center()
+        .p_px(16.0)
         .child(
-            text("Video Player Demo")
-                .size(18.0)
-                .weight(FontWeight::Bold)
-                .color(Color::WHITE),
-        )
-        .child(
-            canvas(move |ctx: &mut dyn DrawContext, bounds| {
-                if let Some(frame) = player_for_canvas.current_frame() {
-                    let rgba = frame.as_rgba();
-                    ctx.draw_rgba_pixels(
-                        &rgba,
-                        frame.width,
-                        frame.height,
-                        Rect::new(0.0, 0.0, bounds.width, bounds.height),
-                    );
-                } else {
-                    // Draw red so we can see the canvas has size
-                    ctx.fill_rect(
-                        Rect::new(0.0, 0.0, bounds.width, bounds.height),
-                        0.0.into(),
-                        Brush::Solid(Color::rgba(0.5, 0.0, 0.0, 1.0)),
-                    );
-                }
-            })
-            .w(ctx.width - 32.0)
-            .h(ctx.height - 100.0),
+            video_player(Rc::new(player))
+                .w(ctx.width - 32.0)
+                .h(ctx.height - 32.0)
+                .bg(Color::BLACK)
+                .rounded(8.0)
+                .into_div(),
         )
 }
