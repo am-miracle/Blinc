@@ -1068,6 +1068,23 @@ struct MeshPipeline {
     env_cubemap: wgpu::Texture,
     env_cubemap_view: wgpu::TextureView,
     env_sampler: wgpu::Sampler,
+    /// Skybox pipeline — renders the environment cubemap as a
+    /// background behind the mesh. Shares the cubemap texture/sampler
+    /// but has its own bind group layout (camera vectors + cubemap).
+    skybox_pipeline: wgpu::RenderPipeline,
+    skybox_bind_group_layout: wgpu::BindGroupLayout,
+    skybox_uniform_buffer: wgpu::Buffer,
+    /// HDR intermediate texture (`Rgba16Float`). Meshes render here
+    /// instead of the `Bgra8Unorm` framebuffer so specular + emissive
+    /// values above 1.0 accumulate without clipping. The tonemap pass
+    /// reads this and writes the tonemapped result to the frame target.
+    hdr_texture: Option<wgpu::Texture>,
+    hdr_view: Option<wgpu::TextureView>,
+    hdr_size: (u32, u32),
+    /// Fullscreen ACES tonemap pipeline + resources.
+    tonemap_pipeline: wgpu::RenderPipeline,
+    tonemap_bind_group_layout: wgpu::BindGroupLayout,
+    tonemap_sampler: wgpu::Sampler,
 }
 
 /// Generate one face of a procedural sky cubemap at the given resolution.
@@ -7141,8 +7158,12 @@ impl GpuRenderer {
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some("fs_main"),
+                    // Target the HDR intermediate (Rgba16Float), not the
+                    // sRGB framebuffer — this preserves values above 1.0
+                    // for specular and emissive. The tonemap pass later
+                    // maps the HDR range down to the framebuffer's format.
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: self.texture_format,
+                        format: wgpu::TextureFormat::Rgba16Float,
                         blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -7153,11 +7174,6 @@ impl GpuRenderer {
                     cull_mode: Some(wgpu::Face::Back),
                     ..Default::default()
                 },
-                // Depth-test enabled for the main mesh pass so back
-                // faces and interior geometry z-sort correctly. The
-                // depth texture itself is allocated lazily in
-                // `render_mesh_data` — see `ensure_main_depth` — sized
-                // to match the frame target and recreated on resize.
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: true,
@@ -7465,6 +7481,72 @@ impl GpuRenderer {
             ..Default::default()
         });
 
+        // ── Skybox pipeline ──────────────────────────────────────────────
+        //
+        // The skybox is a fixed screen-space gradient (not a sky dome),
+        // so it has no bindings — no camera, no cubemap. Empty layout.
+        let skybox_bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Skybox Bind Group Layout"),
+                    entries: &[],
+                });
+
+        let skybox_pipeline = crate::custom_pass::create_fullscreen_pipeline(
+            &self.device,
+            "Skybox Pipeline",
+            include_str!("shaders/skybox.wgsl"),
+            wgpu::TextureFormat::Rgba16Float,
+            &skybox_bind_group_layout,
+        );
+
+        let skybox_uniform_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Skybox Uniforms"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // ── Tonemap pipeline ────────────────────────────────────────────
+        let tonemap_bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Tonemap Bind Group Layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
+
+        let tonemap_pipeline = crate::custom_pass::create_fullscreen_pipeline(
+            &self.device,
+            "Tonemap Pipeline",
+            include_str!("shaders/tonemap.wgsl"),
+            self.texture_format,
+            &tonemap_bind_group_layout,
+        );
+
+        let tonemap_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Tonemap Sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         self.mesh_pipeline = Some(MeshPipeline {
             pipeline,
             bind_group_layout,
@@ -7490,6 +7572,15 @@ impl GpuRenderer {
             env_cubemap,
             env_cubemap_view,
             env_sampler,
+            skybox_pipeline,
+            skybox_bind_group_layout,
+            skybox_uniform_buffer,
+            hdr_texture: None,
+            hdr_view: None,
+            hdr_size: (0, 0),
+            tonemap_pipeline,
+            tonemap_bind_group_layout,
+            tonemap_sampler,
         });
     }
 
@@ -7893,17 +7984,17 @@ impl GpuRenderer {
         // NOTE: we re-borrow `self.mesh_pipeline` here via a mutable
         // path because the earlier `let mp = self.mesh_pipeline.as_ref()`
         // borrow ended at the bind_group creation above.
+        // ── Lazily (re)allocate depth + HDR textures ─────────────────────
         let (viewport_w, viewport_h) = self.viewport_size;
         {
             let mp_mut = self.mesh_pipeline.as_mut().unwrap();
-            let needs_realloc =
-                mp_mut.main_depth_size != (viewport_w, viewport_h) || mp_mut.main_depth.is_none();
-            if needs_realloc {
+            let size = (viewport_w.max(1), viewport_h.max(1));
+            if mp_mut.main_depth_size != size || mp_mut.main_depth.is_none() {
                 let depth = self.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("Mesh Main Depth"),
                     size: wgpu::Extent3d {
-                        width: viewport_w.max(1),
-                        height: viewport_h.max(1),
+                        width: size.0,
+                        height: size.1,
                         depth_or_array_layers: 1,
                     },
                     mip_level_count: 1,
@@ -7913,30 +8004,81 @@ impl GpuRenderer {
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                     view_formats: &[],
                 });
-                let view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+                mp_mut.main_depth_view = Some(depth.create_view(&Default::default()));
                 mp_mut.main_depth = Some(depth);
-                mp_mut.main_depth_view = Some(view);
-                mp_mut.main_depth_size = (viewport_w, viewport_h);
+                mp_mut.main_depth_size = size;
+            }
+            if mp_mut.hdr_size != size || mp_mut.hdr_texture.is_none() {
+                let hdr = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Mesh HDR Intermediate"),
+                    size: wgpu::Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                mp_mut.hdr_view = Some(hdr.create_view(&Default::default()));
+                mp_mut.hdr_texture = Some(hdr);
+                mp_mut.hdr_size = size;
             }
         }
 
-        // ── Main render pass ─────────────────────────────────────────────
+        // ── Skybox bind group (empty — shader is screen-space only) ─────
         let mp = self.mesh_pipeline.as_ref().unwrap();
+        let skybox_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Skybox Bind Group"),
+            layout: &mp.skybox_bind_group_layout,
+            entries: &[],
+        });
+
+        // ── HDR pass: skybox + mesh → Rgba16Float intermediate ──────────
         let depth_view = mp
             .main_depth_view
             .as_ref()
             .expect("main_depth_view populated above");
+        let hdr_view = mp.hdr_view.as_ref().expect("hdr_view populated above");
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Mesh Render"),
             });
 
+        // Sub-pass A: skybox → HDR (no depth attachment — the skybox
+        // pipeline was created without depth_stencil so it can't share
+        // a render pass with the mesh pipeline that has depth enabled).
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Mesh Pass"),
+                label: Some("Skybox Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
+                    view: hdr_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            pass.set_pipeline(&mp.skybox_pipeline);
+            pass.set_bind_group(0, &skybox_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Sub-pass B: mesh → HDR (with depth, LoadOp::Load preserves skybox)
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Mesh HDR Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: hdr_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -7947,11 +8089,6 @@ impl GpuRenderer {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: depth_view,
                     depth_ops: Some(wgpu::Operations {
-                        // Clear to 1.0 (far plane) at the start of
-                        // every frame. A persistent depth buffer
-                        // across frames would require per-frame
-                        // invalidation anyway, so clearing is both
-                        // simpler and correct.
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
                     }),
@@ -7961,8 +8098,52 @@ impl GpuRenderer {
             });
 
             pass.set_pipeline(&mp.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..index_count, 0, 0..1);
+        }
 
-            // Clip to the canvas viewport if the caller provided one.
+        // Pass 2: tonemap HDR → framebuffer (ACES filmic + sRGB gamma)
+        //
+        // The tonemap pass reads the Rgba16Float intermediate and writes
+        // tonemapped sRGB to the caller's frame target. Viewport/scissor
+        // are set here (not on the mesh pass) so the tonemap fullscreen
+        // triangle only writes within the canvas bounds while the mesh
+        // pass renders at full HDR resolution for correct edge sampling.
+        {
+            let tonemap_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Tonemap Bind Group"),
+                layout: &mp.tonemap_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(hdr_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&mp.tonemap_sampler),
+                    },
+                ],
+            });
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Tonemap Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&mp.tonemap_pipeline);
+
             if let Some([vx, vy, vw, vh]) = viewport {
                 pass.set_viewport(vx, vy, vw.max(1.0), vh.max(1.0), 0.0, 1.0);
                 pass.set_scissor_rect(
@@ -7973,10 +8154,8 @@ impl GpuRenderer {
                 );
             }
 
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..index_count, 0, 0..1);
+            pass.set_bind_group(0, &tonemap_bind_group, &[]);
+            pass.draw(0..3, 0..1); // fullscreen triangle
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
