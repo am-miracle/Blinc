@@ -8,9 +8,13 @@ use blinc_core::Color;
 use blinc_media::Player;
 
 use crate::div::{div, Div};
+use crate::svg::svg;
 use crate::text::text;
 
 use super::format_time::format_time_ms;
+
+const PLAY_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>"#;
+const PAUSE_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>"#;
 
 /// Shared media controls — play/pause, seek bar, time, volume.
 ///
@@ -34,7 +38,7 @@ impl MediaControls {
         let volume = player.volume();
         let is_live = player.is_live();
 
-        let play_label = if is_playing { "\u{23F8}" } else { "\u{25B6}" };
+        let play_icon = if is_playing { PAUSE_SVG } else { PLAY_SVG };
         let player_for_click = Rc::clone(&player);
 
         let mut row = div()
@@ -53,7 +57,7 @@ impl MediaControls {
                     .justify_center()
                     .cursor_pointer()
                     .class("blinc-media-play-btn")
-                    .child(text(play_label).size(12.0).color(Color::WHITE))
+                    .child(svg(play_icon).square(14.0).color(Color::WHITE))
                     .on_click(move |_| {
                         if player_for_click.is_playing() {
                             player_for_click.pause();

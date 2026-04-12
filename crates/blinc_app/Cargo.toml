@@ -156,6 +156,7 @@ blinc_image = { path = "../blinc_image", version = "0.5.0" }
 blinc_icons = { path = "../blinc_icons", version = "0.5.0" }
 blinc_tabler_icons = { path = "../blinc_tabler_icons", version = "0.5.0" }
 blinc_canvas_kit = { path = "../blinc_canvas_kit", version = "0.5.0" }
+blinc_media = { path = "../blinc_media", version = "0.5.0" }
 
 [features]
 default = ["windowed"]

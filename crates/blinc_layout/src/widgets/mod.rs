@@ -40,7 +40,6 @@ pub mod gesture;
 pub mod hr;
 pub mod link;
 pub mod list;
-#[cfg(feature = "media")]
 pub mod media;
 pub mod overlay;
 pub mod radio;
