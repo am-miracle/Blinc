@@ -33,6 +33,7 @@ manageable.
 - [**Image Layer Test**](./example-gallery/image_layer_test.md) — Tests the rendering order of images vs primitives (paths, backgrounds).
 - [**Keyframe Animation Canvas**](./example-gallery/keyframe_canvas.md) — Demonstrates keyframe animations with the canvas element for:
 - [**Markdown Editor**](./example-gallery/markdown_demo.md) — A split-view markdown editor with:
+- [**3D Mesh Demo — renders the Khronos glTF `DamagedHelmet` sample model**](./example-gallery/mesh_3d_demo.md) — Demonstrates:
 - [**Motion Demo**](./example-gallery/motion_demo.md) — Auto-built from the cross-target source.
 - [**Music Player Glass Card**](./example-gallery/music_player.md) — Recreates an iOS-style "Now Playing" music player card with liquid glass
 - [**Notch Menu Bar**](./example-gallery/notch_demo.md) — Demonstrates a macOS-style menu bar with a notched dropdown that slides

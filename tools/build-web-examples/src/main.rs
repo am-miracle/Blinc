@@ -459,14 +459,15 @@ fn extract_window_size(source: &str) -> Option<(u32, u32)> {
 }
 
 fn detect_image_assets(source: &str) -> Vec<String> {
-    let mut out = std::collections::BTreeSet::new();
+    let mut raw_paths = std::collections::BTreeSet::new();
     let asset_prefix = "crates/blinc_app/examples/assets/";
 
     // Match string literals like "crates/blinc_app/examples/assets/foo.webp"
+    // or directory constants like "crates/blinc_app/examples/assets/3d/DamagedHelmet"
     for segment in source.split('"') {
         let trimmed = segment.trim();
         if trimmed.starts_with(asset_prefix) && !trimmed.contains('\n') {
-            out.insert(trimmed.to_string());
+            raw_paths.insert(trimmed.to_string());
         }
     }
     // Match markdown image syntax: ![alt](crates/blinc_app/examples/assets/foo.webp)
@@ -474,11 +475,54 @@ fn detect_image_assets(source: &str) -> Vec<String> {
         let trimmed = segment.trim();
         if trimmed.starts_with(asset_prefix) {
             if let Some(end) = trimmed.find(')') {
-                out.insert(trimmed[..end].to_string());
+                raw_paths.insert(trimmed[..end].to_string());
             }
         }
     }
+
+    // Expand directory paths: if a detected path is a directory on disk,
+    // include all files under it recursively. This handles the common
+    // pattern of `const DIR: &str = "crates/.../assets/3d/Model"` where
+    // the individual file paths are constructed via `format!()` and
+    // aren't detectable as string literals.
+    let mut out = std::collections::BTreeSet::new();
+    for path in &raw_paths {
+        let p = Path::new(path);
+        if p.is_dir() {
+            if let Ok(entries) = list_files_recursive(p) {
+                for file_path in entries {
+                    if let Some(s) = file_path.to_str() {
+                        out.insert(s.to_string());
+                    }
+                }
+            }
+        } else if p.is_file() {
+            out.insert(path.clone());
+        }
+        // If path doesn't exist on disk (e.g. scanned from source but
+        // not checked out), include it anyway — the staging step will
+        // skip missing files gracefully.
+        if !p.exists() {
+            out.insert(path.clone());
+        }
+    }
     out.into_iter().collect()
+}
+
+/// Recursively list all files under `dir`, returning paths relative to
+/// the current working directory (which is the workspace root).
+fn list_files_recursive(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(list_files_recursive(&path)?);
+        } else {
+            files.push(path);
+        }
+    }
+    Ok(files)
 }
 
 /// Scan the example source for `use <crate>::` patterns from our
@@ -1609,37 +1653,27 @@ fn stage_wrappers(
         println!("  staged {} → {}", meta.name, dest.display());
     }
 
-    // Copy the shared example assets directory so image URLs
-    // like `crates/blinc_app/examples/assets/photo.webp` resolve
-    // from each example's served root. The assets land at
-    // `<stage_dir>/<name>/crates/blinc_app/examples/assets/` —
-    // the same relative path the Rust source uses, so the browser
-    // fetch() URL matches the img() string verbatim.
-    let src_assets = workspace_root.join("crates/blinc_app/examples/assets");
-    if src_assets.is_dir() {
-        let any_has_images = examples.iter().any(|m| !m.image_assets.is_empty());
-        if any_has_images {
-            for meta in examples {
-                if meta.image_assets.is_empty() {
-                    continue;
-                }
-                let dest_assets = stage_dir
-                    .join(&meta.name)
-                    .join("crates/blinc_app/examples/assets");
-                fs::create_dir_all(&dest_assets)?;
-                // Only copy the specific files this example references
-                for asset_path in &meta.image_assets {
-                    let filename = Path::new(asset_path)
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy();
-                    let src_file = src_assets.join(filename.as_ref());
-                    if src_file.exists() {
-                        fs::copy(&src_file, dest_assets.join(filename.as_ref()))?;
-                        println!("  staged asset {} → {}", filename, meta.name);
-                    }
-                }
+    // Copy detected assets into each example's staging directory,
+    // preserving the full relative path from the workspace root so
+    // browser fetch() URLs like
+    // `crates/blinc_app/examples/assets/3d/DamagedHelmet/albedo.jpg`
+    // resolve correctly from the example's served root.
+    for meta in examples {
+        if meta.image_assets.is_empty() {
+            continue;
+        }
+        let dest_root = stage_dir.join(&meta.name);
+        for asset_path in &meta.image_assets {
+            let src_file = workspace_root.join(asset_path);
+            if !src_file.exists() {
+                continue;
             }
+            let dest_file = dest_root.join(asset_path);
+            if let Some(parent) = dest_file.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&src_file, &dest_file)?;
+            println!("  staged asset {} → {}", asset_path, meta.name);
         }
     }
 

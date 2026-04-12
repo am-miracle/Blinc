@@ -36,6 +36,7 @@
   - [Image Layer Test](./web/example-gallery/image_layer_test.md)
   - [Keyframe Animation Canvas](./web/example-gallery/keyframe_canvas.md)
   - [Markdown Editor](./web/example-gallery/markdown_demo.md)
+  - [3D Mesh Demo — renders the Khronos glTF `DamagedHelmet` sample model](./web/example-gallery/mesh_3d_demo.md)
   - [Motion Demo](./web/example-gallery/motion_demo.md)
   - [Music Player Glass Card](./web/example-gallery/music_player.md)
   - [Notch Menu Bar](./web/example-gallery/notch_demo.md)
