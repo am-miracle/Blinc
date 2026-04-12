@@ -243,7 +243,12 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             OrbitCamera::default()
                 .with_distance(3.2)
                 .with_elevation(0.2)
-                .with_azimuth(0.4),
+                .with_azimuth(0.4)
+                // The DamagedHelmet model center is offset 0.187 in Z
+                // after the +90° X rotation baked into the vertices.
+                // Target the actual center so the grid aligns with
+                // the helmet during orbit.
+                .with_target(Vec3::new(0.0, 0.0, 0.187)),
         )
         .with_light(Light::Directional {
             direction: Vec3::new(-0.4, -1.0, -0.3).normalize(),

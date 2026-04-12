@@ -96,6 +96,11 @@ pub struct RenderPassContext<'a> {
     pub inv_view_proj: Option<[f32; 16]>,
     /// Camera world-space position. Only populated for `Scene3D`.
     pub camera_pos: Option<[f32; 3]>,
+    /// Canvas viewport rect in physical pixels `[x, y, w, h]`. Scene3D
+    /// passes should apply `set_viewport` + `set_scissor_rect` with
+    /// these values so their output clips to the same region as the mesh.
+    /// `None` = full target (no canvas wrapper).
+    pub viewport: Option<[f32; 4]>,
 }
 
 /// Trait for user-defined render passes.

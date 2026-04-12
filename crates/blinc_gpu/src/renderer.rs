@@ -8195,7 +8195,7 @@ impl GpuRenderer {
             // self. execute_scene3d_passes doesn't modify MeshPipeline's
             // hdr_view — it only accesses custom_passes.
             let hdr_ref = unsafe { &*hdr_view_ptr };
-            self.execute_scene3d_passes(hdr_ref, 1.0, view_proj, &inv_vp, camera_pos);
+            self.execute_scene3d_passes(hdr_ref, 1.0, view_proj, &inv_vp, camera_pos, viewport);
         }
 
         // Re-create encoder + re-borrow mp for remaining passes
@@ -8497,17 +8497,12 @@ impl GpuRenderer {
             view_proj: None,
             inv_view_proj: None,
             camera_pos: None,
+            viewport: None,
         };
         self.custom_passes.execute_stage(stage, &ctx);
     }
 
     /// Execute Scene3D custom passes with camera context.
-    ///
-    /// Unlike `execute_custom_passes` (which runs PreRender/PostProcess
-    /// passes without camera data), this method populates `view_proj`,
-    /// `inv_view_proj`, and `camera_pos` on the `RenderPassContext` so
-    /// Scene3D passes (grids, helpers, custom 3D effects) can project
-    /// screen coordinates into world space.
     pub fn execute_scene3d_passes(
         &mut self,
         target: &wgpu::TextureView,
@@ -8515,6 +8510,7 @@ impl GpuRenderer {
         view_proj: &[f32; 16],
         inv_view_proj: &[f32; 16],
         camera_pos: [f32; 3],
+        viewport: Option<[f32; 4]>,
     ) {
         let stage = crate::custom_pass::RenderStage::Scene3D;
         if !self.custom_passes.has_passes(stage) {
@@ -8531,6 +8527,7 @@ impl GpuRenderer {
             view_proj: Some(*view_proj),
             inv_view_proj: Some(*inv_view_proj),
             camera_pos: Some(camera_pos),
+            viewport,
         };
         self.custom_passes.execute_stage(stage, &ctx);
     }

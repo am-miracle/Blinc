@@ -185,6 +185,19 @@ impl CustomRenderPass for GridPass {
                 ..Default::default()
             });
             pass.set_pipeline(pipeline);
+
+            // Clip to the canvas viewport so the grid aligns with the
+            // mesh (which also renders at this viewport offset).
+            if let Some([vx, vy, vw, vh]) = ctx.viewport {
+                pass.set_viewport(vx, vy, vw.max(1.0), vh.max(1.0), 0.0, 1.0);
+                pass.set_scissor_rect(
+                    vx.max(0.0) as u32,
+                    vy.max(0.0) as u32,
+                    vw.max(1.0) as u32,
+                    vh.max(1.0) as u32,
+                );
+            }
+
             pass.set_bind_group(0, &bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
