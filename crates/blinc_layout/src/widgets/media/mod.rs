@@ -18,7 +18,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use blinc_core::Color;
-use blinc_media::{Player, VideoState};
+use blinc_media::{Frame, Player, VideoState};
 use blinc_theme::{ColorToken, ThemeState};
 
 use crate::div::{div, Div, ElementBuilder, ElementTypeId};
@@ -180,17 +180,28 @@ impl VideoPlayerWidget {
         let player = Rc::clone(&self.player);
         let mut container = self.inner.flex_col();
 
-        // Video surface
+        // Video surface — caches last frame to avoid mutex + Arc clone
+        // when frame_generation hasn't changed between paints
         let player_for_canvas = Rc::clone(&player);
+        let cached: std::rc::Rc<std::cell::RefCell<(u64, Option<std::sync::Arc<Frame>>)>> =
+            std::rc::Rc::new(std::cell::RefCell::new((0, None)));
         let surface = crate::canvas::canvas(
             move |ctx: &mut dyn blinc_core::DrawContext, bounds: crate::canvas::CanvasBounds| {
+                // Only fetch a new frame from the mutex when generation advances
+                let gen = player_for_canvas.frame_generation();
+                let mut cache = cached.borrow_mut();
+                if gen != cache.0 {
+                    cache.1 = player_for_canvas.current_frame();
+                    cache.0 = gen;
+                }
+
                 ctx.fill_rect(
                     blinc_core::Rect::new(0.0, 0.0, bounds.width, bounds.height),
                     blinc_core::CornerRadius::default(),
                     blinc_core::Brush::Solid(Color::BLACK),
                 );
 
-                if let Some(frame) = player_for_canvas.current_frame() {
+                if let Some(ref frame) = cache.1 {
                     let rgba = frame.as_rgba();
                     let vid_w = frame.width as f32;
                     let vid_h = frame.height as f32;

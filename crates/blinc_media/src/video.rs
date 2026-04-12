@@ -126,6 +126,10 @@ struct VideoPlayerInner {
     position_ms: u64,
     duration_ms: u64,
     generation: u64,
+    /// Incremented each time a new decoded frame is stored.
+    /// Consumers compare against their last-seen value to skip
+    /// redundant GPU uploads when the frame hasn't changed.
+    frame_generation: u64,
     #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
     source_bytes: Option<std::sync::Arc<Vec<u8>>>,
 }
@@ -148,6 +152,7 @@ impl VideoPlayer {
             position_ms: 0,
             duration_ms: 0,
             generation: 0,
+            frame_generation: 0,
             #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
             source_bytes: None,
         }));
@@ -166,23 +171,28 @@ impl VideoPlayer {
                 {
                     let mut inner = state_for_tick.lock().unwrap();
                     if inner.playback_state == VideoState::Playing {
-                        inner.position_ms = crate::web_video::position_ms(_tick_id);
+                        let new_pos = crate::web_video::position_ms(_tick_id);
                         let new_dur = crate::web_video::duration_ms(_tick_id);
+                        let pos_changed = inner.position_ms != new_pos;
                         let dur_changed = inner.duration_ms != new_dur;
+                        inner.position_ms = new_pos;
                         inner.duration_ms = new_dur;
-                        let pos = inner.position_ms;
                         drop(inner);
 
-                        if let Some(frame) = crate::web_video::capture_frame(_tick_id) {
-                            state_for_tick.lock().unwrap().current_frame =
-                                Some(std::sync::Arc::new(frame));
+                        // Only capture frame when video has advanced —
+                        // getImageData is expensive (~8MB copy for 1080p)
+                        if pos_changed {
+                            if let Some(frame) = crate::web_video::capture_frame(_tick_id) {
+                                let mut inner = state_for_tick.lock().unwrap();
+                                inner.current_frame = Some(std::sync::Arc::new(frame));
+                                inner.frame_generation += 1;
+                            }
+                            pos_for_tick.set(new_pos);
+                            redraw_handle.request_redraw();
                         }
-
-                        pos_for_tick.set(pos);
                         if dur_changed {
                             dur_for_tick.set(new_dur);
                         }
-                        redraw_handle.request_redraw();
 
                         if crate::web_video::is_ended(_tick_id) {
                             state_for_tick.lock().unwrap().playback_state = VideoState::Ended;
@@ -367,9 +377,21 @@ impl VideoPlayer {
         self.state.lock().unwrap().current_frame.clone()
     }
 
+    /// Get the current frame generation counter.
+    /// Incremented each time a new decoded frame is stored.
+    /// Consumers can compare against their last-seen value to skip
+    /// redundant work (e.g. GPU texture uploads) when the frame
+    /// hasn't changed.
+    pub fn frame_generation(&self) -> u64 {
+        self.state.lock().unwrap().frame_generation
+    }
+
     /// Push a decoded frame (called by decoder thread or native bridge)
     pub fn push_frame(&self, frame: Frame) {
-        self.state.lock().unwrap().current_frame = Some(std::sync::Arc::new(frame));
+        let mut inner = self.state.lock().unwrap();
+        inner.current_frame = Some(std::sync::Arc::new(frame));
+        inner.frame_generation += 1;
+        drop(inner);
         self.sync_signals();
     }
 
@@ -544,6 +566,7 @@ impl VideoPlayer {
             };
 
             let mut decoded_count: u32 = 0;
+            let mut playback_clock: Option<std::time::Instant> = None;
 
             // Calculate starting sample from seek position, snap to nearest keyframe
             let target_sample = if start_ms > 0 && duration_ms > 0 {
@@ -689,13 +712,20 @@ impl VideoPlayer {
                     if sample_idx >= target_sample {
                         let mut inner = state.lock().unwrap();
                         inner.current_frame = Some(std::sync::Arc::new(frame));
+                        inner.frame_generation += 1;
                         inner.position_ms = (sample_idx as u64 * duration_ms) / sample_count as u64;
                     }
                 }
 
-                // Don't sleep while catching up to seek target
+                // Wall-clock pacing: sleep only for remaining time after decode
                 if sample_idx >= target_sample {
-                    std::thread::sleep(frame_duration);
+                    let clock = playback_clock.get_or_insert_with(std::time::Instant::now);
+                    let frames_since_start = (sample_idx - target_sample) as u32 + 1;
+                    let target_time = *clock + frame_duration * frames_since_start;
+                    let now = std::time::Instant::now();
+                    if target_time > now {
+                        std::thread::sleep(target_time - now);
+                    }
                 }
             }
 
@@ -713,6 +743,7 @@ impl VideoPlayer {
                         inner.current_frame = Some(std::sync::Arc::new(Frame::from_rgba(
                             rgba, w as u32, h as u32,
                         )));
+                        inner.frame_generation += 1;
                         inner.position_ms = duration_ms;
                     }
                 }
