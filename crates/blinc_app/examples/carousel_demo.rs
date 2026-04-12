@@ -17,7 +17,7 @@ use blinc_layout::units::px;
 
 const CARD_COUNT: usize = 5;
 const CARD_WIDTH: f32 = 280.0;
-const CARD_HEIGHT: f32 = 360.0;
+// const CARD_HEIGHT: f32 = 360.0;
 const CARD_GAP: f32 = 20.0;
 const VIEWPORT_WIDTH: f32 = 400.0;
 
