@@ -117,11 +117,6 @@ impl Default for VideoDecoder {
 #[derive(Clone)]
 pub struct VideoPlayer {
     state: std::sync::Arc<std::sync::Mutex<VideoPlayerInner>>,
-    /// Change counter signal. Incremented on ANY state change — new
-    /// frame, play/pause, position update, volume change. UI widgets
-    /// depend on this signal's ID via `Stateful::deps([player.signal()])`
-    /// so only the video widget rebuilds, not the entire tree.
-    change_counter: blinc_core::State<u64>,
 }
 
 struct VideoPlayerInner {
@@ -134,28 +129,32 @@ struct VideoPlayerInner {
 }
 
 impl VideoPlayer {
-    #[track_caller]
     pub fn new() -> Self {
-        let loc = std::panic::Location::caller();
-        let key = format!(
-            "video_player:{}:{}:{}",
-            loc.file(),
-            loc.line(),
-            loc.column()
-        );
-        let ctx = blinc_core::BlincContextState::get();
-        let change_counter = ctx.use_state_keyed(&key, || 0u64);
-        Self {
-            state: std::sync::Arc::new(std::sync::Mutex::new(VideoPlayerInner {
-                playback_state: VideoState::Idle,
-                volume: 1.0,
-                current_frame: None,
-                source: None,
-                position_ms: 0,
-                duration_ms: 0,
-            })),
-            change_counter,
+        let state = std::sync::Arc::new(std::sync::Mutex::new(VideoPlayerInner {
+            playback_state: VideoState::Idle,
+            volume: 1.0,
+            current_frame: None,
+            source: None,
+            position_ms: 0,
+            duration_ms: 0,
+        }));
+
+        // Register a tick callback with the animation scheduler that
+        // requests a redraw every tick while the video is playing.
+        // This drives the canvas repaint loop — the canvas callback
+        // picks up `current_frame()` on each repaint.
+        let state_for_tick = state.clone();
+        if let Some(handle) = blinc_animation::try_get_scheduler() {
+            let redraw_handle = handle.clone();
+            handle.register_tick_callback(move |_dt| {
+                let ps = state_for_tick.lock().unwrap().playback_state;
+                if ps == VideoState::Playing {
+                    redraw_handle.request_redraw();
+                }
+            });
         }
+
+        Self { state }
     }
 
     /// Load a video source
@@ -184,7 +183,6 @@ impl VideoPlayer {
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("video", "play", ());
         }
-        self.notify();
     }
 
     /// Pause playback
@@ -194,7 +192,6 @@ impl VideoPlayer {
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("video", "pause", ());
         }
-        self.notify();
     }
 
     /// Stop playback and reset position
@@ -209,7 +206,6 @@ impl VideoPlayer {
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("video", "stop", ());
         }
-        self.notify();
     }
 
     /// Seek to a position in milliseconds
@@ -225,7 +221,6 @@ impl VideoPlayer {
                 )],
             );
         }
-        self.notify();
     }
 
     /// Set volume (0.0 to 1.0)
@@ -239,7 +234,6 @@ impl VideoPlayer {
                 vec![blinc_core::native_bridge::NativeValue::Float32(volume)],
             );
         }
-        self.notify();
     }
 
     /// Get the current decoded frame
@@ -275,17 +269,6 @@ impl VideoPlayer {
     /// Check if playing
     pub fn is_playing(&self) -> bool {
         self.playback_state() == VideoState::Playing
-    }
-
-    /// Signal ID for state changes. Pass into a `Stateful` widget's
-    /// `.deps([...])` list so it rebuilds on any player state change
-    /// (new frame, play/pause, position, volume).
-    pub fn signal(&self) -> blinc_core::SignalId {
-        self.change_counter.signal_id()
-    }
-
-    fn notify(&self) {
-        self.change_counter.update(|n| n + 1);
     }
 
     /// Load and play an MP4 file from disk.
@@ -362,7 +345,6 @@ impl VideoPlayer {
         }
 
         let state = self.state.clone();
-        let change_counter = self.change_counter.clone();
 
         std::thread::spawn(move || {
             let mut decoder = VideoDecoder::new();
@@ -457,7 +439,6 @@ impl VideoPlayer {
                         inner.current_frame = Some(frame);
                         inner.position_ms = (sample_idx as u64 * duration_ms) / sample_count as u64;
                         drop(inner);
-                        change_counter.update(|n| n + 1);
                     }
                 }
 

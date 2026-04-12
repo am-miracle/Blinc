@@ -4263,6 +4263,12 @@ impl RenderContext {
                 self.renderer
                     .render_with_clear(target, &batch, [0.0, 0.0, 0.0, 1.0]);
 
+                // Render dynamic images (video frames from draw_rgba_pixels)
+                if !batch.dynamic_images.is_empty() {
+                    self.renderer
+                        .render_dynamic_images(target, &batch.dynamic_images);
+                }
+
                 // Render background images to target after clear (so they're visible behind glass)
                 if has_bg_images {
                     self.render_images_ref(target, &bg_images);
@@ -4394,6 +4400,12 @@ impl RenderContext {
                 self.renderer
                     .render_with_clear(target, &z0_batch, [0.0, 0.0, 0.0, 1.0]);
 
+                // Render dynamic images (video frames)
+                if !batch.dynamic_images.is_empty() {
+                    self.renderer
+                        .render_dynamic_images(target, &batch.dynamic_images);
+                }
+
                 // Render paths with MSAA for smooth edges on curved shapes like notch
                 if use_msaa_overlay && z0_batch.has_paths() {
                     self.renderer
@@ -4458,6 +4470,12 @@ impl RenderContext {
                 // Fast path: render full batch (handles layer effects like backdrop-filter)
                 self.renderer
                     .render_with_clear(target, &batch, [0.0, 0.0, 0.0, 1.0]);
+
+                // Render dynamic images (video frames)
+                if !batch.dynamic_images.is_empty() {
+                    self.renderer
+                        .render_dynamic_images(target, &batch.dynamic_images);
+                }
 
                 // Render paths with MSAA for smooth edges on curved shapes like notch
                 if use_msaa_overlay && batch.has_paths() {

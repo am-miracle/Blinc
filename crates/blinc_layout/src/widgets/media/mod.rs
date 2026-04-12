@@ -174,63 +174,38 @@ impl VideoPlayerWidget {
     }
 
     pub fn into_div(self) -> Div {
-        let player = (*self.player).clone(); // VideoPlayer: Clone via Arc
-        let frame_signal = player.signal();
+        let player = Rc::clone(&self.player);
         let mut container = self.inner.flex_col();
 
-        // NoState — the video player's state transitions are driven
-        // by the decode thread (not UI events), so the FSM pattern
-        // doesn't apply. The signal dependency handles redraws.
-        let video_stateful =
-            crate::stateful::stateful_with_key::<crate::stateful::NoState>("__blinc_video_surface")
-                .deps([frame_signal])
-                .on_state(move |_ctx| {
-                    let player_for_canvas = player.clone();
-                    let player_for_controls = player.clone();
-
-                    let mut inner = div().flex_col().w_full().h_full();
-
-                    inner = inner.child(
-                        crate::canvas::canvas(
-                            move |ctx: &mut dyn blinc_core::DrawContext,
-                                  bounds: crate::canvas::CanvasBounds| {
-                                if let Some(frame) = player_for_canvas.current_frame() {
-                                    let rgba = frame.as_rgba();
-                                    let dest = blinc_core::Rect::new(
-                                        0.0,
-                                        0.0,
-                                        bounds.width,
-                                        bounds.height,
-                                    );
-                                    ctx.draw_rgba_pixels(&rgba, frame.width, frame.height, dest);
-                                } else {
-                                    ctx.fill_rect(
-                                        blinc_core::Rect::new(
-                                            0.0,
-                                            0.0,
-                                            bounds.width,
-                                            bounds.height,
-                                        ),
-                                        blinc_core::CornerRadius::default(),
-                                        blinc_core::Brush::Solid(Color::rgba(
-                                            0.05, 0.05, 0.07, 1.0,
-                                        )),
-                                    );
-                                }
-                            },
-                        )
-                        .w_full()
-                        .flex_grow(),
+        // Video surface — direct canvas child, not inside a Stateful.
+        // The canvas render callback fires every paint frame. The
+        // decode thread keeps the UI repainting by dirtying the
+        // reactive flag via `change_counter.update()`.
+        let player_for_canvas = Rc::clone(&player);
+        let surface = crate::canvas::canvas(
+            move |ctx: &mut dyn blinc_core::DrawContext, bounds: crate::canvas::CanvasBounds| {
+                if let Some(frame) = player_for_canvas.current_frame() {
+                    let rgba = frame.as_rgba();
+                    let dest = blinc_core::Rect::new(0.0, 0.0, bounds.width, bounds.height);
+                    ctx.draw_rgba_pixels(&rgba, frame.width, frame.height, dest);
+                } else {
+                    ctx.fill_rect(
+                        blinc_core::Rect::new(0.0, 0.0, bounds.width, bounds.height),
+                        blinc_core::CornerRadius::default(),
+                        blinc_core::Brush::Solid(Color::rgba(0.05, 0.05, 0.07, 1.0)),
                     );
+                }
+            },
+        )
+        .w_full()
+        .flex_grow();
 
-                    let controls = MediaControls::new(Rc::new(player_for_controls))
-                        .class("blinc-video-controls");
-                    inner = inner.child(controls.into_div());
+        container = container.child(surface);
 
-                    inner
-                });
+        // Controls
+        let controls = MediaControls::new(player).class("blinc-video-controls");
+        container = container.child(controls.into_div());
 
-        container = container.child(video_stateful);
         container
     }
 }

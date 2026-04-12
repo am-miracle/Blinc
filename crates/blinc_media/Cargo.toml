@@ -11,6 +11,7 @@ rust-version.workspace = true
 [dependencies]
 blinc_core = { path = "../blinc_core", version = "0.5.0" }
 blinc_platform = { path = "../blinc_platform", version = "0.5.0" }
+blinc_animation = { path = "../blinc_animation", version = "0.5.0" }
 tracing.workspace = true
 
 # Audio playback (desktop) — Vorbis, Opus, WAV, FLAC

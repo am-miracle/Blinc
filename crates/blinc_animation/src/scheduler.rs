@@ -558,6 +558,7 @@ impl AnimationScheduler {
     pub fn handle(&self) -> SchedulerHandle {
         SchedulerHandle {
             inner: Arc::downgrade(&self.inner),
+            needs_redraw: Arc::clone(&self.needs_redraw),
         }
     }
 
@@ -882,9 +883,18 @@ impl AnimationAccess for AnimationScheduler {
 #[derive(Clone)]
 pub struct SchedulerHandle {
     inner: Weak<Mutex<SchedulerInner>>,
+    needs_redraw: Arc<AtomicBool>,
 }
 
 impl SchedulerHandle {
+    /// Request a redraw from anywhere — fires the scheduler's
+    /// `needs_redraw` flag which the main thread's event loop picks up.
+    /// Use this from background threads (e.g. video decode) that need
+    /// the UI to repaint without registering a full animation.
+    pub fn request_redraw(&self) {
+        self.needs_redraw.store(true, Ordering::Release);
+    }
+
     // =========================================================================
     // Spring Operations
     // =========================================================================
