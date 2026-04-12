@@ -7,6 +7,9 @@
 use blinc_core::draw::Vertex;
 use std::f32::consts::PI;
 
+/// (normal, tangent_unused, [4 vertex positions]) per face.
+type BoxFace = ([f32; 3], [f32; 3], [[f32; 3]; 4]);
+
 /// Primitive geometry generator. Call a static method, get back
 /// vertices + indices ready for `MeshData`.
 pub struct Geometry;
@@ -23,7 +26,7 @@ impl Geometry {
 
         // 6 faces × 4 vertices = 24 vertices (unshared for correct normals)
         #[rustfmt::skip]
-        let faces: &[([f32; 3], [f32; 3], [[f32; 3]; 4])] = &[
+        let faces: &[BoxFace] = &[
             // (normal, tangent_sign_unused, [positions])
             ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [[-hw,-hh, hd],[ hw,-hh, hd],[ hw, hh, hd],[-hw, hh, hd]]),  // +Z
             ([0.0, 0.0,-1.0], [-1.0,0.0, 0.0], [[ hw,-hh,-hd],[-hw,-hh,-hd],[-hw, hh,-hd],[ hw, hh,-hd]]), // -Z

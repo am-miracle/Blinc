@@ -13,7 +13,6 @@ pub struct GridPass {
     pipeline: Option<wgpu::RenderPipeline>,
     bind_group_layout: Option<wgpu::BindGroupLayout>,
     uniform_buffer: Option<wgpu::Buffer>,
-    sampler: Option<wgpu::Sampler>,
     pub grid_size: f32,
     pub subdivisions: f32,
     pub fade_near: f32,
@@ -23,13 +22,18 @@ pub struct GridPass {
     enabled: bool,
 }
 
+impl Default for GridPass {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GridPass {
     pub fn new() -> Self {
         Self {
             pipeline: None,
             bind_group_layout: None,
             uniform_buffer: None,
-            sampler: None,
             grid_size: 1.0,
             subdivisions: 5.0,
             fade_near: 8.0,
@@ -74,7 +78,7 @@ impl CustomRenderPass for GridPass {
         &mut self,
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
+        _format: wgpu::TextureFormat,
     ) {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Grid Bind Group Layout"),
