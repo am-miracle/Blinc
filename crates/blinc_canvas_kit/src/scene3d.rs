@@ -13,13 +13,43 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use blinc_core::draw::{Material, MeshData, Vertex};
 use blinc_core::events::event_types;
 use blinc_core::layer::CubemapData;
 use blinc_core::{
-    BlincContextState, Camera, CameraProjection, DrawContext, Light, SignalId, State, Vec3,
+    BlincContextState, Camera, CameraProjection, DrawContext, Light, Mat4, SignalId, State, Vec3,
 };
 use blinc_layout::canvas::{canvas, CanvasBounds};
 use blinc_layout::div::{div, Div};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scene Objects
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Opaque handle to a mesh in the scene. Returned by `SceneKit3D::add`
+/// and used to update transforms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MeshHandle(usize);
+
+/// A single object in the scene graph.
+#[derive(Clone)]
+struct SceneObject {
+    mesh: Arc<MeshData>,
+    position: Vec3,
+    rotation: Vec3,
+    scale: Vec3,
+    visible: bool,
+}
+
+impl SceneObject {
+    fn transform(&self) -> Mat4 {
+        let t = Mat4::translation(self.position.x, self.position.y, self.position.z);
+        let s = Mat4::scale(self.scale.x, self.scale.y, self.scale.z);
+        let ry = Mat4::rotation_y(self.rotation.y);
+        // T × Ry × S (rotation around other axes can be added later)
+        t.mul(&ry).mul(&s)
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Procedural Environment Cubemap
@@ -246,13 +276,10 @@ impl OrbitCamera {
 pub struct SceneKit3D {
     camera: State<OrbitCamera>,
     lights: Rc<RefCell<Vec<Light>>>,
+    objects: Rc<RefCell<Vec<SceneObject>>>,
     drag_sensitivity: f32,
     zoom_sensitivity: f32,
-    /// Per-frame velocity decay. 0.95 = slow smooth deceleration,
-    /// 0.85 = quick stop. Default 0.95.
     momentum_decay: f32,
-    /// Pre-generated environment cubemap for IBL reflections. Shared
-    /// via `Arc` so cloning is cheap.
     environment: Arc<CubemapData>,
 }
 
@@ -263,6 +290,7 @@ impl SceneKit3D {
         Self {
             camera: ctx.use_state_keyed(&format!("{key}_cam"), OrbitCamera::default),
             lights: Rc::new(RefCell::new(Vec::new())),
+            objects: Rc::new(RefCell::new(Vec::new())),
             drag_sensitivity: 0.002,
             zoom_sensitivity: 0.001,
             momentum_decay: 0.95,
@@ -318,6 +346,94 @@ impl SceneKit3D {
 
     pub fn set_lights(&self, lights: Vec<Light>) {
         *self.lights.borrow_mut() = lights;
+    }
+
+    // ── Scene object management ─────────────────────────────────────
+
+    /// Add a mesh from geometry + material. Returns a handle for
+    /// updating the object's transform later.
+    pub fn add(
+        &self,
+        geometry: (Vec<Vertex>, Vec<u32>),
+        material: impl Into<Material>,
+    ) -> MeshHandle {
+        let (vertices, indices) = geometry;
+        let mesh = Arc::new(MeshData {
+            vertices,
+            indices,
+            material: material.into(),
+            skin: None,
+        });
+        let mut objects = self.objects.borrow_mut();
+        let handle = MeshHandle(objects.len());
+        objects.push(SceneObject {
+            mesh,
+            position: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            scale: Vec3::ONE,
+            visible: true,
+        });
+        handle
+    }
+
+    /// Add a pre-built `MeshData` (e.g. loaded from glTF).
+    pub fn add_mesh(&self, mesh: Arc<MeshData>) -> MeshHandle {
+        let mut objects = self.objects.borrow_mut();
+        let handle = MeshHandle(objects.len());
+        objects.push(SceneObject {
+            mesh,
+            position: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            scale: Vec3::ONE,
+            visible: true,
+        });
+        handle
+    }
+
+    pub fn set_position(&self, handle: MeshHandle, position: Vec3) {
+        if let Some(obj) = self.objects.borrow_mut().get_mut(handle.0) {
+            obj.position = position;
+        }
+    }
+
+    pub fn set_rotation(&self, handle: MeshHandle, rotation: Vec3) {
+        if let Some(obj) = self.objects.borrow_mut().get_mut(handle.0) {
+            obj.rotation = rotation;
+        }
+    }
+
+    pub fn set_scale(&self, handle: MeshHandle, scale: Vec3) {
+        if let Some(obj) = self.objects.borrow_mut().get_mut(handle.0) {
+            obj.scale = scale;
+        }
+    }
+
+    pub fn set_visible(&self, handle: MeshHandle, visible: bool) {
+        if let Some(obj) = self.objects.borrow_mut().get_mut(handle.0) {
+            obj.visible = visible;
+        }
+    }
+
+    /// Render all scene objects. Call this inside the `element()`
+    /// render closure, or use the no-arg `element_auto()` which calls
+    /// it for you.
+    pub fn render_scene(&self, ctx: &mut dyn DrawContext) {
+        let objects = self.objects.borrow();
+        for obj in objects.iter() {
+            if obj.visible {
+                ctx.draw_mesh_data(Arc::clone(&obj.mesh), obj.transform());
+            }
+        }
+    }
+
+    /// Build a fully wired Div that automatically renders all meshes
+    /// added via `add()` / `add_mesh()`. No render closure needed —
+    /// the scene manages its own drawing.
+    pub fn element_auto(&self) -> Div {
+        let kit = self.clone();
+        self.element(move |ctx, _bounds| {
+            kit.render_scene(ctx);
+        })
     }
 
     pub fn element<F>(&self, render_fn: F) -> Div

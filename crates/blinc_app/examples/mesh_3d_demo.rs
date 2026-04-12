@@ -13,7 +13,7 @@
 //!   f32 attributes at known bufferView offsets, u16 indices), so
 //!   parsing is a handful of offset reads plus a `blinc_image::ImageData`
 //!   call for the albedo texture.
-//! 
+//!
 //!
 //! Run with:
 //!

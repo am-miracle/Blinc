@@ -24,7 +24,9 @@
 //! ```
 
 pub mod background;
+pub mod geometry;
 pub mod hit;
+pub mod material;
 pub mod pan;
 pub mod scene3d;
 pub mod selection;
@@ -46,9 +48,11 @@ use blinc_layout::div::{div, Div};
 use blinc_layout::event_handler::EventContext;
 
 pub use background::{CanvasBackground, PatternConfig, ZoomAdaptive};
+pub use geometry::Geometry;
 pub use hit::{CanvasDragEvent, CanvasEvent, HitRegion, InteractionState};
+pub use material::MaterialBuilder;
 pub use pan::PanController;
-pub use scene3d::{EnvironmentData, OrbitCamera, SceneKit3D};
+pub use scene3d::{EnvironmentData, MeshHandle, OrbitCamera, SceneKit3D};
 pub use selection::{CanvasTool, MarqueeState, SelectionChangeEvent, SelectionState};
 pub use snap::SnapController;
 pub use spatial::SpatialIndex;
@@ -58,9 +62,11 @@ pub use zoom::ZoomController;
 /// Prelude for convenient imports.
 pub mod prelude {
     pub use crate::background::{CanvasBackground, PatternConfig, ZoomAdaptive};
+    pub use crate::geometry::Geometry;
     pub use crate::hit::{CanvasDragEvent, CanvasEvent, HitRegion, InteractionState};
+    pub use crate::material::MaterialBuilder;
     pub use crate::pan::PanController;
-    pub use crate::scene3d::{EnvironmentData, OrbitCamera, SceneKit3D};
+    pub use crate::scene3d::{EnvironmentData, MeshHandle, OrbitCamera, SceneKit3D};
     pub use crate::selection::{CanvasTool, MarqueeState, SelectionChangeEvent, SelectionState};
     pub use crate::snap::SnapController;
     pub use crate::spatial::SpatialIndex;
