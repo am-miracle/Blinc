@@ -250,7 +250,8 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             color: Color::WHITE,
             intensity: 2.5,
             cast_shadows: false,
-        });
+        })
+        .with_grid(10.0, 100, 20);
 
     div()
         .w(ctx.width)

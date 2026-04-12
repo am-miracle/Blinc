@@ -25,6 +25,7 @@
 
 pub mod background;
 pub mod geometry;
+pub mod grid_pass;
 pub mod hit;
 pub mod material;
 pub mod pan;

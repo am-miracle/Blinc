@@ -59,6 +59,15 @@ pub enum RenderStage {
     /// Before the main UI rendering.
     /// Good for: skyboxes, 3D scene backgrounds, clearing with custom colors.
     PreRender,
+    /// Inside the 3D mesh HDR pipeline, between skybox and mesh passes.
+    /// Good for: ground grids, scene helpers, wireframe overlays, custom
+    /// 3D effects that need the camera view-projection. The target is
+    /// the `Rgba16Float` HDR intermediate, not the final framebuffer —
+    /// the pass output is tonemapped alongside the mesh.
+    ///
+    /// Camera data is available in `RenderPassContext::view_proj` and
+    /// `camera_pos` when this stage runs.
+    Scene3D,
     /// After all UI rendering.
     /// Good for: screen-space effects, overlays, debug visualizations, tone mapping.
     PostProcess,
@@ -80,6 +89,13 @@ pub struct RenderPassContext<'a> {
     pub texture_format: wgpu::TextureFormat,
     /// Display scale factor (DPI)
     pub scale_factor: f64,
+    /// View-projection matrix (column-major `[f32; 16]`). Only populated
+    /// for `Scene3D` stage passes; `None` for PreRender/PostProcess.
+    pub view_proj: Option<[f32; 16]>,
+    /// Inverse view-projection matrix. Only populated for `Scene3D`.
+    pub inv_view_proj: Option<[f32; 16]>,
+    /// Camera world-space position. Only populated for `Scene3D`.
+    pub camera_pos: Option<[f32; 3]>,
 }
 
 /// Trait for user-defined render passes.

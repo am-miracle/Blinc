@@ -8460,6 +8460,43 @@ impl GpuRenderer {
             viewport_height: self.viewport_size.1,
             texture_format: self.texture_format,
             scale_factor,
+            view_proj: None,
+            inv_view_proj: None,
+            camera_pos: None,
+        };
+        self.custom_passes.execute_stage(stage, &ctx);
+    }
+
+    /// Execute Scene3D custom passes with camera context.
+    ///
+    /// Unlike `execute_custom_passes` (which runs PreRender/PostProcess
+    /// passes without camera data), this method populates `view_proj`,
+    /// `inv_view_proj`, and `camera_pos` on the `RenderPassContext` so
+    /// Scene3D passes (grids, helpers, custom 3D effects) can project
+    /// screen coordinates into world space.
+    pub fn execute_scene3d_passes(
+        &mut self,
+        target: &wgpu::TextureView,
+        scale_factor: f64,
+        view_proj: &[f32; 16],
+        inv_view_proj: &[f32; 16],
+        camera_pos: [f32; 3],
+    ) {
+        let stage = crate::custom_pass::RenderStage::Scene3D;
+        if !self.custom_passes.has_passes(stage) {
+            return;
+        }
+        let ctx = crate::custom_pass::RenderPassContext {
+            device: &self.device,
+            queue: &self.queue,
+            target,
+            viewport_width: self.viewport_size.0,
+            viewport_height: self.viewport_size.1,
+            texture_format: self.texture_format,
+            scale_factor,
+            view_proj: Some(*view_proj),
+            inv_view_proj: Some(*inv_view_proj),
+            camera_pos: Some(camera_pos),
         };
         self.custom_passes.execute_stage(stage, &ctx);
     }
