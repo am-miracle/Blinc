@@ -241,7 +241,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     // the upper-front-left.
     // Load HDRI environment for realistic reflections
     let hdr_bytes =
-        blinc_platform::assets::load_asset(&format!("{ASSETS_3D_DIR}/rogland_clear_night_2k.hdr"))
+        blinc_platform::assets::load_asset(format!("{ASSETS_3D_DIR}/rogland_clear_night_2k.hdr"))
             .unwrap_or_else(|e| panic!("failed to load HDRI: {e}"));
 
     let kit = SceneKit3D::new("mesh_3d_demo")
