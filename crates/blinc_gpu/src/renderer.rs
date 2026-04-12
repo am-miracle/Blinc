@@ -1085,6 +1085,16 @@ struct MeshPipeline {
     tonemap_pipeline: wgpu::RenderPipeline,
     tonemap_bind_group_layout: wgpu::BindGroupLayout,
     tonemap_sampler: wgpu::Sampler,
+    /// Bloom pipeline — shared for threshold-downsample and Kawase blur.
+    bloom_pipeline: wgpu::RenderPipeline,
+    bloom_bind_group_layout: wgpu::BindGroupLayout,
+    bloom_uniform_buffer: wgpu::Buffer,
+    /// Two half-res Rgba16Float ping-pong textures for bloom blur.
+    bloom_a: Option<wgpu::Texture>,
+    bloom_a_view: Option<wgpu::TextureView>,
+    bloom_b: Option<wgpu::Texture>,
+    bloom_b_view: Option<wgpu::TextureView>,
+    bloom_size: (u32, u32),
 }
 
 /// Generate one face of a procedural sky cubemap at the given resolution.
@@ -7529,6 +7539,16 @@ impl GpuRenderer {
                             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                             count: None,
                         },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
                     ],
                 });
 
@@ -7545,6 +7565,56 @@ impl GpuRenderer {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
+        });
+
+        // ── Bloom pipeline ──────────────────────────────────────────────
+        let bloom_bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Bloom Bind Group Layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
+
+        let bloom_pipeline = crate::custom_pass::create_fullscreen_pipeline(
+            &self.device,
+            "Bloom Pipeline",
+            include_str!("shaders/bloom.wgsl"),
+            wgpu::TextureFormat::Rgba16Float,
+            &bloom_bind_group_layout,
+        );
+
+        let bloom_uniform_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Bloom Uniforms"),
+            size: 16, // vec2 texel_size + f32 threshold + f32 mode
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         self.mesh_pipeline = Some(MeshPipeline {
@@ -7581,6 +7651,14 @@ impl GpuRenderer {
             tonemap_pipeline,
             tonemap_bind_group_layout,
             tonemap_sampler,
+            bloom_pipeline,
+            bloom_bind_group_layout,
+            bloom_uniform_buffer,
+            bloom_a: None,
+            bloom_a_view: None,
+            bloom_b: None,
+            bloom_b_view: None,
+            bloom_size: (0, 0),
         });
     }
 
@@ -8028,6 +8106,33 @@ impl GpuRenderer {
                 mp_mut.hdr_texture = Some(hdr);
                 mp_mut.hdr_size = size;
             }
+            // Bloom ping-pong textures at half resolution
+            let bloom_w = (size.0 / 2).max(1);
+            let bloom_h = (size.1 / 2).max(1);
+            if mp_mut.bloom_size != (bloom_w, bloom_h) || mp_mut.bloom_a.is_none() {
+                let bloom_desc = wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d {
+                        width: bloom_w,
+                        height: bloom_h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                };
+                let a = self.device.create_texture(&bloom_desc);
+                let b = self.device.create_texture(&bloom_desc);
+                mp_mut.bloom_a_view = Some(a.create_view(&Default::default()));
+                mp_mut.bloom_b_view = Some(b.create_view(&Default::default()));
+                mp_mut.bloom_a = Some(a);
+                mp_mut.bloom_b = Some(b);
+                mp_mut.bloom_size = (bloom_w, bloom_h);
+            }
         }
 
         // ── Skybox bind group (empty — shader is screen-space only) ─────
@@ -8104,13 +8209,170 @@ impl GpuRenderer {
             pass.draw_indexed(0..index_count, 0, 0..1);
         }
 
+        // ── Bloom passes ────────────────────────────────────────────────
+        //
+        // Pass B1: threshold + downsample HDR → bloom_a (half-res)
+        // Pass B2: Kawase blur bloom_a → bloom_b
+        // Pass B3: Kawase blur bloom_b → bloom_a (wider)
+        let bloom_a_view = mp.bloom_a_view.as_ref().unwrap();
+        let bloom_b_view = mp.bloom_b_view.as_ref().unwrap();
+        let (bloom_w, bloom_h) = mp.bloom_size;
+        let bloom_texel = [1.0 / bloom_w as f32, 1.0 / bloom_h as f32];
+
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct BloomUniforms {
+            texel_size: [f32; 2],
+            threshold: f32,
+            mode: f32,
+        }
+
+        // B1: threshold+downsample HDR → bloom_a
+        {
+            let uniforms = BloomUniforms {
+                texel_size: bloom_texel,
+                threshold: 0.8,
+                mode: 0.0,
+            };
+            self.queue
+                .write_buffer(&mp.bloom_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Bloom Threshold"),
+                layout: &mp.bloom_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: mp.bloom_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(hdr_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&mp.tonemap_sampler),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom Threshold"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: bloom_a_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            pass.set_pipeline(&mp.bloom_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // B2: blur bloom_a → bloom_b
+        {
+            let uniforms = BloomUniforms {
+                texel_size: bloom_texel,
+                threshold: 0.0,
+                mode: 1.0,
+            };
+            self.queue
+                .write_buffer(&mp.bloom_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Bloom Blur 1"),
+                layout: &mp.bloom_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: mp.bloom_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(bloom_a_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&mp.tonemap_sampler),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom Blur 1"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: bloom_b_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            pass.set_pipeline(&mp.bloom_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // B3: blur bloom_b → bloom_a (second iteration for wider glow)
+        {
+            let uniforms = BloomUniforms {
+                texel_size: bloom_texel,
+                threshold: 0.0,
+                mode: 1.0,
+            };
+            self.queue
+                .write_buffer(&mp.bloom_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Bloom Blur 2"),
+                layout: &mp.bloom_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: mp.bloom_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(bloom_b_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&mp.tonemap_sampler),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom Blur 2"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: bloom_a_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            pass.set_pipeline(&mp.bloom_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
         // Pass 2: tonemap HDR → framebuffer (ACES filmic + sRGB gamma)
         //
-        // The tonemap pass reads the Rgba16Float intermediate and writes
-        // tonemapped sRGB to the caller's frame target. Viewport/scissor
-        // are set here (not on the mesh pass) so the tonemap fullscreen
-        // triangle only writes within the canvas bounds while the mesh
-        // pass renders at full HDR resolution for correct edge sampling.
+        // The tonemap pass reads the Rgba16Float intermediate and the
+        // bloom result, composites them, and writes tonemapped sRGB to
+        // the caller's frame target. Viewport/scissor are set here (not
+        // on the mesh pass) so the tonemap fullscreen triangle only
+        // writes within the canvas bounds while the mesh pass renders at
+        // full HDR resolution for correct edge sampling.
         {
             let tonemap_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Tonemap Bind Group"),
@@ -8123,6 +8385,10 @@ impl GpuRenderer {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: wgpu::BindingResource::Sampler(&mp.tonemap_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(bloom_a_view),
                     },
                 ],
             });
