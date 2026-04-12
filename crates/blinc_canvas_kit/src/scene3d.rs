@@ -89,6 +89,77 @@ pub fn generate_studio_environment(size: u32) -> EnvironmentData {
     }
 }
 
+/// Load an equirectangular HDRI image (Radiance .hdr format) and
+/// convert it to a cubemap for IBL reflections. The input is the raw
+/// file bytes — the function decodes internally via `image::codecs::hdr`.
+///
+/// The cubemap is generated at `face_size × face_size` per face with
+/// mipmaps. Each mip is downsampled from the equirectangular source
+/// (not from the previous mip) so the direction→color mapping stays
+/// accurate at every resolution, matching `generate_studio_environment`.
+///
+/// # Panics
+///
+/// Panics if the bytes can't be decoded as a Radiance HDR image.
+pub fn generate_hdri_environment(hdr_bytes: &[u8], face_size: u32) -> EnvironmentData {
+    let img = image::load_from_memory(hdr_bytes).expect("failed to decode HDR image");
+    let rgb32 = img.to_rgb32f();
+    let (eq_w, eq_h) = (rgb32.width() as usize, rgb32.height() as usize);
+    let rgb_data = rgb32.into_raw();
+
+    let sample_equirect = |dir_x: f32, dir_y: f32, dir_z: f32| -> (f32, f32, f32) {
+        let len = (dir_x * dir_x + dir_y * dir_y + dir_z * dir_z).sqrt();
+        let (nx, ny, nz) = (dir_x / len, dir_y / len, dir_z / len);
+        let u = 0.5 + nz.atan2(nx) / (2.0 * std::f32::consts::PI);
+        let v = 0.5 - ny.asin() / std::f32::consts::PI;
+        let px = ((u * eq_w as f32) as usize).min(eq_w - 1);
+        let py = ((v * eq_h as f32) as usize).min(eq_h - 1);
+        let idx = (py * eq_w + px) * 3;
+        (rgb_data[idx], rgb_data[idx + 1], rgb_data[idx + 2])
+    };
+
+    let mip_count = (face_size as f32).log2() as u32 + 1;
+    let mut faces = Vec::with_capacity((6 * mip_count) as usize);
+
+    for face in 0..6u32 {
+        for mip in 0..mip_count {
+            let mip_size = (face_size >> mip).max(1);
+            let mut data = Vec::with_capacity((mip_size * mip_size * 8) as usize);
+
+            for y in 0..mip_size {
+                for x in 0..mip_size {
+                    let u = (x as f32 + 0.5) / mip_size as f32 * 2.0 - 1.0;
+                    let v = (y as f32 + 0.5) / mip_size as f32 * 2.0 - 1.0;
+
+                    let (dx, dy, dz) = match face {
+                        0 => (1.0, -v, -u),
+                        1 => (-1.0, -v, u),
+                        2 => (u, 1.0, v),
+                        3 => (u, -1.0, -v),
+                        4 => (u, -v, 1.0),
+                        _ => (-u, -v, -1.0),
+                    };
+
+                    let (r, g, b) = sample_equirect(dx, dy, dz);
+
+                    for &val in &[r, g, b, 1.0f32] {
+                        data.extend_from_slice(&f32_to_f16(val).to_le_bytes());
+                    }
+                }
+            }
+            faces.push(data);
+        }
+    }
+
+    EnvironmentData {
+        cubemap: Arc::new(CubemapData {
+            faces,
+            size: face_size,
+            mip_count,
+        }),
+    }
+}
+
 /// Generate one face of a studio environment cubemap at the given
 /// resolution. Returns **f16 RGBA** bytes (4 x u16 per texel) for the
 /// `Rgba16Float` cubemap format. The environment has:
@@ -310,6 +381,25 @@ impl SceneKit3D {
 
     /// Replace the IBL environment cubemap used for reflections.
     pub fn with_environment(mut self, env: EnvironmentData) -> Self {
+        self.environment = env.cubemap;
+        self
+    }
+
+    /// Load an HDRI equirectangular image (Radiance `.hdr` format) for
+    /// IBL reflections. The metal and glass surfaces in the scene will
+    /// reflect the actual HDR image content instead of the procedural
+    /// studio gradient.
+    ///
+    /// `face_size` controls the cubemap face resolution. 256 is good
+    /// for most scenes; 512 for high-quality close-up reflections.
+    ///
+    /// ```ignore
+    /// let hdr_bytes = std::fs::read("studio.hdr").unwrap();
+    /// let kit = SceneKit3D::new("demo")
+    ///     .with_hdri(&hdr_bytes, 256);
+    /// ```
+    pub fn with_hdri(mut self, hdr_bytes: &[u8], face_size: u32) -> Self {
+        let env = generate_hdri_environment(hdr_bytes, face_size);
         self.environment = env.cubemap;
         self
     }
