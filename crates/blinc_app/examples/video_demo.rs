@@ -5,6 +5,10 @@
 //! - Play/pause/stop controls via `MediaControls`
 //! - Frame display on a canvas element
 //!
+//! `VideoPlayer` captures the UI dirty flag at construction and sets it
+//! when each decoded frame arrives. The frame loop picks this up and
+//! repaints the canvas with the latest frame.
+//!
 //! Run with:
 //!
 //! ```sh
@@ -12,6 +16,7 @@
 //! ```
 
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
@@ -20,6 +25,18 @@ use blinc_layout::widgets::media::video_player;
 use blinc_media::VideoPlayer;
 
 const VIDEO_PATH: &str = "crates/blinc_app/examples/assets/german-shepherd-hd_1920_1080_25fps.mp4";
+
+static PLAYER: OnceLock<VideoPlayer> = OnceLock::new();
+
+fn shared_player() -> VideoPlayer {
+    PLAYER
+        .get_or_init(|| {
+            let p = VideoPlayer::new();
+            p.load_file(VIDEO_PATH);
+            p
+        })
+        .clone()
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
@@ -39,8 +56,7 @@ fn main() -> Result<()> {
 }
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
-    let player = Rc::new(VideoPlayer::new());
-    player.load_file(VIDEO_PATH);
+    let player = Rc::new(shared_player());
 
     div()
         .w(ctx.width)

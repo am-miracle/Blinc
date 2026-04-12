@@ -17,8 +17,9 @@
 use crate::frame::Frame;
 
 /// Video playback state
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum VideoState {
+    #[default]
     Idle,
     Playing,
     Paused,
@@ -111,8 +112,16 @@ impl Default for VideoDecoder {
 ///     canvas_render(&frame.as_rgba(), frame.width, frame.height);
 /// }
 /// ```
+/// Cloning shares the same playback state — all clones see the same
+/// frames, position, and play/pause state via the inner `Arc<Mutex>`.
+#[derive(Clone)]
 pub struct VideoPlayer {
     state: std::sync::Arc<std::sync::Mutex<VideoPlayerInner>>,
+    /// Change counter signal. Incremented on ANY state change — new
+    /// frame, play/pause, position update, volume change. UI widgets
+    /// depend on this signal's ID via `Stateful::deps([player.signal()])`
+    /// so only the video widget rebuilds, not the entire tree.
+    change_counter: blinc_core::State<u64>,
 }
 
 struct VideoPlayerInner {
@@ -125,7 +134,17 @@ struct VideoPlayerInner {
 }
 
 impl VideoPlayer {
+    #[track_caller]
     pub fn new() -> Self {
+        let loc = std::panic::Location::caller();
+        let key = format!(
+            "video_player:{}:{}:{}",
+            loc.file(),
+            loc.line(),
+            loc.column()
+        );
+        let ctx = blinc_core::BlincContextState::get();
+        let change_counter = ctx.use_state_keyed(&key, || 0u64);
         Self {
             state: std::sync::Arc::new(std::sync::Mutex::new(VideoPlayerInner {
                 playback_state: VideoState::Idle,
@@ -135,6 +154,7 @@ impl VideoPlayer {
                 position_ms: 0,
                 duration_ms: 0,
             })),
+            change_counter,
         }
     }
 
@@ -159,44 +179,42 @@ impl VideoPlayer {
 
     /// Start or resume playback
     pub fn play(&self) {
-        let mut inner = self.state.lock().unwrap();
-        inner.playback_state = VideoState::Playing;
-
+        self.state.lock().unwrap().playback_state = VideoState::Playing;
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("video", "play", ());
         }
+        self.notify();
     }
 
     /// Pause playback
     pub fn pause(&self) {
-        let mut inner = self.state.lock().unwrap();
-        inner.playback_state = VideoState::Paused;
-
+        self.state.lock().unwrap().playback_state = VideoState::Paused;
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("video", "pause", ());
         }
+        self.notify();
     }
 
     /// Stop playback and reset position
     pub fn stop(&self) {
-        let mut inner = self.state.lock().unwrap();
-        inner.playback_state = VideoState::Idle;
-        inner.position_ms = 0;
-        inner.current_frame = None;
-
+        {
+            let mut inner = self.state.lock().unwrap();
+            inner.playback_state = VideoState::Idle;
+            inner.position_ms = 0;
+            inner.current_frame = None;
+        }
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>("video", "stop", ());
         }
+        self.notify();
     }
 
     /// Seek to a position in milliseconds
     pub fn seek(&self, position_ms: u64) {
-        let mut inner = self.state.lock().unwrap();
-        inner.position_ms = position_ms;
-
+        self.state.lock().unwrap().position_ms = position_ms;
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>(
@@ -207,12 +225,12 @@ impl VideoPlayer {
                 )],
             );
         }
+        self.notify();
     }
 
     /// Set volume (0.0 to 1.0)
     pub fn set_volume(&self, volume: f32) {
         self.state.lock().unwrap().volume = volume.clamp(0.0, 1.0);
-
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let _ = blinc_core::native_bridge::native_call::<(), _>(
@@ -221,6 +239,7 @@ impl VideoPlayer {
                 vec![blinc_core::native_bridge::NativeValue::Float32(volume)],
             );
         }
+        self.notify();
     }
 
     /// Get the current decoded frame
@@ -256,6 +275,17 @@ impl VideoPlayer {
     /// Check if playing
     pub fn is_playing(&self) -> bool {
         self.playback_state() == VideoState::Playing
+    }
+
+    /// Signal ID for state changes. Pass into a `Stateful` widget's
+    /// `.deps([...])` list so it rebuilds on any player state change
+    /// (new frame, play/pause, position, volume).
+    pub fn signal(&self) -> blinc_core::SignalId {
+        self.change_counter.signal_id()
+    }
+
+    fn notify(&self) {
+        self.change_counter.update(|n| n + 1);
     }
 
     /// Load and play an MP4 file from disk.
@@ -332,11 +362,20 @@ impl VideoPlayer {
         }
 
         let state = self.state.clone();
+        let change_counter = self.change_counter.clone();
 
         std::thread::spawn(move || {
             let mut decoder = VideoDecoder::new();
 
-            for ps in &parameter_sets {
+            tracing::info!(
+                "video: starting decode thread, {} SPS/PPS sets, {} samples, {}ms duration",
+                parameter_sets.len(),
+                sample_count,
+                duration_ms
+            );
+
+            for (i, ps) in parameter_sets.iter().enumerate() {
+                tracing::debug!("video: feeding parameter set {} ({} bytes)", i, ps.len());
                 decoder.decode_nal(ps);
             }
 
@@ -378,6 +417,14 @@ impl VideoPlayer {
                     }
                 };
 
+                if sample_idx <= 3 {
+                    tracing::info!(
+                        "video: sample {} size={} bytes",
+                        sample_idx,
+                        sample.bytes.len()
+                    );
+                }
+
                 // Convert length-prefixed NALUs to Annex B for OpenH264
                 let sample_bytes = &sample.bytes;
                 let mut offset = 0;
@@ -396,10 +443,21 @@ impl VideoPlayer {
                     annex_b.extend_from_slice(&sample_bytes[offset..offset + nal_len]);
                     offset += nal_len;
 
-                    if let Some(frame) = decoder.decode_nal(&annex_b) {
+                    let result = decoder.decode_nal(&annex_b);
+                    if sample_idx <= 3 {
+                        tracing::info!(
+                            "video: NAL {} bytes, nal_type={}, decoded={}",
+                            annex_b.len(),
+                            annex_b.get(4).map(|b| b & 0x1f).unwrap_or(0),
+                            result.is_some()
+                        );
+                    }
+                    if let Some(frame) = result {
                         let mut inner = state.lock().unwrap();
                         inner.current_frame = Some(frame);
                         inner.position_ms = (sample_idx as u64 * duration_ms) / sample_count as u64;
+                        drop(inner);
+                        change_counter.update(|n| n + 1);
                     }
                 }
 
