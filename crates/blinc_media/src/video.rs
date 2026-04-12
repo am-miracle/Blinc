@@ -257,6 +257,166 @@ impl VideoPlayer {
     pub fn is_playing(&self) -> bool {
         self.playback_state() == VideoState::Playing
     }
+
+    /// Load and play an MP4 file from disk.
+    ///
+    /// Spawns a background thread that demuxes the MP4 container,
+    /// extracts H.264 NAL units from the video track, decodes each
+    /// frame via OpenH264, and pushes the resulting RGBA frames at the
+    /// video's native framerate. The `video_player` widget displays
+    /// whatever `current_frame()` returns each render tick.
+    ///
+    /// Playback can be paused/resumed/stopped via the `Player` trait
+    /// methods — the background thread checks `playback_state` each
+    /// frame and sleeps when paused.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the file can't be read or doesn't contain an H.264
+    /// video track.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn load_file(&self, path: &str) {
+        use std::io::BufReader;
+
+        let file = std::fs::File::open(path)
+            .unwrap_or_else(|e| panic!("failed to open video: {path}: {e}"));
+        let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let reader = BufReader::new(file);
+
+        let mp4 = mp4::Mp4Reader::read_header(reader, file_size)
+            .unwrap_or_else(|e| panic!("failed to parse MP4: {e}"));
+
+        // Find the H.264 video track
+        let video_track_id = mp4
+            .tracks()
+            .values()
+            .find(|t| t.media_type().ok() == Some(mp4::MediaType::H264))
+            .map(|t| t.track_id())
+            .unwrap_or_else(|| panic!("no H.264 video track found in {path}"));
+
+        let track = &mp4.tracks()[&video_track_id];
+        let sample_count = track.sample_count();
+        let _timescale = track.timescale();
+        let duration_ms = track.duration().as_millis() as u64;
+
+        // Store duration
+        {
+            let mut inner = self.state.lock().unwrap();
+            inner.duration_ms = duration_ms;
+            inner.source = Some(path.to_string());
+            inner.playback_state = VideoState::Playing;
+        }
+
+        // Collect the SPS/PPS from the track's decoder config (avcC box)
+        // so OpenH264 can initialize its decoder state before the first
+        // IDR frame. Without this, the first few frames may decode as
+        // garbage or the decoder may reject the stream entirely.
+        let mut parameter_sets: Vec<Vec<u8>> = Vec::new();
+        if let Some(ref avc1) = track.trak.mdia.minf.stbl.stsd.avc1 {
+            for sps in &avc1.avcc.sequence_parameter_sets {
+                let mut nal = vec![0x00, 0x00, 0x00, 0x01];
+                nal.extend_from_slice(&sps.bytes);
+                parameter_sets.push(nal);
+            }
+            for pps in &avc1.avcc.picture_parameter_sets {
+                let mut nal = vec![0x00, 0x00, 0x00, 0x01];
+                nal.extend_from_slice(&pps.bytes);
+                parameter_sets.push(nal);
+            }
+        }
+
+        let state = self.state.clone();
+
+        std::thread::spawn(move || {
+            let mut decoder = VideoDecoder::new();
+
+            // Feed SPS/PPS first
+            for ps in &parameter_sets {
+                decoder.decode_nal(ps);
+            }
+
+            // Re-open the file for sample reading (Mp4Reader consumed the original)
+            let file =
+                match std::fs::File::open(state.lock().unwrap().source.clone().unwrap_or_default())
+                {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::error!("failed to re-open video file: {e}");
+                        return;
+                    }
+                };
+            let reader = BufReader::new(file);
+            let mut mp4 = match mp4::Mp4Reader::read_header(reader, file_size) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!("failed to re-parse MP4: {e}");
+                    return;
+                }
+            };
+
+            let frame_duration = if sample_count > 0 {
+                std::time::Duration::from_millis(duration_ms / sample_count as u64)
+            } else {
+                std::time::Duration::from_millis(33) // ~30fps fallback
+            };
+
+            for sample_idx in 1..=sample_count {
+                // Check playback state
+                loop {
+                    let ps = state.lock().unwrap().playback_state;
+                    match ps {
+                        VideoState::Playing => break,
+                        VideoState::Paused => {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            continue;
+                        }
+                        VideoState::Idle | VideoState::Ended => return,
+                    }
+                }
+
+                // Read the sample (compressed H.264 data)
+                let sample = match mp4.read_sample(video_track_id, sample_idx) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::warn!("failed to read sample {sample_idx}: {e}");
+                        continue;
+                    }
+                };
+
+                // Convert from length-prefixed NALUs (MP4 avcC format)
+                // to Annex B (start code prefixed) for OpenH264
+                let bytes = &sample.bytes;
+                let mut offset = 0;
+                while offset + 4 <= bytes.len() {
+                    let nal_len = u32::from_be_bytes([
+                        bytes[offset],
+                        bytes[offset + 1],
+                        bytes[offset + 2],
+                        bytes[offset + 3],
+                    ]) as usize;
+                    offset += 4;
+                    if offset + nal_len > bytes.len() {
+                        break;
+                    }
+                    let mut annex_b = vec![0x00, 0x00, 0x00, 0x01];
+                    annex_b.extend_from_slice(&bytes[offset..offset + nal_len]);
+                    offset += nal_len;
+
+                    if let Some(frame) = decoder.decode_nal(&annex_b) {
+                        let mut inner = state.lock().unwrap();
+                        inner.current_frame = Some(frame);
+                        inner.position_ms = (sample_idx as u64 * duration_ms) / sample_count as u64;
+                    }
+                }
+
+                std::thread::sleep(frame_duration);
+            }
+
+            // Playback finished
+            state.lock().unwrap().playback_state = VideoState::Ended;
+        });
+    }
 }
 
 impl Default for VideoPlayer {

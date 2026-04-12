@@ -24,3 +24,7 @@ version = "0.17"
 # Video decode (desktop) — OpenH264 (royalty-free, Cisco covers patents)
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies.openh264]
 version = "0.9"
+
+# MP4 demuxer (desktop) — extract H.264 NAL units from container
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies.mp4]
+version = "0.14"
