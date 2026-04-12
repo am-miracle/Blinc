@@ -329,6 +329,40 @@ impl SceneKit3D {
         self
     }
 
+    /// Add a ground-plane grid on Y=0 as a scene object.
+    ///
+    /// `size` is the total extent, `divisions` is the number of major
+    /// cells, `subdivisions` is minor lines per cell. The grid uses
+    /// vertex colors (gray lines, red X axis, blue Z axis) and an
+    /// unlit material so it doesn't respond to scene lighting.
+    pub fn with_grid(self, size: f32, divisions: u32, subdivisions: u32) -> Self {
+        let (vertices, indices) = crate::geometry::Geometry::grid(
+            size,
+            divisions,
+            subdivisions,
+            0.005, // thin line width
+        );
+        let material = Material {
+            unlit: true,
+            alpha_mode: blinc_core::draw::AlphaMode::Blend,
+            ..Default::default()
+        };
+        let mesh = Arc::new(MeshData {
+            vertices,
+            indices,
+            material,
+            skin: None,
+        });
+        self.objects.borrow_mut().push(SceneObject {
+            mesh,
+            position: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            scale: Vec3::ONE,
+            visible: true,
+        });
+        self
+    }
+
     pub fn camera(&self) -> OrbitCamera {
         self.camera.get()
     }

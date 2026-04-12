@@ -240,4 +240,102 @@ impl Geometry {
 
         (vertices, indices)
     }
+
+    /// Flat grid on the XZ plane (Y = 0) centered at origin.
+    ///
+    /// Generates thin quad strips for each grid line — both major and
+    /// minor subdivisions. Lines have vertex color baked in (gray for
+    /// minor, brighter for major, red for X axis, blue for Z axis).
+    ///
+    /// `size` is the total extent (grid goes from -size/2 to +size/2).
+    /// `divisions` is the number of cells along each axis.
+    /// `subdivisions` is the number of minor lines per cell.
+    /// `line_width` is the thickness of each line quad.
+    pub fn grid(
+        size: f32,
+        divisions: u32,
+        subdivisions: u32,
+        line_width: f32,
+    ) -> (Vec<Vertex>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let half = size * 0.5;
+        let total_lines = divisions * subdivisions;
+        let step = size / total_lines as f32;
+        let hw = line_width * 0.5;
+
+        let minor_color = [0.35, 0.35, 0.35, 0.4];
+        let major_color = [0.5, 0.5, 0.5, 0.6];
+        let x_axis_color = [0.7, 0.2, 0.2, 0.7];
+        let z_axis_color = [0.2, 0.3, 0.7, 0.7];
+
+        for i in 0..=total_lines {
+            let t = -half + i as f32 * step;
+            let is_major = subdivisions > 0 && i % subdivisions == 0;
+
+            // Lines parallel to Z axis (varying X)
+            let color_x = if t.abs() < step * 0.5 {
+                z_axis_color
+            } else if is_major {
+                major_color
+            } else {
+                minor_color
+            };
+            let base = vertices.len() as u32;
+            vertices.push(
+                Vertex::new([t - hw, 0.0, -half])
+                    .with_normal([0.0, 1.0, 0.0])
+                    .with_color(color_x),
+            );
+            vertices.push(
+                Vertex::new([t + hw, 0.0, -half])
+                    .with_normal([0.0, 1.0, 0.0])
+                    .with_color(color_x),
+            );
+            vertices.push(
+                Vertex::new([t + hw, 0.0, half])
+                    .with_normal([0.0, 1.0, 0.0])
+                    .with_color(color_x),
+            );
+            vertices.push(
+                Vertex::new([t - hw, 0.0, half])
+                    .with_normal([0.0, 1.0, 0.0])
+                    .with_color(color_x),
+            );
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+            // Lines parallel to X axis (varying Z)
+            let color_z = if t.abs() < step * 0.5 {
+                x_axis_color
+            } else if is_major {
+                major_color
+            } else {
+                minor_color
+            };
+            let base = vertices.len() as u32;
+            vertices.push(
+                Vertex::new([-half, 0.0, t - hw])
+                    .with_normal([0.0, 1.0, 0.0])
+                    .with_color(color_z),
+            );
+            vertices.push(
+                Vertex::new([half, 0.0, t - hw])
+                    .with_normal([0.0, 1.0, 0.0])
+                    .with_color(color_z),
+            );
+            vertices.push(
+                Vertex::new([half, 0.0, t + hw])
+                    .with_normal([0.0, 1.0, 0.0])
+                    .with_color(color_z),
+            );
+            vertices.push(
+                Vertex::new([-half, 0.0, t + hw])
+                    .with_normal([0.0, 1.0, 0.0])
+                    .with_color(color_z),
+            );
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+
+        (vertices, indices)
+    }
 }
