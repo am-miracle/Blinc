@@ -234,7 +234,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         .with_light(Light::Directional {
             direction: Vec3::new(-0.4, -1.0, -0.3).normalize(),
             color: Color::WHITE,
-            intensity: 1.2,
+            intensity: 2.5,
             cast_shadows: false,
         });
 

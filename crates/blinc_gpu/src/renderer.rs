@@ -1097,69 +1097,111 @@ struct MeshPipeline {
     bloom_size: (u32, u32),
 }
 
-/// Generate one face of a procedural sky cubemap at the given resolution.
-/// Returns RGBA8 bytes. The sky is a smooth gradient:
-/// - Zenith: dark blue (0.05, 0.08, 0.25)
-/// - Horizon: bright warm white (1.0, 0.95, 0.85) — this is the bright
-///   band that shows up as the "horizon reflection" on metallic surfaces.
-/// - Nadir: dark warm ground (0.12, 0.10, 0.08)
+/// Generate one face of a studio environment cubemap at the given
+/// resolution. Returns **f16 RGBA** bytes (4 × u16 per texel) for the
+/// `Rgba16Float` cubemap format. The environment has:
 ///
-/// Face indices follow the standard cubemap convention:
-///   0 = +X, 1 = -X, 2 = +Y, 3 = -Y, 4 = +Z, 5 = -Z
+/// - A warm key area light from the upper-right front
+/// - A cool fill area light from the left-behind
+/// - A subtle warm ground bounce from below
+/// - A neutral gradient sky base
+///
+/// The area lights produce HDR values > 1.0 so the mesh shader's
+/// Cook-Torrance specular picks up distinct bright reflections
+/// instead of reflecting a featureless gradient. This mimics the
+/// studio HDRI setups that Sketchfab / Marmoset use.
 fn generate_cubemap_face(face: u32, size: u32) -> Vec<u8> {
-    let mut data = Vec::with_capacity((size * size * 4) as usize);
+    // 4 × f16 per texel = 8 bytes per texel
+    let mut data = Vec::with_capacity((size * size * 8) as usize);
     for y in 0..size {
         for x in 0..size {
-            // Map texel to [-1, 1] on the face
             let u = (x as f32 + 0.5) / size as f32 * 2.0 - 1.0;
             let v = (y as f32 + 0.5) / size as f32 * 2.0 - 1.0;
 
-            // Direction vector for this texel (unnormalized)
             let (dx, dy, dz) = match face {
-                0 => (1.0, -v, -u),  // +X
-                1 => (-1.0, -v, u),  // -X
-                2 => (u, 1.0, v),    // +Y
-                3 => (u, -1.0, -v),  // -Y
-                4 => (u, -v, 1.0),   // +Z
-                _ => (-u, -v, -1.0), // -Z
+                0 => (1.0, -v, -u),
+                1 => (-1.0, -v, u),
+                2 => (u, 1.0, v),
+                3 => (u, -1.0, -v),
+                4 => (u, -v, 1.0),
+                _ => (-u, -v, -1.0),
             };
 
-            // Normalize
             let len = (dx * dx + dy * dy + dz * dz).sqrt();
-            let ny = dy / len; // we only need the Y component for the sky gradient
+            let (nx, ny, nz) = (dx / len, dy / len, dz / len);
 
-            // Neutral studio environment — warm horizon, subtle cool
-            // zenith, dark ground. Tuned to match the "studio lighting"
-            // look typical of model viewers (Sketchfab, Marmoset, etc.)
-            // rather than an outdoor sky. The warm horizon band produces
-            // the dominant reflection on metallic surfaces; the zenith
-            // contributes a subtle cool fill without painting everything
-            // blue (the earlier 0.05, 0.08, 0.25 zenith was too blue).
-            let (r, g, b) = if ny > 0.0 {
-                // Upper hemisphere: neutral dark zenith → bright warm horizon
+            // ── Base sky gradient ────────────────────────────────────
+            let (mut r, mut g, mut b) = if ny > 0.0 {
                 let t = (1.0 - ny).powf(4.0);
-                (
-                    0.10 + t * 0.90, // 0.10 → 1.0
-                    0.10 + t * 0.88, // 0.10 → 0.98
-                    0.12 + t * 0.78, // 0.12 → 0.90
-                )
+                (0.08 + t * 0.35, 0.08 + t * 0.33, 0.10 + t * 0.28)
             } else {
-                // Lower hemisphere: horizon → dark warm ground
                 let t = (1.0 + ny).powf(2.0);
-                (
-                    0.15 + t * 0.85, // 0.15 → 1.0
-                    0.13 + t * 0.85, // 0.13 → 0.98
-                    0.10 + t * 0.80, // 0.10 → 0.90
-                )
+                (0.06 + t * 0.20, 0.05 + t * 0.18, 0.04 + t * 0.15)
             };
 
-            data.push((r.min(1.0) * 255.0) as u8);
-            data.push((g.min(1.0) * 255.0) as u8);
-            data.push((b.min(1.0) * 255.0) as u8);
-            data.push(255);
+            // ── Virtual area lights ──────────────────────────────────
+            // Each light is a soft gaussian blob on the cubemap sphere.
+            // `dot(dir, light_dir)` measures angular proximity; the
+            // gaussian falls off from the center.
+            let area_lights: &[(f32, f32, f32, f32, f32, f32, f32)] = &[
+                //  dir_x  dir_y  dir_z  radius  R     G     B
+                (0.5, 0.4, 0.7, 0.15, 5.0, 4.5, 3.8), // warm key (upper-right front)
+                (-0.7, 0.2, -0.4, 0.20, 1.2, 1.4, 1.8), // cool fill (left-behind)
+                (0.0, -0.7, 0.3, 0.30, 0.8, 0.6, 0.5), // warm ground bounce
+                (-0.3, 0.8, 0.0, 0.25, 0.5, 0.55, 0.6), // subtle top fill (cool)
+                (0.8, 0.0, -0.5, 0.12, 2.5, 2.3, 2.0), // rim accent (right side)
+            ];
+
+            for &(lx, ly, lz, radius, lr, lg, lb) in area_lights {
+                let ll = (lx * lx + ly * ly + lz * lz).sqrt();
+                let dot = (nx * lx + ny * ly + nz * lz) / ll;
+                let cos_edge = 1.0 - radius;
+                if dot > cos_edge {
+                    let t = ((dot - cos_edge) / radius).min(1.0);
+                    // Smooth falloff (quadratic)
+                    let intensity = t * t;
+                    r += lr * intensity;
+                    g += lg * intensity;
+                    b += lb * intensity;
+                }
+            }
+
+            // Write as f16 RGBA (little-endian u16 per channel)
+            for &val in &[r, g, b, 1.0f32] {
+                data.extend_from_slice(&f32_to_f16(val).to_le_bytes());
+            }
         }
     }
     data
+}
+
+/// Convert f32 to IEEE 754 half-precision (f16) as a u16.
+fn f32_to_f16(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xFF) as i32;
+    let mantissa = bits & 0x7FFFFF;
+
+    if exp == 0 {
+        // Zero or denorm → f16 zero
+        return sign;
+    }
+    if exp == 0xFF {
+        // Inf or NaN
+        return sign | 0x7C00 | if mantissa != 0 { 0x0200 } else { 0 };
+    }
+
+    let new_exp = exp - 127 + 15;
+    if new_exp >= 31 {
+        // Overflow → f16 infinity
+        return sign | 0x7C00;
+    }
+    if new_exp <= 0 {
+        // Underflow → f16 zero (skip denorms for simplicity)
+        return sign;
+    }
+
+    sign | ((new_exp as u16) << 10) | ((mantissa >> 13) as u16)
 }
 
 struct BindGroupLayouts {
@@ -7443,7 +7485,7 @@ impl GpuRenderer {
             mip_level_count: env_mip_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -7466,7 +7508,8 @@ impl GpuRenderer {
                     &data,
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(mip_size * 4),
+                        // Rgba16Float = 8 bytes per texel (4 × f16)
+                        bytes_per_row: Some(mip_size * 8),
                         rows_per_image: Some(mip_size),
                     },
                     wgpu::Extent3d {
