@@ -86,7 +86,8 @@ fn load_texture(path: &str) -> TextureData {
 fn load_helmet() -> MeshData {
     let bin_path = format!("{HELMET_GLTF_DIR}/DamagedHelmet.bin");
 
-    let bin = std::fs::read(&bin_path).unwrap_or_else(|e| panic!("failed to read {bin_path}: {e}"));
+    let bin = blinc_platform::assets::load_asset(&bin_path)
+        .unwrap_or_else(|e| panic!("failed to read {bin_path}: {e}"));
 
     // Little-endian readers for the two primitive types the glTF
     // uses. `try_into` + `unwrap` is fine here because the offsets are
