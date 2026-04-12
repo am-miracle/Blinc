@@ -337,18 +337,18 @@ impl SceneKit3D {
     /// The pass is registered with the GPU renderer via
     /// `BlincContextState::register_custom_pass` so it works from
     /// closures without needing direct renderer access.
-    /// Add an infinity ground-plane grid via `CustomRenderPass` at the
-    /// `Scene3D` stage. On wasm32 this is currently a no-op — the grid
-    /// pass requires `Send` for the registration queue, and wgpu types
-    /// are `!Send` on the browser main thread. A future wasm-specific
-    /// registration path will address this.
     pub fn with_grid(self) -> Self {
+        let grid = crate::grid_pass::GridPass::new();
+        let boxed: Box<dyn blinc_gpu::custom_pass::CustomRenderPass> = Box::new(grid);
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let grid = crate::grid_pass::GridPass::new();
-            let boxed: Box<dyn blinc_gpu::custom_pass::CustomRenderPass> = Box::new(grid);
             let type_erased: Box<dyn std::any::Any + Send> = Box::new(boxed);
             BlincContextState::get().register_custom_pass(type_erased);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let type_erased: Box<dyn std::any::Any> = Box::new(boxed);
+            BlincContextState::get().register_custom_pass_nosend(type_erased);
         }
         self
     }
