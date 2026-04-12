@@ -194,21 +194,27 @@ fn parallax_mapping(uv: vec2<f32>, view_dir_ts: vec3<f32>, scale: f32) -> vec2<f
 
     var current_uv = uv;
     var current_depth = 0.0;
-    var current_height = textureSample(displacement_texture, base_sampler, current_uv).r;
+    // Use textureSampleLevel (explicit LOD 0) instead of textureSample
+    // inside the loop — textureSample requires implicit derivatives
+    // which aren't available in non-uniform control flow (the break
+    // condition depends on the texture value). WebGPU validators
+    // reject textureSample here; native drivers silently accept it
+    // but produce undefined LOD selection.
+    var current_height = textureSampleLevel(displacement_texture, base_sampler, current_uv, 0.0).r;
 
     for (var i = 0u; i < 16u; i++) {
         if current_depth >= current_height {
             break;
         }
         current_uv -= delta_uv;
-        current_height = textureSample(displacement_texture, base_sampler, current_uv).r;
+        current_height = textureSampleLevel(displacement_texture, base_sampler, current_uv, 0.0).r;
         current_depth += layer_depth;
     }
 
     // Interpolate between last two layers for smoother result
     let prev_uv = current_uv + delta_uv;
     let after_depth = current_height - current_depth;
-    let before_depth = textureSample(displacement_texture, base_sampler, prev_uv).r
+    let before_depth = textureSampleLevel(displacement_texture, base_sampler, prev_uv, 0.0).r
                        - current_depth + layer_depth;
     let weight = after_depth / (after_depth - before_depth);
     return mix(current_uv, prev_uv, weight);
