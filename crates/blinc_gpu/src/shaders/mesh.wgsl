@@ -131,8 +131,12 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 // ─── Shadow sampling with PCF ────────────────────────────────────────────
 
 fn sample_shadow(shadow_coord: vec3<f32>) -> f32 {
-    // 4-tap PCF for soft shadow edges
-    let texel_size = 1.0 / 2048.0;  // shadow map resolution
+    // 4-tap PCF for soft shadow edges. Uses textureSampleCompareLevel
+    // (explicit LOD 0) instead of textureSampleCompare because this
+    // function is called from non-uniform control flow (the shadow_uv
+    // bounds check in fs_main). Chrome's WebGPU validator rejects
+    // implicit-LOD texture sampling in non-uniform flow.
+    let texel_size = 1.0 / 2048.0;
     var shadow = 0.0;
     let offsets = array<vec2<f32>, 4>(
         vec2(-texel_size, -texel_size),
@@ -141,10 +145,10 @@ fn sample_shadow(shadow_coord: vec3<f32>) -> f32 {
         vec2( texel_size,  texel_size),
     );
     for (var i = 0u; i < 4u; i++) {
-        shadow += textureSampleCompare(
+        shadow += textureSampleCompareLevel(
             shadow_map, shadow_sampler,
             shadow_coord.xy + offsets[i],
-            shadow_coord.z - 0.002  // bias to reduce shadow acne
+            shadow_coord.z - 0.002
         );
     }
     return shadow * 0.25;
