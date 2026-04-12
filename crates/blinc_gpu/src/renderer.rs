@@ -1030,9 +1030,29 @@ struct MeshPipeline {
     default_normal_map: crate::image::GpuImage,
     /// Default black displacement map (no displacement)
     default_displacement: crate::image::GpuImage,
+    /// Default 1x1 white metallic-roughness texture. Bound when the
+    /// material has no MR texture; multiplying scalar metallic ×
+    /// roughness by (1,1,1,1) produces the scalar-only path.
+    default_metallic_roughness: crate::image::GpuImage,
+    /// Default 1x1 white emissive texture. Bound when the material
+    /// has no emissive texture; the shader gates on the
+    /// `has_emissive_texture` flag so the default is only read for
+    /// layout validation.
+    default_emissive: crate::image::GpuImage,
+    /// Default 1x1 white occlusion texture. Same rationale as the
+    /// other defaults.
+    default_occlusion: crate::image::GpuImage,
     sampler: wgpu::Sampler,
     /// Storage buffer for joint matrices (skeletal animation, max 256 joints)
     joint_buffer: wgpu::Buffer,
+    /// Depth buffer for the main mesh pass. Separate from the shadow
+    /// map — this one is sized to match the frame target so back faces
+    /// and interior geometry z-test against front faces. Lazily
+    /// created on the first render_mesh_data call and recreated when
+    /// the viewport size changes.
+    main_depth: Option<wgpu::Texture>,
+    main_depth_view: Option<wgpu::TextureView>,
+    main_depth_size: (u32, u32),
     /// Shadow depth pass pipeline
     shadow_pipeline: wgpu::RenderPipeline,
     shadow_bind_group_layout: wgpu::BindGroupLayout,
@@ -1042,6 +1062,77 @@ struct MeshPipeline {
     shadow_view: wgpu::TextureView,
     /// Comparison sampler for PCF shadow sampling
     shadow_sampler: wgpu::Sampler,
+    /// Procedural environment cubemap for IBL reflections. Generated
+    /// once at pipeline init — a smooth sky gradient that gives metals
+    /// and glass surfaces ambient reflections proportional to roughness.
+    env_cubemap: wgpu::Texture,
+    env_cubemap_view: wgpu::TextureView,
+    env_sampler: wgpu::Sampler,
+}
+
+/// Generate one face of a procedural sky cubemap at the given resolution.
+/// Returns RGBA8 bytes. The sky is a smooth gradient:
+/// - Zenith: dark blue (0.05, 0.08, 0.25)
+/// - Horizon: bright warm white (1.0, 0.95, 0.85) — this is the bright
+///   band that shows up as the "horizon reflection" on metallic surfaces.
+/// - Nadir: dark warm ground (0.12, 0.10, 0.08)
+///
+/// Face indices follow the standard cubemap convention:
+///   0 = +X, 1 = -X, 2 = +Y, 3 = -Y, 4 = +Z, 5 = -Z
+fn generate_cubemap_face(face: u32, size: u32) -> Vec<u8> {
+    let mut data = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            // Map texel to [-1, 1] on the face
+            let u = (x as f32 + 0.5) / size as f32 * 2.0 - 1.0;
+            let v = (y as f32 + 0.5) / size as f32 * 2.0 - 1.0;
+
+            // Direction vector for this texel (unnormalized)
+            let (dx, dy, dz) = match face {
+                0 => (1.0, -v, -u),  // +X
+                1 => (-1.0, -v, u),  // -X
+                2 => (u, 1.0, v),    // +Y
+                3 => (u, -1.0, -v),  // -Y
+                4 => (u, -v, 1.0),   // +Z
+                _ => (-u, -v, -1.0), // -Z
+            };
+
+            // Normalize
+            let len = (dx * dx + dy * dy + dz * dz).sqrt();
+            let ny = dy / len; // we only need the Y component for the sky gradient
+
+            // Neutral studio environment — warm horizon, subtle cool
+            // zenith, dark ground. Tuned to match the "studio lighting"
+            // look typical of model viewers (Sketchfab, Marmoset, etc.)
+            // rather than an outdoor sky. The warm horizon band produces
+            // the dominant reflection on metallic surfaces; the zenith
+            // contributes a subtle cool fill without painting everything
+            // blue (the earlier 0.05, 0.08, 0.25 zenith was too blue).
+            let (r, g, b) = if ny > 0.0 {
+                // Upper hemisphere: neutral dark zenith → bright warm horizon
+                let t = (1.0 - ny).powf(4.0);
+                (
+                    0.10 + t * 0.90, // 0.10 → 1.0
+                    0.10 + t * 0.88, // 0.10 → 0.98
+                    0.12 + t * 0.78, // 0.12 → 0.90
+                )
+            } else {
+                // Lower hemisphere: horizon → dark warm ground
+                let t = (1.0 + ny).powf(2.0);
+                (
+                    0.15 + t * 0.85, // 0.15 → 1.0
+                    0.13 + t * 0.85, // 0.13 → 0.98
+                    0.10 + t * 0.80, // 0.10 → 0.90
+                )
+            };
+
+            data.push((r.min(1.0) * 255.0) as u8);
+            data.push((g.min(1.0) * 255.0) as u8);
+            data.push((b.min(1.0) * 255.0) as u8);
+            data.push(255);
+        }
+    }
+    data
 }
 
 struct BindGroupLayouts {
@@ -6918,6 +7009,63 @@ impl GpuRenderer {
                             },
                             count: None,
                         },
+                        // 9: Metallic / roughness texture (glTF convention:
+                        // metallic in .b, roughness in .g, multiplied per-texel
+                        // by the scalar factors in MaterialUniforms).
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 9,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        // 10: Emissive texture — multiplied per-texel by the
+                        // scalar `emissive` RGB in MaterialUniforms. Used for
+                        // self-lit surfaces (HUD glyphs, LED panels, etc.).
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 10,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        // 11: Ambient occlusion texture — .r channel attenuates
+                        // the ambient/indirect diffuse term. `occlusion_strength`
+                        // in MaterialUniforms controls how much AO applies.
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 11,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        // 12: Environment cubemap for IBL reflections
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 12,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::Cube,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        // 13: Environment cubemap sampler
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 13,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
                     ],
                 });
 
@@ -7005,7 +7153,18 @@ impl GpuRenderer {
                     cull_mode: Some(wgpu::Face::Back),
                     ..Default::default()
                 },
-                depth_stencil: None,
+                // Depth-test enabled for the main mesh pass so back
+                // faces and interior geometry z-sort correctly. The
+                // depth texture itself is allocated lazily in
+                // `render_mesh_data` — see `ensure_main_depth` — sized
+                // to match the frame target and recreated on resize.
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
                 cache: None,
@@ -7019,9 +7178,24 @@ impl GpuRenderer {
             mapped_at_creation: false,
         });
 
+        // Material uniform layout:
+        //   base_color: vec4           16
+        //   metallic_roughness: vec2    8
+        //   emissive: vec3 + pad       16  (WGSL vec3 is 16-byte aligned)
+        //   unlit: f32                  4
+        //   has_mr_texture: f32         4
+        //   has_emissive_texture: f32   4
+        //   has_occlusion_texture: f32  4
+        //   occlusion_strength: f32     4
+        //   _pad: f32 * 3              12  (round up to 16-byte struct end)
+        //                              ─
+        //                              80 bytes total, safely rounded to 96.
+        //
+        // We size to 96 to leave headroom for one more vec4 without
+        // having to resize the buffer when the next PBR input lands.
         let material_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Mesh Material"),
-            size: 64,
+            size: 96,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -7054,6 +7228,42 @@ impl GpuRenderer {
             1,
             1,
             Some("mesh_default_displacement"),
+        );
+
+        // Default white metallic/roughness. Bound whenever the material
+        // has no MR texture — the shader gates the sample on the
+        // `has_metallic_roughness_texture` flag and uses only the scalar
+        // factors in that branch, so the texture itself is only read for
+        // bind-group layout validation, never sampled.
+        let default_metallic_roughness = crate::image::GpuImage::from_rgba(
+            &self.device,
+            &self.queue,
+            &[255, 255, 255, 255],
+            1,
+            1,
+            Some("mesh_default_metallic_roughness"),
+        );
+
+        // Default white emissive texture — same gating as above.
+        let default_emissive = crate::image::GpuImage::from_rgba(
+            &self.device,
+            &self.queue,
+            &[255, 255, 255, 255],
+            1,
+            1,
+            Some("mesh_default_emissive"),
+        );
+
+        // Default white occlusion texture — 1.0 means "no occlusion",
+        // so even if a caller accidentally leaves the flag on the AO
+        // term reduces to the multiplicative identity.
+        let default_occlusion = crate::image::GpuImage::from_rgba(
+            &self.device,
+            &self.queue,
+            &[255, 255, 255, 255],
+            1,
+            1,
+            Some("mesh_default_occlusion"),
         );
 
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -7187,6 +7397,74 @@ impl GpuRenderer {
             ..Default::default()
         });
 
+        // ── IBL environment cubemap ─────────────────────────────────────
+        //
+        // Procedural sky gradient rendered CPU-side into a 128×128×6
+        // cubemap with mipmaps. Each mip level is regenerated from the
+        // sky function (not downsampled) so the direction → color mapping
+        // stays accurate at every resolution. The shader samples this at
+        // `roughness * max_mip` level so smooth surfaces get sharp
+        // reflections and rough surfaces see a blurry ambient tint.
+        let env_size: u32 = 128;
+        let env_mip_count = (env_size as f32).log2() as u32 + 1;
+        let env_cubemap = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("IBL Environment Cubemap"),
+            size: wgpu::Extent3d {
+                width: env_size,
+                height: env_size,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: env_mip_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        for face in 0..6u32 {
+            for mip in 0..env_mip_count {
+                let mip_size = (env_size >> mip).max(1);
+                let data = generate_cubemap_face(face, mip_size);
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &env_cubemap,
+                        mip_level: mip,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: face,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(mip_size * 4),
+                        rows_per_image: Some(mip_size),
+                    },
+                    wgpu::Extent3d {
+                        width: mip_size,
+                        height: mip_size,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+
+        let env_cubemap_view = env_cubemap.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+
+        let env_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("IBL Environment Sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         self.mesh_pipeline = Some(MeshPipeline {
             pipeline,
             bind_group_layout,
@@ -7195,14 +7473,23 @@ impl GpuRenderer {
             default_texture,
             default_normal_map,
             default_displacement,
+            default_metallic_roughness,
+            default_emissive,
+            default_occlusion,
             sampler,
             joint_buffer,
+            main_depth: None,
+            main_depth_view: None,
+            main_depth_size: (0, 0),
             shadow_pipeline,
             shadow_bind_group_layout,
             shadow_uniform_buffer,
             shadow_map,
             shadow_view,
             shadow_sampler,
+            env_cubemap,
+            env_cubemap_view,
+            env_sampler,
         });
     }
 
@@ -7221,6 +7508,7 @@ impl GpuRenderer {
         light_dir: [f32; 3],
         light_intensity: f32,
         light_view_proj: Option<&[f32; 16]>,
+        viewport: Option<[f32; 4]>,
     ) {
         if mesh.vertices.is_empty() || mesh.indices.is_empty() {
             return;
@@ -7385,22 +7673,48 @@ impl GpuRenderer {
             .write_buffer(&mp.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         // ── Upload material ──────────────────────────────────────────────
+        //
+        // Layout must match `MaterialUniforms` in mesh.wgsl. WGSL's
+        // std140-like alignment puts the vec3 on a 16-byte boundary, so
+        // `emissive` is followed by 4 bytes of implicit padding before
+        // `unlit` — we represent that explicitly with `emissive_pad` to
+        // keep the bytemuck Pod layout matching the shader's struct.
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         struct MaterialGpu {
             base_color: [f32; 4],
             metallic_roughness: [f32; 2],
+            _pad_mr: [f32; 2],
             emissive: [f32; 3],
             unlit: f32,
-            _pad: [f32; 2],
+            has_metallic_roughness_texture: f32,
+            has_emissive_texture: f32,
+            has_occlusion_texture: f32,
+            occlusion_strength: f32,
         }
 
         let mat = MaterialGpu {
             base_color: mesh.material.base_color,
             metallic_roughness: [mesh.material.metallic, mesh.material.roughness],
+            _pad_mr: [0.0; 2],
             emissive: mesh.material.emissive,
             unlit: if mesh.material.unlit { 1.0 } else { 0.0 },
-            _pad: [0.0; 2],
+            has_metallic_roughness_texture: if mesh.material.metallic_roughness_texture.is_some() {
+                1.0
+            } else {
+                0.0
+            },
+            has_emissive_texture: if mesh.material.emissive_texture.is_some() {
+                1.0
+            } else {
+                0.0
+            },
+            has_occlusion_texture: if mesh.material.occlusion_texture.is_some() {
+                1.0
+            } else {
+                0.0
+            },
+            occlusion_strength: mesh.material.occlusion_strength,
         };
         self.queue
             .write_buffer(&mp.material_buffer, 0, bytemuck::bytes_of(&mat));
@@ -7439,6 +7753,39 @@ impl GpuRenderer {
             )
         });
 
+        let metallic_roughness_tex = mesh.material.metallic_roughness_texture.as_ref().map(|td| {
+            crate::image::GpuImage::from_rgba(
+                &self.device,
+                &self.queue,
+                &td.rgba,
+                td.width,
+                td.height,
+                Some("mesh_metallic_roughness_tex"),
+            )
+        });
+
+        let emissive_tex = mesh.material.emissive_texture.as_ref().map(|td| {
+            crate::image::GpuImage::from_rgba(
+                &self.device,
+                &self.queue,
+                &td.rgba,
+                td.width,
+                td.height,
+                Some("mesh_emissive_tex"),
+            )
+        });
+
+        let occlusion_tex = mesh.material.occlusion_texture.as_ref().map(|td| {
+            crate::image::GpuImage::from_rgba(
+                &self.device,
+                &self.queue,
+                &td.rgba,
+                td.width,
+                td.height,
+                Some("mesh_occlusion_tex"),
+            )
+        });
+
         let base_view = base_tex
             .as_ref()
             .map_or_else(|| mp.default_texture.view(), |t| t.view());
@@ -7448,6 +7795,15 @@ impl GpuRenderer {
         let displacement_view = displacement_tex
             .as_ref()
             .map_or_else(|| mp.default_displacement.view(), |t| t.view());
+        let metallic_roughness_view = metallic_roughness_tex
+            .as_ref()
+            .map_or_else(|| mp.default_metallic_roughness.view(), |t| t.view());
+        let emissive_view = emissive_tex
+            .as_ref()
+            .map_or_else(|| mp.default_emissive.view(), |t| t.view());
+        let occlusion_view = occlusion_tex
+            .as_ref()
+            .map_or_else(|| mp.default_occlusion.view(), |t| t.view());
 
         // ── Upload joint matrices (skeletal animation) ───────────────────
         let skin_joint_buf = mesh.skin.as_ref().map(|skin| {
@@ -7503,10 +7859,73 @@ impl GpuRenderer {
                     binding: 8,
                     resource: joint_buffer_ref.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(metallic_roughness_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(emissive_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(occlusion_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&mp.env_cubemap_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::Sampler(&mp.env_sampler),
+                },
             ],
         });
 
+        // ── Main depth buffer ────────────────────────────────────────────
+        //
+        // Lazily (re)allocate a depth texture matching the current
+        // viewport. Cached on the MeshPipeline so successive frames
+        // reuse it; resized when the viewport changes. Without this,
+        // the main mesh pass has no depth test and back faces draw
+        // over front faces in mesh submission order.
+        //
+        // NOTE: we re-borrow `self.mesh_pipeline` here via a mutable
+        // path because the earlier `let mp = self.mesh_pipeline.as_ref()`
+        // borrow ended at the bind_group creation above.
+        let (viewport_w, viewport_h) = self.viewport_size;
+        {
+            let mp_mut = self.mesh_pipeline.as_mut().unwrap();
+            let needs_realloc =
+                mp_mut.main_depth_size != (viewport_w, viewport_h) || mp_mut.main_depth.is_none();
+            if needs_realloc {
+                let depth = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Mesh Main Depth"),
+                    size: wgpu::Extent3d {
+                        width: viewport_w.max(1),
+                        height: viewport_h.max(1),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Depth32Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+                let view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+                mp_mut.main_depth = Some(depth);
+                mp_mut.main_depth_view = Some(view);
+                mp_mut.main_depth_size = (viewport_w, viewport_h);
+            }
+        }
+
         // ── Main render pass ─────────────────────────────────────────────
+        let mp = self.mesh_pipeline.as_ref().unwrap();
+        let depth_view = mp
+            .main_depth_view
+            .as_ref()
+            .expect("main_depth_view populated above");
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -7525,11 +7944,35 @@ impl GpuRenderer {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        // Clear to 1.0 (far plane) at the start of
+                        // every frame. A persistent depth buffer
+                        // across frames would require per-frame
+                        // invalidation anyway, so clearing is both
+                        // simpler and correct.
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 ..Default::default()
             });
 
             pass.set_pipeline(&mp.pipeline);
+
+            // Clip to the canvas viewport if the caller provided one.
+            if let Some([vx, vy, vw, vh]) = viewport {
+                pass.set_viewport(vx, vy, vw.max(1.0), vh.max(1.0), 0.0, 1.0);
+                pass.set_scissor_rect(
+                    vx.max(0.0) as u32,
+                    vy.max(0.0) as u32,
+                    vw.max(1.0) as u32,
+                    vh.max(1.0) as u32,
+                );
+            }
+
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
             pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);

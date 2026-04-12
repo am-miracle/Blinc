@@ -7,7 +7,7 @@ use blinc_core::{
 };
 use blinc_gpu::{
     FontRegistry, GenericFont as GpuGenericFont, GpuGlyph, GpuImage, GpuImageInstance,
-    GpuPaintContext, GpuPrimitive, GpuRenderer, ImageRenderingContext, PrimitiveBatch,
+    GpuPaintContext, GpuPrimitive, GpuRenderer, ImageRenderingContext, PendingMesh, PrimitiveBatch,
     TextAlignment, TextAnchor, TextRenderingContext,
 };
 use blinc_layout::div::{FontFamily, FontWeight, GenericFont, TextAlign, TextVerticalAlign};
@@ -3802,6 +3802,15 @@ impl RenderContext {
         // Take the batch (mutable so CSS-transformed text primitives can be added)
         let mut batch = ctx.take_batch();
 
+        // Take any 3D mesh draws captured via `ctx.draw_mesh_data(...)`
+        // inside canvas callbacks. These are dispatched after all 2D
+        // content lands so the mesh composites on top of the UI — see
+        // the `render_mesh_data` dispatch loop near the end of this
+        // function. Drained here (not at the dispatch site) so
+        // `ctx` can drop right after `take_batch`/`take_pending_meshes`
+        // and the rest of the frame runs without holding onto it.
+        let pending_meshes = ctx.take_pending_meshes();
+
         // Collect text, SVG, image, and flow elements WITH motion state
         let (all_texts, all_svgs, all_images, flow_elements) =
             self.collect_render_elements_with_state(tree, Some(render_state));
@@ -4568,6 +4577,23 @@ impl RenderContext {
 
         // Poll the device to free completed command buffers
         self.renderer.poll();
+
+        // Dispatch 3D mesh draws captured during `tree.render_with_motion`.
+        // Each `PendingMesh` carries a snapshot of the camera and lights
+        // active when `canvas(|ctx, bounds| ctx.draw_mesh_data(...))` fired,
+        // so the mesh pipeline renders at the correct pose even if the
+        // closure's camera was transient. View-projection is computed
+        // from the captured camera + the actual frame viewport so aspect
+        // stays correct under window resizes.
+        //
+        // MVP scope: meshes render to the full frame target (no scissor
+        // to the canvas bounds yet), composite on top of the 2D UI, and
+        // sit under `render_overlays` so overlay panels still clip
+        // cleanly over them. Per-canvas viewport clipping is a
+        // follow-up once the first end-to-end demo proves the path.
+        if !pending_meshes.is_empty() {
+            dispatch_pending_meshes(&mut self.renderer, target, width, height, &pending_meshes);
+        }
 
         // Render overlays from RenderState
         self.render_overlays(render_state, width, height, target);
@@ -5410,4 +5436,225 @@ fn scale_and_translate_path(
         .collect();
 
     blinc_core::Path::from_commands(new_commands)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3D mesh dispatch
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Dispatch every `PendingMesh` captured by `GpuPaintContext` to
+/// `GpuRenderer::render_mesh_data` against the frame target.
+///
+/// Computes a view-projection matrix from each pending mesh's captured
+/// `Camera` against the current viewport size (so aspect stays correct
+/// under window resizes) and extracts the first `Light::Directional`
+/// for the mesh pipeline's sun light. Other light types are ignored
+/// for now — the mesh pipeline only takes a single directional input,
+/// and widening that is follow-up work tracked alongside per-canvas
+/// viewport clipping.
+///
+/// If a mesh's camera is `Camera::default()` the pose is identity /
+/// zero-eye which produces an invisible frame; demos should always
+/// `ctx.set_camera(&cam)` before calling `ctx.draw_mesh_data`. A
+/// `tracing::warn!` surfaces the silent-empty case to avoid
+/// head-scratching during demo authoring.
+fn dispatch_pending_meshes(
+    renderer: &mut GpuRenderer,
+    target: &wgpu::TextureView,
+    width: u32,
+    height: u32,
+    meshes: &[PendingMesh],
+) {
+    if meshes.is_empty() {
+        return;
+    }
+    let aspect = if height > 0 {
+        width as f32 / height as f32
+    } else {
+        1.0
+    };
+
+    for pending in meshes {
+        // Use the canvas viewport aspect when available so the
+        // perspective projection matches the clipped region, not the
+        // full frame. Falls back to the frame aspect for full-viewport
+        // mesh draws (no canvas wrapper).
+        let vp_aspect = pending
+            .viewport
+            .map(|[_, _, w, h]| if h > 0.0 { w / h } else { 1.0 })
+            .unwrap_or(aspect);
+        let view_proj = camera_view_proj(&pending.camera, vp_aspect);
+        let camera_pos = [
+            pending.camera.position.x,
+            pending.camera.position.y,
+            pending.camera.position.z,
+        ];
+        let (light_dir, light_intensity) = first_directional_light(&pending.lights);
+        let model = mat4_to_array(&pending.transform);
+
+        renderer.render_mesh_data(
+            target,
+            pending.mesh.as_ref(),
+            &model,
+            &view_proj,
+            camera_pos,
+            light_dir,
+            light_intensity,
+            None,
+            pending.viewport,
+        );
+    }
+}
+
+/// Build a view × projection matrix for the captured `Camera`.
+///
+/// Right-handed coordinate system, +Y up. Matches the convention the
+/// mesh shader expects (see `crates/blinc_gpu/src/shaders/mesh.wgsl`).
+///
+/// For `CameraProjection::Perspective`, the stored `aspect` field on
+/// the projection is overridden by the frame's actual aspect so the
+/// scene doesn't stretch on resize — the stored value is just a
+/// fallback default from `Camera::perspective`.
+fn camera_view_proj(camera: &blinc_core::Camera, frame_aspect: f32) -> [f32; 16] {
+    let view = mat4_look_at(camera.position, camera.target, camera.up);
+    let proj = match camera.projection {
+        blinc_core::CameraProjection::Perspective {
+            fov_y, near, far, ..
+        } => mat4_perspective_rh(fov_y, frame_aspect, near, far),
+        blinc_core::CameraProjection::Orthographic {
+            left,
+            right,
+            bottom,
+            top,
+            near,
+            far,
+        } => mat4_orthographic_rh(left, right, bottom, top, near, far),
+    };
+    mat4_mul_flat(&proj, &view)
+}
+
+/// Extract the first `Light::Directional` from the snapshot, returning
+/// a normalized direction vector and scalar intensity. Falls back to a
+/// soft top-down fill if none is present so the demo never renders
+/// pitch-black.
+fn first_directional_light(lights: &[blinc_core::Light]) -> ([f32; 3], f32) {
+    for light in lights {
+        if let blinc_core::Light::Directional {
+            direction,
+            intensity,
+            ..
+        } = light
+        {
+            let d = direction.normalize();
+            return ([d.x, d.y, d.z], *intensity);
+        }
+    }
+    ([0.0, -1.0, 0.3], 0.8)
+}
+
+/// Flatten a column-major `Mat4` to the `[f32; 16]` layout
+/// `GpuRenderer::render_mesh_data` expects.
+fn mat4_to_array(m: &blinc_core::Mat4) -> [f32; 16] {
+    let mut out = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            out[col * 4 + row] = m.cols[col][row];
+        }
+    }
+    out
+}
+
+/// Multiply two flat column-major 4×4 matrices (`a * b`), returning a
+/// `[f32; 16]` in the same layout. Used to compose `proj * view` after
+/// both are computed in `Mat4`/array form.
+fn mat4_mul_flat(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut out = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            let mut s = 0.0;
+            for k in 0..4 {
+                s += a[k * 4 + row] * b[col * 4 + k];
+            }
+            out[col * 4 + row] = s;
+        }
+    }
+    out
+}
+
+/// Right-handed look-at view matrix. Produces `[f32; 16]` directly
+/// (column-major) for the downstream multiply.
+fn mat4_look_at(
+    eye: blinc_core::Vec3,
+    target: blinc_core::Vec3,
+    up: blinc_core::Vec3,
+) -> [f32; 16] {
+    let f = blinc_core::Vec3::new(target.x - eye.x, target.y - eye.y, target.z - eye.z).normalize();
+    let r = f.cross(up).normalize();
+    let u = r.cross(f);
+    let tx = -(r.x * eye.x + r.y * eye.y + r.z * eye.z);
+    let ty = -(u.x * eye.x + u.y * eye.y + u.z * eye.z);
+    let tz = f.x * eye.x + f.y * eye.y + f.z * eye.z;
+    // Column-major: col0 = [r.x, u.x, -f.x, 0], col1 = [r.y, u.y, -f.y, 0], ...
+    [
+        r.x, u.x, -f.x, 0.0, r.y, u.y, -f.y, 0.0, r.z, u.z, -f.z, 0.0, tx, ty, tz, 1.0,
+    ]
+}
+
+/// Right-handed perspective projection. Maps view-space Z in `[-far, -near]`
+/// to clip-space depth `[0, 1]` (wgpu convention). `fov_y` is radians.
+fn mat4_perspective_rh(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
+    let f = 1.0 / (fov_y * 0.5).tan();
+    let nf = 1.0 / (near - far);
+    [
+        f / aspect,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        f,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        far * nf,
+        -1.0,
+        0.0,
+        0.0,
+        far * near * nf,
+        0.0,
+    ]
+}
+
+/// Right-handed orthographic projection. Uses the same clip-space
+/// depth range `[0, 1]` as the perspective variant so the mesh shader
+/// can stay agnostic of the projection choice.
+fn mat4_orthographic_rh(
+    left: f32,
+    right: f32,
+    bottom: f32,
+    top: f32,
+    near: f32,
+    far: f32,
+) -> [f32; 16] {
+    let rl = 1.0 / (right - left);
+    let tb = 1.0 / (top - bottom);
+    let fnn = 1.0 / (far - near);
+    [
+        2.0 * rl,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        2.0 * tb,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -fnn,
+        0.0,
+        -(right + left) * rl,
+        -(top + bottom) * tb,
+        -near * fnn,
+        1.0,
+    ]
 }

@@ -764,34 +764,65 @@ pub struct MeshData {
     pub skin: Option<SkinningData>,
 }
 
-/// PBR-like material for mesh rendering
+/// PBR material for mesh rendering.
+///
+/// Follows the glTF 2.0 metallic-roughness workflow. Scalar factors
+/// (`base_color`, `metallic`, `roughness`, `emissive`) are multiplied
+/// by their optional textures when those textures are present; when a
+/// texture is `None` the scalar acts alone, which means a caller can
+/// leave every texture unset and still get a valid flat-shaded material.
 #[derive(Clone, Debug)]
 pub struct Material {
-    /// Base color (RGBA)
+    /// Base color (RGBA). Multiplied against `base_color_texture` when
+    /// that texture is present.
     pub base_color: [f32; 4],
-    /// Metallic factor (0.0 = dielectric, 1.0 = metal)
+    /// Metallic factor. Multiplied against the `.b` channel of
+    /// `metallic_roughness_texture` when present. glTF convention:
+    /// `0.0` = dielectric, `1.0` = pure metal.
     pub metallic: f32,
-    /// Roughness factor (0.0 = mirror, 1.0 = diffuse)
+    /// Roughness factor. Multiplied against the `.g` channel of
+    /// `metallic_roughness_texture` when present. `0.0` = mirror,
+    /// `1.0` = perfectly diffuse.
     pub roughness: f32,
-    /// Emissive color (RGB, intensity via magnitude)
+    /// Emissive color (RGB, linear). Multiplied against
+    /// `emissive_texture` when present.
     pub emissive: [f32; 3],
-    /// Base color texture (RGBA pixels, None = use base_color)
+    /// Base color texture (sRGB RGBA pixels, decoded per-fragment).
+    /// `None` = use `base_color` alone.
     pub base_color_texture: Option<TextureData>,
-    /// Normal map texture (tangent-space normals encoded as RGB)
+    /// Normal map (tangent-space normals encoded as RGB in `[0,1]`,
+    /// shader unpacks to `[-1,1]`).
     pub normal_map: Option<TextureData>,
-    /// Normal map strength (0.0 = flat, 1.0 = full effect)
+    /// Normal map strength. `0.0` = flat, `1.0` = full effect.
     pub normal_scale: f32,
-    /// Displacement / height map texture (grayscale)
+    /// Metallic/roughness texture. glTF convention: metallic in `.b`,
+    /// roughness in `.g`. The shader multiplies these per-texel by the
+    /// scalar `metallic` / `roughness` factors above.
+    pub metallic_roughness_texture: Option<TextureData>,
+    /// Emissive texture (sRGB RGB). Multiplied per-texel by
+    /// `emissive`. Used for glowing HUD elements, lights, screens —
+    /// anything the mesh emits light from regardless of incident
+    /// illumination.
+    pub emissive_texture: Option<TextureData>,
+    /// Ambient occlusion texture (grayscale). The `.r` channel
+    /// attenuates the ambient + indirect diffuse terms to simulate
+    /// crevice self-shadowing without running a full ray query.
+    pub occlusion_texture: Option<TextureData>,
+    /// Occlusion strength. `0.0` = no AO, `1.0` = full AO from the
+    /// texture. Matches the glTF `occlusionTexture.strength` semantic.
+    pub occlusion_strength: f32,
+    /// Displacement / height map (grayscale). Drives parallax
+    /// occlusion mapping in the shader.
     pub displacement_map: Option<TextureData>,
-    /// Displacement scale in world units
+    /// Displacement scale in world units.
     pub displacement_scale: f32,
-    /// Whether the material is unlit (ignore lighting)
+    /// Whether the material is unlit (ignore lighting).
     pub unlit: bool,
-    /// Alpha mode
+    /// Alpha mode.
     pub alpha_mode: AlphaMode,
-    /// Whether this mesh receives shadows from other meshes
+    /// Whether this mesh receives shadows from other meshes.
     pub receives_shadows: bool,
-    /// Whether this mesh casts shadows onto other meshes
+    /// Whether this mesh casts shadows onto other meshes.
     pub casts_shadows: bool,
 }
 
@@ -805,6 +836,10 @@ impl Default for Material {
             base_color_texture: None,
             normal_map: None,
             normal_scale: 1.0,
+            metallic_roughness_texture: None,
+            emissive_texture: None,
+            occlusion_texture: None,
+            occlusion_strength: 1.0,
             displacement_map: None,
             displacement_scale: 0.05,
             unlit: false,
@@ -1589,6 +1624,13 @@ pub trait DrawContext {
 
     /// Set the camera for 3D rendering
     fn set_camera(&mut self, camera: &Camera);
+
+    /// Set the logical bounds of the 3D viewport region. Called by
+    /// `SceneKit3D::element` before `draw_mesh_data` so the paint
+    /// context can compute the physical-pixel viewport rect from the
+    /// current transform stack + these bounds, clipping the mesh to
+    /// the canvas element rather than the full frame.
+    fn set_3d_viewport_bounds(&mut self, _width: f32, _height: f32) {}
 
     /// Draw a mesh with a material (using cached mesh/material handles)
     fn draw_mesh(&mut self, mesh: MeshId, material: MaterialId, transform: Mat4);

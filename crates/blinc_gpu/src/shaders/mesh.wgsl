@@ -1,6 +1,20 @@
-// PBR mesh shader — shadow mapping, normal mapping, parallax displacement, skeletal skinning
+// PBR mesh shader — Cook-Torrance BRDF with metallic/roughness/emissive/AO
+// texture sampling, shadow mapping, normal mapping, parallax displacement,
+// skeletal skinning.
 //
 // Vertex format: position[3], normal[3], uv[2], color[4], tangent[4], joints[4], weights[4]
+//
+// The BRDF implementation follows glTF 2.0's metallic-roughness workflow:
+//   - D  = Trowbridge-Reitz (GGX) normal distribution function
+//   - G  = Smith's method with Schlick-GGX geometry term
+//   - F  = Schlick's Fresnel approximation
+//   - kd = (1 - F) * (1 - metallic) for energy-conserving diffuse
+//
+// Per-texel metallic/roughness/emissive/AO samples are multiplied against
+// the scalar factors from `MaterialUniforms`. When a texture is absent the
+// caller binds a 1×1 white default so the multiplication is identity —
+// the shader never branches on `has_*` flags for the texture samples
+// themselves, only for the scalar override fallback.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -24,6 +38,12 @@ struct MaterialUniforms {
     metallic_roughness: vec2<f32>,
     emissive: vec3<f32>,
     unlit: f32,
+    // Texture presence flags: 1.0 = sample the texture and multiply,
+    // 0.0 = skip the sample (the bound texture is a 1×1 default).
+    has_metallic_roughness_texture: f32,
+    has_emissive_texture: f32,
+    has_occlusion_texture: f32,
+    occlusion_strength: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -35,6 +55,11 @@ struct MaterialUniforms {
 @group(0) @binding(6) var shadow_sampler: sampler_comparison;
 @group(0) @binding(7) var displacement_texture: texture_2d<f32>;
 @group(0) @binding(8) var<storage, read> joint_matrices: array<mat4x4<f32>>;
+@group(0) @binding(9) var metallic_roughness_texture: texture_2d<f32>;
+@group(0) @binding(10) var emissive_texture: texture_2d<f32>;
+@group(0) @binding(11) var occlusion_texture: texture_2d<f32>;
+@group(0) @binding(12) var env_cubemap: texture_cube<f32>;
+@group(0) @binding(13) var env_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -125,6 +150,41 @@ fn sample_shadow(shadow_coord: vec3<f32>) -> f32 {
     return shadow * 0.25;
 }
 
+// ─── Cook-Torrance BRDF components ───────────────────────────────────────
+
+/// GGX / Trowbridge-Reitz normal distribution function. Describes how
+/// microfacet normals cluster around the macro-surface normal at a
+/// given roughness. `roughness = 0` → delta spike (mirror);
+/// `roughness = 1` → hemispherical lobe (matte).
+fn d_ggx(n_dot_h: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let n_dot_h2 = n_dot_h * n_dot_h;
+    let denom = n_dot_h2 * (a2 - 1.0) + 1.0;
+    return a2 / (3.14159265 * denom * denom);
+}
+
+/// Schlick-GGX geometry term for a single direction. Combined with
+/// itself for `G = G1(V) * G1(L)` (Smith's method, height-uncorrelated).
+fn g_schlick_ggx(n_dot_v: f32, roughness: f32) -> f32 {
+    // Direct-lighting remap (Disney): k = (r + 1)^2 / 8
+    let r = roughness + 1.0;
+    let k = (r * r) / 8.0;
+    return n_dot_v / (n_dot_v * (1.0 - k) + k);
+}
+
+/// Smith's method geometry term combining view and light attenuation.
+fn g_smith(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
+    return g_schlick_ggx(n_dot_v, roughness) * g_schlick_ggx(n_dot_l, roughness);
+}
+
+/// Schlick's Fresnel approximation. `F0` is the base reflectance at
+/// normal incidence — `vec3(0.04)` for dielectrics, `base_color` for
+/// pure metals. Returns the reflectance at the given half-vector angle.
+fn f_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
+    return f0 + (vec3(1.0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
 // ─── Parallax occlusion mapping ──────────────────────────────────────────
 
 fn parallax_mapping(uv: vec2<f32>, view_dir_ts: vec3<f32>, scale: f32) -> vec2<f32> {
@@ -197,37 +257,98 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         shading_normal = normalize(TBN * tangent_normal);
     }
 
-    // PBR shading
+    // ─── Sample per-texel PBR inputs ─────────────────────────────────
+    //
+    // glTF 2.0 metallic-roughness convention:
+    //   metallicRoughnessTexture.b = metallic
+    //   metallicRoughnessTexture.g = roughness
+    //   occlusionTexture.r         = AO
+    //
+    // The scalar factors from `MaterialUniforms` multiply the per-texel
+    // samples, so `metallic: 1.0, roughness: 1.0` preserves the texture
+    // values unchanged while smaller scalars attenuate them globally.
+    // When `has_*` is 0.0 the caller has bound a 1×1 white default so
+    // the multiply is effectively a no-op and we skip the
+    // `textureSample` call for clarity.
+    var metallic = material.metallic_roughness.x;
+    var roughness = material.metallic_roughness.y;
+    if material.has_metallic_roughness_texture > 0.5 {
+        let mr = textureSample(metallic_roughness_texture, base_sampler, uv);
+        metallic = metallic * mr.b;
+        roughness = roughness * mr.g;
+    }
+    // Clamp roughness away from 0 — GGX's 1/α² term explodes at
+    // zero, producing NaNs and blown-out highlights. 0.04 matches the
+    // glTF spec's minimum perceptual roughness.
+    roughness = clamp(roughness, 0.04, 1.0);
+
+    var emissive_value = material.emissive;
+    if material.has_emissive_texture > 0.5 {
+        let em = textureSample(emissive_texture, base_sampler, uv).rgb;
+        emissive_value = emissive_value * em;
+    }
+
+    var ao = 1.0;
+    if material.has_occlusion_texture > 0.5 {
+        let sampled_ao = textureSample(occlusion_texture, base_sampler, uv).r;
+        // glTF semantic: `color = mix(color, color * ao, strength)` — a
+        // strength of 1 fully applies AO, 0 bypasses it.
+        ao = mix(1.0, sampled_ao, material.occlusion_strength);
+    }
+
+    // ─── Cook-Torrance BRDF ──────────────────────────────────────────
+    //
+    // Direct lighting from the single directional sun light. IBL
+    // (environment-based indirect lighting) lands in Stage 4 and
+    // adds a second contribution alongside this one.
     let L = normalize(-uniforms.light_dir);
     let V = normalize(uniforms.camera_pos - input.world_pos);
     let H = normalize(L + V);
 
-    // Diffuse (Lambertian)
-    let NdotL = max(dot(shading_normal, L), 0.0);
-    let diffuse = base_color.rgb * NdotL * uniforms.light_intensity;
+    // `Nsh` is the shading normal (post-normal-map); `N` earlier in
+    // the function is the raw geometric normal used to build the TBN
+    // matrix. Use a distinct name here to avoid shadowing that one.
+    let Nsh = shading_normal;
+    let n_dot_l = max(dot(Nsh, L), 0.0);
+    let n_dot_v = max(dot(Nsh, V), 0.0001);
+    let n_dot_h = max(dot(Nsh, H), 0.0);
+    let v_dot_h = max(dot(V, H), 0.0);
 
-    // Specular (Blinn-Phong approximation)
-    let NdotH = max(dot(shading_normal, H), 0.0);
-    let roughness = max(material.metallic_roughness.y, 0.04);
-    let spec_power = (1.0 - roughness) * 128.0;
-    let specular = pow(NdotH, spec_power) * uniforms.light_intensity * material.metallic_roughness.x;
+    // Base reflectance: 4% for dielectrics, full base color for metals.
+    // glTF convention: F0 = mix(0.04, baseColor, metallic).
+    let f0 = mix(vec3(0.04), base_color.rgb, metallic);
 
-    // Fresnel (Schlick approximation)
-    let F0 = mix(vec3(0.04), base_color.rgb, material.metallic_roughness.x);
-    let VdotH = max(dot(V, H), 0.0);
-    let fresnel = F0 + (vec3(1.0) - F0) * pow(1.0 - VdotH, 5.0);
+    // Cook-Torrance numerator: D * G * F
+    let d = d_ggx(n_dot_h, roughness);
+    let g = g_smith(n_dot_v, n_dot_l, roughness);
+    let f = f_schlick(v_dot_h, f0);
 
-    // Shadow
+    // Specular BRDF: (D * G * F) / (4 * NdotL * NdotV)
+    // The 0.0001 clamp on n_dot_v above protects the denominator.
+    let specular_brdf = (d * g * f) / (4.0 * n_dot_l * n_dot_v + 0.0001);
+
+    // Diffuse BRDF: energy-conserving Lambertian.
+    // kd = (1 - F) attenuates diffuse where specular reflects, and
+    // multiplying by (1 - metallic) zeroes diffuse for pure metals —
+    // metals absorb all refracted light.
+    let kd = (vec3(1.0) - f) * (1.0 - metallic);
+    let diffuse_brdf = kd * base_color.rgb / 3.14159265;
+
+    // Combined direct radiance. `n_dot_l` factor is the Lambert term
+    // from the rendering equation; `uniforms.light_intensity` is the
+    // sun's irradiance in arbitrary units tuned by the caller.
+    let direct_lighting =
+        (diffuse_brdf + specular_brdf) * uniforms.light_intensity * n_dot_l;
+
+    // ─── Shadow ──────────────────────────────────────────────────────
     var shadow_factor = 1.0;
     if uniforms.shadow_enabled > 0.5 {
-        // Convert shadow_pos from clip space to UV space
         let shadow_ndc = input.shadow_pos.xyz / input.shadow_pos.w;
         let shadow_uv = vec3(
             shadow_ndc.x * 0.5 + 0.5,
-            -shadow_ndc.y * 0.5 + 0.5,  // flip Y for texture coordinates
+            -shadow_ndc.y * 0.5 + 0.5,
             shadow_ndc.z,
         );
-        // Only apply shadow if within shadow map bounds
         if shadow_uv.x >= 0.0 && shadow_uv.x <= 1.0 &&
            shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0 &&
            shadow_uv.z >= 0.0 && shadow_uv.z <= 1.0 {
@@ -235,13 +356,29 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // Ambient
-    let ambient = base_color.rgb * 0.15;
+    // ─── IBL ambient (environment cubemap reflection) ──────────────
+    //
+    // Sample the procedural environment cubemap for both diffuse and
+    // specular indirect lighting. The cubemap has mipmaps generated at
+    // decreasing resolution; sampling at `roughness * max_mip` blurs
+    // the reflection proportionally — smooth glass gets a sharp
+    // horizon reflection, rough metal gets a soft ambient tint.
+    //
+    // Diffuse: sample at the shading normal direction at the highest
+    // mip (fully blurred = irradiance-like) and attenuate by kd.
+    //
+    // Specular: sample at the reflection vector at a mip proportional
+    // to roughness, weighted by Fresnel.
+    let max_mip = 7.0;
+    let R = reflect(-V, Nsh);
+    let irradiance = textureSampleLevel(env_cubemap, env_sampler, Nsh, max_mip).rgb;
+    let prefiltered = textureSampleLevel(env_cubemap, env_sampler, R, roughness * max_mip).rgb;
+    let env_fresnel = f_schlick(n_dot_v, f0);
 
-    // Emissive
-    let emissive = material.emissive;
+    let ambient_diffuse = kd * base_color.rgb * irradiance;
+    let ambient_specular = prefiltered * env_fresnel;
+    let ambient = (ambient_diffuse + ambient_specular) * ao;
 
-    let lit_color = diffuse * shadow_factor + fresnel * specular * shadow_factor;
-    let final_color = ambient + lit_color + emissive;
+    let final_color = ambient + direct_lighting * shadow_factor + emissive_value;
     return vec4(final_color, base_color.a);
 }

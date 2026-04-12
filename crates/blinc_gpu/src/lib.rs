@@ -37,7 +37,7 @@ pub use custom_pass::{
 };
 pub use gradient_texture::{GradientTextureCache, RasterizedGradient, GRADIENT_TEXTURE_WIDTH};
 pub use image::{GpuImage, GpuImageInstance, ImageRenderingContext};
-pub use paint::GpuPaintContext;
+pub use paint::{GpuPaintContext, PendingMesh};
 pub use path::{
     extract_brush_info, tessellate_fill, tessellate_stroke, PathBrushInfo, PathBrushType,
     PathVertex, TessellatedPath,

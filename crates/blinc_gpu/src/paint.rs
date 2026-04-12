@@ -44,9 +44,9 @@
 use blinc_core::{
     Affine2D, BillboardFacing, BlendMode, Brush, Camera, ClipShape, Color, CornerRadius,
     DrawCommand, DrawContext, Environment, ImageId, ImageOptions, LayerConfig, LayerId, Light,
-    Mat4, MaterialId, MeshId, MeshInstance, ParticleBlendMode, ParticleEmitterShape, ParticleForce,
-    ParticleSystemData, Path, Point, Rect, Sdf3DViewport, SdfBuilder, Shadow, ShapeId, Size,
-    Stroke, TextStyle, Transform,
+    Mat4, MaterialId, MeshData, MeshId, MeshInstance, ParticleBlendMode, ParticleEmitterShape,
+    ParticleForce, ParticleSystemData, Path, Point, Rect, Sdf3DViewport, SdfBuilder, Shadow,
+    ShapeId, Size, Stroke, TextStyle, Transform,
 };
 
 use crate::path::{extract_brush_info, tessellate_fill, tessellate_stroke};
@@ -110,6 +110,47 @@ struct LayerState {
 type ClipStackEntry = (ClipShape, Option<(u32, u32)>, [f32; 4]);
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Pending 3D Mesh Draw
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A 3D mesh draw captured inside a canvas callback.
+///
+/// `GpuPaintContext` can't invoke `GpuRenderer::render_mesh_data` directly
+/// from inside `DrawContext::draw_mesh_data` — the paint context is a
+/// batch builder and has no handle to the renderer. So instead the
+/// override records the call (mesh data, model transform, a snapshot of
+/// the active camera + lights) and the outer render loop drains the list
+/// after `take_batch` and dispatches to `renderer.render_mesh_data` with
+/// the frame's real target. See `GpuPaintContext::take_pending_meshes`.
+///
+/// Fields are `pub` so the caller in `blinc_app::context` can read them
+/// without going through accessors. Don't construct these directly —
+/// go through `DrawContext::draw_mesh_data`.
+#[derive(Clone, Debug)]
+pub struct PendingMesh {
+    /// Mesh geometry + PBR material. `Arc` so the capture is cheap and
+    /// the same mesh can be drawn at multiple transforms without cloning
+    /// the vertex/index buffers each time.
+    pub mesh: std::sync::Arc<MeshData>,
+    /// Model transform (world-space placement of this instance).
+    pub transform: Mat4,
+    /// Snapshot of the active camera at draw time. The outer render
+    /// loop turns this into a view-projection matrix using the frame's
+    /// actual viewport size so aspect stays correct under resizes.
+    pub camera: Camera,
+    /// Snapshot of the active lights at draw time. For MVP, only the
+    /// first `Light::Directional` contributes (shadow pass disabled);
+    /// point / spot / ambient lights are ignored until the mesh
+    /// pipeline grows support for them.
+    pub lights: Vec<Light>,
+    /// Screen-space viewport rect in physical pixels [x, y, w, h].
+    /// When `Some`, the renderer applies `set_viewport` + `set_scissor_rect`
+    /// to clip the mesh to this region. When `None`, the mesh renders to
+    /// the full frame target.
+    pub viewport: Option<[f32; 4]>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GPU Paint Context
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -167,6 +208,15 @@ pub struct GpuPaintContext<'a> {
     current_corner_shape: [f32; 4], // superellipse n per corner (default [1.0; 4] = round)
     // Overflow fade: pending value consumed by next push_clip
     pending_overflow_fade: [f32; 4], // [top, right, bottom, left] in CSS pixels
+    /// 3D mesh draws captured during this frame. `draw_mesh_data` pushes
+    /// here; the outer render loop drains with `take_pending_meshes`
+    /// after `take_batch` and dispatches each to
+    /// `GpuRenderer::render_mesh_data` against the frame's target.
+    pending_meshes: Vec<PendingMesh>,
+    /// 3D viewport bounds (logical pixels). Set by SceneKit3D before
+    /// `draw_mesh_data` so the viewport rect can be computed from the
+    /// transform stack position + these bounds.
+    mesh_viewport_bounds: Option<(f32, f32)>,
 }
 
 impl<'a> GpuPaintContext<'a> {
@@ -204,6 +254,8 @@ impl<'a> GpuPaintContext<'a> {
             current_mask_info: [0.0; 4],
             current_corner_shape: [1.0; 4],
             pending_overflow_fade: [0.0; 4],
+            pending_meshes: Vec::new(),
+            mesh_viewport_bounds: None,
         }
     }
 
@@ -253,6 +305,8 @@ impl<'a> GpuPaintContext<'a> {
             current_mask_info: [0.0; 4],
             current_corner_shape: [1.0; 4],
             pending_overflow_fade: [0.0; 4],
+            pending_meshes: Vec::new(),
+            mesh_viewport_bounds: None,
         }
     }
 
@@ -1103,6 +1157,19 @@ impl<'a> GpuPaintContext<'a> {
     /// Take the accumulated batch for rendering
     pub fn take_batch(&mut self) -> PrimitiveBatch {
         std::mem::take(&mut self.batch)
+    }
+
+    /// Take the accumulated 3D mesh draws captured during this frame.
+    ///
+    /// Every call to [`DrawContext::draw_mesh_data`] inside a canvas
+    /// callback pushes one [`PendingMesh`] here. The outer render loop
+    /// drains this list after `take_batch`, computes a
+    /// view-projection matrix from each entry's captured camera against
+    /// the frame's real target size, and dispatches to
+    /// `GpuRenderer::render_mesh_data`. See `blinc_app::context` for
+    /// the dispatch site.
+    pub fn take_pending_meshes(&mut self) -> Vec<PendingMesh> {
+        std::mem::take(&mut self.pending_meshes)
     }
 
     /// Get a reference to the current batch
@@ -2579,12 +2646,41 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
     }
 
     fn draw_mesh(&mut self, _mesh: MeshId, _material: MaterialId, _transform: Mat4) {
-        // 3D mesh rendering is not yet implemented
-        // Would require a full 3D rendering pipeline
+        // Cached-mesh path (MeshId / MaterialId pair). Not wired —
+        // `draw_mesh_data` below is the direct path and the one the
+        // canvas widget uses.
     }
 
     fn draw_mesh_instanced(&mut self, _mesh: MeshId, _instances: &[MeshInstance]) {
-        // 3D mesh rendering is not yet implemented
+        // Cached-mesh instanced path. Not wired — see `draw_mesh`.
+    }
+
+    fn set_3d_viewport_bounds(&mut self, width: f32, height: f32) {
+        self.mesh_viewport_bounds = Some((width, height));
+    }
+
+    fn draw_mesh_data(&mut self, mesh: &MeshData, transform: Mat4) {
+        let camera = self.camera.clone().unwrap_or_default();
+
+        // Compute the physical-pixel viewport rect from the current
+        // transform stack (which has the canvas position baked in by
+        // the layout renderer) and the logical bounds set by
+        // set_3d_viewport_bounds. When both are available, the mesh
+        // clips to the canvas region; otherwise it renders full-frame.
+        let viewport = self.mesh_viewport_bounds.map(|(lw, lh)| {
+            let tl = self.transform_point(blinc_core::Point::new(0.0, 0.0));
+            let br = self.transform_point(blinc_core::Point::new(lw, lh));
+            [tl.x, tl.y, (br.x - tl.x).abs(), (br.y - tl.y).abs()]
+        });
+        self.mesh_viewport_bounds = None;
+
+        self.pending_meshes.push(PendingMesh {
+            mesh: std::sync::Arc::new(mesh.clone()),
+            transform,
+            camera,
+            lights: self.lights.clone(),
+            viewport,
+        });
     }
 
     fn add_light(&mut self, light: Light) {
