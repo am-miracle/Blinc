@@ -47,6 +47,7 @@ use blinc_core::{AlphaMode, Color, Light, Mat4, Material, MeshData, TextureData,
 /// from the workspace root, so relative paths resolve against the
 /// repo root, not `crates/blinc_app/`.
 const HELMET_GLTF_DIR: &str = "crates/blinc_app/examples/assets/3d/DamagedHelmet";
+const ASSETS_3D_DIR: &str = "crates/blinc_app/examples/assets/3d";
 
 // ── glTF binary layout constants ────────────────────────────────────────
 //
@@ -238,18 +239,20 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     // chosen so the DamagedHelmet (~1.9m tall by its own AABB) fits
     // comfortably in a 45° FOV viewport, and a warm key light from
     // the upper-front-left.
+    // Load HDRI environment for realistic reflections
+    let hdr_bytes =
+        blinc_platform::assets::load_asset(&format!("{ASSETS_3D_DIR}/rogland_clear_night_2k.hdr"))
+            .unwrap_or_else(|e| panic!("failed to load HDRI: {e}"));
+
     let kit = SceneKit3D::new("mesh_3d_demo")
         .with_camera(
             OrbitCamera::default()
                 .with_distance(3.2)
                 .with_elevation(0.2)
                 .with_azimuth(0.4)
-                // The DamagedHelmet model center is offset 0.187 in Z
-                // after the +90° X rotation baked into the vertices.
-                // Target the actual center so the grid aligns with
-                // the helmet during orbit.
                 .with_target(Vec3::new(0.0, 0.0, 0.187)),
         )
+        .with_hdri(&hdr_bytes, 256)
         .with_light(Light::Directional {
             direction: Vec3::new(-0.4, -1.0, -0.3).normalize(),
             color: Color::WHITE,

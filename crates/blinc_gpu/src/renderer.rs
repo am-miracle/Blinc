@@ -7628,7 +7628,7 @@ impl GpuRenderer {
     /// pipeline's environment cubemap texture. Requires `ensure_mesh_pipeline`
     /// to have been called first (the texture must already exist).
     pub fn upload_environment_cubemap(&mut self, data: &blinc_core::layer::CubemapData) {
-        let mp = match self.mesh_pipeline.as_ref() {
+        let mp = match self.mesh_pipeline.as_mut() {
             Some(mp) => mp,
             None => return,
         };
@@ -7641,6 +7641,32 @@ impl GpuRenderer {
                 data.faces.len()
             );
             return;
+        }
+
+        // Recreate the cubemap texture if the incoming size differs
+        // from the current one (e.g. procedural 128 → HDRI 256).
+        let current_size = mp.env_cubemap.size();
+        if current_size.width != data.size || current_size.height != data.size {
+            let env_mip_count = (data.size as f32).log2() as u32 + 1;
+            let new_tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("IBL Environment Cubemap"),
+                size: wgpu::Extent3d {
+                    width: data.size,
+                    height: data.size,
+                    depth_or_array_layers: 6,
+                },
+                mip_level_count: env_mip_count,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            mp.env_cubemap_view = new_tex.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::Cube),
+                ..Default::default()
+            });
+            mp.env_cubemap = new_tex;
         }
 
         for face in 0..6u32 {
