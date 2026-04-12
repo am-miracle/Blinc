@@ -5514,19 +5514,6 @@ fn dispatch_pending_meshes(
         let (light_dir, light_intensity) = first_directional_light(&pending.lights);
         let model = mat4_to_array(&pending.transform);
 
-        // Execute Scene3D custom passes (grids, helpers, etc.) BEFORE
-        // the mesh — they render to the same HDR intermediate and share
-        // the camera context. The passes see the skybox background but
-        // not the mesh, which means the mesh depth-tests correctly
-        // against grid lines.
-        renderer.execute_scene3d_passes(
-            target,
-            1.0, // scale_factor — already accounted for in viewport
-            &view_proj,
-            &inv_view_proj,
-            camera_pos,
-        );
-
         renderer.render_mesh_data(
             target,
             &pending.mesh,
@@ -5694,47 +5681,82 @@ fn mat4_orthographic_rh(
     ]
 }
 
-/// Inverse of a column-major 4×4 matrix via cofactor expansion.
+/// Inverse of a column-major 4×4 matrix (GLU-style cofactor expansion).
 fn mat4_inverse_flat(m: &[f32; 16]) -> [f32; 16] {
-    let a = |r: usize, c: usize| -> f32 { m[c * 4 + r] };
-
-    let s0 = a(0, 0) * a(1, 1) - a(1, 0) * a(0, 1);
-    let s1 = a(0, 0) * a(1, 2) - a(1, 0) * a(0, 2);
-    let s2 = a(0, 0) * a(1, 3) - a(1, 0) * a(0, 3);
-    let s3 = a(0, 1) * a(1, 2) - a(1, 1) * a(0, 2);
-    let s4 = a(0, 1) * a(1, 3) - a(1, 1) * a(0, 3);
-    let s5 = a(0, 2) * a(1, 3) - a(1, 2) * a(0, 3);
-    let c5 = a(2, 2) * a(3, 3) - a(3, 2) * a(2, 3);
-    let c4 = a(2, 1) * a(3, 3) - a(3, 1) * a(2, 3);
-    let c3 = a(2, 1) * a(3, 2) - a(3, 1) * a(2, 2);
-    let c2 = a(2, 0) * a(3, 3) - a(3, 0) * a(2, 3);
-    let c1 = a(2, 0) * a(3, 2) - a(3, 0) * a(2, 2);
-    let c0 = a(2, 0) * a(3, 1) - a(3, 0) * a(2, 1);
-
-    let det = s0 * c5 - s1 * c4 + s2 * c3 + s3 * c2 - s4 * c1 + s5 * c0;
+    let mut inv = [0.0f32; 16];
+    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15]
+        + m[9] * m[7] * m[14]
+        + m[13] * m[6] * m[11]
+        - m[13] * m[7] * m[10];
+    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15]
+        - m[8] * m[7] * m[14]
+        - m[12] * m[6] * m[11]
+        + m[12] * m[7] * m[10];
+    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15]
+        + m[8] * m[7] * m[13]
+        + m[12] * m[5] * m[11]
+        - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14]
+        - m[8] * m[6] * m[13]
+        - m[12] * m[5] * m[10]
+        + m[12] * m[6] * m[9];
+    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15]
+        - m[9] * m[3] * m[14]
+        - m[13] * m[2] * m[11]
+        + m[13] * m[3] * m[10];
+    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15]
+        + m[8] * m[3] * m[14]
+        + m[12] * m[2] * m[11]
+        - m[12] * m[3] * m[10];
+    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15]
+        - m[8] * m[3] * m[13]
+        - m[12] * m[1] * m[11]
+        + m[12] * m[3] * m[9];
+    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14]
+        + m[8] * m[2] * m[13]
+        + m[12] * m[1] * m[10]
+        - m[12] * m[2] * m[9];
+    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15]
+        + m[5] * m[3] * m[14]
+        + m[13] * m[2] * m[7]
+        - m[13] * m[3] * m[6];
+    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15]
+        - m[4] * m[3] * m[14]
+        - m[12] * m[2] * m[7]
+        + m[12] * m[3] * m[6];
+    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15]
+        + m[4] * m[3] * m[13]
+        + m[12] * m[1] * m[7]
+        - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14]
+        - m[4] * m[2] * m[13]
+        - m[12] * m[1] * m[6]
+        + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11]
+        - m[5] * m[3] * m[10]
+        - m[9] * m[2] * m[7]
+        + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11]
+        + m[4] * m[3] * m[10]
+        + m[8] * m[2] * m[7]
+        - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11]
+        - m[4] * m[3] * m[9]
+        - m[8] * m[1] * m[7]
+        + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10]
+        + m[4] * m[2] * m[9]
+        + m[8] * m[1] * m[6]
+        - m[8] * m[2] * m[5];
+    let det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
     if det.abs() < 1e-12 {
         return [
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
     }
     let id = 1.0 / det;
-
-    let mut inv = [0.0f32; 16];
-    inv[0 * 4 + 0] = (a(1, 1) * c5 - a(1, 2) * c4 + a(1, 3) * c3) * id;
-    inv[0 * 4 + 1] = (-a(0, 1) * c5 + a(0, 2) * c4 - a(0, 3) * c3) * id;
-    inv[0 * 4 + 2] = (a(3, 1) * s5 - a(3, 2) * s4 + a(3, 3) * s3) * id;
-    inv[0 * 4 + 3] = (-a(2, 1) * s5 + a(2, 2) * s4 - a(2, 3) * s3) * id;
-    inv[1 * 4 + 0] = (-a(1, 0) * c5 + a(1, 2) * c2 - a(1, 3) * c1) * id;
-    inv[1 * 4 + 1] = (a(0, 0) * c5 - a(0, 2) * c2 + a(0, 3) * c1) * id;
-    inv[1 * 4 + 2] = (-a(3, 0) * s5 + a(3, 2) * s2 - a(3, 3) * s1) * id;
-    inv[1 * 4 + 3] = (a(2, 0) * s5 - a(2, 2) * s2 + a(2, 3) * s1) * id;
-    inv[2 * 4 + 0] = (a(1, 0) * c4 - a(1, 1) * c2 + a(1, 3) * c0) * id;
-    inv[2 * 4 + 1] = (-a(0, 0) * c4 + a(0, 1) * c2 - a(0, 3) * c0) * id;
-    inv[2 * 4 + 2] = (a(3, 0) * s4 - a(3, 1) * s2 + a(3, 3) * s0) * id;
-    inv[2 * 4 + 3] = (-a(2, 0) * s4 + a(2, 1) * s2 - a(2, 3) * s0) * id;
-    inv[3 * 4 + 0] = (-a(1, 0) * c3 + a(1, 1) * c1 - a(1, 2) * c0) * id;
-    inv[3 * 4 + 1] = (a(0, 0) * c3 - a(0, 1) * c1 + a(0, 2) * c0) * id;
-    inv[3 * 4 + 2] = (-a(3, 0) * s3 + a(3, 1) * s1 - a(3, 2) * s0) * id;
-    inv[3 * 4 + 3] = (a(2, 0) * s3 - a(2, 1) * s1 + a(2, 2) * s0) * id;
+    for v in &mut inv {
+        *v *= id;
+    }
     inv
 }

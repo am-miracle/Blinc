@@ -340,6 +340,12 @@ pub struct BlincContextState {
     recorder_snapshot_callback: RwLock<Option<RecorderSnapshotCallback>>,
     /// Callback for tracking element updates with category
     recorder_update_callback: RwLock<Option<RecorderUpdateCallback>>,
+
+    /// Pending custom render passes queued by components (e.g. SceneKit3D)
+    /// for registration with the GPU renderer. Type-erased as
+    /// `Box<dyn Any + Send>` because blinc_core can't depend on
+    /// blinc_gpu. The windowed runner downcasts and drains each frame.
+    pending_custom_passes: Mutex<Vec<Box<dyn std::any::Any + Send>>>,
 }
 
 impl BlincContextState {
@@ -366,6 +372,7 @@ impl BlincContextState {
             recorder_event_callback: RwLock::new(None),
             recorder_snapshot_callback: RwLock::new(None),
             recorder_update_callback: RwLock::new(None),
+            pending_custom_passes: Mutex::new(Vec::new()),
         };
 
         if CONTEXT_STATE.set(state).is_err() {
@@ -397,6 +404,7 @@ impl BlincContextState {
             recorder_event_callback: RwLock::new(None),
             recorder_snapshot_callback: RwLock::new(None),
             recorder_update_callback: RwLock::new(None),
+            pending_custom_passes: Mutex::new(Vec::new()),
         };
 
         if CONTEXT_STATE.set(state).is_err() {
@@ -846,6 +854,28 @@ impl BlincContextState {
     /// Check if update recording is enabled
     pub fn is_recording_updates(&self) -> bool {
         self.recorder_update_callback.read().unwrap().is_some()
+    }
+
+    // =========================================================================
+    // Custom Render Pass Registration
+    // =========================================================================
+
+    /// Queue a custom render pass for registration with the GPU renderer.
+    ///
+    /// The pass is type-erased as `Box<dyn Any + Send>` because blinc_core
+    /// can't depend on blinc_gpu. The windowed runner downcasts to
+    /// `Box<dyn CustomRenderPass>` and registers with the renderer.
+    ///
+    /// Use this from closures and components (like SceneKit3D) that don't
+    /// have direct access to `WindowedContext` or `RenderContext`.
+    pub fn register_custom_pass(&self, pass: Box<dyn std::any::Any + Send>) {
+        self.pending_custom_passes.lock().unwrap().push(pass);
+    }
+
+    /// Drain all pending custom passes. Called by the windowed runner
+    /// each frame to forward queued passes to the GPU renderer.
+    pub fn drain_custom_passes(&self) -> Vec<Box<dyn std::any::Any + Send>> {
+        std::mem::take(&mut *self.pending_custom_passes.lock().unwrap())
     }
 
     // =========================================================================

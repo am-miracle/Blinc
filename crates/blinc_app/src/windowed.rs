@@ -4037,6 +4037,17 @@ impl WindowedApp {
                                 let sf = windowed_ctx.scale_factor as f32;
                                 blinc_app.set_cursor_position(mx * sf, my * sf);
 
+                                // Drain any custom passes queued via BlincContextState
+                                // (e.g. SceneKit3D registering a GridPass from a closure)
+                                {
+                                    let ctx_state = blinc_core::BlincContextState::get();
+                                    for pass in ctx_state.drain_custom_passes() {
+                                        if let Ok(typed) = pass.downcast::<Box<dyn blinc_gpu::custom_pass::CustomRenderPass>>() {
+                                            blinc_app.context().register_custom_pass(*typed);
+                                        }
+                                    }
+                                }
+
                                 // Render with motion animations
                                 // Use physical pixel dimensions for the render surface
                                 let result = blinc_app.render_tree_with_motion(

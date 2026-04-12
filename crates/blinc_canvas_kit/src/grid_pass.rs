@@ -90,11 +90,13 @@ impl CustomRenderPass for GridPass {
             }],
         });
 
+        // Scene3D passes render to the Rgba16Float HDR intermediate,
+        // not the surface format. Hardcode to match.
         let pipeline = blinc_gpu::custom_pass::create_fullscreen_pipeline(
             device,
             "Grid Pipeline",
             GRID_SHADER,
-            format,
+            wgpu::TextureFormat::Rgba16Float,
             &bind_group_layout,
         );
 

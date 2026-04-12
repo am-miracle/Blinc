@@ -251,7 +251,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             intensity: 2.5,
             cast_shadows: false,
         })
-        .with_grid(10.0, 100, 20);
+        .with_grid();
 
     div()
         .w(ctx.width)

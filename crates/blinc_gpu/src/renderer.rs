@@ -8174,7 +8174,41 @@ impl GpuRenderer {
             pass.draw(0..3, 0..1);
         }
 
-        // Sub-pass B: mesh → HDR (with depth, LoadOp::Load preserves skybox)
+        // Sub-pass: Scene3D custom passes → HDR (between skybox and mesh).
+        // Submit the skybox encoder first, then run Scene3D passes
+        // (which create their own encoders), then re-borrow mp for mesh.
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Drop the `mp` borrow before the mutable `execute_scene3d_passes`
+        // call, then re-borrow for the mesh pass.
+        {
+            // Get the HDR view pointer before dropping mp
+            let hdr_view_ptr = self
+                .mesh_pipeline
+                .as_ref()
+                .unwrap()
+                .hdr_view
+                .as_ref()
+                .unwrap() as *const wgpu::TextureView;
+            let inv_vp = mat4_inverse_flat(view_proj);
+            // SAFETY: hdr_view lives on MeshPipeline which is owned by
+            // self. execute_scene3d_passes doesn't modify MeshPipeline's
+            // hdr_view — it only accesses custom_passes.
+            let hdr_ref = unsafe { &*hdr_view_ptr };
+            self.execute_scene3d_passes(hdr_ref, 1.0, view_proj, &inv_vp, camera_pos);
+        }
+
+        // Re-create encoder + re-borrow mp for remaining passes
+        let mp = self.mesh_pipeline.as_ref().unwrap();
+        let depth_view = mp.main_depth_view.as_ref().unwrap();
+        let hdr_view = mp.hdr_view.as_ref().unwrap();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Mesh Render (continued)"),
+            });
+
+        // Sub-pass B: mesh → HDR (with depth, LoadOp::Load preserves skybox + grid)
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Mesh HDR Pass"),
@@ -11106,4 +11140,84 @@ mod tests {
             assert_eq!(cache.pool_size(), 0);
         });
     }
+}
+
+/// Inverse of a column-major 4×4 matrix (GLU-style cofactor expansion).
+fn mat4_inverse_flat(m: &[f32; 16]) -> [f32; 16] {
+    let mut inv = [0.0f32; 16];
+    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15]
+        + m[9] * m[7] * m[14]
+        + m[13] * m[6] * m[11]
+        - m[13] * m[7] * m[10];
+    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15]
+        - m[8] * m[7] * m[14]
+        - m[12] * m[6] * m[11]
+        + m[12] * m[7] * m[10];
+    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15]
+        + m[8] * m[7] * m[13]
+        + m[12] * m[5] * m[11]
+        - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14]
+        - m[8] * m[6] * m[13]
+        - m[12] * m[5] * m[10]
+        + m[12] * m[6] * m[9];
+    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15]
+        - m[9] * m[3] * m[14]
+        - m[13] * m[2] * m[11]
+        + m[13] * m[3] * m[10];
+    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15]
+        + m[8] * m[3] * m[14]
+        + m[12] * m[2] * m[11]
+        - m[12] * m[3] * m[10];
+    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15]
+        - m[8] * m[3] * m[13]
+        - m[12] * m[1] * m[11]
+        + m[12] * m[3] * m[9];
+    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14]
+        + m[8] * m[2] * m[13]
+        + m[12] * m[1] * m[10]
+        - m[12] * m[2] * m[9];
+    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15]
+        + m[5] * m[3] * m[14]
+        + m[13] * m[2] * m[7]
+        - m[13] * m[3] * m[6];
+    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15]
+        - m[4] * m[3] * m[14]
+        - m[12] * m[2] * m[7]
+        + m[12] * m[3] * m[6];
+    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15]
+        + m[4] * m[3] * m[13]
+        + m[12] * m[1] * m[7]
+        - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14]
+        - m[4] * m[2] * m[13]
+        - m[12] * m[1] * m[6]
+        + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11]
+        - m[5] * m[3] * m[10]
+        - m[9] * m[2] * m[7]
+        + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11]
+        + m[4] * m[3] * m[10]
+        + m[8] * m[2] * m[7]
+        - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11]
+        - m[4] * m[3] * m[9]
+        - m[8] * m[1] * m[7]
+        + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10]
+        + m[4] * m[2] * m[9]
+        + m[8] * m[1] * m[6]
+        - m[8] * m[2] * m[5];
+    let det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if det.abs() < 1e-12 {
+        return [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+    }
+    let id = 1.0 / det;
+    for v in &mut inv {
+        *v *= id;
+    }
+    inv
 }
