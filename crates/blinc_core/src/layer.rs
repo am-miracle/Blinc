@@ -1837,6 +1837,21 @@ pub struct Environment {
     pub background_color: Option<Color>,
 }
 
+/// Raw cubemap data for IBL environments.
+///
+/// Stored as f16 RGBA bytes per face per mip level. The renderer uploads
+/// this into a `Rgba16Float` cubemap texture when it differs from the
+/// currently bound environment.
+#[derive(Clone, Debug)]
+pub struct CubemapData {
+    /// Face data: `faces[face * mip_count + mip]` for face 0..6, mip 0..mip_count.
+    pub faces: Vec<Vec<u8>>,
+    /// Base resolution per face (width == height).
+    pub size: u32,
+    /// Number of mip levels.
+    pub mip_count: u32,
+}
+
 /// Parameters for 3D SDF raymarching viewport
 ///
 /// This struct contains all the information needed to render an SDF scene

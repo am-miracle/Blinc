@@ -43,10 +43,10 @@
 
 use blinc_core::{
     Affine2D, BillboardFacing, BlendMode, Brush, Camera, ClipShape, Color, CornerRadius,
-    DrawCommand, DrawContext, Environment, ImageId, ImageOptions, LayerConfig, LayerId, Light,
-    Mat4, MaterialId, MeshData, MeshId, MeshInstance, ParticleBlendMode, ParticleEmitterShape,
-    ParticleForce, ParticleSystemData, Path, Point, Rect, Sdf3DViewport, SdfBuilder, Shadow,
-    ShapeId, Size, Stroke, TextStyle, Transform,
+    CubemapData, DrawCommand, DrawContext, Environment, ImageId, ImageOptions, LayerConfig,
+    LayerId, Light, Mat4, MaterialId, MeshData, MeshId, MeshInstance, ParticleBlendMode,
+    ParticleEmitterShape, ParticleForce, ParticleSystemData, Path, Point, Rect, Sdf3DViewport,
+    SdfBuilder, Shadow, ShapeId, Size, Stroke, TextStyle, Transform,
 };
 
 use crate::path::{extract_brush_info, tessellate_fill, tessellate_stroke};
@@ -148,6 +148,11 @@ pub struct PendingMesh {
     /// to clip the mesh to this region. When `None`, the mesh renders to
     /// the full frame target.
     pub viewport: Option<[f32; 4]>,
+    /// Pre-generated environment cubemap for IBL reflections. When `Some`,
+    /// the renderer uploads this data to the cubemap texture (if it differs
+    /// from what is currently bound). When `None`, the renderer's default
+    /// neutral gray fallback is used.
+    pub env_cubemap: Option<std::sync::Arc<CubemapData>>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -217,6 +222,9 @@ pub struct GpuPaintContext<'a> {
     /// `draw_mesh_data` so the viewport rect can be computed from the
     /// transform stack position + these bounds.
     mesh_viewport_bounds: Option<(f32, f32)>,
+    /// Environment cubemap data set by `set_environment_cubemap`. Captured
+    /// into each `PendingMesh` so the renderer can upload it.
+    pending_env: Option<std::sync::Arc<CubemapData>>,
 }
 
 impl<'a> GpuPaintContext<'a> {
@@ -256,6 +264,7 @@ impl<'a> GpuPaintContext<'a> {
             pending_overflow_fade: [0.0; 4],
             pending_meshes: Vec::new(),
             mesh_viewport_bounds: None,
+            pending_env: None,
         }
     }
 
@@ -307,6 +316,7 @@ impl<'a> GpuPaintContext<'a> {
             pending_overflow_fade: [0.0; 4],
             pending_meshes: Vec::new(),
             mesh_viewport_bounds: None,
+            pending_env: None,
         }
     }
 
@@ -2659,14 +2669,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         self.mesh_viewport_bounds = Some((width, height));
     }
 
-    fn draw_mesh_data(&mut self, mesh: &MeshData, transform: Mat4) {
+    fn draw_mesh_data(&mut self, mesh: std::sync::Arc<MeshData>, transform: Mat4) {
         let camera = self.camera.clone().unwrap_or_default();
 
-        // Compute the physical-pixel viewport rect from the current
-        // transform stack (which has the canvas position baked in by
-        // the layout renderer) and the logical bounds set by
-        // set_3d_viewport_bounds. When both are available, the mesh
-        // clips to the canvas region; otherwise it renders full-frame.
         let viewport = self.mesh_viewport_bounds.map(|(lw, lh)| {
             let tl = self.transform_point(blinc_core::Point::new(0.0, 0.0));
             let br = self.transform_point(blinc_core::Point::new(lw, lh));
@@ -2674,12 +2679,14 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         });
         self.mesh_viewport_bounds = None;
 
+        // No clone — just Arc::clone (pointer bump, not 81.5 MB copy)
         self.pending_meshes.push(PendingMesh {
-            mesh: std::sync::Arc::new(mesh.clone()),
+            mesh,
             transform,
             camera,
             lights: self.lights.clone(),
             viewport,
+            env_cubemap: self.pending_env.clone(),
         });
     }
 
@@ -2689,6 +2696,10 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
 
     fn set_environment(&mut self, _env: &Environment) {
         // 3D environment is not yet implemented
+    }
+
+    fn set_environment_cubemap(&mut self, data: std::sync::Arc<CubemapData>) {
+        self.pending_env = Some(data);
     }
 
     fn billboard_draw(

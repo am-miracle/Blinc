@@ -11,13 +11,150 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use blinc_core::events::event_types;
+use blinc_core::layer::CubemapData;
 use blinc_core::{
     BlincContextState, Camera, CameraProjection, DrawContext, Light, SignalId, State, Vec3,
 };
 use blinc_layout::canvas::{canvas, CanvasBounds};
 use blinc_layout::div::{div, Div};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Procedural Environment Cubemap
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Pre-generated cubemap face data for the IBL environment.
+///
+/// Each entry in `faces` is one mip level of one face (f16 RGBA bytes).
+/// Layout: `faces[face * mip_count + mip]` for face 0..6, mip 0..mip_count.
+#[derive(Clone)]
+pub struct EnvironmentData {
+    /// Underlying cubemap data (face bytes, base size, mip count).
+    pub cubemap: Arc<CubemapData>,
+}
+
+/// Generate a studio environment cubemap at the given base resolution.
+///
+/// Produces a warm key / cool fill / ground bounce lighting setup that
+/// gives PBR metals and glass surfaces ambient reflections proportional
+/// to roughness, mimicking the studio HDRI setups used by Sketchfab and
+/// Marmoset Toolbag.
+pub fn generate_studio_environment(size: u32) -> EnvironmentData {
+    let mip_count = (size as f32).log2() as u32 + 1;
+    let mut faces = Vec::with_capacity((6 * mip_count) as usize);
+    for face in 0..6u32 {
+        for mip in 0..mip_count {
+            let mip_size = (size >> mip).max(1);
+            faces.push(generate_cubemap_face(face, mip_size));
+        }
+    }
+    EnvironmentData {
+        cubemap: Arc::new(CubemapData {
+            faces,
+            size,
+            mip_count,
+        }),
+    }
+}
+
+/// Generate one face of a studio environment cubemap at the given
+/// resolution. Returns **f16 RGBA** bytes (4 x u16 per texel) for the
+/// `Rgba16Float` cubemap format. The environment has:
+///
+/// - A warm key area light from the upper-right front
+/// - A cool fill area light from the left-behind
+/// - A subtle warm ground bounce from below
+/// - A neutral gradient sky base
+///
+/// The area lights produce HDR values > 1.0 so the mesh shader's
+/// Cook-Torrance specular picks up distinct bright reflections
+/// instead of reflecting a featureless gradient.
+fn generate_cubemap_face(face: u32, size: u32) -> Vec<u8> {
+    // 4 x f16 per texel = 8 bytes per texel
+    let mut data = Vec::with_capacity((size * size * 8) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let u = (x as f32 + 0.5) / size as f32 * 2.0 - 1.0;
+            let v = (y as f32 + 0.5) / size as f32 * 2.0 - 1.0;
+
+            let (dx, dy, dz) = match face {
+                0 => (1.0, -v, -u),
+                1 => (-1.0, -v, u),
+                2 => (u, 1.0, v),
+                3 => (u, -1.0, -v),
+                4 => (u, -v, 1.0),
+                _ => (-u, -v, -1.0),
+            };
+
+            let len = (dx * dx + dy * dy + dz * dz).sqrt();
+            let (nx, ny, nz) = (dx / len, dy / len, dz / len);
+
+            // Base sky gradient
+            let (mut r, mut g, mut b) = if ny > 0.0 {
+                let t = (1.0 - ny).powf(4.0);
+                (0.08 + t * 0.35, 0.08 + t * 0.33, 0.10 + t * 0.28)
+            } else {
+                let t = (1.0 + ny).powf(2.0);
+                (0.06 + t * 0.20, 0.05 + t * 0.18, 0.04 + t * 0.15)
+            };
+
+            // Virtual area lights — soft gaussian blobs on the cubemap sphere
+            let area_lights: &[(f32, f32, f32, f32, f32, f32, f32)] = &[
+                //  dir_x  dir_y  dir_z  radius  R     G     B
+                (0.5, 0.4, 0.7, 0.15, 5.0, 4.5, 3.8), // warm key (upper-right front)
+                (-0.7, 0.2, -0.4, 0.20, 1.2, 1.4, 1.8), // cool fill (left-behind)
+                (0.0, -0.7, 0.3, 0.30, 0.8, 0.6, 0.5), // warm ground bounce
+                (-0.3, 0.8, 0.0, 0.25, 0.5, 0.55, 0.6), // subtle top fill (cool)
+                (0.8, 0.0, -0.5, 0.12, 2.5, 2.3, 2.0), // rim accent (right side)
+            ];
+
+            for &(lx, ly, lz, radius, lr, lg, lb) in area_lights {
+                let ll = (lx * lx + ly * ly + lz * lz).sqrt();
+                let dot = (nx * lx + ny * ly + nz * lz) / ll;
+                let cos_edge = 1.0 - radius;
+                if dot > cos_edge {
+                    let t = ((dot - cos_edge) / radius).min(1.0);
+                    let intensity = t * t;
+                    r += lr * intensity;
+                    g += lg * intensity;
+                    b += lb * intensity;
+                }
+            }
+
+            for &val in &[r, g, b, 1.0f32] {
+                data.extend_from_slice(&f32_to_f16(val).to_le_bytes());
+            }
+        }
+    }
+    data
+}
+
+/// Convert f32 to IEEE 754 half-precision (f16) as a u16.
+fn f32_to_f16(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xFF) as i32;
+    let mantissa = bits & 0x7FFFFF;
+
+    if exp == 0 {
+        return sign;
+    }
+    if exp == 0xFF {
+        return sign | 0x7C00 | if mantissa != 0 { 0x0200 } else { 0 };
+    }
+
+    let new_exp = exp - 127 + 15;
+    if new_exp >= 31 {
+        return sign | 0x7C00;
+    }
+    if new_exp <= 0 {
+        return sign;
+    }
+
+    sign | ((new_exp as u16) << 10) | ((mantissa >> 13) as u16)
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct OrbitCamera {
@@ -114,17 +251,22 @@ pub struct SceneKit3D {
     /// Per-frame velocity decay. 0.95 = slow smooth deceleration,
     /// 0.85 = quick stop. Default 0.95.
     momentum_decay: f32,
+    /// Pre-generated environment cubemap for IBL reflections. Shared
+    /// via `Arc` so cloning is cheap.
+    environment: Arc<CubemapData>,
 }
 
 impl SceneKit3D {
     pub fn new(key: &str) -> Self {
         let ctx = BlincContextState::get();
+        let env = generate_studio_environment(128);
         Self {
             camera: ctx.use_state_keyed(&format!("{key}_cam"), OrbitCamera::default),
             lights: Rc::new(RefCell::new(Vec::new())),
             drag_sensitivity: 0.002,
             zoom_sensitivity: 0.001,
             momentum_decay: 0.95,
+            environment: env.cubemap,
         }
     }
 
@@ -135,6 +277,12 @@ impl SceneKit3D {
 
     pub fn with_light(self, light: Light) -> Self {
         self.lights.borrow_mut().push(light);
+        self
+    }
+
+    /// Replace the IBL environment cubemap used for reflections.
+    pub fn with_environment(mut self, env: EnvironmentData) -> Self {
+        self.environment = env.cubemap;
         self
     }
 
@@ -180,6 +328,7 @@ impl SceneKit3D {
         let camera_scroll = self.camera.clone();
         let camera_render = self.camera.clone();
         let lights_render = Rc::clone(&self.lights);
+        let env_data = Arc::clone(&self.environment);
         let drag_sens = self.drag_sensitivity;
         let zoom_sens = self.zoom_sensitivity;
         let decay = self.momentum_decay;
@@ -241,6 +390,7 @@ impl SceneKit3D {
                     }
 
                     let camera = cam.to_camera();
+                    ctx.set_environment_cubemap(Arc::clone(&env_data));
                     ctx.set_camera(&camera);
                     for light in lights_render.borrow().iter() {
                         ctx.add_light(light.clone());

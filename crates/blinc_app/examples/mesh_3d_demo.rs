@@ -11,8 +11,8 @@
 //! - Inline glTF loading — no external `gltf` crate dep. The sample
 //!   model has a fixed layout (single mesh, single primitive, packed
 //!   f32 attributes at known bufferView offsets, u16 indices), so
-//!   parsing is a handful of offset reads plus an `image::open` call
-//!   for the albedo texture.
+//!   parsing is a handful of offset reads plus a `blinc_image::ImageData`
+//!   call for the albedo texture.
 //!
 //! Run with:
 //!
@@ -22,7 +22,7 @@
 //!
 //! Controls: drag the viewport to orbit, scroll to zoom.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
@@ -69,15 +69,15 @@ const VTX_COUNT: usize = 14556;
 /// canvas render closure through an `Rc` so each frame re-uses the
 /// same heap allocation.
 /// Decode an image file into the `TextureData` struct the mesh pipeline
-/// expects. Panics on failure — these are build-time asset paths and a
+/// expects. Uses `blinc_image::ImageData` for cross-platform image
+/// decoding. Panics on failure — these are build-time asset paths and a
 /// missing file means the demo checkout is incomplete.
 fn load_texture(path: &str) -> TextureData {
-    let img = image::open(path)
-        .unwrap_or_else(|e| panic!("failed to read {path}: {e}"))
-        .to_rgba8();
-    let (width, height) = (img.width(), img.height());
+    let img = blinc_image::ImageData::load(blinc_image::ImageSource::File(path.into()))
+        .unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
+    let (width, height) = img.dimensions();
     TextureData {
-        rgba: img.into_raw(),
+        rgba: img.into_pixels(),
         width,
         height,
     }
@@ -147,7 +147,7 @@ fn load_helmet() -> MeshData {
     }
 
     // Load the full PBR texture stack. All five textures decode to
-    // RGBA via the `image` crate (already a workspace dev-dep). The
+    // RGBA via `blinc_image::ImageData` (cross-platform loader). The
     // mesh pipeline samples each one — see
     // `crates/blinc_gpu/src/shaders/mesh.wgsl::fs_main` for the
     // Cook-Torrance BRDF math and the per-texel MR / emissive / AO
@@ -218,7 +218,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     // only" because the rest of the UI is static. Follow-up: cache
     // via `BlincContextState::use_state_keyed` if any demo ever
     // changes that pattern.
-    let helmet = Rc::new(load_helmet());
+    let helmet = Arc::new(load_helmet());
 
     // Build the scene kit with a default framing: distance
     // chosen so the DamagedHelmet (~1.9m tall by its own AABB) fits
@@ -253,7 +253,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                     // The only line that matters. Camera and lights
                     // are already set by `SceneKit3D::element`, so
                     // the scene closure just emits mesh draws.
-                    ctx.draw_mesh_data(&helmet, Mat4::default());
+                    ctx.draw_mesh_data(helmet.clone(), Mat4::default());
                 })),
         )
         .child(hint_bar())

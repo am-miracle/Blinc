@@ -5475,6 +5475,14 @@ fn dispatch_pending_meshes(
     };
 
     for pending in meshes {
+        // Upload the environment cubemap if the pending mesh carries one.
+        // The renderer's texture is overwritten each time, so only the
+        // last-set environment matters — but in practice every PendingMesh
+        // from the same SceneKit3D shares the same Arc.
+        if let Some(ref env) = pending.env_cubemap {
+            renderer.upload_environment_cubemap(env);
+        }
+
         // Use the canvas viewport aspect when available so the
         // perspective projection matches the clipped region, not the
         // full frame. Falls back to the frame aspect for full-viewport
@@ -5494,7 +5502,7 @@ fn dispatch_pending_meshes(
 
         renderer.render_mesh_data(
             target,
-            pending.mesh.as_ref(),
+            &pending.mesh,
             &model,
             &view_proj,
             camera_pos,

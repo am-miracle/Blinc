@@ -34,8 +34,8 @@
 
 use crate::layer::{
     Affine2D, BillboardFacing, BlendMode, Brush, Camera, ClipShape, Color, CornerRadius,
-    Environment, LayerId, Light, Mat4, ParticleSystemData, Point, Rect, Sdf3DViewport, Shadow,
-    Size, Vec2,
+    CubemapData, Environment, LayerId, Light, Mat4, ParticleSystemData, Point, Rect, Sdf3DViewport,
+    Shadow, Size, Vec2,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1645,14 +1645,14 @@ pub trait DrawContext {
     /// vertex/index buffer upload and rendering.
     ///
     /// ```ignore
-    /// let mesh = MeshData {
+    /// let mesh = Arc::new(MeshData {
     ///     vertices: vec![Vertex::new([-0.5, -0.5, 0.0]), ...],
     ///     indices: vec![0, 1, 2],
     ///     material: Material::default(),
-    /// };
-    /// ctx.draw_mesh_data(&mesh, Mat4::IDENTITY);
+    /// });
+    /// ctx.draw_mesh_data(mesh.clone(), Mat4::IDENTITY);
     /// ```
-    fn draw_mesh_data(&mut self, _mesh: &MeshData, _transform: Mat4) {
+    fn draw_mesh_data(&mut self, _mesh: std::sync::Arc<MeshData>, _transform: Mat4) {
         // Default no-op — GPU implementations override
     }
 
@@ -1661,6 +1661,13 @@ pub trait DrawContext {
 
     /// Set the environment (skybox, IBL)
     fn set_environment(&mut self, env: &Environment);
+
+    /// Provide a pre-generated cubemap for IBL reflections.
+    ///
+    /// The GPU implementation uploads the face/mip data to the environment
+    /// cubemap texture. Scenes that don't call this get a neutral gray
+    /// fallback.
+    fn set_environment_cubemap(&mut self, _data: std::sync::Arc<CubemapData>) {}
 
     // ─────────────────────────────────────────────────────────────────────────
     // Dimension Bridging

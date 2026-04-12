@@ -1068,6 +1068,17 @@ struct MeshPipeline {
     env_cubemap: wgpu::Texture,
     env_cubemap_view: wgpu::TextureView,
     env_sampler: wgpu::Sampler,
+    /// Cached GPU textures for the most recently rendered mesh material.
+    /// Keyed by the Arc pointer of the MeshData — if the same Arc is
+    /// drawn again (same mesh, same frame or next frame), the cached
+    /// textures are reused instead of re-uploading 80+ MB of pixel data.
+    cached_mesh_ptr: usize,
+    cached_base_tex: Option<crate::image::GpuImage>,
+    cached_normal_tex: Option<crate::image::GpuImage>,
+    cached_displacement_tex: Option<crate::image::GpuImage>,
+    cached_mr_tex: Option<crate::image::GpuImage>,
+    cached_emissive_tex: Option<crate::image::GpuImage>,
+    cached_occlusion_tex: Option<crate::image::GpuImage>,
     /// Skybox pipeline — renders the environment cubemap as a
     /// background behind the mesh. Shares the cubemap texture/sampler
     /// but has its own bind group layout (camera vectors + cubemap).
@@ -1095,113 +1106,6 @@ struct MeshPipeline {
     bloom_b: Option<wgpu::Texture>,
     bloom_b_view: Option<wgpu::TextureView>,
     bloom_size: (u32, u32),
-}
-
-/// Generate one face of a studio environment cubemap at the given
-/// resolution. Returns **f16 RGBA** bytes (4 × u16 per texel) for the
-/// `Rgba16Float` cubemap format. The environment has:
-///
-/// - A warm key area light from the upper-right front
-/// - A cool fill area light from the left-behind
-/// - A subtle warm ground bounce from below
-/// - A neutral gradient sky base
-///
-/// The area lights produce HDR values > 1.0 so the mesh shader's
-/// Cook-Torrance specular picks up distinct bright reflections
-/// instead of reflecting a featureless gradient. This mimics the
-/// studio HDRI setups that Sketchfab / Marmoset use.
-fn generate_cubemap_face(face: u32, size: u32) -> Vec<u8> {
-    // 4 × f16 per texel = 8 bytes per texel
-    let mut data = Vec::with_capacity((size * size * 8) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let u = (x as f32 + 0.5) / size as f32 * 2.0 - 1.0;
-            let v = (y as f32 + 0.5) / size as f32 * 2.0 - 1.0;
-
-            let (dx, dy, dz) = match face {
-                0 => (1.0, -v, -u),
-                1 => (-1.0, -v, u),
-                2 => (u, 1.0, v),
-                3 => (u, -1.0, -v),
-                4 => (u, -v, 1.0),
-                _ => (-u, -v, -1.0),
-            };
-
-            let len = (dx * dx + dy * dy + dz * dz).sqrt();
-            let (nx, ny, nz) = (dx / len, dy / len, dz / len);
-
-            // ── Base sky gradient ────────────────────────────────────
-            let (mut r, mut g, mut b) = if ny > 0.0 {
-                let t = (1.0 - ny).powf(4.0);
-                (0.08 + t * 0.35, 0.08 + t * 0.33, 0.10 + t * 0.28)
-            } else {
-                let t = (1.0 + ny).powf(2.0);
-                (0.06 + t * 0.20, 0.05 + t * 0.18, 0.04 + t * 0.15)
-            };
-
-            // ── Virtual area lights ──────────────────────────────────
-            // Each light is a soft gaussian blob on the cubemap sphere.
-            // `dot(dir, light_dir)` measures angular proximity; the
-            // gaussian falls off from the center.
-            let area_lights: &[(f32, f32, f32, f32, f32, f32, f32)] = &[
-                //  dir_x  dir_y  dir_z  radius  R     G     B
-                (0.5, 0.4, 0.7, 0.15, 5.0, 4.5, 3.8), // warm key (upper-right front)
-                (-0.7, 0.2, -0.4, 0.20, 1.2, 1.4, 1.8), // cool fill (left-behind)
-                (0.0, -0.7, 0.3, 0.30, 0.8, 0.6, 0.5), // warm ground bounce
-                (-0.3, 0.8, 0.0, 0.25, 0.5, 0.55, 0.6), // subtle top fill (cool)
-                (0.8, 0.0, -0.5, 0.12, 2.5, 2.3, 2.0), // rim accent (right side)
-            ];
-
-            for &(lx, ly, lz, radius, lr, lg, lb) in area_lights {
-                let ll = (lx * lx + ly * ly + lz * lz).sqrt();
-                let dot = (nx * lx + ny * ly + nz * lz) / ll;
-                let cos_edge = 1.0 - radius;
-                if dot > cos_edge {
-                    let t = ((dot - cos_edge) / radius).min(1.0);
-                    // Smooth falloff (quadratic)
-                    let intensity = t * t;
-                    r += lr * intensity;
-                    g += lg * intensity;
-                    b += lb * intensity;
-                }
-            }
-
-            // Write as f16 RGBA (little-endian u16 per channel)
-            for &val in &[r, g, b, 1.0f32] {
-                data.extend_from_slice(&f32_to_f16(val).to_le_bytes());
-            }
-        }
-    }
-    data
-}
-
-/// Convert f32 to IEEE 754 half-precision (f16) as a u16.
-fn f32_to_f16(value: f32) -> u16 {
-    let bits = value.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xFF) as i32;
-    let mantissa = bits & 0x7FFFFF;
-
-    if exp == 0 {
-        // Zero or denorm → f16 zero
-        return sign;
-    }
-    if exp == 0xFF {
-        // Inf or NaN
-        return sign | 0x7C00 | if mantissa != 0 { 0x0200 } else { 0 };
-    }
-
-    let new_exp = exp - 127 + 15;
-    if new_exp >= 31 {
-        // Overflow → f16 infinity
-        return sign | 0x7C00;
-    }
-    if new_exp <= 0 {
-        // Underflow → f16 zero (skip denorms for simplicity)
-        return sign;
-    }
-
-    sign | ((new_exp as u16) << 10) | ((mantissa >> 13) as u16)
 }
 
 struct BindGroupLayouts {
@@ -7467,12 +7371,10 @@ impl GpuRenderer {
 
         // ── IBL environment cubemap ─────────────────────────────────────
         //
-        // Procedural sky gradient rendered CPU-side into a 128×128×6
-        // cubemap with mipmaps. Each mip level is regenerated from the
-        // sky function (not downsampled) so the direction → color mapping
-        // stays accurate at every resolution. The shader samples this at
-        // `roughness * max_mip` level so smooth surfaces get sharp
-        // reflections and rough surfaces see a blurry ambient tint.
+        // The cubemap starts as a neutral gray fallback (0.15, 0.15, 0.15
+        // in f16). SceneKit3D provides the real studio environment via
+        // `set_environment_cubemap` → `upload_environment_cubemap`, which
+        // overwrites the fallback on the first frame that has 3D content.
         let env_size: u32 = 128;
         let env_mip_count = (env_size as f32).log2() as u32 + 1;
         let env_cubemap = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -7490,10 +7392,21 @@ impl GpuRenderer {
             view_formats: &[],
         });
 
+        // Fill every face × mip with neutral gray (f16 RGBA).
+        // f32_to_f16(0.15) ≈ 0x3106, f32_to_f16(1.0) = 0x3C00.
+        let gray_r = 0x3106u16; // ~0.15
+        let gray_a = 0x3C00u16; // 1.0
         for face in 0..6u32 {
             for mip in 0..env_mip_count {
                 let mip_size = (env_size >> mip).max(1);
-                let data = generate_cubemap_face(face, mip_size);
+                let texels = (mip_size * mip_size) as usize;
+                let mut data = Vec::with_capacity(texels * 8);
+                for _ in 0..texels {
+                    data.extend_from_slice(&gray_r.to_le_bytes());
+                    data.extend_from_slice(&gray_r.to_le_bytes());
+                    data.extend_from_slice(&gray_r.to_le_bytes());
+                    data.extend_from_slice(&gray_a.to_le_bytes());
+                }
                 self.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture: &env_cubemap,
@@ -7508,7 +7421,6 @@ impl GpuRenderer {
                     &data,
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        // Rgba16Float = 8 bytes per texel (4 × f16)
                         bytes_per_row: Some(mip_size * 8),
                         rows_per_image: Some(mip_size),
                     },
@@ -7685,6 +7597,13 @@ impl GpuRenderer {
             env_cubemap,
             env_cubemap_view,
             env_sampler,
+            cached_mesh_ptr: 0,
+            cached_base_tex: None,
+            cached_normal_tex: None,
+            cached_displacement_tex: None,
+            cached_mr_tex: None,
+            cached_emissive_tex: None,
+            cached_occlusion_tex: None,
             skybox_pipeline,
             skybox_bind_group_layout,
             skybox_uniform_buffer,
@@ -7705,6 +7624,57 @@ impl GpuRenderer {
         });
     }
 
+    /// Upload externally-generated cubemap face/mip data into the mesh
+    /// pipeline's environment cubemap texture. Requires `ensure_mesh_pipeline`
+    /// to have been called first (the texture must already exist).
+    pub fn upload_environment_cubemap(&mut self, data: &blinc_core::layer::CubemapData) {
+        let mp = match self.mesh_pipeline.as_ref() {
+            Some(mp) => mp,
+            None => return,
+        };
+
+        let expected = (6 * data.mip_count) as usize;
+        if data.faces.len() != expected {
+            tracing::warn!(
+                "upload_environment_cubemap: expected {} face entries, got {}",
+                expected,
+                data.faces.len()
+            );
+            return;
+        }
+
+        for face in 0..6u32 {
+            for mip in 0..data.mip_count {
+                let mip_size = (data.size >> mip).max(1);
+                let idx = (face * data.mip_count + mip) as usize;
+                let face_data = &data.faces[idx];
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &mp.env_cubemap,
+                        mip_level: mip,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: face,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    face_data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(mip_size * 8),
+                        rows_per_image: Some(mip_size),
+                    },
+                    wgpu::Extent3d {
+                        width: mip_size,
+                        height: mip_size,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+    }
+
     /// Render mesh data with shadow mapping, normal mapping, and parallax displacement.
     ///
     /// If `light_view_proj` is provided, a shadow depth pass is executed first,
@@ -7713,7 +7683,7 @@ impl GpuRenderer {
     pub fn render_mesh_data(
         &mut self,
         target: &wgpu::TextureView,
-        mesh: &blinc_core::draw::MeshData,
+        mesh: &std::sync::Arc<blinc_core::draw::MeshData>,
         transform: &[f32; 16],
         view_proj: &[f32; 16],
         camera_pos: [f32; 3],
@@ -7931,89 +7901,72 @@ impl GpuRenderer {
         self.queue
             .write_buffer(&mp.material_buffer, 0, bytemuck::bytes_of(&mat));
 
-        // ── Upload textures (kept alive through render) ──────────────────
-        let base_tex = mesh.material.base_color_texture.as_ref().map(|td| {
-            crate::image::GpuImage::from_rgba(
-                &self.device,
-                &self.queue,
-                &td.rgba,
-                td.width,
-                td.height,
-                Some("mesh_base_color_tex"),
-            )
-        });
+        // ── Upload textures (cached across frames) ────────────────────────
+        //
+        // GPU texture creation + upload is expensive (~80 MB for the
+        // DamagedHelmet's 5 × 2048² textures). Cache by Arc pointer:
+        // if the same MeshData Arc is drawn again, reuse the GPU
+        // textures from last frame. Only re-upload when the mesh changes.
+        let mesh_ptr = std::sync::Arc::as_ptr(mesh) as usize;
+        {
+            let mp_mut = self.mesh_pipeline.as_mut().unwrap();
+            if mp_mut.cached_mesh_ptr != mesh_ptr {
+                mp_mut.cached_mesh_ptr = mesh_ptr;
 
-        let normal_tex = mesh.material.normal_map.as_ref().map(|td| {
-            crate::image::GpuImage::from_rgba(
-                &self.device,
-                &self.queue,
-                &td.rgba,
-                td.width,
-                td.height,
-                Some("mesh_normal_map"),
-            )
-        });
+                let upload = |td: &Option<blinc_core::TextureData>,
+                              label: &str|
+                 -> Option<crate::image::GpuImage> {
+                    td.as_ref().map(|td| {
+                        crate::image::GpuImage::from_rgba(
+                            &self.device,
+                            &self.queue,
+                            &td.rgba,
+                            td.width,
+                            td.height,
+                            Some(label),
+                        )
+                    })
+                };
 
-        let displacement_tex = mesh.material.displacement_map.as_ref().map(|td| {
-            crate::image::GpuImage::from_rgba(
-                &self.device,
-                &self.queue,
-                &td.rgba,
-                td.width,
-                td.height,
-                Some("mesh_displacement_map"),
-            )
-        });
+                mp_mut.cached_base_tex =
+                    upload(&mesh.material.base_color_texture, "mesh_base_color_tex");
+                mp_mut.cached_normal_tex = upload(&mesh.material.normal_map, "mesh_normal_map");
+                mp_mut.cached_displacement_tex =
+                    upload(&mesh.material.displacement_map, "mesh_displacement_map");
+                mp_mut.cached_mr_tex = upload(
+                    &mesh.material.metallic_roughness_texture,
+                    "mesh_metallic_roughness_tex",
+                );
+                mp_mut.cached_emissive_tex =
+                    upload(&mesh.material.emissive_texture, "mesh_emissive_tex");
+                mp_mut.cached_occlusion_tex =
+                    upload(&mesh.material.occlusion_texture, "mesh_occlusion_tex");
+            }
+        }
 
-        let metallic_roughness_tex = mesh.material.metallic_roughness_texture.as_ref().map(|td| {
-            crate::image::GpuImage::from_rgba(
-                &self.device,
-                &self.queue,
-                &td.rgba,
-                td.width,
-                td.height,
-                Some("mesh_metallic_roughness_tex"),
-            )
-        });
-
-        let emissive_tex = mesh.material.emissive_texture.as_ref().map(|td| {
-            crate::image::GpuImage::from_rgba(
-                &self.device,
-                &self.queue,
-                &td.rgba,
-                td.width,
-                td.height,
-                Some("mesh_emissive_tex"),
-            )
-        });
-
-        let occlusion_tex = mesh.material.occlusion_texture.as_ref().map(|td| {
-            crate::image::GpuImage::from_rgba(
-                &self.device,
-                &self.queue,
-                &td.rgba,
-                td.width,
-                td.height,
-                Some("mesh_occlusion_tex"),
-            )
-        });
-
-        let base_view = base_tex
+        let mp = self.mesh_pipeline.as_ref().unwrap();
+        let base_view = mp
+            .cached_base_tex
             .as_ref()
             .map_or_else(|| mp.default_texture.view(), |t| t.view());
-        let normal_view = normal_tex
+        let normal_view = mp
+            .cached_normal_tex
             .as_ref()
             .map_or_else(|| mp.default_normal_map.view(), |t| t.view());
-        let displacement_view = displacement_tex
+        let displacement_view = mp
+            .cached_displacement_tex
             .as_ref()
             .map_or_else(|| mp.default_displacement.view(), |t| t.view());
-        let metallic_roughness_view = metallic_roughness_tex
+        let metallic_roughness_view = mp
+            .cached_mr_tex
             .as_ref()
             .map_or_else(|| mp.default_metallic_roughness.view(), |t| t.view());
-        let emissive_view = emissive_tex
+        let emissive_view = mp
+            .cached_emissive_tex
             .as_ref()
             .map_or_else(|| mp.default_emissive.view(), |t| t.view());
-        let occlusion_view = occlusion_tex
+        let occlusion_view = mp
+            .cached_occlusion_tex
             .as_ref()
             .map_or_else(|| mp.default_occlusion.view(), |t| t.view());
 

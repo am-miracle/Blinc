@@ -48,7 +48,7 @@ use blinc_layout::event_handler::EventContext;
 pub use background::{CanvasBackground, PatternConfig, ZoomAdaptive};
 pub use hit::{CanvasDragEvent, CanvasEvent, HitRegion, InteractionState};
 pub use pan::PanController;
-pub use scene3d::{OrbitCamera, SceneKit3D};
+pub use scene3d::{EnvironmentData, OrbitCamera, SceneKit3D};
 pub use selection::{CanvasTool, MarqueeState, SelectionChangeEvent, SelectionState};
 pub use snap::SnapController;
 pub use spatial::SpatialIndex;
@@ -60,7 +60,7 @@ pub mod prelude {
     pub use crate::background::{CanvasBackground, PatternConfig, ZoomAdaptive};
     pub use crate::hit::{CanvasDragEvent, CanvasEvent, HitRegion, InteractionState};
     pub use crate::pan::PanController;
-    pub use crate::scene3d::{OrbitCamera, SceneKit3D};
+    pub use crate::scene3d::{EnvironmentData, OrbitCamera, SceneKit3D};
     pub use crate::selection::{CanvasTool, MarqueeState, SelectionChangeEvent, SelectionState};
     pub use crate::snap::SnapController;
     pub use crate::spatial::SpatialIndex;
