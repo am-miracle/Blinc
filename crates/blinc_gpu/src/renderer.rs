@@ -1450,19 +1450,23 @@ impl GpuRenderer {
             _ => return,
         };
 
-        if !ranges.core.is_empty() {
-            if overlay {
-                render_pass.set_pipeline(&pipelines.sdf_core_overlay);
-            } else {
-                render_pass.set_pipeline(&pipelines.sdf_core);
-            }
-            render_pass.draw(0..6, full_range.clone());
-        }
+        // Draw order: Shadow → Notch → 3D → Core (back to front).
+        // Shadows are backgrounds, notches are containers, core shapes
+        // (rects/circles) are foreground. This ensures children drawn
+        // by the core pipeline appear on top of notch parents.
         if !ranges.shadow.is_empty() {
             if overlay {
                 render_pass.set_pipeline(&pipelines.sdf_shadow_overlay);
             } else {
                 render_pass.set_pipeline(&pipelines.sdf_shadow);
+            }
+            render_pass.draw(0..6, full_range.clone());
+        }
+        if !ranges.notch.is_empty() {
+            if overlay {
+                render_pass.set_pipeline(&pipelines.sdf_notch_overlay);
+            } else {
+                render_pass.set_pipeline(&pipelines.sdf_notch);
             }
             render_pass.draw(0..6, full_range.clone());
         }
@@ -1474,11 +1478,11 @@ impl GpuRenderer {
             }
             render_pass.draw(0..6, full_range.clone());
         }
-        if !ranges.notch.is_empty() {
+        if !ranges.core.is_empty() {
             if overlay {
-                render_pass.set_pipeline(&pipelines.sdf_notch_overlay);
+                render_pass.set_pipeline(&pipelines.sdf_core_overlay);
             } else {
-                render_pass.set_pipeline(&pipelines.sdf_notch);
+                render_pass.set_pipeline(&pipelines.sdf_core);
             }
             render_pass.draw(0..6, full_range.clone());
         }
@@ -1514,20 +1518,21 @@ impl GpuRenderer {
             (Some(s), Some(e)) => s..e,
             _ => return,
         };
-        if !ranges.core.is_empty() {
-            render_pass.set_pipeline(&msaa.sdf_core);
-            render_pass.draw(0..6, full_range.clone());
-        }
+        // Back-to-front: Shadow → Notch → 3D → Core
         if !ranges.shadow.is_empty() {
             render_pass.set_pipeline(&msaa.sdf_shadow);
+            render_pass.draw(0..6, full_range.clone());
+        }
+        if !ranges.notch.is_empty() {
+            render_pass.set_pipeline(&msaa.sdf_notch);
             render_pass.draw(0..6, full_range.clone());
         }
         if !ranges.sdf_3d.is_empty() {
             render_pass.set_pipeline(&msaa.sdf_3d);
             render_pass.draw(0..6, full_range.clone());
         }
-        if !ranges.notch.is_empty() {
-            render_pass.set_pipeline(&msaa.sdf_notch);
+        if !ranges.core.is_empty() {
+            render_pass.set_pipeline(&msaa.sdf_core);
             render_pass.draw(0..6, full_range.clone());
         }
     }
