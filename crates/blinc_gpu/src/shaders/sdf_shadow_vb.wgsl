@@ -504,6 +504,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let fill_type = prim.type_info.y;
     let clip_type = prim.type_info.z;
 
+    // Early type filter — discard primitives handled by other split pipelines
+    if prim_type < 3u || prim_type > 6u { discard; }
+
     // Early clip test - discard if completely outside clip region (screen space)
     let clip_alpha = calculate_clip_alpha(p, prim.clip_bounds, prim.clip_radius, clip_type, prim.clip_fade);
     if clip_alpha < 0.001 {

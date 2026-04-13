@@ -669,6 +669,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let cos_rx = prim.perspective.y;
     let persp_d = prim.perspective.z;
     let shape_type = u32(prim.perspective.w);
+
+    // Early type filter — discard non-3D primitives handled by other split pipelines
+    if shape_type == 0u { discard; }
+
     let depth = prim.sdf_3d.x;
 
     // ── 3D SDF Raymarching Path (individual shapes) ──

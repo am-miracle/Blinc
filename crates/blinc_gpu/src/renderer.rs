@@ -1343,12 +1343,36 @@ impl GpuRenderer {
         if primitives.is_empty() {
             return SdfPrimitiveRanges::default();
         }
-        let (sorted, ranges) = Self::sort_primitives_by_category(primitives);
-        self.write_primitives_safe(&sorted);
+        // Don't sort — preserve original z-order. Just scan for which
+        // categories are present so we know which pipelines to activate.
+        // Each split shader discards non-matching prim_types in fs_main.
+        let mut ranges = SdfPrimitiveRanges::default();
+        let len = primitives.len() as u32;
+        let full = 0..len;
+        for p in primitives {
+            match p.pipeline_category() {
+                SdfPipelineCategory::Core => {
+                    if ranges.core.is_empty() { ranges.core = full.clone(); }
+                }
+                SdfPipelineCategory::Shadow => {
+                    if ranges.shadow.is_empty() { ranges.shadow = full.clone(); }
+                }
+                SdfPipelineCategory::Sdf3D => {
+                    if ranges.sdf_3d.is_empty() { ranges.sdf_3d = full.clone(); }
+                }
+                SdfPipelineCategory::Notch => {
+                    if ranges.notch.is_empty() { ranges.notch = full.clone(); }
+                }
+                SdfPipelineCategory::Text => {
+                    if ranges.text.is_empty() { ranges.text = full.clone(); }
+                }
+            }
+        }
+        self.write_primitives_safe(primitives);
 
         // VERTEX_STORAGE fallback: build instance data and upload to VB
         if !self.has_vertex_storage {
-            let instances: Vec<SdfVertexInstance> = sorted
+            let instances: Vec<SdfVertexInstance> = primitives
                 .iter()
                 .map(SdfVertexInstance::from_primitive)
                 .collect();
@@ -1403,13 +1427,36 @@ impl GpuRenderer {
         if let Some(buf) = vb_buffer {
             render_pass.set_vertex_buffer(0, buf.slice(..));
         }
+        // Draw the full primitive range through each pipeline that has
+        // matching primitives. Each split shader's fs_main checks prim_type
+        // and discards non-matching instances. This preserves z-order
+        // between categories (e.g., a notch parent at z=5 and its circle
+        // child at z=6 render in the correct order).
+        //
+        // The total range spans from the lowest to highest instance index
+        // across all non-empty categories.
+        let total_start = [&ranges.core, &ranges.shadow, &ranges.sdf_3d, &ranges.notch]
+            .iter()
+            .filter(|r| !r.is_empty())
+            .map(|r| r.start)
+            .min();
+        let total_end = [&ranges.core, &ranges.shadow, &ranges.sdf_3d, &ranges.notch]
+            .iter()
+            .filter(|r| !r.is_empty())
+            .map(|r| r.end)
+            .max();
+        let full_range = match (total_start, total_end) {
+            (Some(s), Some(e)) => s..e,
+            _ => return,
+        };
+
         if !ranges.core.is_empty() {
             if overlay {
                 render_pass.set_pipeline(&pipelines.sdf_core_overlay);
             } else {
                 render_pass.set_pipeline(&pipelines.sdf_core);
             }
-            render_pass.draw(0..6, ranges.core.clone());
+            render_pass.draw(0..6, full_range.clone());
         }
         if !ranges.shadow.is_empty() {
             if overlay {
@@ -1417,7 +1464,7 @@ impl GpuRenderer {
             } else {
                 render_pass.set_pipeline(&pipelines.sdf_shadow);
             }
-            render_pass.draw(0..6, ranges.shadow.clone());
+            render_pass.draw(0..6, full_range.clone());
         }
         if !ranges.sdf_3d.is_empty() {
             if overlay {
@@ -1425,7 +1472,7 @@ impl GpuRenderer {
             } else {
                 render_pass.set_pipeline(&pipelines.sdf_3d);
             }
-            render_pass.draw(0..6, ranges.sdf_3d.clone());
+            render_pass.draw(0..6, full_range.clone());
         }
         if !ranges.notch.is_empty() {
             if overlay {
@@ -1433,7 +1480,7 @@ impl GpuRenderer {
             } else {
                 render_pass.set_pipeline(&pipelines.sdf_notch);
             }
-            render_pass.draw(0..6, ranges.notch.clone());
+            render_pass.draw(0..6, full_range.clone());
         }
         // Note: text range is NOT drawn here — text uses the separate text pipeline
     }
@@ -1452,21 +1499,36 @@ impl GpuRenderer {
         if let Some(buf) = vb_buffer {
             render_pass.set_vertex_buffer(0, buf.slice(..));
         }
+        // Full range for z-order preservation (same approach as draw_split_sdf)
+        let total_start = [&ranges.core, &ranges.shadow, &ranges.sdf_3d, &ranges.notch]
+            .iter()
+            .filter(|r| !r.is_empty())
+            .map(|r| r.start)
+            .min();
+        let total_end = [&ranges.core, &ranges.shadow, &ranges.sdf_3d, &ranges.notch]
+            .iter()
+            .filter(|r| !r.is_empty())
+            .map(|r| r.end)
+            .max();
+        let full_range = match (total_start, total_end) {
+            (Some(s), Some(e)) => s..e,
+            _ => return,
+        };
         if !ranges.core.is_empty() {
             render_pass.set_pipeline(&msaa.sdf_core);
-            render_pass.draw(0..6, ranges.core.clone());
+            render_pass.draw(0..6, full_range.clone());
         }
         if !ranges.shadow.is_empty() {
             render_pass.set_pipeline(&msaa.sdf_shadow);
-            render_pass.draw(0..6, ranges.shadow.clone());
+            render_pass.draw(0..6, full_range.clone());
         }
         if !ranges.sdf_3d.is_empty() {
             render_pass.set_pipeline(&msaa.sdf_3d);
-            render_pass.draw(0..6, ranges.sdf_3d.clone());
+            render_pass.draw(0..6, full_range.clone());
         }
         if !ranges.notch.is_empty() {
             render_pass.set_pipeline(&msaa.sdf_notch);
-            render_pass.draw(0..6, ranges.notch.clone());
+            render_pass.draw(0..6, full_range.clone());
         }
     }
 
