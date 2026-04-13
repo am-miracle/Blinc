@@ -1593,15 +1593,28 @@ impl GpuRenderer {
             }
             #[cfg(not(target_os = "macos"))]
             {
-                surface_caps
-                    .formats
-                    .iter()
-                    .find(|f| f.is_srgb())
-                    .copied()
-                    .unwrap_or(surface_caps.formats[0])
+                // On WebGL2 (GL adapter without storage buffers), prefer non-sRGB
+                // to avoid double gamma correction — shaders output sRGB-encoded
+                // colors directly, and an sRGB surface would apply gamma again.
+                let prefer_non_srgb = adapter.limits().max_storage_buffers_per_shader_stage == 0;
+                if prefer_non_srgb {
+                    surface_caps
+                        .formats
+                        .iter()
+                        .find(|f| !f.is_srgb())
+                        .copied()
+                        .unwrap_or(surface_caps.formats[0])
+                } else {
+                    surface_caps
+                        .formats
+                        .iter()
+                        .find(|f| f.is_srgb())
+                        .copied()
+                        .unwrap_or(surface_caps.formats[0])
+                }
             }
         });
-        tracing::debug!("Selected texture format: {:?}", texture_format);
+        tracing::info!("Selected texture format: {:?} (sRGB: {})", texture_format, texture_format.is_srgb());
 
         let renderer = Self::create_renderer(
             instance,
@@ -1712,19 +1725,29 @@ impl GpuRenderer {
             surface_caps.alpha_modes
         );
 
-        // Browsers report sRGB-correct formats for canvas surfaces
-        // (Chrome: Bgra8UnormSrgb; Safari TP: Rgba8UnormSrgb). Either
-        // is fine — pick the first sRGB format we find, falling back
-        // to whatever the browser offered if neither is sRGB-tagged.
+        // On WebGPU (Chrome/Safari), prefer sRGB — the browser pipeline
+        // expects sRGB output. On WebGL2 (GL adapter, no storage buffers),
+        // prefer non-sRGB — shaders output sRGB-encoded colors directly,
+        // and an sRGB surface would apply gamma encoding again (washed out).
+        let is_gl_adapter = adapter.limits().max_storage_buffers_per_shader_stage == 0;
         let texture_format = config.texture_format.unwrap_or_else(|| {
-            surface_caps
-                .formats
-                .iter()
-                .find(|f| f.is_srgb())
-                .copied()
-                .unwrap_or(surface_caps.formats[0])
+            if is_gl_adapter {
+                surface_caps
+                    .formats
+                    .iter()
+                    .find(|f| !f.is_srgb())
+                    .copied()
+                    .unwrap_or(surface_caps.formats[0])
+            } else {
+                surface_caps
+                    .formats
+                    .iter()
+                    .find(|f| f.is_srgb())
+                    .copied()
+                    .unwrap_or(surface_caps.formats[0])
+            }
         });
-        tracing::debug!("Web surface texture format: {:?}", texture_format);
+        tracing::info!("Web surface texture format: {:?} (sRGB: {}, GL adapter: {})", texture_format, texture_format.is_srgb(), is_gl_adapter);
 
         let renderer = Self::create_renderer(
             instance,
