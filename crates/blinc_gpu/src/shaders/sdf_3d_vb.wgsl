@@ -875,4 +875,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Safety fallback: if neither 3D path triggered, discard
     discard;
+    return vec4<f32>(0.0);
 }

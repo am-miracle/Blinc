@@ -36,8 +36,10 @@ use crate::primitives::{
 use crate::shaders::{
     BLUR_SHADER, COLOR_MATRIX_SHADER, COMPOSITE_SHADER, DROP_SHADOW_SHADER, GLASS_SHADER,
     GLOW_SHADER, IMAGE_SHADER, LAYER_COMPOSITE_SHADER, MASK_IMAGE_SHADER, PATH_SHADER, SDF_SHADER,
-    SDF_3D_SHADER, SDF_3D_VB_SHADER, SDF_CORE_SHADER, SDF_CORE_VB_SHADER,
-    SDF_NOTCH_SHADER, SDF_NOTCH_VB_SHADER, SDF_SHADOW_SHADER, SDF_SHADOW_VB_SHADER,
+    SDF_3D_SHADER, SDF_3D_VB_SHADER, SDF_3D_DT_SHADER,
+    SDF_CORE_SHADER, SDF_CORE_VB_SHADER, SDF_CORE_DT_SHADER,
+    SDF_NOTCH_SHADER, SDF_NOTCH_VB_SHADER, SDF_NOTCH_DT_SHADER,
+    SDF_SHADOW_SHADER, SDF_SHADOW_VB_SHADER, SDF_SHADOW_DT_SHADER,
     SIMPLE_GLASS_SHADER, TEXT_SHADER,
 };
 
@@ -402,6 +404,17 @@ struct Buffers {
     /// Created/resized on demand when the adapter lacks storage buffers in
     /// vertex shaders.
     sdf_vertex_instances: Option<wgpu::Buffer>,
+    /// Data texture for primitive data (WebGL2 fallback when no storage buffers).
+    /// Width = 23 texels (one per vec4 field of GpuPrimitive), height = max_primitives.
+    /// Format: Rgba32Float.
+    prim_data_texture: Option<wgpu::Texture>,
+    prim_data_view: Option<wgpu::TextureView>,
+    /// Data texture for auxiliary data (WebGL2 fallback when no storage buffers).
+    /// Width = 1024 texels, height grows on demand. Format: Rgba32Float.
+    aux_data_texture: Option<wgpu::Texture>,
+    aux_data_view: Option<wgpu::TextureView>,
+    /// Current height of the aux data texture (for resize detection)
+    aux_data_texture_height: u32,
 }
 
 /// Bind groups for shader resources
@@ -1056,6 +1069,12 @@ pub struct GpuRenderer {
     /// When `false`, SDF pipelines use an instance-stepped vertex buffer
     /// fallback (WebGL2 path).
     has_vertex_storage: bool,
+    /// Whether the GPU adapter supports storage buffers at all
+    /// (i.e. `max_storage_buffers_per_shader_stage > 0`).
+    /// When `false`, the renderer uses data textures (Rgba32Float) to pass
+    /// primitive and auxiliary data to fragment shaders instead of storage
+    /// buffers. This is the Tier 3 / WebGL2 fallback path.
+    has_storage_buffers: bool,
 }
 
 /// Image rendering pipeline (created lazily on first image render)
@@ -1230,11 +1249,41 @@ impl GpuRenderer {
         } else {
             primitives
         };
-        self.queue.write_buffer(
-            &self.buffers.primitives,
-            0,
-            bytemuck::cast_slice(primitives_to_write),
-        );
+
+        if !self.has_storage_buffers {
+            // DT mode: upload to data texture instead of storage buffer.
+            // Each GpuPrimitive is 23 × vec4<f32> = 23 RGBA32F texels in a row.
+            if let Some(ref tex) = self.buffers.prim_data_texture {
+                let bytes = bytemuck::cast_slice::<GpuPrimitive, u8>(primitives_to_write);
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytes,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        // 23 texels × 16 bytes per RGBA32F texel = 368 bytes per row
+                        bytes_per_row: Some(23 * 16),
+                        rows_per_image: None,
+                    },
+                    wgpu::Extent3d {
+                        width: 23,
+                        height: primitives_to_write.len() as u32,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        } else {
+            // Tier 1/2: write to storage buffer as before
+            self.queue.write_buffer(
+                &self.buffers.primitives,
+                0,
+                bytemuck::cast_slice(primitives_to_write),
+            );
+        }
     }
 
     /// Sort primitives by `SdfPipelineCategory` and compute contiguous ranges.
@@ -1752,7 +1801,7 @@ impl GpuRenderer {
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
         texture_format: wgpu::TextureFormat,
-        config: RendererConfig,
+        mut config: RendererConfig,
         viewport_size: (u32, u32),
     ) -> Result<Self, RendererError> {
         // Check if the adapter supports storage buffers in vertex shaders
@@ -1764,9 +1813,31 @@ impl GpuRenderer {
             tracing::info!("VERTEX_STORAGE not supported — using instance vertex buffer fallback");
         }
 
+        // Check if the adapter supports storage buffers at all (Tier 3 / DT fallback)
+        let has_storage_buffers =
+            adapter.limits().max_storage_buffers_per_shader_stage > 0;
+        if !has_storage_buffers {
+            tracing::info!(
+                "No storage buffer support — using data texture fallback (WebGL2 mode)"
+            );
+            // When there are no storage buffers, max_storage_buffer_binding_size is 0,
+            // so apply_renderer_config_overrides clamped max_primitives/max_glyphs to 1.
+            // Re-apply sensible defaults clamped by texture dimension limits instead.
+            let tex_max = adapter.limits().max_texture_dimension_2d as usize;
+            let defaults = RendererConfig::default();
+            // Use env overrides if present, otherwise fall back to defaults
+            config.max_primitives = env_usize("BLINC_GPU_MAX_PRIMITIVES")
+                .unwrap_or(defaults.max_primitives)
+                .clamp(1, tex_max);
+            config.max_glyphs = env_usize("BLINC_GPU_MAX_GLYPHS")
+                .unwrap_or(defaults.max_glyphs)
+                .clamp(1, tex_max);
+            log_renderer_config(&config);
+        }
+
         // Create bind group layouts
         let bind_group_layouts =
-            Self::create_bind_group_layouts_with_flags(&device, has_vertex_storage);
+            Self::create_bind_group_layouts_with_flags(&device, has_vertex_storage, has_storage_buffers);
 
         // Create shaders
         let sdf_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1795,12 +1866,21 @@ impl GpuRenderer {
         });
 
         // Split SDF shaders — specialized pipelines for each primitive category.
-        // When VERTEX_STORAGE is not available, use the VB fallback shaders
-        // that read per-instance data from vertex attributes instead of storage.
-        let sdf_core_source = if has_vertex_storage { SDF_CORE_SHADER } else { SDF_CORE_VB_SHADER };
-        let sdf_shadow_source = if has_vertex_storage { SDF_SHADOW_SHADER } else { SDF_SHADOW_VB_SHADER };
-        let sdf_3d_source = if has_vertex_storage { SDF_3D_SHADER } else { SDF_3D_VB_SHADER };
-        let sdf_notch_source = if has_vertex_storage { SDF_NOTCH_SHADER } else { SDF_NOTCH_VB_SHADER };
+        // Three tiers:
+        //   Tier 1 (full): Storage buffers in VS + FS — sdf_*.wgsl
+        //   Tier 2 (VB):   No VS storage, FS storage works — sdf_*_vb.wgsl + vertex buffer
+        //   Tier 3 (DT):   No storage at all (WebGL2) — sdf_*_dt.wgsl + VB + data textures
+        let (sdf_core_source, sdf_shadow_source, sdf_3d_source, sdf_notch_source) =
+            if !has_storage_buffers {
+                // Tier 3: Data texture fallback (no storage buffers at all)
+                (SDF_CORE_DT_SHADER, SDF_SHADOW_DT_SHADER, SDF_3D_DT_SHADER, SDF_NOTCH_DT_SHADER)
+            } else if !has_vertex_storage {
+                // Tier 2: VB fallback (no VS storage, FS storage works)
+                (SDF_CORE_VB_SHADER, SDF_SHADOW_VB_SHADER, SDF_3D_VB_SHADER, SDF_NOTCH_VB_SHADER)
+            } else {
+                // Tier 1: Full storage buffer support
+                (SDF_CORE_SHADER, SDF_SHADOW_SHADER, SDF_3D_SHADER, SDF_NOTCH_SHADER)
+            };
 
         let sdf_core_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("SDF Core Shader"),
@@ -1837,8 +1917,8 @@ impl GpuRenderer {
             has_vertex_storage,
         );
 
-        // Create buffers
-        let buffers = Self::create_buffers(&device, &config);
+        // Create buffers (storage buffers always created; DT textures added when needed)
+        let buffers = Self::create_buffers(&device, &config, has_storage_buffers);
 
         // Create placeholder glyph atlas textures (1x1 transparent)
         // These are used when no text is rendered, satisfying the bind group layout
@@ -1989,6 +2069,7 @@ impl GpuRenderer {
             &gradient_texture_cache,
             &placeholder_path_image_view,
             &path_image_sampler,
+            has_storage_buffers,
         );
 
         let flow_pipeline_cache =
@@ -2042,12 +2123,14 @@ impl GpuRenderer {
             flow_pipeline_cache,
             scene_copy_texture: None,
             has_vertex_storage,
+            has_storage_buffers,
         })
     }
 
     fn create_bind_group_layouts_with_flags(
         device: &wgpu::Device,
         has_vertex_storage: bool,
+        has_storage_buffers: bool,
     ) -> BindGroupLayouts {
         // When VERTEX_STORAGE is available, the primitives storage buffer
         // is visible to both vertex and fragment stages. Otherwise, only
@@ -2057,6 +2140,57 @@ impl GpuRenderer {
             wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT
         } else {
             wgpu::ShaderStages::FRAGMENT
+        };
+
+        // Binding 1 & 5: Storage buffers normally; data textures when no storage support
+        let binding_1_entry = if has_storage_buffers {
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: primitives_visibility,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }
+        } else {
+            // DT mode: primitive data comes from an Rgba32Float texture
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }
+        };
+
+        let binding_5_entry = if has_storage_buffers {
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }
+        } else {
+            // DT mode: aux data comes from an Rgba32Float texture
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }
         };
 
         // SDF bind group layout (includes glyph atlas for unified text rendering)
@@ -2074,17 +2208,8 @@ impl GpuRenderer {
                     },
                     count: None,
                 },
-                // Primitives storage buffer
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: primitives_visibility,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
+                // Binding 1: Primitives (storage buffer or data texture)
+                binding_1_entry,
                 // Glyph atlas texture (grayscale text)
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
@@ -2114,17 +2239,8 @@ impl GpuRenderer {
                     },
                     count: None,
                 },
-                // Auxiliary data storage buffer (group shapes, polygon clips)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
+                // Binding 5: Auxiliary data (storage buffer or data texture)
+                binding_5_entry,
             ],
         });
 
@@ -2143,14 +2259,26 @@ impl GpuRenderer {
                     },
                     count: None,
                 },
-                // Glass primitives storage buffer
+                // Glass primitives: storage buffer (normal) or texture (WebGL2 DT fallback)
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    visibility: if has_storage_buffers {
+                        wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT
+                    } else {
+                        wgpu::ShaderStages::FRAGMENT
+                    },
+                    ty: if has_storage_buffers {
+                        wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        }
+                    } else {
+                        wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }
                     },
                     count: None,
                 },
@@ -2190,14 +2318,26 @@ impl GpuRenderer {
                     },
                     count: None,
                 },
-                // Glyphs storage buffer
+                // Glyphs: storage buffer (normal) or texture (WebGL2 DT fallback)
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    visibility: if has_storage_buffers {
+                        wgpu::ShaderStages::VERTEX
+                    } else {
+                        wgpu::ShaderStages::VERTEX
+                    },
+                    ty: if has_storage_buffers {
+                        wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        }
+                    } else {
+                        wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        }
                     },
                     count: None,
                 },
@@ -3109,7 +3249,11 @@ impl GpuRenderer {
         }
     }
 
-    fn create_buffers(device: &wgpu::Device, config: &RendererConfig) -> Buffers {
+    fn create_buffers(
+        device: &wgpu::Device,
+        config: &RendererConfig,
+        has_storage_buffers: bool,
+    ) -> Buffers {
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Uniforms Buffer"),
             size: std::mem::size_of::<Uniforms>() as u64,
@@ -3117,6 +3261,9 @@ impl GpuRenderer {
             mapped_at_creation: false,
         });
 
+        // Storage buffers are always created (even in DT mode they are needed by
+        // non-SDF pipelines like glass). In DT mode the SDF bind group uses data
+        // textures instead, but these buffers remain for other uses.
         let primitives = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Primitives Buffer"),
             size: (std::mem::size_of::<GpuPrimitive>() * config.max_primitives) as u64,
@@ -3161,6 +3308,48 @@ impl GpuRenderer {
             mapped_at_creation: false,
         });
 
+        // Create data textures for DT (Tier 3) fallback when no storage buffers
+        let (prim_data_texture, prim_data_view, aux_data_texture, aux_data_view, aux_data_texture_height) =
+            if !has_storage_buffers {
+                // Primitive data texture: width=23 (one texel per vec4 field), height=max_primitives
+                let prim_tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Primitive Data Texture"),
+                    size: wgpu::Extent3d {
+                        width: 23,
+                        height: config.max_primitives as u32,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let prim_view = prim_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+                // Aux data texture: width=1024, height=1 initially (resized on demand)
+                let aux_tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Aux Data Texture"),
+                    size: wgpu::Extent3d {
+                        width: 1024,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let aux_view = aux_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+                (Some(prim_tex), Some(prim_view), Some(aux_tex), Some(aux_view), 1u32)
+            } else {
+                (None, None, None, None, 0u32)
+            };
+
         Buffers {
             uniforms,
             primitives,
@@ -3176,6 +3365,11 @@ impl GpuRenderer {
             color_matrix_uniforms: None,
             aux_data,
             sdf_vertex_instances: None,
+            prim_data_texture,
+            prim_data_view,
+            aux_data_texture,
+            aux_data_view,
+            aux_data_texture_height,
         }
     }
 
@@ -3190,7 +3384,38 @@ impl GpuRenderer {
         gradient_texture_cache: &GradientTextureCache,
         path_image_view: &wgpu::TextureView,
         path_image_sampler: &wgpu::Sampler,
+        has_storage_buffers: bool,
     ) -> BindGroups {
+        // Binding 1: primitives (storage buffer or data texture)
+        let binding_1 = if has_storage_buffers {
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buffers.primitives.as_entire_binding(),
+            }
+        } else {
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(
+                    buffers.prim_data_view.as_ref().expect("DT mode requires prim_data_view"),
+                ),
+            }
+        };
+
+        // Binding 5: aux data (storage buffer or data texture)
+        let binding_5 = if has_storage_buffers {
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: buffers.aux_data.as_entire_binding(),
+            }
+        } else {
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(
+                    buffers.aux_data_view.as_ref().expect("DT mode requires aux_data_view"),
+                ),
+            }
+        };
+
         let sdf = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("SDF Bind Group"),
             layout: &layouts.sdf,
@@ -3199,10 +3424,7 @@ impl GpuRenderer {
                     binding: 0,
                     resource: buffers.uniforms.as_entire_binding(),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buffers.primitives.as_entire_binding(),
-                },
+                binding_1,
                 // Glyph atlas texture (binding 2)
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -3218,11 +3440,7 @@ impl GpuRenderer {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(color_glyph_atlas_view),
                 },
-                // Auxiliary data buffer (binding 5)
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: buffers.aux_data.as_entire_binding(),
-                },
+                binding_5,
             ],
         });
 
@@ -3283,6 +3501,7 @@ impl GpuRenderer {
         texture_format: wgpu::TextureFormat,
         sample_count: u32,
         has_vertex_storage: bool,
+        has_storage_buffers: bool,
     ) -> MsaaPipelines {
         let blend_state = wgpu::BlendState {
             color: wgpu::BlendComponent {
@@ -3388,10 +3607,14 @@ impl GpuRenderer {
                 })
             };
 
-        let msaa_core_src = if has_vertex_storage { SDF_CORE_SHADER } else { SDF_CORE_VB_SHADER };
-        let msaa_shadow_src = if has_vertex_storage { SDF_SHADOW_SHADER } else { SDF_SHADOW_VB_SHADER };
-        let msaa_3d_src = if has_vertex_storage { SDF_3D_SHADER } else { SDF_3D_VB_SHADER };
-        let msaa_notch_src = if has_vertex_storage { SDF_NOTCH_SHADER } else { SDF_NOTCH_VB_SHADER };
+        let (msaa_core_src, msaa_shadow_src, msaa_3d_src, msaa_notch_src) =
+            if !has_storage_buffers {
+                (SDF_CORE_DT_SHADER, SDF_SHADOW_DT_SHADER, SDF_3D_DT_SHADER, SDF_NOTCH_DT_SHADER)
+            } else if !has_vertex_storage {
+                (SDF_CORE_VB_SHADER, SDF_SHADOW_VB_SHADER, SDF_3D_VB_SHADER, SDF_NOTCH_VB_SHADER)
+            } else {
+                (SDF_CORE_SHADER, SDF_SHADOW_SHADER, SDF_3D_SHADER, SDF_NOTCH_SHADER)
+            };
 
         let sdf_core = make_msaa_sdf_pipeline(msaa_core_src, "SDF Core Pipeline (MSAA)");
         let sdf_shadow = make_msaa_sdf_pipeline(msaa_shadow_src, "SDF Shadow Pipeline (MSAA)");
@@ -4330,6 +4553,12 @@ impl GpuRenderer {
             return;
         }
 
+        if !self.has_storage_buffers {
+            // DT mode: upload aux data to texture instead of storage buffer
+            self.update_aux_data_texture(&batch.aux_data);
+            return;
+        }
+
         let data_size = (batch.aux_data.len() * std::mem::size_of::<[f32; 4]>()) as u64;
         let buffer_size = self.buffers.aux_data.size();
 
@@ -4353,6 +4582,70 @@ impl GpuRenderer {
         );
     }
 
+    /// Upload auxiliary data to the DT fallback texture (Tier 3 / WebGL2).
+    ///
+    /// The texture has width=1024 and variable height. If the data exceeds
+    /// the current texture capacity, the texture is recreated larger and
+    /// the SDF bind group is rebound.
+    fn update_aux_data_texture(&mut self, aux_data: &[[f32; 4]]) {
+        const AUX_TEX_WIDTH: u32 = 1024;
+        let count = aux_data.len() as u32;
+        let needed_height = ((count + AUX_TEX_WIDTH - 1) / AUX_TEX_WIDTH).max(1);
+
+        if needed_height > self.buffers.aux_data_texture_height {
+            // Recreate the texture with more rows
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Aux Data Texture"),
+                size: wgpu::Extent3d {
+                    width: AUX_TEX_WIDTH,
+                    height: needed_height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.buffers.aux_data_texture = Some(tex);
+            self.buffers.aux_data_view = Some(view);
+            self.buffers.aux_data_texture_height = needed_height;
+
+            // Rebind since the texture changed
+            self.rebind_sdf_bind_group();
+        }
+
+        if let Some(ref tex) = self.buffers.aux_data_texture {
+            // Pad aux_data to full rows so write_texture gets a complete rectangle
+            let total_texels = (AUX_TEX_WIDTH * needed_height) as usize;
+            let mut padded = aux_data.to_vec();
+            padded.resize(total_texels, [0.0f32; 4]);
+
+            let bytes = bytemuck::cast_slice::<[f32; 4], u8>(&padded);
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(AUX_TEX_WIDTH * 16), // 1024 texels × 16 bytes
+                    rows_per_image: None,
+                },
+                wgpu::Extent3d {
+                    width: AUX_TEX_WIDTH,
+                    height: needed_height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+
     /// Recreate the SDF bind group (needed when aux_data buffer is resized).
     ///
     /// Uses the real glyph atlas if `active_glyph_atlas` is set, otherwise
@@ -4370,6 +4663,36 @@ impl GpuRenderer {
                 )
             };
 
+        // Binding 1: primitives (storage buffer or data texture)
+        let binding_1 = if self.has_storage_buffers {
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: self.buffers.primitives.as_entire_binding(),
+            }
+        } else {
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(
+                    self.buffers.prim_data_view.as_ref().expect("DT mode requires prim_data_view"),
+                ),
+            }
+        };
+
+        // Binding 5: aux data (storage buffer or data texture)
+        let binding_5 = if self.has_storage_buffers {
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: self.buffers.aux_data.as_entire_binding(),
+            }
+        } else {
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(
+                    self.buffers.aux_data_view.as_ref().expect("DT mode requires aux_data_view"),
+                ),
+            }
+        };
+
         self.bind_groups.sdf = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("SDF Bind Group (rebound)"),
             layout: &self.bind_group_layouts.sdf,
@@ -4378,10 +4701,7 @@ impl GpuRenderer {
                     binding: 0,
                     resource: self.buffers.uniforms.as_entire_binding(),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.buffers.primitives.as_entire_binding(),
-                },
+                binding_1,
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(atlas_view),
@@ -4394,10 +4714,7 @@ impl GpuRenderer {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(color_atlas_view),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: self.buffers.aux_data.as_entire_binding(),
-                },
+                binding_5,
             ],
         });
     }
@@ -5815,6 +6132,7 @@ impl GpuRenderer {
                 self.texture_format,
                 sample_count,
                 self.has_vertex_storage,
+                self.has_storage_buffers,
             ));
         }
 
@@ -6092,6 +6410,7 @@ impl GpuRenderer {
                 self.texture_format,
                 sample_count,
                 self.has_vertex_storage,
+                self.has_storage_buffers,
             ));
         }
 

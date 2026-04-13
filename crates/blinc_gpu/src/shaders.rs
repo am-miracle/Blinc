@@ -2247,6 +2247,21 @@ pub const SDF_3D_VB_SHADER: &str = include_str!("shaders/sdf_3d_vb.wgsl");
 /// Vertex-buffer fallback: Notch primitives
 pub const SDF_NOTCH_VB_SHADER: &str = include_str!("shaders/sdf_notch_vb.wgsl");
 
+/// Data-texture fallback: Core shapes (no storage buffers needed — WebGL2)
+///
+/// Replaces storage buffer reads with textureLoad from RGBA32F data textures.
+/// Also uses vertex buffer instance attributes (inherits from VB variant).
+pub const SDF_CORE_DT_SHADER: &str = include_str!("shaders/sdf_core_dt.wgsl");
+
+/// Data-texture fallback: Shadow primitives
+pub const SDF_SHADOW_DT_SHADER: &str = include_str!("shaders/sdf_shadow_dt.wgsl");
+
+/// Data-texture fallback: 3D raymarched shapes
+pub const SDF_3D_DT_SHADER: &str = include_str!("shaders/sdf_3d_dt.wgsl");
+
+/// Data-texture fallback: Notch primitives
+pub const SDF_NOTCH_DT_SHADER: &str = include_str!("shaders/sdf_notch_dt.wgsl");
+
 /// Shader for text rendering with SDF glyphs
 ///
 /// Supports both grayscale text glyphs and color emoji:
@@ -4913,5 +4928,25 @@ mod tests {
     #[test]
     fn sdf_notch_vb_shader_parses() {
         parse_wgsl(SDF_NOTCH_VB_SHADER).expect("SDF_NOTCH_VB_SHADER");
+    }
+
+    #[test]
+    fn sdf_core_dt_shader_parses() {
+        parse_wgsl(SDF_CORE_DT_SHADER).expect("SDF_CORE_DT_SHADER");
+    }
+
+    #[test]
+    fn sdf_shadow_dt_shader_parses() {
+        parse_wgsl(SDF_SHADOW_DT_SHADER).expect("SDF_SHADOW_DT_SHADER");
+    }
+
+    #[test]
+    fn sdf_3d_dt_shader_parses() {
+        parse_wgsl(SDF_3D_DT_SHADER).expect("SDF_3D_DT_SHADER");
+    }
+
+    #[test]
+    fn sdf_notch_dt_shader_parses() {
+        parse_wgsl(SDF_NOTCH_DT_SHADER).expect("SDF_NOTCH_DT_SHADER");
     }
 }

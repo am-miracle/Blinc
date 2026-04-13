@@ -1,4 +1,8 @@
 // ============================================================================
+// Data-Texture variant — vs_main reads per-instance fields from an
+// instance-stepped vertex buffer; fs_main reads primitive data via
+// textureLoad from an RGBA32F data texture instead of a storage buffer.
+// Enables WebGL2 compatibility (no storage buffer support required).
 // Blinc SDF 3D Primitive Shader
 //
 // Handles primitives that use 3D SDF raymarching — when perspective.w
@@ -92,14 +96,54 @@ struct Primitive {
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(0) @binding(1) var<storage, read> primitives: array<Primitive>;
+@group(0) @binding(1) var prim_data: texture_2d<f32>;
 // Glyph atlas textures for unified text rendering
 @group(0) @binding(2) var glyph_atlas: texture_2d<f32>;
 @group(0) @binding(3) var glyph_sampler: sampler;
 @group(0) @binding(4) var color_glyph_atlas: texture_2d<f32>;
-// Auxiliary data buffer for variable-length per-primitive data
+// Auxiliary data texture for variable-length per-primitive data
 // (3D group shape descriptors, polygon clip vertices, etc.)
-@group(0) @binding(5) var<storage, read> aux_data: array<vec4<f32>>;
+@group(0) @binding(5) var aux_tex: texture_2d<f32>;
+
+// ============================================================================
+// Data-Texture Helpers
+// ============================================================================
+
+fn load_primitive(index: u32) -> Primitive {
+    var p: Primitive;
+    let y = i32(index);
+    p.bounds = textureLoad(prim_data, vec2<i32>(0, y), 0);
+    p.corner_radius = textureLoad(prim_data, vec2<i32>(1, y), 0);
+    p.color = textureLoad(prim_data, vec2<i32>(2, y), 0);
+    p.color2 = textureLoad(prim_data, vec2<i32>(3, y), 0);
+    p.border = textureLoad(prim_data, vec2<i32>(4, y), 0);
+    p.border_color = textureLoad(prim_data, vec2<i32>(5, y), 0);
+    p.shadow = textureLoad(prim_data, vec2<i32>(6, y), 0);
+    p.shadow_color = textureLoad(prim_data, vec2<i32>(7, y), 0);
+    p.clip_bounds = textureLoad(prim_data, vec2<i32>(8, y), 0);
+    p.clip_radius = textureLoad(prim_data, vec2<i32>(9, y), 0);
+    p.gradient_params = textureLoad(prim_data, vec2<i32>(10, y), 0);
+    p.rotation = textureLoad(prim_data, vec2<i32>(11, y), 0);
+    p.local_affine = textureLoad(prim_data, vec2<i32>(12, y), 0);
+    p.perspective = textureLoad(prim_data, vec2<i32>(13, y), 0);
+    p.sdf_3d = textureLoad(prim_data, vec2<i32>(14, y), 0);
+    p.light = textureLoad(prim_data, vec2<i32>(15, y), 0);
+    p.filter_a = textureLoad(prim_data, vec2<i32>(16, y), 0);
+    p.filter_b = textureLoad(prim_data, vec2<i32>(17, y), 0);
+    p.mask_params = textureLoad(prim_data, vec2<i32>(18, y), 0);
+    p.mask_info = textureLoad(prim_data, vec2<i32>(19, y), 0);
+    p.corner_shape = textureLoad(prim_data, vec2<i32>(20, y), 0);
+    p.clip_fade = textureLoad(prim_data, vec2<i32>(21, y), 0);
+    p.type_info = bitcast<vec4<u32>>(textureLoad(prim_data, vec2<i32>(22, y), 0));
+    return p;
+}
+
+const AUX_TEX_WIDTH: i32 = 1024;
+
+fn load_aux(index: u32) -> vec4<f32> {
+    let i = i32(index);
+    return textureLoad(aux_tex, vec2<i32>(i % AUX_TEX_WIDTH, i / AUX_TEX_WIDTH), 0);
+}
 
 // ============================================================================
 // Vertex Shader
@@ -109,27 +153,33 @@ struct Primitive {
 fn vs_main(
     @builtin(vertex_index) vertex_index: u32,
     @builtin(instance_index) instance_index: u32,
+    @location(0) vb_bounds: vec4<f32>,
+    @location(1) vb_shadow: vec4<f32>,
+    @location(2) vb_rotation: vec4<f32>,
+    @location(3) vb_perspective: vec4<f32>,
+    @location(4) vb_sdf_3d: vec4<f32>,
+    @location(5) vb_local_affine: vec4<f32>,
+    @location(6) vb_corner_radius: vec4<f32>,
+    @location(7) vb_light: vec4<f32>,
 ) -> VertexOutput {
     var out: VertexOutput;
 
-    let prim = primitives[instance_index];
-
     // Expand bounds for shadow blur
-    let blur_expand = prim.shadow.z * 3.0 + abs(prim.shadow.x) + abs(prim.shadow.y);
+    let blur_expand = vb_shadow.z * 3.0 + abs(vb_shadow.x) + abs(vb_shadow.y);
 
     // Extract 3D rotation/perspective parameters
-    let sin_rz = prim.rotation.x;
-    let cos_rz = prim.rotation.y;
-    let sin_ry = prim.rotation.z;
-    let cos_ry = prim.rotation.w;
-    let sin_rx = prim.perspective.x;
-    let cos_rx = prim.perspective.y;
-    let persp_d = prim.perspective.z;
+    let sin_rz = vb_rotation.x;
+    let cos_rz = vb_rotation.y;
+    let sin_ry = vb_rotation.z;
+    let cos_ry = vb_rotation.w;
+    let sin_rx = vb_perspective.x;
+    let cos_rx = vb_perspective.y;
+    let persp_d = vb_perspective.z;
 
     // 3D perspective: project all 8 corners of the 3D bounding box to find AABB
-    let ctr = prim.bounds.xy + prim.bounds.zw * 0.5;
-    let half = prim.bounds.zw * 0.5;
-    let half_d = prim.sdf_3d.x * 0.5; // half-depth
+    let ctr = vb_bounds.xy + vb_bounds.zw * 0.5;
+    let half = vb_bounds.zw * 0.5;
+    let half_d = vb_sdf_3d.x * 0.5; // half-depth
     let corners3d = array<vec3<f32>, 8>(
         vec3<f32>(-half.x, -half.y, -half_d),
         vec3<f32>( half.x, -half.y, -half_d),
@@ -170,8 +220,8 @@ fn vs_main(
     // |\ |
     // | \|
     // 3--2
-    // Triangle 1: 0 → 1 → 3 (TL → TR → BL) - upper-left triangle
-    // Triangle 2: 1 → 2 → 3 (TR → BR → BL) - lower-right triangle
+    // Triangle 1: 0 -> 1 -> 3 (TL -> TR -> BL) - upper-left triangle
+    // Triangle 2: 1 -> 2 -> 3 (TR -> BR -> BL) - lower-right triangle
     // Shared edge: 1-3 (top-right to bottom-left = / diagonal)
     //
     // PowerVR Vulkan codegen bug workaround: dynamic indexing into a
@@ -335,7 +385,7 @@ fn calculate_polygon_clip_alpha(p: vec2<f32>, vertex_count: u32, aux_offset: u32
     for (var i: u32 = 0u; i < vertex_count; i = i + 1u) {
         // Read vertex i: packed as (x0, y0, x1, y1) per vec4
         let vec_idx = aux_offset + (i / 2u);
-        let data = aux_data[vec_idx];
+        let data = load_aux(vec_idx);
         var vi: vec2<f32>;
         if (i % 2u) == 0u {
             vi = data.xy;
@@ -346,7 +396,7 @@ fn calculate_polygon_clip_alpha(p: vec2<f32>, vertex_count: u32, aux_offset: u32
         // Read vertex j (next, wrapping)
         let j = (i + 1u) % vertex_count;
         let vec_idx_j = aux_offset + (j / 2u);
-        let data_j = aux_data[vec_idx_j];
+        let data_j = load_aux(vec_idx_j);
         var vj: vec2<f32>;
         if (j % 2u) == 0u {
             vj = data_j.xy;
@@ -497,9 +547,9 @@ fn eval_group_sdf(p: vec3<f32>, shape_count: u32, aux_offset: u32) -> f32 {
     var d = 1e10;
     for (var i = 0u; i < shape_count; i++) {
         let base = aux_offset + i * 4u;
-        let s_offset = aux_data[base];       // x, y, z, corner_radius
-        let s_params = aux_data[base + 1u];  // shape_type, depth, op_type, blend
-        let s_half = aux_data[base + 2u];    // half_w, half_h, half_d, 0
+        let s_offset = load_aux(base);       // x, y, z, corner_radius
+        let s_params = load_aux(base + 1u);  // shape_type, depth, op_type, blend
+        let s_half = load_aux(base + 2u);    // half_w, half_h, half_d, 0
 
         let local_p = p - s_offset.xyz;
         let shape_d = sdf_3d_eval(local_p, u32(s_params.x), s_half.xyz, s_offset.w);
@@ -532,10 +582,10 @@ fn eval_group_closest_shape_color(hp: vec3<f32>, shape_count: u32, aux_offset: u
     var closest_color = vec4<f32>(1.0);
     for (var i = 0u; i < shape_count; i++) {
         let base = aux_offset + i * 4u;
-        let s_offset = aux_data[base];
-        let s_params = aux_data[base + 1u];
-        let s_half = aux_data[base + 2u];
-        let s_color = aux_data[base + 3u];
+        let s_offset = load_aux(base);
+        let s_params = load_aux(base + 1u);
+        let s_half = load_aux(base + 2u);
+        let s_color = load_aux(base + 3u);
 
         let local_p = hp - s_offset.xyz;
         let d = abs(sdf_3d_eval(local_p, u32(s_params.x), s_half.xyz, s_offset.w));
@@ -625,7 +675,7 @@ fn rotate_z_inv(p: vec3<f32>, s: f32, c: f32) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let prim = primitives[in.instance_index];
+    let prim = load_primitive(in.instance_index);
     let p = in.uv;
 
     // Screen-space derivative magnitude, computed up-front *outside*
