@@ -51,6 +51,134 @@ pub const NOTCH_MOD_BULGE: f32 = 2.0;
 pub const NOTCH_MOD_CUT: f32 = 3.0;
 pub const NOTCH_MOD_PEAK: f32 = 4.0;
 
+/// Pipeline category for multi-pipeline SDF dispatch.
+///
+/// Primitives are sorted by category before GPU upload so each
+/// specialized pipeline draws a contiguous range of instances.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SdfPipelineCategory {
+    /// Rect, Circle, Ellipse — 2D shapes with borders, gradients, filters
+    Core = 0,
+    /// Shadow, InnerShadow, CircleShadow, CircleInnerShadow
+    Shadow = 1,
+    /// 3D raymarched shapes (shape_type > 0 in perspective.w)
+    Sdf3D = 2,
+    /// Notch (prim_type 8) — concave corners + edge modifiers
+    Notch = 3,
+    /// Text (prim_type 7) — handled by TEXT_SHADER pipeline
+    Text = 4,
+}
+
+impl GpuPrimitive {
+    /// Determine which SDF pipeline should render this primitive.
+    /// 3D is detected by shape_type in perspective[3], not by prim_type.
+    pub fn pipeline_category(&self) -> SdfPipelineCategory {
+        let prim_type = self.type_info[0];
+        // Check for 3D: perspective[3] = shape_3d_type (f32 encoding of 1-6)
+        let shape_3d_type = self.perspective[3] as u32;
+        if shape_3d_type > 0 {
+            return SdfPipelineCategory::Sdf3D;
+        }
+        match prim_type {
+            0 | 1 | 2 => SdfPipelineCategory::Core,
+            3 | 4 | 5 | 6 => SdfPipelineCategory::Shadow,
+            7 => SdfPipelineCategory::Text,
+            8 => SdfPipelineCategory::Notch,
+            _ => SdfPipelineCategory::Core, // fallback
+        }
+    }
+}
+
+/// Vertex-shader-required fields for the SDF pipeline, packed into an
+/// instance-stepped vertex buffer. Used as a fallback when the GPU
+/// adapter does not support `VERTEX_STORAGE` (storage buffers in vertex
+/// shaders). The fragment shader still reads the full `GpuPrimitive`
+/// from the storage buffer — only the vertex stage needs this.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SdfVertexInstance {
+    pub bounds: [f32; 4],
+    pub shadow: [f32; 4],
+    pub rotation: [f32; 4],
+    pub perspective: [f32; 4],
+    pub sdf_3d: [f32; 4],
+    pub local_affine: [f32; 4],
+    pub corner_radius: [f32; 4],
+    pub light: [f32; 4],
+}
+
+impl SdfVertexInstance {
+    /// Extract vertex-shader-needed fields from a full primitive.
+    pub fn from_primitive(p: &GpuPrimitive) -> Self {
+        Self {
+            bounds: p.bounds,
+            shadow: p.shadow,
+            rotation: p.rotation,
+            perspective: p.perspective,
+            sdf_3d: p.sdf_3d,
+            local_affine: p.local_affine,
+            corner_radius: p.corner_radius,
+            light: p.light,
+        }
+    }
+
+    /// Vertex buffer layout for instance-stepped SDF vertex data.
+    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<SdfVertexInstance>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &[
+            // @location(0) bounds
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 0,
+                shader_location: 0,
+            },
+            // @location(1) shadow
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 16,
+                shader_location: 1,
+            },
+            // @location(2) rotation
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 32,
+                shader_location: 2,
+            },
+            // @location(3) perspective
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 48,
+                shader_location: 3,
+            },
+            // @location(4) sdf_3d
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 64,
+                shader_location: 4,
+            },
+            // @location(5) local_affine
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 80,
+                shader_location: 5,
+            },
+            // @location(6) corner_radius
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 96,
+                shader_location: 6,
+            },
+            // @location(7) light
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 112,
+                shader_location: 7,
+            },
+        ],
+    };
+}
+
 /// Fill types (must match shader constants)
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -31,11 +31,13 @@ use crate::path::PathVertex;
 use crate::primitives::{
     BlurUniforms, ColorMatrixUniforms, DropShadowUniforms, GlassType, GlassUniforms, GlowUniforms,
     GpuGlassPrimitive, GpuGlyph, GpuPrimitive, MaskImageUniforms, PathUniforms, PrimitiveBatch,
-    Sdf3DUniform, Uniforms, Viewport3D,
+    Sdf3DUniform, SdfPipelineCategory, SdfVertexInstance, Uniforms, Viewport3D,
 };
 use crate::shaders::{
     BLUR_SHADER, COLOR_MATRIX_SHADER, COMPOSITE_SHADER, DROP_SHADOW_SHADER, GLASS_SHADER,
     GLOW_SHADER, IMAGE_SHADER, LAYER_COMPOSITE_SHADER, MASK_IMAGE_SHADER, PATH_SHADER, SDF_SHADER,
+    SDF_3D_SHADER, SDF_3D_VB_SHADER, SDF_CORE_SHADER, SDF_CORE_VB_SHADER,
+    SDF_NOTCH_SHADER, SDF_NOTCH_VB_SHADER, SDF_SHADOW_SHADER, SDF_SHADOW_VB_SHADER,
     SIMPLE_GLASS_SHADER, TEXT_SHADER,
 };
 
@@ -290,10 +292,28 @@ impl GpuMemoryBudget {
 
 /// Render pipelines for different primitive types
 struct Pipelines {
-    /// Pipeline for SDF primitives (rects, circles, etc.)
+    /// Pipeline for SDF primitives (rects, circles, etc.) — monolithic fallback (deprecated)
+    #[allow(dead_code)]
     sdf: wgpu::RenderPipeline,
-    /// Pipeline for SDF primitives rendering on top of existing content (1x sampled)
+    /// Pipeline for SDF primitives rendering on top of existing content (1x sampled) — monolithic fallback (deprecated)
+    #[allow(dead_code)]
     sdf_overlay: wgpu::RenderPipeline,
+    /// Split SDF pipeline: core shapes (Rect, Circle, Ellipse)
+    sdf_core: wgpu::RenderPipeline,
+    /// Split SDF pipeline: shadow shapes (Shadow, InnerShadow, CircleShadow, CircleInnerShadow)
+    sdf_shadow: wgpu::RenderPipeline,
+    /// Split SDF pipeline: 3D raymarched shapes
+    sdf_3d: wgpu::RenderPipeline,
+    /// Split SDF pipeline: notch shapes
+    sdf_notch: wgpu::RenderPipeline,
+    /// Split SDF overlay pipeline: core shapes (1x sampled)
+    sdf_core_overlay: wgpu::RenderPipeline,
+    /// Split SDF overlay pipeline: shadow shapes (1x sampled)
+    sdf_shadow_overlay: wgpu::RenderPipeline,
+    /// Split SDF overlay pipeline: 3D raymarched shapes (1x sampled)
+    sdf_3d_overlay: wgpu::RenderPipeline,
+    /// Split SDF overlay pipeline: notch shapes (1x sampled)
+    sdf_notch_overlay: wgpu::RenderPipeline,
     /// Pipeline for text rendering (MSAA)
     #[allow(dead_code)]
     text: wgpu::RenderPipeline,
@@ -332,8 +352,17 @@ struct EffectPipelines {
 
 /// Cached MSAA pipelines for dynamic sample counts
 struct MsaaPipelines {
-    /// SDF pipeline for this sample count
+    /// SDF pipeline for this sample count (monolithic fallback, deprecated)
+    #[allow(dead_code)]
     sdf: wgpu::RenderPipeline,
+    /// Split SDF MSAA pipeline: core shapes
+    sdf_core: wgpu::RenderPipeline,
+    /// Split SDF MSAA pipeline: shadow shapes
+    sdf_shadow: wgpu::RenderPipeline,
+    /// Split SDF MSAA pipeline: 3D raymarched shapes
+    sdf_3d: wgpu::RenderPipeline,
+    /// Split SDF MSAA pipeline: notch shapes
+    sdf_notch: wgpu::RenderPipeline,
     /// Path pipeline for this sample count
     path: wgpu::RenderPipeline,
     /// Sample count these pipelines were created for
@@ -369,6 +398,10 @@ struct Buffers {
     color_matrix_uniforms: Option<wgpu::Buffer>,
     /// Storage buffer for auxiliary per-primitive data (group shapes, polygon clips)
     aux_data: wgpu::Buffer,
+    /// Instance vertex buffer for VERTEX_STORAGE fallback (WebGL2).
+    /// Created/resized on demand when the adapter lacks storage buffers in
+    /// vertex shaders.
+    sdf_vertex_instances: Option<wgpu::Buffer>,
 }
 
 /// Bind groups for shader resources
@@ -916,6 +949,20 @@ impl LayerTextureCache {
     }
 }
 
+/// Primitive range boundaries for split SDF pipeline dispatch.
+///
+/// After sorting primitives by `SdfPipelineCategory`, each category
+/// occupies a contiguous range in the GPU buffer. Text primitives are
+/// tracked here for completeness but rendered by the separate text pipeline.
+#[derive(Clone, Default)]
+struct SdfPrimitiveRanges {
+    core: std::ops::Range<u32>,
+    shadow: std::ops::Range<u32>,
+    sdf_3d: std::ops::Range<u32>,
+    notch: std::ops::Range<u32>,
+    text: std::ops::Range<u32>,
+}
+
 /// The GPU renderer using wgpu
 ///
 /// This is the main rendering engine that:
@@ -1005,6 +1052,10 @@ pub struct GpuRenderer {
     /// Staging texture for scene capture (used by flow shaders with sample_scene()).
     /// Lazily created/resized to match the render target.
     scene_copy_texture: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
+    /// Whether the GPU adapter supports storage buffers in vertex shaders.
+    /// When `false`, SDF pipelines use an instance-stepped vertex buffer
+    /// fallback (WebGL2 path).
+    has_vertex_storage: bool,
 }
 
 /// Image rendering pipeline (created lazily on first image render)
@@ -1184,6 +1235,177 @@ impl GpuRenderer {
             0,
             bytemuck::cast_slice(primitives_to_write),
         );
+    }
+
+    /// Sort primitives by `SdfPipelineCategory` and compute contiguous ranges.
+    ///
+    /// Returns a new sorted `Vec` and the corresponding `SdfPrimitiveRanges`.
+    /// Text primitives are included in the sorted output (and tracked in ranges)
+    /// but should NOT be drawn by the split SDF pipelines — they use the separate
+    /// text pipeline.
+    fn sort_primitives_by_category(
+        primitives: &[GpuPrimitive],
+    ) -> (Vec<GpuPrimitive>, SdfPrimitiveRanges) {
+        if primitives.is_empty() {
+            return (Vec::new(), SdfPrimitiveRanges::default());
+        }
+        let mut sorted: Vec<GpuPrimitive> = primitives.to_vec();
+        sorted.sort_by_key(|p| p.pipeline_category());
+
+        let mut ranges = SdfPrimitiveRanges::default();
+        let mut i = 0u32;
+        let len = sorted.len() as u32;
+        while i < len {
+            let cat = sorted[i as usize].pipeline_category();
+            let start = i;
+            while i < len && sorted[i as usize].pipeline_category() == cat {
+                i += 1;
+            }
+            let range = start..i;
+            match cat {
+                SdfPipelineCategory::Core => ranges.core = range,
+                SdfPipelineCategory::Shadow => ranges.shadow = range,
+                SdfPipelineCategory::Sdf3D => ranges.sdf_3d = range,
+                SdfPipelineCategory::Notch => ranges.notch = range,
+                SdfPipelineCategory::Text => ranges.text = range,
+            }
+        }
+        (sorted, ranges)
+    }
+
+    /// Sort primitives, upload to the GPU buffer (with safety truncation), and return ranges.
+    ///
+    /// When `has_vertex_storage` is `false`, also builds and uploads the
+    /// `SdfVertexInstance` buffer used by the VB fallback shaders.
+    fn upload_sorted_primitives(&mut self, primitives: &[GpuPrimitive]) -> SdfPrimitiveRanges {
+        if primitives.is_empty() {
+            return SdfPrimitiveRanges::default();
+        }
+        let (sorted, ranges) = Self::sort_primitives_by_category(primitives);
+        self.write_primitives_safe(&sorted);
+
+        // VERTEX_STORAGE fallback: build instance data and upload to VB
+        if !self.has_vertex_storage {
+            let instances: Vec<SdfVertexInstance> = sorted
+                .iter()
+                .map(SdfVertexInstance::from_primitive)
+                .collect();
+            let bytes = bytemuck::cast_slice::<SdfVertexInstance, u8>(&instances);
+            let needed = bytes.len() as u64;
+
+            // Create or resize the vertex buffer if necessary
+            let needs_new_buffer = match &self.buffers.sdf_vertex_instances {
+                Some(buf) => buf.size() < needed,
+                None => true,
+            };
+            if needs_new_buffer {
+                self.buffers.sdf_vertex_instances =
+                    Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("SDF Vertex Instances (VB Fallback)"),
+                        size: needed,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+            }
+            if let Some(buf) = &self.buffers.sdf_vertex_instances {
+                self.queue.write_buffer(buf, 0, bytes);
+            }
+        }
+
+        ranges
+    }
+
+    /// Returns the SDF vertex instance buffer for the VB fallback path,
+    /// or `None` when VERTEX_STORAGE is supported.
+    fn sdf_vb_buffer(&self) -> Option<&wgpu::Buffer> {
+        if self.has_vertex_storage {
+            None
+        } else {
+            self.buffers.sdf_vertex_instances.as_ref()
+        }
+    }
+
+    /// Issue draw calls for split SDF pipelines using pre-computed ranges.
+    ///
+    /// The bind group must already be set on the render pass before calling this.
+    /// If `overlay` is true, the overlay pipeline variants are used (1x sampled).
+    /// When `vb_buffer` is `Some`, the instance vertex buffer is bound at slot 0
+    /// before each pipeline draw (VERTEX_STORAGE fallback path).
+    fn draw_split_sdf<'a>(
+        render_pass: &mut wgpu::RenderPass<'a>,
+        pipelines: &'a Pipelines,
+        ranges: &SdfPrimitiveRanges,
+        overlay: bool,
+        vb_buffer: Option<&'a wgpu::Buffer>,
+    ) {
+        if let Some(buf) = vb_buffer {
+            render_pass.set_vertex_buffer(0, buf.slice(..));
+        }
+        if !ranges.core.is_empty() {
+            if overlay {
+                render_pass.set_pipeline(&pipelines.sdf_core_overlay);
+            } else {
+                render_pass.set_pipeline(&pipelines.sdf_core);
+            }
+            render_pass.draw(0..6, ranges.core.clone());
+        }
+        if !ranges.shadow.is_empty() {
+            if overlay {
+                render_pass.set_pipeline(&pipelines.sdf_shadow_overlay);
+            } else {
+                render_pass.set_pipeline(&pipelines.sdf_shadow);
+            }
+            render_pass.draw(0..6, ranges.shadow.clone());
+        }
+        if !ranges.sdf_3d.is_empty() {
+            if overlay {
+                render_pass.set_pipeline(&pipelines.sdf_3d_overlay);
+            } else {
+                render_pass.set_pipeline(&pipelines.sdf_3d);
+            }
+            render_pass.draw(0..6, ranges.sdf_3d.clone());
+        }
+        if !ranges.notch.is_empty() {
+            if overlay {
+                render_pass.set_pipeline(&pipelines.sdf_notch_overlay);
+            } else {
+                render_pass.set_pipeline(&pipelines.sdf_notch);
+            }
+            render_pass.draw(0..6, ranges.notch.clone());
+        }
+        // Note: text range is NOT drawn here — text uses the separate text pipeline
+    }
+
+    /// Issue draw calls for split SDF pipelines using MSAA pipeline variants.
+    ///
+    /// Used by `render_overlay_msaa` where a specific sample count is in play.
+    /// When `vb_buffer` is `Some`, the instance vertex buffer is bound at slot 0
+    /// (VERTEX_STORAGE fallback path).
+    fn draw_split_sdf_msaa<'a>(
+        render_pass: &mut wgpu::RenderPass<'a>,
+        msaa: &'a MsaaPipelines,
+        ranges: &SdfPrimitiveRanges,
+        vb_buffer: Option<&'a wgpu::Buffer>,
+    ) {
+        if let Some(buf) = vb_buffer {
+            render_pass.set_vertex_buffer(0, buf.slice(..));
+        }
+        if !ranges.core.is_empty() {
+            render_pass.set_pipeline(&msaa.sdf_core);
+            render_pass.draw(0..6, ranges.core.clone());
+        }
+        if !ranges.shadow.is_empty() {
+            render_pass.set_pipeline(&msaa.sdf_shadow);
+            render_pass.draw(0..6, ranges.shadow.clone());
+        }
+        if !ranges.sdf_3d.is_empty() {
+            render_pass.set_pipeline(&msaa.sdf_3d);
+            render_pass.draw(0..6, ranges.sdf_3d.clone());
+        }
+        if !ranges.notch.is_empty() {
+            render_pass.set_pipeline(&msaa.sdf_notch);
+            render_pass.draw(0..6, ranges.notch.clone());
+        }
     }
 
     /// Create a new renderer without a surface (for headless rendering)
@@ -1383,19 +1605,25 @@ impl GpuRenderer {
         // Check that the adapter supports storage buffers in vertex
         // shaders — Blinc's SDF pipeline requires this (the primitives
         // buffer is `var<storage, read>` accessed from both vertex and
-        // fragment stages). Early WebGPU implementations (Safari TP,
-        // some Firefox builds) may not have VERTEX_STORAGE.
-        let downlevel = adapter.get_downlevel_capabilities();
-        if !downlevel
-            .flags
-            .contains(wgpu::DownlevelFlags::VERTEX_STORAGE)
+        // fragment stages). Skip on wasm32: the WebGPU spec guarantees
+        // storage buffer support, but wgpu's downlevel report can be
+        // wrong when the GL fallback adapter is selected (WebGL2 lacks
+        // VERTEX_STORAGE, producing a false negative even though the
+        // browser's WebGPU backend supports it).
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            return Err(RendererError::ShaderError(
-                "This browser's WebGPU implementation does not support storage buffers \
-                 in vertex shaders (VERTEX_STORAGE). Blinc requires this feature for \
-                 its SDF rendering pipeline. Try Chrome 113+ or Edge 113+."
-                    .to_string(),
-            ));
+            let downlevel = adapter.get_downlevel_capabilities();
+            if !downlevel
+                .flags
+                .contains(wgpu::DownlevelFlags::VERTEX_STORAGE)
+            {
+                return Err(RendererError::ShaderError(
+                    "GPU adapter does not support storage buffers in vertex shaders \
+                     (VERTEX_STORAGE). Blinc requires this feature for its SDF \
+                     rendering pipeline."
+                        .to_string(),
+                ));
+            }
         }
 
         let required_limits = device_required_limits(&adapter);
@@ -1527,8 +1755,18 @@ impl GpuRenderer {
         config: RendererConfig,
         viewport_size: (u32, u32),
     ) -> Result<Self, RendererError> {
+        // Check if the adapter supports storage buffers in vertex shaders
+        let has_vertex_storage = adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::VERTEX_STORAGE);
+        if !has_vertex_storage {
+            tracing::info!("VERTEX_STORAGE not supported — using instance vertex buffer fallback");
+        }
+
         // Create bind group layouts
-        let bind_group_layouts = Self::create_bind_group_layouts(&device);
+        let bind_group_layouts =
+            Self::create_bind_group_layouts_with_flags(&device, has_vertex_storage);
 
         // Create shaders
         let sdf_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1556,17 +1794,47 @@ impl GpuRenderer {
             source: wgpu::ShaderSource::Wgsl(LAYER_COMPOSITE_SHADER.into()),
         });
 
+        // Split SDF shaders — specialized pipelines for each primitive category.
+        // When VERTEX_STORAGE is not available, use the VB fallback shaders
+        // that read per-instance data from vertex attributes instead of storage.
+        let sdf_core_source = if has_vertex_storage { SDF_CORE_SHADER } else { SDF_CORE_VB_SHADER };
+        let sdf_shadow_source = if has_vertex_storage { SDF_SHADOW_SHADER } else { SDF_SHADOW_VB_SHADER };
+        let sdf_3d_source = if has_vertex_storage { SDF_3D_SHADER } else { SDF_3D_VB_SHADER };
+        let sdf_notch_source = if has_vertex_storage { SDF_NOTCH_SHADER } else { SDF_NOTCH_VB_SHADER };
+
+        let sdf_core_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("SDF Core Shader"),
+            source: wgpu::ShaderSource::Wgsl(sdf_core_source.into()),
+        });
+        let sdf_shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("SDF Shadow Shader"),
+            source: wgpu::ShaderSource::Wgsl(sdf_shadow_source.into()),
+        });
+        let sdf_3d_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("SDF 3D Shader"),
+            source: wgpu::ShaderSource::Wgsl(sdf_3d_source.into()),
+        });
+        let sdf_notch_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("SDF Notch Shader"),
+            source: wgpu::ShaderSource::Wgsl(sdf_notch_source.into()),
+        });
+
         // Create pipelines (core only — effect pipelines are lazy)
         let pipelines = Self::create_pipelines(
             &device,
             &bind_group_layouts,
             &sdf_shader,
+            &sdf_core_shader,
+            &sdf_shadow_shader,
+            &sdf_3d_shader,
+            &sdf_notch_shader,
             &text_shader,
             &composite_shader,
             &path_shader,
             &layer_composite_shader,
             texture_format,
             config.sample_count,
+            has_vertex_storage,
         );
 
         // Create buffers
@@ -1773,10 +2041,24 @@ impl GpuRenderer {
             blend_target_ptr: None,
             flow_pipeline_cache,
             scene_copy_texture: None,
+            has_vertex_storage,
         })
     }
 
-    fn create_bind_group_layouts(device: &wgpu::Device) -> BindGroupLayouts {
+    fn create_bind_group_layouts_with_flags(
+        device: &wgpu::Device,
+        has_vertex_storage: bool,
+    ) -> BindGroupLayouts {
+        // When VERTEX_STORAGE is available, the primitives storage buffer
+        // is visible to both vertex and fragment stages. Otherwise, only
+        // the fragment stage reads it — the vertex shader gets its data
+        // from an instance-stepped vertex buffer instead.
+        let primitives_visibility = if has_vertex_storage {
+            wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT
+        } else {
+            wgpu::ShaderStages::FRAGMENT
+        };
+
         // SDF bind group layout (includes glyph atlas for unified text rendering)
         let sdf = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("SDF Bind Group Layout"),
@@ -1795,7 +2077,7 @@ impl GpuRenderer {
                 // Primitives storage buffer
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    visibility: primitives_visibility,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -2342,12 +2624,17 @@ impl GpuRenderer {
         device: &wgpu::Device,
         layouts: &BindGroupLayouts,
         sdf_shader: &wgpu::ShaderModule,
+        sdf_core_shader: &wgpu::ShaderModule,
+        sdf_shadow_shader: &wgpu::ShaderModule,
+        sdf_3d_shader: &wgpu::ShaderModule,
+        sdf_notch_shader: &wgpu::ShaderModule,
         text_shader: &wgpu::ShaderModule,
         composite_shader: &wgpu::ShaderModule,
         path_shader: &wgpu::ShaderModule,
         layer_composite_shader: &wgpu::ShaderModule,
         texture_format: wgpu::TextureFormat,
         sample_count: u32,
+        has_vertex_storage: bool,
     ) -> Pipelines {
         let blend_state = wgpu::BlendState {
             color: wgpu::BlendComponent {
@@ -2441,6 +2728,73 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+
+        // --- Split SDF pipelines (share sdf_layout, same blend/primitive state) ---
+        // When VERTEX_STORAGE is unavailable, SDF vertex shaders read from an
+        // instance-stepped vertex buffer instead of the storage buffer.
+        let sdf_vb_buffers: &[wgpu::VertexBufferLayout<'_>] = if has_vertex_storage {
+            &[]
+        } else {
+            &[SdfVertexInstance::LAYOUT]
+        };
+
+        // Helper closure to create an SDF pipeline pair (MSAA + overlay) from a shader module
+        let make_sdf_pipeline_pair =
+            |shader: &wgpu::ShaderModule, label: &str| -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+                let msaa = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&sdf_layout),
+                    vertex: wgpu::VertexState {
+                        module: shader,
+                        entry_point: Some("vs_main"),
+                        buffers: sdf_vb_buffers,
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: shader,
+                        entry_point: Some("fs_main"),
+                        targets: color_targets,
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    }),
+                    primitive: primitive_state,
+                    depth_stencil: None,
+                    multisample: multisample_state,
+                    multiview: None,
+                    cache: None,
+                });
+                let overlay_label = format!("{label} Overlay");
+                let overlay = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(&overlay_label),
+                    layout: Some(&sdf_layout),
+                    vertex: wgpu::VertexState {
+                        module: shader,
+                        entry_point: Some("vs_main"),
+                        buffers: sdf_vb_buffers,
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: shader,
+                        entry_point: Some("fs_main"),
+                        targets: color_targets,
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    }),
+                    primitive: primitive_state,
+                    depth_stencil: None,
+                    multisample: overlay_multisample_state,
+                    multiview: None,
+                    cache: None,
+                });
+                (msaa, overlay)
+            };
+
+        let (sdf_core, sdf_core_overlay) =
+            make_sdf_pipeline_pair(sdf_core_shader, "SDF Core Pipeline");
+        let (sdf_shadow, sdf_shadow_overlay) =
+            make_sdf_pipeline_pair(sdf_shadow_shader, "SDF Shadow Pipeline");
+        let (sdf_3d, sdf_3d_overlay) =
+            make_sdf_pipeline_pair(sdf_3d_shader, "SDF 3D Pipeline");
+        let (sdf_notch, sdf_notch_overlay) =
+            make_sdf_pipeline_pair(sdf_notch_shader, "SDF Notch Pipeline");
 
         // Text pipeline
         let text_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2737,6 +3091,14 @@ impl GpuRenderer {
         Pipelines {
             sdf,
             sdf_overlay,
+            sdf_core,
+            sdf_shadow,
+            sdf_3d,
+            sdf_notch,
+            sdf_core_overlay,
+            sdf_shadow_overlay,
+            sdf_3d_overlay,
+            sdf_notch_overlay,
             text,
             text_overlay,
             composite,
@@ -2813,6 +3175,7 @@ impl GpuRenderer {
             glow_uniforms: None,
             color_matrix_uniforms: None,
             aux_data,
+            sdf_vertex_instances: None,
         }
     }
 
@@ -2919,6 +3282,7 @@ impl GpuRenderer {
         layouts: &BindGroupLayouts,
         texture_format: wgpu::TextureFormat,
         sample_count: u32,
+        has_vertex_storage: bool,
     ) -> MsaaPipelines {
         let blend_state = wgpu::BlendState {
             color: wgpu::BlendComponent {
@@ -2988,6 +3352,51 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+
+        // Split SDF shader modules (MSAA)
+        let sdf_vb_buffers: &[wgpu::VertexBufferLayout<'_>] = if has_vertex_storage {
+            &[]
+        } else {
+            &[SdfVertexInstance::LAYOUT]
+        };
+        let make_msaa_sdf_pipeline =
+            |source: &str, label: &str| -> wgpu::RenderPipeline {
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                });
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&sdf_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: sdf_vb_buffers,
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        targets: color_targets,
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    }),
+                    primitive: primitive_state,
+                    depth_stencil: None,
+                    multisample: multisample_state,
+                    multiview: None,
+                    cache: None,
+                })
+            };
+
+        let msaa_core_src = if has_vertex_storage { SDF_CORE_SHADER } else { SDF_CORE_VB_SHADER };
+        let msaa_shadow_src = if has_vertex_storage { SDF_SHADOW_SHADER } else { SDF_SHADOW_VB_SHADER };
+        let msaa_3d_src = if has_vertex_storage { SDF_3D_SHADER } else { SDF_3D_VB_SHADER };
+        let msaa_notch_src = if has_vertex_storage { SDF_NOTCH_SHADER } else { SDF_NOTCH_VB_SHADER };
+
+        let sdf_core = make_msaa_sdf_pipeline(msaa_core_src, "SDF Core Pipeline (MSAA)");
+        let sdf_shadow = make_msaa_sdf_pipeline(msaa_shadow_src, "SDF Shadow Pipeline (MSAA)");
+        let sdf_3d = make_msaa_sdf_pipeline(msaa_3d_src, "SDF 3D Pipeline (MSAA)");
+        let sdf_notch = make_msaa_sdf_pipeline(msaa_notch_src, "SDF Notch Pipeline (MSAA)");
 
         // Create path shader
         let path_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -3086,6 +3495,10 @@ impl GpuRenderer {
 
         MsaaPipelines {
             sdf,
+            sdf_core,
+            sdf_shadow,
+            sdf_3d,
+            sdf_notch,
             path,
             sample_count,
         }
@@ -3519,25 +3932,8 @@ impl GpuRenderer {
         // Cull off-screen primitives before GPU upload
         let visible_primitives = self.cull_primitives(&batch.primitives);
 
-        // Update primitives buffer (with safety limit to prevent buffer overflow)
-        if !visible_primitives.is_empty() {
-            let max_primitives = self.config.max_primitives;
-            let primitives_to_write = if visible_primitives.len() > max_primitives {
-                tracing::warn!(
-                    "Primitive count {} exceeds buffer capacity {}, truncating",
-                    visible_primitives.len(),
-                    max_primitives
-                );
-                &visible_primitives[..max_primitives]
-            } else {
-                &visible_primitives[..]
-            };
-            self.queue.write_buffer(
-                &self.buffers.primitives,
-                0,
-                bytemuck::cast_slice(primitives_to_write),
-            );
-        }
+        // Sort primitives by pipeline category and upload
+        let sdf_ranges = self.upload_sorted_primitives(&visible_primitives);
 
         // Update auxiliary data buffer (group shapes, polygon clips)
         // This may call rebind_sdf_bind_group() if the buffer needs resizing.
@@ -3580,12 +3976,10 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            // Render SDF primitives (only visible ones)
+            // Render SDF primitives via split pipelines
             if !visible_primitives.is_empty() {
-                render_pass.set_pipeline(&self.pipelines.sdf);
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                let count = visible_primitives.len().min(self.config.max_primitives) as u32;
-                render_pass.draw(0..6, 0..count);
+                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
             }
 
             // Render paths
@@ -3864,14 +4258,8 @@ impl GpuRenderer {
         // Update auxiliary data buffer
         self.update_aux_data_buffer(batch);
 
-        // Update primitives buffer with filtered primitives
-        if !included_primitives.is_empty() {
-            self.queue.write_buffer(
-                &self.buffers.primitives,
-                0,
-                bytemuck::cast_slice(&included_primitives),
-            );
-        }
+        // Sort and upload filtered primitives
+        let sdf_ranges = self.upload_sorted_primitives(&included_primitives);
 
         // Update path buffers if we have path geometry
         let has_paths = !batch.paths.vertices.is_empty() && !batch.paths.indices.is_empty();
@@ -3909,11 +4297,10 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            // Render SDF primitives (filtered)
+            // Render SDF primitives via split pipelines (filtered)
             if !included_primitives.is_empty() {
-                render_pass.set_pipeline(&self.pipelines.sdf);
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                render_pass.draw(0..6, 0..included_primitives.len() as u32);
+                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
             }
 
             // Render paths (always rendered - path filtering would be more complex)
@@ -4117,8 +4504,8 @@ impl GpuRenderer {
         self.queue
             .write_buffer(&self.buffers.uniforms, 0, bytemuck::bytes_of(&uniforms));
 
-        // Update primitives buffer (using safe write to prevent overflow)
-        self.write_primitives_safe(&batch.primitives);
+        // Sort and upload primitives
+        let sdf_ranges = self.upload_sorted_primitives(&batch.primitives);
 
         // Update path buffers if we have path geometry
         let has_paths = !batch.paths.vertices.is_empty() && !batch.paths.indices.is_empty();
@@ -4156,11 +4543,10 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            // Render SDF primitives
+            // Render SDF primitives via split pipelines
             if !batch.primitives.is_empty() {
-                render_pass.set_pipeline(&self.pipelines.sdf);
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                render_pass.draw(0..6, 0..batch.primitives.len() as u32);
+                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
             }
 
             // Render paths
@@ -4382,12 +4768,8 @@ impl GpuRenderer {
             bytemuck::bytes_of(&main_uniforms),
         );
 
-        // Update primitives buffer
-        self.queue.write_buffer(
-            &self.buffers.primitives,
-            0,
-            bytemuck::cast_slice(&batch.primitives),
-        );
+        // Sort and upload primitives
+        let sdf_ranges = self.upload_sorted_primitives(&batch.primitives);
 
         // Create command encoder
         let mut encoder = self
@@ -4419,9 +4801,8 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            render_pass.set_pipeline(&self.pipelines.sdf);
             render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-            render_pass.draw(0..6, 0..batch.primitives.len() as u32);
+            Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
         }
 
         // Submit commands
@@ -4456,14 +4837,8 @@ impl GpuRenderer {
         // Update auxiliary data buffer
         self.update_aux_data_buffer(batch);
 
-        // Update primitives buffer
-        if !batch.primitives.is_empty() {
-            self.queue.write_buffer(
-                &self.buffers.primitives,
-                0,
-                bytemuck::cast_slice(&batch.primitives),
-            );
-        }
+        // Sort and upload primitives
+        let sdf_ranges = self.upload_sorted_primitives(&batch.primitives);
 
         // Split glass primitives into simple and liquid for separate rendering
         let mut simple_primitives: Vec<GpuGlassPrimitive> = Vec::new();
@@ -4599,9 +4974,8 @@ impl GpuRenderer {
             });
 
             if !batch.primitives.is_empty() {
-                render_pass.set_pipeline(&self.pipelines.sdf);
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                render_pass.draw(0..6, 0..batch.primitives.len() as u32);
+                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
             }
         }
 
@@ -4635,9 +5009,8 @@ impl GpuRenderer {
             });
 
             if !batch.primitives.is_empty() {
-                render_pass.set_pipeline(&self.pipelines.sdf);
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                render_pass.draw(0..6, 0..batch.primitives.len() as u32);
+                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
             }
         }
 
@@ -4798,12 +5171,8 @@ impl GpuRenderer {
         // Pass 4: Render foreground primitives (on top of glass)
         // This requires a separate submission because we need to overwrite the primitives buffer
         if !batch.foreground_primitives.is_empty() {
-            // Upload foreground primitives to the buffer
-            self.queue.write_buffer(
-                &self.buffers.primitives,
-                0,
-                bytemuck::cast_slice(&batch.foreground_primitives),
-            );
+            // Sort and upload foreground primitives
+            let fg_ranges = self.upload_sorted_primitives(&batch.foreground_primitives);
 
             let mut encoder = self
                 .device
@@ -4827,9 +5196,8 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            render_pass.set_pipeline(&self.pipelines.sdf);
             render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-            render_pass.draw(0..6, 0..batch.foreground_primitives.len() as u32);
+            Self::draw_split_sdf(&mut render_pass, &self.pipelines, &fg_ranges, false, self.sdf_vb_buffer());
 
             drop(render_pass);
             self.queue.submit(std::iter::once(encoder.finish()));
@@ -4917,14 +5285,8 @@ impl GpuRenderer {
         // Update auxiliary data buffer
         self.update_aux_data_buffer(batch);
 
-        // Update primitives buffer
-        if !batch.primitives.is_empty() {
-            self.queue.write_buffer(
-                &self.buffers.primitives,
-                0,
-                bytemuck::cast_slice(&batch.primitives),
-            );
-        }
+        // Sort and upload primitives
+        let sdf_ranges = self.upload_sorted_primitives(&batch.primitives);
 
         // Update path buffers if we have path geometry
         let has_paths = !batch.paths.vertices.is_empty() && !batch.paths.indices.is_empty();
@@ -4970,11 +5332,10 @@ impl GpuRenderer {
                 }
             }
 
-            // Render SDF primitives using overlay pipeline
+            // Render SDF primitives using split overlay pipelines
             if !batch.primitives.is_empty() {
-                render_pass.set_pipeline(&self.pipelines.sdf_overlay);
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                render_pass.draw(0..6, 0..batch.primitives.len() as u32);
+                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, true, self.sdf_vb_buffer());
             }
         }
 
@@ -5179,14 +5540,8 @@ impl GpuRenderer {
             self.update_path_buffers(batch);
         }
 
-        // Write filtered primitives
-        if !included_primitives.is_empty() {
-            self.queue.write_buffer(
-                &self.buffers.primitives,
-                0,
-                bytemuck::cast_slice(&included_primitives),
-            );
-        }
+        // Sort and upload filtered primitives
+        let sdf_ranges = self.upload_sorted_primitives(&included_primitives);
 
         let mut encoder = self
             .device
@@ -5224,11 +5579,10 @@ impl GpuRenderer {
                 }
             }
 
-            // Render filtered SDF primitives
+            // Render filtered SDF primitives via split overlay pipelines
             if !included_primitives.is_empty() {
-                render_pass.set_pipeline(&self.pipelines.sdf_overlay);
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                render_pass.draw(0..6, 0..included_primitives.len() as u32);
+                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, true, self.sdf_vb_buffer());
             }
         }
 
@@ -5245,14 +5599,8 @@ impl GpuRenderer {
         self.queue
             .write_buffer(&self.buffers.uniforms, 0, bytemuck::bytes_of(&uniforms));
 
-        // Update primitives buffer
-        if !batch.primitives.is_empty() {
-            self.queue.write_buffer(
-                &self.buffers.primitives,
-                0,
-                bytemuck::cast_slice(&batch.primitives),
-            );
-        }
+        // Sort and upload primitives
+        let sdf_ranges = self.upload_sorted_primitives(&batch.primitives);
 
         // Update path buffers if we have path geometry
         let has_paths = !batch.paths.vertices.is_empty() && !batch.paths.indices.is_empty();
@@ -5298,11 +5646,10 @@ impl GpuRenderer {
                 }
             }
 
-            // Render SDF primitives
+            // Render SDF primitives via split overlay pipelines
             if !batch.primitives.is_empty() {
-                render_pass.set_pipeline(&self.pipelines.sdf_overlay);
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                render_pass.draw(0..6, 0..batch.primitives.len() as u32);
+                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, true, self.sdf_vb_buffer());
             }
         }
 
@@ -5333,12 +5680,8 @@ impl GpuRenderer {
         self.queue
             .write_buffer(&self.buffers.uniforms, 0, bytemuck::bytes_of(&uniforms));
 
-        // Update primitives buffer
-        self.queue.write_buffer(
-            &self.buffers.primitives,
-            0,
-            bytemuck::cast_slice(primitives),
-        );
+        // Sort and upload primitives
+        let sdf_ranges = self.upload_sorted_primitives(primitives);
 
         // Create command encoder
         let mut encoder = self
@@ -5365,10 +5708,9 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            // Render SDF primitives
-            render_pass.set_pipeline(&self.pipelines.sdf_overlay);
+            // Render SDF primitives via split overlay pipelines
             render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-            render_pass.draw(0..6, 0..primitives.len() as u32);
+            Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, true, self.sdf_vb_buffer());
         }
 
         // Submit commands
@@ -5472,6 +5814,7 @@ impl GpuRenderer {
                 &self.bind_group_layouts,
                 self.texture_format,
                 sample_count,
+                self.has_vertex_storage,
             ));
         }
 
@@ -5594,14 +5937,8 @@ impl GpuRenderer {
         self.queue
             .write_buffer(&self.buffers.uniforms, 0, bytemuck::bytes_of(&uniforms));
 
-        // Update primitives buffer
-        if !batch.primitives.is_empty() {
-            self.queue.write_buffer(
-                &self.buffers.primitives,
-                0,
-                bytemuck::cast_slice(&batch.primitives),
-            );
-        }
+        // Sort and upload primitives
+        let sdf_ranges = self.upload_sorted_primitives(&batch.primitives);
 
         // Update path buffers
         let has_paths = !batch.paths.vertices.is_empty() && !batch.paths.indices.is_empty();
@@ -5664,16 +6001,15 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            // Get the appropriate pipelines for the sample count
-            let (path_pipeline, sdf_pipeline) = if sample_count > 1 {
+            // Get the appropriate path pipeline for the sample count
+            let path_pipeline = if sample_count > 1 {
                 if let Some(ref msaa) = self.msaa_pipelines {
-                    (&msaa.path, &msaa.sdf)
+                    &msaa.path
                 } else {
-                    // Fallback (shouldn't happen due to creation above)
-                    (&self.pipelines.path, &self.pipelines.sdf)
+                    &self.pipelines.path
                 }
             } else {
-                (&self.pipelines.path, &self.pipelines.sdf)
+                &self.pipelines.path
             };
 
             // Render paths using MSAA pipeline
@@ -5689,11 +6025,18 @@ impl GpuRenderer {
                 }
             }
 
-            // Render SDF primitives using MSAA pipeline
+            // Render SDF primitives using split MSAA pipelines
             if !batch.primitives.is_empty() {
-                render_pass.set_pipeline(sdf_pipeline);
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                render_pass.draw(0..6, 0..batch.primitives.len() as u32);
+                if sample_count > 1 {
+                    if let Some(ref msaa) = self.msaa_pipelines {
+                        Self::draw_split_sdf_msaa(&mut render_pass, msaa, &sdf_ranges, self.sdf_vb_buffer());
+                    } else {
+                        Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
+                    }
+                } else {
+                    Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
+                }
             }
         }
 
@@ -5748,6 +6091,7 @@ impl GpuRenderer {
                 &self.bind_group_layouts,
                 self.texture_format,
                 sample_count,
+                self.has_vertex_storage,
             ));
         }
 
@@ -9814,7 +10158,7 @@ impl GpuRenderer {
         }
 
         // Extract the primitive range
-        let primitive_count = end_idx - start_idx;
+        let _primitive_count = end_idx - start_idx;
         let primitives = &batch.primitives[start_idx..end_idx];
 
         if primitives.is_empty() {
@@ -9829,12 +10173,8 @@ impl GpuRenderer {
         self.queue
             .write_buffer(&self.buffers.uniforms, 0, bytemuck::bytes_of(&uniforms));
 
-        // Write primitive range to buffer
-        self.queue.write_buffer(
-            &self.buffers.primitives,
-            0,
-            bytemuck::cast_slice(primitives),
-        );
+        // Sort and upload primitive range
+        let sdf_ranges = self.upload_sorted_primitives(primitives);
 
         // Create command encoder
         let mut encoder = self
@@ -9866,9 +10206,8 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            render_pass.set_pipeline(&self.pipelines.sdf);
             render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-            render_pass.draw(0..6, 0..primitive_count as u32);
+            Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -9926,7 +10265,7 @@ impl GpuRenderer {
         let offset_x = layer_pos.0 - effect_expansion.0;
         let offset_y = layer_pos.1 - effect_expansion.1;
 
-        let mut offset_primitives: Vec<GpuPrimitive> = primitives
+        let offset_primitives: Vec<GpuPrimitive> = primitives
             .iter()
             .map(|p| {
                 let mut op = *p;
@@ -9952,13 +10291,8 @@ impl GpuRenderer {
         self.queue
             .write_buffer(&self.buffers.uniforms, 0, bytemuck::bytes_of(&uniforms));
 
-        // Write offset primitives to buffer and capture count for draw call
-        let primitive_count = offset_primitives.len() as u32;
-        self.queue.write_buffer(
-            &self.buffers.primitives,
-            0,
-            bytemuck::cast_slice(&offset_primitives),
-        );
+        // Sort and upload offset primitives
+        let sdf_ranges = self.upload_sorted_primitives(&offset_primitives);
         drop(offset_primitives); // Free Vec immediately - data is now on GPU
 
         // Create command encoder
@@ -9986,9 +10320,8 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            render_pass.set_pipeline(&self.pipelines.sdf);
             render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-            render_pass.draw(0..6, 0..primitive_count);
+            Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

@@ -2207,6 +2207,46 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Split SDF shader: Core shapes (Rect, Circle, Ellipse)
+///
+/// Handles prim_type 0-2 with full features: borders, gradients,
+/// CSS filters, mask gradients, perspective, clip regions.
+/// Part of the multi-pipeline SDF split for driver compatibility.
+pub const SDF_CORE_SHADER: &str = include_str!("shaders/sdf_core.wgsl");
+
+/// Split SDF shader: Shadow primitives
+///
+/// Handles prim_type 3-6 (Shadow, InnerShadow, CircleShadow,
+/// CircleInnerShadow). Each case is self-contained with early return.
+pub const SDF_SHADOW_SHADER: &str = include_str!("shaders/sdf_shadow.wgsl");
+
+/// Split SDF shader: 3D raymarched shapes
+///
+/// Handles primitives with shape_type > 0 (3D box, sphere, cylinder,
+/// torus, capsule, group). 32-step raymarching with Blinn-Phong lighting.
+pub const SDF_3D_SHADER: &str = include_str!("shaders/sdf_3d.wgsl");
+
+/// Split SDF shader: Notch primitives (prim_type 8)
+///
+/// Handles concave corners with edge modifiers (scoop, bulge, cut, peak).
+/// Full border, gradient, filter, and mask support.
+pub const SDF_NOTCH_SHADER: &str = include_str!("shaders/sdf_notch.wgsl");
+
+/// Vertex-buffer fallback: Core shapes (no VERTEX_STORAGE needed)
+///
+/// Same as SDF_CORE_SHADER but vs_main reads instance attributes
+/// from a vertex buffer instead of the storage buffer.
+pub const SDF_CORE_VB_SHADER: &str = include_str!("shaders/sdf_core_vb.wgsl");
+
+/// Vertex-buffer fallback: Shadow primitives
+pub const SDF_SHADOW_VB_SHADER: &str = include_str!("shaders/sdf_shadow_vb.wgsl");
+
+/// Vertex-buffer fallback: 3D raymarched shapes
+pub const SDF_3D_VB_SHADER: &str = include_str!("shaders/sdf_3d_vb.wgsl");
+
+/// Vertex-buffer fallback: Notch primitives
+pub const SDF_NOTCH_VB_SHADER: &str = include_str!("shaders/sdf_notch_vb.wgsl");
+
 /// Shader for text rendering with SDF glyphs
 ///
 /// Supports both grayscale text glyphs and color emoji:
@@ -4833,5 +4873,45 @@ mod tests {
     #[test]
     fn mask_image_shader_parses() {
         parse_wgsl(MASK_IMAGE_SHADER).expect("MASK_IMAGE_SHADER");
+    }
+
+    #[test]
+    fn sdf_core_shader_parses() {
+        parse_wgsl(SDF_CORE_SHADER).expect("SDF_CORE_SHADER");
+    }
+
+    #[test]
+    fn sdf_shadow_shader_parses() {
+        parse_wgsl(SDF_SHADOW_SHADER).expect("SDF_SHADOW_SHADER");
+    }
+
+    #[test]
+    fn sdf_3d_shader_parses() {
+        parse_wgsl(SDF_3D_SHADER).expect("SDF_3D_SHADER");
+    }
+
+    #[test]
+    fn sdf_notch_shader_parses() {
+        parse_wgsl(SDF_NOTCH_SHADER).expect("SDF_NOTCH_SHADER");
+    }
+
+    #[test]
+    fn sdf_core_vb_shader_parses() {
+        parse_wgsl(SDF_CORE_VB_SHADER).expect("SDF_CORE_VB_SHADER");
+    }
+
+    #[test]
+    fn sdf_shadow_vb_shader_parses() {
+        parse_wgsl(SDF_SHADOW_VB_SHADER).expect("SDF_SHADOW_VB_SHADER");
+    }
+
+    #[test]
+    fn sdf_3d_vb_shader_parses() {
+        parse_wgsl(SDF_3D_VB_SHADER).expect("SDF_3D_VB_SHADER");
+    }
+
+    #[test]
+    fn sdf_notch_vb_shader_parses() {
+        parse_wgsl(SDF_NOTCH_VB_SHADER).expect("SDF_NOTCH_VB_SHADER");
     }
 }
