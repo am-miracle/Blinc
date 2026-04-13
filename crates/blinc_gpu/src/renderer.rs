@@ -35,12 +35,11 @@ use crate::primitives::{
 };
 use crate::shaders::{
     BLUR_SHADER, COLOR_MATRIX_SHADER, COMPOSITE_SHADER, DROP_SHADOW_SHADER, GLASS_SHADER,
-    GLOW_SHADER, IMAGE_SHADER, LAYER_COMPOSITE_SHADER, MASK_IMAGE_SHADER, PATH_SHADER, SDF_SHADER,
-    SDF_3D_SHADER, SDF_3D_VB_SHADER, SDF_3D_DT_SHADER,
-    SDF_CORE_SHADER, SDF_CORE_VB_SHADER, SDF_CORE_DT_SHADER,
-    SDF_NOTCH_SHADER, SDF_NOTCH_VB_SHADER, SDF_NOTCH_DT_SHADER,
-    SDF_SHADOW_SHADER, SDF_SHADOW_VB_SHADER, SDF_SHADOW_DT_SHADER,
-    SIMPLE_GLASS_SHADER, TEXT_DT_SHADER, TEXT_SHADER,
+    GLOW_SHADER, IMAGE_SHADER, LAYER_COMPOSITE_SHADER, MASK_IMAGE_SHADER, PATH_SHADER,
+    SDF_3D_DT_SHADER, SDF_3D_SHADER, SDF_3D_VB_SHADER, SDF_CORE_DT_SHADER, SDF_CORE_SHADER,
+    SDF_CORE_VB_SHADER, SDF_NOTCH_DT_SHADER, SDF_NOTCH_SHADER, SDF_NOTCH_VB_SHADER, SDF_SHADER,
+    SDF_SHADOW_DT_SHADER, SDF_SHADOW_SHADER, SDF_SHADOW_VB_SHADER, SIMPLE_GLASS_SHADER,
+    TEXT_DT_SHADER, TEXT_SHADER,
 };
 
 fn env_u64(name: &str) -> Option<u64> {
@@ -1614,7 +1613,11 @@ impl GpuRenderer {
                 }
             }
         });
-        tracing::info!("Selected texture format: {:?} (sRGB: {})", texture_format, texture_format.is_srgb());
+        tracing::info!(
+            "Selected texture format: {:?} (sRGB: {})",
+            texture_format,
+            texture_format.is_srgb()
+        );
 
         let renderer = Self::create_renderer(
             instance,
@@ -1747,7 +1750,12 @@ impl GpuRenderer {
                     .unwrap_or(surface_caps.formats[0])
             }
         });
-        tracing::info!("Web surface texture format: {:?} (sRGB: {}, GL adapter: {})", texture_format, texture_format.is_srgb(), is_gl_adapter);
+        tracing::info!(
+            "Web surface texture format: {:?} (sRGB: {}, GL adapter: {})",
+            texture_format,
+            texture_format.is_srgb(),
+            is_gl_adapter
+        );
 
         let renderer = Self::create_renderer(
             instance,
@@ -1846,12 +1854,9 @@ impl GpuRenderer {
         }
 
         // Check if the adapter supports storage buffers at all (Tier 3 / DT fallback)
-        let has_storage_buffers =
-            adapter.limits().max_storage_buffers_per_shader_stage > 0;
+        let has_storage_buffers = adapter.limits().max_storage_buffers_per_shader_stage > 0;
         if !has_storage_buffers {
-            tracing::info!(
-                "No storage buffer support — using data texture fallback (WebGL2 mode)"
-            );
+            tracing::info!("No storage buffer support — using data texture fallback (WebGL2 mode)");
             // When there are no storage buffers, max_storage_buffer_binding_size is 0,
             // so apply_renderer_config_overrides clamped max_primitives/max_glyphs to 1.
             // Re-apply sensible defaults clamped by texture dimension limits instead.
@@ -1868,21 +1873,32 @@ impl GpuRenderer {
         }
 
         // Create bind group layouts
-        let bind_group_layouts =
-            Self::create_bind_group_layouts_with_flags(&device, has_vertex_storage, has_storage_buffers);
+        let bind_group_layouts = Self::create_bind_group_layouts_with_flags(
+            &device,
+            has_vertex_storage,
+            has_storage_buffers,
+        );
 
         // Create shaders
         // In DT mode (no storage buffers), the monolithic SDF_SHADER uses
         // var<storage, read> which conflicts with the texture bind group layout.
         // Use the DT core shader as a stand-in — the monolithic pipeline is
         // kept for backward compat but isn't used when split pipelines are active.
-        let monolithic_sdf_source = if has_storage_buffers { SDF_SHADER } else { SDF_CORE_DT_SHADER };
+        let monolithic_sdf_source = if has_storage_buffers {
+            SDF_SHADER
+        } else {
+            SDF_CORE_DT_SHADER
+        };
         let sdf_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("SDF Shader"),
             source: wgpu::ShaderSource::Wgsl(monolithic_sdf_source.into()),
         });
 
-        let text_source = if has_storage_buffers { TEXT_SHADER } else { TEXT_DT_SHADER };
+        let text_source = if has_storage_buffers {
+            TEXT_SHADER
+        } else {
+            TEXT_DT_SHADER
+        };
         let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Text Shader"),
             source: wgpu::ShaderSource::Wgsl(text_source.into()),
@@ -1911,13 +1927,28 @@ impl GpuRenderer {
         let (sdf_core_source, sdf_shadow_source, sdf_3d_source, sdf_notch_source) =
             if !has_storage_buffers {
                 // Tier 3: Data texture fallback (no storage buffers at all)
-                (SDF_CORE_DT_SHADER, SDF_SHADOW_DT_SHADER, SDF_3D_DT_SHADER, SDF_NOTCH_DT_SHADER)
+                (
+                    SDF_CORE_DT_SHADER,
+                    SDF_SHADOW_DT_SHADER,
+                    SDF_3D_DT_SHADER,
+                    SDF_NOTCH_DT_SHADER,
+                )
             } else if !has_vertex_storage {
                 // Tier 2: VB fallback (no VS storage, FS storage works)
-                (SDF_CORE_VB_SHADER, SDF_SHADOW_VB_SHADER, SDF_3D_VB_SHADER, SDF_NOTCH_VB_SHADER)
+                (
+                    SDF_CORE_VB_SHADER,
+                    SDF_SHADOW_VB_SHADER,
+                    SDF_3D_VB_SHADER,
+                    SDF_NOTCH_VB_SHADER,
+                )
             } else {
                 // Tier 1: Full storage buffer support
-                (SDF_CORE_SHADER, SDF_SHADOW_SHADER, SDF_3D_SHADER, SDF_NOTCH_SHADER)
+                (
+                    SDF_CORE_SHADER,
+                    SDF_SHADOW_SHADER,
+                    SDF_3D_SHADER,
+                    SDF_NOTCH_SHADER,
+                )
             };
 
         let sdf_core_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2923,60 +2954,60 @@ impl GpuRenderer {
         // --- Split SDF pipelines (share sdf_layout, same blend/primitive state) ---
 
         // Helper closure to create an SDF pipeline pair (MSAA + overlay) from a shader module
-        let make_sdf_pipeline_pair =
-            |shader: &wgpu::ShaderModule, label: &str| -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
-                let msaa = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(&sdf_layout),
-                    vertex: wgpu::VertexState {
-                        module: shader,
-                        entry_point: Some("vs_main"),
-                        buffers: sdf_vb_buffers,
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: shader,
-                        entry_point: Some("fs_main"),
-                        targets: color_targets,
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    }),
-                    primitive: primitive_state,
-                    depth_stencil: None,
-                    multisample: multisample_state,
-                    multiview: None,
-                    cache: None,
-                });
-                let overlay_label = format!("{label} Overlay");
-                let overlay = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(&overlay_label),
-                    layout: Some(&sdf_layout),
-                    vertex: wgpu::VertexState {
-                        module: shader,
-                        entry_point: Some("vs_main"),
-                        buffers: sdf_vb_buffers,
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: shader,
-                        entry_point: Some("fs_main"),
-                        targets: color_targets,
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    }),
-                    primitive: primitive_state,
-                    depth_stencil: None,
-                    multisample: overlay_multisample_state,
-                    multiview: None,
-                    cache: None,
-                });
-                (msaa, overlay)
-            };
+        let make_sdf_pipeline_pair = |shader: &wgpu::ShaderModule,
+                                      label: &str|
+         -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+            let msaa = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&sdf_layout),
+                vertex: wgpu::VertexState {
+                    module: shader,
+                    entry_point: Some("vs_main"),
+                    buffers: sdf_vb_buffers,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: shader,
+                    entry_point: Some("fs_main"),
+                    targets: color_targets,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: primitive_state,
+                depth_stencil: None,
+                multisample: multisample_state,
+                multiview: None,
+                cache: None,
+            });
+            let overlay_label = format!("{label} Overlay");
+            let overlay = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(&overlay_label),
+                layout: Some(&sdf_layout),
+                vertex: wgpu::VertexState {
+                    module: shader,
+                    entry_point: Some("vs_main"),
+                    buffers: sdf_vb_buffers,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: shader,
+                    entry_point: Some("fs_main"),
+                    targets: color_targets,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: primitive_state,
+                depth_stencil: None,
+                multisample: overlay_multisample_state,
+                multiview: None,
+                cache: None,
+            });
+            (msaa, overlay)
+        };
 
         let (sdf_core, sdf_core_overlay) =
             make_sdf_pipeline_pair(sdf_core_shader, "SDF Core Pipeline");
         let (sdf_shadow, sdf_shadow_overlay) =
             make_sdf_pipeline_pair(sdf_shadow_shader, "SDF Shadow Pipeline");
-        let (sdf_3d, sdf_3d_overlay) =
-            make_sdf_pipeline_pair(sdf_3d_shader, "SDF 3D Pipeline");
+        let (sdf_3d, sdf_3d_overlay) = make_sdf_pipeline_pair(sdf_3d_shader, "SDF 3D Pipeline");
         let (sdf_notch, sdf_notch_overlay) =
             make_sdf_pipeline_pair(sdf_notch_shader, "SDF Notch Pipeline");
 
@@ -3357,63 +3388,78 @@ impl GpuRenderer {
         });
 
         // Create data textures for DT (Tier 3) fallback when no storage buffers
-        let (prim_data_texture, prim_data_view, aux_data_texture, aux_data_view, aux_data_texture_height, glyph_data_texture, glyph_data_view) =
-            if !has_storage_buffers {
-                // Primitive data texture: width=23 (one texel per vec4 field), height=max_primitives
-                let prim_tex = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Primitive Data Texture"),
-                    size: wgpu::Extent3d {
-                        width: 23,
-                        height: config.max_primitives as u32,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba32Float,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                let prim_view = prim_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let (
+            prim_data_texture,
+            prim_data_view,
+            aux_data_texture,
+            aux_data_view,
+            aux_data_texture_height,
+            glyph_data_texture,
+            glyph_data_view,
+        ) = if !has_storage_buffers {
+            // Primitive data texture: width=23 (one texel per vec4 field), height=max_primitives
+            let prim_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Primitive Data Texture"),
+                size: wgpu::Extent3d {
+                    width: 23,
+                    height: config.max_primitives as u32,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let prim_view = prim_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-                // Aux data texture: width=1024, height=1 initially (resized on demand)
-                let aux_tex = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Aux Data Texture"),
-                    size: wgpu::Extent3d {
-                        width: 1024,
-                        height: 1,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba32Float,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                let aux_view = aux_tex.create_view(&wgpu::TextureViewDescriptor::default());
+            // Aux data texture: width=1024, height=1 initially (resized on demand)
+            let aux_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Aux Data Texture"),
+                size: wgpu::Extent3d {
+                    width: 1024,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let aux_view = aux_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-                // Glyph data texture: width=6 (one texel per vec4 field), height=max_glyphs
-                let glyph_tex = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Glyph Data Texture"),
-                    size: wgpu::Extent3d {
-                        width: 6,
-                        height: config.max_glyphs as u32,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba32Float,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                let glyph_view = glyph_tex.create_view(&wgpu::TextureViewDescriptor::default());
+            // Glyph data texture: width=6 (one texel per vec4 field), height=max_glyphs
+            let glyph_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Glyph Data Texture"),
+                size: wgpu::Extent3d {
+                    width: 6,
+                    height: config.max_glyphs as u32,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let glyph_view = glyph_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-                (Some(prim_tex), Some(prim_view), Some(aux_tex), Some(aux_view), 1u32, Some(glyph_tex), Some(glyph_view))
-            } else {
-                (None, None, None, None, 0u32, None, None)
-            };
+            (
+                Some(prim_tex),
+                Some(prim_view),
+                Some(aux_tex),
+                Some(aux_view),
+                1u32,
+                Some(glyph_tex),
+                Some(glyph_view),
+            )
+        } else {
+            (None, None, None, None, 0u32, None, None)
+        };
 
         Buffers {
             uniforms,
@@ -3463,7 +3509,10 @@ impl GpuRenderer {
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::TextureView(
-                    buffers.prim_data_view.as_ref().expect("DT mode requires prim_data_view"),
+                    buffers
+                        .prim_data_view
+                        .as_ref()
+                        .expect("DT mode requires prim_data_view"),
                 ),
             }
         };
@@ -3478,7 +3527,10 @@ impl GpuRenderer {
             wgpu::BindGroupEntry {
                 binding: 5,
                 resource: wgpu::BindingResource::TextureView(
-                    buffers.aux_data_view.as_ref().expect("DT mode requires aux_data_view"),
+                    buffers
+                        .aux_data_view
+                        .as_ref()
+                        .expect("DT mode requires aux_data_view"),
                 ),
             }
         };
@@ -3645,43 +3697,57 @@ impl GpuRenderer {
         } else {
             &[SdfVertexInstance::LAYOUT]
         };
-        let make_msaa_sdf_pipeline =
-            |source: &str, label: &str| -> wgpu::RenderPipeline {
-                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(label),
-                    source: wgpu::ShaderSource::Wgsl(source.into()),
-                });
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(&sdf_layout),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some("vs_main"),
-                        buffers: sdf_vb_buffers,
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some("fs_main"),
-                        targets: color_targets,
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    }),
-                    primitive: primitive_state,
-                    depth_stencil: None,
-                    multisample: multisample_state,
-                    multiview: None,
-                    cache: None,
-                })
-            };
+        let make_msaa_sdf_pipeline = |source: &str, label: &str| -> wgpu::RenderPipeline {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&sdf_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: sdf_vb_buffers,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: color_targets,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: primitive_state,
+                depth_stencil: None,
+                multisample: multisample_state,
+                multiview: None,
+                cache: None,
+            })
+        };
 
-        let (msaa_core_src, msaa_shadow_src, msaa_3d_src, msaa_notch_src) =
-            if !has_storage_buffers {
-                (SDF_CORE_DT_SHADER, SDF_SHADOW_DT_SHADER, SDF_3D_DT_SHADER, SDF_NOTCH_DT_SHADER)
-            } else if !has_vertex_storage {
-                (SDF_CORE_VB_SHADER, SDF_SHADOW_VB_SHADER, SDF_3D_VB_SHADER, SDF_NOTCH_VB_SHADER)
-            } else {
-                (SDF_CORE_SHADER, SDF_SHADOW_SHADER, SDF_3D_SHADER, SDF_NOTCH_SHADER)
-            };
+        let (msaa_core_src, msaa_shadow_src, msaa_3d_src, msaa_notch_src) = if !has_storage_buffers
+        {
+            (
+                SDF_CORE_DT_SHADER,
+                SDF_SHADOW_DT_SHADER,
+                SDF_3D_DT_SHADER,
+                SDF_NOTCH_DT_SHADER,
+            )
+        } else if !has_vertex_storage {
+            (
+                SDF_CORE_VB_SHADER,
+                SDF_SHADOW_VB_SHADER,
+                SDF_3D_VB_SHADER,
+                SDF_NOTCH_VB_SHADER,
+            )
+        } else {
+            (
+                SDF_CORE_SHADER,
+                SDF_SHADOW_SHADER,
+                SDF_3D_SHADER,
+                SDF_NOTCH_SHADER,
+            )
+        };
 
         let sdf_core = make_msaa_sdf_pipeline(msaa_core_src, "SDF Core Pipeline (MSAA)");
         let sdf_shadow = make_msaa_sdf_pipeline(msaa_shadow_src, "SDF Shadow Pipeline (MSAA)");
@@ -4269,7 +4335,13 @@ impl GpuRenderer {
             // Render SDF primitives via split pipelines
             if !visible_primitives.is_empty() {
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
+                Self::draw_split_sdf(
+                    &mut render_pass,
+                    &self.pipelines,
+                    &sdf_ranges,
+                    false,
+                    self.sdf_vb_buffer(),
+                );
             }
 
             // Render paths
@@ -4590,7 +4662,13 @@ impl GpuRenderer {
             // Render SDF primitives via split pipelines (filtered)
             if !included_primitives.is_empty() {
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
+                Self::draw_split_sdf(
+                    &mut render_pass,
+                    &self.pipelines,
+                    &sdf_ranges,
+                    false,
+                    self.sdf_vb_buffer(),
+                );
             }
 
             // Render paths (always rendered - path filtering would be more complex)
@@ -4740,7 +4818,10 @@ impl GpuRenderer {
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::TextureView(
-                    self.buffers.prim_data_view.as_ref().expect("DT mode requires prim_data_view"),
+                    self.buffers
+                        .prim_data_view
+                        .as_ref()
+                        .expect("DT mode requires prim_data_view"),
                 ),
             }
         };
@@ -4755,7 +4836,10 @@ impl GpuRenderer {
             wgpu::BindGroupEntry {
                 binding: 5,
                 resource: wgpu::BindingResource::TextureView(
-                    self.buffers.aux_data_view.as_ref().expect("DT mode requires aux_data_view"),
+                    self.buffers
+                        .aux_data_view
+                        .as_ref()
+                        .expect("DT mode requires aux_data_view"),
                 ),
             }
         };
@@ -4930,7 +5014,13 @@ impl GpuRenderer {
             // Render SDF primitives via split pipelines
             if !batch.primitives.is_empty() {
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
+                Self::draw_split_sdf(
+                    &mut render_pass,
+                    &self.pipelines,
+                    &sdf_ranges,
+                    false,
+                    self.sdf_vb_buffer(),
+                );
             }
 
             // Render paths
@@ -5186,7 +5276,13 @@ impl GpuRenderer {
             });
 
             render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-            Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
+            Self::draw_split_sdf(
+                &mut render_pass,
+                &self.pipelines,
+                &sdf_ranges,
+                false,
+                self.sdf_vb_buffer(),
+            );
         }
 
         // Submit commands
@@ -5359,7 +5455,13 @@ impl GpuRenderer {
 
             if !batch.primitives.is_empty() {
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
+                Self::draw_split_sdf(
+                    &mut render_pass,
+                    &self.pipelines,
+                    &sdf_ranges,
+                    false,
+                    self.sdf_vb_buffer(),
+                );
             }
         }
 
@@ -5394,7 +5496,13 @@ impl GpuRenderer {
 
             if !batch.primitives.is_empty() {
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
+                Self::draw_split_sdf(
+                    &mut render_pass,
+                    &self.pipelines,
+                    &sdf_ranges,
+                    false,
+                    self.sdf_vb_buffer(),
+                );
             }
         }
 
@@ -5581,7 +5689,13 @@ impl GpuRenderer {
             });
 
             render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-            Self::draw_split_sdf(&mut render_pass, &self.pipelines, &fg_ranges, false, self.sdf_vb_buffer());
+            Self::draw_split_sdf(
+                &mut render_pass,
+                &self.pipelines,
+                &fg_ranges,
+                false,
+                self.sdf_vb_buffer(),
+            );
 
             drop(render_pass);
             self.queue.submit(std::iter::once(encoder.finish()));
@@ -5719,7 +5833,13 @@ impl GpuRenderer {
             // Render SDF primitives using split overlay pipelines
             if !batch.primitives.is_empty() {
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, true, self.sdf_vb_buffer());
+                Self::draw_split_sdf(
+                    &mut render_pass,
+                    &self.pipelines,
+                    &sdf_ranges,
+                    true,
+                    self.sdf_vb_buffer(),
+                );
             }
         }
 
@@ -5966,7 +6086,13 @@ impl GpuRenderer {
             // Render filtered SDF primitives via split overlay pipelines
             if !included_primitives.is_empty() {
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, true, self.sdf_vb_buffer());
+                Self::draw_split_sdf(
+                    &mut render_pass,
+                    &self.pipelines,
+                    &sdf_ranges,
+                    true,
+                    self.sdf_vb_buffer(),
+                );
             }
         }
 
@@ -6033,7 +6159,13 @@ impl GpuRenderer {
             // Render SDF primitives via split overlay pipelines
             if !batch.primitives.is_empty() {
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-                Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, true, self.sdf_vb_buffer());
+                Self::draw_split_sdf(
+                    &mut render_pass,
+                    &self.pipelines,
+                    &sdf_ranges,
+                    true,
+                    self.sdf_vb_buffer(),
+                );
             }
         }
 
@@ -6094,7 +6226,13 @@ impl GpuRenderer {
 
             // Render SDF primitives via split overlay pipelines
             render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-            Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, true, self.sdf_vb_buffer());
+            Self::draw_split_sdf(
+                &mut render_pass,
+                &self.pipelines,
+                &sdf_ranges,
+                true,
+                self.sdf_vb_buffer(),
+            );
         }
 
         // Submit commands
@@ -6415,12 +6553,29 @@ impl GpuRenderer {
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
                 if sample_count > 1 {
                     if let Some(ref msaa) = self.msaa_pipelines {
-                        Self::draw_split_sdf_msaa(&mut render_pass, msaa, &sdf_ranges, self.sdf_vb_buffer());
+                        Self::draw_split_sdf_msaa(
+                            &mut render_pass,
+                            msaa,
+                            &sdf_ranges,
+                            self.sdf_vb_buffer(),
+                        );
                     } else {
-                        Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
+                        Self::draw_split_sdf(
+                            &mut render_pass,
+                            &self.pipelines,
+                            &sdf_ranges,
+                            false,
+                            self.sdf_vb_buffer(),
+                        );
                     }
                 } else {
-                    Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
+                    Self::draw_split_sdf(
+                        &mut render_pass,
+                        &self.pipelines,
+                        &sdf_ranges,
+                        false,
+                        self.sdf_vb_buffer(),
+                    );
                 }
             }
         }
@@ -10624,7 +10779,13 @@ impl GpuRenderer {
             });
 
             render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-            Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
+            Self::draw_split_sdf(
+                &mut render_pass,
+                &self.pipelines,
+                &sdf_ranges,
+                false,
+                self.sdf_vb_buffer(),
+            );
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -10738,7 +10899,13 @@ impl GpuRenderer {
             });
 
             render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-            Self::draw_split_sdf(&mut render_pass, &self.pipelines, &sdf_ranges, false, self.sdf_vb_buffer());
+            Self::draw_split_sdf(
+                &mut render_pass,
+                &self.pipelines,
+                &sdf_ranges,
+                false,
+                self.sdf_vb_buffer(),
+            );
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
