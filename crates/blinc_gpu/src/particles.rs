@@ -536,6 +536,9 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 "#;
 
+/// Data-texture fallback: Particle rendering (no storage buffers — WebGL2)
+pub const PARTICLE_RENDER_DT_SHADER: &str = include_str!("shaders/particle_render_dt.wgsl");
+
 /// GPU particle render shader (billboard quads)
 pub const PARTICLE_RENDER_SHADER: &str = r#"
 // ============================================================================

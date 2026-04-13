@@ -34,12 +34,13 @@ use crate::primitives::{
     Sdf3DUniform, SdfPipelineCategory, SdfVertexInstance, Uniforms, Viewport3D,
 };
 use crate::shaders::{
-    BLUR_SHADER, COLOR_MATRIX_SHADER, COMPOSITE_SHADER, DROP_SHADOW_SHADER, GLASS_SHADER,
-    GLOW_SHADER, IMAGE_SHADER, LAYER_COMPOSITE_SHADER, MASK_IMAGE_SHADER, PATH_SHADER,
-    SDF_3D_DT_SHADER, SDF_3D_SHADER, SDF_3D_VB_SHADER, SDF_CORE_DT_SHADER, SDF_CORE_SHADER,
-    SDF_CORE_VB_SHADER, SDF_NOTCH_DT_SHADER, SDF_NOTCH_SHADER, SDF_NOTCH_VB_SHADER, SDF_SHADER,
-    SDF_SHADOW_DT_SHADER, SDF_SHADOW_SHADER, SDF_SHADOW_VB_SHADER, SIMPLE_GLASS_SHADER,
-    TEXT_DT_SHADER, TEXT_SHADER,
+    BLUR_SHADER, COLOR_MATRIX_SHADER, COMPOSITE_SHADER, DROP_SHADOW_SHADER, GLASS_DT_SHADER,
+    GLASS_SHADER, GLOW_SHADER, IMAGE_SHADER, LAYER_COMPOSITE_SHADER, MASK_IMAGE_SHADER,
+    MESH_DT_SHADER, PATH_SHADER, SDF_3D_DT_SHADER, SDF_3D_SHADER, SDF_3D_VB_SHADER,
+    SDF_CORE_DT_SHADER, SDF_CORE_SHADER, SDF_CORE_VB_SHADER, SDF_NOTCH_DT_SHADER,
+    SDF_NOTCH_SHADER, SDF_NOTCH_VB_SHADER, SDF_SHADER, SDF_SHADOW_DT_SHADER, SDF_SHADOW_SHADER,
+    SDF_SHADOW_VB_SHADER, SIMPLE_GLASS_DT_SHADER, SIMPLE_GLASS_SHADER, TEXT_DT_SHADER,
+    TEXT_SHADER,
 };
 
 fn env_u64(name: &str) -> Option<u64> {
@@ -1116,8 +1117,13 @@ struct MeshPipeline {
     /// other defaults.
     default_occlusion: crate::image::GpuImage,
     sampler: wgpu::Sampler,
-    /// Storage buffer for joint matrices (skeletal animation, max 256 joints)
+    /// Storage buffer for joint matrices (skeletal animation, max 256 joints).
+    /// Used when `has_storage_buffers` is true.
     joint_buffer: wgpu::Buffer,
+    /// Data-texture fallback for joint matrices (WebGL2 DT mode).
+    /// Width=4 (one texel per mat4 row), height=num_joints, RGBA32Float.
+    joint_data_texture: Option<wgpu::Texture>,
+    joint_data_view: Option<wgpu::TextureView>,
     /// Depth buffer for the main mesh pass. Separate from the shadow
     /// map — this one is sized to match the frame target so back faces
     /// and interior geometry z-test against front faces. Lazily
@@ -7532,18 +7538,29 @@ impl GpuRenderer {
             return;
         }
 
+        let glass_source = if self.has_storage_buffers {
+            GLASS_SHADER
+        } else {
+            GLASS_DT_SHADER
+        };
+        let simple_glass_source = if self.has_storage_buffers {
+            SIMPLE_GLASS_SHADER
+        } else {
+            SIMPLE_GLASS_DT_SHADER
+        };
+
         let glass_shader = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("Glass Shader"),
-                source: wgpu::ShaderSource::Wgsl(GLASS_SHADER.into()),
+                source: wgpu::ShaderSource::Wgsl(glass_source.into()),
             });
 
         let simple_glass_shader = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("Simple Glass Shader"),
-                source: wgpu::ShaderSource::Wgsl(SIMPLE_GLASS_SHADER.into()),
+                source: wgpu::ShaderSource::Wgsl(simple_glass_source.into()),
             });
 
         let layout = self
@@ -7794,7 +7811,11 @@ impl GpuRenderer {
         }
 
         // ── Main mesh shader ─────────────────────────────────────────────
-        let shader_src = include_str!("shaders/mesh.wgsl");
+        let shader_src = if self.has_storage_buffers {
+            include_str!("shaders/mesh.wgsl")
+        } else {
+            MESH_DT_SHADER
+        };
         let shader = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -7887,14 +7908,24 @@ impl GpuRenderer {
                             },
                             count: None,
                         },
-                        // 8: Joint matrices storage buffer (skeletal animation)
+                        // 8: Joint matrices — storage buffer (normal) or texture (WebGL2 DT)
                         wgpu::BindGroupLayoutEntry {
                             binding: 8,
                             visibility: wgpu::ShaderStages::VERTEX,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
+                            ty: if self.has_storage_buffers {
+                                wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                    has_dynamic_offset: false,
+                                    min_binding_size: None,
+                                }
+                            } else {
+                                wgpu::BindingType::Texture {
+                                    sample_type: wgpu::TextureSampleType::Float {
+                                        filterable: false,
+                                    },
+                                    view_dimension: wgpu::TextureViewDimension::D2,
+                                    multisampled: false,
+                                }
                             },
                             count: None,
                         },
@@ -8161,7 +8192,7 @@ impl GpuRenderer {
             ..Default::default()
         });
 
-        // Joint matrices storage buffer — identity matrix as default (no skinning)
+        // Joint matrices — identity matrix as default (no skinning)
         // Max 256 joints * 64 bytes per mat4x4 = 16384 bytes
         let identity: [f32; 16] = [
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -8173,6 +8204,50 @@ impl GpuRenderer {
                 contents: bytemuck::cast_slice(&identity),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             });
+
+        // DT mode: create a RGBA32Float texture for joint matrices.
+        // Width=4 (one texel per mat4 row), height=256 (max joints).
+        // Initialised with the identity matrix at row 0.
+        let (joint_data_texture, joint_data_view) = if !self.has_storage_buffers {
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Mesh Joint Data Texture"),
+                size: wgpu::Extent3d {
+                    width: 4,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            // Upload identity matrix at row 0: 4 texels (one per mat4 row)
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&identity),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * 16), // 4 texels * 16 bytes per RGBA32F texel
+                    rows_per_image: None,
+                },
+                wgpu::Extent3d {
+                    width: 4,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            (Some(tex), Some(view))
+        } else {
+            (None, None)
+        };
 
         // ── Shadow pipeline ──────────────────────────────────────────────
         let shadow_shader_src = include_str!("shaders/shadow.wgsl");
@@ -8501,6 +8576,8 @@ impl GpuRenderer {
             default_occlusion,
             sampler,
             joint_buffer,
+            joint_data_texture,
+            joint_data_view,
             main_depth: None,
             main_depth_view: None,
             main_depth_size: (0, 0),
@@ -8913,17 +8990,67 @@ impl GpuRenderer {
             .map_or_else(|| mp.default_occlusion.view(), |t| t.view());
 
         // ── Upload joint matrices (skeletal animation) ───────────────────
-        let skin_joint_buf = mesh.skin.as_ref().map(|skin| {
-            let count = skin.joint_matrices.len().min(256);
-            let data: &[u8] = bytemuck::cast_slice(&skin.joint_matrices[..count]);
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Mesh Joint Matrices"),
-                    contents: data,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                })
-        });
+        //
+        // DT mode: upload to joint_data_texture (RGBA32Float, width=4,
+        // height=num_joints). Storage-buffer mode: create a temporary
+        // buffer or reuse the default one.
+        let skin_joint_buf = if self.has_storage_buffers {
+            mesh.skin.as_ref().map(|skin| {
+                let count = skin.joint_matrices.len().min(256);
+                let data: &[u8] = bytemuck::cast_slice(&skin.joint_matrices[..count]);
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Mesh Joint Matrices"),
+                        contents: data,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    })
+            })
+        } else {
+            // DT mode: upload joint matrices to the data texture
+            if let Some(skin) = mesh.skin.as_ref() {
+                let count = skin.joint_matrices.len().min(256);
+                let data: &[u8] = bytemuck::cast_slice(&skin.joint_matrices[..count]);
+                if let Some(ref tex) = mp.joint_data_texture {
+                    self.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: tex,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        data,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(4 * 16), // 4 texels * 16 bytes
+                            rows_per_image: None,
+                        },
+                        wgpu::Extent3d {
+                            width: 4,
+                            height: count as u32,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+            }
+            None
+        };
         let joint_buffer_ref = skin_joint_buf.as_ref().unwrap_or(&mp.joint_buffer);
+
+        // Binding 8: joint matrices — storage buffer or data texture
+        let joint_binding_8 = if self.has_storage_buffers {
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: joint_buffer_ref.as_entire_binding(),
+            }
+        } else {
+            // DT mode: bind the joint data texture view
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(
+                    mp.joint_data_view.as_ref().expect("joint_data_view in DT mode"),
+                ),
+            }
+        };
 
         // ── Create bind group ────────────────────────────────────────────
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -8962,10 +9089,7 @@ impl GpuRenderer {
                     binding: 7,
                     resource: wgpu::BindingResource::TextureView(displacement_view),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: joint_buffer_ref.as_entire_binding(),
-                },
+                joint_binding_8,
                 wgpu::BindGroupEntry {
                     binding: 9,
                     resource: wgpu::BindingResource::TextureView(metallic_roughness_view),
@@ -11714,6 +11838,13 @@ impl GpuRenderer {
         use std::hash::{Hash, Hasher};
 
         if viewports.is_empty() {
+            return;
+        }
+
+        // Particles require compute shaders (for the simulation pass) and
+        // storage buffers (for the particle buffer). WebGL2 has neither,
+        // so skip particle rendering entirely in DT/Tier-3 mode.
+        if !self.has_storage_buffers {
             return;
         }
 

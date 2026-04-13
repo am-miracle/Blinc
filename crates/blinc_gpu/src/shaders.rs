@@ -2268,6 +2268,15 @@ pub const SDF_NOTCH_DT_SHADER: &str = include_str!("shaders/sdf_notch_dt.wgsl");
 /// Same visual output as TEXT_SHADER.
 pub const TEXT_DT_SHADER: &str = include_str!("shaders/text_dt.wgsl");
 
+/// Data-texture fallback: Glass effects (no storage buffers — WebGL2)
+pub const GLASS_DT_SHADER: &str = include_str!("shaders/glass_dt.wgsl");
+
+/// Data-texture fallback: Simple glass effects (no storage buffers — WebGL2)
+pub const SIMPLE_GLASS_DT_SHADER: &str = include_str!("shaders/simple_glass_dt.wgsl");
+
+/// Data-texture fallback: Mesh rendering with joint matrices as texture (WebGL2)
+pub const MESH_DT_SHADER: &str = include_str!("shaders/mesh_dt.wgsl");
+
 /// Shader for text rendering with SDF glyphs
 ///
 /// Supports both grayscale text glyphs and color emoji:
@@ -4959,5 +4968,20 @@ mod tests {
     #[test]
     fn text_dt_shader_parses() {
         parse_wgsl(TEXT_DT_SHADER).expect("TEXT_DT_SHADER");
+    }
+
+    #[test]
+    fn glass_dt_shader_parses() {
+        parse_wgsl(GLASS_DT_SHADER).expect("GLASS_DT_SHADER");
+    }
+
+    #[test]
+    fn simple_glass_dt_shader_parses() {
+        parse_wgsl(SIMPLE_GLASS_DT_SHADER).expect("SIMPLE_GLASS_DT_SHADER");
+    }
+
+    #[test]
+    fn mesh_dt_shader_parses() {
+        parse_wgsl(MESH_DT_SHADER).expect("MESH_DT_SHADER");
     }
 }
