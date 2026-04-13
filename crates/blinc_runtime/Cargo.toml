@@ -14,12 +14,12 @@ default = ["full"]
 full = ["blinc_core", "blinc_animation", "blinc_layout", "blinc_gpu", "blinc_paint"]
 
 [dependencies]
-blinc_core = { path = "../blinc_core", version = "0.5.0", optional = true }
-blinc_animation = { path = "../blinc_animation", version = "0.5.0", optional = true }
-blinc_layout = { path = "../blinc_layout", version = "0.5.0", optional = true }
-blinc_gpu = { path = "../blinc_gpu", version = "0.5.0", optional = true }
-blinc_paint = { path = "../blinc_paint", version = "0.5.0", optional = true }
-# blinc_cn = { path = "../blinc_cn", version = "0.5.0", optional = true }
+blinc_core = { path = "../blinc_core", version = "0.5.1", optional = true }
+blinc_animation = { path = "../blinc_animation", version = "0.5.1", optional = true }
+blinc_layout = { path = "../blinc_layout", version = "0.5.1", optional = true }
+blinc_gpu = { path = "../blinc_gpu", version = "0.5.1", optional = true }
+blinc_paint = { path = "../blinc_paint", version = "0.5.1", optional = true }
+# blinc_cn = { path = "../blinc_cn", version = "0.5.1", optional = true }
 
 # Errors
 anyhow.workspace = true

@@ -28,10 +28,10 @@ thiserror = "2"
 tracing = "0.1"
 
 # Platform asset loading (optional)
-blinc_platform = { path = "../blinc_platform", version = "0.5.0", optional = true }
+blinc_platform = { path = "../blinc_platform", version = "0.5.1", optional = true }
 
 # Text rendering for emoji (optional)
-blinc_text = { path = "../blinc_text", version = "0.5.0", optional = true }
+blinc_text = { path = "../blinc_text", version = "0.5.1", optional = true }
 
 [features]
 default = ["platform", "emoji"]

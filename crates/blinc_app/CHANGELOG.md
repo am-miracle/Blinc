@@ -2,6 +2,15 @@
 
 All notable changes to `blinc_app` will be documented in this file.
 
+## [0.5.1] - 2026-04-13
+
+### Added
+- `BlincApp::has_storage_buffers()` API for platform capability detection
+
+### Changed
+- Web surface configuration: COPY_SRC conditionally based on adapter support
+- Web surface format: non-sRGB on WebGL2 GL adapter
+
 ## [0.5.0] - 2026-04-10
 
 ### Added

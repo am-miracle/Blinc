@@ -2,6 +2,25 @@
 
 All notable changes to `blinc_gpu` will be documented in this file.
 
+## [0.5.1] - 2026-04-13
+
+### Changed
+- Split monolithic SDF shader (~2400 lines) into 4 specialized pipelines: core (Rect/Circle/Ellipse), shadow, 3D raymarching, notch
+- Back-to-front draw order for split pipelines preserving z-order
+- Monolithic SDF_SHADER no longer compiled (split pipelines only)
+- Non-sRGB surface format on WebGL2 GL adapter (avoids double gamma)
+- Surface COPY_SRC conditionally dropped when unsupported
+- Glass rendering skipped on WebGL2 (DT shader exists, per-frame plumbing pending)
+- Particle rendering skipped on WebGL2 (no compute shader support)
+
+### Added
+- VERTEX_STORAGE fallback: instance-stepped vertex buffers when adapter lacks vertex storage
+- WebGL2 data texture fallback: primitive/glyph/aux data packed into Rgba32Float textures via textureLoad, replacing all storage buffer reads
+- Data texture variants for all shader types: SDF (core/shadow/3d/notch), text, glass, simple glass, mesh, particle render
+- Early prim_type discard guards in all split shaders
+- Frame generation counter for skip-redundant GPU uploads
+- 28 shader parse tests (up from 16)
+
 ## [0.5.0] - 2026-04-10
 
 ### Fixed

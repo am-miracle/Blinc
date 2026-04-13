@@ -1,6 +1,6 @@
 # Blinc Roadmap
 
-> Last updated: 2026-04-10
+> Last updated: 2026-04-13
 
 ## Vision
 
@@ -343,7 +343,7 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | Android | Stable | wgpu (Vulkan) |
 | iOS | Stable | wgpu (Metal) |
 | HarmonyOS | In progress | wgpu (Vulkan/OpenGL ES) |
-| Web (WASM) | **Preview (Tier 2)** | wgpu WebGPU. Full render pipeline: SDF, glass, @flow, motion, overlays, CSS animations/transitions, blend modes, layer effects. Chrome 113+, Edge 113+, Firefox 141+, Safari 18+ (macOS Tahoe), iPhone Safari (iOS 18+). Text: Arial + FiraCode + JetBrains Mono bundled. Asset preload via `fetch()`. See [`docs/web.md`](docs/web.md). |
+| Web (WASM) | **Preview (Tier 2)** | wgpu WebGPU + WebGL2 fallback. Full render pipeline: SDF (split pipelines: core/shadow/3D/notch), text, mesh, @flow, motion, overlays, CSS animations/transitions, blend modes, layer effects. **WebGL2 fallback** (0.5.1): data texture path replaces storage buffers on GL adapters (Android Chrome, older browsers); VERTEX_STORAGE fallback via instance-stepped vertex buffers; glass and particle rendering pending on WebGL2. Chrome 113+, Edge 113+, Firefox 141+, Safari 18+ (macOS Tahoe), iPhone Safari (iOS 18+), Android Chrome (WebGL2). Text: Arial + FiraCode + JetBrains Mono bundled. Asset preload via `fetch()`. See [`docs/web.md`](docs/web.md). |
 | Embedded (RPi) | Future | Framebuffer or Vulkan |
 
 ---
@@ -356,6 +356,7 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | 0.3.0 | Q3 2026 | Mobile production readiness — gestures, safe area, haptics, navigation/router, deep linking, media (audio/video/camera), native bridge | **Complete** |
 | 0.4.0 | Q3 2026 | GPU & rendering — 3D mesh pipeline (PBR, shadows, normal maps, skeletal animation), custom shaders (bind groups, compute, post-processing), render culling, memory budget | **Complete** (pulled forward from 0.5.0) |
 | 0.5.0 | Q2 2026 | Web/WASM platform (WebGPU), rich text editor, virtualized list, lazy image loading, mobile soft keyboard + edit menu | **Complete** |
+| 0.5.1 | Q2 2026 | WebGL2 fallback (data textures, vertex storage fallback), split SDF pipelines, video player fixes (wasm duration/pacing), platform capability detection | **Complete** |
 | 0.6.0 | Q4 2026 | Zyntax DSL v1 — lexer, parser, type checker, Rust codegen, build.rs integration | Planned |
 | 0.7.0 | Q1 2027 | Developer experience — hot reload, visual inspector, layout/animation debugger, performance profiler | Planned |
 | 0.8.0 | Q1 2027 | Accessibility v1 — semantic roles, screen reader, keyboard navigation, ARIA-like attributes, high contrast, reduced motion | Planned |

@@ -2,6 +2,17 @@
 
 All notable changes to `blinc_layout` will be documented in this file.
 
+## [0.5.1] - 2026-04-13
+
+### Added
+- `video_player()` widget with signal-driven media controls (play/pause, seek, time, volume)
+- `VideoControlsBuilder` lazy-built Stateful driven by player signals
+- `AudioPlayerWidget` with optional waveform visualization
+
+### Fixed
+- Video seek bar wrapped in own Stateful with position/duration signal deps (was invisible until volume clicked)
+- Video volume slider bar colors swapped (active/inactive were reversed)
+
 ## [0.5.0] - 2026-04-10
 
 ### Added

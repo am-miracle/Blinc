@@ -15,7 +15,7 @@ png = ["dep:png"]
 
 [dependencies]
 png = { version = "0.17", optional = true }
-blinc_core = { path = "../blinc_core", version = "0.5.0" }
+blinc_core = { path = "../blinc_core", version = "0.5.1" }
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 tracing.workspace = true

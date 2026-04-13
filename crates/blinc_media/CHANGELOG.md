@@ -2,6 +2,28 @@
 
 All notable changes to `blinc_media` will be documented in this file.
 
+## [0.5.1] - 2026-04-13
+
+### Added
+- MP4 demuxer + `VideoPlayer::load_file` for desktop H.264 playback via OpenH264
+- `VideoPlayer::load_bytes` for in-memory MP4 decoding
+- Browser-native `<video>` playback via `web_video.rs` (wasm32): `create`, `load_bytes`, `play`, `pause`, `seek`, `set_volume`, `capture_frame`
+- `video_player()` widget with signal-driven controls (play/pause, seek bar, time display, volume)
+- `VideoPlayer::frame_generation()` counter for consumer-side redundant upload skip
+- `SdfVertexInstance` struct for vertex-buffer-based SDF vertex data (VERTEX_STORAGE fallback)
+
+### Fixed
+- Wasm video: `duration_signal` now propagated from tick callback (was always 0:00)
+- Wasm video: `playing_signal.set(false)` on video end (button no longer stuck on pause)
+- Wasm video: `load_bytes` no longer prematurely sets playing state before user interaction
+- Wasm video: frame capture skipped when `currentTime` unchanged (saves ~8MB/tick at 1080p)
+- Desktop video: wall-clock pacing replaces fixed `thread::sleep` per frame (no more playback drift)
+- Video seek bar wrapped in own Stateful with position/duration deps (was invisible until volume clicked)
+- Video surface canvas caches last `Arc<Frame>` to skip mutex lock + Arc clone on unchanged frames
+- `BlobPropertyBag::type_` → `set_type` (deprecated API warning)
+- `#[cfg_attr(target_arch = "wasm32", allow(dead_code))]` on `generation` field
+- `#[allow(dead_code)]` on `is_paused` (reserved for future use)
+
 ## [0.4.0] - 2026-04-05
 
 ### Added
