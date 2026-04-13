@@ -659,8 +659,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let fill_type = prim.type_info.y;
     let clip_type = prim.type_info.z;
 
-    // Early type filter — discard primitives handled by other split pipelines
-    if prim_type > 2u { discard; }
+    // Early type filter — discard primitives handled by other split pipelines.
+    // Allow prim_type 7 (text) — transformed text glyphs are rendered through
+    // the SDF pipeline with css_affine, not the separate text pipeline.
+    if prim_type > 2u && prim_type != 7u { discard; }
 
     // Early clip test - discard if completely outside clip region (screen space)
     let clip_alpha = calculate_clip_alpha(p, prim.clip_bounds, prim.clip_radius, clip_type, prim.clip_fade);
@@ -763,6 +765,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         case 2u /* PRIM_ELLIPSE */: {
             d = sd_ellipse(sp, center, size * 0.5);
+        }
+        case 7u /* PRIM_TEXT */: {
+            let uv_bounds = prim.gradient_params;
+            let is_color = fill_type == 1u;
+            let local_uv = (sp - origin) / size;
+            let atlas_uv = uv_bounds.xy + local_uv * (uv_bounds.zw - uv_bounds.xy);
+
+            var text_result: vec4<f32>;
+            if is_color {
+                text_result = textureSampleLevel(color_glyph_atlas, glyph_sampler, atlas_uv, 0.0);
+            } else {
+                let coverage = textureSampleLevel(glyph_atlas, glyph_sampler, atlas_uv, 0.0).r;
+                let gamma_coverage = pow(coverage, 0.7);
+                text_result = vec4<f32>(prim.color.rgb, prim.color.a * gamma_coverage);
+            }
+
+            text_result.a *= clip_alpha;
+
+            let edge_aa = 1.0;
+            let clip_edge_alpha = smoothstep(0.0, edge_aa, min(
+                min(p.x - prim.clip_bounds.x, prim.clip_bounds.x + prim.clip_bounds.z - p.x),
+                min(p.y - prim.clip_bounds.y, prim.clip_bounds.y + prim.clip_bounds.w - p.y)
+            ));
+            text_result.a *= clip_edge_alpha;
+
+            return text_result;
         }
         default: {
             d = sd_shaped_rect(sp, origin, size, prim.corner_radius, prim.corner_shape);
