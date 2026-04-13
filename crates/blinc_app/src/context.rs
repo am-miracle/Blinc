@@ -3733,6 +3733,12 @@ impl RenderContext {
         &self.queue
     }
 
+    /// Whether the GPU adapter supports storage buffers.
+    /// False on WebGL2 (GL adapter) — the renderer uses data textures instead.
+    pub fn has_storage_buffers(&self) -> bool {
+        self.renderer.has_storage_buffers()
+    }
+
     /// Get the shared font registry
     ///
     /// This can be used to share fonts between text measurement and rendering,

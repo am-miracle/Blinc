@@ -2262,6 +2262,12 @@ pub const SDF_3D_DT_SHADER: &str = include_str!("shaders/sdf_3d_dt.wgsl");
 /// Data-texture fallback: Notch primitives
 pub const SDF_NOTCH_DT_SHADER: &str = include_str!("shaders/sdf_notch_dt.wgsl");
 
+/// Data-texture fallback: Text rendering (no storage buffers — WebGL2)
+///
+/// Glyph data packed into Rgba32Float texture (width=6, height=max_glyphs).
+/// Same visual output as TEXT_SHADER.
+pub const TEXT_DT_SHADER: &str = include_str!("shaders/text_dt.wgsl");
+
 /// Shader for text rendering with SDF glyphs
 ///
 /// Supports both grayscale text glyphs and color emoji:
@@ -4948,5 +4954,10 @@ mod tests {
     #[test]
     fn sdf_notch_dt_shader_parses() {
         parse_wgsl(SDF_NOTCH_DT_SHADER).expect("SDF_NOTCH_DT_SHADER");
+    }
+
+    #[test]
+    fn text_dt_shader_parses() {
+        parse_wgsl(TEXT_DT_SHADER).expect("TEXT_DT_SHADER");
     }
 }

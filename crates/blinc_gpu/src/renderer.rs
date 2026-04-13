@@ -40,7 +40,7 @@ use crate::shaders::{
     SDF_CORE_SHADER, SDF_CORE_VB_SHADER, SDF_CORE_DT_SHADER,
     SDF_NOTCH_SHADER, SDF_NOTCH_VB_SHADER, SDF_NOTCH_DT_SHADER,
     SDF_SHADOW_SHADER, SDF_SHADOW_VB_SHADER, SDF_SHADOW_DT_SHADER,
-    SIMPLE_GLASS_SHADER, TEXT_SHADER,
+    SIMPLE_GLASS_SHADER, TEXT_DT_SHADER, TEXT_SHADER,
 };
 
 fn env_u64(name: &str) -> Option<u64> {
@@ -415,6 +415,10 @@ struct Buffers {
     aux_data_view: Option<wgpu::TextureView>,
     /// Current height of the aux data texture (for resize detection)
     aux_data_texture_height: u32,
+    /// Data texture for glyph data (WebGL2 fallback).
+    /// Width = 6 texels (one per vec4 field of GpuGlyph), height = max_glyphs.
+    glyph_data_texture: Option<wgpu::Texture>,
+    glyph_data_view: Option<wgpu::TextureView>,
 }
 
 /// Bind groups for shader resources
@@ -1201,6 +1205,11 @@ struct BindGroupLayouts {
 }
 
 impl GpuRenderer {
+    /// Whether the GPU adapter supports storage buffers.
+    pub fn has_storage_buffers(&self) -> bool {
+        self.has_storage_buffers
+    }
+
     /// Get the preferred backend for the current platform
     ///
     /// Using the primary backend instead of all backends reduces memory usage
@@ -1850,11 +1859,7 @@ impl GpuRenderer {
             source: wgpu::ShaderSource::Wgsl(monolithic_sdf_source.into()),
         });
 
-        // In DT mode, TEXT_SHADER uses var<storage, read> which conflicts with
-        // the texture bind group layout. Use the DT core shader as a stand-in
-        // so the pipeline can be created without panic. Text won't render in DT
-        // mode until a proper TEXT_DT_SHADER is implemented.
-        let text_source = if has_storage_buffers { TEXT_SHADER } else { SDF_CORE_DT_SHADER };
+        let text_source = if has_storage_buffers { TEXT_SHADER } else { TEXT_DT_SHADER };
         let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Text Shader"),
             source: wgpu::ShaderSource::Wgsl(text_source.into()),
@@ -2338,9 +2343,8 @@ impl GpuRenderer {
                     visibility: if has_storage_buffers {
                         wgpu::ShaderStages::VERTEX
                     } else {
-                        // DT mode uses the SDF core DT shader as stand-in, which
-                        // has module-scope binding declarations visible to both stages
-                        wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT
+                        // DT mode: TEXT_DT_SHADER reads glyph_data texture in vs_main
+                        wgpu::ShaderStages::VERTEX
                     },
                     ty: if has_storage_buffers {
                         wgpu::BindingType::Buffer {
@@ -2960,8 +2964,9 @@ impl GpuRenderer {
             push_constant_ranges: &[],
         });
 
-        // In DT mode, the text shader is the DT core stand-in which needs VB layout
-        let text_vb_buffers: &[wgpu::VertexBufferLayout<'_>] = sdf_vb_buffers;
+        // TEXT_DT_SHADER has its own vs_main that reads from a glyph data texture
+        // (no VB instance attributes needed — unlike SDF DT which uses VB + DT).
+        let text_vb_buffers: &[wgpu::VertexBufferLayout<'_>] = &[];
 
         let text = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Text Pipeline"),
@@ -3329,7 +3334,7 @@ impl GpuRenderer {
         });
 
         // Create data textures for DT (Tier 3) fallback when no storage buffers
-        let (prim_data_texture, prim_data_view, aux_data_texture, aux_data_view, aux_data_texture_height) =
+        let (prim_data_texture, prim_data_view, aux_data_texture, aux_data_view, aux_data_texture_height, glyph_data_texture, glyph_data_view) =
             if !has_storage_buffers {
                 // Primitive data texture: width=23 (one texel per vec4 field), height=max_primitives
                 let prim_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -3365,9 +3370,26 @@ impl GpuRenderer {
                 });
                 let aux_view = aux_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-                (Some(prim_tex), Some(prim_view), Some(aux_tex), Some(aux_view), 1u32)
+                // Glyph data texture: width=6 (one texel per vec4 field), height=max_glyphs
+                let glyph_tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Glyph Data Texture"),
+                    size: wgpu::Extent3d {
+                        width: 6,
+                        height: config.max_glyphs as u32,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let glyph_view = glyph_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+                (Some(prim_tex), Some(prim_view), Some(aux_tex), Some(aux_view), 1u32, Some(glyph_tex), Some(glyph_view))
             } else {
-                (None, None, None, None, 0u32)
+                (None, None, None, None, 0u32, None, None)
             };
 
         Buffers {
@@ -3390,6 +3412,8 @@ impl GpuRenderer {
             aux_data_texture,
             aux_data_view,
             aux_data_texture_height,
+            glyph_data_texture,
+            glyph_data_view,
         }
     }
 
@@ -6672,9 +6696,34 @@ impl GpuRenderer {
         self.queue
             .write_buffer(&self.buffers.uniforms, 0, bytemuck::bytes_of(&uniforms));
 
-        // Update glyphs buffer
-        self.queue
-            .write_buffer(&self.buffers.glyphs, 0, bytemuck::cast_slice(glyphs));
+        // Update glyphs: storage buffer or data texture
+        if self.has_storage_buffers {
+            self.queue
+                .write_buffer(&self.buffers.glyphs, 0, bytemuck::cast_slice(glyphs));
+        } else if let Some(ref tex) = self.buffers.glyph_data_texture {
+            if !glyphs.is_empty() {
+                let bytes = bytemuck::cast_slice(glyphs);
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytes,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(6 * 16), // 6 texels × 16 bytes per Rgba32Float = 96 bytes = sizeof(GpuGlyph)
+                        rows_per_image: None,
+                    },
+                    wgpu::Extent3d {
+                        width: 6,
+                        height: glyphs.len() as u32,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
 
         // Check if we need to recreate the text bind group
         // Invalidate if either atlas view pointer changed (texture was recreated)
@@ -6702,10 +6751,8 @@ impl GpuRenderer {
                         resource: if self.has_storage_buffers {
                             self.buffers.glyphs.as_entire_binding()
                         } else {
-                            // DT mode: use prim_data texture as stand-in for glyphs
-                            // (text won't render until a proper glyph DT shader exists)
                             wgpu::BindingResource::TextureView(
-                                self.buffers.prim_data_view.as_ref().unwrap(),
+                                self.buffers.glyph_data_view.as_ref().unwrap(),
                             )
                         },
                     },

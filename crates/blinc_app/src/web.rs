@@ -622,13 +622,16 @@ impl WebApp {
 
         // 4. Configure the surface for the canvas's physical dimensions.
         let texture_format = blinc_app.texture_format();
+        // COPY_SRC is needed for blend mode two-pass compositing, but
+        // the GL (WebGL2) adapter doesn't support it on the surface.
+        // Detect via renderer's has_storage_buffers — GL adapters lack
+        // both storage buffers and surface COPY_SRC.
+        let mut surface_usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        if blinc_app.has_storage_buffers() {
+            surface_usage |= wgpu::TextureUsages::COPY_SRC;
+        }
         let surface_config = wgpu::SurfaceConfiguration {
-            // COPY_SRC is required for blend mode two-pass compositing:
-            // the blend shader copies the surface texture to a dest
-            // texture before rendering the blended layer on top.
-            // Without it, Chrome rejects the CopyTextureToTexture
-            // command with "doesn't include TextureUsage::CopySrc".
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: surface_usage,
             format: texture_format,
             width: physical_width as u32,
             height: physical_height as u32,

@@ -322,6 +322,11 @@ impl BlincApp {
         self.ctx.queue()
     }
 
+    /// Whether the GPU adapter supports storage buffers.
+    pub fn has_storage_buffers(&self) -> bool {
+        self.ctx.has_storage_buffers()
+    }
+
     /// Create a new wgpu surface for an additional window.
     ///
     /// Uses the existing GPU instance to create a surface that shares
