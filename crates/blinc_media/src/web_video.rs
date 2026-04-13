@@ -81,8 +81,8 @@ pub(crate) fn load_bytes(player_id: u64, bytes: &[u8]) {
         let parts = js_sys::Array::new();
         parts.push(&array.buffer());
 
-        let mut opts = BlobPropertyBag::new();
-        opts.type_("video/mp4");
+        let opts = BlobPropertyBag::new();
+        opts.set_type("video/mp4");
         let blob = Blob::new_with_buffer_source_sequence_and_options(&parts, &opts).unwrap();
         let url = Url::create_object_url_with_blob(&blob).unwrap();
 
@@ -145,6 +145,7 @@ pub(crate) fn position_ms(player_id: u64) -> u64 {
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn is_paused(player_id: u64) -> bool {
     WEB_VIDEOS.with(|map| {
         let map = map.borrow();

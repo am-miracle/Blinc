@@ -125,6 +125,7 @@ struct VideoPlayerInner {
     source: Option<String>,
     position_ms: u64,
     duration_ms: u64,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     generation: u64,
     /// Incremented each time a new decoded frame is stored.
     /// Consumers compare against their last-seen value to skip
