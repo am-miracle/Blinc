@@ -1840,14 +1840,24 @@ impl GpuRenderer {
             Self::create_bind_group_layouts_with_flags(&device, has_vertex_storage, has_storage_buffers);
 
         // Create shaders
+        // In DT mode (no storage buffers), the monolithic SDF_SHADER uses
+        // var<storage, read> which conflicts with the texture bind group layout.
+        // Use the DT core shader as a stand-in — the monolithic pipeline is
+        // kept for backward compat but isn't used when split pipelines are active.
+        let monolithic_sdf_source = if has_storage_buffers { SDF_SHADER } else { SDF_CORE_DT_SHADER };
         let sdf_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("SDF Shader"),
-            source: wgpu::ShaderSource::Wgsl(SDF_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(monolithic_sdf_source.into()),
         });
 
+        // In DT mode, TEXT_SHADER uses var<storage, read> which conflicts with
+        // the texture bind group layout. Use the DT core shader as a stand-in
+        // so the pipeline can be created without panic. Text won't render in DT
+        // mode until a proper TEXT_DT_SHADER is implemented.
+        let text_source = if has_storage_buffers { TEXT_SHADER } else { SDF_CORE_DT_SHADER };
         let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Text Shader"),
-            source: wgpu::ShaderSource::Wgsl(TEXT_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(text_source.into()),
         });
 
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2155,10 +2165,14 @@ impl GpuRenderer {
                 count: None,
             }
         } else {
-            // DT mode: primitive data comes from an Rgba32Float texture
+            // DT mode: primitive data comes from an Rgba32Float texture.
+            // VERTEX | FRAGMENT visibility needed because WGSL module-scope
+            // bindings are validated against all entry points in the module,
+            // even if only fs_main reads the texture. Texture bindings don't
+            // require VERTEX_STORAGE (that flag only applies to storage buffers).
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     view_dimension: wgpu::TextureViewDimension::D2,
@@ -2183,7 +2197,7 @@ impl GpuRenderer {
             // DT mode: aux data comes from an Rgba32Float texture
             wgpu::BindGroupLayoutEntry {
                 binding: 5,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     view_dimension: wgpu::TextureViewDimension::D2,
@@ -2324,7 +2338,9 @@ impl GpuRenderer {
                     visibility: if has_storage_buffers {
                         wgpu::ShaderStages::VERTEX
                     } else {
-                        wgpu::ShaderStages::VERTEX
+                        // DT mode uses the SDF core DT shader as stand-in, which
+                        // has module-scope binding declarations visible to both stages
+                        wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT
                     },
                     ty: if has_storage_buffers {
                         wgpu::BindingType::Buffer {
@@ -2818,13 +2834,21 @@ impl GpuRenderer {
             push_constant_ranges: &[],
         });
 
+        // When VERTEX_STORAGE is unavailable, SDF vertex shaders read from an
+        // instance-stepped vertex buffer instead of the storage buffer.
+        let sdf_vb_buffers: &[wgpu::VertexBufferLayout<'_>] = if has_vertex_storage {
+            &[]
+        } else {
+            &[SdfVertexInstance::LAYOUT]
+        };
+
         let sdf = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("SDF Pipeline"),
             layout: Some(&sdf_layout),
             vertex: wgpu::VertexState {
                 module: sdf_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[],
+                buffers: sdf_vb_buffers,
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -2853,7 +2877,7 @@ impl GpuRenderer {
             vertex: wgpu::VertexState {
                 module: sdf_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[],
+                buffers: sdf_vb_buffers,
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -2870,13 +2894,6 @@ impl GpuRenderer {
         });
 
         // --- Split SDF pipelines (share sdf_layout, same blend/primitive state) ---
-        // When VERTEX_STORAGE is unavailable, SDF vertex shaders read from an
-        // instance-stepped vertex buffer instead of the storage buffer.
-        let sdf_vb_buffers: &[wgpu::VertexBufferLayout<'_>] = if has_vertex_storage {
-            &[]
-        } else {
-            &[SdfVertexInstance::LAYOUT]
-        };
 
         // Helper closure to create an SDF pipeline pair (MSAA + overlay) from a shader module
         let make_sdf_pipeline_pair =
@@ -2943,13 +2960,16 @@ impl GpuRenderer {
             push_constant_ranges: &[],
         });
 
+        // In DT mode, the text shader is the DT core stand-in which needs VB layout
+        let text_vb_buffers: &[wgpu::VertexBufferLayout<'_>] = sdf_vb_buffers;
+
         let text = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Text Pipeline"),
             layout: Some(&text_layout),
             vertex: wgpu::VertexState {
                 module: text_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[],
+                buffers: text_vb_buffers,
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -2972,7 +2992,7 @@ impl GpuRenderer {
             vertex: wgpu::VertexState {
                 module: text_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[],
+                buffers: text_vb_buffers,
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -6679,7 +6699,15 @@ impl GpuRenderer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: self.buffers.glyphs.as_entire_binding(),
+                        resource: if self.has_storage_buffers {
+                            self.buffers.glyphs.as_entire_binding()
+                        } else {
+                            // DT mode: use prim_data texture as stand-in for glyphs
+                            // (text won't render until a proper glyph DT shader exists)
+                            wgpu::BindingResource::TextureView(
+                                self.buffers.prim_data_view.as_ref().unwrap(),
+                            )
+                        },
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
