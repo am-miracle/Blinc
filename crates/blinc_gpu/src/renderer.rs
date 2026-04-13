@@ -1952,19 +1952,6 @@ impl GpuRenderer {
         );
 
         // Create shaders
-        // In DT mode (no storage buffers), the monolithic SDF_SHADER uses
-        // var<storage, read> which conflicts with the texture bind group layout.
-        // Use the DT core shader as a stand-in — the monolithic pipeline is
-        // kept for backward compat but isn't used when split pipelines are active.
-        let monolithic_sdf_source = if has_storage_buffers {
-            SDF_SHADER
-        } else {
-            SDF_CORE_DT_SHADER
-        };
-        let sdf_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SDF Shader"),
-            source: wgpu::ShaderSource::Wgsl(monolithic_sdf_source.into()),
-        });
 
         let text_source = if has_storage_buffers {
             TEXT_SHADER
@@ -2022,6 +2009,14 @@ impl GpuRenderer {
                     SDF_NOTCH_SHADER,
                 )
             };
+
+        // The monolithic SDF_SHADER is no longer compiled — split pipelines
+        // handle all primitive types. Use core shader as stand-in for the
+        // dead-code monolithic pipeline fields in the Pipelines struct.
+        let sdf_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("SDF Shader (stand-in — split pipelines active)"),
+            source: wgpu::ShaderSource::Wgsl(sdf_core_source.into()),
+        });
 
         let sdf_core_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("SDF Core Shader"),
@@ -3727,10 +3722,18 @@ impl GpuRenderer {
             alpha_to_coverage_enabled: false,
         };
 
-        // Create SDF shader
+        // Monolithic stand-in (MSAA) — uses core shader to avoid compiling
+        // the full SDF_SHADER which exceeds PowerVR's shader compiler limit.
+        let msaa_core_source = if !has_storage_buffers {
+            SDF_CORE_DT_SHADER
+        } else if !has_vertex_storage {
+            SDF_CORE_VB_SHADER
+        } else {
+            SDF_CORE_SHADER
+        };
         let sdf_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SDF Shader (MSAA)"),
-            source: wgpu::ShaderSource::Wgsl(SDF_SHADER.into()),
+            label: Some("SDF Shader (MSAA stand-in)"),
+            source: wgpu::ShaderSource::Wgsl(msaa_core_source.into()),
         });
 
         let sdf_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
