@@ -1352,19 +1352,29 @@ impl GpuRenderer {
         for p in primitives {
             match p.pipeline_category() {
                 SdfPipelineCategory::Core => {
-                    if ranges.core.is_empty() { ranges.core = full.clone(); }
+                    if ranges.core.is_empty() {
+                        ranges.core = full.clone();
+                    }
                 }
                 SdfPipelineCategory::Shadow => {
-                    if ranges.shadow.is_empty() { ranges.shadow = full.clone(); }
+                    if ranges.shadow.is_empty() {
+                        ranges.shadow = full.clone();
+                    }
                 }
                 SdfPipelineCategory::Sdf3D => {
-                    if ranges.sdf_3d.is_empty() { ranges.sdf_3d = full.clone(); }
+                    if ranges.sdf_3d.is_empty() {
+                        ranges.sdf_3d = full.clone();
+                    }
                 }
                 SdfPipelineCategory::Notch => {
-                    if ranges.notch.is_empty() { ranges.notch = full.clone(); }
+                    if ranges.notch.is_empty() {
+                        ranges.notch = full.clone();
+                    }
                 }
                 SdfPipelineCategory::Text => {
-                    if ranges.text.is_empty() { ranges.text = full.clone(); }
+                    if ranges.text.is_empty() {
+                        ranges.text = full.clone();
+                    }
                 }
             }
         }
