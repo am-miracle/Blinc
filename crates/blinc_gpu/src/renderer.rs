@@ -37,10 +37,9 @@ use crate::shaders::{
     BLUR_SHADER, COLOR_MATRIX_SHADER, COMPOSITE_SHADER, DROP_SHADOW_SHADER, GLASS_DT_SHADER,
     GLASS_SHADER, GLOW_SHADER, IMAGE_SHADER, LAYER_COMPOSITE_SHADER, MASK_IMAGE_SHADER,
     MESH_DT_SHADER, PATH_SHADER, SDF_3D_DT_SHADER, SDF_3D_SHADER, SDF_3D_VB_SHADER,
-    SDF_CORE_DT_SHADER, SDF_CORE_SHADER, SDF_CORE_VB_SHADER, SDF_NOTCH_DT_SHADER,
-    SDF_NOTCH_SHADER, SDF_NOTCH_VB_SHADER, SDF_SHADER, SDF_SHADOW_DT_SHADER, SDF_SHADOW_SHADER,
-    SDF_SHADOW_VB_SHADER, SIMPLE_GLASS_DT_SHADER, SIMPLE_GLASS_SHADER, TEXT_DT_SHADER,
-    TEXT_SHADER,
+    SDF_CORE_DT_SHADER, SDF_CORE_SHADER, SDF_CORE_VB_SHADER, SDF_NOTCH_DT_SHADER, SDF_NOTCH_SHADER,
+    SDF_NOTCH_VB_SHADER, SDF_SHADER, SDF_SHADOW_DT_SHADER, SDF_SHADOW_SHADER, SDF_SHADOW_VB_SHADER,
+    SIMPLE_GLASS_DT_SHADER, SIMPLE_GLASS_SHADER, TEXT_DT_SHADER, TEXT_SHADER,
 };
 
 fn env_u64(name: &str) -> Option<u64> {
@@ -9047,7 +9046,9 @@ impl GpuRenderer {
             wgpu::BindGroupEntry {
                 binding: 8,
                 resource: wgpu::BindingResource::TextureView(
-                    mp.joint_data_view.as_ref().expect("joint_data_view in DT mode"),
+                    mp.joint_data_view
+                        .as_ref()
+                        .expect("joint_data_view in DT mode"),
                 ),
             }
         };
