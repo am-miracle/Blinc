@@ -720,7 +720,7 @@ impl VideoPlayer {
                 // Wall-clock pacing: sleep only for remaining time after decode
                 if sample_idx >= target_sample {
                     let clock = playback_clock.get_or_insert_with(std::time::Instant::now);
-                    let frames_since_start = (sample_idx - target_sample) as u32 + 1;
+                    let frames_since_start = (sample_idx - target_sample) + 1;
                     let target_time = *clock + frame_duration * frames_since_start;
                     let now = std::time::Instant::now();
                     if target_time > now {

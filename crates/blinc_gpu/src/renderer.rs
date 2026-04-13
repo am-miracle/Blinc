@@ -4735,7 +4735,7 @@ impl GpuRenderer {
     fn update_aux_data_texture(&mut self, aux_data: &[[f32; 4]]) {
         const AUX_TEX_WIDTH: u32 = 1024;
         let count = aux_data.len() as u32;
-        let needed_height = ((count + AUX_TEX_WIDTH - 1) / AUX_TEX_WIDTH).max(1);
+        let needed_height = count.div_ceil(AUX_TEX_WIDTH).max(1);
 
         if needed_height > self.buffers.aux_data_texture_height {
             // Recreate the texture with more rows

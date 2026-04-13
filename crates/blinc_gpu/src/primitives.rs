@@ -80,8 +80,8 @@ impl GpuPrimitive {
             return SdfPipelineCategory::Sdf3D;
         }
         match prim_type {
-            0 | 1 | 2 => SdfPipelineCategory::Core,
-            3 | 4 | 5 | 6 => SdfPipelineCategory::Shadow,
+            0..=2 => SdfPipelineCategory::Core,
+            3..=6 => SdfPipelineCategory::Shadow,
             7 => SdfPipelineCategory::Text,
             8 => SdfPipelineCategory::Notch,
             _ => SdfPipelineCategory::Core, // fallback
