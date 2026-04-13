@@ -2337,14 +2337,12 @@ impl GpuRenderer {
                     },
                     count: None,
                 },
-                // Glass primitives: storage buffer (normal) or texture (WebGL2 DT fallback)
+                // Glass primitives: storage buffer (normal) or texture (WebGL2 DT fallback).
+                // VERTEX | FRAGMENT in both modes — DT shader declares binding at module
+                // scope, wgpu validates against all entry points.
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: if has_storage_buffers {
-                        wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT
-                    } else {
-                        wgpu::ShaderStages::FRAGMENT
-                    },
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: if has_storage_buffers {
                         wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -5056,7 +5054,7 @@ impl GpuRenderer {
         backdrop: &wgpu::TextureView,
         batch: &PrimitiveBatch,
     ) {
-        if batch.glass_primitives.is_empty() {
+        if batch.glass_primitives.is_empty() || !self.has_storage_buffers {
             return;
         }
         self.ensure_glass_pipelines();
@@ -5310,6 +5308,13 @@ impl GpuRenderer {
         batch: &PrimitiveBatch,
         has_backdrop_content: bool,
     ) {
+        // Glass effects require storage buffers for per-frame primitive data.
+        // On WebGL2 (no storage buffers), skip glass rendering — the glass DT
+        // shader exists but needs a per-frame glass data texture + bind group
+        // plumbing that isn't implemented yet.
+        if !self.has_storage_buffers {
+            return;
+        }
         self.ensure_glass_pipelines();
 
         // Update uniforms for rendering (always use full viewport size)
