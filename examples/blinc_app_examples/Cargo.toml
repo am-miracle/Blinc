@@ -1,0 +1,36 @@
+[package]
+name = "blinc_app_examples"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Example apps for the Blinc framework — not published to crates.io"
+publish = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("fuchsia", "ohos"))', 'cfg(target_env, values("ohos"))'] }
+
+[dependencies]
+blinc_app = { path = "../../crates/blinc_app", features = ["windowed"] }
+blinc_core = { path = "../../crates/blinc_core" }
+blinc_layout = { path = "../../crates/blinc_layout" }
+blinc_theme = { path = "../../crates/blinc_theme" }
+blinc_gpu = { path = "../../crates/blinc_gpu" }
+blinc_svg = { path = "../../crates/blinc_svg" }
+blinc_text = { path = "../../crates/blinc_text" }
+blinc_animation = { path = "../../crates/blinc_animation" }
+blinc_paint = { path = "../../crates/blinc_paint" }
+blinc_router = { path = "../../crates/blinc_router" }
+blinc_cn = { path = "../../crates/blinc_cn" }
+blinc_image = { path = "../../crates/blinc_image" }
+blinc_icons = { path = "../../crates/blinc_icons" }
+blinc_tabler_icons = { path = "../../crates/blinc_tabler_icons" }
+blinc_canvas_kit = { path = "../../crates/blinc_canvas_kit" }
+blinc_media = { path = "../../crates/blinc_media" }
+blinc_platform = { path = "../../crates/blinc_platform" }
+blinc_platform_desktop = { path = "../../extensions/blinc_platform_desktop" }
+
+image.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -17,4 +17,4 @@ Demonstrates the new selector API features:
 
 > **Tip:** Some demos are best viewed in a full browser window. Click "Open in a new tab" below for the full experience.
 
-[Open in a new tab](../../examples/carousel_demo/index.html) · [View source on GitHub](https://github.com/project-blinc/Blinc/blob/main/crates/blinc_app/examples/carousel_demo.rs)
+[Open in a new tab](../../examples/carousel_demo/index.html) · [View source on GitHub](https://github.com/project-blinc/Blinc/blob/main/examples/blinc_app_examples/examples/carousel_demo.rs)

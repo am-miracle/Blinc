@@ -1,5 +1,5 @@
 //! `blinc-build-web-examples` — codegen tool that auto-discovers
-//! cross-target examples in `crates/blinc_app/examples/*.rs` and
+//! cross-target examples in `examples/blinc_app_examples/examples/*.rs` and
 //! emits one wasm wrapper crate per example under
 //! `examples/_generated/<name>/`.
 //!
@@ -10,7 +10,7 @@
 //!
 //! # Discovery
 //!
-//! Every `.rs` file under `crates/blinc_app/examples/` is
+//! Every `.rs` file under `examples/blinc_app_examples/examples/` is
 //! syntactically parsed. A file is selected if:
 //!
 //! 1. Its top `//!` doc-comment block does NOT contain `no-web:`
@@ -75,7 +75,7 @@ use std::path::{Path, PathBuf};
 // ============================================================================
 
 /// Directory holding the upstream cross-target examples.
-const EXAMPLES_DIR: &str = "crates/blinc_app/examples";
+const EXAMPLES_DIR: &str = "examples/blinc_app_examples/examples";
 
 /// Directory where this tool writes generated wrapper crates.
 const GENERATED_DIR: &str = "examples/_generated";
@@ -188,7 +188,7 @@ struct ExampleMeta {
     extra_deps: Vec<(String, String)>,
     /// Image asset paths referenced in the example source. Detected
     /// by scanning for string literals that match
-    /// `crates/blinc_app/examples/assets/`. On the web target these
+    /// `examples/blinc_app_examples/examples/assets/`. On the web target these
     /// are fetched via `preload_assets` at startup (the browser
     /// serves them from the same origin as the wasm).
     image_assets: Vec<String>,
@@ -413,7 +413,7 @@ fn format_fallback_title(stem: &str) -> String {
 }
 
 /// Scan the example source for image asset paths. Looks for quoted
-/// strings containing `crates/blinc_app/examples/assets/` — the
+/// strings containing `examples/blinc_app_examples/examples/assets/` — the
 /// convention all desktop examples use for bundled images. Returns
 /// deduplicated, sorted paths.
 /// Extract `width` and `height` from a `WindowConfig { ... }` block
@@ -460,17 +460,17 @@ fn extract_window_size(source: &str) -> Option<(u32, u32)> {
 
 fn detect_image_assets(source: &str) -> Vec<String> {
     let mut raw_paths = std::collections::BTreeSet::new();
-    let asset_prefix = "crates/blinc_app/examples/assets/";
+    let asset_prefix = "examples/blinc_app_examples/examples/assets/";
 
-    // Match string literals like "crates/blinc_app/examples/assets/foo.webp"
-    // or directory constants like "crates/blinc_app/examples/assets/3d/DamagedHelmet"
+    // Match string literals like "examples/blinc_app_examples/examples/assets/foo.webp"
+    // or directory constants like "examples/blinc_app_examples/examples/assets/3d/DamagedHelmet"
     for segment in source.split('"') {
         let trimmed = segment.trim();
         if trimmed.starts_with(asset_prefix) && !trimmed.contains('\n') {
             raw_paths.insert(trimmed.to_string());
         }
     }
-    // Match markdown image syntax: ![alt](crates/blinc_app/examples/assets/foo.webp)
+    // Match markdown image syntax: ![alt](examples/blinc_app_examples/examples/assets/foo.webp)
     for segment in source.split('(') {
         let trimmed = segment.trim();
         if trimmed.starts_with(asset_prefix) {
@@ -665,7 +665,7 @@ wasm-opt = ['-O', '--all-features']
 wasm-opt = false
 
 # Strictly a wasm32 wrapper. The desktop side of the same example
-# is `cargo run -p blinc_app --example {name} --features windowed`.
+# is `cargo run -p blinc_app_examples --example {name} --features windowed`.
 # Native builds of this wrapper are intentionally no-ops — the whole
 # crate is `#![cfg(target_arch = "wasm32")]`-gated inside `src/lib.rs`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -788,7 +788,7 @@ fn render_lib_rs(stem: &str, crate_name: &str, image_assets: &[String]) -> Strin
 //! Wasm wrapper for the `{stem}` example. The entire crate is
 //! `#![cfg(target_arch = "wasm32")]`-gated — native builds of this
 //! wrapper are no-ops. The desktop side of the same example is
-//! `cargo run -p blinc_app --example {stem} --features windowed`.
+//! `cargo run -p blinc_app_examples --example {stem} --features windowed`.
 //!
 //! Flow:
 //!
@@ -1104,7 +1104,7 @@ fn render_gallery_page(meta: &ExampleMeta) -> String {
     let description = if meta.description.trim().is_empty() {
         String::from(
             "This example is auto-generated from the cross-target source \
-             in `crates/blinc_app/examples/`. See the linked source file \
+             in `examples/blinc_app_examples/examples/`. See the linked source file \
              for the full details.",
         )
     } else {
@@ -1143,7 +1143,7 @@ fn render_gallery_index(examples: &[ExampleMeta]) -> String {
     let mut body = String::new();
     body.push_str(
         "# Example Gallery\n\n\
-         Every example in [`crates/blinc_app/examples/`](https://github.com/project-blinc/Blinc/tree/main/crates/blinc_app/examples)\n\
+         Every example in [`examples/blinc_app_examples/examples/`](https://github.com/project-blinc/Blinc/tree/main/examples/blinc_app_examples/examples)\n\
          that follows the cross-target convention is auto-built for the web\n\
          target by `tools/build-web-examples` and embedded below. The same\n\
          `build_ui` function that runs on desktop, iOS, and Android runs\n\
@@ -1265,7 +1265,7 @@ fn patch_summary(workspace_root: &Path, examples: &[ExampleMeta]) -> std::io::Re
 //
 // File classification:
 //
-//   - `crates/blinc_app/examples/<name>.rs` → only `<name>` rebuilds
+//   - `examples/blinc_app_examples/examples/<name>.rs` → only `<name>` rebuilds
 //   - `Cargo.lock` / `crates/!blinc_app/**` / `extensions/**` /
 //     `tools/build-web-examples/**` / wrapper templates →
 //     "shared change", every wrapper rebuilds
@@ -1392,7 +1392,7 @@ fn plan_builds(workspace_root: &Path, examples: &[ExampleMeta], force: bool) -> 
     let mut changed_examples: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut shared_changes: Vec<String> = Vec::new();
     for path in &changed {
-        if let Some(rest) = path.strip_prefix("crates/blinc_app/examples/") {
+        if let Some(rest) = path.strip_prefix("examples/blinc_app_examples/examples/") {
             // Only top-level *.rs files in that directory count;
             // subdirectories (like the `assets/` folder) don't.
             if let Some(stem) = rest.strip_suffix(".rs") {
@@ -1401,7 +1401,7 @@ fn plan_builds(workspace_root: &Path, examples: &[ExampleMeta], force: bool) -> 
                     continue;
                 }
             }
-            // Files under crates/blinc_app/examples/ that aren't
+            // Files under examples/blinc_app_examples/examples/ that aren't
             // top-level .rs (e.g. assets/) don't affect any
             // wrapper's wasm output, so they're ignored.
             continue;
@@ -1656,7 +1656,7 @@ fn stage_wrappers(
     // Copy detected assets into each example's staging directory,
     // preserving the full relative path from the workspace root so
     // browser fetch() URLs like
-    // `crates/blinc_app/examples/assets/3d/DamagedHelmet/albedo.jpg`
+    // `examples/blinc_app_examples/examples/assets/3d/DamagedHelmet/albedo.jpg`
     // resolve correctly from the example's served root.
     for meta in examples {
         if meta.image_assets.is_empty() {

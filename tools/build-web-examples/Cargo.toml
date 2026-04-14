@@ -1,6 +1,6 @@
 [package]
 name = "blinc-build-web-examples"
-description = "Codegen tool that auto-discovers examples in crates/blinc_app/examples/ and emits wasm wrapper crates under examples/_generated/"
+description = "Codegen tool that auto-discovers examples in examples/blinc_app_examples/examples/ and emits wasm wrapper crates under examples/_generated/"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

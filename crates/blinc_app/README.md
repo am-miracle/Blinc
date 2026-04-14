@@ -144,7 +144,7 @@ See the `examples/` directory for complete examples:
 Run examples with:
 
 ```bash
-cargo run -p blinc_app --example hello_world --features windowed
+cargo run -p blinc_app_examples --example hello_world --features windowed
 ```
 
 ## License

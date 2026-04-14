@@ -7,7 +7,7 @@ on:
       - 'docs/book/**'
       - '.github/workflows/docs.yml'
       - 'crates/*/src/**'
-      - 'crates/blinc_app/examples/**'
+      - 'examples/blinc_app_examples/examples/**'
       - 'extensions/*/src/**'
       - 'tools/build-web-examples/**'
       - 'assets/**'
@@ -18,7 +18,7 @@ on:
       - 'docs/book/**'
       - '.github/workflows/docs.yml'
       - 'crates/*/src/**'
-      - 'crates/blinc_app/examples/**'
+      - 'examples/blinc_app_examples/examples/**'
       - 'extensions/*/src/**'
       - 'tools/build-web-examples/**'
       - 'assets/**'
@@ -102,7 +102,7 @@ jobs:
       # "rebuild all" → predictable behavior.
 
       # Regenerates `examples/_generated/<name>/` wrapper crates
-      # from the cross-target source in `crates/blinc_app/examples/`,
+      # from the cross-target source in `examples/blinc_app_examples/examples/`,
       # rewrites the gallery markdown + SUMMARY patch in
       # `docs/book/src/web/`, and runs `wasm-pack build --target web
       # --release` in each wrapper. The built wrappers land in

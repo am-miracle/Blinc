@@ -1,6 +1,6 @@
 # Example Gallery
 
-Every example in [`crates/blinc_app/examples/`](https://github.com/project-blinc/Blinc/tree/main/crates/blinc_app/examples)
+Every example in [`examples/blinc_app_examples/examples/`](https://github.com/project-blinc/Blinc/tree/main/examples/blinc_app_examples/examples)
 that follows the cross-target convention is auto-built for the web
 target by `tools/build-web-examples` and embedded below. The same
 `build_ui` function that runs on desktop, iOS, and Android runs

@@ -1,6 +1,6 @@
 # Writing a Cross-Target Example
 
-Every example under [`crates/blinc_app/examples/`](https://github.com/project-blinc/Blinc/tree/main/crates/blinc_app/examples)
+Every example under [`examples/blinc_app_examples/examples/`](https://github.com/project-blinc/Blinc/tree/main/examples/blinc_app_examples/examples)
 runs on **every** platform Blinc supports — desktop via
 `WindowedApp::run`, web via `WebApp::run_with_setup`, and (where
 the widgets allow) iOS and Android via the mobile runners — with
@@ -68,7 +68,7 @@ A complete minimal example looks like this:
 //! - First thing the example demonstrates
 //! - Second thing
 //!
-//! Run with: cargo run -p blinc_app --example my_new --features windowed
+//! Run with: cargo run -p blinc_app_examples --example my_new --features windowed
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
@@ -104,7 +104,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 }
 ```
 
-Save that as `crates/blinc_app/examples/my_new.rs` and run
+Save that as `examples/blinc_app_examples/examples/my_new.rs` and run
 `cargo run -p blinc-build-web-examples`. The gallery picks it up
 on the next book build.
 
@@ -199,7 +199,7 @@ line with a short reason to the top of the doc block:
 The codegen tool skips any file with `no-web:` in its doc block
 (no wrapper crate, no gallery entry) without erroring out. The
 desktop build is untouched, and the example continues to work as
-`cargo run -p blinc_app --example <name> --features windowed`.
+`cargo run -p blinc_app_examples --example <name> --features windowed`.
 
 Currently opted out:
 
@@ -212,7 +212,7 @@ Currently opted out:
 **Desktop**:
 
 ```bash
-cargo run -p blinc_app --example my_new --features windowed
+cargo run -p blinc_app_examples --example my_new --features windowed
 ```
 
 Unchanged from before the cross-target convention.

@@ -37,9 +37,13 @@ members = [
     "examples/web_typography",
     "examples/web_text_widgets",
     "examples/web_text_position",
+    # Cross-target desktop examples (was crates/blinc_app/examples/*).
+    # Separate crate so its 35MB of assets (videos, 3D models, HDRIs)
+    # don't bloat the published blinc_app package.
+    "examples/blinc_app_examples",
     # Auto-generated wasm wrapper crates produced by
     # `tools/build-web-examples` from the cross-target examples in
-    # `crates/blinc_app/examples/`. The directory is gitignored except
+    # `examples/blinc_app_examples/examples/`. The directory is gitignored except
     # for the .gitignore + .gitkeep marker; the glob below tolerates
     # an empty match so a fresh checkout still resolves the workspace
     # before the codegen tool has run.

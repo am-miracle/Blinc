@@ -20,13 +20,13 @@
 //!
 //! ```bash
 //! # Scan a single crate, print summary to stdout
-//! cargo run -p blinc-emoji-scan -- crates/blinc_app/examples
+//! cargo run -p blinc-emoji-scan -- examples/blinc_app_examples/examples
 //!
 //! # Scan multiple paths, write codepoint set to a file (one
 //! # `U+XXXX` per line, sorted, deduplicated)
 //! cargo run -p blinc-emoji-scan -- \
 //!     --output target/codepoints.txt \
-//!     crates/blinc_app/examples crates/blinc_cn/src
+//!     examples/blinc_app_examples/examples crates/blinc_cn/src
 //! ```
 //!
 //! The default output when no `--output` is given is a human summary:

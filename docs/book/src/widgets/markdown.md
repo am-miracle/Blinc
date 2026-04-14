@@ -227,7 +227,7 @@ let light = MarkdownConfig::light();
 A full markdown editor with live preview is available in the examples:
 
 ```bash
-cargo run -p blinc_app --example markdown_demo --features windowed
+cargo run -p blinc_app_examples --example markdown_demo --features windowed
 ```
 
 This demonstrates:

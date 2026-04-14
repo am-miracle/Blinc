@@ -35,7 +35,7 @@ nodes keeps the harvested set tight.
 
 ```bash
 # Print a human-readable report to stdout
-cargo run -p blinc-emoji-scan -- crates/blinc_app/examples
+cargo run -p blinc-emoji-scan -- examples/blinc_app_examples/examples
 
 # Write a sorted codepoint list for a subsetter (pyftsubset,
 # harfbuzz-subset, Typst's `subsetter` crate, etc.)

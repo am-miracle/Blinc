@@ -1,6 +1,6 @@
 # Video Player
 
-This example is auto-generated from the cross-target source in `crates/blinc_app/examples/`. See the linked source file for the full details.
+This example is auto-generated from the cross-target source in `examples/blinc_app_examples/examples/`. See the linked source file for the full details.
 
 <iframe
   src="../../examples/video_demo/index.html"
@@ -13,4 +13,4 @@ This example is auto-generated from the cross-target source in `crates/blinc_app
 
 > **Tip:** Some demos are best viewed in a full browser window. Click "Open in a new tab" below for the full experience.
 
-[Open in a new tab](../../examples/video_demo/index.html) · [View source on GitHub](https://github.com/project-blinc/Blinc/blob/main/crates/blinc_app/examples/video_demo.rs)
+[Open in a new tab](../../examples/video_demo/index.html) · [View source on GitHub](https://github.com/project-blinc/Blinc/blob/main/examples/blinc_app_examples/examples/video_demo.rs)

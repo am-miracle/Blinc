@@ -260,7 +260,7 @@ fn counter_button(
 }
 ```
 
-> **Tip:** For more examples, explore the `crates/blinc_app/examples/` directory which includes
+> **Tip:** For more examples, explore the `examples/blinc_app_examples/examples/` directory which includes
 > `windowed.rs`, `canvas_demo.rs`, `motion_demo.rs`, and more.
 
 ## Key Concepts Learned

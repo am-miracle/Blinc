@@ -245,5 +245,5 @@ fn demo_ui() -> impl ElementBuilder {
 Run the rich text demo to see all features in action:
 
 ```bash
-cargo run -p blinc_app --example rich_text_demo --features windowed
+cargo run -p blinc_app_examples --example rich_text_demo --features windowed
 ```
