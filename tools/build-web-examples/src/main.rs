@@ -119,7 +119,11 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         "blinc_animation",
         r#"{ path = "../../../crates/blinc_animation" }"#,
     ),
-    ("blinc_cn::", "blinc_cn", r#"{ path = "../../../crates/blinc_cn" }"#),
+    (
+        "blinc_cn::",
+        "blinc_cn",
+        r#"{ path = "../../../crates/blinc_cn" }"#,
+    ),
     (
         "blinc_icons::",
         "blinc_icons",
@@ -140,7 +144,11 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         "blinc_theme",
         r#"{ path = "../../../crates/blinc_theme" }"#,
     ),
-    ("blinc_text::", "blinc_text", r#"{ path = "../../../crates/blinc_text" }"#),
+    (
+        "blinc_text::",
+        "blinc_text",
+        r#"{ path = "../../../crates/blinc_text" }"#,
+    ),
     (
         "blinc_paint::",
         "blinc_paint",
@@ -151,7 +159,11 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         "blinc_router",
         r#"{ path = "../../../crates/blinc_router" }"#,
     ),
-    ("blinc_svg::", "blinc_svg", r#"{ path = "../../../crates/blinc_svg" }"#),
+    (
+        "blinc_svg::",
+        "blinc_svg",
+        r#"{ path = "../../../crates/blinc_svg" }"#,
+    ),
     (
         "blinc_image::",
         "blinc_image",
@@ -184,7 +196,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
     (
         "blinc_skeleton::",
         "blinc_skeleton",
-        r#"{ git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "5fe1730bdb63dac972b20f752f38883ce886e4b9" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "053f638c03bf8329ce77d79c8976a22fec3b7c52" }"#,
     ),
     (
         "blinc_input::",
