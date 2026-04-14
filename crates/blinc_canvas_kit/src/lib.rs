@@ -28,9 +28,12 @@ pub mod geometry;
 pub mod grid_pass;
 pub mod hit;
 pub mod material;
+pub mod math;
 pub mod pan;
+pub mod painter;
 pub mod scene3d;
 pub mod selection;
+pub mod sketch;
 pub mod snap;
 pub mod spatial;
 pub mod viewport;
@@ -46,15 +49,17 @@ use blinc_core::layer::{Affine2D, Color, CornerRadius, Point, Rect};
 use blinc_core::{BlincContextState, Brush, SignalId, State};
 use blinc_layout::canvas::{canvas, CanvasBounds};
 use blinc_layout::div::{div, Div};
-use blinc_layout::event_handler::EventContext;
+pub use blinc_layout::event_handler::EventContext;
 
 pub use background::{CanvasBackground, PatternConfig, ZoomAdaptive};
 pub use geometry::Geometry;
 pub use hit::{CanvasDragEvent, CanvasEvent, HitRegion, InteractionState};
 pub use material::MaterialBuilder;
 pub use pan::PanController;
+pub use painter::Painter2D;
 pub use scene3d::{EnvironmentData, MeshHandle, OrbitCamera, SceneKit3D};
 pub use selection::{CanvasTool, MarqueeState, SelectionChangeEvent, SelectionState};
+pub use sketch::{sketch, Player, Sketch, SketchContext, SketchEvents};
 pub use snap::SnapController;
 pub use spatial::SpatialIndex;
 pub use viewport::{affine_inverse, CanvasViewport};
@@ -67,8 +72,10 @@ pub mod prelude {
     pub use crate::hit::{CanvasDragEvent, CanvasEvent, HitRegion, InteractionState};
     pub use crate::material::MaterialBuilder;
     pub use crate::pan::PanController;
+    pub use crate::painter::Painter2D;
     pub use crate::scene3d::{EnvironmentData, MeshHandle, OrbitCamera, SceneKit3D};
     pub use crate::selection::{CanvasTool, MarqueeState, SelectionChangeEvent, SelectionState};
+    pub use crate::sketch::{sketch, Player, Sketch, SketchContext, SketchEvents};
     pub use crate::snap::SnapController;
     pub use crate::spatial::SpatialIndex;
     pub use crate::viewport::{affine_inverse, CanvasViewport};
@@ -79,6 +86,13 @@ pub mod prelude {
 type EventCallback = Arc<dyn Fn(&CanvasEvent) + Send + Sync>;
 type DragCallback = Arc<dyn Fn(&CanvasDragEvent) + Send + Sync>;
 type SelectionCallback = Arc<dyn Fn(&SelectionChangeEvent) + Send + Sync>;
+/// Subscriber that sees every raw `EventContext` routed through
+/// `CanvasKit::handle_event`, in addition to whatever CanvasKit's own
+/// pan / zoom / selection / hit-testing does with it. Used to bridge
+/// the canvas-bounded event stream into polling input layers (e.g.
+/// `blinc_input::InputState`) without the caller having to attach
+/// handlers to a `Div` directly.
+type AnyEventCallback = Arc<dyn Fn(&EventContext) + Send + Sync>;
 
 /// Interactive canvas toolkit — receives events, manages viewport state,
 /// and provides hit testing for canvas-drawn elements.
@@ -106,6 +120,9 @@ pub struct CanvasKit {
     on_drag_cb: Option<DragCallback>,
     on_drag_end_cb: Option<EventCallback>,
     on_selection_change_cb: Option<SelectionCallback>,
+    /// Subscribers forwarded every raw `EventContext` CanvasKit sees —
+    /// see [`CanvasKit::on_any_event`].
+    any_event_cbs: Vec<AnyEventCallback>,
 }
 
 impl CanvasKit {
@@ -128,6 +145,7 @@ impl CanvasKit {
             on_drag_cb: None,
             on_drag_end_cb: None,
             on_selection_change_cb: None,
+            any_event_cbs: Vec::new(),
         }
     }
 
@@ -234,6 +252,28 @@ impl CanvasKit {
         self.on_selection_change_cb = Some(Arc::new(cb));
     }
 
+    /// Subscribe to the raw `EventContext` stream CanvasKit routes.
+    ///
+    /// Every event `CanvasKit::handle_event` receives — pointer down /
+    /// up / move, drag / drag-end, scroll, pinch — is also forwarded to
+    /// every subscriber registered here. Use this to bridge canvas
+    /// input into a polling layer like `blinc_input::InputState`
+    /// without having to attach `Div` handlers yourself: CanvasKit is
+    /// already scoped to the canvas's bounds, so subscribers see only
+    /// events the user directed at the canvas.
+    ///
+    /// Keyboard events are not forwarded here — Blinc's key routing
+    /// is focus-based and lives outside CanvasKit. For those, attach
+    /// `on_key_down` / `on_key_up` to the `Div` that wraps your canvas
+    /// (e.g. via `kit.element(...)`'s return value) and forward from
+    /// there.
+    ///
+    /// Can be called multiple times; subscribers fan out in
+    /// registration order.
+    pub fn on_any_event(&mut self, cb: impl Fn(&EventContext) + Send + Sync + 'static) {
+        self.any_event_cbs.push(Arc::new(cb));
+    }
+
     // ── Selection ───────────────────────────────────────────────────
 
     /// Current selection state.
@@ -333,6 +373,13 @@ impl CanvasKit {
     /// selection, marquee, and callbacks.
     pub fn handle_event(&self, evt: &EventContext) {
         let screen_pt = Point::new(evt.local_x, evt.local_y);
+
+        // Fan out to any-event subscribers before the match so they
+        // see events like `DRAG_END` / `PINCH` that the match below
+        // may not individually inspect. Ordering is registration-order.
+        for cb in &self.any_event_cbs {
+            cb(evt);
+        }
 
         match evt.event_type {
             event_types::POINTER_DOWN => {

@@ -1,6 +1,6 @@
 [package]
 name = "blinc_canvas_kit"
-description = "Interactive canvas toolkit for game editors and node graphs — pan, zoom, spatial indexing, multi-select, marquee, and snap-to-grid"
+description = "Canvas authoring toolkit: interactive scene graphs (pan, zoom, selection, grid), 3D scene kit, and p5.js-style immediate-mode sketching over Blinc's DrawContext"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -21,3 +21,9 @@ blinc_gpu = { path = "../blinc_gpu", version = "0.5.1" }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 image = { workspace = true, features = ["hdr"] }
+
+# Cross-target monotonic clock. `std::time::Instant` panics on
+# `wasm32-unknown-unknown`; `web_time::Instant` is a zero-cost re-export of
+# `std::time::Instant` on native and wraps `performance.now()` on the web,
+# so `sketch::Sketch` gets wall-clock `t`/`dt` on every target.
+web-time = "1.1"
