@@ -22,7 +22,7 @@ RETRY_WAIT=45   # seconds between retries (~6 min max wait per crate)
 # so it's stripped from the published crate, allowing core to go first.
 PHASE1=(blinc_macros blinc_platform blinc_icons blinc_core)
 PHASE2=(blinc_animation blinc_paint blinc_svg blinc_text)
-PHASE3=(blinc_theme blinc_image blinc_media blinc_layout)
+PHASE3=(blinc_theme blinc_image blinc_media blinc_layout blinc_noto_emoji blinc_noto_symbols)
 PHASE4=(blinc_gpu blinc_cn blinc_tabler_icons blinc_canvas_kit blinc_router blinc_runtime)
 PHASE5=(blinc_platform_desktop blinc_platform_android blinc_platform_ios blinc_platform_web)
 PHASE6=(blinc_app blinc_test_suite)
