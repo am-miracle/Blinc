@@ -9301,17 +9301,17 @@ impl GpuRenderer {
             if already_cached {
                 continue;
             }
-            // Upload pixels via `with_bytes` while the Mutex is held,
-            // then drop the CPU copy. Every Material clone of this
-            // `TextureData` shares the same inner handle, so the drop
-            // flows through all of them — freeing ~N×texture-bytes
-            // MB on multi-material assets (buster_drone: ~350 MB).
-            //
-            // `with_bytes` returns `None` when the CPU buffer has
-            // already been released — only possible on a FIFO-cache
-            // eviction-then-rerequest, which this asset never hits
-            // (≤ 16 unique textures vs `MESH_CACHE_CAPACITY = 128`),
-            // but defend against it anyway rather than panicking.
+            // Upload pixels via `with_bytes`. We DO NOT call
+            // `drop_cpu_bytes()` here anymore — that was observed to
+            // break the texture bind group on multi-slot materials
+            // where the same image is referenced across slots
+            // (buster_drone's body material reuses body_metallic
+            // _roughness.png for both occlusion AND metallicRoughness),
+            // because the first slot's `drop_cpu_bytes()` would fire
+            // through the shared `Arc<TextureDataInner>` and leave a
+            // subsequent slot's `with_bytes` returning `None`. The
+            // CPU copy stays alive through the `Arc<MeshData>`'s
+            // lifetime; memory gain from dropping it is optional.
             let Some(img) = td.with_bytes(|bytes| {
                 crate::image::GpuImage::from_rgba(
                     &self.device,
@@ -9324,7 +9324,6 @@ impl GpuRenderer {
             }) else {
                 continue;
             };
-            td.drop_cpu_bytes();
             let mp_mut = self.mesh_pipeline.as_mut().unwrap();
             mp_mut.cached_gpu_images.insert(key, img);
             mp_mut.cached_gpu_image_keys.push_back(key);
