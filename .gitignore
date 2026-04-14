@@ -75,3 +75,14 @@ docs/plan/
 test_output/
 test_references/
 vendor/
+
+# Colocated downstream packages with their own upstream git repos.
+# Each subdirectory is an independent project (own Cargo workspace,
+# own Cargo.lock, own git remote). They live here for convenient
+# path-based deps on Blinc crates like:
+#
+#   blinc_app = { path = "../../crates/blinc_app" }
+#
+# but are NOT tracked by this repo and NOT part of its Cargo workspace.
+/packages/
+

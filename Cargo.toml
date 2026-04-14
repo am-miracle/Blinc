@@ -74,6 +74,12 @@ members = [
     "crates/blinc_noto_symbols",
 ]
 
+# Colocated downstream packages are gitignored (see .gitignore) and have
+# their own upstream repos. Exclude their directory from this workspace so
+# their Cargo.toml files don't get implicitly picked up if someone creates
+# them as a workspace-style project.
+exclude = ["packages/*", "packages"]
+
 # Platform-specific crates are included but have target-gated dependencies
 # Build for Android: source scripts/android-env.sh && cargo build --target aarch64-linux-android -p blinc_platform_android
 # Build for iOS: cargo build --target aarch64-apple-ios -p blinc_platform_ios
