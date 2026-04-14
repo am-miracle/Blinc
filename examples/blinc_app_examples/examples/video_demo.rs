@@ -18,7 +18,8 @@ use blinc_media::VideoPlayer;
 #[cfg(target_arch = "wasm32")]
 use blinc_platform::assets::load_asset;
 
-const VIDEO_PATH: &str = "examples/blinc_app_examples/examples/assets/german-shepherd-hd_1920_1080_25fps.mp4";
+const VIDEO_PATH: &str =
+    "examples/blinc_app_examples/examples/assets/german-shepherd-hd_1920_1080_25fps.mp4";
 
 static PLAYER: OnceLock<VideoPlayer> = OnceLock::new();
 
