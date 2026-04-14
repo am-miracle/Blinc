@@ -92,6 +92,24 @@ impl SceneState {
         let mut scene =
             blinc_gltf::load_asset(path).unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
 
+        // ── Densify rotation channels ─────────────────────────────────
+        //
+        // buster_drone's blade rotation channels are sparse relative to
+        // their angular speed — many consecutive keyframes encode > 180°
+        // of rotation, which standard slerp interprets as the *shorter*
+        // arc going the wrong way. After takeoff this shows up as the
+        // blades jittering forward and backward instead of spinning.
+        //
+        // `densify_rotation_channels` inserts intermediate keys
+        // wherever a segment's true authored arc exceeds 60°, so the
+        // runtime sampler only ever slerps unambiguous short arcs.
+        // Idempotent — safe to call on already-dense channels.
+        let mut total_inserted = 0usize;
+        for anim in scene.animations.iter_mut() {
+            total_inserted += blinc_skeleton::densify_rotation_channels(anim);
+        }
+        tracing::info!("densified rotation channels: {total_inserted} keyframes inserted");
+
         // ── Disable shadows on rotor meshes ──────────────────────────────
         //
         // The blade meshes spin fast enough that per-frame shadow detail

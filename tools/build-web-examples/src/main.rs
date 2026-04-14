@@ -102,64 +102,94 @@ const SUMMARY_END: &str = "<!-- end:web-examples -->";
 /// if the example actually uses the crate, so wrappers for simple
 /// examples stay small. A new workspace crate that examples start
 /// depending on needs one line added here.
+/// Each entry is `(prefix in source, package name, full TOML
+/// dependency spec)`. The spec is emitted verbatim as the right-hand
+/// side of `package_name = ...` in the generated wrapper's
+/// `Cargo.toml`, so it can be either a `path` dep on a workspace
+/// crate or a `git` dep on a downstream `/packages/*` crate that
+/// lives in its own upstream repo. The spec must be a valid TOML
+/// inline table starting with `{` and ending with `}`.
+///
+/// When bumping a `git` rev here, also bump the matching entries in
+/// `examples/blinc_app_examples/Cargo.toml` so the desktop and wasm
+/// builds stay on the same package commit.
 const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
     (
         "blinc_animation::",
         "blinc_animation",
-        "../../../crates/blinc_animation",
+        r#"{ path = "../../../crates/blinc_animation" }"#,
     ),
-    ("blinc_cn::", "blinc_cn", "../../../crates/blinc_cn"),
+    ("blinc_cn::", "blinc_cn", r#"{ path = "../../../crates/blinc_cn" }"#),
     (
         "blinc_icons::",
         "blinc_icons",
-        "../../../crates/blinc_icons",
+        r#"{ path = "../../../crates/blinc_icons" }"#,
     ),
     (
         "blinc_tabler_icons::",
         "blinc_tabler_icons",
-        "../../../crates/blinc_tabler_icons",
+        r#"{ path = "../../../crates/blinc_tabler_icons" }"#,
     ),
     (
         "blinc_canvas_kit::",
         "blinc_canvas_kit",
-        "../../../crates/blinc_canvas_kit",
+        r#"{ path = "../../../crates/blinc_canvas_kit" }"#,
     ),
     (
         "blinc_theme::",
         "blinc_theme",
-        "../../../crates/blinc_theme",
+        r#"{ path = "../../../crates/blinc_theme" }"#,
     ),
-    ("blinc_text::", "blinc_text", "../../../crates/blinc_text"),
+    ("blinc_text::", "blinc_text", r#"{ path = "../../../crates/blinc_text" }"#),
     (
         "blinc_paint::",
         "blinc_paint",
-        "../../../crates/blinc_paint",
+        r#"{ path = "../../../crates/blinc_paint" }"#,
     ),
     (
         "blinc_router::",
         "blinc_router",
-        "../../../crates/blinc_router",
+        r#"{ path = "../../../crates/blinc_router" }"#,
     ),
-    ("blinc_svg::", "blinc_svg", "../../../crates/blinc_svg"),
+    ("blinc_svg::", "blinc_svg", r#"{ path = "../../../crates/blinc_svg" }"#),
     (
         "blinc_image::",
         "blinc_image",
-        "../../../crates/blinc_image",
+        r#"{ path = "../../../crates/blinc_image" }"#,
     ),
     (
         "blinc_media::",
         "blinc_media",
-        "../../../crates/blinc_media",
+        r#"{ path = "../../../crates/blinc_media" }"#,
     ),
     (
         "blinc_platform::",
         "blinc_platform",
-        "../../../crates/blinc_platform",
+        r#"{ path = "../../../crates/blinc_platform" }"#,
     ),
     (
         "blinc_macros::",
         "blinc_macros",
-        "../../../crates/blinc_macros",
+        r#"{ path = "../../../crates/blinc_macros" }"#,
+    ),
+    // Downstream `/packages/*` crates live in their own upstream repos
+    // and are gitignored locally — wasm wrappers can't path-dep on
+    // them. Pin to the same git revs the workspace's
+    // `examples/blinc_app_examples/Cargo.toml` uses; bump in lockstep.
+    (
+        "blinc_gltf::",
+        "blinc_gltf",
+        r#"{ git = "https://github.com/project-blinc/blinc_gltf.git", rev = "0d7938a32f5b720ac62370b69a9316ca5a652e56", features = ["platform-assets"] }"#,
+    ),
+    (
+        "blinc_skeleton::",
+        "blinc_skeleton",
+        r#"{ git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "5fe1730bdb63dac972b20f752f38883ce886e4b9" }"#,
+    ),
+    (
+        "blinc_input::",
+        "blinc_input",
+        r#"{ git = "https://github.com/project-blinc/blinc_input.git", rev = "0e9f2ad829eb7f6c6ef251bdd14f879777b64e1a" }"#,
     ),
 ];
 
@@ -183,8 +213,11 @@ struct ExampleMeta {
     /// example uses as a footer) or at the end of the doc block.
     /// Rendered verbatim as markdown on the gallery page.
     description: String,
-    /// Extra `blinc_*` workspace crates this example imports, in
-    /// deterministic order. Each entry is `(package_name, path)`.
+    /// Extra `blinc_*` crates this example imports, in deterministic
+    /// order. Each entry is `(package_name, full_toml_spec)` where
+    /// `spec` is the inline-table right-hand side of the dependency
+    /// declaration — `{ path = "..." }` for workspace crates,
+    /// `{ git = "...", rev = "..." }` for `/packages/*` crates.
     extra_deps: Vec<(String, String)>,
     /// Image asset paths referenced in the example source. Detected
     /// by scanning for string literals that match
@@ -533,9 +566,9 @@ fn list_files_recursive(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> 
 /// depends on `foo`".
 fn infer_extra_deps(source: &str) -> Vec<(String, String)> {
     let mut out: BTreeMap<String, String> = BTreeMap::new();
-    for (prefix, package, path) in INFERABLE_DEPS {
+    for (prefix, package, spec) in INFERABLE_DEPS {
         if source.contains(prefix) {
-            out.insert((*package).to_string(), (*path).to_string());
+            out.insert((*package).to_string(), (*spec).to_string());
         }
     }
     out.into_iter().collect()
@@ -615,8 +648,11 @@ fn crate_name_for(stem: &str) -> String {
 
 fn render_cargo_toml(crate_name: &str, meta: &ExampleMeta) -> String {
     let mut extra_deps = String::new();
-    for (package, path) in &meta.extra_deps {
-        extra_deps.push_str(&format!("{package} = {{ path = \"{path}\" }}\n"));
+    // Each `extra_deps` entry is `(package_name, full_toml_spec)` —
+    // the spec already includes the leading `{` and trailing `}` and
+    // can be either `{ path = "..." }` or `{ git = "...", rev = "..." }`.
+    for (package, spec) in &meta.extra_deps {
+        extra_deps.push_str(&format!("{package} = {spec}\n"));
     }
 
     format!(

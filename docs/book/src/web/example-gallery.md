@@ -29,6 +29,7 @@ manageable.
 - [**Emoji and HTML Entities**](./example-gallery/emoji_demo.md) — This example demonstrates:
 - [**@flow Shader**](./example-gallery/flow_demo.md) — Demonstrates the @flow DAG-based shader system.
 - [**Fluid Surface**](./example-gallery/fluid_demo.md) — Combines `@flow` GPU shaders with `pointer-query` CSS-driven interaction.
+- [**Smoke test for the downstream-packages canvas stack.**](./example-gallery/gltf_animation_demo.md) — Exercises, end-to-end:
 - [**Image CSS Styling**](./example-gallery/image_css_demo.md) — Demonstrates CSS properties that work on images via stylesheets:
 - [**Image Layer Test**](./example-gallery/image_layer_test.md) — Tests the rendering order of images vs primitives (paths, backgrounds).
 - [**Keyframe Animation Canvas**](./example-gallery/keyframe_canvas.md) — Demonstrates keyframe animations with the canvas element for:
@@ -55,6 +56,6 @@ manageable.
 - [**Theme System**](./example-gallery/theme_demo.md) — This example demonstrates the Blinc theming system capabilities:
 - [**Timeline Animation**](./example-gallery/timeline_demo.md) — This example demonstrates timeline-based animations using the stateful API:
 - [**Typography**](./example-gallery/typography_demo.md) — This example demonstrates typography helpers:
-- [**Video Player**](./example-gallery/video_demo.md) — Auto-built from the cross-target source.
+- [**Video Player**](./example-gallery/video_demo.md) — Demonstrates the video_player widget with `blinc_media::VideoPlayer` instance and controls.
 - [**Wet Glass**](./example-gallery/wet_glass_demo.md) — Procedural wet-window effect with real light refraction through water drops.
 - [**Windowed Application**](./example-gallery/windowed.md) — This example demonstrates how to create a windowed Blinc application

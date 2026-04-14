@@ -1,6 +1,6 @@
 # Video Player
 
-This example is auto-generated from the cross-target source in `examples/blinc_app_examples/examples/`. See the linked source file for the full details.
+Demonstrates the video_player widget with `blinc_media::VideoPlayer` instance and controls.
 
 <iframe
   src="../../examples/video_demo/index.html"
