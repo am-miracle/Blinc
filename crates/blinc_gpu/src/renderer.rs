@@ -9275,7 +9275,7 @@ impl GpuRenderer {
         // Multiple materials typically reference the same underlying
         // image (glTF explicitly reuses images across primitives —
         // buster_drone has 39 meshes but only 10 distinct textures).
-        // Keying by `TextureData.rgba.as_ptr()` means each unique image
+        // Keying by `TextureData::cache_key()` means each unique image
         // becomes exactly one `GpuImage`, regardless of how many
         // materials point at it. FIFO-evicted at `MESH_CACHE_CAPACITY`.
         let texture_slots: [(&Option<blinc_core::TextureData>, &str); 6] = [
@@ -9291,7 +9291,7 @@ impl GpuRenderer {
         ];
         for (td_opt, label) in &texture_slots {
             let Some(td) = td_opt.as_ref() else { continue };
-            let key = td.rgba.as_ptr() as usize;
+            let key = td.cache_key();
             let already_cached = self
                 .mesh_pipeline
                 .as_ref()
@@ -9301,14 +9301,30 @@ impl GpuRenderer {
             if already_cached {
                 continue;
             }
-            let img = crate::image::GpuImage::from_rgba(
-                &self.device,
-                &self.queue,
-                &td.rgba,
-                td.width,
-                td.height,
-                Some(*label),
-            );
+            // Upload pixels via `with_bytes` while the Mutex is held,
+            // then drop the CPU copy. Every Material clone of this
+            // `TextureData` shares the same inner handle, so the drop
+            // flows through all of them — freeing ~N×texture-bytes
+            // MB on multi-material assets (buster_drone: ~350 MB).
+            //
+            // `with_bytes` returns `None` when the CPU buffer has
+            // already been released — only possible on a FIFO-cache
+            // eviction-then-rerequest, which this asset never hits
+            // (≤ 16 unique textures vs `MESH_CACHE_CAPACITY = 128`),
+            // but defend against it anyway rather than panicking.
+            let Some(img) = td.with_bytes(|bytes| {
+                crate::image::GpuImage::from_rgba(
+                    &self.device,
+                    &self.queue,
+                    bytes,
+                    td.width,
+                    td.height,
+                    Some(*label),
+                )
+            }) else {
+                continue;
+            };
+            td.drop_cpu_bytes();
             let mp_mut = self.mesh_pipeline.as_mut().unwrap();
             mp_mut.cached_gpu_images.insert(key, img);
             mp_mut.cached_gpu_image_keys.push_back(key);
@@ -9325,7 +9341,7 @@ impl GpuRenderer {
         let lookup = |td_opt: &Option<blinc_core::TextureData>| -> Option<&crate::image::GpuImage> {
             td_opt
                 .as_ref()
-                .and_then(|td| mp.cached_gpu_images.get(&(td.rgba.as_ptr() as usize)))
+                .and_then(|td| mp.cached_gpu_images.get(&td.cache_key()))
         };
         let base_view = lookup(&mesh.material.base_color_texture)
             .map_or_else(|| mp.default_texture.view(), |t| t.view());

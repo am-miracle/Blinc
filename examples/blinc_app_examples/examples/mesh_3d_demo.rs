@@ -90,11 +90,7 @@ fn load_texture(path: &str) -> TextureData {
     let img = blinc_image::ImageData::load(blinc_image::ImageSource::File(path.into()))
         .unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
     let (width, height) = img.dimensions();
-    TextureData {
-        rgba: img.into_pixels().into(),
-        width,
-        height,
-    }
+    TextureData::new(img.into_pixels(), width, height)
 }
 
 fn load_helmet() -> MeshData {

@@ -55,9 +55,8 @@ use blinc_core::{Color, DrawContext, Light, Mat4, MeshData, Vec3};
 use blinc_gltf::{GltfAnimation, GltfScene};
 use blinc_input::{DivInputExt, InputState};
 
-// Workspace-relative paths — `cargo run -p blinc_app_examples --example ...`
+// Workspace-relative path — `cargo run -p blinc_app_examples --example ...`
 // resolves from the repo root, not the crate root.
-const ASSETS_3D: &str = "examples/blinc_app_examples/examples/assets/3d";
 const GLTF_PATH: &str = "examples/blinc_app_examples/examples/assets/3d/buster_drone/scene.gltf";
 
 /// ID on the viewport Div — used by `ctx.query(...).on_ready(...)` to
@@ -103,8 +102,18 @@ impl SceneState {
         // platform loader is registered. On desktop the default
         // `FilesystemAssetLoader` reads from the CWD, which matches
         // `cargo run` resolving from the repo root.
-        let mut scene =
-            blinc_gltf::load_asset(path).unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
+        // Downsample oversized textures at load. buster_drone ships
+        // several 4K × 4K albedo / normal / metallic-roughness maps
+        // (~64 MB each decoded RGBA8 × CPU + GPU copies); 2K is the
+        // practical ceiling for the viewport sizes the demo runs at,
+        // and the runtime's trilinear sampler keeps normal-viewing-
+        // distance quality indistinguishable. Cuts total texture
+        // memory roughly 4×.
+        let opts = blinc_gltf::LoadOptions {
+            max_texture_size: Some(2048),
+        };
+        let mut scene = blinc_gltf::load_asset_with_options(path, &opts)
+            .unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
 
         // ── Densify rotation channels ─────────────────────────────────
         //
@@ -378,9 +387,13 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         cam_distance
     );
 
-    let hdr_path = format!("{ASSETS_3D}/rogland_clear_night_2k.hdr");
-    let hdr_bytes = blinc_platform::assets::load_asset(&hdr_path)
-        .unwrap_or_else(|e| panic!("failed to load HDRI {hdr_path}: {e}"));
+    // No custom HDRI — buster_drone's surfaces are matte-metallic
+    // enough that the default 128²-face procedural studio cubemap
+    // `SceneKit3D::new` installs carries all the IBL the scene
+    // actually uses. Loading a real `.hdr` would add ~32 MB for the
+    // decoded f32×4 panorama plus ~10 MB for a 512-face cubemap
+    // (CPU + GPU copies) without visible quality gain. The directional
+    // key light below does the heavy lifting.
     let kit = SceneKit3D::new("gltf_animation_demo")
         .with_camera(
             OrbitCamera::default()
@@ -389,14 +402,6 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                 .with_azimuth(0.6)
                 .with_target(cam_target),
         )
-        // Larger face size (512) + brighter key light — the
-        // buster_drone's mostly-metallic surfaces pick up almost all
-        // of their visible color from IBL reflections, so resolution
-        // matters. Intensity bumped from the mesh_3d_demo default
-        // because this scene has more surface area competing for the
-        // same key light, plus a night-sky HDRI that barely
-        // contributes ambient on its own.
-        .with_hdri(&hdr_bytes, 512)
         .with_light(Light::Directional {
             direction: Vec3::new(-0.4, -1.0, -0.3).normalize(),
             color: Color::WHITE,

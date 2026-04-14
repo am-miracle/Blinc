@@ -852,21 +852,96 @@ impl Default for Material {
 
 /// Texture data for materials.
 ///
-/// `rgba` is stored as `Arc<[u8]>` so cloning a `Material` (and
-/// therefore a `MeshData` that contains it) is a refcount bump rather
-/// than a multi-megabyte memcpy. This matters for any scene that
-/// reuses a single decoded image across multiple materials: a 4K×4K
-/// RGBA texture decoded to 64 MB is shared by every material that
-/// references it instead of duplicated per slot.
+/// Stores CPU-side RGBA8 pixel bytes plus the dimensions. Cloning a
+/// `TextureData` (and therefore the `Material` that contains it) is a
+/// refcount bump, not a pixel-data copy — multiple materials that
+/// reference the same decoded image share one backing buffer.
 ///
-/// Readers continue to work with `&[u8]` via deref: `&td.rgba` passes
-/// cleanly to anything expecting `&[u8]`. Writers that need mutable
-/// access should use `Arc::make_mut` to clone-on-write.
+/// The CPU buffer is wrapped in `Mutex<Option<Arc<[u8]>>>` and lives
+/// behind an outer `Arc` shared across clones. That lets the GPU
+/// renderer drop the CPU copy via [`Self::drop_cpu_bytes`] after
+/// uploading to VRAM without needing mutable access to every
+/// `Material` that holds a clone. Every clone sees the drop, and
+/// [`Self::cache_key`] keeps returning the same stable identifier
+/// so the GPU cache's per-texture entry stays reachable for
+/// subsequent frames.
+///
+/// Readers use [`Self::with_bytes`] to borrow `&[u8]` while the CPU
+/// copy is still present. After `drop_cpu_bytes()` those calls
+/// return `None` — callers that need to re-upload must hold their
+/// own copy elsewhere.
 #[derive(Clone, Debug)]
 pub struct TextureData {
-    pub rgba: std::sync::Arc<[u8]>,
+    inner: std::sync::Arc<TextureDataInner>,
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug)]
+struct TextureDataInner {
+    /// CPU-side pixel buffer. `None` once
+    /// [`TextureData::drop_cpu_bytes`] has been called — typically
+    /// after the first GPU upload.
+    rgba: std::sync::Mutex<Option<std::sync::Arc<[u8]>>>,
+    /// Identifier used as the key in GPU texture caches. Captured at
+    /// construction from the original `Arc<[u8]>` pointer and
+    /// preserved even after `rgba` has been dropped.
+    cache_key: usize,
+}
+
+impl TextureData {
+    /// Construct a new `TextureData` from raw RGBA8 bytes. Panics (in
+    /// debug builds) if `bytes.len() != width * height * 4`.
+    pub fn new(bytes: Vec<u8>, width: u32, height: u32) -> Self {
+        debug_assert_eq!(
+            bytes.len(),
+            (width as usize) * (height as usize) * 4,
+            "TextureData::new: byte count doesn't match dimensions",
+        );
+        let arc_bytes: std::sync::Arc<[u8]> = bytes.into();
+        // `Arc::as_ptr(&Arc<[u8]>)` returns a fat `*const [u8]` — cast
+        // through the thin `*const u8` element pointer to get a plain
+        // address for the cache key.
+        let cache_key = std::sync::Arc::as_ptr(&arc_bytes) as *const u8 as usize;
+        Self {
+            inner: std::sync::Arc::new(TextureDataInner {
+                rgba: std::sync::Mutex::new(Some(arc_bytes)),
+                cache_key,
+            }),
+            width,
+            height,
+        }
+    }
+
+    /// Stable identifier for the backing CPU buffer, suitable for use
+    /// as a GPU cache key. Preserved across `clone()` and across
+    /// [`Self::drop_cpu_bytes`].
+    pub fn cache_key(&self) -> usize {
+        self.inner.cache_key
+    }
+
+    /// Borrow the CPU pixel buffer and run `f` with `&[u8]`. Returns
+    /// `None` if the buffer has been released via
+    /// [`Self::drop_cpu_bytes`]. Blocks only for the duration of
+    /// `f` — callers shouldn't do GPU submits inside.
+    pub fn with_bytes<R>(&self, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        let guard = self.inner.rgba.lock().unwrap();
+        guard.as_ref().map(|arc| f(arc))
+    }
+
+    /// `true` iff the CPU pixel buffer is still retained.
+    pub fn has_cpu_bytes(&self) -> bool {
+        self.inner.rgba.lock().unwrap().is_some()
+    }
+
+    /// Release the CPU pixel buffer. Every clone of this
+    /// `TextureData` shares the same inner handle, so one call drops
+    /// the buffer for all of them. Intended to be called by the GPU
+    /// renderer after [`GpuRenderer`](`crate::draw::DrawContext`)-
+    /// shaped code has uploaded the texture to VRAM.
+    pub fn drop_cpu_bytes(&self) {
+        *self.inner.rgba.lock().unwrap() = None;
+    }
 }
 
 /// Alpha blending mode
