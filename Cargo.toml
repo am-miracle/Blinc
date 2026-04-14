@@ -196,3 +196,17 @@ lto = "fat"
 opt-level = "z"
 panic = "abort"
 strip = "symbols"
+
+# Local-dev overrides for the downstream `/packages/blinc_*` crates.
+# Each of those packages depends on Blinc through a pinned git rev so
+# they remain usable as standalone git deps for outside consumers.
+# Inside this Blinc workspace we redirect those git deps back to the
+# local crates, so changes to Blinc flow through without having to
+# push + bump revs in every package. CI builds that don't have
+# `/packages/` checked out skip the patch entirely (the workspace
+# resolver only applies patches whose `path` exists).
+[patch."https://github.com/project-blinc/Blinc.git"]
+blinc_core = { path = "crates/blinc_core" }
+blinc_canvas_kit = { path = "crates/blinc_canvas_kit" }
+blinc_layout = { path = "crates/blinc_layout" }
+blinc_platform = { path = "crates/blinc_platform" }

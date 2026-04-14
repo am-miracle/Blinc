@@ -31,12 +31,15 @@ blinc_media = { path = "../../crates/blinc_media" }
 blinc_platform = { path = "../../crates/blinc_platform" }
 blinc_platform_desktop = { path = "../../extensions/blinc_platform_desktop" }
 
-# Downstream packages living in `/packages/` — gitignored, workspace-
-# excluded, own upstream repos. Path deps during local dev; swap for
-# crates.io versions once they're published.
-blinc_gltf = { path = "../../packages/blinc_gltf", features = ["platform-assets"] }
-blinc_skeleton = { path = "../../packages/blinc_skeleton" }
-blinc_input = { path = "../../packages/blinc_input" }
+# Downstream packages — each lives in its own upstream repo under the
+# `project-blinc` org, colocated locally under the gitignored `/packages/`
+# directory during development. Pinned to current `main` commits so CI
+# (which doesn't have the path-only checkout) can resolve them. Swap
+# these for `version = "..."` crates.io entries once the packages ship
+# stable releases.
+blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "0d7938a32f5b720ac62370b69a9316ca5a652e56", features = ["platform-assets"] }
+blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "30af4418ad1d77df4f46f2511f5f89eeb436d2fa" }
+blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = "0e9f2ad829eb7f6c6ef251bdd14f879777b64e1a" }
 
 image.workspace = true
 tracing.workspace = true
