@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-const EXAMPLE_PATH: &str = "../../crates/blinc_app/examples/text_position_test.rs";
+const EXAMPLE_PATH: &str = "../../examples/blinc_app_examples/examples/text_position_test.rs";
 
 fn main() {
     let manifest_dir =

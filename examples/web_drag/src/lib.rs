@@ -1,7 +1,7 @@
 //! Blinc web example — drag gestures via Stateful + State + on_drag.
 //!
 //! Validates that the same drag patterns the native sortable demo
-//! ([`crates/blinc_app/examples/sortable_demo.rs`](../../crates/blinc_app/examples/sortable_demo.rs))
+//! ([`examples/blinc_app_examples/examples/sortable_demo.rs`](../../examples/blinc_app_examples/examples/sortable_demo.rs))
 //! uses work unchanged on wasm32. Three things have to be wired
 //! correctly for this to render anything visible on click + drag:
 //!
@@ -59,7 +59,7 @@ use wasm_bindgen::prelude::*;
 const ARIAL_TTF: &[u8] = include_bytes!("../../../assets/fonts/Arial.ttf");
 
 /// FSM for the drag container. Identical shape to the
-/// `DragFSM` in [`sortable_demo.rs`](../../crates/blinc_app/examples/sortable_demo.rs)
+/// `DragFSM` in [`sortable_demo.rs`](../../examples/blinc_app_examples/examples/sortable_demo.rs)
 /// — `Idle` until the user mouses down, `Dragging` while a drag
 /// gesture is in progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -172,7 +172,7 @@ fn build_ui(_ctx: &mut WindowedContext) -> Div {
 ///   FSM transition — so decoupling the two cells keeps the
 ///   re-render cadence right and matches the same split the
 ///   `sortable_list_section` in
-///   [`sortable_demo.rs`](../../crates/blinc_app/examples/sortable_demo.rs#L324)
+///   [`sortable_demo.rs`](../../examples/blinc_app_examples/examples/sortable_demo.rs#L324)
 ///   uses (`State<SortListState>` for the items + `State<f32>`
 ///   for `drag_offset`).
 ///

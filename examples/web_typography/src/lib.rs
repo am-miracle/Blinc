@@ -1,6 +1,6 @@
 //! Web typography debug demo
 //!
-//! Direct port of `crates/blinc_app/examples/typography_demo.rs` for
+//! Direct port of `examples/blinc_app_examples/examples/typography_demo.rs` for
 //! local wasm32 debugging. Run with:
 //!
 //! ```bash

@@ -1,4 +1,4 @@
-# Auto-generated wasm wrapper crates for `crates/blinc_app/examples/*.rs`.
+# Auto-generated wasm wrapper crates for `examples/blinc_app_examples/examples/*.rs`.
 #
 # These are produced by the `tools/build-web-examples` codegen tool by
 # walking the example source tree, finding files that match the cross-

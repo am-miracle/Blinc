@@ -1,6 +1,6 @@
 //! Web text widgets debug demo
 //!
-//! Direct port of `crates/blinc_app/examples/text_widgets.rs` for
+//! Direct port of `examples/blinc_app_examples/examples/text_widgets.rs` for
 //! local wasm32 debugging. Run with:
 //!
 //! ```bash
