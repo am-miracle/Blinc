@@ -2677,7 +2677,15 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             let br = self.transform_point(blinc_core::Point::new(lw, lh));
             [tl.x, tl.y, (br.x - tl.x).abs(), (br.y - tl.y).abs()]
         });
-        self.mesh_viewport_bounds = None;
+        // Keep the bounds live for the rest of this canvas render.
+        // Clearing them after the first draw made single-mesh demos
+        // work but silently broke multi-mesh scenes: subsequent meshes
+        // received `viewport: None`, and their tonemap passes rendered
+        // to the FULL FRAME instead of the canvas rect — each mesh
+        // overwriting the previous output, leaving only the last-drawn
+        // mesh visible. `set_3d_viewport_bounds` is called once per
+        // canvas render, so overwriting here is redundant; next
+        // canvas's bounds will overwrite on their own.
 
         // No clone — just Arc::clone (pointer bump, not 81.5 MB copy)
         self.pending_meshes.push(PendingMesh {

@@ -5511,13 +5511,65 @@ fn dispatch_pending_meshes(
         1.0
     };
 
+    // Dedupe environment cubemap uploads by `Arc` identity. Without
+    // this, multi-mesh scenes pay a full cubemap re-upload per
+    // primitive — 39 meshes × 6 faces × ~9 mips = ~2000 redundant
+    // `queue.write_texture` calls per frame on assets like
+    // buster_drone, which dominates frame time. Every `PendingMesh`
+    // from the same `SceneKit3D` shares the same `Arc<CubemapData>`,
+    // so a cheap `Arc::ptr_eq` is enough to skip.
+    let mut last_env: Option<std::sync::Arc<blinc_core::layer::CubemapData>> = None;
+
+    // ── Shadow frustum (first directional light, first scene) ──────────
+    //
+    // Compute ONE light_view_proj for the whole mesh batch. Using the
+    // first scene's camera target as a focus point and scaling the
+    // orthographic frustum off the camera distance keeps the shadow
+    // map sized to roughly what the viewer can see. Good enough for
+    // the single-scene case (the common case); multi-scene frames
+    // with divergent targets would want per-scene shadow maps, which
+    // is out of scope here.
+    let first = &meshes[0];
+    let (light_dir, _light_intensity_0) = first_directional_light(&first.lights);
+    let light_view_proj = compute_shadow_matrix(&first.camera, light_dir);
+
+    // ── Phase 1: shadow depth pass for every caster ────────────────────
+    //
+    // All shadow-caster meshes write into the single shadow_map before
+    // ANY main pass samples it. The first caster clears, the rest
+    // load. Non-casters skip the pass entirely.
+    let mut shadow_index: usize = 0;
     for pending in meshes {
-        // Upload the environment cubemap if the pending mesh carries one.
-        // The renderer's texture is overwritten each time, so only the
-        // last-set environment matters — but in practice every PendingMesh
-        // from the same SceneKit3D shares the same Arc.
+        if !pending.mesh.material.casts_shadows {
+            continue;
+        }
+        let model = mat4_to_array(&pending.transform);
+        renderer.render_mesh_shadow_pass(&pending.mesh, &model, &light_view_proj, shadow_index);
+        shadow_index += 1;
+    }
+    // If no casters were drawn, skip shadow sampling entirely so the
+    // main pass doesn't read a stale / uninitialized shadow map.
+    let shadow_matrix: Option<&[f32; 16]> = if shadow_index > 0 {
+        Some(&light_view_proj)
+    } else {
+        None
+    };
+
+    // ── Phase 2: main HDR/tonemap passes for every mesh ────────────────
+    let batch_count = meshes.len();
+    for (batch_index, pending) in meshes.iter().enumerate() {
+        // Upload the environment cubemap only when its `Arc` identity
+        // changes. The renderer's texture is overwritten on each real
+        // upload, so only the last distinct environment matters.
         if let Some(ref env) = pending.env_cubemap {
-            renderer.upload_environment_cubemap(env);
+            let is_new = last_env
+                .as_ref()
+                .map(|prev| !std::sync::Arc::ptr_eq(prev, env))
+                .unwrap_or(true);
+            if is_new {
+                renderer.upload_environment_cubemap(env);
+                last_env = Some(env.clone());
+            }
         }
 
         // Use the canvas viewport aspect when available so the
@@ -5529,7 +5581,7 @@ fn dispatch_pending_meshes(
             .map(|[_, _, w, h]| if h > 0.0 { w / h } else { 1.0 })
             .unwrap_or(aspect);
         let view_proj = camera_view_proj(&pending.camera, vp_aspect);
-        let inv_view_proj = mat4_inverse_flat(&view_proj);
+        let _inv_view_proj = mat4_inverse_flat(&view_proj);
         let camera_pos = [
             pending.camera.position.x,
             pending.camera.position.y,
@@ -5538,7 +5590,7 @@ fn dispatch_pending_meshes(
         let (light_dir, light_intensity) = first_directional_light(&pending.lights);
         let model = mat4_to_array(&pending.transform);
 
-        renderer.render_mesh_data(
+        renderer.render_mesh_data_batched(
             target,
             &pending.mesh,
             &model,
@@ -5546,10 +5598,59 @@ fn dispatch_pending_meshes(
             camera_pos,
             light_dir,
             light_intensity,
-            None,
+            shadow_matrix,
             pending.viewport,
+            batch_index,
+            batch_count,
         );
     }
+}
+
+/// Build a view × projection matrix for a directional light illuminating
+/// the scene the given camera is looking at.
+///
+/// This is a deliberately simple fit: we center the orthographic frustum
+/// on the camera target and scale it off the camera distance. The result
+/// covers roughly what the viewer can see, which is enough for a
+/// single-drone / single-object scene (the main case today). A more
+/// ambitious implementation would fit the frustum to the scene's actual
+/// world-space AABB (or to the view frustum intersected with the scene
+/// bounds), plus use cascaded shadow maps for landscapes.
+///
+/// Up-vector selection avoids the degenerate case where `light_dir` is
+/// parallel to world-Y (makes the look-at cross product collapse).
+fn compute_shadow_matrix(camera: &blinc_core::Camera, light_dir: [f32; 3]) -> [f32; 16] {
+    let target = camera.target;
+    let eye = camera.position;
+    let dx = eye.x - target.x;
+    let dy = eye.y - target.y;
+    let dz = eye.z - target.z;
+    let cam_dist = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
+
+    // Ortho frustum half-extent — ~1.0× camera distance covers the
+    // full scene for typical framings (frame_camera multiplies scene
+    // diagonal by 1.1, so camera distance ≈ scene diagonal).
+    let half = cam_dist;
+
+    // Light sits on the opposite side of the target from its direction,
+    // far enough back that the near plane doesn't clip the scene.
+    let ld = blinc_core::Vec3::new(light_dir[0], light_dir[1], light_dir[2]).normalize();
+    let light_pos = blinc_core::Vec3::new(
+        target.x - ld.x * cam_dist * 2.0,
+        target.y - ld.y * cam_dist * 2.0,
+        target.z - ld.z * cam_dist * 2.0,
+    );
+
+    // Pick an up-vector not parallel to the light direction.
+    let up = if ld.y.abs() > 0.95 {
+        blinc_core::Vec3::new(0.0, 0.0, 1.0)
+    } else {
+        blinc_core::Vec3::new(0.0, 1.0, 0.0)
+    };
+
+    let view = mat4_look_at(light_pos, target, up);
+    let proj = mat4_orthographic_rh(-half, half, -half, half, 0.1, cam_dist * 4.0);
+    mat4_mul_flat(&proj, &view)
 }
 
 /// Build a view × projection matrix for the captured `Camera`.

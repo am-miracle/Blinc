@@ -187,7 +187,8 @@ impl<'a> Painter2D<'a> {
             self.ctx.fill_circle(center, r, brush);
         }
         if let Some((brush, width)) = self.stroke.clone() {
-            self.ctx.stroke_circle(center, r, &Stroke::new(width), brush);
+            self.ctx
+                .stroke_circle(center, r, &Stroke::new(width), brush);
         }
         self
     }

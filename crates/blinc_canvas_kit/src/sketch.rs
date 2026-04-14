@@ -332,4 +332,3 @@ impl SketchEvents for Div {
             .on_key_up(move |e| f6(e))
     }
 }
-

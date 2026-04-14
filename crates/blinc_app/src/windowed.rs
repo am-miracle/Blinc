@@ -3098,6 +3098,7 @@ impl WindowedApp {
                                         Key::Enter => 13,
                                         Key::Tab => 9,
                                         Key::Escape => 27,
+                                        Key::Space => 32,
                                         Key::Left => 37,
                                         Key::Right => 39,
                                         Key::Up => 38,
@@ -3173,6 +3174,31 @@ impl WindowedApp {
                                         }
                                         KeyState::Released => {
                                             router.on_key_up(key_code);
+
+                                            // Also broadcast KEY_UP through the
+                                            // `keyboard_events` path. Without this the
+                                            // focus-targeted dispatch only fires on the
+                                            // focused leaf node, so ancestor handlers
+                                            // (e.g. `blinc_input::DivInputExt::capture_input`
+                                            // attached to a viewport Div) never see
+                                            // releases and their internal
+                                            // `keys_down`-tracking sets never clear —
+                                            // which in turn makes polling consumers see
+                                            // every key as permanently-held after the
+                                            // first press. Matches the broadcast path
+                                            // KEY_DOWN already uses below.
+                                            if key_code != 0 {
+                                                keyboard_events.push(PendingEvent {
+                                                    event_type: blinc_core::events::event_types::KEY_UP,
+                                                    key_char: None,
+                                                    key_code,
+                                                    shift: mods.shift,
+                                                    ctrl: mods.ctrl,
+                                                    alt: mods.alt,
+                                                    meta: mods.meta,
+                                                    ..Default::default()
+                                                });
+                                            }
                                         }
                                     }
                                 },

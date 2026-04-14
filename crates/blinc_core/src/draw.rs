@@ -850,10 +850,21 @@ impl Default for Material {
     }
 }
 
-/// Texture data for materials
+/// Texture data for materials.
+///
+/// `rgba` is stored as `Arc<[u8]>` so cloning a `Material` (and
+/// therefore a `MeshData` that contains it) is a refcount bump rather
+/// than a multi-megabyte memcpy. This matters for any scene that
+/// reuses a single decoded image across multiple materials: a 4K×4K
+/// RGBA texture decoded to 64 MB is shared by every material that
+/// references it instead of duplicated per slot.
+///
+/// Readers continue to work with `&[u8]` via deref: `&td.rgba` passes
+/// cleanly to anything expecting `&[u8]`. Writers that need mutable
+/// access should use `Arc::make_mut` to clone-on-write.
 #[derive(Clone, Debug)]
 pub struct TextureData {
-    pub rgba: Vec<u8>,
+    pub rgba: std::sync::Arc<[u8]>,
     pub width: u32,
     pub height: u32,
 }

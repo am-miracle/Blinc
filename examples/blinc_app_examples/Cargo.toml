@@ -31,6 +31,13 @@ blinc_media = { path = "../../crates/blinc_media" }
 blinc_platform = { path = "../../crates/blinc_platform" }
 blinc_platform_desktop = { path = "../../extensions/blinc_platform_desktop" }
 
+# Downstream packages living in `/packages/` — gitignored, workspace-
+# excluded, own upstream repos. Path deps during local dev; swap for
+# crates.io versions once they're published.
+blinc_gltf = { path = "../../packages/blinc_gltf", features = ["platform-assets"] }
+blinc_skeleton = { path = "../../packages/blinc_skeleton" }
+blinc_input = { path = "../../packages/blinc_input" }
+
 image.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

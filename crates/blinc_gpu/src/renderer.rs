@@ -1091,6 +1091,20 @@ struct ImagePipeline {
 /// Shadow map resolution (square)
 const SHADOW_MAP_SIZE: u32 = 2048;
 
+/// Maximum number of distinct meshes whose GPU buffers / textures we
+/// keep warm between frames. When exceeded, the FIFO eviction policy
+/// drops the oldest entry. Sized conservatively — 128 fits every
+/// asset in the workspace examples, scales to large editor scenes,
+/// and caps worst-case GPU memory at ~`128 × per-mesh-footprint`.
+const MESH_CACHE_CAPACITY: usize = 128;
+
+/// Per-mesh cached vertex + index GPU buffers.
+struct MeshBufferCacheEntry {
+    vertex: wgpu::Buffer,
+    index: wgpu::Buffer,
+    index_count: u32,
+}
+
 /// Lazily-created 3D mesh rendering pipeline
 struct MeshPipeline {
     pipeline: wgpu::RenderPipeline,
@@ -1146,17 +1160,28 @@ struct MeshPipeline {
     env_cubemap: wgpu::Texture,
     env_cubemap_view: wgpu::TextureView,
     env_sampler: wgpu::Sampler,
-    /// Cached GPU textures for the most recently rendered mesh material.
-    /// Keyed by the Arc pointer of the MeshData — if the same Arc is
-    /// drawn again (same mesh, same frame or next frame), the cached
-    /// textures are reused instead of re-uploading 80+ MB of pixel data.
-    cached_mesh_ptr: usize,
-    cached_base_tex: Option<crate::image::GpuImage>,
-    cached_normal_tex: Option<crate::image::GpuImage>,
-    cached_displacement_tex: Option<crate::image::GpuImage>,
-    cached_mr_tex: Option<crate::image::GpuImage>,
-    cached_emissive_tex: Option<crate::image::GpuImage>,
-    cached_occlusion_tex: Option<crate::image::GpuImage>,
+    /// Per-mesh vertex + index buffer cache. Keyed by the raw pointer
+    /// of the mesh's `Arc<MeshData>`. Without this, `render_mesh_data`
+    /// builds fresh `wgpu::Buffer`s every frame from the mesh's vertex
+    /// / index `Vec`s — for a 39-mesh scene like buster_drone that's
+    /// ~1.8 GB of vertex uploads per frame.
+    ///
+    /// Guarded by `cached_mesh_buffer_keys` for FIFO eviction so a
+    /// long-running application that streams distinct meshes doesn't
+    /// leak GPU memory. See `MESH_CACHE_CAPACITY`.
+    cached_mesh_buffers: std::collections::HashMap<usize, MeshBufferCacheEntry>,
+    cached_mesh_buffer_keys: std::collections::VecDeque<usize>,
+    /// GPU texture cache, keyed by the raw pointer of the source
+    /// `TextureData`'s `Arc<[u8]>` pixel buffer. Materials that reference
+    /// the same underlying image share a single `GpuImage` instead of
+    /// each mesh creating its own — critical because otherwise a
+    /// 39-mesh asset with ~10 unique textures would upload ~195 GPU
+    /// textures (GB of VRAM) instead of 10 (~few hundred MB).
+    ///
+    /// The companion `cached_gpu_image_keys` deque tracks insertion
+    /// order for FIFO eviction at `MESH_CACHE_CAPACITY`.
+    cached_gpu_images: std::collections::HashMap<usize, crate::image::GpuImage>,
+    cached_gpu_image_keys: std::collections::VecDeque<usize>,
     /// Skybox pipeline — renders the environment cubemap as a
     /// background behind the mesh. Shares the cubemap texture/sampler
     /// but has its own bind group layout (camera vectors + cubemap).
@@ -8151,14 +8176,34 @@ impl GpuRenderer {
                     // maps the HDR range down to the framebuffer's format.
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba16Float,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        // Premultiplied-alpha blending: the shader
+                        // premultiplies `reflected * alpha` but leaves
+                        // `emissive` un-attenuated so self-emitted
+                        // light is preserved through transparent
+                        // surfaces. `BlendState::ALPHA_BLENDING` would
+                        // scale the whole final color by alpha,
+                        // killing emissive glows on any BLEND material
+                        // whose base-color mask has low alpha (e.g.
+                        // buster_drone's body decal region around the
+                        // nose).
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: Some(wgpu::Face::Back),
+                    // Culling disabled — glTF allows per-material
+                    // `doubleSided`, but the mesh pipeline currently
+                    // can't switch cull state per-draw. Some assets
+                    // author inward-facing winding on interior
+                    // components (shells that are meant to be
+                    // doubleSided) and cull_mode: Back makes those
+                    // geometries silently invisible. Rendering
+                    // backfaces too is marginally more expensive but
+                    // correct for every asset; making it material-
+                    // driven would need a second pipeline variant.
+                    cull_mode: None,
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -8271,8 +8316,24 @@ impl GpuRenderer {
 
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Mesh Sampler"),
+            // Trilinear filtering for PBR textures at distance. glTF
+            // exporters frequently author one set of textures intended
+            // to be used at multiple distances; without mipmap_filter
+            // set, min_filter alone gives aliased highlights on
+            // metallic-roughness maps viewed at steep angles.
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            // REPEAT wrap matches the glTF spec default and what
+            // buster_drone's sampler explicitly requests (wrapS/T =
+            // GL_REPEAT = 10497). ClampToEdge (the wgpu default) breaks
+            // tiled terrain textures — their UVs often run past [0,1]
+            // to tile — and also subtly breaks body meshes whose UV
+            // shells straddle the 0/1 seam. The mesh loader no longer
+            // clamps UVs to [0,1]; the sampler handles repeat natively.
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
             ..Default::default()
         });
 
@@ -8674,13 +8735,10 @@ impl GpuRenderer {
             env_cubemap,
             env_cubemap_view,
             env_sampler,
-            cached_mesh_ptr: 0,
-            cached_base_tex: None,
-            cached_normal_tex: None,
-            cached_displacement_tex: None,
-            cached_mr_tex: None,
-            cached_emissive_tex: None,
-            cached_occlusion_tex: None,
+            cached_mesh_buffers: std::collections::HashMap::new(),
+            cached_mesh_buffer_keys: std::collections::VecDeque::new(),
+            cached_gpu_images: std::collections::HashMap::new(),
+            cached_gpu_image_keys: std::collections::VecDeque::new(),
             skybox_pipeline,
             skybox_bind_group_layout,
             skybox_uniform_buffer,
@@ -8778,10 +8836,164 @@ impl GpuRenderer {
         }
     }
 
+    /// Render a mesh's shadow depth into the global shadow map.
+    ///
+    /// Must be called for every shadow-casting mesh in the frame BEFORE
+    /// any main-pass draw runs, so that when [`Self::render_mesh_data_batched`]
+    /// samples the shadow map it sees the fully populated scene depth.
+    ///
+    /// `shadow_batch_index` controls the shadow map's depth load op:
+    /// - `0` → `Clear(1.0)` (reset the whole map for the new frame)
+    /// - `>0` → `Load` (accumulate this mesh's depth alongside earlier
+    ///   shadow casters)
+    ///
+    /// Caller responsibility: only invoke this for meshes whose material
+    /// has `casts_shadows == true`, and count them consecutively starting
+    /// from zero. The receiver-side `receives_shadows` flag is handled
+    /// entirely in `render_mesh_data_batched` via the `light_view_proj`
+    /// parameter.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_mesh_shadow_pass(
+        &mut self,
+        mesh: &std::sync::Arc<blinc_core::draw::MeshData>,
+        transform: &[f32; 16],
+        light_view_proj: &[f32; 16],
+        shadow_batch_index: usize,
+    ) {
+        if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+            return;
+        }
+        self.ensure_mesh_pipeline();
+
+        // Reuse the same Arc<MeshData>-keyed vertex/index cache the
+        // main pass uses. If the main pass hasn't uploaded this mesh's
+        // buffers yet, populate the cache here; subsequent main-pass
+        // calls will hit the cache for free.
+        let mesh_ptr = std::sync::Arc::as_ptr(mesh) as usize;
+        let needs_buffers = !self
+            .mesh_pipeline
+            .as_ref()
+            .unwrap()
+            .cached_mesh_buffers
+            .contains_key(&mesh_ptr);
+        if needs_buffers {
+            let vertex_data: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    mesh.vertices.as_ptr() as *const u8,
+                    mesh.vertices.len() * std::mem::size_of::<blinc_core::draw::Vertex>(),
+                )
+            };
+            let vertex_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Mesh Vertices (cached)"),
+                    contents: vertex_data,
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let index_data: &[u8] = bytemuck::cast_slice(&mesh.indices);
+            let index_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Mesh Indices (cached)"),
+                    contents: index_data,
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+            let entry = MeshBufferCacheEntry {
+                vertex: vertex_buffer,
+                index: index_buffer,
+                index_count: mesh.indices.len() as u32,
+            };
+            let mp_mut = self.mesh_pipeline.as_mut().unwrap();
+            mp_mut.cached_mesh_buffers.insert(mesh_ptr, entry);
+            mp_mut.cached_mesh_buffer_keys.push_back(mesh_ptr);
+            while mp_mut.cached_mesh_buffer_keys.len() > MESH_CACHE_CAPACITY {
+                if let Some(old_key) = mp_mut.cached_mesh_buffer_keys.pop_front() {
+                    mp_mut.cached_mesh_buffers.remove(&old_key);
+                }
+            }
+        }
+        let (vertex_buffer, index_buffer, index_count) = {
+            let mp = self.mesh_pipeline.as_ref().unwrap();
+            let entry = mp
+                .cached_mesh_buffers
+                .get(&mesh_ptr)
+                .expect("mesh buffer cache entry must exist after insert");
+            (entry.vertex.clone(), entry.index.clone(), entry.index_count)
+        };
+
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct ShadowUniforms {
+            light_view_proj: [f32; 16],
+            model: [f32; 16],
+        }
+
+        let shadow_uniforms = ShadowUniforms {
+            light_view_proj: *light_view_proj,
+            model: *transform,
+        };
+
+        let mp = self.mesh_pipeline.as_ref().unwrap();
+        self.queue.write_buffer(
+            &mp.shadow_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&shadow_uniforms),
+        );
+
+        let shadow_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shadow Bind Group"),
+            layout: &mp.shadow_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: mp.shadow_uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        // First shadow caster in the frame clears the map; subsequent
+        // casters load so their depth accumulates with earlier draws.
+        let load_op = if shadow_batch_index == 0 {
+            wgpu::LoadOp::Clear(1.0)
+        } else {
+            wgpu::LoadOp::Load
+        };
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Shadow Pass"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Shadow Depth Pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &mp.shadow_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: load_op,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&mp.shadow_pipeline);
+            pass.set_bind_group(0, &shadow_bind_group, &[]);
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..index_count, 0, 0..1);
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
     /// Render mesh data with shadow mapping, normal mapping, and parallax displacement.
     ///
-    /// If `light_view_proj` is provided, a shadow depth pass is executed first,
-    /// then the main pass samples the shadow map for soft PCF shadows.
+    /// When `light_view_proj` is provided AND the mesh material has
+    /// `receives_shadows == true`, the main fragment shader samples the
+    /// shadow map produced by prior [`Self::render_mesh_shadow_pass`]
+    /// calls in the same frame. Passing `Some(...)` here without having
+    /// populated the shadow map leaves the depth compare sampling a
+    /// cleared/stale texture.
     #[allow(clippy::too_many_arguments)]
     pub fn render_mesh_data(
         &mut self,
@@ -8795,102 +9007,144 @@ impl GpuRenderer {
         light_view_proj: Option<&[f32; 16]>,
         viewport: Option<[f32; 4]>,
     ) {
+        // Defer to the batch-aware variant; single-mesh calls behave
+        // exactly as before (clear + skybox on first, tonemap on last).
+        self.render_mesh_data_batched(
+            target,
+            mesh,
+            transform,
+            view_proj,
+            camera_pos,
+            light_dir,
+            light_intensity,
+            light_view_proj,
+            viewport,
+            0,
+            1,
+        );
+    }
+
+    /// Batch-aware version of [`Self::render_mesh_data`].
+    ///
+    /// `batch_index` is the 0-based position of this mesh within the
+    /// current frame's mesh batch; `batch_count` is the batch size.
+    ///
+    /// - When `batch_index == 0`, the HDR intermediate is cleared and
+    ///   the skybox pass runs. Subsequent calls preserve the HDR so
+    ///   every mesh in the batch accumulates into it.
+    /// - When `batch_index + 1 == batch_count` (last mesh), the
+    ///   bloom + tonemap passes run, writing the composited HDR to
+    ///   the frame target.
+    ///
+    /// Without this batching, the skybox pass clears HDR on every
+    /// single-mesh call — causing multi-mesh scenes (e.g. a 39-mesh
+    /// glTF asset) to show only the *last* mesh drawn because each
+    /// tonemap pass reads HDR with only that mesh's contribution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_mesh_data_batched(
+        &mut self,
+        target: &wgpu::TextureView,
+        mesh: &std::sync::Arc<blinc_core::draw::MeshData>,
+        transform: &[f32; 16],
+        view_proj: &[f32; 16],
+        camera_pos: [f32; 3],
+        light_dir: [f32; 3],
+        light_intensity: f32,
+        light_view_proj: Option<&[f32; 16]>,
+        viewport: Option<[f32; 4]>,
+        batch_index: usize,
+        batch_count: usize,
+    ) {
         if mesh.vertices.is_empty() || mesh.indices.is_empty() {
             return;
         }
+        let is_first = batch_index == 0;
+        let is_last = batch_index + 1 >= batch_count.max(1);
 
         self.ensure_mesh_pipeline();
 
-        // Create vertex buffer (shared between shadow pass and main pass)
-        // Safety: Vertex is repr(C) with only f32 fields
-        let vertex_data: &[u8] = unsafe {
-            std::slice::from_raw_parts(
-                mesh.vertices.as_ptr() as *const u8,
-                mesh.vertices.len() * std::mem::size_of::<blinc_core::draw::Vertex>(),
-            )
-        };
-        let vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Mesh Vertices"),
-                contents: vertex_data,
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
-        let index_data: &[u8] = bytemuck::cast_slice(&mesh.indices);
-        let index_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Mesh Indices"),
-                contents: index_data,
-                usage: wgpu::BufferUsages::INDEX,
-            });
-
-        let index_count = mesh.indices.len() as u32;
-        let shadow_enabled = light_view_proj.is_some() && mesh.material.casts_shadows;
-
-        // ── Shadow depth pass ────────────────────────────────────────────
-        if shadow_enabled {
-            let lvp = light_view_proj.unwrap();
-
-            #[repr(C)]
-            #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-            struct ShadowUniforms {
-                light_view_proj: [f32; 16],
-                model: [f32; 16],
-            }
-
-            let shadow_uniforms = ShadowUniforms {
-                light_view_proj: *lvp,
-                model: *transform,
+        // ── Vertex + index buffer cache ──────────────────────────────────
+        //
+        // Keyed by the `Arc<MeshData>` raw pointer. Without this, every
+        // `draw_mesh_data` call uploads fresh vertex / index buffers —
+        // a 39-mesh asset like buster_drone would push ~1.8 GB through
+        // the wgpu queue per frame, pinning the render thread at ~1fps.
+        //
+        // FIFO-evicted at `MESH_CACHE_CAPACITY`. Scenes that recycle
+        // the same Arcs each frame (the normal case) hit the cache on
+        // every call after the first; streaming-mesh apps evict their
+        // oldest entry and pay a re-upload for it on next touch.
+        let mesh_ptr = std::sync::Arc::as_ptr(mesh) as usize;
+        let needs_buffers = !self
+            .mesh_pipeline
+            .as_ref()
+            .unwrap()
+            .cached_mesh_buffers
+            .contains_key(&mesh_ptr);
+        if needs_buffers {
+            // Safety: `Vertex` is `#[repr(C)]` with only f32/u32 fields
+            // so a raw reinterpret to `&[u8]` is well-defined.
+            let vertex_data: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    mesh.vertices.as_ptr() as *const u8,
+                    mesh.vertices.len() * std::mem::size_of::<blinc_core::draw::Vertex>(),
+                )
             };
-
-            let mp = self.mesh_pipeline.as_ref().unwrap();
-            self.queue.write_buffer(
-                &mp.shadow_uniform_buffer,
-                0,
-                bytemuck::bytes_of(&shadow_uniforms),
-            );
-
-            let shadow_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Shadow Bind Group"),
-                layout: &mp.shadow_bind_group_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: mp.shadow_uniform_buffer.as_entire_binding(),
-                }],
-            });
-
-            let mut encoder = self
+            let vertex_buffer = self
                 .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Shadow Pass"),
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Mesh Vertices (cached)"),
+                    contents: vertex_data,
+                    usage: wgpu::BufferUsages::VERTEX,
                 });
-
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Shadow Depth Pass"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &mp.shadow_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    ..Default::default()
+            let index_data: &[u8] = bytemuck::cast_slice(&mesh.indices);
+            let index_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Mesh Indices (cached)"),
+                    contents: index_data,
+                    usage: wgpu::BufferUsages::INDEX,
                 });
-
-                pass.set_pipeline(&mp.shadow_pipeline);
-                pass.set_bind_group(0, &shadow_bind_group, &[]);
-                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..index_count, 0, 0..1);
+            let entry = MeshBufferCacheEntry {
+                vertex: vertex_buffer,
+                index: index_buffer,
+                index_count: mesh.indices.len() as u32,
+            };
+            let mp_mut = self.mesh_pipeline.as_mut().unwrap();
+            mp_mut.cached_mesh_buffers.insert(mesh_ptr, entry);
+            mp_mut.cached_mesh_buffer_keys.push_back(mesh_ptr);
+            // Cap the cache — drop the oldest entry (FIFO) when full.
+            // An LRU policy would need a touch-on-hit step; FIFO is
+            // good enough for the common case where every mesh in a
+            // scene is drawn every frame (all entries are equally
+            // hot).
+            while mp_mut.cached_mesh_buffer_keys.len() > MESH_CACHE_CAPACITY {
+                if let Some(old_key) = mp_mut.cached_mesh_buffer_keys.pop_front() {
+                    mp_mut.cached_mesh_buffers.remove(&old_key);
+                }
             }
-
-            self.queue.submit(std::iter::once(encoder.finish()));
         }
+
+        // Pull cloned buffer handles out of the cache so the rest of
+        // the function owns its references independently of any
+        // further mutable borrows of `self.mesh_pipeline`. `wgpu::Buffer`
+        // is reference-counted internally, so `.clone()` is cheap.
+        let (vertex_buffer, index_buffer, index_count) = {
+            let mp = self.mesh_pipeline.as_ref().unwrap();
+            let entry = mp
+                .cached_mesh_buffers
+                .get(&mesh_ptr)
+                .expect("mesh buffer cache entry must exist after insert");
+            (entry.vertex.clone(), entry.index.clone(), entry.index_count)
+        };
+
+        // Shadow map population happens BEFORE this call via
+        // `render_mesh_shadow_pass`. Here we only sample it; the map is
+        // populated-or-not based on whether the caller passed a light
+        // matrix, and each mesh opts into receiving shadows via its
+        // own `receives_shadows` flag (caster status is irrelevant for
+        // receiving).
+        let shadow_map_populated = light_view_proj.is_some();
 
         // ── Upload main uniforms ─────────────────────────────────────────
         let identity_mat: [f32; 16] = [
@@ -8943,7 +9197,7 @@ impl GpuRenderer {
             viewport_size: [self.viewport_size.0 as f32, self.viewport_size.1 as f32],
             has_texture,
             has_normal_map,
-            shadow_enabled: if shadow_enabled && mesh.material.receives_shadows {
+            shadow_enabled: if shadow_map_populated && mesh.material.receives_shadows {
                 1.0
             } else {
                 0.0
@@ -8976,8 +9230,18 @@ impl GpuRenderer {
             has_emissive_texture: f32,
             has_occlusion_texture: f32,
             occlusion_strength: f32,
+            // Alpha mode is encoded as a float so WGSL's uniform layout
+            // rules don't need a bool type (which isn't POD anyway).
+            // Matches shader `MaterialUniforms.alpha_mode`.
+            alpha_mode: f32,
+            _pad_am: [f32; 3],
         }
 
+        let alpha_mode = match mesh.material.alpha_mode {
+            blinc_core::draw::AlphaMode::Opaque => 0.0,
+            blinc_core::draw::AlphaMode::Mask => 1.0,
+            blinc_core::draw::AlphaMode::Blend => 2.0,
+        };
         let mat = MaterialGpu {
             base_color: mesh.material.base_color,
             metallic_roughness: [mesh.material.metallic, mesh.material.roughness],
@@ -9000,77 +9264,80 @@ impl GpuRenderer {
                 0.0
             },
             occlusion_strength: mesh.material.occlusion_strength,
+            alpha_mode,
+            _pad_am: [0.0; 3],
         };
         self.queue
             .write_buffer(&mp.material_buffer, 0, bytemuck::bytes_of(&mat));
 
-        // ── Upload textures (cached across frames) ────────────────────────
+        // ── Upload textures — cache by source `Arc<[u8]>` pointer ─────────
         //
-        // GPU texture creation + upload is expensive (~80 MB for the
-        // DamagedHelmet's 5 × 2048² textures). Cache by Arc pointer:
-        // if the same MeshData Arc is drawn again, reuse the GPU
-        // textures from last frame. Only re-upload when the mesh changes.
-        let mesh_ptr = std::sync::Arc::as_ptr(mesh) as usize;
-        {
+        // Multiple materials typically reference the same underlying
+        // image (glTF explicitly reuses images across primitives —
+        // buster_drone has 39 meshes but only 10 distinct textures).
+        // Keying by `TextureData.rgba.as_ptr()` means each unique image
+        // becomes exactly one `GpuImage`, regardless of how many
+        // materials point at it. FIFO-evicted at `MESH_CACHE_CAPACITY`.
+        let texture_slots: [(&Option<blinc_core::TextureData>, &str); 6] = [
+            (&mesh.material.base_color_texture, "mesh_base_color_tex"),
+            (&mesh.material.normal_map, "mesh_normal_map"),
+            (&mesh.material.displacement_map, "mesh_displacement_map"),
+            (
+                &mesh.material.metallic_roughness_texture,
+                "mesh_metallic_roughness_tex",
+            ),
+            (&mesh.material.emissive_texture, "mesh_emissive_tex"),
+            (&mesh.material.occlusion_texture, "mesh_occlusion_tex"),
+        ];
+        for (td_opt, label) in &texture_slots {
+            let Some(td) = td_opt.as_ref() else { continue };
+            let key = td.rgba.as_ptr() as usize;
+            let already_cached = self
+                .mesh_pipeline
+                .as_ref()
+                .unwrap()
+                .cached_gpu_images
+                .contains_key(&key);
+            if already_cached {
+                continue;
+            }
+            let img = crate::image::GpuImage::from_rgba(
+                &self.device,
+                &self.queue,
+                &td.rgba,
+                td.width,
+                td.height,
+                Some(*label),
+            );
             let mp_mut = self.mesh_pipeline.as_mut().unwrap();
-            if mp_mut.cached_mesh_ptr != mesh_ptr {
-                mp_mut.cached_mesh_ptr = mesh_ptr;
-
-                let upload = |td: &Option<blinc_core::TextureData>,
-                              label: &str|
-                 -> Option<crate::image::GpuImage> {
-                    td.as_ref().map(|td| {
-                        crate::image::GpuImage::from_rgba(
-                            &self.device,
-                            &self.queue,
-                            &td.rgba,
-                            td.width,
-                            td.height,
-                            Some(label),
-                        )
-                    })
-                };
-
-                mp_mut.cached_base_tex =
-                    upload(&mesh.material.base_color_texture, "mesh_base_color_tex");
-                mp_mut.cached_normal_tex = upload(&mesh.material.normal_map, "mesh_normal_map");
-                mp_mut.cached_displacement_tex =
-                    upload(&mesh.material.displacement_map, "mesh_displacement_map");
-                mp_mut.cached_mr_tex = upload(
-                    &mesh.material.metallic_roughness_texture,
-                    "mesh_metallic_roughness_tex",
-                );
-                mp_mut.cached_emissive_tex =
-                    upload(&mesh.material.emissive_texture, "mesh_emissive_tex");
-                mp_mut.cached_occlusion_tex =
-                    upload(&mesh.material.occlusion_texture, "mesh_occlusion_tex");
+            mp_mut.cached_gpu_images.insert(key, img);
+            mp_mut.cached_gpu_image_keys.push_back(key);
+            while mp_mut.cached_gpu_image_keys.len() > MESH_CACHE_CAPACITY {
+                if let Some(old_key) = mp_mut.cached_gpu_image_keys.pop_front() {
+                    mp_mut.cached_gpu_images.remove(&old_key);
+                }
             }
         }
 
         let mp = self.mesh_pipeline.as_ref().unwrap();
-        let base_view = mp
-            .cached_base_tex
-            .as_ref()
+        // Look up the `GpuImage` for each material slot, falling back to
+        // the default placeholder texture when the slot is empty.
+        let lookup = |td_opt: &Option<blinc_core::TextureData>| -> Option<&crate::image::GpuImage> {
+            td_opt
+                .as_ref()
+                .and_then(|td| mp.cached_gpu_images.get(&(td.rgba.as_ptr() as usize)))
+        };
+        let base_view = lookup(&mesh.material.base_color_texture)
             .map_or_else(|| mp.default_texture.view(), |t| t.view());
-        let normal_view = mp
-            .cached_normal_tex
-            .as_ref()
+        let normal_view = lookup(&mesh.material.normal_map)
             .map_or_else(|| mp.default_normal_map.view(), |t| t.view());
-        let displacement_view = mp
-            .cached_displacement_tex
-            .as_ref()
+        let displacement_view = lookup(&mesh.material.displacement_map)
             .map_or_else(|| mp.default_displacement.view(), |t| t.view());
-        let metallic_roughness_view = mp
-            .cached_mr_tex
-            .as_ref()
+        let metallic_roughness_view = lookup(&mesh.material.metallic_roughness_texture)
             .map_or_else(|| mp.default_metallic_roughness.view(), |t| t.view());
-        let emissive_view = mp
-            .cached_emissive_tex
-            .as_ref()
+        let emissive_view = lookup(&mesh.material.emissive_texture)
             .map_or_else(|| mp.default_emissive.view(), |t| t.view());
-        let occlusion_view = mp
-            .cached_occlusion_tex
-            .as_ref()
+        let occlusion_view = lookup(&mesh.material.occlusion_texture)
             .map_or_else(|| mp.default_occlusion.view(), |t| t.view());
 
         // ── Upload joint matrices (skeletal animation) ───────────────────
@@ -9306,7 +9573,13 @@ impl GpuRenderer {
         // Sub-pass A: skybox → HDR (no depth attachment — the skybox
         // pipeline was created without depth_stencil so it can't share
         // a render pass with the mesh pipeline that has depth enabled).
-        {
+        //
+        // Only the first mesh in a batch runs the skybox pass; it also
+        // owns the `LoadOp::Clear` that resets the HDR intermediate
+        // for the whole frame. Later meshes in the same batch skip
+        // both so their contributions accumulate in HDR instead of
+        // being wiped away.
+        if is_first {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Skybox Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -9331,10 +9604,11 @@ impl GpuRenderer {
         // (which create their own encoders), then re-borrow mp for mesh.
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        // Drop the `mp` borrow before the mutable `execute_scene3d_passes`
-        // call, then re-borrow for the mesh pass.
-        {
-            // Get the HDR view pointer before dropping mp
+        // Scene3D custom passes also need to run once per frame, not
+        // per mesh — otherwise a 3D grid/lines pass would re-render
+        // its geometry every mesh, stacking overdraw. Gate on
+        // `is_first` for the same reason as the skybox.
+        if is_first {
             let hdr_view_ptr = self
                 .mesh_pipeline
                 .as_ref()
@@ -9360,7 +9634,15 @@ impl GpuRenderer {
                 label: Some("Mesh Render (continued)"),
             });
 
-        // Sub-pass B: mesh → HDR (with depth, LoadOp::Load preserves skybox + grid)
+        // Sub-pass B: mesh → HDR. Depth is `Clear(1.0)` only on the
+        // first mesh of the batch — subsequent meshes `Load` so the
+        // accumulated depth rejects fragments occluded by earlier
+        // draws within the same frame.
+        let depth_load_op = if is_first {
+            wgpu::LoadOp::Clear(1.0)
+        } else {
+            wgpu::LoadOp::Load
+        };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Mesh HDR Pass"),
@@ -9376,7 +9658,7 @@ impl GpuRenderer {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: depth_view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        load: depth_load_op,
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -9391,220 +9673,228 @@ impl GpuRenderer {
             pass.draw_indexed(0..index_count, 0, 0..1);
         }
 
-        // ── Bloom passes ────────────────────────────────────────────────
+        // ── Bloom + tonemap passes ─────────────────────────────────────
+        //
+        // Only the LAST mesh in a batch composites HDR into the frame
+        // target. Earlier meshes accumulate into HDR with the mesh
+        // pass above and return so their contributions stay in HDR
+        // until the final pass tonemaps the full scene.
         //
         // Pass B1: threshold + downsample HDR → bloom_a (half-res)
         // Pass B2: Kawase blur bloom_a → bloom_b
         // Pass B3: Kawase blur bloom_b → bloom_a (wider)
-        let bloom_a_view = mp.bloom_a_view.as_ref().unwrap();
-        let bloom_b_view = mp.bloom_b_view.as_ref().unwrap();
-        let (bloom_w, bloom_h) = mp.bloom_size;
-        let bloom_texel = [1.0 / bloom_w as f32, 1.0 / bloom_h as f32];
+        if is_last {
+            let bloom_a_view = mp.bloom_a_view.as_ref().unwrap();
+            let bloom_b_view = mp.bloom_b_view.as_ref().unwrap();
+            let (bloom_w, bloom_h) = mp.bloom_size;
+            let bloom_texel = [1.0 / bloom_w as f32, 1.0 / bloom_h as f32];
 
-        #[repr(C)]
-        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-        struct BloomUniforms {
-            texel_size: [f32; 2],
-            threshold: f32,
-            mode: f32,
-        }
-
-        // B1: threshold+downsample HDR → bloom_a
-        {
-            let uniforms = BloomUniforms {
-                texel_size: bloom_texel,
-                threshold: 0.8,
-                mode: 0.0,
-            };
-            self.queue
-                .write_buffer(&mp.bloom_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Bloom Threshold"),
-                layout: &mp.bloom_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: mp.bloom_uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(hdr_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&mp.tonemap_sampler),
-                    },
-                ],
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Bloom Threshold"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: bloom_a_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                ..Default::default()
-            });
-            pass.set_pipeline(&mp.bloom_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.draw(0..3, 0..1);
-        }
-
-        // B2: blur bloom_a → bloom_b
-        {
-            let uniforms = BloomUniforms {
-                texel_size: bloom_texel,
-                threshold: 0.0,
-                mode: 1.0,
-            };
-            self.queue
-                .write_buffer(&mp.bloom_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Bloom Blur 1"),
-                layout: &mp.bloom_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: mp.bloom_uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(bloom_a_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&mp.tonemap_sampler),
-                    },
-                ],
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Bloom Blur 1"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: bloom_b_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                ..Default::default()
-            });
-            pass.set_pipeline(&mp.bloom_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.draw(0..3, 0..1);
-        }
-
-        // B3: blur bloom_b → bloom_a (second iteration for wider glow)
-        {
-            let uniforms = BloomUniforms {
-                texel_size: bloom_texel,
-                threshold: 0.0,
-                mode: 1.0,
-            };
-            self.queue
-                .write_buffer(&mp.bloom_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Bloom Blur 2"),
-                layout: &mp.bloom_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: mp.bloom_uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(bloom_b_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&mp.tonemap_sampler),
-                    },
-                ],
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Bloom Blur 2"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: bloom_a_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                ..Default::default()
-            });
-            pass.set_pipeline(&mp.bloom_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.draw(0..3, 0..1);
-        }
-
-        // Pass 2: tonemap HDR → framebuffer (ACES filmic + sRGB gamma)
-        //
-        // The tonemap pass reads the Rgba16Float intermediate and the
-        // bloom result, composites them, and writes tonemapped sRGB to
-        // the caller's frame target. Viewport/scissor are set here (not
-        // on the mesh pass) so the tonemap fullscreen triangle only
-        // writes within the canvas bounds while the mesh pass renders at
-        // full HDR resolution for correct edge sampling.
-        {
-            let tonemap_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Tonemap Bind Group"),
-                layout: &mp.tonemap_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(hdr_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&mp.tonemap_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(bloom_a_view),
-                    },
-                ],
-            });
-
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Tonemap Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                ..Default::default()
-            });
-
-            pass.set_pipeline(&mp.tonemap_pipeline);
-
-            if let Some([vx, vy, vw, vh]) = viewport {
-                pass.set_viewport(vx, vy, vw.max(1.0), vh.max(1.0), 0.0, 1.0);
-                pass.set_scissor_rect(
-                    vx.max(0.0) as u32,
-                    vy.max(0.0) as u32,
-                    vw.max(1.0) as u32,
-                    vh.max(1.0) as u32,
-                );
+            #[repr(C)]
+            #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+            struct BloomUniforms {
+                texel_size: [f32; 2],
+                threshold: f32,
+                mode: f32,
             }
 
-            pass.set_bind_group(0, &tonemap_bind_group, &[]);
-            pass.draw(0..3, 0..1); // fullscreen triangle
-        }
+            // B1: threshold+downsample HDR → bloom_a
+            {
+                let uniforms = BloomUniforms {
+                    texel_size: bloom_texel,
+                    threshold: 0.8,
+                    mode: 0.0,
+                };
+                self.queue
+                    .write_buffer(&mp.bloom_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Bloom Threshold"),
+                    layout: &mp.bloom_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: mp.bloom_uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(hdr_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&mp.tonemap_sampler),
+                        },
+                    ],
+                });
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Bloom Threshold"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: bloom_a_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    ..Default::default()
+                });
+                pass.set_pipeline(&mp.bloom_pipeline);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+
+            // B2: blur bloom_a → bloom_b
+            {
+                let uniforms = BloomUniforms {
+                    texel_size: bloom_texel,
+                    threshold: 0.0,
+                    mode: 1.0,
+                };
+                self.queue
+                    .write_buffer(&mp.bloom_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Bloom Blur 1"),
+                    layout: &mp.bloom_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: mp.bloom_uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(bloom_a_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&mp.tonemap_sampler),
+                        },
+                    ],
+                });
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Bloom Blur 1"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: bloom_b_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    ..Default::default()
+                });
+                pass.set_pipeline(&mp.bloom_pipeline);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+
+            // B3: blur bloom_b → bloom_a (second iteration for wider glow)
+            {
+                let uniforms = BloomUniforms {
+                    texel_size: bloom_texel,
+                    threshold: 0.0,
+                    mode: 1.0,
+                };
+                self.queue
+                    .write_buffer(&mp.bloom_uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Bloom Blur 2"),
+                    layout: &mp.bloom_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: mp.bloom_uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(bloom_b_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&mp.tonemap_sampler),
+                        },
+                    ],
+                });
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Bloom Blur 2"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: bloom_a_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    ..Default::default()
+                });
+                pass.set_pipeline(&mp.bloom_pipeline);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+
+            // Pass 2: tonemap HDR → framebuffer (ACES filmic + sRGB gamma)
+            //
+            // The tonemap pass reads the Rgba16Float intermediate and the
+            // bloom result, composites them, and writes tonemapped sRGB to
+            // the caller's frame target. Viewport/scissor are set here (not
+            // on the mesh pass) so the tonemap fullscreen triangle only
+            // writes within the canvas bounds while the mesh pass renders at
+            // full HDR resolution for correct edge sampling.
+            {
+                let tonemap_bind_group =
+                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Tonemap Bind Group"),
+                        layout: &mp.tonemap_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(hdr_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&mp.tonemap_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(bloom_a_view),
+                            },
+                        ],
+                    });
+
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Tonemap Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    ..Default::default()
+                });
+
+                pass.set_pipeline(&mp.tonemap_pipeline);
+
+                if let Some([vx, vy, vw, vh]) = viewport {
+                    pass.set_viewport(vx, vy, vw.max(1.0), vh.max(1.0), 0.0, 1.0);
+                    pass.set_scissor_rect(
+                        vx.max(0.0) as u32,
+                        vy.max(0.0) as u32,
+                        vw.max(1.0) as u32,
+                        vh.max(1.0) as u32,
+                    );
+                }
+
+                pass.set_bind_group(0, &tonemap_bind_group, &[]);
+                pass.draw(0..3, 0..1); // fullscreen triangle
+            }
+        } // end `if is_last` — bloom + tonemap run only on final mesh
 
         self.queue.submit(std::iter::once(encoder.finish()));
     }

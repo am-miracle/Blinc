@@ -49,6 +49,13 @@ struct MaterialUniforms {
     has_emissive_texture: f32,
     has_occlusion_texture: f32,
     occlusion_strength: f32,
+    // glTF alphaMode encoded as a float: 0 = Opaque, 1 = Mask, 2 = Blend.
+    // Mirrors `mesh.wgsl` — the Rust side uploads the same struct
+    // regardless of which shader variant is compiled.
+    alpha_mode: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -260,11 +267,22 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // Sample base color
+    // Sample base color. See `mesh.wgsl` for the full rationale — we
+    // multiply factor × vertex_color × tex_color so `KHR_materials_*`
+    // factors compose correctly on top of authored textures.
     var base_color = material.base_color * input.vertex_color;
     if uniforms.has_texture > 0.5 {
         let tex_color = textureSample(base_texture, base_sampler, uv);
-        base_color = tex_color * input.vertex_color;
+        base_color = base_color * tex_color;
+    }
+
+    // Alpha-mode branch (0 = Opaque, 1 = Mask, 2 = Blend). Must match
+    // `mesh.wgsl`.
+    if material.alpha_mode < 0.5 {
+        base_color.a = 1.0;
+    } else if material.alpha_mode < 1.5 {
+        if base_color.a < 0.5 { discard; }
+        base_color.a = 1.0;
     }
 
     if material.unlit > 0.5 {
@@ -403,6 +421,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let ambient_specular = prefiltered * env_fresnel;
     let ambient = (ambient_diffuse + ambient_specular) * ao;
 
-    let final_color = ambient + direct_lighting * shadow_factor + emissive_value;
-    return vec4(final_color, base_color.a);
+    // Premultiplied-alpha output — see `mesh.wgsl` for rationale.
+    // Emissive is self-emitted light; it must survive transparency.
+    let reflected = ambient + direct_lighting * shadow_factor;
+    let final_rgb = reflected * base_color.a + emissive_value;
+    return vec4(final_rgb, base_color.a);
 }

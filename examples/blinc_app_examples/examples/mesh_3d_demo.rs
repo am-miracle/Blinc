@@ -91,7 +91,7 @@ fn load_texture(path: &str) -> TextureData {
         .unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
     let (width, height) = img.dimensions();
     TextureData {
-        rgba: img.into_pixels(),
+        rgba: img.into_pixels().into(),
         width,
         height,
     }

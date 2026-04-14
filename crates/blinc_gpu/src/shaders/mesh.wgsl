@@ -44,6 +44,17 @@ struct MaterialUniforms {
     has_emissive_texture: f32,
     has_occlusion_texture: f32,
     occlusion_strength: f32,
+    // glTF alphaMode encoded as a float: 0 = Opaque, 1 = Mask, 2 = Blend.
+    // Opaque/Mask force the output alpha to 1.0 so the pipeline's
+    // `ALPHA_BLENDING` state multiplies src.rgb by 1, writing the fully
+    // lit color. Blend passes the sampled alpha through. Without this
+    // branch, assets that mark opaque paint materials as `BLEND` (or
+    // simply leave an unused alpha channel in the base-color texture)
+    // render attenuated against the dark HDR intermediate.
+    alpha_mode: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -246,12 +257,27 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // Sample base color
+    // Sample base color. We multiply the material base_color factor
+    // by the sampled texel (when a texture is bound) AND the
+    // interpolated vertex color — this matches the glTF spec and
+    // `KHR_materials_unlit` expectations.
     var base_color = material.base_color * input.vertex_color;
     if uniforms.has_texture > 0.5 {
         let tex_color = textureSample(base_texture, base_sampler, uv);
-        base_color = tex_color * input.vertex_color;
+        base_color = base_color * tex_color;
     }
+
+    // Alpha-mode branch: Mask discards below cutoff (glTF default 0.5),
+    // Opaque/Mask force alpha to 1, Blend passes sampled alpha through.
+    // Kept out of the unlit early-return so unlit materials also get
+    // the right alpha treatment.
+    if material.alpha_mode < 0.5 {
+        base_color.a = 1.0;                        // Opaque
+    } else if material.alpha_mode < 1.5 {
+        if base_color.a < 0.5 { discard; }         // Mask
+        base_color.a = 1.0;
+    }
+    // else: Blend — leave base_color.a as sampled.
 
     if material.unlit > 0.5 {
         return base_color;
@@ -389,6 +415,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let ambient_specular = prefiltered * env_fresnel;
     let ambient = (ambient_diffuse + ambient_specular) * ao;
 
-    let final_color = ambient + direct_lighting * shadow_factor + emissive_value;
-    return vec4(final_color, base_color.a);
+    // Premultiplied-alpha output. Surface-reflected light (ambient +
+    // direct) is attenuated by the material's sampled alpha because a
+    // transparent surface lets you see *through* it; but emissive is
+    // self-emitted light — a glowing pixel visible regardless of how
+    // transparent the surrounding material is. Separating the two
+    // terms here + premultiplied-alpha blending on the pipeline side
+    // means a BLEND material with a low-alpha base color (e.g. the
+    // body decal mask) can still show its bright emissive eye /
+    // accent glows.
+    let reflected = ambient + direct_lighting * shadow_factor;
+    let final_rgb = reflected * base_color.a + emissive_value;
+    return vec4(final_rgb, base_color.a);
 }
