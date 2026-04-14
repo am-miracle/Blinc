@@ -696,6 +696,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         default: {
             discard;
+            return vec4<f32>(0.0);
         }
     }
 
