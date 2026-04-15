@@ -37,9 +37,9 @@ blinc_platform_desktop = { path = "../../extensions/blinc_platform_desktop" }
 # (which doesn't have the path-only checkout) can resolve them. Swap
 # these for `version = "..."` crates.io entries once the packages ship
 # stable releases.
-blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "61216ad974c71fbcd504f73c6662672029791ca2", features = ["platform-assets"] }
-blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "c76a113681c15436c5f70fcca66e8c49d8dc4830" }
-blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = "0e9f2ad829eb7f6c6ef251bdd14f879777b64e1a" }
+blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "3c8cb8986bdc9f79c069bdc386c2ebc638474d5e", features = ["platform-assets"] }
+blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "397c8a7fafa6b0ccbb0e46cc8cd876fb785f937a" }
+blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = "a3444c29601e111f769da9bdba1e902ead25659f" }
 
 image.workspace = true
 tracing.workspace = true

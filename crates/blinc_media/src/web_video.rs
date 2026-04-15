@@ -47,8 +47,24 @@ pub(crate) fn create(player_id: u64) {
     canvas.style().set_property("display", "none").ok();
     document().body().unwrap().append_child(&canvas).ok();
 
+    // `willReadFrequently: true` hints the browser to back the 2D
+    // canvas with a software buffer instead of the default
+    // GPU-resident one. The video player calls `getImageData` on every
+    // tick to pull decoded frames into CPU memory for `blinc_media`
+    // consumers — on a GPU-backed canvas each `getImageData` stalls
+    // the GPU while it copies pixels back, and Chrome flags it with
+    // the console warning "Canvas2D: Multiple readback operations".
+    // With the hint set, reads are effectively free but GPU draws
+    // to this canvas (we don't do any) would slow down.
+    let ctx_options = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &ctx_options,
+        &wasm_bindgen::JsValue::from_str("willReadFrequently"),
+        &wasm_bindgen::JsValue::from_bool(true),
+    )
+    .ok();
     let ctx2d: CanvasRenderingContext2d = canvas
-        .get_context("2d")
+        .get_context_with_context_options("2d", &ctx_options)
         .unwrap()
         .unwrap()
         .dyn_into()
