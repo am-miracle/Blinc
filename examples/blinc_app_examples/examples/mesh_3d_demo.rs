@@ -186,10 +186,7 @@ impl AsyncAssets {
                 tracing::error!("mesh_3d_demo: asset load failed");
                 return;
             };
-            tracing::info!(
-                "mesh_3d_demo: applying HDRI ({} bytes)",
-                hdr_bytes.len()
-            );
+            tracing::info!("mesh_3d_demo: applying HDRI ({} bytes)", hdr_bytes.len());
             kit.set_hdri(&hdr_bytes, 256);
             let _ = slot.set(helmet);
             scene_ready.set(true);
@@ -201,10 +198,7 @@ impl AsyncAssets {
             wasm_bindgen_futures::spawn_local(async move {
                 loop {
                     if let Some((helmet, hdr_bytes)) = try_load_assets() {
-                        tracing::info!(
-                            "mesh_3d_demo: applying HDRI ({} bytes)",
-                            hdr_bytes.len()
-                        );
+                        tracing::info!("mesh_3d_demo: applying HDRI ({} bytes)", hdr_bytes.len());
                         kit.set_hdri(&hdr_bytes, 256);
                         let _ = slot.set(helmet);
                         scene_ready.set(true);
