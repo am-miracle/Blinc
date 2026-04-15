@@ -44,7 +44,8 @@
 //! frame, and the debug profile's per-call overhead adds up. Debug is
 //! playable but sluggish.
 
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use blinc_animation::get_scheduler;
 use blinc_app::prelude::*;
@@ -69,6 +70,37 @@ const VIEWPORT_ID: &str = "gltf-animation-viewport";
 // shared-Arc handle into each closure.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Async wrapper around the real `SceneState`. Gives the UI a handle
+/// that exists from the very first frame, long before the glTF asset
+/// has finished loading — the scene-kit element's render closure
+/// checks `get()` each frame and either draws the scene or a loading
+/// overlay. When the background loader finally populates the slot the
+/// next frame starts rendering the real mesh.
+///
+/// Fields that need to exist *before* the scene is ready (input state,
+/// the "kick playback once the viewport lays out" latch) live here on
+/// the handle rather than on `SceneState`. Reactive fields still live
+/// on `SceneState` and are reached only after `slot.get()` returns
+/// `Some`.
+#[derive(Clone)]
+struct AsyncHandle {
+    /// Set exactly once by the background loader after
+    /// [`SceneState::try_load`] succeeds. Read each frame by the
+    /// render closure. `OnceLock` survives the drop-lock / write-once
+    /// contract without mutex overhead on hot reads.
+    slot: Arc<OnceLock<SceneState>>,
+    /// Polled-input state captured by the viewport `Div`. Kept on the
+    /// handle (not `SceneState`) so `capture_input(&handle.input)`
+    /// works from the first frame — otherwise the demo couldn't
+    /// receive input while still loading.
+    input: InputState,
+    /// Latched "autoplay requested" flag. The viewport's `on_ready`
+    /// callback can fire *before* the scene is loaded; flip this to
+    /// `true` there and the render closure consumes it on the first
+    /// frame the scene is available, un-pausing playback.
+    autoplay_pending: Arc<AtomicBool>,
+}
+
 #[derive(Clone)]
 struct SceneState {
     scene: Arc<Mutex<GltfScene>>,
@@ -81,7 +113,6 @@ struct SceneState {
     /// the render closure doesn't need to lock `scene` to read it.
     animation: Arc<Option<GltfAnimation>>,
     playback: Arc<Mutex<Playback>>,
-    input: InputState,
     duration: f32,
 }
 
@@ -95,13 +126,19 @@ struct Playback {
 }
 
 impl SceneState {
-    fn load(path: &str) -> Self {
-        // Cross-platform: goes through `blinc_platform::assets` so the
-        // same demo code runs on desktop (filesystem), Android (APK
-        // assets), iOS (bundle), and web (HTTP) once the right
-        // platform loader is registered. On desktop the default
-        // `FilesystemAssetLoader` reads from the CWD, which matches
-        // `cargo run` resolving from the repo root.
+    /// Attempt to load the scene. Returns `None` on *any* failure —
+    /// most importantly the web case where `blinc_platform::assets`
+    /// returns an error until `WebAssetLoader::preload` has
+    /// populated the cache. Callers (typically a retry loop in a
+    /// background task) poll until this returns `Some`.
+    ///
+    /// Cross-platform: goes through `blinc_platform::assets` so the
+    /// same demo code runs on desktop (filesystem), Android (APK
+    /// assets), iOS (bundle), and web (HTTP) once the right
+    /// platform loader is registered. On desktop the default
+    /// `FilesystemAssetLoader` reads from the CWD, which matches
+    /// `cargo run` resolving from the repo root.
+    fn try_load(path: &str) -> Option<Self> {
         // Downsample oversized textures at load. buster_drone ships
         // several 4K × 4K albedo / normal / metallic-roughness maps
         // (~64 MB each decoded RGBA8 × CPU + GPU copies); 2K is the
@@ -112,8 +149,10 @@ impl SceneState {
         let opts = blinc_gltf::LoadOptions {
             max_texture_size: Some(2048),
         };
-        let mut scene = blinc_gltf::load_asset_with_options(path, &opts)
-            .unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
+        let mut scene = match blinc_gltf::load_asset_with_options(path, &opts) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
 
         // ── Densify rotation channels ─────────────────────────────────
         //
@@ -258,7 +297,7 @@ impl SceneState {
             })
             .collect();
         let animation = scene.animations.first().cloned();
-        Self {
+        Some(Self {
             scene: Arc::new(Mutex::new(scene)),
             arc_meshes: Arc::new(arc_meshes),
             animation: Arc::new(animation),
@@ -267,10 +306,101 @@ impl SceneState {
                 duration,
                 paused: true,
             })),
-            input: InputState::new(),
             duration,
+        })
+    }
+}
+
+impl AsyncHandle {
+    fn new() -> Self {
+        Self {
+            slot: Arc::new(OnceLock::new()),
+            input: InputState::new(),
+            autoplay_pending: Arc::new(AtomicBool::new(false)),
         }
     }
+
+    /// Kick off the scene load on a background worker. On desktop this
+    /// is a plain OS thread; on wasm it's `wasm_bindgen_futures::
+    /// spawn_local` polling [`SceneState::try_load`] every ~100 ms
+    /// until the `WebAssetLoader` cache has been populated by the
+    /// preload task spun up in the wasm wrapper's setup closure.
+    fn spawn_load(&self, path: &'static str) {
+        let slot = self.slot.clone();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        std::thread::spawn(move || {
+            if let Some(state) = SceneState::try_load(path) {
+                register_scheduler_tick(&state);
+                let _ = slot.set(state);
+                // Wake the renderer so the next frame swaps the
+                // loading overlay out for real geometry. Without this
+                // the scene wouldn't paint until some other event
+                // (cursor move, resize, scheduler-driven redraw)
+                // woke the main thread.
+                get_scheduler().request_redraw();
+            } else {
+                tracing::error!(
+                    "SceneState::try_load failed for {path} — scene will not render"
+                );
+            }
+        });
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            wasm_bindgen_futures::spawn_local(async move {
+                loop {
+                    if let Some(state) = SceneState::try_load(path) {
+                        register_scheduler_tick(&state);
+                        let _ = slot.set(state);
+                        get_scheduler().request_redraw();
+                        break;
+                    }
+                    // Preload hasn't populated the cache yet. Yield
+                    // back to the browser task queue and retry in
+                    // 100 ms. The exponential-scale middleground
+                    // (50–200 ms) is a decent compromise between
+                    // snappy load-when-ready and avoiding wasted
+                    // parse attempts.
+                    sleep_ms(100).await;
+                }
+            });
+        }
+    }
+
+    fn get(&self) -> Option<&SceneState> {
+        self.slot.get()
+    }
+
+    /// If the scene just finished loading and `on_ready` already
+    /// fired, un-pause playback. Called every frame from the render
+    /// closure; cheap (atomic read + compare-exchange).
+    fn autoplay_if_ready(&self) {
+        if let Some(state) = self.slot.get() {
+            if self.autoplay_pending.swap(false, Ordering::AcqRel) {
+                state.playback.lock().unwrap().paused = false;
+            }
+        }
+    }
+}
+
+/// Minimal wasm32 `setTimeout`-based sleep, without pulling in
+/// `gloo_timers` just for one async function. Yields back to the JS
+/// task queue for `ms` milliseconds.
+#[cfg(target_arch = "wasm32")]
+async fn sleep_ms(ms: u32) {
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen_futures::JsFuture;
+    let promise = js_sys::Promise::new(&mut |resolve: js_sys::Function, _reject| {
+        web_sys::window()
+            .and_then(|w| {
+                w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                    &resolve, ms as i32,
+                )
+                .ok()
+            });
+    });
+    let _ = JsFuture::from(promise).await;
 }
 
 // Animation playback uses `blinc_skeleton::animate_scene_nodes` — it
@@ -337,55 +467,44 @@ fn main() -> Result<()> {
 }
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
-    // Cache the loaded scene across UI rebuilds. `use_state_keyed`'s
-    // init closure runs exactly once for this string key, so the
-    // 9-second glTF parse + texture decode happens once at startup
-    // and subsequent rebuilds (window resize, etc.) reuse the same
-    // `SceneState` handle. The same closure also registers a tick
-    // callback on the global animation scheduler and turns on
-    // continuous redraw — both one-shot setups that would double up
-    // if attached per-`build_ui` invocation.
-    let state = ctx
-        .use_state_keyed("gltf_animation_demo_state", || {
-            let state = SceneState::load(GLTF_PATH);
-            register_scheduler_tick(&state);
-            state
+    // `use_state_keyed` caches the `AsyncHandle` across UI rebuilds.
+    // The init closure runs exactly once for this key — it spawns
+    // the background loader and returns a handle that can be
+    // polled every frame. `build_ui` returns immediately; the
+    // first frame paints a loading overlay, and once the background
+    // loader finishes the scene appears on its own (via
+    // `get_scheduler().request_redraw()` fired from the loader).
+    let handle = ctx
+        .use_state_keyed("gltf_animation_demo_handle", || {
+            let handle = AsyncHandle::new();
+            handle.spawn_load(GLTF_PATH);
+            handle
         })
         .try_get()
-        .expect("state signal should exist after use_state_keyed init");
-    let duration = state.duration;
+        .expect("handle signal should exist after use_state_keyed init");
 
-    // ── on_ready: kick off playback once the viewport is laid out ─────
+    // ── on_ready: latch "kick off playback once ready" ────────────────
     //
-    // The scene starts paused so the first frame renders the rest
-    // pose, then `on_ready` unpauses (fires exactly once per stable
-    // element id, persisting through rebuilds). The scheduler tick
-    // itself was registered by `SceneState::load`'s caller above — it
-    // advances time on its own thread whether or not the viewport is
-    // visible, but respects `paused`.
-    let start_playback = state.playback.clone();
+    // `on_ready` fires as soon as the viewport lays out — which may
+    // be well before the scene has finished loading. Flip the
+    // autoplay latch instead of touching playback directly; the
+    // render closure consumes the latch once `handle.get()` becomes
+    // `Some`.
+    let autoplay_latch = handle.autoplay_pending.clone();
     ctx.query(VIEWPORT_ID).on_ready(move |_| {
-        start_playback.lock().unwrap().paused = false;
+        autoplay_latch.store(true, Ordering::Release);
     });
 
-    // ── Scene kit: orbit camera + HDRI ────────────────────────────────
+    // ── Scene kit: orbit camera + light ───────────────────────────────
     //
-    // Framing is computed from the loaded scene's world-space AABB
-    // instead of being hardcoded — buster_drone's ground plane is
-    // ±180 units wide and its drone body ~40 units across, so a
-    // hardcoded `distance = 8.0` (authored for DamagedHelmet-scale
-    // meshes) would sit inside the ground-plane geometry. Framing the
-    // diagonal times ~1.1 pulls the camera just outside the scene
-    // AABB, keeping the whole asset in view regardless of authoring
-    // units.
-    let (cam_target, cam_distance) = frame_camera(state.scene.lock().unwrap().world_aabb());
-    tracing::info!(
-        "camera: target=({:.2},{:.2},{:.2}) distance={:.2}",
-        cam_target.x,
-        cam_target.y,
-        cam_target.z,
-        cam_distance
-    );
+    // Camera framing ideally derives from the loaded scene's
+    // world-space AABB, but the scene isn't loaded yet. Use a
+    // reasonable default that frames buster_drone's ~400-unit
+    // ground plane; users can drag to reframe once the model
+    // appears. Computing a proper frame post-load would require
+    // re-writing the `OrbitCamera` signal from the render closure,
+    // which is more invasive than it's worth for a demo.
+    let (cam_target, cam_distance) = (Vec3::new(0.0, 20.0, 0.0), 250.0);
 
     // No custom HDRI — buster_drone's surfaces are matte-metallic
     // enough that the default 128²-face procedural studio cubemap
@@ -412,26 +531,44 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     // ── Viewport render closure ───────────────────────────────────────
     //
     // The render path doesn't advance time or call `request_redraw` —
-    // both responsibilities live on the scheduler tick registered in
-    // `register_scheduler_tick`. Input polling stays here because the
-    // user's intent is expressed at render cadence (pressing space
-    // between two frames pauses for the next frame), and clearing
-    // edge-triggered state at the tail matches that.
-    let state_ren = state.clone();
+    // both responsibilities live on the scheduler tick registered
+    // when the background loader populates the slot. While the scene
+    // is still loading the closure runs every frame (courtesy of the
+    // viewport's normal repaint cadence) but skips the mesh-draw
+    // path and lets the SceneKit3D environment + light render on
+    // their own — the default procedural studio cubemap gives the
+    // canvas a neutral gray backdrop, which reads as "loading" well
+    // enough for this demo without a dedicated overlay widget.
+    //
+    // Input polling and edge-triggered-state clearing happen every
+    // frame regardless of scene availability so key events aren't
+    // dropped just because the model hasn't finished downloading.
+    let handle_ren = handle.clone();
     let viewport = kit
         .element(move |ctx: &mut dyn DrawContext, _bounds| {
+            handle_ren.autoplay_if_ready();
+
+            // Scene not loaded yet — SceneKit3D's own environment +
+            // light still paint, so the viewport shows a neutral
+            // backdrop instead of a blank black rectangle. Skip the
+            // mesh pipeline entirely.
+            let Some(state) = handle_ren.get() else {
+                handle_ren.input.frame_end();
+                return;
+            };
+
             // ── Input → playback state ────────────────────────────────
-            let mut pb = state_ren.playback.lock().unwrap();
-            if state_ren.input.is_key_just_pressed(KeyCode::SPACE) {
+            let mut pb = state.playback.lock().unwrap();
+            if handle_ren.input.is_key_just_pressed(KeyCode::SPACE) {
                 pb.paused = !pb.paused;
             }
-            if state_ren.input.is_key_just_pressed(KeyCode(b'R' as u32)) {
+            if handle_ren.input.is_key_just_pressed(KeyCode(b'R' as u32)) {
                 pb.time = 0.0;
             }
-            if state_ren.input.is_key_down(KeyCode::LEFT) {
+            if handle_ren.input.is_key_down(KeyCode::LEFT) {
                 pb.time = (pb.time - 1.0 / 60.0).max(0.0);
             }
-            if state_ren.input.is_key_down(KeyCode::RIGHT) {
+            if handle_ren.input.is_key_down(KeyCode::RIGHT) {
                 pb.time += 1.0 / 60.0;
             }
             let t = pb.time;
@@ -443,8 +580,8 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             // world-transform computation keeps the GPU dispatch path
             // free of any lock held across `draw_mesh_data` calls.
             let draws: Vec<(usize, Mat4)> = {
-                let mut scene_mut = state_ren.scene.lock().unwrap();
-                if let Some(anim) = state_ren.animation.as_ref() {
+                let mut scene_mut = state.scene.lock().unwrap();
+                if let Some(anim) = state.animation.as_ref() {
                     blinc_skeleton::animate_scene_nodes(&mut scene_mut, anim, t);
                 }
                 let world = scene_mut.compute_world_transforms();
@@ -458,15 +595,22 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 
             // ── GPU dispatch without holding the scene lock ───────────
             for (mesh_idx, xf) in draws {
-                for prim in &state_ren.arc_meshes[mesh_idx] {
+                for prim in &state.arc_meshes[mesh_idx] {
                     ctx.draw_mesh_data(prim.clone(), xf);
                 }
             }
 
-            state_ren.input.frame_end();
+            handle_ren.input.frame_end();
         })
-        .capture_input(&state.input)
+        .capture_input(&handle.input)
         .id(VIEWPORT_ID);
+
+    // Clip duration isn't known until the scene has loaded. Show a
+    // placeholder on the header until then; a post-load rebuild
+    // would re-render the header with the real value, but a rebuild
+    // isn't triggered here (we poll state from the render closure
+    // instead). Good enough for a demo.
+    let duration = handle.get().map(|s| s.duration).unwrap_or(0.0);
 
     div()
         .w(ctx.width)
@@ -484,29 +628,6 @@ fn clip_duration(anim: &GltfAnimation) -> f32 {
         .iter()
         .filter_map(|ch| ch.sampler.times.last().copied())
         .fold(0.0f32, f32::max)
-}
-
-/// Pick orbit-camera (target, distance) from an optional scene AABB.
-/// Falls back to a safe default if the scene has no mesh-bearing nodes.
-fn frame_camera(aabb: Option<([f32; 3], [f32; 3])>) -> (Vec3, f32) {
-    let (min, max) = match aabb {
-        Some(v) => v,
-        None => return (Vec3::new(0.0, 0.0, 0.0), 8.0),
-    };
-    let center = Vec3::new(
-        (min[0] + max[0]) * 0.5,
-        (min[1] + max[1]) * 0.5,
-        (min[2] + max[2]) * 0.5,
-    );
-    let dx = max[0] - min[0];
-    let dy = max[1] - min[1];
-    let dz = max[2] - min[2];
-    let diag = (dx * dx + dy * dy + dz * dz).sqrt();
-    // Multiplier tuned so the AABB's corners sit just inside the
-    // default 45° FOV without clipping — roughly `tan(22.5°)^-1`
-    // plus some padding.
-    let distance = (diag * 1.1).max(1.0);
-    (center, distance)
 }
 
 fn header_bar(duration: f32) -> Div {

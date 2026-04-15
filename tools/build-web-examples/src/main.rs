@@ -742,7 +742,8 @@ blinc_layout = {{ path = "../../../crates/blinc_layout" }}
 blinc_core = {{ path = "../../../crates/blinc_core" }}
 {extra_deps}wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = {{ version = "0.3", features = ["console"] }}
+js-sys = "0.3"
+web-sys = {{ version = "0.3", features = ["console", "Window"] }}
 console_error_panic_hook = "0.1"
 tracing = {{ workspace = true }}
 tracing-wasm = "0.2"

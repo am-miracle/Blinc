@@ -44,3 +44,16 @@ blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = 
 image.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# Wasm-only deps used by the `gltf_animation_demo` for its
+# `sleep_ms`-based background loader loop. The demo spawns
+# `wasm_bindgen_futures::spawn_local` which polls
+# `SceneState::try_load` until the `WebAssetLoader` cache is
+# populated; between retries it needs a `setTimeout`-backed
+# `JsFuture` to yield back to the browser. Gated behind the wasm
+# cfg so desktop builds don't pull any of these in.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window"] }
