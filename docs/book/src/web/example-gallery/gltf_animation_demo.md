@@ -1,16 +1,30 @@
-# Smoke test for the downstream-packages canvas stack.
+# Skeleton animation with glTF + `blinc_canvas_kit`.
 
-Exercises, end-to-end:
+Loads a rigged glTF scene (Sketchfab's buster_drone — 39 meshes,
+92 nodes, one 25-second "Start_Liftoff" clip with 100 transform
+channels), runs it through the `blinc_skeleton` poser each frame,
+and renders the resulting transforms with `SceneKit3D`'s
+immediate-mode PBR path. The clip drives node-level TRS channels
+(no skins in this asset), so it exercises the pure-transform
+animation pipeline end to end:
 
-- `blinc_gltf`: load a real glTF asset (buster_drone) — 39 meshes,
-  92 nodes, 1 animation with 100 transform channels.
-- `blinc_skeleton`: sample the animation clip into node transforms
-  each frame (no skins in this asset — pure transform animation).
-- `blinc_canvas_kit::SceneKit3D`: orbit camera, HDRI lighting, PBR
-  rendering via the immediate-mode `draw_mesh_data` path.
-- `blinc_canvas_kit::SketchEvents::on_canvas_events`: one-call event
-  forwarding from the scene's `Div` into…
-- `blinc_input::InputState`: polling keys inside the render closure.
+- `blinc_gltf::load_asset` — cross-platform asset loading
+  (filesystem / APK / bundle / HTTP) through the
+  `blinc_platform::assets` global loader, plus `KHR_materials_*`
+  support and the full PBR metallic-roughness material block.
+- `blinc_skeleton::densify_rotation_channels` — preprocesses the
+  clip's rotation channels so fast rotors (blade rotation > 180°
+  per keyframe, a frequent FBX-exporter trap) slerp smoothly
+  instead of flipping direction every keyframe.
+- `blinc_skeleton::animate_scene_nodes` — samples the clip at the
+  current playback time and writes interpolated TRS values into
+  `scene.nodes[*].transform`.
+- `blinc_canvas_kit::SceneKit3D` — orbit camera, HDRI-lit
+  environment, and `ctx.draw_mesh_data(...)` per primitive.
+- `blinc_input::InputState` via
+  `blinc_canvas_kit::SketchEvents::on_canvas_events` — polling
+  keyboard + pointer state inside the render closure with a single
+  `.capture_input(&state.input)` call on the scene's `Div`.
 
 Controls:
 - **Drag**: orbit camera (wired by `SceneKit3D`)

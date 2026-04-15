@@ -530,6 +530,14 @@ fn detect_image_assets(source: &str) -> Vec<String> {
     // pattern of `const DIR: &str = "crates/.../assets/3d/Model"` where
     // the individual file paths are constructed via `format!()` and
     // aren't detectable as string literals.
+    //
+    // `.gltf` references also expand to their containing directory —
+    // a `.gltf` is always a multi-file asset (sibling `.bin` buffer
+    // plus a `textures/` subdir) and `blinc_gltf::load_asset` resolves
+    // each sibling via the platform asset loader. On web that loader
+    // is `WebAssetLoader` which REQUIRES each path to have been
+    // preloaded. Without this expansion the main `.gltf` file
+    // preloads but its buffer and textures panic at runtime.
     let mut out = std::collections::BTreeSet::new();
     for path in &raw_paths {
         let p = Path::new(path);
@@ -543,6 +551,18 @@ fn detect_image_assets(source: &str) -> Vec<String> {
             }
         } else if p.is_file() {
             out.insert(path.clone());
+            let is_gltf_json = path.ends_with(".gltf");
+            if is_gltf_json {
+                if let Some(parent) = p.parent() {
+                    if let Ok(entries) = list_files_recursive(parent) {
+                        for file_path in entries {
+                            if let Some(s) = file_path.to_str() {
+                                out.insert(s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
         }
         // If path doesn't exist on disk (e.g. scanned from source but
         // not checked out), include it anyway — the staging step will

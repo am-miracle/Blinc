@@ -32,7 +32,7 @@
   - [Emoji and HTML Entities](./web/example-gallery/emoji_demo.md)
   - [@flow Shader](./web/example-gallery/flow_demo.md)
   - [Fluid Surface](./web/example-gallery/fluid_demo.md)
-  - [Smoke test for the downstream-packages canvas stack.](./web/example-gallery/gltf_animation_demo.md)
+  - [Skeleton animation with glTF + `blinc_canvas_kit`.](./web/example-gallery/gltf_animation_demo.md)
   - [Image CSS Styling](./web/example-gallery/image_css_demo.md)
   - [Image Layer Test](./web/example-gallery/image_layer_test.md)
   - [Keyframe Animation Canvas](./web/example-gallery/keyframe_canvas.md)

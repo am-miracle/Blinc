@@ -78,7 +78,17 @@ members = [
 # their own upstream repos. Exclude their directory from this workspace so
 # their Cargo.toml files don't get implicitly picked up if someone creates
 # them as a workspace-style project.
-exclude = ["packages/*", "packages"]
+exclude = [
+    "packages/*",
+    "packages",
+    # Scaffold template for `blinc new` — this is a source template with
+    # `{{project_name}}` placeholders, not a real crate. Cargo picks it
+    # up when resolving git-fetched copies of this repo (blinc_gltf etc.
+    # declare Blinc deps by git URL, and cargo scans every Cargo.toml
+    # in the fetched tree) and chokes on the placeholder package name.
+    "toolchain/templates",
+    "toolchain/templates/rust",
+]
 
 # Platform-specific crates are included but have target-gated dependencies
 # Build for Android: source scripts/android-env.sh && cargo build --target aarch64-linux-android -p blinc_platform_android
