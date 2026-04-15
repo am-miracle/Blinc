@@ -31,14 +31,44 @@ fn shared_player() -> VideoPlayer {
             #[cfg(not(target_arch = "wasm32"))]
             p.load_file(VIDEO_PATH);
 
+            // On wasm the wrapper background-spawns `WebAssetLoader::
+            // preload`, so `load_asset` may fail at `build_ui` time
+            // with "asset not preloaded". Poll on a 100 ms retry loop
+            // until the fetch lands and feed the bytes into the
+            // player — `build_ui` returns immediately with the player
+            // already wired into the widget tree, so controls appear
+            // straight away and come alive the moment the source is
+            // attached.
             #[cfg(target_arch = "wasm32")]
-            if let Ok(bytes) = load_asset(VIDEO_PATH) {
-                p.load_bytes(bytes);
+            {
+                let player = p.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    loop {
+                        if let Ok(bytes) = load_asset(VIDEO_PATH) {
+                            player.load_bytes(bytes);
+                            break;
+                        }
+                        sleep_ms(100).await;
+                    }
+                });
             }
 
             p
         })
         .clone()
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn sleep_ms(ms: u32) {
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen_futures::JsFuture;
+    let promise = js_sys::Promise::new(&mut |resolve: js_sys::Function, _reject| {
+        web_sys::window().and_then(|w| {
+            w.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32)
+                .ok()
+        });
+    });
+    let _ = JsFuture::from(promise).await;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
