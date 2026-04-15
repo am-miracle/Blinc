@@ -1,37 +1,28 @@
 # Skeleton animation with glTF + `blinc_canvas_kit`.
 
-Loads a rigged glTF scene (Sketchfab's buster_drone — 39 meshes,
-92 nodes, one 25-second "Start_Liftoff" clip with 100 transform
-channels), runs it through the `blinc_skeleton` poser each frame,
-and renders the resulting transforms with `SceneKit3D`'s
-immediate-mode PBR path. The clip drives node-level TRS channels
-(no skins in this asset), so it exercises the pure-transform
-animation pipeline end to end:
+Loads Sketchfab's buster_drone (39 meshes, 92 nodes, one 25-second
+`Start_Liftoff` clip), runs the clip through `blinc_skeleton` each
+frame, and renders the result with `SceneKit3D`. Asset load is
+non-blocking: the UI paints a loading overlay while a background
+thread parses the glTF, then flips a `scene_ready` signal that
+the overlay's `Stateful` subtree dismisses itself on.
 
-- `blinc_gltf::load_asset` — cross-platform asset loading
-  (filesystem / APK / bundle / HTTP) through the
-  `blinc_platform::assets` global loader, plus `KHR_materials_*`
-  support and the full PBR metallic-roughness material block.
-- `blinc_skeleton::densify_rotation_channels` — preprocesses the
-  clip's rotation channels so fast rotors (blade rotation > 180°
-  per keyframe, a frequent FBX-exporter trap) slerp smoothly
-  instead of flipping direction every keyframe.
-- `blinc_skeleton::animate_scene_nodes` — samples the clip at the
-  current playback time and writes interpolated TRS values into
-  `scene.nodes[*].transform`.
-- `blinc_canvas_kit::SceneKit3D` — orbit camera, HDRI-lit
-  environment, and `ctx.draw_mesh_data(...)` per primitive.
-- `blinc_input::InputState` via
-  `blinc_canvas_kit::SketchEvents::on_canvas_events` — polling
-  keyboard + pointer state inside the render closure with a single
-  `.capture_input(&state.input)` call on the scene's `Div`.
+The model is "Buster Drone" by LaVADraGoN
+(<https://sketchfab.com/3d-models/buster-drone-294e79652f494130ad2ab00a13fdbafd>),
+licensed CC-BY-4.0 (<http://creativecommons.org/licenses/by/4.0/>).
+Full attribution alongside the asset in `assets/3d/buster_drone/license.txt`.
 
 Controls:
-- **Drag**: orbit camera (wired by `SceneKit3D`)
-- **Scroll**: zoom in / out
-- **Space**: pause / resume the animation
-- **R**: reset clip time to 0
-- **Left / Right**: scrub ±1 frame while held
+- **Drag**: orbit
+- **Scroll**: zoom
+- **Space**: pause / resume
+- **R**: reset clip time
+- **Left / Right**: scrub ±1 frame
+
+```sh
+cargo run -p blinc_app_examples --example gltf_animation_demo \
+    --features windowed --release
+```
 
 <iframe
   src="../../examples/gltf_animation_demo/index.html"

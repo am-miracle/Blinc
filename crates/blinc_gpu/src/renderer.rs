@@ -8763,6 +8763,14 @@ impl GpuRenderer {
     /// pipeline's environment cubemap texture. Requires `ensure_mesh_pipeline`
     /// to have been called first (the texture must already exist).
     pub fn upload_environment_cubemap(&mut self, data: &blinc_core::layer::CubemapData) {
+        // Ensure the mesh pipeline (and its env cubemap texture) exists
+        // before writing to it. Without this, the first frame of any
+        // scene silently drops the upload — the pipeline is normally
+        // lazy-created inside `render_mesh_data_batched`, which runs
+        // AFTER `dispatch_pending_meshes` calls this function. Result:
+        // the default procedural gray cubemap wins forever even if the
+        // user called `SceneKit3D::set_hdri(...)` later.
+        self.ensure_mesh_pipeline();
         let mp = match self.mesh_pipeline.as_mut() {
             Some(mp) => mp,
             None => return,

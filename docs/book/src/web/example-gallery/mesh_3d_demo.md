@@ -12,6 +12,12 @@ Demonstrates:
   f32 attributes at known bufferView offsets, u16 indices), so
   parsing is a handful of offset reads plus a `blinc_image::ImageData`
   call for the albedo texture.
+- Non-blocking asset loading. On desktop the mesh + HDR decode is
+  cheap and runs synchronously; on wasm the `WebAssetLoader`
+  preload is background-spawned by the wrapper, so `build_ui`
+  returns before any asset is cached. A `spawn_local` polling loop
+  waits for the preload, then populates a shared slot that the
+  Stateful viewport wrapper swaps the loading overlay out for.
 
 <iframe
   src="../../examples/mesh_3d_demo/index.html"

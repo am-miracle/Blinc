@@ -366,15 +366,35 @@ pub struct SceneKit3D {
 impl SceneKit3D {
     pub fn new(key: &str) -> Self {
         let ctx = BlincContextState::get();
-        let env = generate_studio_environment(128);
+        // Persist the environment + lights + objects Arc<RwLock<…>>
+        // handles across rebuilds via `use_state_keyed` — exactly like
+        // the camera state. Without this, every `build_ui` invocation
+        // constructs a FRESH `Arc<RwLock<…>>` for each field, so a
+        // `kit.clone()` captured by (for example) a background loader
+        // thread ends up mutating a different lock than the next
+        // rebuild's `kit.element(...)` reads from. Runtime setters
+        // like `set_hdri` / `set_light` would then silently no-op
+        // from the viewport's perspective. Using `use_state_keyed`
+        // guarantees every rebuild's kit shares the same underlying
+        // locks with the initial one. `State::get()` returns the
+        // `Arc<RwLock<…>>` by clone (cheap pointer bump).
+        let env = ctx.use_state_keyed(&format!("{key}_env"), || {
+            Arc::new(RwLock::new(generate_studio_environment(128).cubemap))
+        });
+        let lights = ctx.use_state_keyed(&format!("{key}_lights"), || {
+            Arc::new(RwLock::new(Vec::<Light>::new()))
+        });
+        let objects = ctx.use_state_keyed(&format!("{key}_objects"), || {
+            Arc::new(RwLock::new(Vec::<SceneObject>::new()))
+        });
         Self {
             camera: ctx.use_state_keyed(&format!("{key}_cam"), OrbitCamera::default),
-            lights: Arc::new(RwLock::new(Vec::new())),
-            objects: Arc::new(RwLock::new(Vec::new())),
+            lights: lights.try_get().expect("lights signal initialised"),
+            objects: objects.try_get().expect("objects signal initialised"),
             drag_sensitivity: 0.002,
             zoom_sensitivity: 0.001,
             momentum_decay: 0.95,
-            environment: Arc::new(RwLock::new(env.cubemap)),
+            environment: env.try_get().expect("env signal initialised"),
         }
     }
 
