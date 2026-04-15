@@ -946,11 +946,35 @@ pub fn _start() {{
         } else {
             let urls: Vec<String> = image_assets
                 .iter()
-                .map(|p| format!("                    \"{}\"", p))
+                .map(|p| format!("                        \"{}\"", p))
                 .collect();
+            // Background-spawn the preload instead of awaiting it.
+            // Without this the setup closure blocks before the first
+            // frame is painted, leaving the user staring at a blank
+            // canvas for the entire download duration (~74 MB on
+            // buster_drone = several seconds on a slow connection).
+            //
+            // The cloned `asset_loader_handle()` lives in the
+            // `spawn_local` task. Callers query progress via
+            // `app.preload_progress()` — an `Arc<PreloadProgress>`
+            // safe to poll every frame — to build a loading overlay.
+            // Assets are available to synchronous `load_asset` calls
+            // only after the preload task's fetches resolve (check
+            // `progress.is_complete()` before calling).
             format!(
-                "                app.preload_assets(&[\n{}\n                ]).await.ok();\n",
-                urls.join(",\n")
+                r#"                let loader = app.asset_loader_handle();
+                wasm_bindgen_futures::spawn_local(async move {{
+                    let urls = [
+{urls}
+                    ];
+                    if let Err(e) = loader.preload(&urls).await {{
+                        web_sys::console::error_1(
+                            &format!("preload failed: {{e}}").into(),
+                        );
+                    }}
+                }});
+"#,
+                urls = urls.join(",\n")
             )
         },
     )

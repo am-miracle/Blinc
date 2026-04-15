@@ -66,7 +66,7 @@ pub mod window;
 pub mod wasm_bindgen_glue;
 
 // Public API
-pub use assets::WebAssetLoader;
+pub use assets::{PreloadProgress, WebAssetLoader};
 pub use input::{
     convert_key_from_dom, convert_mouse_button, convert_pointer_button, modifiers_from_keyboard,
     modifiers_from_mouse,

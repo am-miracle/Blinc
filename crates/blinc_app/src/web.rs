@@ -1060,6 +1060,25 @@ impl WebApp {
             .map_err(|e| crate::error::BlincError::Platform(format!("preload_assets: {e}")))
     }
 
+    /// Shared handle to the asset loader's preload progress. Cheap to
+    /// clone (it's an `Arc`) and safe to poll every frame — the
+    /// counters inside are atomic.
+    ///
+    /// Apps that want first-paint-before-assets show a loading state
+    /// rebuilt from this handle while preload runs in the background.
+    /// See `blinc_canvas_kit::loading_overlay` for a drop-in widget.
+    pub fn preload_progress(&self) -> std::sync::Arc<blinc_platform_web::PreloadProgress> {
+        self.asset_loader.progress()
+    }
+
+    /// Cloneable handle to the underlying `WebAssetLoader`. Returned
+    /// so apps can move it into a `spawn_local` closure and start a
+    /// preload pass that runs concurrently with the first-frame
+    /// render — the wasm wrapper generator uses this pattern.
+    pub fn asset_loader_handle(&self) -> std::sync::Arc<blinc_platform_web::WebAssetLoader> {
+        self.asset_loader.clone()
+    }
+
     /// Install browser DOM event listeners that route input through the
     /// shared [`WindowedContext::event_router`] and dispatch the
     /// resulting events through the cached render tree.

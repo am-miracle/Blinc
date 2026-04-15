@@ -31,6 +31,10 @@ tracing.workspace = true
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
+# For `join_all` — concurrent await over N futures so `WebAssetLoader
+# ::preload` pipelines its `fetch()` calls instead of serializing
+# them. Minimal `alloc` feature only; we don't need the full executor.
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
 web-sys = { version = "0.3", features = [
     # Window / DOM
     "Window",

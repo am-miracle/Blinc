@@ -27,18 +27,91 @@ use blinc_platform::{PlatformError, Result};
 /// satisfy the `AssetLoader: Send + Sync` bound. Lookups are cheap
 /// (single hash + clone of the byte vector). The cache is unbounded
 /// — preloaded assets stay resident for the lifetime of the loader.
+/// Shared snapshot of a preload pass's progress. Bumped atomically as
+/// each URL's `fetch()` resolves. Apps clone the `Arc` returned by
+/// [`WebAssetLoader::progress`] once and query it every frame to drive
+/// a loading-state UI (spinner, progress bar, asset name readout).
+///
+/// Counter semantics:
+/// - `total`: number of URLs the *current* preload pass was asked to
+///   fetch. Increases by `urls.len()` when `preload()` starts.
+/// - `completed`: fetches that resolved successfully and were inserted
+///   into the cache.
+/// - `failed`: fetches that returned an error (404, network drop,
+///   decode error in the platform's `fetch_bytes`).
+///
+/// Call [`Self::is_complete`] to check "all URLs accounted for". A
+/// pass with zero URLs is considered complete immediately.
+#[derive(Debug, Default)]
+pub struct PreloadProgress {
+    total: std::sync::atomic::AtomicUsize,
+    completed: std::sync::atomic::AtomicUsize,
+    failed: std::sync::atomic::AtomicUsize,
+}
+
+impl PreloadProgress {
+    pub fn total(&self) -> usize {
+        self.total.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub fn completed(&self) -> usize {
+        self.completed.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub fn failed(&self) -> usize {
+        self.failed.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// Number of fetches that have either succeeded or failed — i.e.
+    /// ones that are no longer in flight.
+    pub fn settled(&self) -> usize {
+        self.completed() + self.failed()
+    }
+    /// `true` iff every requested fetch has resolved (success or fail).
+    /// A pass that hasn't started yet (no URLs registered) is also
+    /// complete by this definition.
+    pub fn is_complete(&self) -> bool {
+        let t = self.total();
+        t == 0 || self.settled() >= t
+    }
+    /// Progress as a `0..=1` fraction. Returns `1.0` before any URL
+    /// has been registered.
+    pub fn fraction(&self) -> f32 {
+        let t = self.total();
+        if t == 0 {
+            1.0
+        } else {
+            (self.settled() as f32 / t as f32).min(1.0)
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct WebAssetLoader {
     cache: Mutex<HashMap<String, Vec<u8>>>,
+    progress: std::sync::Arc<PreloadProgress>,
 }
 
 impl WebAssetLoader {
     /// Create an empty loader. Use [`preload`](Self::preload) to fill
     /// it before any synchronous `load()` call.
     pub fn new() -> Self {
-        Self {
-            cache: Mutex::new(HashMap::new()),
-        }
+        Self::default()
+    }
+
+    /// Clone the shared preload-progress handle. Cheap (Arc bump). The
+    /// returned value reflects the loader's live state — polling it
+    /// on subsequent frames shows real-time progress.
+    ///
+    /// Typical pattern:
+    ///
+    /// ```ignore
+    /// let progress = app.asset_loader().progress();  // one clone
+    /// build_ui(move |ctx| {
+    ///     // read each frame via the Arc — no borrow of the loader
+    ///     let p = progress.clone();
+    ///     div().child(text(format!("{:.0}%", p.fraction() * 100.0)))
+    /// });
+    /// ```
+    pub fn progress(&self) -> std::sync::Arc<PreloadProgress> {
+        self.progress.clone()
     }
 
     /// Insert raw bytes for `key` directly into the cache. Useful when
@@ -63,6 +136,13 @@ impl WebAssetLoader {
 
     /// Pre-load `urls` into the cache via the browser `fetch()` API.
     ///
+    /// Fetches are issued in parallel — the browser's HTTP connection
+    /// pool handles the fan-out (typically 6 concurrent requests per
+    /// origin). A previous serial implementation turned a 1–2 s
+    /// pipelined download of an 11-file / ~74 MB glTF asset into a
+    /// 5–10 s wall-time stall on the event loop, because each
+    /// `fetch_bytes().await` had to complete before the next started.
+    ///
     /// Each URL is stored under its own string as the cache key, so
     /// `loader.load(AssetPath::Relative("fonts/Inter.ttf".into()))`
     /// resolves to the bytes fetched from `"fonts/Inter.ttf"`.
@@ -71,9 +151,31 @@ impl WebAssetLoader {
     /// does nothing — there's nothing to fetch from outside a browser.
     #[cfg(target_arch = "wasm32")]
     pub async fn preload(&self, urls: &[&str]) -> Result<()> {
-        for url in urls {
-            let bytes = Self::fetch_bytes(url).await?;
-            self.insert_raw(*url, bytes);
+        use futures::future::join_all;
+        use std::sync::atomic::Ordering;
+
+        // Bump the total *before* we start awaiting anything so UI
+        // polling sees "N assets queued" on the very first frame after
+        // preload kicks off. Otherwise the first frame would read
+        // 0/0 (fraction = 1.0 = "done") and flash past the loading
+        // state.
+        self.progress.total.fetch_add(urls.len(), Ordering::Release);
+
+        let fetches = urls.iter().map(|u| {
+            let progress = self.progress.clone();
+            async move {
+                let result = Self::fetch_bytes(u).await.map(|b| (*u, b));
+                match &result {
+                    Ok(_) => progress.completed.fetch_add(1, Ordering::Release),
+                    Err(_) => progress.failed.fetch_add(1, Ordering::Release),
+                };
+                result
+            }
+        });
+        let results = join_all(fetches).await;
+        for result in results {
+            let (url, bytes) = result?;
+            self.insert_raw(url, bytes);
         }
         Ok(())
     }
