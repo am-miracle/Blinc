@@ -51,7 +51,7 @@ use blinc_core::{
 };
 
 const HELMET_GLTF_DIR: &str = "examples/blinc_app_examples/examples/assets/3d/DamagedHelmet";
-const ASSETS_3D_DIR: &str = "examples/blinc_app_examples/examples/assets/3d";
+const HDR_PATH: &str = "examples/blinc_app_examples/examples/assets/3d/rogland_clear_night_2k.hdr";
 
 // glTF bufferView offsets — fixed in the Khronos sample repo.
 const IDX_OFFSET: usize = 0;
@@ -146,14 +146,15 @@ fn try_load_helmet() -> Option<MeshData> {
     })
 }
 
-/// Load helmet mesh + HDR bytes. All-or-nothing: returns `None` if any
-/// of the asset fetches isn't ready yet. The wasm polling loop calls
-/// this on a retry tick until it resolves.
+/// Load the helmet mesh + HDR bytes. Both go through the platform
+/// asset loader, so the wasm polling loop retries on a tick until
+/// preload's cache populates. Returns `None` as soon as any fetch
+/// misses. HDR is handed back as raw bytes — `SceneKit3D::set_hdri`
+/// does the cubemap prefilter on the loader thread.
 fn try_load_assets() -> Option<(Arc<MeshData>, Vec<u8>)> {
     let helmet = try_load_helmet()?;
-    let hdr_path = format!("{ASSETS_3D_DIR}/rogland_clear_night_2k.hdr");
-    let hdr = blinc_platform::assets::load_asset(&hdr_path).ok()?;
-    Some((Arc::new(helmet), hdr))
+    let hdr_bytes = blinc_platform::assets::load_asset(HDR_PATH).ok()?;
+    Some((Arc::new(helmet), hdr_bytes))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -163,7 +164,7 @@ fn try_load_assets() -> Option<(Arc<MeshData>, Vec<u8>)> {
 
 #[derive(Clone)]
 struct AsyncAssets {
-    slot: Arc<OnceLock<(Arc<MeshData>, Vec<u8>)>>,
+    slot: Arc<OnceLock<Arc<MeshData>>>,
 }
 
 impl AsyncAssets {
@@ -173,26 +174,39 @@ impl AsyncAssets {
         }
     }
 
-    fn spawn_load(&self, scene_ready: State<bool>) {
+    /// Spawn the loader. `kit` is cloned in so `set_hdri` can be
+    /// called once HDR bytes resolve — `SceneKit3D` is now `Send`,
+    /// so the clone moves into the worker cleanly.
+    fn spawn_load(&self, kit: SceneKit3D, scene_ready: State<bool>) {
         let slot = self.slot.clone();
 
         #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
-            if let Some(assets) = try_load_assets() {
-                let _ = slot.set(assets);
-                scene_ready.set(true);
-                get_scheduler().request_redraw();
-            } else {
+            let Some((helmet, hdr_bytes)) = try_load_assets() else {
                 tracing::error!("mesh_3d_demo: asset load failed");
-            }
+                return;
+            };
+            tracing::info!(
+                "mesh_3d_demo: applying HDRI ({} bytes)",
+                hdr_bytes.len()
+            );
+            kit.set_hdri(&hdr_bytes, 256);
+            let _ = slot.set(helmet);
+            scene_ready.set(true);
+            get_scheduler().request_redraw();
         });
 
         #[cfg(target_arch = "wasm32")]
         {
             wasm_bindgen_futures::spawn_local(async move {
                 loop {
-                    if let Some(assets) = try_load_assets() {
-                        let _ = slot.set(assets);
+                    if let Some((helmet, hdr_bytes)) = try_load_assets() {
+                        tracing::info!(
+                            "mesh_3d_demo: applying HDRI ({} bytes)",
+                            hdr_bytes.len()
+                        );
+                        kit.set_hdri(&hdr_bytes, 256);
+                        let _ = slot.set(helmet);
                         scene_ready.set(true);
                         get_scheduler().request_redraw();
                         break;
@@ -203,7 +217,7 @@ impl AsyncAssets {
         }
     }
 
-    fn get(&self) -> Option<&(Arc<MeshData>, Vec<u8>)> {
+    fn get(&self) -> Option<&Arc<MeshData>> {
         self.slot.get()
     }
 }
@@ -243,61 +257,51 @@ fn main() -> Result<()> {
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     // Scene-ready signal — flipped by the loader once helmet + HDR
-    // are resident. The overlay's Stateful subtree watches it; the
-    // viewport's Stateful subtree watches the same signal to swap the
-    // "no mesh yet" placeholder for a real `SceneKit3D::element`.
+    // are resident. The overlay's Stateful subtree watches it.
     let scene_ready = ctx.use_state_keyed("mesh_3d_scene_ready", || false);
 
+    // Kit + viewport built ONCE — same pattern as `gltf_animation_demo`.
+    // Default procedural studio cubemap until the loader thread calls
+    // `kit.set_hdri(bytes, 256)` with the asset-loaded HDR (the kit's
+    // `Arc<RwLock<…>>` env field picks the swap up on the next frame).
+    let kit = SceneKit3D::new("mesh_3d_demo")
+        .with_camera(
+            OrbitCamera::default()
+                .with_distance(3.2)
+                .with_elevation(0.2)
+                .with_azimuth(0.4)
+                .with_target(Vec3::new(0.0, 0.0, 0.187)),
+        )
+        .with_light(Light::Directional {
+            direction: Vec3::new(-0.4, -1.0, -0.3).normalize(),
+            color: Color::WHITE,
+            intensity: 2.5,
+            cast_shadows: false,
+        });
+
     // Shared assets handle — spawn_load runs exactly once thanks to
-    // `use_state_keyed`'s single-init contract.
+    // `use_state_keyed`'s single-init contract. The kit is cloned in
+    // so the loader can call `set_hdri` once the HDR bytes resolve.
     let assets = ctx
         .use_state_keyed("mesh_3d_assets", {
             let scene_ready = scene_ready.clone();
+            let kit = kit.clone();
             move || {
                 let a = AsyncAssets::new();
-                a.spawn_load(scene_ready);
+                a.spawn_load(kit, scene_ready);
                 a
             }
         })
         .try_get()
         .expect("assets handle should exist after use_state_keyed init");
 
-    // Viewport area — Stateful wrapping the whole scene so we can
-    // build the kit lazily, once HDR bytes are in hand. Recreating
-    // `SceneKit3D` on the ready transition is cheap: it uses
-    // `use_state_keyed` internally so orbit-camera state persists.
-    let scene_ready_vp = scene_ready.clone();
-    let assets_vp = assets.clone();
-    let viewport = stateful::<NoState>()
-        .deps([scene_ready.signal_id()])
-        .on_state(move |_ctx| {
-            let Some((helmet, hdr_bytes)) = assets_vp.get() else {
-                return div();
-            };
-            let helmet = helmet.clone();
-            let kit = SceneKit3D::new("mesh_3d_demo")
-                .with_camera(
-                    OrbitCamera::default()
-                        .with_distance(3.2)
-                        .with_elevation(0.2)
-                        .with_azimuth(0.4)
-                        .with_target(Vec3::new(0.0, 0.0, 0.187)),
-                )
-                .with_hdri(hdr_bytes, 256)
-                .with_light(Light::Directional {
-                    direction: Vec3::new(-0.4, -1.0, -0.3).normalize(),
-                    color: Color::WHITE,
-                    intensity: 2.5,
-                    cast_shadows: false,
-                });
-            let _ = scene_ready_vp.get(); // subscribe for completeness
-            div().child(kit.element(move |ctx, _bounds| {
-                ctx.draw_mesh_data(helmet.clone(), Mat4::default());
-            }))
-        })
-        .flex_grow()
-        .w_full()
-        .overflow_clip();
+    let assets_ren = assets.clone();
+    let viewport = kit.element(move |ctx, _bounds| {
+        let Some(helmet) = assets_ren.get() else {
+            return;
+        };
+        ctx.draw_mesh_data(helmet.clone(), Mat4::default());
+    });
 
     // Loading overlay — same structure every refresh, `.hidden()`
     // toggled on ready. See `gltf_animation_demo` for why the shape

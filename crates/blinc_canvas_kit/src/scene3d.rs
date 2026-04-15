@@ -9,9 +9,8 @@
 //! flag, which triggers the next frame's redraw — creating a
 //! self-sustaining animation loop until velocity drops below threshold.
 
-use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use blinc_core::draw::{Material, MeshData, Vertex};
 use blinc_core::events::event_types;
@@ -346,12 +345,22 @@ impl OrbitCamera {
 #[derive(Clone)]
 pub struct SceneKit3D {
     camera: State<OrbitCamera>,
-    lights: Rc<RefCell<Vec<Light>>>,
-    objects: Rc<RefCell<Vec<SceneObject>>>,
+    /// `Arc<RwLock<…>>` (was `Rc<RefCell<…>>`) so the kit is `Send`
+    /// and clones can be moved into background loader threads that
+    /// call `set_hdri` / `add_light` / `add_mesh` once async assets
+    /// resolve. Reads are concurrent (per-frame iteration in the
+    /// render closure); writes are exclusive.
+    lights: Arc<RwLock<Vec<Light>>>,
+    objects: Arc<RwLock<Vec<SceneObject>>>,
     drag_sensitivity: f32,
     zoom_sensitivity: f32,
     momentum_decay: f32,
-    environment: Arc<CubemapData>,
+    /// `Arc<RwLock<…>>` so async asset loaders can mutate the
+    /// environment after `element()` has captured the kit. The render
+    /// closure reads the inner `Arc<CubemapData>` once per frame —
+    /// swapping it from a background task takes effect on the next
+    /// repaint.
+    environment: Arc<RwLock<Arc<CubemapData>>>,
 }
 
 impl SceneKit3D {
@@ -360,12 +369,12 @@ impl SceneKit3D {
         let env = generate_studio_environment(128);
         Self {
             camera: ctx.use_state_keyed(&format!("{key}_cam"), OrbitCamera::default),
-            lights: Rc::new(RefCell::new(Vec::new())),
-            objects: Rc::new(RefCell::new(Vec::new())),
+            lights: Arc::new(RwLock::new(Vec::new())),
+            objects: Arc::new(RwLock::new(Vec::new())),
             drag_sensitivity: 0.002,
             zoom_sensitivity: 0.001,
             momentum_decay: 0.95,
-            environment: env.cubemap,
+            environment: Arc::new(RwLock::new(env.cubemap)),
         }
     }
 
@@ -375,13 +384,13 @@ impl SceneKit3D {
     }
 
     pub fn with_light(self, light: Light) -> Self {
-        self.lights.borrow_mut().push(light);
+        self.lights.write().unwrap().push(light);
         self
     }
 
     /// Replace the IBL environment cubemap used for reflections.
-    pub fn with_environment(mut self, env: EnvironmentData) -> Self {
-        self.environment = env.cubemap;
+    pub fn with_environment(self, env: EnvironmentData) -> Self {
+        self.set_environment(env);
         self
     }
 
@@ -398,10 +407,24 @@ impl SceneKit3D {
     /// let kit = SceneKit3D::new("demo")
     ///     .with_hdri(&hdr_bytes, 256);
     /// ```
-    pub fn with_hdri(mut self, hdr_bytes: &[u8], face_size: u32) -> Self {
-        let env = generate_hdri_environment(hdr_bytes, face_size);
-        self.environment = env.cubemap;
+    pub fn with_hdri(self, hdr_bytes: &[u8], face_size: u32) -> Self {
+        self.set_hdri(hdr_bytes, face_size);
         self
+    }
+
+    /// Replace the IBL environment at runtime. Takes effect on the
+    /// next frame the kit's `element()` paints. Cheap (single Arc
+    /// swap behind a write lock); safe to call from any thread.
+    pub fn set_environment(&self, env: EnvironmentData) {
+        *self.environment.write().unwrap() = env.cubemap;
+    }
+
+    /// Decode `hdr_bytes` into a prefiltered cubemap and install it
+    /// as the IBL environment. Same use case as `with_hdri` but
+    /// callable after the kit has been built — handy when the HDR
+    /// loads asynchronously through `blinc_platform::assets::load_asset`.
+    pub fn set_hdri(&self, hdr_bytes: &[u8], face_size: u32) {
+        self.set_environment(generate_hdri_environment(hdr_bytes, face_size));
     }
 
     pub fn with_drag_sensitivity(mut self, sens: f32) -> Self {
@@ -459,7 +482,7 @@ impl SceneKit3D {
     }
 
     pub fn set_lights(&self, lights: Vec<Light>) {
-        *self.lights.borrow_mut() = lights;
+        *self.lights.write().unwrap() = lights;
     }
 
     // ── Scene object management ─────────────────────────────────────
@@ -478,7 +501,7 @@ impl SceneKit3D {
             material: material.into(),
             skin: None,
         });
-        let mut objects = self.objects.borrow_mut();
+        let mut objects = self.objects.write().unwrap();
         let handle = MeshHandle(objects.len());
         objects.push(SceneObject {
             mesh,
@@ -492,7 +515,7 @@ impl SceneKit3D {
 
     /// Add a pre-built `MeshData` (e.g. loaded from glTF).
     pub fn add_mesh(&self, mesh: Arc<MeshData>) -> MeshHandle {
-        let mut objects = self.objects.borrow_mut();
+        let mut objects = self.objects.write().unwrap();
         let handle = MeshHandle(objects.len());
         objects.push(SceneObject {
             mesh,
@@ -505,25 +528,25 @@ impl SceneKit3D {
     }
 
     pub fn set_position(&self, handle: MeshHandle, position: Vec3) {
-        if let Some(obj) = self.objects.borrow_mut().get_mut(handle.0) {
+        if let Some(obj) = self.objects.write().unwrap().get_mut(handle.0) {
             obj.position = position;
         }
     }
 
     pub fn set_rotation(&self, handle: MeshHandle, rotation: Vec3) {
-        if let Some(obj) = self.objects.borrow_mut().get_mut(handle.0) {
+        if let Some(obj) = self.objects.write().unwrap().get_mut(handle.0) {
             obj.rotation = rotation;
         }
     }
 
     pub fn set_scale(&self, handle: MeshHandle, scale: Vec3) {
-        if let Some(obj) = self.objects.borrow_mut().get_mut(handle.0) {
+        if let Some(obj) = self.objects.write().unwrap().get_mut(handle.0) {
             obj.scale = scale;
         }
     }
 
     pub fn set_visible(&self, handle: MeshHandle, visible: bool) {
-        if let Some(obj) = self.objects.borrow_mut().get_mut(handle.0) {
+        if let Some(obj) = self.objects.write().unwrap().get_mut(handle.0) {
             obj.visible = visible;
         }
     }
@@ -532,7 +555,7 @@ impl SceneKit3D {
     /// render closure, or use the no-arg `element_auto()` which calls
     /// it for you.
     pub fn render_scene(&self, ctx: &mut dyn DrawContext) {
-        let objects = self.objects.borrow();
+        let objects = self.objects.read().unwrap();
         for obj in objects.iter() {
             if obj.visible {
                 ctx.draw_mesh_data(Arc::clone(&obj.mesh), obj.transform());
@@ -557,8 +580,8 @@ impl SceneKit3D {
         let camera_drag = self.camera.clone();
         let camera_scroll = self.camera.clone();
         let camera_render = self.camera.clone();
-        let lights_render = Rc::clone(&self.lights);
-        let env_data = Arc::clone(&self.environment);
+        let lights_render = Arc::clone(&self.lights);
+        let env_lock = Arc::clone(&self.environment);
         let drag_sens = self.drag_sensitivity;
         let zoom_sens = self.zoom_sensitivity;
         let decay = self.momentum_decay;
@@ -620,9 +643,9 @@ impl SceneKit3D {
                     }
 
                     let camera = cam.to_camera();
-                    ctx.set_environment_cubemap(Arc::clone(&env_data));
+                    ctx.set_environment_cubemap(Arc::clone(&env_lock.read().unwrap()));
                     ctx.set_camera(&camera);
-                    for light in lights_render.borrow().iter() {
+                    for light in lights_render.read().unwrap().iter() {
                         ctx.add_light(light.clone());
                     }
                     render(ctx, bounds);
