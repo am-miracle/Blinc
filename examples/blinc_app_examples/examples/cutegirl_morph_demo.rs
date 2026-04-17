@@ -136,15 +136,22 @@ impl SceneState {
             });
         }
 
-        // TODO: rough-up skin to reduce the authored-for-offline
-        // "wet / vinyl" look. Needs a stable per-material match
-        // (Material currently carries no name) and a tested factor;
-        // a naive `mesh_idx == 1` + `×2.5` override made the face
-        // disappear in practice, likely because the texture-sampled
-        // metallic channel was getting zeroed in a way the shader
-        // didn't expect. Leaving the skin glossy until we have a
-        // better hook — probably: add a `name: Option<String>` field
-        // on Material parsed from glTF, then match by "Std_Skin_*".
+        // Bump roughness on the face mesh so skin stops reading as
+        // wet vinyl. Gated so you can flip it off if the match is
+        // wrong. Keeping metallic untouched — the earlier combo of
+        // metallic=0 + roughness×2.5 made the face disappear, likely
+        // a driver quirk around the texture-sampled channel
+        // interaction. Setting roughness directly to a fixed value
+        // is the minimal safe change.
+        const ROUGHEN_FACE_SKIN: bool = true;
+        const FACE_MESH_INDEX: usize = 1;
+        if ROUGHEN_FACE_SKIN {
+            blinc_gltf::apply_material_overrides(&mut scene, |mesh_idx, _, _, mat| {
+                if mesh_idx == FACE_MESH_INDEX {
+                    mat.roughness = 0.9;
+                }
+            });
+        }
 
         let duration = scene.animations.first().map(clip_duration).unwrap_or(0.0);
         let morph_mesh_count = scene
