@@ -563,14 +563,7 @@ impl GpuRenderer {
                     depth_stencil: Some(wgpu::DepthStencilState {
                         format: wgpu::TextureFormat::Depth32Float,
                         depth_write_enabled: false,
-                        // `LessEqual` rather than `Less` so the colour
-                        // pass passes at depths the depth-prepass
-                        // (which runs immediately before each blend
-                        // mesh in the same render pass) just wrote.
-                        // With `Less` the strict-compare would reject
-                        // every fragment whose depth equals the
-                        // prepass value — i.e. the whole mesh.
-                        depth_compare: wgpu::CompareFunction::LessEqual,
+                        depth_compare: wgpu::CompareFunction::Less,
                         stencil: wgpu::StencilState::default(),
                         bias: wgpu::DepthBiasState::default(),
                     }),
@@ -2257,38 +2250,9 @@ impl GpuRenderer {
                 ..Default::default()
             });
 
-            let is_blend =
-                matches!(mesh.material.alpha_mode, blinc_core::draw::AlphaMode::Blend);
-
-            // Depth prepass for BLEND meshes — runs immediately before
-            // the color draw inside the same render pass. Writes
-            // depth where alpha passes the cutoff (color writes are
-            // masked by the pipeline), so:
-            //
-            //   - overlapping triangles WITHIN this mesh z-occlude
-            //     each other correctly on the color pass
-            //   - subsequent BLEND meshes' passes LoadOp::Load this
-            //     depth, so they z-test against this mesh too
-            //
-            // Together this eliminates the "see-through solid"
-            // transparency bugs that per-mesh-no-depth-write produced
-            // on overlapping blend layers (hair strands, eye
-            // decorator layers, drone body panels), without needing
-            // a per-triangle sort. Paired with the LessEqual compare
-            // on `blend_pipeline`, the color pass passes exactly at
-            // the depths this prepass wrote.
-            if is_blend {
-                pass.set_pipeline(&mp.blend_prepass_pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
-                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..index_count, 0, 0..1);
-            }
-
-            let selected_pipeline = if is_blend {
-                &mp.blend_pipeline
-            } else {
-                &mp.pipeline
+            let selected_pipeline = match mesh.material.alpha_mode {
+                blinc_core::draw::AlphaMode::Blend => &mp.blend_pipeline,
+                _ => &mp.pipeline,
             };
             pass.set_pipeline(selected_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
