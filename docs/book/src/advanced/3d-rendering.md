@@ -8,9 +8,10 @@ The interchange format for 3D geometry is `MeshData`. Users convert from any sou
 
 ```rust
 use blinc_core::{MeshData, Vertex, Material, Mat4};
+use std::sync::Arc;
 
 let mesh = MeshData {
-    vertices: vec![
+    vertices: Arc::new(vec![
         Vertex::new([-0.5, -0.5, 0.0])
             .with_normal([0.0, 0.0, 1.0])
             .with_uv([0.0, 0.0])
@@ -23,10 +24,12 @@ let mesh = MeshData {
             .with_normal([0.0, 0.0, 1.0])
             .with_uv([0.5, 1.0])
             .with_color([0.0, 0.0, 1.0, 1.0]),
-    ],
-    indices: vec![0, 1, 2],
+    ]),
+    indices: Arc::new(vec![0, 1, 2]),
     material: Material::default(),
     skin: None,
+    morph_targets: Arc::new(Vec::new()),
+    morph_weights: Vec::new(),
 };
 ```
 
@@ -222,10 +225,12 @@ let joint_matrices: Vec<[f32; 16]> = skeleton.bones.iter()
     .collect();
 
 let mesh = MeshData {
-    vertices: skinned_vertices,  // vertices with .joints and .weights set
-    indices: indices,
+    vertices: Arc::new(skinned_vertices),  // vertices with .joints and .weights set
+    indices: Arc::new(indices),
     material: Material::default(),
     skin: Some(SkinningData { joint_matrices }),
+    morph_targets: Arc::new(Vec::new()),
+    morph_weights: Vec::new(),
 };
 ```
 

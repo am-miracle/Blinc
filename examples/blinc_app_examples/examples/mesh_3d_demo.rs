@@ -140,11 +140,11 @@ fn try_load_helmet() -> Option<MeshData> {
     };
 
     Some(MeshData {
-        vertices,
-        indices,
+        vertices: std::sync::Arc::new(vertices),
+        indices: std::sync::Arc::new(indices),
         material,
         skin: None,
-        morph_targets: Vec::new(),
+        morph_targets: std::sync::Arc::new(Vec::new()),
         morph_weights: Vec::new(),
     })
 }

@@ -516,11 +516,11 @@ impl SceneKit3D {
     ) -> MeshHandle {
         let (vertices, indices) = geometry;
         let mesh = Arc::new(MeshData {
-            vertices,
-            indices,
+            vertices: Arc::new(vertices),
+            indices: Arc::new(indices),
             material: material.into(),
             skin: None,
-            morph_targets: Vec::new(),
+            morph_targets: Arc::new(Vec::new()),
             morph_weights: Vec::new(),
         });
         let mut objects = self.objects.write().unwrap();

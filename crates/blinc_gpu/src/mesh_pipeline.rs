@@ -1677,7 +1677,7 @@ impl GpuRenderer {
                 let vcount = mesh.vertices.len();
                 let tcount = mesh.morph_targets.len();
                 let mut flat: Vec<f32> = Vec::with_capacity(2 * tcount * vcount * 4);
-                for target in &mesh.morph_targets {
+                for target in mesh.morph_targets.iter() {
                     for v in 0..vcount {
                         // Position delta (vec3 + 0 padding).
                         let p = target

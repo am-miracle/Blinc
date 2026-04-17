@@ -755,30 +755,42 @@ impl Vertex {
 /// ```
 #[derive(Clone, Debug)]
 pub struct MeshData {
-    pub vertices: Vec<Vertex>,
-    pub indices: Vec<u32>,
+    /// Shared-reference vertex buffer. `Arc<Vec<…>>` (not plain
+    /// `Vec<…>`) so animated meshes can clone `MeshData` per frame
+    /// for per-draw morph / skin updates without deep-copying the
+    /// vertex data each time. A 5 K-vertex mesh is ~400 KB; at
+    /// 60 fps × N meshes this add up to significant bandwidth
+    /// otherwise. Readers should Deref-chain through to the slice:
+    /// `mesh.vertices.len()`, `&mesh.vertices[..]`,
+    /// `bytemuck::cast_slice(&mesh.vertices)` all work.
+    pub vertices: std::sync::Arc<Vec<Vertex>>,
+    /// Shared-reference index buffer. Same rationale as
+    /// [`Self::vertices`].
+    pub indices: std::sync::Arc<Vec<u32>>,
     pub material: Material,
     /// Optional skinning data for skeletal animation.
     /// When provided, the GPU applies bone transforms to each vertex
     /// based on joint indices and weights.
     pub skin: Option<SkinningData>,
-    /// Per-primitive morph targets (blend shapes). Each entry is a
+    /// Per-primitive morph targets (blend shapes). Shared-reference
+    /// for the same reason as `vertices` — morph deltas on a
+    /// 152-target face can be tens of megabytes. Each entry is a
     /// set of per-vertex deltas (position, optionally normal /
     /// tangent) authored against the base `vertices` array. At
     /// runtime the renderer computes
     /// `final_vertex = base_vertex + Σ weights[i] · morph_targets[i]`
     /// using weights provided by the animation pipeline
-    /// (`blinc_skeleton::Pose::morph_weights`). Empty for meshes
-    /// without morph data — which is the common case.
-    pub morph_targets: Vec<MorphTarget>,
+    /// (`blinc_skeleton::Pose::morph_weights`). Empty `Arc<Vec>` for
+    /// meshes without morph data — which is the common case.
+    pub morph_targets: std::sync::Arc<Vec<MorphTarget>>,
     /// Per-draw morph weights, one float per entry in `morph_targets`.
     /// The renderer reads this to compute
     /// `final = base + Σ weights[i] · morph_targets[i]` in the vertex
     /// stage. Callers update this each frame from their animation
     /// source (typically `blinc_skeleton::Pose::morph_weights_for_node`).
-    /// Empty or shorter-than-`morph_targets.len()` means the missing
-    /// weights are treated as zero — the base vertex passes through
-    /// unchanged. Ignored when `morph_targets` is empty.
+    /// Plain `Vec` (not Arc) because it's written per draw — the
+    /// whole point of Arc-ing the *other* fields is that this one
+    /// stays cheap to mutate.
     pub morph_weights: Vec<f32>,
 }
 
