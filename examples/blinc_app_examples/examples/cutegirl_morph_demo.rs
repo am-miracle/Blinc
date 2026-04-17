@@ -40,7 +40,7 @@ use blinc_app::windowed::WindowedContext;
 use blinc_canvas_kit::prelude::*;
 use blinc_canvas_kit::AutoFramer;
 use blinc_core::events::KeyCode;
-use blinc_core::{Color, DrawContext, Light, MeshData, State, Vec3};
+use blinc_core::{Color, DrawContext, Light, Mat4, MeshData, State, Vec3};
 use blinc_gltf::{GltfAnimation, GltfScene};
 use blinc_input::{DivInputExt, InputState};
 use blinc_layout::prelude::text;
@@ -314,28 +314,105 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             let t = pb.time;
             drop(pb);
 
-            // blinc_skeleton::build_frame_draws handles the full per-
-            // frame dispatch assembly: node TRS, skinning matrices
-            // (via the full node graph), morph weights, per-draw
-            // MeshData clones with Arc<Vec> refcount bumps, opaque-
-            // before-blend sorting + back-to-front within blend.
-            let cam_eye = camera_signal_ren.get().eye();
-            let cam_pos = [cam_eye.x, cam_eye.y, cam_eye.z];
-            let draws: Vec<blinc_skeleton::FrameDraw> = {
+            // Per-frame sampling: node TRS, the pose (for skinning),
+            // and morph weights. Done inside one scene lock so borrows
+            // don't overlap; outputs are owned so we can drop the lock
+            // before dispatching draws.
+            let (draws, skinning, weights_by_node) = {
                 let mut scene_mut = state.scene.lock().unwrap();
-                match state.animation.as_ref().as_ref() {
-                    Some(anim) => blinc_skeleton::build_frame_draws(
-                        &mut scene_mut,
-                        &state.base_meshes,
-                        anim,
-                        t,
-                        cam_pos,
-                    ),
-                    None => Vec::new(),
-                }
+                let (skinning, weights_by_node) = match state.animation.as_ref().as_ref() {
+                    Some(anim) => {
+                        blinc_skeleton::animate_scene_nodes(&mut scene_mut, anim, t);
+                        // One skeleton — assume every skinned mesh in
+                        // the scene shares it (true for cutegirl and
+                        // most character exports). Multi-skin assets
+                        // would need one SkinningData per skin index.
+                        match scene_mut.skeletons.first() {
+                            Some(skel) => {
+                                // Use scene_skinning_data — reads
+                                // joint worlds via the full node graph
+                                // (compute_world_transforms), so
+                                // Armature / offset / pivot glue nodes
+                                // between joints are folded in. The
+                                // Bone::parent-only path miss those
+                                // transforms and plants the character
+                                // at origin with wrong scale.
+                                let sd =
+                                    blinc_skeleton::scene_skinning_data(&scene_mut, skel);
+                                // Separately sample morph weights —
+                                // no Pose needed for that side-table.
+                                let morphs =
+                                    blinc_skeleton::animate_scene_morph_weights(anim, t);
+                                (Some(sd), morphs)
+                            }
+                            None => (None, std::collections::HashMap::new()),
+                        }
+                    }
+                    None => (None, std::collections::HashMap::new()),
+                };
+                let world = scene_mut.compute_world_transforms();
+                let draws: Vec<(usize, usize, Option<usize>, Mat4)> = scene_mut
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, n)| n.mesh.map(|m| (i, m, n.skin, world[i])))
+                    .collect();
+                (draws, skinning, weights_by_node)
             };
-            for d in draws {
-                ctx.draw_mesh_data(d.mesh, d.transform);
+
+            // glTF 2.0 spec: a skinned mesh's joint matrices already
+            // produce world-space positions; the mesh node's own
+            // transform must NOT be re-applied on top. Passing the
+            // node's world transform double-rotates/translates the
+            // mesh — visible as striations + offset body parts.
+            // Non-skinned meshes use the node transform as usual.
+            let identity: Mat4 = Mat4::IDENTITY;
+
+            // Sort opaque/mask draws before blend draws. Blend
+            // materials (hair, eyelashes, tearlines) don't write
+            // depth — they need the opaque depth already laid down
+            // so they z-reject where the face is in front. Without
+            // this order, transparent hair rendered first would
+            // alpha-blend against the background, and opaque face
+            // drawn later wouldn't correct the premultiplied output.
+            let mut sorted: Vec<_> = draws.into_iter().collect();
+            sorted.sort_by_key(|(_, mesh_idx, _, _)| {
+                state.base_meshes[*mesh_idx]
+                    .iter()
+                    .any(|p| matches!(p.material.alpha_mode, blinc_core::AlphaMode::Blend))
+                    as u8
+            });
+
+            for (node_idx, mesh_idx, node_skin, xf) in sorted {
+                let morph = weights_by_node.get(&node_idx);
+                let is_skinned = node_skin.is_some();
+                let draw_xf = if is_skinned { identity } else { xf };
+                for prim in &state.base_meshes[mesh_idx] {
+                    let has_morphs = !prim.morph_targets.is_empty();
+                    if !has_morphs && !is_skinned {
+                        ctx.draw_mesh_data(Arc::new(prim.clone()), draw_xf);
+                        continue;
+                    }
+                    let mut per_draw = prim.clone();
+                    if is_skinned {
+                        if let Some(sd) = skinning.as_ref() {
+                            per_draw.skin = Some(sd.clone());
+                        }
+                    }
+                    if has_morphs {
+                        let target_count = prim.morph_targets.len();
+                        per_draw.morph_weights = match morph {
+                            Some(w) if w.len() >= target_count => w[..target_count].to_vec(),
+                            Some(w) => {
+                                let mut v = w.clone();
+                                v.resize(target_count, 0.0);
+                                v
+                            }
+                            None => vec![0.0; target_count],
+                        };
+                    }
+                    ctx.draw_mesh_data(Arc::new(per_draw), draw_xf);
+                }
             }
 
             handle_ren.input.frame_end();
