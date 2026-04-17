@@ -856,6 +856,12 @@ pub struct Material {
     pub unlit: bool,
     /// Alpha mode.
     pub alpha_mode: AlphaMode,
+    /// Per-material cutoff used when `alpha_mode == Mask`. Fragments
+    /// with base-color alpha below this threshold are discarded.
+    /// glTF default is `0.5`; overridden per asset via the
+    /// `alphaCutoff` material property. Ignored for `Opaque` and
+    /// `Blend` modes.
+    pub alpha_cutoff: f32,
     /// Whether this mesh receives shadows from other meshes.
     pub receives_shadows: bool,
     /// Whether this mesh casts shadows onto other meshes.
@@ -880,6 +886,7 @@ impl Default for Material {
             displacement_scale: 0.05,
             unlit: false,
             alpha_mode: AlphaMode::Opaque,
+            alpha_cutoff: 0.5,
             receives_shadows: true,
             casts_shadows: true,
         }

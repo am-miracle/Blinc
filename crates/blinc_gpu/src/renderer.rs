@@ -9242,7 +9242,12 @@ impl GpuRenderer {
             // rules don't need a bool type (which isn't POD anyway).
             // Matches shader `MaterialUniforms.alpha_mode`.
             alpha_mode: f32,
-            _pad_am: [f32; 3],
+            /// Mask-mode cutoff (glTF default 0.5; overrideable via
+            /// `Material::alpha_cutoff`). Fragments whose base-color
+            /// alpha is below this are `discard`ed. Ignored when
+            /// `alpha_mode != Mask`.
+            alpha_cutoff: f32,
+            _pad_am: [f32; 2],
         }
 
         let alpha_mode = match mesh.material.alpha_mode {
@@ -9273,7 +9278,8 @@ impl GpuRenderer {
             },
             occlusion_strength: mesh.material.occlusion_strength,
             alpha_mode,
-            _pad_am: [0.0; 3],
+            alpha_cutoff: mesh.material.alpha_cutoff,
+            _pad_am: [0.0; 2],
         };
         self.queue
             .write_buffer(&mp.material_buffer, 0, bytemuck::bytes_of(&mat));

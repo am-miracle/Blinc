@@ -53,7 +53,10 @@ struct MaterialUniforms {
     // Mirrors `mesh.wgsl` — the Rust side uploads the same struct
     // regardless of which shader variant is compiled.
     alpha_mode: f32,
-    _pad0: f32,
+    // Mask-mode alpha cutoff (glTF default 0.5). Mirrors the layout
+    // in `mesh.wgsl` — Rust-side `MaterialGpu` uploads the same
+    // struct regardless of which shader variant is compiled.
+    alpha_cutoff: f32,
     _pad1: f32,
     _pad2: f32,
 }
@@ -281,7 +284,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if material.alpha_mode < 0.5 {
         base_color.a = 1.0;
     } else if material.alpha_mode < 1.5 {
-        if base_color.a < 0.5 { discard; }
+        if base_color.a < material.alpha_cutoff { discard; }
         base_color.a = 1.0;
     }
 

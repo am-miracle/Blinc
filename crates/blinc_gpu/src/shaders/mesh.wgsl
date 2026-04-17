@@ -52,7 +52,10 @@ struct MaterialUniforms {
     // simply leave an unused alpha channel in the base-color texture)
     // render attenuated against the dark HDR intermediate.
     alpha_mode: f32,
-    _pad0: f32,
+    // Mask-mode alpha cutoff (glTF default 0.5). Sampled-alpha
+    // below this value gets `discard`ed. Ignored when alpha_mode
+    // isn't Mask.
+    alpha_cutoff: f32,
     _pad1: f32,
     _pad2: f32,
 }
@@ -272,9 +275,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Kept out of the unlit early-return so unlit materials also get
     // the right alpha treatment.
     if material.alpha_mode < 0.5 {
-        base_color.a = 1.0;                        // Opaque
+        base_color.a = 1.0;                                   // Opaque
     } else if material.alpha_mode < 1.5 {
-        if base_color.a < 0.5 { discard; }         // Mask
+        if base_color.a < material.alpha_cutoff { discard; }  // Mask
         base_color.a = 1.0;
     }
     // else: Blend — leave base_color.a as sampled.

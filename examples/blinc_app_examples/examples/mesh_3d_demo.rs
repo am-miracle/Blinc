@@ -134,6 +134,7 @@ fn try_load_helmet() -> Option<MeshData> {
         displacement_scale: 0.0,
         unlit: false,
         alpha_mode: AlphaMode::Opaque,
+        alpha_cutoff: 0.5,
         receives_shadows: false,
         casts_shadows: false,
     };
@@ -143,6 +144,7 @@ fn try_load_helmet() -> Option<MeshData> {
         indices,
         material,
         skin: None,
+        morph_targets: Vec::new(),
     })
 }
 
