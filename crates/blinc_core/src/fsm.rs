@@ -8,6 +8,21 @@
 //! - Transition actions
 //!
 //! Future: hierarchical and parallel states.
+//!
+//! # Not to be confused with `blinc_skeleton::fsm`
+//!
+//! Blinc ships a second, unrelated state-machine implementation in
+//! `blinc_skeleton::fsm` — used for skeletal animation state graphs
+//! (idle → walk → run → attack, with crossfade transitions). That
+//! machine is time-driven (`tick(dt)`), conditions are polled each
+//! frame against named parameters (`set_bool("moving", true)`), and
+//! transitions blend two poses over a configurable duration.
+//!
+//! This machine is **event-driven** (`send(event_id)`),
+//! instantaneous (no transition duration), and leans on user
+//! `FnMut()` callbacks for entry / exit / action work. Reach for
+//! this one on widget interaction; reach for `blinc_skeleton::fsm`
+//! on character animation.
 
 use rustc_hash::FxHashMap;
 use slotmap::{new_key_type, SlotMap};
