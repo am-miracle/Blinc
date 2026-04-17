@@ -221,14 +221,3 @@ blinc_canvas_kit = { path = "crates/blinc_canvas_kit" }
 blinc_layout = { path = "crates/blinc_layout" }
 blinc_platform = { path = "crates/blinc_platform" }
 
-# Same local-dev override for the downstream packages that live under
-# `/packages/` — keeps local edits flowing through until we push and
-# bump pinned revs. Skipped when paths don't exist (CI).
-[patch."https://github.com/project-blinc/blinc_gltf.git"]
-blinc_gltf = { path = "packages/blinc_gltf" }
-
-[patch."https://github.com/project-blinc/blinc_skeleton.git"]
-blinc_skeleton = { path = "packages/blinc_skeleton" }
-
-[patch."https://github.com/project-blinc/blinc_input.git"]
-blinc_input = { path = "packages/blinc_input" }
