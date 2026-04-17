@@ -521,6 +521,7 @@ impl SceneKit3D {
             material: material.into(),
             skin: None,
             morph_targets: Vec::new(),
+            morph_weights: Vec::new(),
         });
         let mut objects = self.objects.write().unwrap();
         let handle = MeshHandle(objects.len());

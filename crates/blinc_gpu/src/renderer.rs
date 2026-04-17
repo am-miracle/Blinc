@@ -1091,125 +1091,11 @@ struct ImagePipeline {
 /// Shadow map resolution (square)
 const SHADOW_MAP_SIZE: u32 = 2048;
 
-/// Maximum number of distinct meshes whose GPU buffers / textures we
-/// keep warm between frames. When exceeded, the FIFO eviction policy
-/// drops the oldest entry. Sized conservatively — 128 fits every
-/// asset in the workspace examples, scales to large editor scenes,
-/// and caps worst-case GPU memory at ~`128 × per-mesh-footprint`.
-const MESH_CACHE_CAPACITY: usize = 128;
+use crate::mesh_pipeline::{
+    MeshBufferCacheEntry, MeshPipeline, MAX_MORPH_TARGETS, MESH_CACHE_CAPACITY,
+    MORPH_CACHE_CAPACITY,
+};
 
-/// Per-mesh cached vertex + index GPU buffers.
-struct MeshBufferCacheEntry {
-    vertex: wgpu::Buffer,
-    index: wgpu::Buffer,
-    index_count: u32,
-}
-
-/// Lazily-created 3D mesh rendering pipeline
-struct MeshPipeline {
-    pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
-    uniform_buffer: wgpu::Buffer,
-    material_buffer: wgpu::Buffer,
-    /// Default 1x1 white texture (used when material has no texture)
-    default_texture: crate::image::GpuImage,
-    /// Default flat normal map (128, 128, 255 = tangent-space up)
-    default_normal_map: crate::image::GpuImage,
-    /// Default black displacement map (no displacement)
-    default_displacement: crate::image::GpuImage,
-    /// Default 1x1 white metallic-roughness texture. Bound when the
-    /// material has no MR texture; multiplying scalar metallic ×
-    /// roughness by (1,1,1,1) produces the scalar-only path.
-    default_metallic_roughness: crate::image::GpuImage,
-    /// Default 1x1 white emissive texture. Bound when the material
-    /// has no emissive texture; the shader gates on the
-    /// `has_emissive_texture` flag so the default is only read for
-    /// layout validation.
-    default_emissive: crate::image::GpuImage,
-    /// Default 1x1 white occlusion texture. Same rationale as the
-    /// other defaults.
-    default_occlusion: crate::image::GpuImage,
-    sampler: wgpu::Sampler,
-    /// Storage buffer for joint matrices (skeletal animation, max 256 joints).
-    /// Used when `has_storage_buffers` is true.
-    joint_buffer: wgpu::Buffer,
-    /// Data-texture fallback for joint matrices (WebGL2 DT mode).
-    /// Width=4 (one texel per mat4 row), height=num_joints, RGBA32Float.
-    joint_data_texture: Option<wgpu::Texture>,
-    joint_data_view: Option<wgpu::TextureView>,
-    /// Depth buffer for the main mesh pass. Separate from the shadow
-    /// map — this one is sized to match the frame target so back faces
-    /// and interior geometry z-test against front faces. Lazily
-    /// created on the first render_mesh_data call and recreated when
-    /// the viewport size changes.
-    main_depth: Option<wgpu::Texture>,
-    main_depth_view: Option<wgpu::TextureView>,
-    main_depth_size: (u32, u32),
-    /// Shadow depth pass pipeline
-    shadow_pipeline: wgpu::RenderPipeline,
-    shadow_bind_group_layout: wgpu::BindGroupLayout,
-    shadow_uniform_buffer: wgpu::Buffer,
-    /// 2048x2048 Depth32Float shadow map texture
-    shadow_map: wgpu::Texture,
-    shadow_view: wgpu::TextureView,
-    /// Comparison sampler for PCF shadow sampling
-    shadow_sampler: wgpu::Sampler,
-    /// Procedural environment cubemap for IBL reflections. Generated
-    /// once at pipeline init — a smooth sky gradient that gives metals
-    /// and glass surfaces ambient reflections proportional to roughness.
-    env_cubemap: wgpu::Texture,
-    env_cubemap_view: wgpu::TextureView,
-    env_sampler: wgpu::Sampler,
-    /// Per-mesh vertex + index buffer cache. Keyed by the raw pointer
-    /// of the mesh's `Arc<MeshData>`. Without this, `render_mesh_data`
-    /// builds fresh `wgpu::Buffer`s every frame from the mesh's vertex
-    /// / index `Vec`s — for a 39-mesh scene like buster_drone that's
-    /// ~1.8 GB of vertex uploads per frame.
-    ///
-    /// Guarded by `cached_mesh_buffer_keys` for FIFO eviction so a
-    /// long-running application that streams distinct meshes doesn't
-    /// leak GPU memory. See `MESH_CACHE_CAPACITY`.
-    cached_mesh_buffers: std::collections::HashMap<usize, MeshBufferCacheEntry>,
-    cached_mesh_buffer_keys: std::collections::VecDeque<usize>,
-    /// GPU texture cache, keyed by the raw pointer of the source
-    /// `TextureData`'s `Arc<[u8]>` pixel buffer. Materials that reference
-    /// the same underlying image share a single `GpuImage` instead of
-    /// each mesh creating its own — critical because otherwise a
-    /// 39-mesh asset with ~10 unique textures would upload ~195 GPU
-    /// textures (GB of VRAM) instead of 10 (~few hundred MB).
-    ///
-    /// The companion `cached_gpu_image_keys` deque tracks insertion
-    /// order for FIFO eviction at `MESH_CACHE_CAPACITY`.
-    cached_gpu_images: std::collections::HashMap<usize, crate::image::GpuImage>,
-    cached_gpu_image_keys: std::collections::VecDeque<usize>,
-    /// Skybox pipeline — renders the environment cubemap as a
-    /// background behind the mesh. Shares the cubemap texture/sampler
-    /// but has its own bind group layout (camera vectors + cubemap).
-    skybox_pipeline: wgpu::RenderPipeline,
-    skybox_bind_group_layout: wgpu::BindGroupLayout,
-    skybox_uniform_buffer: wgpu::Buffer,
-    /// HDR intermediate texture (`Rgba16Float`). Meshes render here
-    /// instead of the `Bgra8Unorm` framebuffer so specular + emissive
-    /// values above 1.0 accumulate without clipping. The tonemap pass
-    /// reads this and writes the tonemapped result to the frame target.
-    hdr_texture: Option<wgpu::Texture>,
-    hdr_view: Option<wgpu::TextureView>,
-    hdr_size: (u32, u32),
-    /// Fullscreen ACES tonemap pipeline + resources.
-    tonemap_pipeline: wgpu::RenderPipeline,
-    tonemap_bind_group_layout: wgpu::BindGroupLayout,
-    tonemap_sampler: wgpu::Sampler,
-    /// Bloom pipeline — shared for threshold-downsample and Kawase blur.
-    bloom_pipeline: wgpu::RenderPipeline,
-    bloom_bind_group_layout: wgpu::BindGroupLayout,
-    bloom_uniform_buffer: wgpu::Buffer,
-    /// Two half-res Rgba16Float ping-pong textures for bloom blur.
-    bloom_a: Option<wgpu::Texture>,
-    bloom_a_view: Option<wgpu::TextureView>,
-    bloom_b: Option<wgpu::Texture>,
-    bloom_b_view: Option<wgpu::TextureView>,
-    bloom_size: (u32, u32),
-}
 
 struct BindGroupLayouts {
     sdf: wgpu::BindGroupLayout,
@@ -8095,6 +7981,33 @@ impl GpuRenderer {
                             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                             count: None,
                         },
+                        // 14: Morph-target deltas (positions + normals,
+                        // interleaved two-vec4-per-(target, vertex)).
+                        // Vertex stage only — the vertex shader's
+                        // per-target loop is the sole consumer.
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 14,
+                            visibility: wgpu::ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        // 15: Morph-target weights — one f32 per target,
+                        // updated per draw from the pose's weight
+                        // sink.
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 15,
+                            visibility: wgpu::ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
                     ],
                 });
 
@@ -8708,6 +8621,23 @@ impl GpuRenderer {
             mapped_at_creation: false,
         });
 
+        let morph_weights_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Mesh Morph Weights"),
+            size: (MAX_MORPH_TARGETS * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // 32 bytes = one (pos_delta, nrm_delta) vec4 pair. Enough to
+        // satisfy the storage-binding layout when the mesh has no
+        // morph targets — the shader never reads it because
+        // `morph_target_count = 0` short-circuits the loop.
+        let morph_deltas_dummy = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Mesh Morph Deltas (dummy)"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         self.mesh_pipeline = Some(MeshPipeline {
             pipeline,
             bind_group_layout,
@@ -8723,6 +8653,9 @@ impl GpuRenderer {
             joint_buffer,
             joint_data_texture,
             joint_data_view,
+            morph_weights_buffer,
+            morph_deltas_dummy,
+            morph_deltas_cache: std::collections::VecDeque::with_capacity(MORPH_CACHE_CAPACITY),
             main_depth: None,
             main_depth_view: None,
             main_depth_size: (0, 0),
@@ -9176,6 +9109,15 @@ impl GpuRenderer {
             displacement_scale: f32,
             normal_scale: f32,
             has_skinning: f32,
+            /// Number of morph targets for this mesh. Zero means the
+            /// vertex-stage morph loop runs zero iterations and the
+            /// dummy-bound delta / weights buffers are never read.
+            morph_target_count: u32,
+            /// Base-mesh vertex count, needed to index into the
+            /// flattened `morph_deltas` array as
+            /// `(target * morph_vertex_count + vertex_idx) * 2 + [0|1]`.
+            morph_vertex_count: u32,
+            _pad_morph: [u32; 2],
         }
 
         let has_texture = if mesh.material.base_color_texture.is_some() {
@@ -9213,6 +9155,9 @@ impl GpuRenderer {
             displacement_scale,
             normal_scale: mesh.material.normal_scale,
             has_skinning: if mesh.skin.is_some() { 1.0 } else { 0.0 },
+            morph_target_count: mesh.morph_targets.len() as u32,
+            morph_vertex_count: mesh.vertices.len() as u32,
+            _pad_morph: [0; 2],
         };
 
         let mp = self.mesh_pipeline.as_ref().unwrap();
@@ -9346,6 +9291,73 @@ impl GpuRenderer {
                     mp_mut.cached_gpu_images.remove(&old_key);
                 }
             }
+        }
+
+        // ── Upload morph-target deltas (cached per mesh) ──────────────────
+        //
+        // Deltas are static after glTF parse, so we upload once per mesh
+        // and reuse across every subsequent draw. Keyed by the
+        // `Arc<MeshData>` raw pointer — scenes that recycle the same
+        // Arcs each frame (the common case) hit the cache.
+        let morph_cache_key: Option<usize> = if !mesh.morph_targets.is_empty() {
+            Some(mesh as *const _ as usize)
+        } else {
+            None
+        };
+        if let Some(key) = morph_cache_key {
+            let mp_mut = self.mesh_pipeline.as_mut().unwrap();
+            let already_cached = mp_mut.morph_deltas_cache.iter().any(|(k, _)| *k == key);
+            if !already_cached {
+                // Flatten all targets into a single `Vec<f32>`. Layout
+                // per (target, vertex) is two vec4s: position delta
+                // then normal delta. Targets without authored normals
+                // emit zeroed normal deltas. Four floats per vec4 to
+                // respect std430 alignment (the shader reads
+                // `array<vec4<f32>>`).
+                let vcount = mesh.vertices.len();
+                let tcount = mesh.morph_targets.len();
+                let mut flat: Vec<f32> = Vec::with_capacity(2 * tcount * vcount * 4);
+                for target in &mesh.morph_targets {
+                    for v in 0..vcount {
+                        // Position delta (vec3 + 0 padding).
+                        let p = target
+                            .delta_positions
+                            .get(v)
+                            .copied()
+                            .unwrap_or([0.0, 0.0, 0.0]);
+                        flat.extend_from_slice(&[p[0], p[1], p[2], 0.0]);
+                        // Normal delta (vec3 + 0) — zero-filled for
+                        // positions-only targets.
+                        let n = target
+                            .delta_normals
+                            .as_ref()
+                            .and_then(|ns| ns.get(v).copied())
+                            .unwrap_or([0.0, 0.0, 0.0]);
+                        flat.extend_from_slice(&[n[0], n[1], n[2], 0.0]);
+                    }
+                }
+                let buffer = self.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("Mesh Morph Deltas"),
+                        contents: bytemuck::cast_slice(&flat),
+                        usage: wgpu::BufferUsages::STORAGE,
+                    },
+                );
+                mp_mut.morph_deltas_cache.push_back((key, buffer));
+                while mp_mut.morph_deltas_cache.len() > MORPH_CACHE_CAPACITY {
+                    mp_mut.morph_deltas_cache.pop_front();
+                }
+            }
+        }
+
+        // Upload this draw's weights (bounded by MAX_MORPH_TARGETS).
+        if !mesh.morph_weights.is_empty() {
+            let n = mesh.morph_weights.len().min(MAX_MORPH_TARGETS);
+            self.queue.write_buffer(
+                &self.mesh_pipeline.as_ref().unwrap().morph_weights_buffer,
+                0,
+                bytemuck::cast_slice(&mesh.morph_weights[..n]),
+            );
         }
 
         let mp = self.mesh_pipeline.as_ref().unwrap();
@@ -9491,6 +9503,26 @@ impl GpuRenderer {
                 wgpu::BindGroupEntry {
                     binding: 13,
                     resource: wgpu::BindingResource::Sampler(&mp.env_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: {
+                        // Resolve the delta buffer: cached per-mesh if
+                        // any morph targets, else the zero-sized dummy.
+                        let buf = morph_cache_key
+                            .and_then(|k| {
+                                mp.morph_deltas_cache
+                                    .iter()
+                                    .find(|(key, _)| *key == k)
+                                    .map(|(_, b)| b)
+                            })
+                            .unwrap_or(&mp.morph_deltas_dummy);
+                        buf.as_entire_binding()
+                    },
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: mp.morph_weights_buffer.as_entire_binding(),
                 },
             ],
         });

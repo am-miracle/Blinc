@@ -21,6 +21,7 @@ pub mod flow_codegen;
 pub mod flow_pipeline;
 pub mod gradient_texture;
 pub mod image;
+pub mod mesh_pipeline;
 pub mod paint;
 pub mod particles;
 pub mod path;

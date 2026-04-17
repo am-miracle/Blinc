@@ -771,6 +771,15 @@ pub struct MeshData {
     /// (`blinc_skeleton::Pose::morph_weights`). Empty for meshes
     /// without morph data — which is the common case.
     pub morph_targets: Vec<MorphTarget>,
+    /// Per-draw morph weights, one float per entry in `morph_targets`.
+    /// The renderer reads this to compute
+    /// `final = base + Σ weights[i] · morph_targets[i]` in the vertex
+    /// stage. Callers update this each frame from their animation
+    /// source (typically `blinc_skeleton::Pose::morph_weights_for_node`).
+    /// Empty or shorter-than-`morph_targets.len()` means the missing
+    /// weights are treated as zero — the base vertex passes through
+    /// unchanged. Ignored when `morph_targets` is empty.
+    pub morph_weights: Vec<f32>,
 }
 
 /// One morph target (aka blend shape) — per-vertex deltas that layer

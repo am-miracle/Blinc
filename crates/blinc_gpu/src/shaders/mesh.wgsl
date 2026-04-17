@@ -31,6 +31,16 @@ struct Uniforms {
     displacement_scale: f32,
     normal_scale: f32,
     has_skinning: f32,
+    // Morph-target count for this mesh. Zero means "no morphs" and
+    // the vertex-stage loop runs zero iterations, so the default
+    // zero-sized dummy buffers bound at bindings 14/15 are never
+    // actually sampled. Non-zero means bindings 14/15 hold valid
+    // morph data; `morph_vertex_count` is the base-mesh vertex
+    // count, needed to index into the flattened delta array.
+    morph_target_count: u32,
+    morph_vertex_count: u32,
+    _pad_morph: u32,
+    _pad_morph_2: u32,
 }
 
 struct MaterialUniforms {
@@ -74,6 +84,15 @@ struct MaterialUniforms {
 @group(0) @binding(11) var occlusion_texture: texture_2d<f32>;
 @group(0) @binding(12) var env_cubemap: texture_cube<f32>;
 @group(0) @binding(13) var env_sampler: sampler;
+// Morph-target data. Interleaved per (target, vertex): two vec4s per
+// entry — `[pos_delta.xyz, 0]` then `[nrm_delta.xyz, 0]`. Flattened
+// as `(target_idx * morph_vertex_count + vertex_idx) * 2` → pos,
+// `+ 1` → normal. Targets without authored normals carry zero
+// normal deltas (the blinc_gltf parser fills them in per-target).
+@group(0) @binding(14) var<storage, read> morph_deltas: array<vec4<f32>>;
+// Per-frame morph weights; one float per target. Callers update it
+// from `Pose::morph_weights_for_node`.
+@group(0) @binding(15) var<storage, read> morph_weights: array<f32>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -106,12 +125,41 @@ fn compute_skin_matrix(joints: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
 }
 
 @vertex
-fn vs_main(input: VertexInput) -> VertexOutput {
+fn vs_main(input: VertexInput, @builtin(vertex_index) vertex_idx: u32) -> VertexOutput {
     var out: VertexOutput;
 
-    // Apply skeletal skinning if enabled
-    var position = vec4(input.position, 1.0);
-    var normal = vec4(input.normal, 0.0);
+    // Start with base vertex attributes.
+    var pos_local = input.position;
+    var nrm_local = input.normal;
+
+    // Morph-target blend — glTF convention is that morph deltas apply
+    // against the *rest* pose, before skinning. `morph_target_count`
+    // is zero for meshes without morph data, so the loop is a no-op
+    // and the bound dummy buffers at bindings 14/15 are never
+    // sampled. Deltas are interleaved: two vec4 slots per
+    // (target, vertex) — position delta then normal delta.
+    for (var t: u32 = 0u; t < uniforms.morph_target_count; t = t + 1u) {
+        let w = morph_weights[t];
+        if (w == 0.0) {
+            continue;
+        }
+        let base = (t * uniforms.morph_vertex_count + vertex_idx) * 2u;
+        let dp = morph_deltas[base];
+        let dn = morph_deltas[base + 1u];
+        pos_local = pos_local + w * dp.xyz;
+        nrm_local = nrm_local + w * dn.xyz;
+    }
+    // Re-normalise the morphed normal — accumulated linear deltas
+    // don't preserve unit length. Tangent would need the same
+    // treatment if morph-target tangent deltas were fed in; the
+    // blinc_gltf parser ignores those slots for now, so we leave
+    // the base tangent untouched.
+    if (uniforms.morph_target_count > 0u) {
+        nrm_local = normalize(nrm_local);
+    }
+
+    var position = vec4(pos_local, 1.0);
+    var normal = vec4(nrm_local, 0.0);
     var tangent_dir = vec4(input.tangent.xyz, 0.0);
 
     if uniforms.has_skinning > 0.5 {

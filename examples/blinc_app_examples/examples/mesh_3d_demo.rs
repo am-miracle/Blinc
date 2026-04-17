@@ -145,6 +145,7 @@ fn try_load_helmet() -> Option<MeshData> {
         material,
         skin: None,
         morph_targets: Vec::new(),
+        morph_weights: Vec::new(),
     })
 }
 
