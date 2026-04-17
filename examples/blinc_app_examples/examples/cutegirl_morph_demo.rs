@@ -329,7 +329,13 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                         // would need one SkinningData per skin index.
                         match scene_mut.skeletons.first() {
                             Some(skel) => {
-                                let mut pose = blinc_skeleton::Pose::rest(&skel.skeleton);
+                                // Seed from the scene's current joint
+                                // TRS (animate_scene_nodes just wrote
+                                // them) — bones not targeted by the
+                                // clip keep their rest pose instead of
+                                // collapsing to identity.
+                                let mut pose =
+                                    blinc_skeleton::Pose::from_scene(&scene_mut, skel);
                                 pose.evaluate(anim, t, skel);
                                 let sd = pose.skinning_data(&skel.skeleton);
                                 (Some(sd), pose.morph_weights)
