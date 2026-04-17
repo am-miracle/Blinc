@@ -115,6 +115,29 @@ impl SceneState {
             tracing::info!("densified rotation channels: {total_inserted} keyframes inserted");
         }
 
+        // Model-specific material overrides. The cutegirl export
+        // authors hair / eyelash / tearline / eye-occlusion as
+        // alpha_mode = Blend, which forces us onto the depth-write-off
+        // transparent pipeline — and without a per-triangle sort (see
+        // earlier attempts) the overlapping strands composite
+        // inconsistently and the face reads as see-through.
+        //
+        // Demoting those materials to Mask with a 0.5 cutoff gives
+        // stable rendering with hard strand edges, zero sort cost,
+        // and proper depth occlusion. The tradeoff is losing the
+        // feathered silhouette — fine for a morph-validation demo.
+        //
+        // Flip to `false` to A/B test the pure Blend path.
+        const DEMOTE_BLEND_TO_MASK: bool = true;
+        if DEMOTE_BLEND_TO_MASK {
+            blinc_gltf::apply_material_overrides(&mut scene, |_, _, _, mat| {
+                if mat.alpha_mode == blinc_core::AlphaMode::Blend {
+                    mat.alpha_mode = blinc_core::AlphaMode::Mask;
+                    mat.alpha_cutoff = 0.5;
+                }
+            });
+        }
+
         let duration = scene.animations.first().map(clip_duration).unwrap_or(0.0);
         let morph_mesh_count = scene
             .meshes
