@@ -39,7 +39,7 @@ blinc_platform_desktop = { path = "../../extensions/blinc_platform_desktop" }
 # stable releases.
 blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "ba7a1ce96a12fe608b771b932d07c34fdb7830cb", features = ["platform-assets"] }
 blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "acf133d44d03e34b73fab84e04e5ff9ef1d93de6" }
-blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = "12be3c954055d44322eaa1e82b957640fa27baff" }
+blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = "3e94941bd59bafcd23ad59e8db504a44fa85b4f5" }
 
 image.workspace = true
 tracing.workspace = true
