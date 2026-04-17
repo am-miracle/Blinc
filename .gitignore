@@ -86,3 +86,17 @@ vendor/
 # but are NOT tracked by this repo and NOT part of its Cargo workspace.
 /packages/
 
+# License-restricted demo assets. Bundled examples use CC-BY-4.0 or
+# more permissive so they can ship with Blinc's open-source
+# distribution. CC-BY-NC-SA-4.0 and similar non-commercial licenses
+# stay untracked — developers fetch them manually to iterate on
+# their local demo, and the relevant demo degrades gracefully when
+# the asset directory is missing.
+#
+# Pattern ignores the directory's contents but keeps `README.md` so
+# the install instructions + attribution requirements ship with the
+# repo. Gitignore negation only works when the parent directory
+# isn't itself ignored, hence the `/*` style.
+/examples/blinc_app_examples/examples/assets/3d/cutegirl_g1/*
+!/examples/blinc_app_examples/examples/assets/3d/cutegirl_g1/README.md
+
