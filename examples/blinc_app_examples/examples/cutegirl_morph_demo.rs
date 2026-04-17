@@ -265,19 +265,27 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                 .with_azimuth(std::f32::consts::PI)
                 .with_target(Vec3::new(0.0, 1.3, 0.0)),
         )
-        // Mostly-frontal key. The renderer's mesh pipeline only reads
-        // the first directional light, and a steep top-down direction
-        // (e.g. `-Y`-heavy) amplifies morph-animation noise — every
-        // time a cheek or brow rolls as a morph fires, `N·L` swings
-        // wildly and the skin flashes dark/bright. A flatter camera-
-        // relative angle means most visible surface normals sit in a
-        // narrow `N·L` band, so morph deltas only perturb shading
-        // subtly instead of strobing it. Upgrade to multi-light (fill
-        // + rim) is a renderer-side change; tracked for later.
+        // Three-point rig. The mesh shader now consumes up to 4
+        // directional lights (MAX_DIR_LIGHTS); the fill clamps the
+        // low end of `N·L` so morph-driven normal swings stop
+        // flashing the skin dark/bright, and the rim separates hair
+        // from the background.
         .with_light(Light::Directional {
-            direction: Vec3::new(-0.2, -0.3, -1.0).normalize(),
+            direction: Vec3::new(-0.3, -0.4, -1.0).normalize(),
             color: Color::WHITE,
-            intensity: 4.5,
+            intensity: 2.5,
+            cast_shadows: false,
+        })
+        .with_light(Light::Directional {
+            direction: Vec3::new(0.7, -0.2, -0.3).normalize(),
+            color: Color::rgba(1.0, 0.95, 0.9, 1.0),
+            intensity: 1.0,
+            cast_shadows: false,
+        })
+        .with_light(Light::Directional {
+            direction: Vec3::new(0.0, -0.1, 1.0).normalize(),
+            color: Color::rgba(0.9, 0.92, 1.0, 1.0),
+            intensity: 0.6,
             cast_shadows: false,
         });
 

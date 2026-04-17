@@ -22,8 +22,22 @@ struct Uniforms {
     light_view_proj: mat4x4<f32>,
     camera_pos: vec3<f32>,
     _pad: f32,
-    light_dir: vec3<f32>,
-    light_intensity: f32,
+    // Up to 4 directional lights. `light_count` tells the fragment
+    // shader how many slots are active; inactive slots are zeroed
+    // but the loop skips them via the bound. Shadow pass uses
+    // `lights[0]` (the key) only; fill / rim lights don't cast.
+    //
+    // Layout per light (std140 packing):
+    //   direction: vec3<f32>  (16-byte aligned)
+    //   intensity: f32        (fills the vec4 tail)
+    //   color:     vec3<f32>
+    //   _pad:      f32
+    // 32 bytes per light × 4 = 128 bytes total.
+    lights: array<DirLight, 4>,
+    light_count: u32,
+    _pad_lc0: f32,
+    _pad_lc1: f32,
+    _pad_lc2: f32,
     viewport_size: vec2<f32>,
     has_texture: f32,
     has_normal_map: f32,
@@ -39,8 +53,15 @@ struct Uniforms {
     // count, needed to index into the flattened delta array.
     morph_target_count: u32,
     morph_vertex_count: u32,
-    _pad_morph: u32,
-    _pad_morph_2: u32,
+    _pad_morph0: u32,
+    _pad_morph1: u32,
+}
+
+struct DirLight {
+    direction: vec3<f32>,
+    intensity: f32,
+    color: vec3<f32>,
+    _pad: f32,
 }
 
 struct MaterialUniforms {
@@ -385,47 +406,51 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     // ─── Cook-Torrance BRDF ──────────────────────────────────────────
     //
-    // Direct lighting from the single directional sun light. IBL
-    // (environment-based indirect lighting) lands in Stage 4 and
-    // adds a second contribution alongside this one.
-    let L = normalize(-uniforms.light_dir);
-    let V = normalize(uniforms.camera_pos - input.world_pos);
-    let H = normalize(L + V);
-
+    // Iterate over all active directional lights. `kd` is material-
+    // dependent and `f0` depends only on metallic/base_color, so we
+    // compute them once outside the loop. Per-light we recompute the
+    // half-vector + NdotL/NdotH/VdotH and the micro-facet BRDF terms.
+    //
     // `Nsh` is the shading normal (post-normal-map); `N` earlier in
     // the function is the raw geometric normal used to build the TBN
     // matrix. Use a distinct name here to avoid shadowing that one.
     let Nsh = shading_normal;
-    let n_dot_l = max(dot(Nsh, L), 0.0);
+    let V = normalize(uniforms.camera_pos - input.world_pos);
     let n_dot_v = max(dot(Nsh, V), 0.0001);
-    let n_dot_h = max(dot(Nsh, H), 0.0);
-    let v_dot_h = max(dot(V, H), 0.0);
 
     // Base reflectance: 4% for dielectrics, full base color for metals.
     // glTF convention: F0 = mix(0.04, baseColor, metallic).
     let f0 = mix(vec3(0.04), base_color.rgb, metallic);
 
-    // Cook-Torrance numerator: D * G * F
-    let d = d_ggx(n_dot_h, roughness);
-    let g = g_smith(n_dot_v, n_dot_l, roughness);
-    let f = f_schlick(v_dot_h, f0);
+    var direct_lighting = vec3(0.0);
+    // Cap the loop at the array bound so WGSL / naga can statically
+    // bound it; `light_count` is guaranteed ≤ array size by the CPU
+    // side, so the extra iterations are skipped via the `break`.
+    for (var li: u32 = 0u; li < 4u; li = li + 1u) {
+        if li >= uniforms.light_count { break; }
+        let light = uniforms.lights[li];
+        let L = normalize(-light.direction);
+        let H = normalize(L + V);
+        let n_dot_l = max(dot(Nsh, L), 0.0);
+        if n_dot_l <= 0.0 { continue; }
+        let n_dot_h = max(dot(Nsh, H), 0.0);
+        let v_dot_h = max(dot(V, H), 0.0);
 
-    // Specular BRDF: (D * G * F) / (4 * NdotL * NdotV)
-    // The 0.0001 clamp on n_dot_v above protects the denominator.
-    let specular_brdf = (d * g * f) / (4.0 * n_dot_l * n_dot_v + 0.0001);
+        // Cook-Torrance: D * G * F
+        let d = d_ggx(n_dot_h, roughness);
+        let g = g_smith(n_dot_v, n_dot_l, roughness);
+        let f = f_schlick(v_dot_h, f0);
 
-    // Diffuse BRDF: energy-conserving Lambertian.
-    // kd = (1 - F) attenuates diffuse where specular reflects, and
-    // multiplying by (1 - metallic) zeroes diffuse for pure metals —
-    // metals absorb all refracted light.
-    let kd = (vec3(1.0) - f) * (1.0 - metallic);
-    let diffuse_brdf = kd * base_color.rgb / 3.14159265;
+        // Specular BRDF: (D * G * F) / (4 * NdotL * NdotV).
+        let specular_brdf = (d * g * f) / (4.0 * n_dot_l * n_dot_v + 0.0001);
 
-    // Combined direct radiance. `n_dot_l` factor is the Lambert term
-    // from the rendering equation; `uniforms.light_intensity` is the
-    // sun's irradiance in arbitrary units tuned by the caller.
-    let direct_lighting =
-        (diffuse_brdf + specular_brdf) * uniforms.light_intensity * n_dot_l;
+        // Diffuse BRDF: energy-conserving Lambertian, zero for metals.
+        let kd = (vec3(1.0) - f) * (1.0 - metallic);
+        let diffuse_brdf = kd * base_color.rgb / 3.14159265;
+
+        direct_lighting = direct_lighting
+            + (diffuse_brdf + specular_brdf) * light.color * light.intensity * n_dot_l;
+    }
 
     // ─── Shadow ──────────────────────────────────────────────────────
     var shadow_factor = 1.0;
@@ -462,7 +487,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let prefiltered = textureSampleLevel(env_cubemap, env_sampler, R, roughness * max_mip).rgb;
     let env_fresnel = f_schlick(n_dot_v, f0);
 
-    let ambient_diffuse = kd * base_color.rgb * irradiance;
+    // For IBL, `kd` is computed against the view direction (not a
+    // specific light dir) — the per-light loop's `kd` is out of
+    // scope, so derive a view-space one here. Same formula:
+    // `kd = (1 - F_view) * (1 - metallic)`.
+    let kd_ambient = (vec3(1.0) - env_fresnel) * (1.0 - metallic);
+    let ambient_diffuse = kd_ambient * base_color.rgb * irradiance;
     let ambient_specular = prefiltered * env_fresnel;
     let ambient = (ambient_diffuse + ambient_specular) * ao;
 

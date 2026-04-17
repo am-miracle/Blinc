@@ -22,6 +22,7 @@ pub mod flow_pipeline;
 pub mod gradient_texture;
 pub mod image;
 pub mod mesh_pipeline;
+pub use mesh_pipeline::{DirectionalLight, MAX_DIR_LIGHTS};
 pub mod paint;
 pub mod particles;
 pub mod path;

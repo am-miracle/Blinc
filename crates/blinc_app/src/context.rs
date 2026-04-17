@@ -5587,7 +5587,7 @@ fn dispatch_pending_meshes(
             pending.camera.position.y,
             pending.camera.position.z,
         ];
-        let (light_dir, light_intensity) = first_directional_light(&pending.lights);
+        let lights = collect_directional_lights(&pending.lights);
         let model = mat4_to_array(&pending.transform);
 
         renderer.render_mesh_data_batched(
@@ -5596,8 +5596,7 @@ fn dispatch_pending_meshes(
             &model,
             &view_proj,
             camera_pos,
-            light_dir,
-            light_intensity,
+            &lights,
             shadow_matrix,
             pending.viewport,
             batch_index,
@@ -5697,6 +5696,40 @@ fn first_directional_light(lights: &[blinc_core::Light]) -> ([f32; 3], f32) {
         }
     }
     ([0.0, -1.0, 0.3], 0.8)
+}
+
+/// Collect every directional light for the mesh shader's multi-light
+/// array. Capped at the shader's `MAX_DIR_LIGHTS`; if the scene has
+/// no directional lights we hand back a single soft top-down default
+/// so the mesh never renders pitch-black.
+fn collect_directional_lights(
+    lights: &[blinc_core::Light],
+) -> Vec<blinc_gpu::DirectionalLight> {
+    let max = blinc_gpu::MAX_DIR_LIGHTS;
+    let mut out: Vec<blinc_gpu::DirectionalLight> = Vec::with_capacity(max);
+    for light in lights {
+        if out.len() >= max {
+            break;
+        }
+        if let blinc_core::Light::Directional {
+            direction,
+            color,
+            intensity,
+            ..
+        } = light
+        {
+            let d = direction.normalize();
+            out.push(blinc_gpu::DirectionalLight {
+                direction: [d.x, d.y, d.z],
+                intensity: *intensity,
+                color: [color.r, color.g, color.b],
+            });
+        }
+    }
+    if out.is_empty() {
+        out.push(blinc_gpu::DirectionalLight::DEFAULT);
+    }
+    out
 }
 
 /// Flatten a column-major `Mat4` to the `[f32; 16]` layout

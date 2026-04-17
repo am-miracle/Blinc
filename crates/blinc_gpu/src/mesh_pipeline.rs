@@ -46,6 +46,29 @@ pub(crate) struct MeshBufferCacheEntry {
     pub(crate) index_count: u32,
 }
 
+/// Upper bound on directional lights the mesh shader will sample.
+/// Matches the `DirLight` array size in mesh.wgsl.
+pub const MAX_DIR_LIGHTS: usize = 4;
+
+/// A single directional light for the mesh shader. `direction`
+/// points from the light toward the scene (i.e. the light's ray
+/// travel direction; the shader negates it to get the surface→light
+/// vector `L`).
+#[derive(Clone, Copy, Debug)]
+pub struct DirectionalLight {
+    pub direction: [f32; 3],
+    pub intensity: f32,
+    pub color: [f32; 3],
+}
+
+impl DirectionalLight {
+    pub const DEFAULT: Self = Self {
+        direction: [0.0, -1.0, 0.3],
+        intensity: 0.8,
+        color: [1.0, 1.0, 1.0],
+    };
+}
+
 /// Lazily-created 3D mesh rendering pipeline.
 pub(crate) struct MeshPipeline {
     pub(crate) pipeline: wgpu::RenderPipeline,
@@ -540,10 +563,10 @@ impl GpuRenderer {
                     cache: None,
                 });
 
-        // 3x mat4 (view_proj + model + light_view_proj) + camera + light + flags = 320 bytes
+        // 3x mat4 (192) + camera+pad (16) + lights[4] (128) + tail (64) = 400 bytes.
         let uniform_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Mesh Uniforms"),
-            size: 320,
+            size: 400,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1353,8 +1376,7 @@ impl GpuRenderer {
         transform: &[f32; 16],
         view_proj: &[f32; 16],
         camera_pos: [f32; 3],
-        light_dir: [f32; 3],
-        light_intensity: f32,
+        lights: &[DirectionalLight],
         light_view_proj: Option<&[f32; 16]>,
         viewport: Option<[f32; 4]>,
     ) {
@@ -1366,8 +1388,7 @@ impl GpuRenderer {
             transform,
             view_proj,
             camera_pos,
-            light_dir,
-            light_intensity,
+            lights,
             light_view_proj,
             viewport,
             0,
@@ -1399,8 +1420,7 @@ impl GpuRenderer {
         transform: &[f32; 16],
         view_proj: &[f32; 16],
         camera_pos: [f32; 3],
-        light_dir: [f32; 3],
-        light_intensity: f32,
+        lights: &[DirectionalLight],
         light_view_proj: Option<&[f32; 16]>,
         viewport: Option<[f32; 4]>,
         batch_index: usize,
@@ -1502,6 +1522,17 @@ impl GpuRenderer {
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
 
+        /// One directional light in WGSL std140 layout: vec3 + f32
+        /// pair, then vec3 + f32. Matches `DirLight` in mesh.wgsl.
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct ShaderDirLight {
+            direction: [f32; 3],
+            intensity: f32,
+            color: [f32; 3],
+            _pad: f32,
+        }
+
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         struct MeshUniforms {
@@ -1510,8 +1541,9 @@ impl GpuRenderer {
             light_view_proj: [f32; 16],
             camera_pos: [f32; 3],
             _pad: f32,
-            light_dir: [f32; 3],
-            light_intensity: f32,
+            lights: [ShaderDirLight; MAX_DIR_LIGHTS],
+            light_count: u32,
+            _pad_lc: [f32; 3],
             viewport_size: [f32; 2],
             has_texture: f32,
             has_normal_map: f32,
@@ -1527,7 +1559,8 @@ impl GpuRenderer {
             /// flattened `morph_deltas` array as
             /// `(target * morph_vertex_count + vertex_idx) * 2 + [0|1]`.
             morph_vertex_count: u32,
-            _pad_morph: [u32; 2],
+            _pad_morph0: u32,
+            _pad_morph1: u32,
         }
 
         let has_texture = if mesh.material.base_color_texture.is_some() {
@@ -1546,14 +1579,33 @@ impl GpuRenderer {
             0.0
         };
 
+        // Pack up to MAX_DIR_LIGHTS into the shader array. Callers
+        // passing more lights get them truncated (rare; tiny constant).
+        let mut shader_lights = [ShaderDirLight {
+            direction: [0.0, -1.0, 0.0],
+            intensity: 0.0,
+            color: [0.0, 0.0, 0.0],
+            _pad: 0.0,
+        }; MAX_DIR_LIGHTS];
+        let light_count = lights.len().min(MAX_DIR_LIGHTS);
+        for (slot, light) in shader_lights.iter_mut().zip(lights).take(light_count) {
+            *slot = ShaderDirLight {
+                direction: light.direction,
+                intensity: light.intensity,
+                color: light.color,
+                _pad: 0.0,
+            };
+        }
+
         let uniforms = MeshUniforms {
             view_proj: *view_proj,
             model: *transform,
             light_view_proj: light_view_proj.copied().unwrap_or(identity_mat),
             camera_pos,
             _pad: 0.0,
-            light_dir,
-            light_intensity,
+            lights: shader_lights,
+            light_count: light_count as u32,
+            _pad_lc: [0.0; 3],
             viewport_size: [self.viewport_size.0 as f32, self.viewport_size.1 as f32],
             has_texture,
             has_normal_map,
@@ -1567,7 +1619,8 @@ impl GpuRenderer {
             has_skinning: if mesh.skin.is_some() { 1.0 } else { 0.0 },
             morph_target_count: mesh.morph_targets.len() as u32,
             morph_vertex_count: mesh.vertices.len() as u32,
-            _pad_morph: [0; 2],
+            _pad_morph0: 0,
+            _pad_morph1: 0,
         };
 
         let mp = self.mesh_pipeline.as_ref().unwrap();
