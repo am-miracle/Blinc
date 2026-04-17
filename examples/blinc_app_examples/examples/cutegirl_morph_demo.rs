@@ -355,14 +355,21 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                 (draws, skinning, weights_by_node)
             };
 
+            // glTF 2.0 spec: a skinned mesh's joint matrices already
+            // produce world-space positions; the mesh node's own
+            // transform must NOT be re-applied on top. Passing the
+            // node's world transform double-rotates/translates the
+            // mesh — visible as striations + offset body parts.
+            // Non-skinned meshes use the node transform as usual.
+            let identity: Mat4 = Mat4::IDENTITY;
             for (node_idx, mesh_idx, node_skin, xf) in draws {
                 let morph = weights_by_node.get(&node_idx);
+                let is_skinned = node_skin.is_some();
+                let draw_xf = if is_skinned { identity } else { xf };
                 for prim in &state.base_meshes[mesh_idx] {
                     let has_morphs = !prim.morph_targets.is_empty();
-                    let is_skinned = node_skin.is_some();
                     if !has_morphs && !is_skinned {
-                        // Static primitive — reuse a fresh Arc and move on.
-                        ctx.draw_mesh_data(Arc::new(prim.clone()), xf);
+                        ctx.draw_mesh_data(Arc::new(prim.clone()), draw_xf);
                         continue;
                     }
                     let mut per_draw = prim.clone();
@@ -383,7 +390,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                             None => vec![0.0; target_count],
                         };
                     }
-                    ctx.draw_mesh_data(Arc::new(per_draw), xf);
+                    ctx.draw_mesh_data(Arc::new(per_draw), draw_xf);
                 }
             }
 
