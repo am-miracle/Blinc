@@ -115,23 +115,21 @@ impl SceneState {
             tracing::info!("densified rotation channels: {total_inserted} keyframes inserted");
         }
 
-        // Model-specific material overrides. The cutegirl export
-        // authors hair / eyelash / tearline / eye-occlusion as
-        // alpha_mode = Blend, which forces us onto the depth-write-off
-        // transparent pipeline — and without a per-triangle sort (see
-        // earlier attempts) the overlapping strands composite
-        // inconsistently and the face reads as see-through.
-        //
-        // Demoting those materials to Mask with a 0.5 cutoff gives
-        // stable rendering with hard strand edges, zero sort cost,
-        // and proper depth occlusion. The tradeoff is losing the
-        // feathered silhouette — fine for a morph-validation demo.
-        //
-        // Flip to `false` to A/B test the pure Blend path.
-        const DEMOTE_BLEND_TO_MASK: bool = true;
-        if DEMOTE_BLEND_TO_MASK {
-            blinc_gltf::apply_material_overrides(&mut scene, |_, _, _, mat| {
-                if mat.alpha_mode == blinc_core::AlphaMode::Blend {
+        // Model-specific material override: demote hair BLEND to MASK.
+        // Cutegirl's hair strands are the source of the overlapping-
+        // transparent flicker — thousands of thin triangles, no
+        // per-triangle sort, unstable composition. MASK with a 0.5
+        // cutoff gives stable hard-edged strands, proper depth, zero
+        // sort cost. We only do this for hair meshes; the thin
+        // decorator overlays (eyelash, tearline, eye-occlusion) must
+        // stay BLEND — they're designed to sit on top of the face skin
+        // *without* writing depth, and forcing them to MASK makes
+        // them depth-reject the face behind them.
+        const DEMOTE_HAIR_BLEND_TO_MASK: bool = true;
+        if DEMOTE_HAIR_BLEND_TO_MASK {
+            blinc_gltf::apply_material_overrides(&mut scene, |_, name, _, mat| {
+                let is_hair = name.map_or(false, |n| n.contains("Hair"));
+                if is_hair && mat.alpha_mode == blinc_core::AlphaMode::Blend {
                     mat.alpha_mode = blinc_core::AlphaMode::Mask;
                     mat.alpha_cutoff = 0.5;
                 }
