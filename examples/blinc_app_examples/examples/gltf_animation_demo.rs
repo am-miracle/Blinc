@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use blinc_animation::get_scheduler;
+use web_time::Instant;
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
 use blinc_canvas_kit::prelude::*;
@@ -53,6 +54,15 @@ struct AsyncHandle {
     input: InputState,
     autoplay_pending: Arc<AtomicBool>,
     auto_framer: AutoFramer,
+    /// Main-thread `Instant` of the previous render closure call.
+    /// Advanced in the render closure itself (not the scheduler bg
+    /// thread) so `Playback.time` stays phase-locked with vsync —
+    /// otherwise the scheduler's own tick cadence and the main
+    /// thread's paint cadence drift out of sync, producing visible
+    /// stutter on fast rotations (buster_drone's rotor blades were
+    /// the canary). `None` means "first frame since the scene
+    /// became available", so we record now and skip the advance.
+    last_frame: Arc<Mutex<Option<Instant>>>,
 }
 
 #[derive(Clone)]
@@ -204,6 +214,7 @@ impl AsyncHandle {
             input: InputState::new(),
             autoplay_pending: Arc::new(AtomicBool::new(false)),
             auto_framer: AutoFramer::new(),
+            last_frame: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -218,7 +229,7 @@ impl AsyncHandle {
         #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
             if let Some(state) = SceneState::try_load(path) {
-                register_scheduler_tick(&state);
+                register_scheduler_tick();
                 let _ = slot.set(state);
                 scene_ready.set(true);
                 get_scheduler().request_redraw();
@@ -232,7 +243,7 @@ impl AsyncHandle {
             wasm_bindgen_futures::spawn_local(async move {
                 loop {
                     if let Some(state) = SceneState::try_load(path) {
-                        register_scheduler_tick(&state);
+                        register_scheduler_tick();
                         let _ = slot.set(state);
                         scene_ready.set(true);
                         get_scheduler().request_redraw();
@@ -271,23 +282,16 @@ async fn sleep_ms(ms: u32) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Scheduler tick — advances `Playback.time` using real per-frame `dt`
-// and wakes the main thread for a redraw.
+// Scheduler tick — wakes the main thread for a redraw each frame.
+// `Playback.time` is advanced by the render closure instead (see
+// `AsyncHandle::last_frame`); doing the time math here would tick at
+// the scheduler's bg-thread cadence, which doesn't line up with vsync
+// and shows up as stroboscopic stutter on fast rotors.
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn register_scheduler_tick(state: &SceneState) {
-    let playback = state.playback.clone();
+fn register_scheduler_tick() {
     let scheduler_for_redraw = get_scheduler();
-    get_scheduler().register_tick_callback(move |dt: f32| {
-        {
-            let mut pb = playback.lock().unwrap();
-            if !pb.paused && pb.duration > 0.0 {
-                pb.time += dt;
-                if pb.time > pb.duration {
-                    pb.time = pb.time.rem_euclid(pb.duration);
-                }
-            }
-        }
+    get_scheduler().register_tick_callback(move |_dt: f32| {
         scheduler_for_redraw.request_redraw();
     });
 }
@@ -373,6 +377,20 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                 .auto_framer
                 .apply(&camera_signal_ren, state.scene.lock().unwrap().world_aabb());
 
+            // Main-thread `dt` from the previous paint. Advancing
+            // `pb.time` here (instead of the scheduler's tick
+            // callback) keeps playback phase-locked with vsync — the
+            // scheduler bg-thread runs on its own cadence and feeds
+            // a `dt` that doesn't match the wall-clock gap between
+            // adjacent renders, producing stutter on fast rotations.
+            let now = Instant::now();
+            let dt = {
+                let mut slot = handle_ren.last_frame.lock().unwrap();
+                let dt = slot.map(|prev| now.duration_since(prev).as_secs_f32()).unwrap_or(0.0);
+                *slot = Some(now);
+                dt
+            };
+
             let mut pb = state.playback.lock().unwrap();
             if handle_ren.input.is_key_just_pressed(KeyCode::SPACE) {
                 pb.paused = !pb.paused;
@@ -385,6 +403,12 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             }
             if handle_ren.input.is_key_down(KeyCode::RIGHT) {
                 pb.time += 1.0 / 60.0;
+            }
+            if !pb.paused && pb.duration > 0.0 {
+                pb.time += dt;
+                if pb.time > pb.duration {
+                    pb.time = pb.time.rem_euclid(pb.duration);
+                }
             }
             let t = pb.time;
             drop(pb);

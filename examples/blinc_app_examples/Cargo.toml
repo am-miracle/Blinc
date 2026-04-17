@@ -44,6 +44,13 @@ blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = 
 image.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Cross-target monotonic clock. `std::time::Instant` panics on
+# `wasm32-unknown-unknown`; `web_time::Instant` is the same API
+# backed by `performance.now()` on web, `Instant::now()` elsewhere.
+# Used by `gltf_animation_demo` to advance playback time on the
+# main thread in sync with the render closure (not the scheduler
+# bg thread, whose cadence doesn't line up with vsync).
+web-time = "1.1"
 
 # Wasm-only deps used by the `gltf_animation_demo` for its
 # `sleep_ms`-based background loader loop. The demo spawns
