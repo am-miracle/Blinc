@@ -520,6 +520,7 @@ impl SceneKit3D {
             indices,
             material: material.into(),
             skin: None,
+            morph_targets: Vec::new(),
         });
         let mut objects = self.objects.write().unwrap();
         let handle = MeshHandle(objects.len());

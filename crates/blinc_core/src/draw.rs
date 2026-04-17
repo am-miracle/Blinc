@@ -762,6 +762,42 @@ pub struct MeshData {
     /// When provided, the GPU applies bone transforms to each vertex
     /// based on joint indices and weights.
     pub skin: Option<SkinningData>,
+    /// Per-primitive morph targets (blend shapes). Each entry is a
+    /// set of per-vertex deltas (position, optionally normal /
+    /// tangent) authored against the base `vertices` array. At
+    /// runtime the renderer computes
+    /// `final_vertex = base_vertex + Σ weights[i] · morph_targets[i]`
+    /// using weights provided by the animation pipeline
+    /// (`blinc_skeleton::Pose::morph_weights`). Empty for meshes
+    /// without morph data — which is the common case.
+    pub morph_targets: Vec<MorphTarget>,
+}
+
+/// One morph target (aka blend shape) — per-vertex deltas that layer
+/// on top of the base mesh. A mesh can have any number of morph
+/// targets; each carries a weight ∈ [0, 1] (or outside that range
+/// for over/undershoot), and the final rendered vertex is the base
+/// plus a weighted sum of the targets.
+///
+/// `delta_positions.len()` must equal `MeshData::vertices.len()`;
+/// the renderer uses positional identity between the base vertex at
+/// index `v` and `delta_positions[v]`. Normal and tangent deltas
+/// follow the same convention and are optional — when a target
+/// only animates positions (a character's cheek bulging with no
+/// meaningful shading change) leaving the normal / tangent slots
+/// empty saves memory.
+#[derive(Clone, Debug, Default)]
+pub struct MorphTarget {
+    /// Per-vertex position delta: final_position[v] += weight ·
+    /// delta_positions[v].
+    pub delta_positions: Vec<[f32; 3]>,
+    /// Optional per-vertex normal delta. Same length as
+    /// `delta_positions` when present.
+    pub delta_normals: Option<Vec<[f32; 3]>>,
+    /// Optional per-vertex tangent delta (xyz — the handedness `w`
+    /// of the base vertex tangent isn't morphed). Same length as
+    /// `delta_positions` when present.
+    pub delta_tangents: Option<Vec<[f32; 3]>>,
 }
 
 /// PBR material for mesh rendering.
