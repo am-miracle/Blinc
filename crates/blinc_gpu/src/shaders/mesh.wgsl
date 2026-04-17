@@ -307,6 +307,34 @@ fn parallax_mapping(uv: vec2<f32>, view_dir_ts: vec3<f32>, scale: f32) -> vec2<f
     return mix(current_uv, prev_uv, weight);
 }
 
+/// Depth-only alpha-tested fragment pass.
+///
+/// Used by the blend depth prepass: samples base-color alpha and
+/// discards anything below `material.alpha_cutoff` (default 0.5 for
+/// BLEND materials that don't otherwise specify). The pipeline it's
+/// paired with writes depth and masks color writes, so the returned
+/// colour is irrelevant — `discard` is the only observable effect.
+///
+/// Stripping every non-alpha path (lighting, IBL, shadow sampling,
+/// normal mapping, parallax, morph renormalisation) keeps this
+/// fragment cheap; most of the prepass cost is depth-buffer bandwidth.
+@fragment
+fn fs_alpha_prepass(input: VertexOutput) -> @location(0) vec4<f32> {
+    var base_color = material.base_color * input.vertex_color;
+    if uniforms.has_texture > 0.5 {
+        base_color = base_color * textureSample(base_texture, base_sampler, input.uv);
+    }
+    // Defensive floor on the cutoff: if the asset left it at 0 (glTF
+    // default for non-Mask materials), anything with any alpha at
+    // all would survive. Use 0.5 as the effective minimum — same
+    // convention the auto-demote in blinc_gltf uses.
+    let cutoff = max(material.alpha_cutoff, 0.5);
+    if base_color.a < cutoff {
+        discard;
+    }
+    return vec4(0.0, 0.0, 0.0, 1.0);
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var uv = input.uv;
