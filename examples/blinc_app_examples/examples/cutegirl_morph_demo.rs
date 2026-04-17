@@ -329,16 +329,21 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                         // would need one SkinningData per skin index.
                         match scene_mut.skeletons.first() {
                             Some(skel) => {
-                                // Seed from the scene's current joint
-                                // TRS (animate_scene_nodes just wrote
-                                // them) — bones not targeted by the
-                                // clip keep their rest pose instead of
-                                // collapsing to identity.
-                                let mut pose =
-                                    blinc_skeleton::Pose::from_scene(&scene_mut, skel);
-                                pose.evaluate(anim, t, skel);
-                                let sd = pose.skinning_data(&skel.skeleton);
-                                (Some(sd), pose.morph_weights)
+                                // Use scene_skinning_data — reads
+                                // joint worlds via the full node graph
+                                // (compute_world_transforms), so
+                                // Armature / offset / pivot glue nodes
+                                // between joints are folded in. The
+                                // Bone::parent-only path miss those
+                                // transforms and plants the character
+                                // at origin with wrong scale.
+                                let sd =
+                                    blinc_skeleton::scene_skinning_data(&scene_mut, skel);
+                                // Separately sample morph weights —
+                                // no Pose needed for that side-table.
+                                let morphs =
+                                    blinc_skeleton::animate_scene_morph_weights(anim, t);
+                                (Some(sd), morphs)
                             }
                             None => (None, std::collections::HashMap::new()),
                         }
