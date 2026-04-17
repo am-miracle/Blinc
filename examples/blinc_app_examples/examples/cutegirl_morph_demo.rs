@@ -40,9 +40,7 @@ use blinc_canvas_kit::prelude::*;
 use blinc_canvas_kit::AutoFramer;
 use blinc_core::events::KeyCode;
 use blinc_core::{Color, DrawContext, Light, Mat4, MeshData, State, Vec3};
-use blinc_gltf::{
-    AnimatedProperty, AnimationSampler, GltfAnimation, GltfScene, KeyframeValues,
-};
+use blinc_gltf::{GltfAnimation, GltfScene};
 use blinc_input::{DivInputExt, InputState};
 use blinc_layout::prelude::text;
 use web_time::Instant;
@@ -207,66 +205,6 @@ fn register_scheduler_tick() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Morph-weight sampling
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Sample a `MorphWeights` channel at `t`. Scalars are laid out as
-/// `times.len() * weight_count` contiguous f32s — one weight block per
-/// keyframe. Clamps at both ends and linearly interpolates between
-/// bracketing keyframes.
-fn sample_weights(sampler: &AnimationSampler, t: f32) -> Option<Vec<f32>> {
-    let scalars = match &sampler.values {
-        KeyframeValues::Scalars(v) => v,
-        _ => return None,
-    };
-    let times = &sampler.times;
-    if times.is_empty() || scalars.is_empty() {
-        return None;
-    }
-    let wc = scalars.len() / times.len();
-    if wc == 0 {
-        return None;
-    }
-    if t <= times[0] {
-        return Some(scalars[..wc].to_vec());
-    }
-    let last = times.len() - 1;
-    if t >= times[last] {
-        return Some(scalars[last * wc..(last + 1) * wc].to_vec());
-    }
-    let i = times.partition_point(|&x| x <= t) - 1;
-    let t0 = times[i];
-    let t1 = times[i + 1];
-    let denom = (t1 - t0).max(1e-6);
-    let u = ((t - t0) / denom).clamp(0.0, 1.0);
-    let a = &scalars[i * wc..(i + 1) * wc];
-    let b = &scalars[(i + 1) * wc..(i + 2) * wc];
-    let mut out = Vec::with_capacity(wc);
-    for k in 0..wc {
-        out.push(a[k] * (1.0 - u) + b[k] * u);
-    }
-    Some(out)
-}
-
-/// Walk the clip, returning `(node_index → weights)` for every
-/// `MorphWeights` channel that samples non-empty at `t`.
-fn sample_all_morph_weights(
-    clip: &GltfAnimation,
-    t: f32,
-) -> std::collections::HashMap<usize, Vec<f32>> {
-    let mut out = std::collections::HashMap::new();
-    for ch in &clip.channels {
-        if ch.target.property != AnimatedProperty::MorphWeights {
-            continue;
-        }
-        if let Some(w) = sample_weights(&ch.sampler, t) {
-            out.insert(ch.target.node, w);
-        }
-    }
-    out
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -384,7 +322,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                     .as_ref()
                     .map(|anim| {
                         blinc_skeleton::animate_scene_nodes(&mut scene_mut, anim, t);
-                        sample_all_morph_weights(anim, t)
+                        blinc_skeleton::animate_scene_morph_weights(anim, t)
                     })
                     .unwrap_or_default();
                 let world = scene_mut.compute_world_transforms();

@@ -1657,10 +1657,15 @@ impl GpuRenderer {
         //
         // Deltas are static after glTF parse, so we upload once per mesh
         // and reuse across every subsequent draw. Keyed by the
-        // `Arc<MeshData>` raw pointer — scenes that recycle the same
-        // Arcs each frame (the common case) hit the cache.
+        // `Arc<Vec<MorphTarget>>` inner pointer — not `&Arc<MeshData>`,
+        // which would be a stack address that varies per call, and not
+        // `Arc::as_ptr(mesh)`, which a per-frame `Arc::new(mesh.clone())`
+        // would rotate every frame. The morph_targets Arc is stable
+        // across shallow mesh clones (the common per-draw pattern for
+        // stamping fresh weights), so keying on it means animated
+        // scenes hit the cache every frame.
         let morph_cache_key: Option<usize> = if !mesh.morph_targets.is_empty() {
-            Some(mesh as *const _ as usize)
+            Some(std::sync::Arc::as_ptr(&mesh.morph_targets) as usize)
         } else {
             None
         };
