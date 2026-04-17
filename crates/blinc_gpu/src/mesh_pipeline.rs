@@ -49,6 +49,14 @@ pub(crate) struct MeshBufferCacheEntry {
 /// Lazily-created 3D mesh rendering pipeline.
 pub(crate) struct MeshPipeline {
     pub(crate) pipeline: wgpu::RenderPipeline,
+    /// Same pipeline as `pipeline` but with `depth_write_enabled: false`.
+    /// Selected when a mesh's material has `AlphaMode::Blend` — writing
+    /// depth from a transparent surface would depth-reject opaque
+    /// fragments rendered later behind it, causing the background to
+    /// bleed through (e.g. transparent hair strands obscuring the face
+    /// skin beneath them). Opaque and Mask materials still use
+    /// `pipeline` so they z-occlude correctly.
+    pub(crate) blend_pipeline: wgpu::RenderPipeline,
     pub(crate) bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) uniform_buffer: wgpu::Buffer,
     pub(crate) material_buffer: wgpu::Buffer,
@@ -437,7 +445,7 @@ impl GpuRenderer {
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[vertex_layout],
+                    buffers: &[vertex_layout.clone()],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -490,6 +498,47 @@ impl GpuRenderer {
                 multiview: None,
                 cache: None,
             });
+
+        // Blend variant — identical except depth writes are disabled.
+        // Drawn for BLEND-mode materials only; opaque / mask still
+        // use `pipeline` so they occlude each other correctly.
+        let blend_pipeline =
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Mesh Pipeline (Blend)"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[vertex_layout.clone()],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: false,
+                        depth_compare: wgpu::CompareFunction::Less,
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
+                    cache: None,
+                });
 
         // 3x mat4 (view_proj + model + light_view_proj) + camera + light + flags = 320 bytes
         let uniform_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1000,6 +1049,7 @@ impl GpuRenderer {
 
         self.mesh_pipeline = Some(MeshPipeline {
             pipeline,
+            blend_pipeline,
             bind_group_layout,
             uniform_buffer,
             material_buffer,
@@ -2092,7 +2142,11 @@ impl GpuRenderer {
                 ..Default::default()
             });
 
-            pass.set_pipeline(&mp.pipeline);
+            let selected_pipeline = match mesh.material.alpha_mode {
+                blinc_core::draw::AlphaMode::Blend => &mp.blend_pipeline,
+                _ => &mp.pipeline,
+            };
+            pass.set_pipeline(selected_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
             pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);

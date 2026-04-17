@@ -367,7 +367,23 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             // mesh — visible as striations + offset body parts.
             // Non-skinned meshes use the node transform as usual.
             let identity: Mat4 = Mat4::IDENTITY;
-            for (node_idx, mesh_idx, node_skin, xf) in draws {
+
+            // Sort opaque/mask draws before blend draws. Blend
+            // materials (hair, eyelashes, tearlines) don't write
+            // depth — they need the opaque depth already laid down
+            // so they z-reject where the face is in front. Without
+            // this order, transparent hair rendered first would
+            // alpha-blend against the background, and opaque face
+            // drawn later wouldn't correct the premultiplied output.
+            let mut sorted: Vec<_> = draws.into_iter().collect();
+            sorted.sort_by_key(|(_, mesh_idx, _, _)| {
+                state.base_meshes[*mesh_idx]
+                    .iter()
+                    .any(|p| matches!(p.material.alpha_mode, blinc_core::AlphaMode::Blend))
+                    as u8
+            });
+
+            for (node_idx, mesh_idx, node_skin, xf) in sorted {
                 let morph = weights_by_node.get(&node_idx);
                 let is_skinned = node_skin.is_some();
                 let draw_xf = if is_skinned { identity } else { xf };
