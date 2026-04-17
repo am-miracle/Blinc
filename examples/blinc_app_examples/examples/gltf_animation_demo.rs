@@ -28,7 +28,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use blinc_animation::get_scheduler;
-use web_time::Instant;
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
 use blinc_canvas_kit::prelude::*;
@@ -38,6 +37,7 @@ use blinc_core::{Color, DrawContext, Light, Mat4, MeshData, State, Vec3};
 use blinc_gltf::{GltfAnimation, GltfScene};
 use blinc_input::{DivInputExt, InputState};
 use blinc_layout::prelude::text;
+use web_time::Instant;
 
 // Workspace-relative — `cargo run` resolves from the repo root.
 const GLTF_PATH: &str = "examples/blinc_app_examples/examples/assets/3d/buster_drone/scene.gltf";
@@ -386,7 +386,9 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             let now = Instant::now();
             let dt = {
                 let mut slot = handle_ren.last_frame.lock().unwrap();
-                let dt = slot.map(|prev| now.duration_since(prev).as_secs_f32()).unwrap_or(0.0);
+                let dt = slot
+                    .map(|prev| now.duration_since(prev).as_secs_f32())
+                    .unwrap_or(0.0);
                 *slot = Some(now);
                 dt
             };
