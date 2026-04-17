@@ -49,13 +49,6 @@ use web_time::Instant;
 const GLTF_PATH: &str =
     "examples/blinc_app_examples/examples/assets/3d/cutegirl_g1/scene.gltf";
 
-/// Shared bundled HDRI — gives a real IBL environment so the
-/// character's PBR skin reads consistently across morph frames instead
-/// of drifting as per-vertex normals shift and the procedural default
-/// cubemap returns wildly different ambient values per sampled angle.
-const HDR_PATH: &str =
-    "examples/blinc_app_examples/examples/assets/3d/rogland_clear_night_2k.hdr";
-
 const VIEWPORT_ID: &str = "cutegirl-morph-viewport";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,29 +185,11 @@ impl AsyncHandle {
         }
     }
 
-    fn spawn_load(
-        &self,
-        path: &'static str,
-        hdr_path: &'static str,
-        kit: SceneKit3D,
-        scene_ready: State<bool>,
-    ) {
+    fn spawn_load(&self, path: &'static str, scene_ready: State<bool>) {
         let slot = self.slot.clone();
 
         #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
-            // HDR is independent of the glTF parse — load + install
-            // first so the kit has a stable environment before the
-            // first animated frame renders.
-            if let Ok(hdr_bytes) = blinc_platform::assets::load_asset(hdr_path) {
-                tracing::info!("cutegirl_morph_demo: HDRI ({} bytes)", hdr_bytes.len());
-                kit.set_hdri(&hdr_bytes, 256);
-            } else {
-                tracing::warn!(
-                    "cutegirl_morph_demo: HDR not found at {hdr_path} — \
-                     IBL falls back to the procedural cubemap"
-                );
-            }
             if let Some(state) = SceneState::try_load(path) {
                 register_scheduler_tick();
                 let _ = slot.set(state);
@@ -225,7 +200,7 @@ impl AsyncHandle {
 
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (path, hdr_path, kit, scene_ready, slot);
+            let _ = (path, scene_ready, slot);
         }
     }
 
@@ -293,16 +268,12 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             cast_shadows: false,
         });
 
-    // Handle creation depends on kit (so the background loader can
-    // install the HDRI). Kept late so persisted-state keyed init runs
-    // once per process.
     let handle = ctx
         .use_state_keyed("cutegirl_morph_demo_handle", {
             let scene_ready = scene_ready.clone();
-            let kit = kit.clone();
             move || {
                 let handle = AsyncHandle::new();
-                handle.spawn_load(GLTF_PATH, HDR_PATH, kit, scene_ready);
+                handle.spawn_load(GLTF_PATH, scene_ready);
                 handle
             }
         })
