@@ -136,30 +136,15 @@ impl SceneState {
             });
         }
 
-        // Rough-up skin materials. Cutegirl ships with a very low
-        // roughness authored on Std_Skin_Head (the asset was tuned for
-        // an offline PBR renderer with specific tonemapping + SSS).
-        // In our pipeline that reads as wet / vinyl skin. Bumping the
-        // roughness factor ×2.5 pushes the shader's clamped final
-        // roughness toward 1.0 even when the metallic-roughness
-        // texture authors very smooth values per-texel.
-        //
-        // Meshes matched by index — cutegirl numbers its face parts
-        // ("0" = tongue, "1" = face skin, "3"–"6" = eye details). Only
-        // the face skin gets the strongest roughness bump; tongue/lips
-        // are on the face mesh and roughening them helps them too.
-        const FACE_MESH_INDEX: usize = 1;
-        blinc_gltf::apply_material_overrides(&mut scene, |mesh_idx, _, _, mat| {
-            if mesh_idx == FACE_MESH_INDEX {
-                // Skin is dielectric — force metallic off in case the
-                // authored factor bleeds any metal contribution.
-                mat.metallic = 0.0;
-                // ×2.5 on the scalar. Shader clamps to [0.04, 1.0]
-                // after multiplying with the MR texture, so this
-                // effectively saturates toward fully matte.
-                mat.roughness = (mat.roughness * 2.5).min(3.0);
-            }
-        });
+        // TODO: rough-up skin to reduce the authored-for-offline
+        // "wet / vinyl" look. Needs a stable per-material match
+        // (Material currently carries no name) and a tested factor;
+        // a naive `mesh_idx == 1` + `×2.5` override made the face
+        // disappear in practice, likely because the texture-sampled
+        // metallic channel was getting zeroed in a way the shader
+        // didn't expect. Leaving the skin glossy until we have a
+        // better hook — probably: add a `name: Option<String>` field
+        // on Material parsed from glTF, then match by "Std_Skin_*".
 
         let duration = scene.animations.first().map(clip_duration).unwrap_or(0.0);
         let morph_mesh_count = scene
