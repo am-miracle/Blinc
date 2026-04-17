@@ -19,11 +19,12 @@
 //! the loading overlay simply never dismisses and a polite error is
 //! logged. Install instructions live in the asset's README.
 //!
-//! Skinning is not hooked up here (Pose → joint matrices → `MeshData.skin`
-//! is future work); the body will read as a rest pose while the face
-//! blend shapes animate. That is sufficient to validate the morph GPU
-//! path: moving face parts with a static body prove the vertex-stage
-//! delta blend is reaching the shader.
+//! Skinning is wired through `blinc_skeleton::Pose::skinning_data` —
+//! every mesh whose node carries a skin index gets a per-frame
+//! `SkinningData`. Cutegirl has a single skeleton shared by all
+//! skinned meshes, so we build one `Pose`/`SkinningData` per frame and
+//! clone into each draw. Multi-skeleton assets would index by
+//! `node.skin` and build one per skin.
 //!
 //! ```sh
 //! cargo run -p blinc_app_examples --example cutegirl_morph_demo \
@@ -313,53 +314,69 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             let t = pb.time;
             drop(pb);
 
-            // Sample node TRS + per-node morph weights for this frame.
-            let (draws, weights_by_node): (Vec<(usize, usize, Mat4)>, _) = {
+            // Per-frame sampling: node TRS, the pose (for skinning),
+            // and morph weights. Done inside one scene lock so borrows
+            // don't overlap; outputs are owned so we can drop the lock
+            // before dispatching draws.
+            let (draws, skinning, weights_by_node) = {
                 let mut scene_mut = state.scene.lock().unwrap();
-                let weights_by_node = state
-                    .animation
-                    .as_ref()
-                    .as_ref()
-                    .map(|anim| {
+                let (skinning, weights_by_node) = match state.animation.as_ref().as_ref() {
+                    Some(anim) => {
                         blinc_skeleton::animate_scene_nodes(&mut scene_mut, anim, t);
-                        blinc_skeleton::animate_scene_morph_weights(anim, t)
-                    })
-                    .unwrap_or_default();
+                        // One skeleton — assume every skinned mesh in
+                        // the scene shares it (true for cutegirl and
+                        // most character exports). Multi-skin assets
+                        // would need one SkinningData per skin index.
+                        match scene_mut.skeletons.first() {
+                            Some(skel) => {
+                                let mut pose = blinc_skeleton::Pose::rest(&skel.skeleton);
+                                pose.evaluate(anim, t, skel);
+                                let sd = pose.skinning_data(&skel.skeleton);
+                                (Some(sd), pose.morph_weights)
+                            }
+                            None => (None, std::collections::HashMap::new()),
+                        }
+                    }
+                    None => (None, std::collections::HashMap::new()),
+                };
                 let world = scene_mut.compute_world_transforms();
-                // (node_index, mesh_index, world_transform) — node_index
-                // is needed so we can look up per-node morph weights.
-                let draws = scene_mut
+                let draws: Vec<(usize, usize, Option<usize>, Mat4)> = scene_mut
                     .nodes
                     .iter()
                     .enumerate()
-                    .filter_map(|(i, n)| n.mesh.map(|m| (i, m, world[i])))
+                    .filter_map(|(i, n)| n.mesh.map(|m| (i, m, n.skin, world[i])))
                     .collect();
-                (draws, weights_by_node)
+                (draws, skinning, weights_by_node)
             };
 
-            for (node_idx, mesh_idx, xf) in draws {
-                let sampled = weights_by_node.get(&node_idx);
+            for (node_idx, mesh_idx, node_skin, xf) in draws {
+                let morph = weights_by_node.get(&node_idx);
                 for prim in &state.base_meshes[mesh_idx] {
-                    if prim.morph_targets.is_empty() {
-                        // No morphs → skip the per-frame clone; reuse
-                        // a single Arc for the whole session.
+                    let has_morphs = !prim.morph_targets.is_empty();
+                    let is_skinned = node_skin.is_some();
+                    if !has_morphs && !is_skinned {
+                        // Static primitive — reuse a fresh Arc and move on.
                         ctx.draw_mesh_data(Arc::new(prim.clone()), xf);
                         continue;
                     }
-                    // Shallow clone — Arc<Vec> inner buffers refcount-bump.
                     let mut per_draw = prim.clone();
-                    // Match the target count; missing sampled block →
-                    // zero weights (rest pose for this primitive).
-                    let target_count = prim.morph_targets.len();
-                    per_draw.morph_weights = match sampled {
-                        Some(w) if w.len() >= target_count => w[..target_count].to_vec(),
-                        Some(w) => {
-                            let mut v = w.clone();
-                            v.resize(target_count, 0.0);
-                            v
+                    if is_skinned {
+                        if let Some(sd) = skinning.as_ref() {
+                            per_draw.skin = Some(sd.clone());
                         }
-                        None => vec![0.0; target_count],
-                    };
+                    }
+                    if has_morphs {
+                        let target_count = prim.morph_targets.len();
+                        per_draw.morph_weights = match morph {
+                            Some(w) if w.len() >= target_count => w[..target_count].to_vec(),
+                            Some(w) => {
+                                let mut v = w.clone();
+                                v.resize(target_count, 0.0);
+                                v
+                            }
+                            None => vec![0.0; target_count],
+                        };
+                    }
                     ctx.draw_mesh_data(Arc::new(per_draw), xf);
                 }
             }
