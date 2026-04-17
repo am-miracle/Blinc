@@ -258,13 +258,26 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             OrbitCamera::default()
                 .with_distance(3.0)
                 .with_elevation(0.15)
-                .with_azimuth(0.0)
+                // Start facing the character's front. The cutegirl export
+                // lands facing roughly +Z; default azimuth = 0 puts the
+                // camera on that same side, so the first frame shows the
+                // back of the head. π rotates around to the front.
+                .with_azimuth(std::f32::consts::PI)
                 .with_target(Vec3::new(0.0, 1.3, 0.0)),
         )
+        // Mostly-frontal key. The renderer's mesh pipeline only reads
+        // the first directional light, and a steep top-down direction
+        // (e.g. `-Y`-heavy) amplifies morph-animation noise — every
+        // time a cheek or brow rolls as a morph fires, `N·L` swings
+        // wildly and the skin flashes dark/bright. A flatter camera-
+        // relative angle means most visible surface normals sit in a
+        // narrow `N·L` band, so morph deltas only perturb shading
+        // subtly instead of strobing it. Upgrade to multi-light (fill
+        // + rim) is a renderer-side change; tracked for later.
         .with_light(Light::Directional {
-            direction: Vec3::new(-0.4, -1.0, -0.3).normalize(),
+            direction: Vec3::new(-0.2, -0.3, -1.0).normalize(),
             color: Color::WHITE,
-            intensity: 4.0,
+            intensity: 4.5,
             cast_shadows: false,
         });
 
