@@ -208,11 +208,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
     // panics on `wasm32-unknown-unknown`; `web_time::Instant` wraps
     // `performance.now()` with the same API. Detected by source
     // scan so demos that don't animate don't pay the extra dep.
-    (
-        "web_time::",
-        "web-time",
-        r#""1.1""#,
-    ),
+    ("web_time::", "web-time", r#""1.1""#),
 ];
 
 // ============================================================================
