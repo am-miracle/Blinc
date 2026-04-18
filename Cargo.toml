@@ -221,3 +221,27 @@ blinc_canvas_kit = { path = "crates/blinc_canvas_kit" }
 blinc_layout = { path = "crates/blinc_layout" }
 blinc_platform = { path = "crates/blinc_platform" }
 
+# Local-dev redirects for the /packages/* downstream repos. While
+# editing blinc_gltf / blinc_skeleton / blinc_input locally, every
+# reference to their pinned git revs (from examples/Cargo.toml and
+# transitively from other downstream repos) resolves to the local
+# checkout instead — no push + rev-bump cycle for iteration.
+#
+# NOTE for CI: these patches require `packages/<crate>/Cargo.toml`
+# to exist on disk. The `packages/` directory is gitignored, so CI
+# runners that only clone Blinc itself will fail cargo resolution.
+# Two ways to handle that when we get back to CI:
+#   a) Make `packages/*` git submodules; CI clones with
+#      `--recurse-submodules`.
+#   b) Add a CI pre-step that strips this block (or a sibling
+#      `Cargo.ci.toml` with the patches removed) before build.
+# The win from local iteration outweighs the CI setup cost.
+[patch."https://github.com/project-blinc/blinc_gltf.git"]
+blinc_gltf = { path = "packages/blinc_gltf" }
+
+[patch."https://github.com/project-blinc/blinc_skeleton.git"]
+blinc_skeleton = { path = "packages/blinc_skeleton" }
+
+[patch."https://github.com/project-blinc/blinc_input.git"]
+blinc_input = { path = "packages/blinc_input" }
+
