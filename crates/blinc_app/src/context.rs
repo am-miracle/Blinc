@@ -35,6 +35,32 @@ const IMAGE_CACHE_CAPACITY: usize = 256;
 /// Maximum number of parsed SVG documents to cache
 const SVG_CACHE_CAPACITY: usize = 128;
 
+/// Decide whether an image entering the cache should be BC-compressed.
+///
+/// BC1/BC3's 4×4 block quantization is designed for large
+/// photographic content where artifacts hide in detail. It's a
+/// visibly bad fit for:
+///
+/// - **Emoji sprites** (`emoji://...`) — tiny color glyphs with
+///   smooth gradients, sharp edges, and feathered alpha. Blocking
+///   artifacts produce obvious banding and ringing.
+/// - **Small icons / logos** — same failure mode at smaller
+///   scale. Anywhere a designer cared about crispness is somewhere
+///   BC will look wrong.
+///
+/// Gate compression behind a minimum dimension floor of 256 px
+/// and a hard skip for the `emoji://` scheme. Large photographic
+/// content (product shots, avatars at reasonable size, wallpaper)
+/// still goes through BC and keeps the VRAM win; small UI sprites
+/// stay lossless.
+fn bc_eligible(source_uri: &str, width: u32, height: u32) -> bool {
+    const MIN_DIM: u32 = 256;
+    if source_uri.starts_with("emoji://") {
+        return false;
+    }
+    width >= MIN_DIM && height >= MIN_DIM
+}
+
 /// Intersect two axis-aligned clip rects [x, y, w, h], returning their overlap.
 fn intersect_clip_rects(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     let x1 = a[0].max(b[0]);
@@ -1148,7 +1174,8 @@ impl RenderContext {
                             // behavior so we don't accidentally
                             // change sampling here — the 2D image
                             // pipeline treats bytes as linear.
-                            let has_bc = self.renderer.has_texture_compression_bc();
+                            let has_bc = self.renderer.has_texture_compression_bc()
+                                && bc_eligible(placeholder_src, data.width(), data.height());
                             let gpu_image = self.image_ctx.create_image_maybe_compressed(
                                 data.pixels(),
                                 data.width(),
@@ -1228,8 +1255,12 @@ impl RenderContext {
             // Create GPU texture — compress to BC1/BC3 when the
             // device supports it so the image cache's VRAM
             // footprint scales with asset count instead of blowing
-            // past the LRU budget on 4K dashboards.
-            let has_bc = self.renderer.has_texture_compression_bc();
+            // past the LRU budget on 4K dashboards. `bc_eligible`
+            // filters out cases where BC's 4×4-block quantization
+            // would be visually unacceptable (emoji sprites, small
+            // icons with smooth gradients).
+            let has_bc = self.renderer.has_texture_compression_bc()
+                && bc_eligible(&image.source, image_data.width(), image_data.height());
             let gpu_image = self.image_ctx.create_image_maybe_compressed(
                 image_data.pixels(),
                 image_data.width(),

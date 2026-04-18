@@ -8808,6 +8808,14 @@ impl GpuRenderer {
         // otherwise to preserve the alpha channel the mask depends
         // on. Falls back to uncompressed upload on devices without
         // BC support or in builds without the `bc-encode` feature.
+        //
+        // The 256-px floor matches the 2D image cache's
+        // `bc_eligible` heuristic: BC's 4×4 block quantization
+        // puts visible banding into small alpha ramps, which is
+        // exactly the signal a mask carries. Large masks
+        // (full-viewport gradient overlays, photo-style alpha
+        // cutouts) still compress.
+        let bc_ok = self.has_texture_compression_bc && width >= 256 && height >= 256;
         let label = format!("mask:{}", url);
         let gpu_img = crate::image::GpuImage::from_rgba_maybe_compressed(
             &self.device,
@@ -8816,7 +8824,7 @@ impl GpuRenderer {
             width,
             height,
             false,
-            self.has_texture_compression_bc,
+            bc_ok,
             Some(&label),
         );
         self.mask_image_cache.insert(url.to_string(), gpu_img);
