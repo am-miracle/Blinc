@@ -914,26 +914,6 @@ impl Default for Material {
     }
 }
 
-/// Texture data for materials.
-///
-/// Stores CPU-side RGBA8 pixel bytes plus the dimensions. Cloning a
-/// `TextureData` (and therefore the `Material` that contains it) is a
-/// refcount bump, not a pixel-data copy — multiple materials that
-/// reference the same decoded image share one backing buffer.
-///
-/// The CPU buffer is wrapped in `Mutex<Option<Arc<[u8]>>>` and lives
-/// behind an outer `Arc` shared across clones. That lets the GPU
-/// renderer drop the CPU copy via [`Self::drop_cpu_bytes`] after
-/// uploading to VRAM without needing mutable access to every
-/// `Material` that holds a clone. Every clone sees the drop, and
-/// [`Self::cache_key`] keeps returning the same stable identifier
-/// so the GPU cache's per-texture entry stays reachable for
-/// subsequent frames.
-///
-/// Readers use [`Self::with_bytes`] to borrow `&[u8]` while the CPU
-/// copy is still present. After `drop_cpu_bytes()` those calls
-/// return `None` — callers that need to re-upload must hold their
-/// own copy elsewhere.
 /// Pixel storage format for a [`TextureData`].
 ///
 /// Block-compressed variants match the wgpu `TexturePixelFormat` family
@@ -994,14 +974,35 @@ impl TexturePixelFormat {
     }
 }
 
+/// Texture data for materials.
+///
+/// Stores CPU-side pixel bytes (RGBA8 or a BC variant — see
+/// [`TexturePixelFormat`]) plus the dimensions. Cloning a
+/// `TextureData` (and therefore the `Material` that contains it) is a
+/// refcount bump, not a pixel-data copy — multiple materials that
+/// reference the same decoded image share one backing buffer.
+///
+/// The CPU buffer is wrapped in `Mutex<Option<Arc<[u8]>>>` and lives
+/// behind an outer `Arc` shared across clones. That lets the GPU
+/// renderer drop the CPU copy via [`TextureData::drop_cpu_bytes`]
+/// after uploading to VRAM without needing mutable access to every
+/// `Material` that holds a clone. Every clone sees the drop, and
+/// [`TextureData::cache_key`] keeps returning the same stable
+/// identifier so the GPU cache's per-texture entry stays reachable
+/// for subsequent frames.
+///
+/// Readers use [`TextureData::with_bytes`] to borrow `&[u8]` while
+/// the CPU copy is still present. After `drop_cpu_bytes()` those
+/// calls return `None` — callers that need to re-upload must hold
+/// their own copy elsewhere.
 #[derive(Clone, Debug)]
 pub struct TextureData {
     inner: std::sync::Arc<TextureDataInner>,
     pub width: u32,
     pub height: u32,
     /// Pixel storage format. Defaults to [`TexturePixelFormat::Rgba8`]
-    /// for the legacy constructor; [`Self::new_compressed`] sets
-    /// one of the BC variants.
+    /// for the legacy constructor; [`TextureData::new_compressed`]
+    /// sets one of the BC variants.
     pub format: TexturePixelFormat,
 }
 
