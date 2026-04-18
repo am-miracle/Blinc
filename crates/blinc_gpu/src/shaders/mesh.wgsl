@@ -89,6 +89,16 @@ struct MaterialUniforms {
     alpha_cutoff: f32,
     _pad1: f32,
     _pad2: f32,
+    // KHR_texture_transform — offset + rotation + scale flattened
+    // into a 2×2 matrix + 2-element offset at upload time:
+    //   uv_out = (M * uv_in) + offset
+    // where M = [[xx, xy], [yx, yy]] stored as
+    // vec4<f32>(xx, xy, yx, yy). Identity = (1, 0, 0, 1, 0, 0) so
+    // the shader multiply below compiles to one vec2 FMA on the
+    // hot path — no branch, no extra sample cost.
+    uv_transform_matrix: vec4<f32>,
+    uv_transform_offset: vec2<f32>,
+    _pad_uv: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -329,7 +339,16 @@ struct ShadedFragment {
 // direct-write path) and `fs_main_oit` (weighted blended OIT path).
 // Any `discard` inside here propagates out of both entry points.
 fn shade(input: VertexOutput) -> ShadedFragment {
-    var uv = input.uv;
+    // Apply the material's `KHR_texture_transform` (identity when the
+    // material didn't ship the extension). All subsequent
+    // `textureSample(... , uv)` calls below pick this up — parallax
+    // occlusion, base color, normal, MR, emissive, occlusion — so
+    // the transform covers every slot the material binds.
+    let m = material.uv_transform_matrix;
+    var uv = vec2<f32>(
+        m.x * input.uv.x + m.y * input.uv.y,
+        m.z * input.uv.x + m.w * input.uv.y,
+    ) + material.uv_transform_offset;
 
     // Build TBN matrix for tangent-space transforms
     let N = normalize(input.world_normal);

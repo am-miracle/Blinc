@@ -52,7 +52,7 @@ pub use draw::{
     ImageOptions, LayerConfig, LayerEffect, LineCap, LineJoin, MaskImage, MaskMode, Material,
     MaterialId, MeshData, MeshId, MeshInstance, Path, PathCommand, RecordingContext, SdfBuilder,
     ShapeId, Skeleton, SkinningData, Stroke, TextAlign, TextBaseline, TextStyle, TextureData,
-    TexturePixelFormat, Transform, Transform3DParams, Vertex,
+    TexturePixelFormat, TextureTransform, Transform, Transform3DParams, Vertex,
 };
 pub use events::{Event, EventData, EventDispatcher, EventType, KeyCode, Modifiers};
 pub use fsm::{FsmId, FsmRuntime, StateId, StateMachine, Transition};

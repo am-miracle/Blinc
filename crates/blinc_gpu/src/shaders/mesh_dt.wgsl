@@ -59,6 +59,12 @@ struct MaterialUniforms {
     alpha_cutoff: f32,
     _pad1: f32,
     _pad2: f32,
+    // KHR_texture_transform (see mesh.wgsl for the full explanation).
+    // Layout must match `MaterialGpu` in mesh_pipeline.rs exactly —
+    // both shader variants share the same upload buffer.
+    uv_transform_matrix: vec4<f32>,
+    uv_transform_offset: vec2<f32>,
+    _pad_uv: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -253,7 +259,13 @@ fn parallax_mapping(uv: vec2<f32>, view_dir_ts: vec3<f32>, scale: f32) -> vec2<f
 // can reuse it (WGSL / naga forbid calling one entry point from
 // another; helpers must be plain functions).
 fn shade_dt(input: VertexOutput) -> vec4<f32> {
-    var uv = input.uv;
+    // Apply KHR_texture_transform — see mesh.wgsl for the rationale.
+    // Every downstream `textureSample(... , uv)` picks this up.
+    let m = material.uv_transform_matrix;
+    var uv = vec2<f32>(
+        m.x * input.uv.x + m.y * input.uv.y,
+        m.z * input.uv.x + m.w * input.uv.y,
+    ) + material.uv_transform_offset;
 
     // Build TBN matrix for tangent-space transforms
     let N = normalize(input.world_normal);

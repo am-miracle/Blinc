@@ -821,6 +821,41 @@ pub struct MorphTarget {
     pub delta_tangents: Option<Vec<[f32; 3]>>,
 }
 
+/// Per-material UV transform — affine offset + rotation + scale applied
+/// to the interpolated texture coordinate before any slot is sampled.
+/// Encodes the `KHR_texture_transform` glTF extension.
+///
+/// Spec form: `uv_out = translate * rotate * scale * uv_in` — the
+/// renderer flattens that to a 2×2 matrix + 2-element offset at upload
+/// time. Identity transform is the default (all slots sampled with the
+/// raw vertex UV).
+///
+/// **Scope note:** Blinc currently stores one transform per-material,
+/// applied uniformly to every slot. The spec allows independent
+/// transforms per texture binding; in practice atlas-packed assets
+/// apply the same transform across all slots and that's what `Option<
+/// TextureTransform>` on [`Material`] reflects. Per-slot transforms
+/// can be layered on later without breaking the current API.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextureTransform {
+    /// UV offset added after scale + rotation.
+    pub offset: [f32; 2],
+    /// Counter-clockwise rotation in radians, around UV origin.
+    pub rotation: f32,
+    /// Per-axis scale applied before rotation. `[1.0, 1.0]` is identity.
+    pub scale: [f32; 2],
+}
+
+impl Default for TextureTransform {
+    fn default() -> Self {
+        Self {
+            offset: [0.0, 0.0],
+            rotation: 0.0,
+            scale: [1.0, 1.0],
+        }
+    }
+}
+
 /// PBR material for mesh rendering.
 ///
 /// Follows the glTF 2.0 metallic-roughness workflow. Scalar factors
@@ -887,6 +922,12 @@ pub struct Material {
     pub receives_shadows: bool,
     /// Whether this mesh casts shadows onto other meshes.
     pub casts_shadows: bool,
+    /// Optional UV transform (`KHR_texture_transform`). Applied to the
+    /// interpolated UV before every texture sample — see
+    /// [`TextureTransform`] for semantics. `None` means the identity
+    /// transform and costs the shader one extra vec2 multiply with
+    /// zero runtime branch.
+    pub texture_transform: Option<TextureTransform>,
 }
 
 impl Default for Material {
@@ -910,6 +951,7 @@ impl Default for Material {
             alpha_cutoff: 0.5,
             receives_shadows: true,
             casts_shadows: true,
+            texture_transform: None,
         }
     }
 }

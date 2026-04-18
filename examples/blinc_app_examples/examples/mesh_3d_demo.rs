@@ -137,6 +137,7 @@ fn try_load_helmet() -> Option<MeshData> {
         alpha_cutoff: 0.5,
         receives_shadows: false,
         casts_shadows: false,
+        texture_transform: None,
     };
 
     Some(MeshData {

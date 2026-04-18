@@ -1891,6 +1891,15 @@ impl GpuRenderer {
             /// `alpha_mode != Mask`.
             alpha_cutoff: f32,
             _pad_am: [f32; 2],
+            /// Packed 2×2 matrix from `KHR_texture_transform`
+            /// (offset + rotation + scale flattened at upload time).
+            /// `[M.xx, M.xy, M.yx, M.yy]` — applied to interpolated
+            /// UV in `shade()`. Identity when the material has no
+            /// texture transform.
+            uv_transform_matrix: [f32; 4],
+            /// Offset pair for the same transform: `uv_out = M*uv + offset`.
+            uv_transform_offset: [f32; 2],
+            _pad_uv: [f32; 2],
         }
 
         let alpha_mode = match mesh.material.alpha_mode {
@@ -1898,6 +1907,29 @@ impl GpuRenderer {
             blinc_core::draw::AlphaMode::Mask => 1.0,
             blinc_core::draw::AlphaMode::Blend => 2.0,
         };
+
+        // Flatten the optional `KHR_texture_transform` into a packed
+        // 2×2 matrix + offset. Spec form is
+        // `uv_out = translate * rotate * scale * uv_in`, which
+        // collapses to `M*uv + offset` where
+        // `M = rotation × diag(scale)`. `None` → identity, which
+        // costs the shader one free vec2-mul with zero branch.
+        let (uv_transform_matrix, uv_transform_offset) =
+            if let Some(t) = mesh.material.texture_transform.as_ref() {
+                let (s, c) = t.rotation.sin_cos();
+                (
+                    [
+                        c * t.scale[0],
+                        -s * t.scale[1],
+                        s * t.scale[0],
+                        c * t.scale[1],
+                    ],
+                    t.offset,
+                )
+            } else {
+                ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0])
+            };
+
         let mat = MaterialGpu {
             base_color: mesh.material.base_color,
             metallic_roughness: [mesh.material.metallic, mesh.material.roughness],
@@ -1923,6 +1955,9 @@ impl GpuRenderer {
             alpha_mode,
             alpha_cutoff: mesh.material.alpha_cutoff,
             _pad_am: [0.0; 2],
+            uv_transform_matrix,
+            uv_transform_offset,
+            _pad_uv: [0.0; 2],
         };
         self.queue
             .write_buffer(&mp.material_buffer, 0, bytemuck::bytes_of(&mat));
