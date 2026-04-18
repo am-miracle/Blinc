@@ -1084,6 +1084,19 @@ fn render_index_html(
     // - Everything else: consumed via the wasm `fetch()` preload
     //   path with `credentials=omit` — `as="fetch" crossorigin`,
     //   matching `WebAssetLoader::fetch_bytes`.
+    // `fetchpriority="high"` on the fetch preloads prevents Chrome's
+    // resource scheduler from deprioritising some preloads behind
+    // others — without it, on HTTP/2 a large first asset (e.g. a
+    // glTF `scene.bin`) can dominate bandwidth while later textures
+    // sit in "Pending" for multiple seconds despite stream
+    // multiplexing being available. Making them all "high" keeps
+    // the server round-robining bytes across the 29 streams so
+    // every asset finishes in roughly the same wall-clock window
+    // instead of one starving the others.
+    //
+    // Not applied to video/audio preloads: those are consumed by
+    // the media element which has its own priority model, and the
+    // attribute isn't meaningful for `as="video"` / `as="audio"`.
     let preload_links = if image_assets.is_empty() {
         String::new()
     } else {
@@ -1097,7 +1110,7 @@ fn render_index_html(
                     format!(r#"    <link rel="preload" as="audio" href="{p}" />"#)
                 }
                 _ => format!(
-                    r#"    <link rel="preload" as="fetch" crossorigin href="{p}" />"#
+                    r#"    <link rel="preload" as="fetch" crossorigin fetchpriority="high" href="{p}" />"#
                 ),
             })
             .collect::<Vec<_>>()
