@@ -173,11 +173,50 @@ impl WebAssetLoader {
             }
         });
         let results = join_all(fetches).await;
+
+        // Partial-failure tolerance: populate the cache with every
+        // successful fetch *before* reporting an error for the ones
+        // that didn't land. Previously a single 404 (or flaky
+        // connection) early-returned via `?` and discarded every
+        // already-completed fetch — the caller would then see every
+        // subsequent `load_asset` fail with "not preloaded" because
+        // the cache was empty, even though most of the bytes did
+        // arrive. For a 29-asset scene (e.g. the strangler rig),
+        // one missing texture shouldn't mean nothing renders.
+        //
+        // Fatal vs. non-fatal: if *nothing* loaded we still bubble
+        // the error (definitely broken — e.g. wrong base URL). If
+        // some fraction landed, log at `warn` and return Ok so the
+        // caller continues; missing textures fall back to the
+        // renderer's 1×1 default and the rest of the scene renders.
+        let mut first_err: Option<PlatformError> = None;
+        let mut inserted = 0usize;
         for result in results {
-            let (url, bytes) = result?;
-            self.insert_raw(url, bytes);
+            match result {
+                Ok((url, bytes)) => {
+                    self.insert_raw(url, bytes);
+                    inserted += 1;
+                }
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
         }
-        Ok(())
+        match first_err {
+            Some(e) if inserted == 0 => Err(e),
+            Some(e) => {
+                tracing::warn!(
+                    "preload partially failed: {} of {} succeeded ({}): {e}",
+                    inserted,
+                    urls.len(),
+                    urls.len() - inserted,
+                );
+                Ok(())
+            }
+            None => Ok(()),
+        }
     }
 
     /// Cross-host placeholder for `preload`. See the wasm32 variant
