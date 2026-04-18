@@ -46,8 +46,7 @@ use blinc_input::{DivInputExt, InputState};
 use blinc_layout::prelude::text;
 use web_time::Instant;
 
-const GLTF_PATH: &str =
-    "examples/blinc_app_examples/examples/assets/3d/cutegirl_g1/scene.gltf";
+const GLTF_PATH: &str = "examples/blinc_app_examples/examples/assets/3d/cutegirl_g1/scene.gltf";
 
 const VIEWPORT_ID: &str = "cutegirl-morph-viewport";
 
@@ -115,26 +114,22 @@ impl SceneState {
             tracing::info!("densified rotation channels: {total_inserted} keyframes inserted");
         }
 
-        // Model-specific material override: demote hair BLEND to MASK.
-        // Cutegirl's hair strands are the source of the overlapping-
-        // transparent flicker — thousands of thin triangles, no
-        // per-triangle sort, unstable composition. MASK with a 0.5
-        // cutoff gives stable hard-edged strands, proper depth, zero
-        // sort cost. We only do this for hair meshes; the thin
-        // decorator overlays (eyelash, tearline, eye-occlusion) must
-        // stay BLEND — they're designed to sit on top of the face skin
-        // *without* writing depth, and forcing them to MASK makes
-        // them depth-reject the face behind them.
-        const DEMOTE_HAIR_BLEND_TO_MASK: bool = true;
-        if DEMOTE_HAIR_BLEND_TO_MASK {
-            blinc_gltf::apply_material_overrides(&mut scene, |_, name, _, mat| {
-                let is_hair = name.map_or(false, |n| n.contains("Hair"));
-                if is_hair && mat.alpha_mode == blinc_core::AlphaMode::Blend {
-                    mat.alpha_mode = blinc_core::AlphaMode::Mask;
-                    mat.alpha_cutoff = 0.5;
-                }
-            });
-        }
+        // Demote hair BLEND → MASK. Per-asset choice: hair strands
+        // have thousands of overlapping alpha triangles with no
+        // per-triangle sort, so rendering them as true BLEND flickers
+        // badly. MASK gives stable hard-edged strands. This used to
+        // live in blinc_gltf as an automatic heuristic; it was
+        // reverted because the same signal (binary alpha) also
+        // applies to thin overlay decorators that specifically want
+        // to STAY BLEND — no way to disambiguate at the framework
+        // layer. Per-asset override is the honest answer.
+        blinc_gltf::apply_material_overrides(&mut scene, |_, name, _, mat| {
+            let is_hair = name.is_some_and(|n| n.contains("Hair"));
+            if is_hair && mat.alpha_mode == blinc_core::AlphaMode::Blend {
+                mat.alpha_mode = blinc_core::AlphaMode::Mask;
+                mat.alpha_cutoff = 0.5;
+            }
+        });
 
         // Bump roughness on the face mesh so skin stops reading as
         // wet vinyl. Gated so you can flip it off if the match is
@@ -388,12 +383,10 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                                 // Bone::parent-only path miss those
                                 // transforms and plants the character
                                 // at origin with wrong scale.
-                                let sd =
-                                    blinc_skeleton::scene_skinning_data(&scene_mut, skel);
+                                let sd = blinc_skeleton::scene_skinning_data(&scene_mut, skel);
                                 // Separately sample morph weights —
                                 // no Pose needed for that side-table.
-                                let morphs =
-                                    blinc_skeleton::animate_scene_morph_weights(anim, t);
+                                let morphs = blinc_skeleton::animate_scene_morph_weights(anim, t);
                                 (Some(sd), morphs)
                             }
                             None => (None, std::collections::HashMap::new()),
@@ -419,22 +412,10 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             // Non-skinned meshes use the node transform as usual.
             let identity: Mat4 = Mat4::IDENTITY;
 
-            // Sort opaque/mask draws before blend draws. Blend
-            // materials (hair, eyelashes, tearlines) don't write
-            // depth — they need the opaque depth already laid down
-            // so they z-reject where the face is in front. Without
-            // this order, transparent hair rendered first would
-            // alpha-blend against the background, and opaque face
-            // drawn later wouldn't correct the premultiplied output.
-            let mut sorted: Vec<_> = draws.into_iter().collect();
-            sorted.sort_by_key(|(_, mesh_idx, _, _)| {
-                state.base_meshes[*mesh_idx]
-                    .iter()
-                    .any(|p| matches!(p.material.alpha_mode, blinc_core::AlphaMode::Blend))
-                    as u8
-            });
-
-            for (node_idx, mesh_idx, node_skin, xf) in sorted {
+            // Alpha-mode ordering is enforced inside the framework
+            // (`dispatch_pending_meshes` in blinc_app sorts OPAQUE +
+            // MASK before BLEND) — submit in scene-graph order.
+            for (node_idx, mesh_idx, node_skin, xf) in draws {
                 let morph = weights_by_node.get(&node_idx);
                 let is_skinned = node_skin.is_some();
                 let draw_xf = if is_skinned { identity } else { xf };
@@ -471,7 +452,19 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         .capture_input(&handle.input)
         .id(VIEWPORT_ID);
 
-    let duration = handle.get().map(|s| s.duration).unwrap_or(0.0);
+    // Reactive header — the scene loads async, so `handle.get()` is
+    // None on first build_ui and `duration` would bake in as 0. Wrap
+    // the header in a `stateful` keyed on `scene_ready` so it re-runs
+    // once the load completes.
+    let handle_header = handle.clone();
+    let scene_ready_h = scene_ready.clone();
+    let header = stateful::<NoState>()
+        .deps([scene_ready.signal_id()])
+        .on_state(move |_ctx| {
+            let _ = scene_ready_h.get();
+            let d = handle_header.get().map(|s| s.duration).unwrap_or(0.0);
+            header_bar(d)
+        });
 
     let scene_ready_s = scene_ready.clone();
     let overlay = stateful::<NoState>()
@@ -512,7 +505,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         .bg(Color::rgba(0.05, 0.06, 0.10, 1.0))
         .flex_col()
         .justify_center()
-        .child(header_bar(duration))
+        .child(header)
         .child(viewport_stack)
         .child(hint_bar())
 }

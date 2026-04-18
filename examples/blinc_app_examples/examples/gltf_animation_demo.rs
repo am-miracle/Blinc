@@ -429,6 +429,9 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                     .collect()
             };
 
+            // Alpha-mode ordering is handled inside the framework
+            // (`dispatch_pending_meshes` in blinc_app sorts OPAQUE +
+            // MASK before BLEND) — callers can submit in any order.
             for (mesh_idx, xf) in draws {
                 for prim in &state.arc_meshes[mesh_idx] {
                     ctx.draw_mesh_data(prim.clone(), xf);
@@ -440,7 +443,19 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         .capture_input(&handle.input)
         .id(VIEWPORT_ID);
 
-    let duration = handle.get().map(|s| s.duration).unwrap_or(0.0);
+    // Reactive header — the scene loads async, so `handle.get()` is
+    // None on first build_ui and `duration` would bake in as 0. Wrap
+    // the header in a `stateful` keyed on `scene_ready` so it re-runs
+    // once the load completes.
+    let handle_header = handle.clone();
+    let scene_ready_h = scene_ready.clone();
+    let header = stateful::<NoState>()
+        .deps([scene_ready.signal_id()])
+        .on_state(move |_ctx| {
+            let _ = scene_ready_h.get();
+            let d = handle_header.get().map(|s| s.duration).unwrap_or(0.0);
+            header_bar(d)
+        });
 
     // Loading overlay — same div shape every refresh, `.hidden()`
     // (display:none) toggled on ready. Display::None differs from the
@@ -487,7 +502,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         .bg(Color::rgba(0.05, 0.06, 0.10, 1.0))
         .flex_col()
         .justify_center()
-        .child(header_bar(duration))
+        .child(header)
         .child(viewport_stack)
         .child(hint_bar())
 }
