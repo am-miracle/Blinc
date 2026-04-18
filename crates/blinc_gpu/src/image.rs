@@ -145,6 +145,7 @@ impl GpuImage {
     /// `width` and `height` must round up to a multiple of 4 for
     /// block coverage — fractional edge blocks are the encoder's
     /// responsibility to pad.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_compressed(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
