@@ -312,20 +312,35 @@ impl VideoControlsBuilder {
                     let seek_player = player.clone();
                     let seek_surface = surface;
                     let seek_accent = accent;
+                    let seek_border = border;
                     let seek_stateful = stateful_with_key::<NoState>(&seek_key)
                         .deps([
                             seek_player.position_signal.signal_id(),
                             seek_player.duration_signal.signal_id(),
+                            seek_player.buffered_signal.signal_id(),
                         ])
                         .on_state(move |_ctx| {
                             let pos = seek_player.position_signal.get();
                             let dur = seek_player.duration_signal.get();
+                            let buf = seek_player.buffered_signal.get().min(dur);
                             let progress = if dur > 0 {
                                 (pos as f32 / dur as f32).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             };
+                            let buffered = if dur > 0 {
+                                (buf as f32 / dur as f32).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
                             let track_color = seek_surface;
+                            // Buffered sits between the dim track and
+                            // the bright progress fill — same hue as
+                            // the UI border (one step brighter than
+                            // the track) so it reads as "downloaded
+                            // but not yet played" without competing
+                            // with the accent fill for attention.
+                            let buffered_color = seek_border;
                             let fill_color = seek_accent;
                             div().flex_grow().h(12.0).child(
                                 crate::canvas::canvas(
@@ -341,6 +356,18 @@ impl VideoControlsBuilder {
                                             2.0.into(),
                                             blinc_core::Brush::Solid(track_color),
                                         );
+                                        if buffered > progress {
+                                            ctx.fill_rect(
+                                                blinc_core::Rect::new(
+                                                    0.0,
+                                                    track_y,
+                                                    bounds.width * buffered,
+                                                    4.0,
+                                                ),
+                                                2.0.into(),
+                                                blinc_core::Brush::Solid(buffered_color),
+                                            );
+                                        }
                                         if progress > 0.0 {
                                             ctx.fill_rect(
                                                 blinc_core::Rect::new(

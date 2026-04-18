@@ -101,6 +101,32 @@ pub trait AssetLoader: Send + Sync {
 
     /// Get the platform name for this loader
     fn platform_name(&self) -> &'static str;
+
+    /// Return a URL the platform's media stack can consume directly,
+    /// bypassing the preload cache and any full-body byte fetch.
+    ///
+    /// For asset types that decode from the full byte buffer (PNG,
+    /// JPEG, glTF, fonts), callers should keep using [`Self::load`]
+    /// — there's no partial-bytes decode path. This exists for media
+    /// types where the platform's own streaming pipeline is better
+    /// than anything we could build on top of raw bytes:
+    ///
+    /// - `<video>` elements on web do HTTP range requests,
+    ///   progressive buffering, seek-ahead, and media-source decoding
+    ///   without us preloading the whole file first.
+    /// - `<audio>` elements do the same.
+    /// - Native file URLs (`file:///absolute/path`) let the host OS
+    ///   mmap or stream the file on demand.
+    ///
+    /// Returns `None` when the loader can't produce a consumable URL
+    /// for the path (e.g. embedded/bundled assets on mobile with no
+    /// intermediate file, or an absent remote path the wasm loader
+    /// doesn't know how to resolve). Callers should then fall back
+    /// to the byte-based [`Self::load`] + `URL.createObjectURL(blob)`
+    /// path.
+    fn asset_url(&self, _path: &AssetPath) -> Option<String> {
+        None
+    }
 }
 
 /// Default filesystem-based asset loader for desktop platforms
@@ -177,6 +203,29 @@ impl AssetLoader for FilesystemAssetLoader {
 
     fn platform_name(&self) -> &'static str {
         "filesystem"
+    }
+
+    /// Emit a `file://<absolute-path>` URL that native media
+    /// pipelines (AVFoundation, FFmpeg, winit's platform media APIs
+    /// via downstream crates) can open directly. Uses
+    /// `canonicalize()` so relative paths fed through
+    /// `resolve_path` still come out as absolute `file://` URLs.
+    /// Returns `None` when the file doesn't exist on disk.
+    fn asset_url(&self, path: &AssetPath) -> Option<String> {
+        let resolved = self.resolve_path(path);
+        let canonical = resolved.canonicalize().ok()?;
+        let s = canonical.to_string_lossy();
+        // Windows: `\\?\C:\path` → `file:///C:/path`
+        // macOS/Linux: `/path` → `file:///path`
+        #[cfg(target_os = "windows")]
+        let fixed = s.strip_prefix(r"\\?\").unwrap_or(&s).replace('\\', "/");
+        #[cfg(not(target_os = "windows"))]
+        let fixed = s.to_string();
+        Some(if fixed.starts_with('/') {
+            format!("file://{fixed}")
+        } else {
+            format!("file:///{fixed}")
+        })
     }
 }
 

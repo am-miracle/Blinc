@@ -306,6 +306,21 @@ impl AssetLoader for WebAssetLoader {
     fn platform_name(&self) -> &'static str {
         "web"
     }
+
+    /// Return the URL as-is for direct consumption by media
+    /// elements. On web the key *is* a URL (relative to the
+    /// page origin) — giving it straight to `<video src=...>`
+    /// lets the browser do HTTP range requests and progressive
+    /// buffering without us ever materialising the full file
+    /// in memory. Equivalent to what every media-streaming site
+    /// does. Returns `None` for embedded-asset paths since those
+    /// have no fetchable URL.
+    fn asset_url(&self, path: &AssetPath) -> Option<String> {
+        match path {
+            AssetPath::Relative(s) | AssetPath::Absolute(s) => Some(s.clone()),
+            AssetPath::Embedded(_) => None,
+        }
+    }
 }
 
 // =============================================================================

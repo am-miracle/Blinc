@@ -85,6 +85,30 @@ pub(crate) fn create(player_id: u64) {
     });
 }
 
+/// Hand a URL directly to the `<video>` element without
+/// materialising the bytes in memory first. The browser's media
+/// pipeline handles HTTP range requests, progressive buffering,
+/// seek, and media-source decoding — every property that makes
+/// `<video>` worth using over a `<canvas>` + custom decoder.
+///
+/// Compare to [`load_bytes`], which fetches the entire file via
+/// the preload cache, copies it into a JS `Uint8Array`, wraps in
+/// a `Blob`, and passes the object URL — the video then has to
+/// fully-buffer before playing, with a second memory copy held
+/// alive for the blob URL's lifetime. Use that path only when
+/// the caller already owns the bytes (e.g. a test harness or a
+/// procedurally generated clip); URL-based loading is the right
+/// default for shipped content.
+pub(crate) fn load_url(player_id: u64, url: &str) {
+    WEB_VIDEOS.with(|map| {
+        let map = map.borrow();
+        if let Some(state) = map.get(&player_id) {
+            state.video.set_src(url);
+            state.video.load();
+        }
+    });
+}
+
 pub(crate) fn load_bytes(player_id: u64, bytes: &[u8]) {
     WEB_VIDEOS.with(|map| {
         let map = map.borrow();
@@ -158,6 +182,39 @@ pub(crate) fn position_ms(player_id: u64) -> u64 {
         map.get(&player_id)
             .map(|s| (s.video.current_time() * 1000.0) as u64)
             .unwrap_or(0)
+    })
+}
+
+/// Report the tip of the progressive-download buffer in milliseconds.
+///
+/// `<video>.buffered` is a `TimeRanges` list — one range per contiguous
+/// chunk the browser has downloaded. Sites that seek around pile up
+/// multiple ranges. We return the end of the range that covers the
+/// current playback position (what the seek bar cares about: "how far
+/// can I scrub forward without waiting?"). If no range covers the
+/// current position we fall back to the last range's end, so the UI
+/// still shows the most-recently-downloaded chunk rather than zero.
+pub(crate) fn buffered_end_ms(player_id: u64) -> u64 {
+    WEB_VIDEOS.with(|map| {
+        let map = map.borrow();
+        let Some(state) = map.get(&player_id) else {
+            return 0;
+        };
+        let ranges = state.video.buffered();
+        let len = ranges.length();
+        if len == 0 {
+            return 0;
+        }
+        let current = state.video.current_time();
+        for i in 0..len {
+            let (Ok(start), Ok(end)) = (ranges.start(i), ranges.end(i)) else {
+                continue;
+            };
+            if current >= start && current <= end {
+                return (end * 1000.0) as u64;
+            }
+        }
+        ranges.end(len - 1).map(|e| (e * 1000.0) as u64).unwrap_or(0)
     })
 }
 

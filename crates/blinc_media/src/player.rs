@@ -24,4 +24,14 @@ pub trait Player {
     fn is_live(&self) -> bool {
         false
     }
+    /// End of the buffered region in milliseconds — how far the UI can
+    /// "fast-forward scrub" into without waiting for more data to download.
+    ///
+    /// Players that own the full decoded/byte payload (native FFmpeg path,
+    /// embedded assets) return `duration_ms()` — everything is in memory
+    /// and ready to seek. The web `<video>` player overrides this to
+    /// report the actual streaming buffer tip from `HTMLMediaElement.buffered`.
+    fn buffered_ms(&self) -> u64 {
+        self.duration_ms()
+    }
 }

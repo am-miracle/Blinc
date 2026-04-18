@@ -116,6 +116,11 @@ pub struct VideoPlayer {
     pub position_signal: blinc_core::State<u64>,
     pub duration_signal: blinc_core::State<u64>,
     pub volume_signal: blinc_core::State<f32>,
+    /// End of the streaming buffer in ms. Drives the "ghost" fill
+    /// behind the seek bar (the part of the timeline that's already
+    /// been downloaded and is safe to scrub into). On native this
+    /// tracks `duration_signal`; on web it polls `<video>.buffered`.
+    pub buffered_signal: blinc_core::State<u64>,
 }
 
 struct VideoPlayerInner {
@@ -144,6 +149,7 @@ impl VideoPlayer {
         let position_signal = blinc_core::use_state_keyed(&format!("vp:{id}:position"), || 0u64);
         let duration_signal = blinc_core::use_state_keyed(&format!("vp:{id}:duration"), || 0u64);
         let volume_signal = blinc_core::use_state_keyed(&format!("vp:{id}:volume"), || 1.0f32);
+        let buffered_signal = blinc_core::use_state_keyed(&format!("vp:{id}:buffered"), || 0u64);
 
         let state = std::sync::Arc::new(std::sync::Mutex::new(VideoPlayerInner {
             playback_state: VideoState::Idle,
@@ -164,6 +170,11 @@ impl VideoPlayer {
         let dur_for_tick = duration_signal.clone();
         #[cfg(target_arch = "wasm32")]
         let playing_for_tick = playing_signal.clone();
+        #[cfg(target_arch = "wasm32")]
+        let buf_for_tick = buffered_signal.clone();
+        #[cfg(target_arch = "wasm32")]
+        let last_buffered: std::sync::Arc<std::sync::atomic::AtomicU64> =
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let _tick_id = id;
         if let Some(handle) = blinc_animation::try_get_scheduler() {
             let redraw_handle = handle.clone();
@@ -193,6 +204,21 @@ impl VideoPlayer {
                         }
                         if dur_changed {
                             dur_for_tick.set(new_dur);
+                        }
+
+                        // Buffered end drifts upward as the browser
+                        // downloads more of the file. Poll it alongside
+                        // position so the seek bar's ghost fill tracks
+                        // the download in real time — but only push
+                        // into the signal when it actually changes, to
+                        // avoid waking subscribers on every frame.
+                        let new_buf = crate::web_video::buffered_end_ms(_tick_id);
+                        if new_buf
+                            != last_buffered.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            last_buffered
+                                .store(new_buf, std::sync::atomic::Ordering::Relaxed);
+                            buf_for_tick.set(new_buf);
                         }
 
                         if crate::web_video::is_ended(_tick_id) {
@@ -225,6 +251,7 @@ impl VideoPlayer {
             position_signal,
             duration_signal,
             volume_signal,
+            buffered_signal,
         }
     }
 
@@ -237,6 +264,20 @@ impl VideoPlayer {
         self.position_signal.set(pos);
         self.duration_signal.set(dur);
         self.volume_signal.set(vol);
+        // Native paths decode from an owned byte buffer — buffered
+        // == duration once the file is on disk/in memory. Web
+        // overrides this from its own polling loop, so skip there
+        // to avoid clobbering the real buffered tip with duration.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.buffered_signal.set(dur);
+    }
+
+    /// End of the streaming buffer in ms (how far the seek bar can
+    /// safely scrub without waiting on download). Mirrors
+    /// [`Self::buffered_signal`] but returns the current value
+    /// without requiring signal subscription.
+    pub fn buffered_ms(&self) -> u64 {
+        self.buffered_signal.get()
     }
 
     /// Load a video source
@@ -474,6 +515,71 @@ impl VideoPlayer {
     #[cfg(target_arch = "wasm32")]
     pub fn load_bytes(&self, bytes: Vec<u8>) {
         crate::web_video::load_bytes(self.player_id, &bytes);
+    }
+
+    /// Load a video from a URL the platform's media stack can open
+    /// directly. Skips any preload / byte-copy path.
+    ///
+    /// - **Web**: hands the URL to the `<video src>` attribute. The
+    ///   browser runs HTTP range requests, progressive buffering,
+    ///   seek-ahead, and MSE decoding — a shipped ~50 MB video
+    ///   starts playing in hundreds of milliseconds instead of
+    ///   waiting for the whole file to download.
+    /// - **Native desktop**: reads the underlying file (FFmpeg
+    ///   decoder) — the "URL" is a `file://<abs-path>` the
+    ///   platform asset loader produced.
+    /// - **Mobile (Android/iOS)**: forwards the path through the
+    ///   native bridge so the platform's `MediaPlayer` / `AVPlayer`
+    ///   streams the file over whatever transport it was fetched
+    ///   from (local, `content://`, remote).
+    ///
+    /// Prefer this over `load_bytes` for shipped content; keep
+    /// `load_bytes` for in-memory buffers without an addressable
+    /// URL (test harnesses, procedurally generated clips).
+    #[cfg(target_arch = "wasm32")]
+    pub fn load_url(&self, url: &str) {
+        {
+            let mut inner = self.state.lock().unwrap();
+            inner.source = Some(url.to_string());
+            inner.playback_state = VideoState::Idle;
+            inner.position_ms = 0;
+        }
+        self.sync_signals();
+        crate::web_video::load_url(self.player_id, url);
+    }
+
+    /// Desktop: file URLs are resolved to bytes and forwarded to
+    /// the decode thread. The URL path exists for API symmetry
+    /// with the web target; on native, there's no separate
+    /// streaming decoder — FFmpeg owns the byte buffer.
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
+    pub fn load_url(&self, url: &str) {
+        // `file:///abs/path` → `/abs/path`. On Windows the path
+        // comes out as `file:///C:/...` — strip the three slashes.
+        let path = url
+            .strip_prefix("file:///")
+            .map(std::string::ToString::to_string)
+            .or_else(|| {
+                url.strip_prefix("file://")
+                    .map(std::string::ToString::to_string)
+            })
+            .unwrap_or_else(|| url.to_string());
+        // Windows paths come out as `C:/...` after the prefix
+        // strip — absolute already. Unix paths from `file://host/x`
+        // (no triple-slash) come out without the leading `/`.
+        let path = if cfg!(target_os = "windows") || path.starts_with('/') {
+            path
+        } else {
+            format!("/{path}")
+        };
+        self.load_file(&path);
+    }
+
+    /// Mobile: forward the URL through the native bridge; the
+    /// platform's `AVPlayer` / `MediaPlayer` handles streaming.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub fn load_url(&self, url: &str) {
+        self.load(url);
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
@@ -792,5 +898,8 @@ impl crate::player::Player for VideoPlayer {
     }
     fn is_playing(&self) -> bool {
         VideoPlayer::is_playing(self)
+    }
+    fn buffered_ms(&self) -> u64 {
+        VideoPlayer::buffered_ms(self)
     }
 }
