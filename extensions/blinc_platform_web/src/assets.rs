@@ -279,6 +279,18 @@ impl AssetLoader for SharedWebAssetLoader {
     fn platform_name(&self) -> &'static str {
         "web"
     }
+    // Forward the URL + preload-state hooks to the inner loader.
+    // Without these the wrapper picked up the `AssetLoader` trait
+    // defaults (`None` / `true`), which made `asset_url()` return
+    // `None` on web — the video demo then silently never loaded,
+    // and the 3D demos' retry loops couldn't tell "still fetching"
+    // from "genuinely missing" any more.
+    fn asset_url(&self, path: &AssetPath) -> Option<String> {
+        self.0.asset_url(path)
+    }
+    fn preload_settled(&self) -> bool {
+        self.0.preload_settled()
+    }
 }
 
 impl AssetLoader for WebAssetLoader {
