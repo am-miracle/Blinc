@@ -266,17 +266,20 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                 .with_azimuth(0.0)
                 .with_target(Vec3::new(0.0, 1.0, 0.0)),
         )
-        // Two-point rig: front key + soft side fill.
+        // Two-point rig: front key + soft side fill. Intensities
+        // are tuned for linear-space lighting (~2.2× what felt
+        // right when the renderer was accidentally skipping the
+        // sRGB→linear decode on diffuse textures).
         .with_light(Light::Directional {
             direction: Vec3::new(-0.3, -0.4, -1.0).normalize(),
             color: Color::WHITE,
-            intensity: 1.4,
+            intensity: 3.0,
             cast_shadows: false,
         })
         .with_light(Light::Directional {
             direction: Vec3::new(0.7, -0.2, -0.3).normalize(),
             color: Color::rgba(1.0, 0.95, 0.9, 1.0),
-            intensity: 0.5,
+            intensity: 1.1,
             cast_shadows: false,
         });
 

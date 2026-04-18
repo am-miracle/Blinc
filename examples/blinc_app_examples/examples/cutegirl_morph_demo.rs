@@ -283,14 +283,20 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         // does plenty of. IBL ambient is the dominant "background"
         // term here; keeping directs modest stops the skin from
         // blowing to ACES clip at morph extremes.
+        // Directions are authored for the camera's frame of
+        // reference: "light rays travel away from the camera into
+        // the scene." Cutegirl's azimuth = π flips the camera to
+        // the -Z side, so the world-space light vectors need the
+        // X and Z signs inverted vs. a +Z-camera demo — otherwise
+        // the key hits the back of her head.
         .with_light(Light::Directional {
-            direction: Vec3::new(-0.3, -0.4, -1.0).normalize(),
+            direction: Vec3::new(0.3, -0.4, 1.0).normalize(),
             color: Color::WHITE,
             intensity: 1.2,
             cast_shadows: false,
         })
         .with_light(Light::Directional {
-            direction: Vec3::new(0.7, -0.2, -0.3).normalize(),
+            direction: Vec3::new(-0.7, -0.2, 0.3).normalize(),
             color: Color::rgba(1.0, 0.95, 0.9, 1.0),
             intensity: 0.4,
             cast_shadows: false,
