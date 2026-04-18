@@ -320,7 +320,9 @@ pub fn asset_url(path: impl Into<AssetPath>) -> Option<String> {
 /// See the trait method for how callers use this to gate
 /// placeholder-fallback logic during a retry loop.
 pub fn preload_settled() -> bool {
-    global_asset_loader().map(|l| l.preload_settled()).unwrap_or(true)
+    global_asset_loader()
+        .map(|l| l.preload_settled())
+        .unwrap_or(true)
 }
 
 #[cfg(test)]
