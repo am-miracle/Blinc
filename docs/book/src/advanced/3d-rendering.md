@@ -130,6 +130,32 @@ let material = Material {
 };
 ```
 
+### Alpha Modes and Transparency
+
+Every material declares one of three `AlphaMode`s:
+
+| Mode | Depth write | Blend | Use for |
+|------|-------------|-------|---------|
+| `Opaque` | yes | replace | solid surfaces (default) |
+| `Mask` | yes | alpha-test (discard below `alpha_cutoff`) | hard cutouts — foliage, hair strands, decals with binary alpha |
+| `Blend` | no | weighted blended OIT (see below) | genuine translucency — glass, smoke, soft edges |
+
+**OIT, not back-to-front sort.** `AlphaMode::Blend` routes through Weighted Blended OIT (McGuire & Bavoil 2013). Every BLEND fragment writes into an accumulation texture and a transmission texture, and a composite pass divides-and-blends the result over the opaque HDR buffer at end of frame. **Callers don't need to sort meshes back-to-front** — the renderer handles overlapping BLEND layers statistically.
+
+**Submission order doesn't matter at the API boundary.** `dispatch_pending_meshes` stable-sorts OPAQUE + MASK before BLEND before handing to the renderer, so you can call `draw_mesh_data` in scene-graph order. (This matters because WBOIT requires every opaque depth to be written before any BLEND fragment runs its depth test — otherwise BLEND pixels that should be occluded by a later-dispatched opaque mesh leak into the composite. The framework sort is what lets you ignore this invariant.)
+
+**glTF loader auto-demotes misflagged BLEND.** Many DCC exporters flag every material as BLEND by default. `blinc_gltf::parse_material` analyses each base-color texture's alpha histogram on load:
+
+| Texture profile | Demoted to | Reason |
+|-----------------|------------|--------|
+| ≥95% texels at α ≥ 0.95 | `Opaque` | dense coverage, no meaningful translucency |
+| ≥99% texels at α ≤ 0.05 or α ≥ 0.95, <1% midrange | `Mask` | strict binary cutout |
+| anything else | stays `Blend` | genuine partial alpha |
+
+Decisions log at `info` level — run any demo with `RUST_LOG=blinc_gltf=info` to see per-material `authored=Blend resolved=Opaque` lines. A material whose BLEND looks wrong usually means either the heuristic matched poorly (report it) or the asset really is authored that way.
+
+**OIT's limitation.** WBOIT approximates a weighted average of overlapping BLEND fragments — it can't perfectly resolve stacked translucent layers at the same depth. In practice this is invisible for single-layer BLEND (most assets) and for sparse translucent overlays (eyelashes, tearlines, decals). Dense BLEND stacks (e.g. foliage with many overlapping leaves) may look slightly washed compared to correct back-to-front sorting; moving such assets to `Mask` when the alpha is binary fixes it.
+
 ## Drawing in Canvas
 
 Use `draw_mesh_data` on the `DrawContext` inside a canvas element:
