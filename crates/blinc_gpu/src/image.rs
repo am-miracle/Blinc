@@ -33,11 +33,58 @@ pub struct GpuImage {
 }
 
 impl GpuImage {
-    /// Create a GPU image from RGBA pixel data
+    /// Create a GPU image from RGBA pixel data (linear encoding).
     pub fn from_rgba(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         pixels: &[u8],
+        width: u32,
+        height: u32,
+        label: Option<&str>,
+    ) -> Self {
+        Self::from_rgba_with_format(
+            device,
+            queue,
+            pixels,
+            wgpu::TextureFormat::Rgba8Unorm,
+            width,
+            height,
+            label,
+        )
+    }
+
+    /// Create a GPU image from sRGB-encoded RGBA pixel data.
+    ///
+    /// Use for diffuse / base-color / emissive textures. The sampler
+    /// decodes sRGB to linear on read, so shader math sees linear
+    /// values. Without this, uploading sRGB-authored assets as
+    /// `Rgba8Unorm` double-applies gamma (too bright) or not at all
+    /// (too bright / washed) depending on the downstream pipeline —
+    /// PNG/JPEG assets from glTF are sRGB-encoded by convention.
+    pub fn from_rgba_srgb(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        label: Option<&str>,
+    ) -> Self {
+        Self::from_rgba_with_format(
+            device,
+            queue,
+            pixels,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            width,
+            height,
+            label,
+        )
+    }
+
+    fn from_rgba_with_format(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pixels: &[u8],
+        format: wgpu::TextureFormat,
         width: u32,
         height: u32,
         label: Option<&str>,
@@ -54,7 +101,7 @@ impl GpuImage {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
+                format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             },
@@ -115,13 +162,9 @@ impl GpuImage {
                 // Rgba8. Treat as the uncompressed path.
                 return Self::from_rgba(device, queue, pixels, width, height, label);
             }
-            (P::Bc1, CompressedColorSpace::Srgb) => {
-                wgpu::TextureFormat::Bc1RgbaUnormSrgb
-            }
+            (P::Bc1, CompressedColorSpace::Srgb) => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
             (P::Bc1, CompressedColorSpace::Linear) => wgpu::TextureFormat::Bc1RgbaUnorm,
-            (P::Bc3, CompressedColorSpace::Srgb) => {
-                wgpu::TextureFormat::Bc3RgbaUnormSrgb
-            }
+            (P::Bc3, CompressedColorSpace::Srgb) => wgpu::TextureFormat::Bc3RgbaUnormSrgb,
             (P::Bc3, CompressedColorSpace::Linear) => wgpu::TextureFormat::Bc3RgbaUnorm,
             // BC4 and BC5 are single/dual-channel linear formats —
             // no sRGB variant exists in wgpu for them. Color-space

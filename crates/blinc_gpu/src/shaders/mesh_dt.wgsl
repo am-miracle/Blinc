@@ -298,8 +298,13 @@ fn shade_dt(input: VertexOutput) -> vec4<f32> {
     // Normal mapping
     var shading_normal = N;
     if uniforms.has_normal_map > 0.5 {
-        let nm = textureSample(normal_texture, base_sampler, uv).rgb;
-        var tangent_normal = nm * 2.0 - 1.0;
+        // Sample RG only and reconstruct Z in-shader — see mesh.wgsl
+        // for the rationale. Works for both RGBA8 normal maps and
+        // BC5RgUnorm uploads.
+        let nm_rg = textureSample(normal_texture, base_sampler, uv).rg;
+        let rg = nm_rg * 2.0 - 1.0;
+        let b = sqrt(max(1.0 - dot(rg, rg), 0.0));
+        var tangent_normal = vec3<f32>(rg.x, rg.y, b);
         tangent_normal.x *= uniforms.normal_scale;
         tangent_normal.y *= uniforms.normal_scale;
         shading_normal = normalize(TBN * tangent_normal);

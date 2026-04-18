@@ -1055,9 +1055,27 @@ impl GpuRenderer {
             view_formats: &[],
         });
 
-        // Fill every face × mip with neutral gray (f16 RGBA).
-        // f32_to_f16(0.15) ≈ 0x3106, f32_to_f16(1.0) = 0x3C00.
-        let gray_r = 0x3106u16; // ~0.15
+        // Fill every face × mip with near-white linear gray.
+        //
+        // Tuning history:
+        //   - `0.15` — original. Looked fine because the render
+        //     path had an sRGB-decoding bug that made every lit
+        //     diffuse pixel ~2.2× too bright.
+        //   - `0.33` — post-gamma-fix compensation. Restored
+        //     brightness on skin/clothing but dark materials
+        //     (black cloth, leather) still read near-pitch-black
+        //     because ambient × dark baseColor collapses to
+        //     noise.
+        //   - `0.75` — matches the "bright studio" look modern
+        //     glTF viewers default to (Sketchfab, three.js
+        //     `RoomEnvironment`, Babylon studio preset). Lifts
+        //     shadowed areas on dark materials via IBL without
+        //     over-exposing skin, because the multiply by
+        //     `baseColor` naturally attenuates ambient for
+        //     darker surfaces.
+        //
+        // f32_to_f16(0.75) = 0x3A00.
+        let gray_r = 0x3A00u16; // 0.75
         let gray_a = 0x3C00u16; // 1.0
         for face in 0..6u32 {
             for mip in 0..env_mip_count {
@@ -1917,18 +1935,37 @@ impl GpuRenderer {
         // Keying by `TextureData::cache_key()` means each unique image
         // becomes exactly one `GpuImage`, regardless of how many
         // materials point at it. FIFO-evicted at `MESH_CACHE_CAPACITY`.
-        let texture_slots: [(&Option<blinc_core::TextureData>, &str); 6] = [
-            (&mesh.material.base_color_texture, "mesh_base_color_tex"),
-            (&mesh.material.normal_map, "mesh_normal_map"),
-            (&mesh.material.displacement_map, "mesh_displacement_map"),
+        // Tuple layout: (slot_texture, label, is_color_slot).
+        // `is_color_slot == true` flags sRGB-encoded slots (base
+        // color, emissive) — picks Bc1RgbaUnormSrgb / Bc3RgbaUnormSrgb
+        // for compressed uploads so the sampler decodes to linear in
+        // the shader. Linear slots (normal map, MR, occlusion,
+        // displacement) use the non-sRGB wgpu variants.
+        let texture_slots: [(&Option<blinc_core::TextureData>, &str, bool); 6] = [
+            (
+                &mesh.material.base_color_texture,
+                "mesh_base_color_tex",
+                true,
+            ),
+            (&mesh.material.normal_map, "mesh_normal_map", false),
+            (
+                &mesh.material.displacement_map,
+                "mesh_displacement_map",
+                false,
+            ),
             (
                 &mesh.material.metallic_roughness_texture,
                 "mesh_metallic_roughness_tex",
+                false,
             ),
-            (&mesh.material.emissive_texture, "mesh_emissive_tex"),
-            (&mesh.material.occlusion_texture, "mesh_occlusion_tex"),
+            (&mesh.material.emissive_texture, "mesh_emissive_tex", true),
+            (
+                &mesh.material.occlusion_texture,
+                "mesh_occlusion_tex",
+                false,
+            ),
         ];
-        for (td_opt, label) in &texture_slots {
+        for (td_opt, label, is_color) in &texture_slots {
             let Some(td) = td_opt.as_ref() else { continue };
             let key = td.cache_key();
             let already_cached = self
@@ -1942,35 +1979,88 @@ impl GpuRenderer {
             }
             // Upload pixels via `with_bytes`, then drop the CPU copy.
             //
-            // On the strangler rig this halves process RSS (~1 GB →
-            // ~500 MB) — each 2K × 2K RGBA8 texture weighs 16 MB on
-            // both sides of the CPU/GPU boundary, and the asset
-            // ships ~29 of them. Sketchfab / three.js / Babylon all
-            // free after upload; keeping the copy alive is only
-            // defensible when the CPU pixels are consulted again
-            // (they aren't here — `cached_gpu_images` caches the
-            // `GpuImage` directly, and the `already_cached` short-
-            // circuit above means multi-slot reuses of the same
-            // `TextureData` never re-enter `with_bytes`).
+            // Route by `td.format`:
+            //   - `Rgba8`     → `GpuImage::from_rgba` (legacy path)
+            //   - `Bc*`       → `GpuImage::from_compressed` with the
+            //                   slot's sRGB vs linear color space.
             //
-            // Risk: if the cache evicts this entry (FIFO at
-            // MESH_CACHE_CAPACITY = 128 unique textures), a later
-            // upload attempt through `with_bytes` returns `None` and
-            // the continue below silently skips it — the mesh then
-            // binds the default 1×1 white placeholder. Scenes with
-            // >128 unique textures would degrade visually. Every
-            // Blinc example at the time of writing has ≤32; if that
-            // ever changes, move the cache to an LRU (the right
-            // answer) rather than un-dropping bytes here.
+            // If a BC-encoded texture arrives on an adapter without
+            // `TEXTURE_COMPRESSION_BC`, `from_compressed` would fail
+            // the upload (wgpu errors on the texture format). Skip
+            // it and warn — the mesh binds the 1×1 default. Callers
+            // controlling encoding via `blinc_gltf::LoadOptions`
+            // should query `renderer.has_texture_compression_bc()`
+            // before enabling BC.
+            //
+            // Cache eviction caveat: if an entry is FIFO-evicted
+            // from `cached_gpu_images` and `with_bytes` returns None
+            // (CPU copy dropped after first upload), the mesh
+            // silently binds the 1×1 placeholder. See the pre-BC
+            // memory-fix comment (commit 97f2223a) for why the CPU
+            // drop stays despite this.
+            use blinc_core::TexturePixelFormat;
+            let compressed = td.format.is_compressed();
+            if compressed && !self.has_texture_compression_bc {
+                tracing::warn!(
+                    label,
+                    format = ?td.format,
+                    "BC texture received but device has no TEXTURE_COMPRESSION_BC — binding default"
+                );
+                continue;
+            }
+            let color_space = crate::image::GpuImage::compressed_color_space(*is_color);
             let Some(img) = td.with_bytes(|bytes| {
-                crate::image::GpuImage::from_rgba(
-                    &self.device,
-                    &self.queue,
-                    bytes,
-                    td.width,
-                    td.height,
-                    Some(*label),
-                )
+                tracing::info!(
+                    label,
+                    format = ?td.format,
+                    bytes = bytes.len(),
+                    width = td.width,
+                    height = td.height,
+                    is_color,
+                    "uploading mesh texture"
+                );
+                if compressed {
+                    crate::image::GpuImage::from_compressed(
+                        &self.device,
+                        &self.queue,
+                        bytes,
+                        td.format,
+                        color_space,
+                        td.width,
+                        td.height,
+                        Some(*label),
+                    )
+                } else {
+                    debug_assert_eq!(td.format, TexturePixelFormat::Rgba8);
+                    // Color slots (diffuse, emissive) upload as
+                    // sRGB so the sampler decodes to linear on
+                    // read — matches what `Bc1RgbaUnormSrgb` /
+                    // `Bc3RgbaUnormSrgb` do on the compressed
+                    // path. glTF encodes diffuse/emissive PNGs
+                    // in sRGB by convention; uploading as plain
+                    // `Rgba8Unorm` leaves shader math working on
+                    // sRGB-encoded values, making lit surfaces
+                    // read ~2× too bright.
+                    if *is_color {
+                        crate::image::GpuImage::from_rgba_srgb(
+                            &self.device,
+                            &self.queue,
+                            bytes,
+                            td.width,
+                            td.height,
+                            Some(*label),
+                        )
+                    } else {
+                        crate::image::GpuImage::from_rgba(
+                            &self.device,
+                            &self.queue,
+                            bytes,
+                            td.width,
+                            td.height,
+                            Some(*label),
+                        )
+                    }
+                }
             }) else {
                 continue;
             };
@@ -2632,11 +2722,20 @@ impl GpuRenderer {
                 mode: f32,
             }
 
-            // B1: threshold+downsample HDR → bloom_a
+            // B1: threshold+downsample HDR → bloom_a.
+            //
+            // Threshold at 0.6 (was 0.8) — catches more of the
+            // sub-clamp specular highlights on bright materials
+            // (tank-top folds, wet skin, metal edges) so the
+            // composited bloom matches the "studio viewer" look
+            // glTF-first tools (Sketchfab, three.js) default to.
+            // 0.8 was effectively hiding the bloom for most
+            // assets because post-tonemap values rarely exceed
+            // 0.8 on diffuse-dominant surfaces.
             {
                 let uniforms = BloomUniforms {
                     texel_size: bloom_texel,
-                    threshold: 0.8,
+                    threshold: 0.6,
                     mode: 0.0,
                 };
                 self.queue

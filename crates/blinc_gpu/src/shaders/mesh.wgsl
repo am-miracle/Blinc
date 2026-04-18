@@ -384,8 +384,17 @@ fn shade(input: VertexOutput) -> ShadedFragment {
     // Normal mapping
     var shading_normal = N;
     if uniforms.has_normal_map > 0.5 {
-        let nm = textureSample(normal_texture, base_sampler, uv).rgb;
-        var tangent_normal = nm * 2.0 - 1.0;
+        // Sample RG only and reconstruct Z in-shader. Works
+        // identically for RGBA8 normal maps (B channel is
+        // dropped — for a unit-length tangent-space normal the
+        // stored B equals the reconstruction) and BC5RgUnorm
+        // normal maps (B is implementation-defined; must be
+        // reconstructed). `max(..., 0)` guards against tiny
+        // negative values from round-off, which sqrt would NaN on.
+        let nm_rg = textureSample(normal_texture, base_sampler, uv).rg;
+        let rg = nm_rg * 2.0 - 1.0;
+        let b = sqrt(max(1.0 - dot(rg, rg), 0.0));
+        var tangent_normal = vec3<f32>(rg.x, rg.y, b);
         tangent_normal.x *= uniforms.normal_scale;
         tangent_normal.y *= uniforms.normal_scale;
         shading_normal = normalize(TBN * tangent_normal);
