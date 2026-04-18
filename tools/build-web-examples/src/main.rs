@@ -203,6 +203,16 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         "blinc_input",
         r#"{ git = "https://github.com/project-blinc/blinc_input.git", rev = "3e94941bd59bafcd23ad59e8db504a44fa85b4f5" }"#,
     ),
+    // Non-`blinc_*` crate that the 3D animation demos use to get a
+    // wasm32-safe monotonic clock. `std::time::Instant::now()`
+    // panics on `wasm32-unknown-unknown`; `web_time::Instant` wraps
+    // `performance.now()` with the same API. Detected by source
+    // scan so demos that don't animate don't pay the extra dep.
+    (
+        "web_time::",
+        "web-time",
+        r#""1.1""#,
+    ),
 ];
 
 // ============================================================================
