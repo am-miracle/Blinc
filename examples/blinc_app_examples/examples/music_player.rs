@@ -269,13 +269,14 @@ fn album_header() -> impl ElementBuilder {
         // Album art placeholder
         .child(
             div()
-                .p_px(6.0)
                 .items_center()
                 .justify_center()
                 .overflow_clip()
                 .id("album-art")
                 .child(
                     image("examples/blinc_app_examples/examples/assets/Asake-Album-Review-1.webp")
+                        .w(350.0)
+                        .h_full()
                         .fit(ObjectFit::Cover),
                 ),
         )
