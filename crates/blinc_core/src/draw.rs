@@ -934,18 +934,83 @@ impl Default for Material {
 /// copy is still present. After `drop_cpu_bytes()` those calls
 /// return `None` — callers that need to re-upload must hold their
 /// own copy elsewhere.
+/// Pixel storage format for a [`TextureData`].
+///
+/// Block-compressed variants match the wgpu `TexturePixelFormat` family
+/// they map to — the GPU sampler handles the on-the-fly
+/// decompression, so callers don't need a shader change when
+/// switching a texture slot from uncompressed to BC.
+///
+/// All BC variants pack 4×4 pixel blocks into a fixed byte budget:
+///
+/// | Variant | Intended use           | Block size | Bits/pixel |
+/// |---------|------------------------|-----------:|-----------:|
+/// | `Rgba8` | Uncompressed RGBA8     |   —        |    32      |
+/// | `Bc1`   | Opaque RGB (diffuse)   |  8 bytes   |     4      |
+/// | `Bc3`   | RGBA with alpha        | 16 bytes   |     8      |
+/// | `Bc4`   | Single-channel R       |  8 bytes   |     4      |
+/// | `Bc5`   | Two-channel RG         | 16 bytes   |     8      |
+///
+/// Diffuse/emissive slots are sRGB-encoded; normal/MR/occlusion
+/// slots are linear. The GPU upload path in `blinc_gpu` picks the
+/// right sRGB-vs-linear wgpu format per slot intent — `TextureData`
+/// only carries the compression topology.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TexturePixelFormat {
+    /// RGBA8 — 32 bits per pixel. Default; matches PNG/JPEG decode
+    /// output.
+    #[default]
+    Rgba8,
+    /// BC1 — 4 bpp; one-bit alpha at best. Good for opaque RGB
+    /// diffuse and emissive.
+    Bc1,
+    /// BC3 — 8 bpp; full alpha. Good for RGBA diffuse when alpha
+    /// is actually used.
+    Bc3,
+    /// BC4 — 4 bpp; single channel. Good for occlusion / AO or
+    /// any R-only input.
+    Bc4,
+    /// BC5 — 8 bpp; two channels. Good for tangent-space normal
+    /// maps (RG; B reconstructed in shader) and metallic-roughness
+    /// (G+B in glTF convention).
+    Bc5,
+}
+
+impl TexturePixelFormat {
+    /// Bits per pixel — used by load-time size sanity checks and
+    /// by the memory accounting in debug logs.
+    pub const fn bits_per_pixel(self) -> u32 {
+        match self {
+            TexturePixelFormat::Rgba8 => 32,
+            TexturePixelFormat::Bc1 | TexturePixelFormat::Bc4 => 4,
+            TexturePixelFormat::Bc3 | TexturePixelFormat::Bc5 => 8,
+        }
+    }
+
+    /// `true` iff the variant is one of the block-compressed formats
+    /// (everything except `Rgba8`).
+    pub const fn is_compressed(self) -> bool {
+        !matches!(self, TexturePixelFormat::Rgba8)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TextureData {
     inner: std::sync::Arc<TextureDataInner>,
     pub width: u32,
     pub height: u32,
+    /// Pixel storage format. Defaults to [`TexturePixelFormat::Rgba8`]
+    /// for the legacy constructor; [`Self::new_compressed`] sets
+    /// one of the BC variants.
+    pub format: TexturePixelFormat,
 }
 
 #[derive(Debug)]
 struct TextureDataInner {
     /// CPU-side pixel buffer. `None` once
     /// [`TextureData::drop_cpu_bytes`] has been called — typically
-    /// after the first GPU upload.
+    /// after the first GPU upload. For compressed variants this
+    /// holds the already-encoded BC blocks, not raw RGBA.
     rgba: std::sync::Mutex<Option<std::sync::Arc<[u8]>>>,
     /// Identifier used as the key in GPU texture caches. Captured at
     /// construction from the original `Arc<[u8]>` pointer and
@@ -974,6 +1039,52 @@ impl TextureData {
             }),
             width,
             height,
+            format: TexturePixelFormat::Rgba8,
+        }
+    }
+
+    /// Construct a new `TextureData` backed by already-encoded
+    /// block-compressed pixels (one of the `Bc*` [`TexturePixelFormat`]
+    /// variants). Panics in debug builds when `bytes.len()` doesn't
+    /// match the format's expected block count for `width × height`.
+    ///
+    /// Width and height both round up to the nearest multiple of 4
+    /// for block coverage; fractional blocks at the edge are the
+    /// caller's responsibility to pad.
+    pub fn new_compressed(
+        bytes: Vec<u8>,
+        format: TexturePixelFormat,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        debug_assert!(
+            format.is_compressed(),
+            "TextureData::new_compressed: expected a BC variant, got {format:?}"
+        );
+        // 4×4 block count. Round up so non-multiple-of-4 dimensions
+        // don't under-report the buffer size.
+        let block_w = width.div_ceil(4) as usize;
+        let block_h = height.div_ceil(4) as usize;
+        let block_size = match format {
+            TexturePixelFormat::Bc1 | TexturePixelFormat::Bc4 => 8,
+            TexturePixelFormat::Bc3 | TexturePixelFormat::Bc5 => 16,
+            TexturePixelFormat::Rgba8 => unreachable!(),
+        };
+        debug_assert_eq!(
+            bytes.len(),
+            block_w * block_h * block_size,
+            "TextureData::new_compressed: byte count doesn't match {format:?} block count"
+        );
+        let arc_bytes: std::sync::Arc<[u8]> = bytes.into();
+        let cache_key = std::sync::Arc::as_ptr(&arc_bytes) as *const u8 as usize;
+        Self {
+            inner: std::sync::Arc::new(TextureDataInner {
+                rgba: std::sync::Mutex::new(Some(arc_bytes)),
+                cache_key,
+            }),
+            width,
+            height,
+            format,
         }
     }
 
