@@ -47,12 +47,14 @@ manageable.
 - [**Semantic @flow**](./example-gallery/semantic_flow_demo.md) — Demonstrates the semantic step/chain/use system for @flow shaders.
 - [**Sortable**](./example-gallery/sortable_demo.md) — Demonstrates drag-based interactions using FSM-driven stateful containers:
 - [**Stateful API**](./example-gallery/stateful_demo.md) — This example demonstrates the new stateful::<S>() API with:
+- [**End-to-end 3D demo wiring Blinc's SceneKit3D renderer up to**](./example-gallery/strangler_demo.md) — dispatch front-end used by any Blinc app that wants to drop
 - [**Unified Styling API**](./example-gallery/styling_demo.md) — Demonstrates all styling approaches in Blinc:
 - [**SVG Animation**](./example-gallery/svg_animation_demo.md) — Demonstrates SVG animation capabilities:
 - [**Table Builder**](./example-gallery/table_demo.md) — This example demonstrates the TableBuilder API for declarative table creation.
 - [**Tabler Icons**](./example-gallery/tabler_icons_demo.md) — Showcases outline and filled icons from the blinc_tabler_icons crate.
 - [**Minimal text positioning test**](./example-gallery/text_position_test.md) — Tests that text is correctly centered within parent containers.
 - [**Text Input Widgets**](./example-gallery/text_widgets.md) — Demonstrates ready-to-use text input and text area elements using the layout API.
+- [**KHR_texture_transform**](./example-gallery/texture_transform_demo.md) — Loads Poly Haven's `marble_cliff_02` asset (CC0) — a displaced
 - [**Theme System**](./example-gallery/theme_demo.md) — This example demonstrates the Blinc theming system capabilities:
 - [**Timeline Animation**](./example-gallery/timeline_demo.md) — This example demonstrates timeline-based animations using the stateful API:
 - [**Typography**](./example-gallery/typography_demo.md) — This example demonstrates typography helpers:
