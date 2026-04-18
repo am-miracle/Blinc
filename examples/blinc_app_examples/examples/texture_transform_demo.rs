@@ -214,10 +214,8 @@ fn main() -> Result<()> {
 }
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
-    let scene_ready =
-        ctx.use_state_keyed("texture_transform_demo_scene_ready", || false);
-    let transform_enabled =
-        ctx.use_state_keyed("texture_transform_demo_enabled", || true);
+    let scene_ready = ctx.use_state_keyed("texture_transform_demo_scene_ready", || false);
+    let transform_enabled = ctx.use_state_keyed("texture_transform_demo_enabled", || true);
 
     let handle = ctx
         .use_state_keyed("texture_transform_demo_handle", {
