@@ -54,6 +54,26 @@ fn env_usize(name: &str) -> Option<usize> {
         .and_then(|v| v.trim().parse::<usize>().ok())
 }
 
+/// Feature set to request from `adapter.request_device`. Picks
+/// `TEXTURE_COMPRESSION_BC` when the adapter advertises it; the
+/// renderer probes the active feature set afterward via
+/// `device.features()` to decide whether to upload BC-encoded
+/// material textures or fall back to Rgba8.
+///
+/// Safe to call on wgpu backends that don't support BC (WebGL2,
+/// iOS/Metal-without-BC): the adapter's features query simply
+/// returns `false` and no feature is requested. Callers that
+/// need to detect this downstream should query
+/// `GpuRenderer::has_texture_compression_bc()`.
+fn requested_device_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+    let mut features = wgpu::Features::empty();
+    let available = adapter.features();
+    if available.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
+        features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
+    }
+    features
+}
+
 fn device_required_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
     // Default wgpu limits include `max_buffer_size = 256 MiB`.
     // This is conservative and may be smaller than what the hardware supports.
@@ -1078,6 +1098,13 @@ pub struct GpuRenderer {
     /// primitive and auxiliary data to fragment shaders instead of storage
     /// buffers. This is the Tier 3 / WebGL2 fallback path.
     pub(crate) has_storage_buffers: bool,
+    /// `true` when `device.features()` reports
+    /// `TEXTURE_COMPRESSION_BC` — the renderer can upload BC1 / BC3
+    /// / BC4 / BC5 material textures and cut GPU VRAM by 4-8× vs
+    /// Rgba8. When `false`, upload paths must fall back to Rgba8
+    /// (all desktop adapters support BC; WebGL2 on iOS Safari and
+    /// a handful of older browsers do not).
+    pub(crate) has_texture_compression_bc: bool,
 }
 
 /// Image rendering pipeline (created lazily on first image render)
@@ -1122,6 +1149,13 @@ impl GpuRenderer {
     /// Whether the GPU adapter supports storage buffers.
     pub fn has_storage_buffers(&self) -> bool {
         self.has_storage_buffers
+    }
+
+    /// Whether the GPU device has `TEXTURE_COMPRESSION_BC` enabled.
+    /// Callers that upload material textures should query this to
+    /// decide between BC (when `true`) and Rgba8 fallback paths.
+    pub fn has_texture_compression_bc(&self) -> bool {
+        self.has_texture_compression_bc
     }
 
     /// Get the preferred backend for the current platform
@@ -1480,7 +1514,7 @@ impl GpuRenderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Blinc GPU Device"),
-                required_features: wgpu::Features::empty(),
+                required_features: requested_device_features(&adapter),
                 required_limits,
                 // MemoryUsage hint tells the driver to prefer lower memory over performance.
                 // This helps reduce RSS on integrated GPUs (Apple Silicon) where GPU memory
@@ -1547,7 +1581,7 @@ impl GpuRenderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Blinc GPU Device"),
-                required_features: wgpu::Features::empty(),
+                required_features: requested_device_features(&adapter),
                 required_limits,
                 // MemoryUsage hint tells the driver to prefer lower memory over performance.
                 // This helps reduce RSS on integrated GPUs (Apple Silicon) where GPU memory
@@ -1699,7 +1733,7 @@ impl GpuRenderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Blinc GPU Device (Web)"),
-                required_features: wgpu::Features::empty(),
+                required_features: requested_device_features(&adapter),
                 required_limits,
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
@@ -1787,7 +1821,7 @@ impl GpuRenderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Blinc GPU Device"),
-                required_features: wgpu::Features::empty(),
+                required_features: requested_device_features(&adapter),
                 required_limits,
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
@@ -1843,6 +1877,23 @@ impl GpuRenderer {
             .contains(wgpu::DownlevelFlags::VERTEX_STORAGE);
         if !has_vertex_storage {
             tracing::info!("VERTEX_STORAGE not supported — using instance vertex buffer fallback");
+        }
+
+        // Check if the device enabled BC texture compression (requested
+        // via `requested_device_features` earlier; we check the
+        // *device* features, not the adapter's, because the device
+        // may have been opened with a subset).
+        let has_texture_compression_bc = device
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
+        if has_texture_compression_bc {
+            tracing::info!(
+                "BC texture compression enabled — material textures upload as BC1/3/4/5"
+            );
+        } else {
+            tracing::info!(
+                "BC texture compression unavailable on this adapter — material textures upload as Rgba8"
+            );
         }
 
         // Check if the adapter supports storage buffers at all (Tier 3 / DT fallback)
@@ -2180,6 +2231,7 @@ impl GpuRenderer {
             scene_copy_texture: None,
             has_vertex_storage,
             has_storage_buffers,
+            has_texture_compression_bc,
         })
     }
 

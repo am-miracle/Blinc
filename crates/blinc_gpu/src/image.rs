@@ -5,6 +5,21 @@
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
+/// Color space tag for a compressed texture upload.
+///
+/// BC1 and BC3 come in two wgpu variants — sRGB-decoded-on-sample
+/// for color slots (diffuse, emissive) and linear for non-color
+/// slots. BC4 / BC5 only exist as linear.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompressedColorSpace {
+    /// sRGB encoding on disk; hardware decodes to linear when
+    /// sampled. Use for diffuse / base color / emissive.
+    Srgb,
+    /// Linear encoding both on disk and in the shader. Use for
+    /// normal, MR, occlusion.
+    Linear,
+}
+
 /// A GPU image texture ready for rendering
 pub struct GpuImage {
     /// The GPU texture
@@ -40,6 +55,94 @@ impl GpuImage {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            pixels,
+        );
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        Self {
+            texture,
+            view,
+            width,
+            height,
+        }
+    }
+
+    /// Slot intent for a compressed upload — determines whether the
+    /// sRGB variant of the matching wgpu `TextureFormat` is used.
+    ///
+    /// - `Color` for diffuse / base-color / emissive (sRGB-encoded
+    ///   on disk, sampled as sRGB so the shader sees linear values).
+    /// - `Linear` for normal maps, metallic-roughness, occlusion, and
+    ///   anything that already stores linear values.
+    pub fn compressed_color_space(color: bool) -> CompressedColorSpace {
+        if color {
+            CompressedColorSpace::Srgb
+        } else {
+            CompressedColorSpace::Linear
+        }
+    }
+
+    /// Create a GPU image from block-compressed pixel data.
+    ///
+    /// `pixels` is the packed BC block buffer — 8 bytes per 4×4
+    /// block for BC1/BC4 and 16 bytes per 4×4 block for BC3/BC5.
+    /// See `blinc_core::TexturePixelFormat` for the format's byte
+    /// layout; the caller is responsible for producing bytes in
+    /// that shape.
+    ///
+    /// `width` and `height` must round up to a multiple of 4 for
+    /// block coverage — fractional edge blocks are the encoder's
+    /// responsibility to pad.
+    pub fn from_compressed(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pixels: &[u8],
+        format: blinc_core::TexturePixelFormat,
+        color_space: CompressedColorSpace,
+        width: u32,
+        height: u32,
+        label: Option<&str>,
+    ) -> Self {
+        use blinc_core::TexturePixelFormat as P;
+        let wgpu_format = match (format, color_space) {
+            (P::Rgba8, _) => {
+                // Fallback: caller asked for compressed but passed
+                // Rgba8. Treat as the uncompressed path.
+                return Self::from_rgba(device, queue, pixels, width, height, label);
+            }
+            (P::Bc1, CompressedColorSpace::Srgb) => {
+                wgpu::TextureFormat::Bc1RgbaUnormSrgb
+            }
+            (P::Bc1, CompressedColorSpace::Linear) => wgpu::TextureFormat::Bc1RgbaUnorm,
+            (P::Bc3, CompressedColorSpace::Srgb) => {
+                wgpu::TextureFormat::Bc3RgbaUnormSrgb
+            }
+            (P::Bc3, CompressedColorSpace::Linear) => wgpu::TextureFormat::Bc3RgbaUnorm,
+            // BC4 and BC5 are single/dual-channel linear formats —
+            // no sRGB variant exists in wgpu for them. Color-space
+            // argument is accepted for uniformity but ignored.
+            (P::Bc4, _) => wgpu::TextureFormat::Bc4RUnorm,
+            (P::Bc5, _) => wgpu::TextureFormat::Bc5RgUnorm,
+        };
+
+        let texture = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label,
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu_format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             },
