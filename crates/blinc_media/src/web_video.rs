@@ -214,7 +214,10 @@ pub(crate) fn buffered_end_ms(player_id: u64) -> u64 {
                 return (end * 1000.0) as u64;
             }
         }
-        ranges.end(len - 1).map(|e| (e * 1000.0) as u64).unwrap_or(0)
+        ranges
+            .end(len - 1)
+            .map(|e| (e * 1000.0) as u64)
+            .unwrap_or(0)
     })
 }
 

@@ -213,11 +213,8 @@ impl VideoPlayer {
                         // into the signal when it actually changes, to
                         // avoid waking subscribers on every frame.
                         let new_buf = crate::web_video::buffered_end_ms(_tick_id);
-                        if new_buf
-                            != last_buffered.load(std::sync::atomic::Ordering::Relaxed)
-                        {
-                            last_buffered
-                                .store(new_buf, std::sync::atomic::Ordering::Relaxed);
+                        if new_buf != last_buffered.load(std::sync::atomic::Ordering::Relaxed) {
+                            last_buffered.store(new_buf, std::sync::atomic::Ordering::Relaxed);
                             buf_for_tick.set(new_buf);
                         }
 
