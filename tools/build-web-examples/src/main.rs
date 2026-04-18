@@ -1033,9 +1033,7 @@ fn render_index_html(
     } else {
         image_assets
             .iter()
-            .map(|p| {
-                format!(r#"    <link rel="preload" as="fetch" crossorigin href="{p}" />"#)
-            })
+            .map(|p| format!(r#"    <link rel="preload" as="fetch" crossorigin href="{p}" />"#))
             .collect::<Vec<_>>()
             .join("\n")
     };

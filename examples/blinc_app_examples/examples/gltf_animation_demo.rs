@@ -254,7 +254,9 @@ impl AsyncHandle {
                     // missing asset keeps the loop spinning forever
                     // and the overlay never dismisses.
                     if blinc_platform::assets::preload_settled() {
-                        tracing::error!("gltf_animation_demo: preload settled without scene resolving");
+                        tracing::error!(
+                            "gltf_animation_demo: preload settled without scene resolving"
+                        );
                         break;
                     }
                     sleep_ms(100).await;
