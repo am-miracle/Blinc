@@ -18,6 +18,12 @@ crate-type = ["lib"]
 blinc_core = { path = "../blinc_core", version = "0.5.1" }
 blinc_layout = { path = "../blinc_layout", version = "0.5.1" }
 blinc_gpu = { path = "../blinc_gpu", version = "0.5.1" }
+# Downstream input polling layer. Used by `SceneKit3D::with_input` to
+# automate the `capture_input` + per-frame `frame_end` wiring that
+# every 3D demo reimplements. The Blinc workspace patches the git
+# rev to `packages/blinc_input` via the root `[patch]` table, so
+# iteration is free; standalone consumers resolve via git.
+blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = "3e94941bd59bafcd23ad59e8db504a44fa85b4f5" }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 image = { workspace = true, features = ["hdr"] }

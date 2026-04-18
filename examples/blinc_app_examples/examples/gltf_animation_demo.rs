@@ -35,7 +35,7 @@ use blinc_canvas_kit::AutoFramer;
 use blinc_core::events::KeyCode;
 use blinc_core::{Color, DrawContext, Light, Mat4, MeshData, State, Vec3};
 use blinc_gltf::{GltfAnimation, GltfScene};
-use blinc_input::{DivInputExt, InputState};
+use blinc_input::InputState;
 use blinc_layout::prelude::text;
 use web_time::Instant;
 
@@ -374,12 +374,18 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     // sample the clip, dispatch the mesh draw list.
     let handle_ren = handle.clone();
     let camera_signal_ren = camera_signal.clone();
+    // `SceneKit3D::with_input` automates `capture_input` + the
+    // per-frame `input.frame_end()` call, so the render closure
+    // below can read input via closure capture without bracketing
+    // every code path with `frame_end()`. The old pattern
+    // (pre-`with_input`) required `.capture_input(&handle.input)`
+    // on the Div and a `frame_end()` call on every early-out.
     let viewport = kit
+        .with_input(&handle.input)
         .element(move |ctx: &mut dyn DrawContext, _bounds| {
             handle_ren.autoplay_if_ready();
 
             let Some(state) = handle_ren.get() else {
-                handle_ren.input.frame_end();
                 return;
             };
 
@@ -447,10 +453,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                     ctx.draw_mesh_data(prim.clone(), xf);
                 }
             }
-
-            handle_ren.input.frame_end();
         })
-        .capture_input(&handle.input)
         .id(VIEWPORT_ID);
 
     // Reactive header — the scene loads async, so `handle.get()` is

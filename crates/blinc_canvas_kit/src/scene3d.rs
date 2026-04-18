@@ -361,6 +361,21 @@ pub struct SceneKit3D {
     /// swapping it from a background task takes effect on the next
     /// repaint.
     environment: Arc<RwLock<Arc<CubemapData>>>,
+    /// Optional `InputState` clone wired via [`Self::with_input`].
+    /// When set, [`Self::element`] automates both halves of the
+    /// polling-input contract the 3D demos reimplement:
+    ///
+    /// - `DivInputExt::capture_input` on the outer viewport `Div`
+    ///   so key / pointer / scroll events feed the state.
+    /// - `InputState::frame_end()` at the end of every paint pass
+    ///   so edge-triggered queries (`is_key_just_pressed`) stay
+    ///   one-frame-scoped.
+    ///
+    /// Readers still access input via closure capture the way
+    /// they do today — the kit doesn't route it through a new
+    /// context type, it only fixes the two error-prone wiring
+    /// calls. Default `None` preserves pre-existing behavior.
+    input: Option<blinc_input::InputState>,
 }
 
 impl SceneKit3D {
@@ -395,6 +410,7 @@ impl SceneKit3D {
             zoom_sensitivity: 0.001,
             momentum_decay: 0.95,
             environment: env.try_get().expect("env signal initialised"),
+            input: None,
         }
     }
 
@@ -454,6 +470,51 @@ impl SceneKit3D {
 
     pub fn with_zoom_sensitivity(mut self, sens: f32) -> Self {
         self.zoom_sensitivity = sens;
+        self
+    }
+
+    /// Wire a [`blinc_input::InputState`] to the viewport the kit's
+    /// [`Self::element`] returns. Stores a clone (cheap — `InputState`
+    /// is `Arc<Mutex<...>>`-backed), and automates:
+    ///
+    /// - `DivInputExt::capture_input(&input)` on the outer `Div`, so
+    ///   key / pointer / scroll events feed the state.
+    /// - `InputState::frame_end()` at the end of every paint pass,
+    ///   so edge-triggered queries (`is_key_just_pressed`) stay
+    ///   one-frame-scoped.
+    ///
+    /// The render closure continues to read input via closure
+    /// capture on the same `InputState` instance. Typical demo
+    /// boilerplate collapses from:
+    ///
+    /// ```ignore
+    /// let viewport = kit
+    ///     .element(move |ctx, _bounds| {
+    ///         let Some(state) = handle.get() else {
+    ///             handle.input.frame_end();   // early-out
+    ///             return;
+    ///         };
+    ///         if handle.input.is_key_just_pressed(KeyCode::SPACE) { ... }
+    ///         handle.input.frame_end();       // normal exit
+    ///     })
+    ///     .capture_input(&handle.input);
+    /// ```
+    ///
+    /// to:
+    ///
+    /// ```ignore
+    /// let viewport = kit
+    ///     .with_input(&handle.input)
+    ///     .element(move |ctx, _bounds| {
+    ///         let Some(state) = handle.get() else { return; };
+    ///         if handle.input.is_key_just_pressed(KeyCode::SPACE) { ... }
+    ///     });
+    /// ```
+    ///
+    /// No-op when the caller doesn't need polling input — `element()`
+    /// stays identical for kits that weren't `.with_input`-configured.
+    pub fn with_input(mut self, input: &blinc_input::InputState) -> Self {
+        self.input = Some(input.clone());
         self
     }
 
@@ -608,8 +669,15 @@ impl SceneKit3D {
         let zoom_sens = self.zoom_sensitivity;
         let decay = self.momentum_decay;
         let render = Rc::new(render_fn);
+        // `input` goes into two places: the inner canvas closure
+        // (for per-frame `frame_end()` after `render_fn` returns)
+        // and the outer `Div` (for `capture_input`). Cloning both
+        // up-front because the closure captures by move and the
+        // outer chain runs after the closure is constructed.
+        let input_frame_end = self.input.clone();
+        let input_capture = self.input.clone();
 
-        div()
+        let outer = div()
             .w_full()
             .h_full()
             .on_drag(move |evt| {
@@ -671,9 +739,28 @@ impl SceneKit3D {
                         ctx.add_light(light.clone());
                     }
                     render(ctx, bounds);
+                    // Settle edge-triggered queries for this paint.
+                    // Caller opted into this via `with_input`; without
+                    // it, `input_frame_end` is `None` and this is a
+                    // no-op. Runs after the user's render closure so
+                    // `is_key_just_pressed` reads stay true for the
+                    // full paint.
+                    if let Some(ref i) = input_frame_end {
+                        i.frame_end();
+                    }
                 })
                 .w_full()
                 .h_full(),
-            )
+            );
+
+        // `capture_input` only applies when the caller configured
+        // input — otherwise `outer` is returned verbatim and the
+        // 6 event handlers the kit already registered above (drag
+        // / scroll / pointer_down) remain untouched.
+        use blinc_input::DivInputExt;
+        match input_capture {
+            Some(ref i) => outer.capture_input(i),
+            None => outer,
+        }
     }
 }
