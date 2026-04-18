@@ -204,13 +204,13 @@ impl WebAssetLoader {
         // `warn` and return Ok so the caller continues; missing
         // textures fall back to the renderer's 1×1 default and the
         // rest of the scene renders.
-        let (successes, first_err) = results.into_iter().fold(
-            (0usize, None::<PlatformError>),
-            |(n, first), r| match r {
-                Ok(()) => (n + 1, first),
-                Err(e) => (n, first.or(Some(e))),
-            },
-        );
+        let (successes, first_err) =
+            results
+                .into_iter()
+                .fold((0usize, None::<PlatformError>), |(n, first), r| match r {
+                    Ok(()) => (n + 1, first),
+                    Err(e) => (n, first.or(Some(e))),
+                });
         match first_err {
             Some(e) if successes == 0 => Err(e),
             Some(e) => {
