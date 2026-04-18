@@ -248,8 +248,11 @@ fn parallax_mapping(uv: vec2<f32>, view_dir_ts: vec3<f32>, scale: f32) -> vec2<f
     return mix(current_uv, prev_uv, weight);
 }
 
-@fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+// Shared shading body — returns the same premultiplied vec4 the
+// original `fs_main` used to return. Factored out so `fs_main_oit`
+// can reuse it (WGSL / naga forbid calling one entry point from
+// another; helpers must be plain functions).
+fn shade_dt(input: VertexOutput) -> vec4<f32> {
     var uv = input.uv;
 
     // Build TBN matrix for tangent-space transforms
@@ -429,4 +432,40 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let reflected = ambient + direct_lighting * shadow_factor;
     let final_rgb = reflected * base_color.a + emissive_value;
     return vec4(final_rgb, base_color.a);
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    return shade_dt(input);
+}
+
+// Weighted Blended OIT entry — see mesh.wgsl for the full rationale.
+// Delegates lighting to `shade_dt` and reweights; the dual-MRT
+// contract matches the storage-buffer path.
+struct OitOutput {
+    @location(0) accum: vec4<f32>,
+    @location(1) reveal: vec4<f32>,
+}
+
+@fragment
+fn fs_main_oit(input: VertexOutput) -> OitOutput {
+    let lit = shade_dt(input);
+    let alpha = lit.a;
+    if alpha <= 0.001 {
+        discard;
+    }
+    // See mesh.wgsl `oit_weight` for the tuning rationale — linear
+    // view-space z (≈ `1 / clip_w`) scaled by 20 so typical
+    // character-scale depths land on the cubic knee.
+    let view_z = 1.0 / max(input.clip_position.w, 1e-6);
+    let scaled = view_z / 20.0;
+    let w_depth = clamp(1.0 / (1e-5 + pow(scaled, 3.0)), 1e-2, 3e3);
+    let w = clamp(alpha * w_depth, 1e-3, 3e3);
+    var out: OitOutput;
+    // `lit.rgb` is already premultiplied (lit = reflected * α + emissive);
+    // feeding it into accum * w gives Σ(c*α*w) as required by the WBOIT
+    // composite (see oit_composite.wgsl).
+    out.accum = vec4(lit.rgb * w, alpha * w);
+    out.reveal = vec4(alpha, 0.0, 0.0, 0.0);
+    return out;
 }

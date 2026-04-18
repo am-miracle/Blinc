@@ -1096,7 +1096,6 @@ use crate::mesh_pipeline::{
     MORPH_CACHE_CAPACITY,
 };
 
-
 struct BindGroupLayouts {
     sdf: wgpu::BindGroupLayout,
     glass: wgpu::BindGroupLayout,
@@ -7798,8 +7797,6 @@ impl GpuRenderer {
             self.render_images(target, gpu_image.view(), &[instance]);
         }
     }
-
-    /// Ensure the mesh rendering pipeline is created
 
     // ─── Custom Render Pass API ────────────────────────────────────────────
 

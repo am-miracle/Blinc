@@ -307,36 +307,28 @@ fn parallax_mapping(uv: vec2<f32>, view_dir_ts: vec3<f32>, scale: f32) -> vec2<f
     return mix(current_uv, prev_uv, weight);
 }
 
-/// Depth-only alpha-tested fragment pass.
-///
-/// Used by the blend depth prepass: samples base-color alpha and
-/// discards anything below `material.alpha_cutoff` (default 0.5 for
-/// BLEND materials that don't otherwise specify). The pipeline it's
-/// paired with writes depth and masks color writes, so the returned
-/// colour is irrelevant — `discard` is the only observable effect.
-///
-/// Stripping every non-alpha path (lighting, IBL, shadow sampling,
-/// normal mapping, parallax, morph renormalisation) keeps this
-/// fragment cheap; most of the prepass cost is depth-buffer bandwidth.
-@fragment
-fn fs_alpha_prepass(input: VertexOutput) -> @location(0) vec4<f32> {
-    var base_color = material.base_color * input.vertex_color;
-    if uniforms.has_texture > 0.5 {
-        base_color = base_color * textureSample(base_texture, base_sampler, input.uv);
-    }
-    // Defensive floor on the cutoff: if the asset left it at 0 (glTF
-    // default for non-Mask materials), anything with any alpha at
-    // all would survive. Use 0.5 as the effective minimum — same
-    // convention the auto-demote in blinc_gltf uses.
-    let cutoff = max(material.alpha_cutoff, 0.5);
-    if base_color.a < cutoff {
-        discard;
-    }
-    return vec4(0.0, 0.0, 0.0, 1.0);
+// Result of the shared shading body. `rgb_premult` is the
+// premultiplied-alpha color (reflected * alpha + emissive); `alpha`
+// is the surface alpha after the mask/opaque branch. `emissive_rgb`
+// is returned separately so the OIT path can decide how to weight
+// emissive vs reflected (keeping emissive un-attenuated through
+// transparent layers).
+struct ShadedFragment {
+    rgb_premult: vec3<f32>,
+    alpha: f32,
+    emissive_rgb: vec3<f32>,
+    /// Raw unlit base color when `material.unlit > 0.5`. Only the
+    /// unlit branch consumes it — lit materials leave it unused.
+    unlit_rgb: vec3<f32>,
+    /// Set to 1.0 when the material is unlit; callers should use
+    /// `unlit_rgb` instead of `rgb_premult` in that case.
+    is_unlit: f32,
 }
 
-@fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+// Shared lighting body. Called by both `fs_main` (opaque/mask/blend
+// direct-write path) and `fs_main_oit` (weighted blended OIT path).
+// Any `discard` inside here propagates out of both entry points.
+fn shade(input: VertexOutput) -> ShadedFragment {
     var uv = input.uv;
 
     // Build TBN matrix for tangent-space transforms
@@ -380,7 +372,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // else: Blend — leave base_color.a as sampled.
 
     if material.unlit > 0.5 {
-        return base_color;
+        var out: ShadedFragment;
+        out.rgb_premult = base_color.rgb * base_color.a;
+        out.alpha = base_color.a;
+        out.emissive_rgb = vec3<f32>(0.0);
+        out.unlit_rgb = base_color.rgb;
+        out.is_unlit = 1.0;
+        return out;
     }
 
     // Normal mapping
@@ -534,6 +532,108 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // body decal mask) can still show its bright emissive eye /
     // accent glows.
     let reflected = ambient + direct_lighting * shadow_factor;
-    let final_rgb = reflected * base_color.a + emissive_value;
-    return vec4(final_rgb, base_color.a);
+    var out: ShadedFragment;
+    out.rgb_premult = reflected * base_color.a + emissive_value;
+    out.alpha = base_color.a;
+    out.emissive_rgb = emissive_value;
+    out.unlit_rgb = vec3<f32>(0.0);
+    out.is_unlit = 0.0;
+    return out;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let s = shade(input);
+    if s.is_unlit > 0.5 {
+        return vec4(s.unlit_rgb, s.alpha);
+    }
+    return vec4(s.rgb_premult, s.alpha);
+}
+
+// Weighted Blended OIT (McGuire & Bavoil 2013) fragment entry.
+//
+// Writes two MRTs:
+//
+//   location 0 — accum (Rgba16Float):
+//       rgb = premultiplied_color * weight
+//       a   = alpha               * weight
+//
+//   location 1 — reveal (R8Unorm):
+//       r   = alpha   (combined with a ZERO / OneMinusSrc blend to
+//                      produce product(1 - alpha_i) across all
+//                      overlapping BLEND fragments)
+//
+// Paired with `oit_composite.wgsl` which divides out the accumulated
+// weight and blends the result over the opaque HDR using the reveal
+// term as "background transmission".
+//
+// Depth test is on (so opaque geometry in front occludes BLEND
+// fragments correctly) but depth write is off (BLEND fragments don't
+// occlude each other — OIT handles ordering statistically).
+struct OitOutput {
+    @location(0) accum: vec4<f32>,
+    @location(1) reveal: vec4<f32>,
+}
+
+// McGuire & Bavoil weight (Eq. 10 / 2013 paper), reworked to use
+// *linear view-space depth* instead of NDC depth.
+//
+// NDC depth (`clip_position.z`) is heavily non-linear under a
+// standard perspective projection — most of the `[0, 1]` range maps
+// to fragments near the far plane. With a cubic weight in NDC z,
+// everything past roughly view_z > 3 collapses into the same tiny
+// weight, and stacked BLEND layers at grazing view angles (e.g. a
+// drone's landing leg seen through a fan's transparent housing)
+// mutually annihilate — each layer multiplies reveal by (1 - α) but
+// contributes almost nothing to accum, so the composite outputs
+// coverage ≈ 1 with a near-zero average colour.
+//
+// The fragment shader's `clip_position.w` component, per WebGPU
+// convention, holds `1 / clip_w` after perspective divide. For a
+// standard perspective matrix `clip_w == view_z` (positive, distance
+// from camera), so `1.0 / clip_position.w` recovers linear
+// view-space depth.
+fn oit_weight(alpha: f32, view_z: f32) -> f32 {
+    // Normalise by 20 so "typical scene depth" (5-10 metres for a
+    // character-scale scene) maps onto the cubic falloff's knee
+    // rather than into the clamp floor. Weights at view_z = 1m land
+    // near the 3e3 clamp (near-plane fragments dominate), weights at
+    // view_z = 5m are around 60, at 10m around 8, at 20m around 1 —
+    // a ~3000× spread that preserves ordering without any single
+    // layer overwhelming the sum.
+    let scaled = view_z / 20.0;
+    let w_depth = clamp(1.0 / (1e-5 + pow(scaled, 3.0)), 1e-2, 3e3);
+    return clamp(alpha * w_depth, 1e-3, 3e3);
+}
+
+@fragment
+fn fs_main_oit(input: VertexOutput) -> OitOutput {
+    let s = shade(input);
+
+    // Unlit materials bypass the premultiplied convention used by
+    // the lit path — shade() stores the raw colour in `unlit_rgb`.
+    // For OIT we still feed premultiplied values into accum so the
+    // composite divide works identically for both paths.
+    var color = s.rgb_premult;
+    if s.is_unlit > 0.5 {
+        color = s.unlit_rgb * s.alpha;
+    }
+
+    // Alpha=0 fragments carry no signal and would only dilute the
+    // accumulator (they contribute 0 to color but still bump weight
+    // denominators at the clamp floor). Skip them.
+    if s.alpha <= 0.001 {
+        discard;
+    }
+
+    let view_z = 1.0 / max(input.clip_position.w, 1e-6);
+    let w = oit_weight(s.alpha, view_z);
+
+    var out: OitOutput;
+    out.accum = vec4(color * w, s.alpha * w);
+    // reveal uses a `src = 0, dst = 1 - src` blend factor in the
+    // pipeline, so writing `alpha` here multiplies the destination
+    // by (1 - alpha) — after N fragments, reveal.r = product(1 - α_i).
+    out.reveal = vec4(s.alpha, 0.0, 0.0, 0.0);
+    return out;
 }

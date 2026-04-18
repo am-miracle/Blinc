@@ -72,23 +72,27 @@ impl DirectionalLight {
 /// Lazily-created 3D mesh rendering pipeline.
 pub(crate) struct MeshPipeline {
     pub(crate) pipeline: wgpu::RenderPipeline,
-    /// Same pipeline as `pipeline` but with `depth_write_enabled: false`.
-    /// Selected when a mesh's material has `AlphaMode::Blend` — writing
-    /// depth from a transparent surface would depth-reject opaque
-    /// fragments rendered later behind it, causing the background to
-    /// bleed through (e.g. transparent hair strands obscuring the face
-    /// skin beneath them). Opaque and Mask materials still use
-    /// `pipeline` so they z-occlude correctly.
-    pub(crate) blend_pipeline: wgpu::RenderPipeline,
-    /// Depth-only alpha-test prepass pipeline for BLEND meshes.
-    /// Writes depth (so subsequent BLEND color passes can z-test
-    /// against each other); color writes are masked off.
+    /// Weighted Blended OIT accumulation pipeline (McGuire & Bavoil
+    /// 2013). Selected for `AlphaMode::Blend` materials. Same vertex
+    /// stage as `pipeline`, fragment entry point is `fs_main_oit`,
+    /// and the color targets are the `oit_accum_view` / `oit_reveal_view`
+    /// intermediates — NOT the HDR target.
     ///
-    /// Together with the app-level phase split (opaque → blend prepass
-    /// → blend color), this eliminates "see-through solid" artifacts
-    /// across overlapping transparent geometry without requiring a
-    /// per-triangle sort.
-    pub(crate) blend_prepass_pipeline: wgpu::RenderPipeline,
+    /// Depth test is on (opaque geometry in front still occludes
+    /// BLEND fragments) but depth write is off (BLEND fragments
+    /// don't occlude each other — OIT handles ordering statistically,
+    /// so we don't depend on submission order or per-triangle sort).
+    ///
+    /// The resulting accum/reveal pair is composited over the HDR
+    /// target by `oit_composite_pipeline` once all BLEND draws for
+    /// the frame have landed (on `is_last`).
+    pub(crate) oit_accum_pipeline: wgpu::RenderPipeline,
+    /// Fullscreen composite pass that reads `oit_accum_view` and
+    /// `oit_reveal_view` and blends the OIT result over the HDR
+    /// intermediate. Runs once per frame on the last mesh, before
+    /// bloom and tonemap.
+    pub(crate) oit_composite_pipeline: wgpu::RenderPipeline,
+    pub(crate) oit_composite_bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) bind_group_layout: wgpu::BindGroupLayout,
     pub(crate) uniform_buffer: wgpu::Buffer,
     pub(crate) material_buffer: wgpu::Buffer,
@@ -170,6 +174,20 @@ pub(crate) struct MeshPipeline {
     pub(crate) hdr_texture: Option<wgpu::Texture>,
     pub(crate) hdr_view: Option<wgpu::TextureView>,
     pub(crate) hdr_size: (u32, u32),
+    /// OIT accumulation target (Rgba16Float). Sized to match the HDR
+    /// intermediate. Holds Σ(premultiplied_color * w, alpha * w)
+    /// across all overlapping BLEND fragments for the current frame.
+    pub(crate) oit_accum_texture: Option<wgpu::Texture>,
+    pub(crate) oit_accum_view: Option<wgpu::TextureView>,
+    /// OIT reveal target (R8Unorm). Cleared to 1.0 at frame start;
+    /// each BLEND fragment multiplies it by (1 - alpha) via a
+    /// ZERO / OneMinusSrc blend factor. After all BLEND fragments
+    /// land, reveal.r = Π(1 - α_i) — the "how much of the background
+    /// is still visible" factor used by the composite pass.
+    pub(crate) oit_reveal_texture: Option<wgpu::Texture>,
+    pub(crate) oit_reveal_view: Option<wgpu::TextureView>,
+    pub(crate) oit_size: (u32, u32),
+    pub(crate) oit_composite_sampler: wgpu::Sampler,
     /// Fullscreen ACES tonemap pipeline + resources.
     pub(crate) tonemap_pipeline: wgpu::RenderPipeline,
     pub(crate) tonemap_bind_group_layout: wgpu::BindGroupLayout,
@@ -477,7 +495,7 @@ impl GpuRenderer {
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[vertex_layout.clone()],
+                    buffers: std::slice::from_ref(&vertex_layout),
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -531,28 +549,69 @@ impl GpuRenderer {
                 cache: None,
             });
 
-        // Blend variant — identical except depth writes are disabled.
-        // Drawn for BLEND-mode materials only; opaque / mask still
-        // use `pipeline` so they occlude each other correctly.
-        let blend_pipeline =
+        // Weighted Blended OIT accumulation pipeline. Targets the
+        // `oit_accum` (Rgba16Float) and `oit_reveal` (R8Unorm)
+        // intermediates via MRT; writes premultiplied-color × weight
+        // into accum (additive) and alpha into reveal (combined with
+        // a `ZERO, OneMinusSrc` blend to produce ∏(1 − α_i)).
+        //
+        // Depth test on, depth write off: opaque geometry in front
+        // still occludes, but BLEND fragments don't occlude each
+        // other — OIT handles ordering without a per-triangle sort.
+        let oit_accum_pipeline =
             self.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("Mesh Pipeline (Blend)"),
+                    label: Some("Mesh Pipeline (OIT Accum)"),
                     layout: Some(&pipeline_layout),
                     vertex: wgpu::VertexState {
                         module: &shader,
                         entry_point: Some("vs_main"),
-                        buffers: &[vertex_layout.clone()],
+                        buffers: std::slice::from_ref(&vertex_layout),
                         compilation_options: Default::default(),
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &shader,
-                        entry_point: Some("fs_main"),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba16Float,
-                            blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
+                        entry_point: Some("fs_main_oit"),
+                        targets: &[
+                            // @location(0) accum — additive,
+                            // Rgba16Float sum of c*α*w and α*w.
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba16Float,
+                                blend: Some(wgpu::BlendState {
+                                    color: wgpu::BlendComponent {
+                                        src_factor: wgpu::BlendFactor::One,
+                                        dst_factor: wgpu::BlendFactor::One,
+                                        operation: wgpu::BlendOperation::Add,
+                                    },
+                                    alpha: wgpu::BlendComponent {
+                                        src_factor: wgpu::BlendFactor::One,
+                                        dst_factor: wgpu::BlendFactor::One,
+                                        operation: wgpu::BlendOperation::Add,
+                                    },
+                                }),
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            // @location(1) reveal — multiplicative
+                            // transmission. Initial clear value is
+                            // 1.0; each fragment's α shrinks it via
+                            // `dst = 0 * src + (1 - src) * dst`.
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::R8Unorm,
+                                blend: Some(wgpu::BlendState {
+                                    color: wgpu::BlendComponent {
+                                        src_factor: wgpu::BlendFactor::Zero,
+                                        dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                                        operation: wgpu::BlendOperation::Add,
+                                    },
+                                    alpha: wgpu::BlendComponent {
+                                        src_factor: wgpu::BlendFactor::Zero,
+                                        dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                                        operation: wgpu::BlendOperation::Add,
+                                    },
+                                }),
+                                write_mask: wgpu::ColorWrites::RED,
+                            }),
+                        ],
                         compilation_options: Default::default(),
                     }),
                     primitive: wgpu::PrimitiveState {
@@ -572,31 +631,91 @@ impl GpuRenderer {
                     cache: None,
                 });
 
-        // Depth-only alpha-test prepass — writes depth, masks colour.
-        // Used to populate the main depth buffer with BLEND
-        // contributions before the color blend pass runs, so
-        // overlapping transparent meshes z-occlude each other
-        // correctly without a per-triangle sort.
-        let blend_prepass_pipeline =
+        // ── OIT composite pipeline ──────────────────────────────────────
+        //
+        // Fullscreen pass that reads `oit_accum` + `oit_reveal` and
+        // blends the WBOIT result over the HDR intermediate. Runs
+        // once per frame (on is_last, before bloom/tonemap).
+        let oit_composite_shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("OIT Composite Shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/oit_composite.wgsl").into()),
+            });
+        let oit_composite_bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("OIT Composite BGL"),
+                    entries: &[
+                        // 0: accum texture
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            },
+                            count: None,
+                        },
+                        // 1: reveal texture
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            },
+                            count: None,
+                        },
+                        // 2: sampler
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                            count: None,
+                        },
+                    ],
+                });
+        let oit_composite_layout =
+            self.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("OIT Composite Pipeline Layout"),
+                    bind_group_layouts: &[&oit_composite_bind_group_layout],
+                    push_constant_ranges: &[],
+                });
+        let oit_composite_pipeline =
             self.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("Mesh Pipeline (Blend Prepass)"),
-                    layout: Some(&pipeline_layout),
+                    label: Some("OIT Composite Pipeline"),
+                    layout: Some(&oit_composite_layout),
                     vertex: wgpu::VertexState {
-                        module: &shader,
+                        module: &oit_composite_shader,
                         entry_point: Some("vs_main"),
-                        buffers: &[vertex_layout.clone()],
+                        buffers: &[],
                         compilation_options: Default::default(),
                     },
                     fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some("fs_alpha_prepass"),
+                        module: &oit_composite_shader,
+                        entry_point: Some("fs_main"),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: wgpu::TextureFormat::Rgba16Float,
-                            blend: None,
-                            // Colour writes fully masked — this pass
-                            // only touches the depth attachment.
-                            write_mask: wgpu::ColorWrites::empty(),
+                            // Over-operator with premultiplied-coverage
+                            // source: final = src.rgb * src.a + dst * (1 - src.a)
+                            blend: Some(wgpu::BlendState {
+                                color: wgpu::BlendComponent {
+                                    src_factor: wgpu::BlendFactor::SrcAlpha,
+                                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                    operation: wgpu::BlendOperation::Add,
+                                },
+                                alpha: wgpu::BlendComponent {
+                                    src_factor: wgpu::BlendFactor::One,
+                                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                    operation: wgpu::BlendOperation::Add,
+                                },
+                            }),
+                            write_mask: wgpu::ColorWrites::ALL,
                         })],
                         compilation_options: Default::default(),
                     }),
@@ -605,17 +724,26 @@ impl GpuRenderer {
                         cull_mode: None,
                         ..Default::default()
                     },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: wgpu::TextureFormat::Depth32Float,
-                        depth_write_enabled: true,
-                        depth_compare: wgpu::CompareFunction::Less,
-                        stencil: wgpu::StencilState::default(),
-                        bias: wgpu::DepthBiasState::default(),
-                    }),
+                    // No depth attachment — this is a fullscreen pass
+                    // writing straight into HDR.
+                    depth_stencil: None,
                     multisample: wgpu::MultisampleState::default(),
                     multiview: None,
                     cache: None,
                 });
+
+        let oit_composite_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("OIT Composite Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            // Texel-perfect fetch — the OIT intermediates are 1:1
+            // with the HDR target, no filtering needed.
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
 
         // 3x mat4 (192) + camera+pad (16) + lights[4] (128) + tail (64) = 400 bytes.
         let uniform_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1126,8 +1254,9 @@ impl GpuRenderer {
 
         self.mesh_pipeline = Some(MeshPipeline {
             pipeline,
-            blend_pipeline,
-            blend_prepass_pipeline,
+            oit_accum_pipeline,
+            oit_composite_pipeline,
+            oit_composite_bind_group_layout,
             bind_group_layout,
             uniform_buffer,
             material_buffer,
@@ -1166,6 +1295,12 @@ impl GpuRenderer {
             hdr_texture: None,
             hdr_view: None,
             hdr_size: (0, 0),
+            oit_accum_texture: None,
+            oit_accum_view: None,
+            oit_reveal_texture: None,
+            oit_reveal_view: None,
+            oit_size: (0, 0),
+            oit_composite_sampler,
             tonemap_pipeline,
             tonemap_bind_group_layout,
             tonemap_sampler,
@@ -1294,11 +1429,17 @@ impl GpuRenderer {
         }
         self.ensure_mesh_pipeline();
 
-        // Reuse the same Arc<MeshData>-keyed vertex/index cache the
-        // main pass uses. If the main pass hasn't uploaded this mesh's
-        // buffers yet, populate the cache here; subsequent main-pass
-        // calls will hit the cache for free.
-        let mesh_ptr = std::sync::Arc::as_ptr(mesh) as usize;
+        // Reuse the same vertex/index cache the main pass uses. Key
+        // on the INNER `Arc<Vec<Vertex>>` pointer — stable across
+        // shallow `MeshData` clones (the common pattern where demos
+        // do `Arc::new(per_draw)` per frame to stamp fresh skinning /
+        // morph weights). Keying on the outer `Arc<MeshData>`
+        // pointer instead uploads a fresh vertex/index buffer every
+        // frame; those buffers can't be freed until the GPU finishes
+        // the prior frame's commands, so memory grows by O(frames ×
+        // meshes × vertex_bytes) until the process dies (observed:
+        // 50 GB on the strangler rig after a few minutes).
+        let mesh_ptr = std::sync::Arc::as_ptr(&mesh.vertices) as usize;
         let needs_buffers = !self
             .mesh_pipeline
             .as_ref()
@@ -1482,8 +1623,23 @@ impl GpuRenderer {
         batch_count: usize,
     ) {
         if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+            tracing::warn!(
+                batch_index,
+                batch_count,
+                verts = mesh.vertices.len(),
+                indices = mesh.indices.len(),
+                "mesh skipped — empty vertex or index buffer"
+            );
             return;
         }
+        tracing::trace!(
+            batch_index,
+            batch_count,
+            verts = mesh.vertices.len(),
+            indices = mesh.indices.len(),
+            alpha_mode = ?mesh.material.alpha_mode,
+            "drawing mesh"
+        );
         let is_first = batch_index == 0;
         let is_last = batch_index + 1 >= batch_count.max(1);
 
@@ -1500,7 +1656,13 @@ impl GpuRenderer {
         // the same Arcs each frame (the normal case) hit the cache on
         // every call after the first; streaming-mesh apps evict their
         // oldest entry and pay a re-upload for it on next touch.
-        let mesh_ptr = std::sync::Arc::as_ptr(mesh) as usize;
+        //
+        // Keyed on the inner `Arc<Vec<Vertex>>` pointer — see the
+        // shadow-pass copy of this cache for the full rationale
+        // (tl;dr: the outer `Arc<MeshData>` pointer changes on every
+        // per-frame `Arc::new(per_draw)` clone, causing a fresh
+        // buffer upload per frame and an unbounded GPU memory leak).
+        let mesh_ptr = std::sync::Arc::as_ptr(&mesh.vertices) as usize;
         let needs_buffers = !self
             .mesh_pipeline
             .as_ref()
@@ -1859,13 +2021,13 @@ impl GpuRenderer {
                         flat.extend_from_slice(&[n[0], n[1], n[2], 0.0]);
                     }
                 }
-                let buffer = self.device.create_buffer_init(
-                    &wgpu::util::BufferInitDescriptor {
+                let buffer = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("Mesh Morph Deltas"),
                         contents: bytemuck::cast_slice(&flat),
                         usage: wgpu::BufferUsages::STORAGE,
-                    },
-                );
+                    });
                 mp_mut.morph_deltas_cache.push_back((key, buffer));
                 while mp_mut.morph_deltas_cache.len() > MORPH_CACHE_CAPACITY {
                     mp_mut.morph_deltas_cache.pop_front();
@@ -2105,6 +2267,44 @@ impl GpuRenderer {
                 mp_mut.hdr_texture = Some(hdr);
                 mp_mut.hdr_size = size;
             }
+            // OIT intermediates — same size as HDR, cleared each frame.
+            if mp_mut.oit_size != size || mp_mut.oit_accum_texture.is_none() {
+                let accum = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("OIT Accum"),
+                    size: wgpu::Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let reveal = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("OIT Reveal"),
+                    size: wgpu::Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R8Unorm,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                mp_mut.oit_accum_view = Some(accum.create_view(&Default::default()));
+                mp_mut.oit_reveal_view = Some(reveal.create_view(&Default::default()));
+                mp_mut.oit_accum_texture = Some(accum);
+                mp_mut.oit_reveal_texture = Some(reveal);
+                mp_mut.oit_size = size;
+            }
             // Bloom ping-pong textures at half resolution
             let bloom_w = (size.0 / 2).max(1);
             let bloom_h = (size.1 / 2).max(1);
@@ -2183,6 +2383,52 @@ impl GpuRenderer {
             pass.draw(0..3, 0..1);
         }
 
+        // OIT intermediate clear — accum to (0,0,0,0), reveal to 1.0.
+        // Runs once per frame on is_first so later BLEND fragments
+        // append to an empty accumulator. `reveal = 1.0` means "no
+        // BLEND fragment has touched this pixel yet"; each fragment
+        // multiplies it by (1 - α_i) via the pipeline's blend factor.
+        if is_first {
+            let accum_view = mp
+                .oit_accum_view
+                .as_ref()
+                .expect("oit_accum_view populated above");
+            let reveal_view = mp
+                .oit_reveal_view
+                .as_ref()
+                .expect("oit_reveal_view populated above");
+            let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("OIT Clear Pass"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: accum_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: reveal_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 1.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 0.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+        }
+
         // Sub-pass: Scene3D custom passes → HDR (between skybox and mesh).
         // Submit the skybox encoder first, then run Scene3D passes
         // (which create their own encoders), then re-borrow mp for mesh.
@@ -2227,7 +2473,52 @@ impl GpuRenderer {
         } else {
             wgpu::LoadOp::Load
         };
-        {
+        let is_blend = matches!(mesh.material.alpha_mode, blinc_core::draw::AlphaMode::Blend);
+        if is_blend {
+            // BLEND → OIT accum + reveal MRT. Both targets share the
+            // main depth buffer (test only, no write) so opaque
+            // geometry in front of a BLEND fragment still occludes it.
+            let accum_view = mp.oit_accum_view.as_ref().unwrap();
+            let reveal_view = mp.oit_reveal_view.as_ref().unwrap();
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Mesh OIT Accum Pass"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: accum_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: reveal_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: depth_load_op,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_pipeline(&mp.oit_accum_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..index_count, 0, 0..1);
+        } else {
+            // OPAQUE / MASK → HDR directly (classic forward path).
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Mesh HDR Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2249,16 +2540,60 @@ impl GpuRenderer {
                 }),
                 ..Default::default()
             });
-
-            let selected_pipeline = match mesh.material.alpha_mode {
-                blinc_core::draw::AlphaMode::Blend => &mp.blend_pipeline,
-                _ => &mp.pipeline,
-            };
-            pass.set_pipeline(selected_pipeline);
+            pass.set_pipeline(&mp.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_vertex_buffer(0, vertex_buffer.slice(..));
             pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..index_count, 0, 0..1);
+        }
+
+        // ── OIT composite → HDR ─────────────────────────────────────
+        //
+        // Once per frame (on is_last), before bloom/tonemap: blend the
+        // OIT accum+reveal intermediates over the HDR target so all
+        // downstream passes see a correctly-composited scene.
+        //
+        // The composite shader discards pixels where no BLEND
+        // fragment wrote (reveal ≈ 1.0, coverage < 1e-4), so the
+        // pass is a no-op on pixels that only had opaque geometry.
+        if is_last {
+            let accum_view = mp.oit_accum_view.as_ref().unwrap();
+            let reveal_view = mp.oit_reveal_view.as_ref().unwrap();
+            let composite_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("OIT Composite Bind Group"),
+                layout: &mp.oit_composite_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(accum_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(reveal_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&mp.oit_composite_sampler),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("OIT Composite Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: hdr_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            pass.set_pipeline(&mp.oit_composite_pipeline);
+            pass.set_bind_group(0, &composite_bg, &[]);
+            pass.draw(0..3, 0..1);
         }
 
         // ── Bloom + tonemap passes ─────────────────────────────────────

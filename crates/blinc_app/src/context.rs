@@ -5556,8 +5556,34 @@ fn dispatch_pending_meshes(
     };
 
     // ── Phase 2: main HDR/tonemap passes for every mesh ────────────────
-    let batch_count = meshes.len();
-    for (batch_index, pending) in meshes.iter().enumerate() {
+    //
+    // Sort OPAQUE + MASK before BLEND before dispatch. Weighted-blended
+    // OIT (the renderer's transparency path) needs every opaque fragment
+    // to have written its depth before any BLEND fragment runs its own
+    // depth test; otherwise a BLEND mesh drawn mid-scene accumulates at
+    // pixels a later-drawn opaque mesh would have occluded, and the OIT
+    // composite washes those opaque pixels out.
+    //
+    // Callers submitting `draw_mesh_data(...)` in scene-graph order
+    // (the most common case — e.g. gltf_animation_demo, cutegirl,
+    // strangler) would otherwise need to sort manually at each call
+    // site. Doing it once here, at the single dispatch seam, keeps
+    // every asset correct without surfacing the OIT ordering invariant
+    // as user-facing knowledge.
+    //
+    // `sort_by_key` is stable so within a mode the caller's submission
+    // order is preserved — matters when a caller is already doing
+    // back-to-front sorting inside the BLEND group.
+    let mut ordered: Vec<&PendingMesh> = meshes.iter().collect();
+    ordered.sort_by_key(|p| {
+        matches!(
+            p.mesh.material.alpha_mode,
+            blinc_core::draw::AlphaMode::Blend
+        ) as u8
+    });
+
+    let batch_count = ordered.len();
+    for (batch_index, &pending) in ordered.iter().enumerate() {
         // Upload the environment cubemap only when its `Arc` identity
         // changes. The renderer's texture is overwritten on each real
         // upload, so only the last distinct environment matters.
@@ -5702,9 +5728,7 @@ fn first_directional_light(lights: &[blinc_core::Light]) -> ([f32; 3], f32) {
 /// array. Capped at the shader's `MAX_DIR_LIGHTS`; if the scene has
 /// no directional lights we hand back a single soft top-down default
 /// so the mesh never renders pitch-black.
-fn collect_directional_lights(
-    lights: &[blinc_core::Light],
-) -> Vec<blinc_gpu::DirectionalLight> {
+fn collect_directional_lights(lights: &[blinc_core::Light]) -> Vec<blinc_gpu::DirectionalLight> {
     let max = blinc_gpu::MAX_DIR_LIGHTS;
     let mut out: Vec<blinc_gpu::DirectionalLight> = Vec::with_capacity(max);
     for light in lights {
