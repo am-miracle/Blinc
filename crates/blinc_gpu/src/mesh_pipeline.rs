@@ -2071,6 +2071,25 @@ impl GpuRenderer {
             while mp_mut.cached_gpu_image_keys.len() > MESH_CACHE_CAPACITY {
                 if let Some(old_key) = mp_mut.cached_gpu_image_keys.pop_front() {
                     mp_mut.cached_gpu_images.remove(&old_key);
+                    // FIFO eviction: the just-evicted texture will now
+                    // render as the 1×1 white default. If the scene is
+                    // still referencing it (most common on scenes
+                    // with > MESH_CACHE_CAPACITY unique textures), the
+                    // visual result is a silent "material went white"
+                    // regression — one of the hardest bugs for app
+                    // authors to diagnose. Log once per eviction so
+                    // it at least shows up in the console; full LRU
+                    // with per-frame reference tracking is the proper
+                    // fix and lives in blinc_canvas_kit's BACKLOG.
+                    tracing::warn!(
+                        target: "blinc_gpu::mesh_texture_cache",
+                        evicted_key = old_key,
+                        capacity = MESH_CACHE_CAPACITY,
+                        "evicting GPU texture — scenes with > {} unique textures will \
+                         render the evicted material as white; consider splitting scenes \
+                         or raising MESH_CACHE_CAPACITY",
+                        MESH_CACHE_CAPACITY,
+                    );
                 }
             }
         }
