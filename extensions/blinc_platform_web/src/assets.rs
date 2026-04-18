@@ -342,11 +342,21 @@ async fn fetch_as_bytes(url: &str) -> Result<Vec<u8>> {
     use js_sys::Uint8Array;
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
-    use web_sys::{Request, RequestInit, RequestMode, Response};
+    use web_sys::{Request, RequestCredentials, RequestInit, RequestMode, Response};
 
     let opts = RequestInit::new();
     opts.set_method("GET");
     opts.set_mode(RequestMode::Cors);
+    // Match the `<link rel="preload" as="fetch" crossorigin>` tags
+    // the build tool emits into index.html. An empty `crossorigin`
+    // attribute resolves to credentials=omit; any mismatch with the
+    // fetch's credentials mode makes the browser discard the
+    // preload and issue a fresh request on the same URL — two
+    // round-trips, defeating the whole point. Keeping these pinned
+    // to `Omit` dedupes cleanly for same-origin and cross-origin
+    // assets alike; Blinc's asset paths are all public (fonts,
+    // textures, glTF) so credentials have nothing to contribute.
+    opts.set_credentials(RequestCredentials::Omit);
 
     let request = Request::new_with_str_and_init(url, &opts).map_err(|e| {
         PlatformError::AssetLoad(format!("Failed to build request for {url}: {e:?}"))
