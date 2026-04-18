@@ -196,7 +196,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
     (
         "blinc_skeleton::",
         "blinc_skeleton",
-        r#"{ git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "e47c26001d26ec6c94f44c93a9253c2783e65537" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "cdf5a5d39fe47d3ba2ddad9699e1d7836fdb4be5" }"#,
     ),
     (
         "blinc_input::",

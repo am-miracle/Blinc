@@ -809,8 +809,8 @@ pub struct MeshData {
 /// empty saves memory.
 #[derive(Clone, Debug, Default)]
 pub struct MorphTarget {
-    /// Per-vertex position delta: final_position[v] += weight ·
-    /// delta_positions[v].
+    /// Per-vertex position delta: `final_position[v] += weight *
+    /// delta_positions[v]`.
     pub delta_positions: Vec<[f32; 3]>,
     /// Optional per-vertex normal delta. Same length as
     /// `delta_positions` when present.
