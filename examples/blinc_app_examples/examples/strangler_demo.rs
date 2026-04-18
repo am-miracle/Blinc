@@ -101,30 +101,27 @@ struct Playback {
 }
 
 impl SceneState {
+    /// Native: synchronously load through `blinc_platform` + build.
+    #[cfg(not(target_arch = "wasm32"))]
     fn try_load(path: &str) -> Option<Self> {
         let opts = blinc_gltf::LoadOptions {
             max_texture_size: Some(2048),
         };
-        let mut scene = match blinc_gltf::load_asset_with_options(path, &opts) {
-            Ok(s) => s,
+        match blinc_gltf::load_asset_with_options(path, &opts) {
+            Ok(scene) => Some(Self::from_scene(scene)),
             Err(e) => {
-                // `try_load` runs in a 100 ms retry loop while the web
-                // preloader is still in flight — logging at `error`
-                // would spray the console with ~10 identical entries
-                // per second of startup. Only surface at `error` once
-                // the loader has declared every preload settled
-                // (success or failure), which is when a still-missing
-                // asset is genuinely a failure the user needs to act
-                // on. Otherwise downgrade to `debug`.
-                if blinc_platform::assets::preload_settled() {
-                    tracing::error!("the_strangler asset not loadable ({e:?})");
-                } else {
-                    tracing::debug!("the_strangler asset not loadable yet ({e:?})");
-                }
-                return None;
+                tracing::error!("the_strangler asset not loadable ({e:?})");
+                None
             }
-        };
+        }
+    }
 
+    /// Build a `SceneState` from an already-loaded `GltfScene`.
+    /// Shared between the native synchronous path and the wasm
+    /// async path — the heavy work (`blinc_gltf::load_asset_async`)
+    /// is isolated above this, so every target agrees on how to
+    /// turn a loaded scene into a ready-to-render state.
+    fn from_scene(mut scene: GltfScene) -> Self {
         let mut total_inserted = 0usize;
         for anim in scene.animations.iter_mut() {
             total_inserted += blinc_skeleton::densify_rotation_channels(anim);
@@ -153,7 +150,7 @@ impl SceneState {
             .map(|m| std::mem::take(&mut m.primitives))
             .collect();
         let animation = scene.animations.first().cloned();
-        Some(Self {
+        Self {
             scene: Arc::new(Mutex::new(scene)),
             base_meshes: Arc::new(base_meshes),
             animation: Arc::new(animation),
@@ -163,7 +160,7 @@ impl SceneState {
                 paused: true,
             })),
             duration,
-        })
+        }
     }
 }
 
@@ -193,25 +190,26 @@ impl AsyncHandle {
 
         #[cfg(target_arch = "wasm32")]
         {
+            // `blinc_gltf::load_asset_with_options_async` folds the
+            // old retry loop into the library: it waits for preload
+            // to settle, loads, and yields between stages so the
+            // browser can paint a loading overlay. The single await
+            // replaces ~20 lines of 100 ms polling + preload_settled
+            // escape-hatch logic the demo used to carry.
             wasm_bindgen_futures::spawn_local(async move {
-                loop {
-                    if let Some(state) = SceneState::try_load(path) {
+                let opts = blinc_gltf::LoadOptions {
+                    max_texture_size: Some(2048),
+                };
+                match blinc_gltf::load_asset_with_options_async(path, &opts, |_| {}).await {
+                    Ok(scene) => {
                         register_scheduler_tick();
-                        let _ = slot.set(state);
+                        let _ = slot.set(SceneState::from_scene(scene));
                         scene_ready.set(true);
                         get_scheduler().request_redraw();
-                        break;
                     }
-                    // Stop polling once the platform loader declares
-                    // every preload settled. `try_load` already logs
-                    // the underlying error at `error!` in that branch;
-                    // without breaking here the loop keeps retrying
-                    // (and relogging) forever against a cache that
-                    // isn't going to fill.
-                    if blinc_platform::assets::preload_settled() {
-                        break;
+                    Err(e) => {
+                        tracing::error!("the_strangler async load failed: {e:?}");
                     }
-                    sleep_ms(100).await;
                 }
             });
         }
@@ -228,19 +226,6 @@ impl AsyncHandle {
             }
         }
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn sleep_ms(ms: u32) {
-    use wasm_bindgen::prelude::*;
-    use wasm_bindgen_futures::JsFuture;
-    let promise = js_sys::Promise::new(&mut |resolve: js_sys::Function, _reject| {
-        web_sys::window().and_then(|w| {
-            w.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32)
-                .ok()
-        });
-    });
-    let _ = JsFuture::from(promise).await;
 }
 
 fn register_scheduler_tick() {
