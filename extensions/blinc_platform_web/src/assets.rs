@@ -367,15 +367,18 @@ async fn fetch_as_bytes(url: &str) -> Result<Vec<u8>> {
     opts.set_method("GET");
     opts.set_mode(RequestMode::Cors);
     // Match the `<link rel="preload" as="fetch" crossorigin>` tags
-    // the build tool emits into index.html. An empty `crossorigin`
-    // attribute resolves to credentials=omit; any mismatch with the
-    // fetch's credentials mode makes the browser discard the
-    // preload and issue a fresh request on the same URL — two
-    // round-trips, defeating the whole point. Keeping these pinned
-    // to `Omit` dedupes cleanly for same-origin and cross-origin
-    // assets alike; Blinc's asset paths are all public (fonts,
-    // textures, glTF) so credentials have nothing to contribute.
-    opts.set_credentials(RequestCredentials::Omit);
+    // the build tool emits into index.html. HTML spec mapping:
+    // empty `crossorigin` attribute → mode=CORS +
+    // credentials=**same-origin** (NOT `omit`). "Anonymous" in
+    // the attribute naming means "don't send creds to a *different*
+    // origin" — same-origin cookies/auth still go. Any mismatch
+    // here makes the browser log
+    // "A preload for X is found, but is not used because the
+    // request credentials mode does not match", discard the
+    // preload, and issue a fresh round-trip on the same URL.
+    // Pinning to `SameOrigin` dedupes cleanly with the `<link>`
+    // and matches the fetch() browser default.
+    opts.set_credentials(RequestCredentials::SameOrigin);
 
     let request = Request::new_with_str_and_init(url, &opts).map_err(|e| {
         PlatformError::AssetLoad(format!("Failed to build request for {url}: {e:?}"))
