@@ -161,57 +161,64 @@ impl WebAssetLoader {
         // state.
         self.progress.total.fetch_add(urls.len(), Ordering::Release);
 
+        // Insert into the cache *before* bumping the per-URL counter,
+        // and do both inside the per-task future rather than in a
+        // post-join fan-in loop. The previous layout had a race
+        // window: every fetch resolved (so `is_complete()` said yes),
+        // but inserts happened sequentially in the post-`join_all`
+        // loop, so the cache was empty while consumers believed
+        // preload was done. Retry-loop callers (the 3D demos)
+        // hit this exact window on warm HTTP cache and exited their
+        // loop on `preload_settled()` without ever seeing a
+        // successfully-populated cache — loading overlay stuck
+        // forever even though every texture was resident in the
+        // browser's disk cache.
+        //
+        // `self` captured by reference is fine here: `preload` is an
+        // async fn, every spawned future's lifetime is bounded by
+        // the `join_all` below, and wasm's single-threaded runtime
+        // means the concurrent `insert_raw` calls serialize through
+        // the cache `Mutex` without contention.
         let fetches = urls.iter().map(|u| {
             let progress = self.progress.clone();
             async move {
-                let result = Self::fetch_bytes(u).await.map(|b| (*u, b));
-                match &result {
-                    Ok(_) => progress.completed.fetch_add(1, Ordering::Release),
-                    Err(_) => progress.failed.fetch_add(1, Ordering::Release),
-                };
-                result
+                let fetch_result = Self::fetch_bytes(u).await;
+                match fetch_result {
+                    Ok(bytes) => {
+                        self.insert_raw(*u, bytes);
+                        progress.completed.fetch_add(1, Ordering::Release);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        progress.failed.fetch_add(1, Ordering::Release);
+                        Err(e)
+                    }
+                }
             }
         });
         let results = join_all(fetches).await;
 
-        // Partial-failure tolerance: populate the cache with every
-        // successful fetch *before* reporting an error for the ones
-        // that didn't land. Previously a single 404 (or flaky
-        // connection) early-returned via `?` and discarded every
-        // already-completed fetch — the caller would then see every
-        // subsequent `load_asset` fail with "not preloaded" because
-        // the cache was empty, even though most of the bytes did
-        // arrive. For a 29-asset scene (e.g. the strangler rig),
-        // one missing texture shouldn't mean nothing renders.
-        //
-        // Fatal vs. non-fatal: if *nothing* loaded we still bubble
-        // the error (definitely broken — e.g. wrong base URL). If
-        // some fraction landed, log at `warn` and return Ok so the
-        // caller continues; missing textures fall back to the
-        // renderer's 1×1 default and the rest of the scene renders.
-        let mut first_err: Option<PlatformError> = None;
-        let mut inserted = 0usize;
-        for result in results {
-            match result {
-                Ok((url, bytes)) => {
-                    self.insert_raw(url, bytes);
-                    inserted += 1;
-                }
-                Err(e) => {
-                    if first_err.is_none() {
-                        first_err = Some(e);
-                    }
-                }
-            }
-        }
+        // Partial-failure tolerance: if *nothing* loaded, surface
+        // the first error (definitely broken — wrong base URL, CORS
+        // misconfig, offline). If some fraction landed, log at
+        // `warn` and return Ok so the caller continues; missing
+        // textures fall back to the renderer's 1×1 default and the
+        // rest of the scene renders.
+        let (successes, first_err) = results.into_iter().fold(
+            (0usize, None::<PlatformError>),
+            |(n, first), r| match r {
+                Ok(()) => (n + 1, first),
+                Err(e) => (n, first.or(Some(e))),
+            },
+        );
         match first_err {
-            Some(e) if inserted == 0 => Err(e),
+            Some(e) if successes == 0 => Err(e),
             Some(e) => {
                 tracing::warn!(
                     "preload partially failed: {} of {} succeeded ({}): {e}",
-                    inserted,
+                    successes,
                     urls.len(),
-                    urls.len() - inserted,
+                    urls.len() - successes,
                 );
                 Ok(())
             }

@@ -509,6 +509,39 @@ fn extract_window_size(source: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// Classify an asset URL for the purpose of `<link rel="preload">`.
+///
+/// Media URLs are consumed by the browser's `<video>` / `<audio>`
+/// elements (or the wasm `<video>.src` streaming path in Blinc),
+/// not by `fetch()`. Declaring them with `as="fetch"` makes the
+/// browser log the classic "preloaded but not used within a few
+/// seconds" warning once the timeout fires, because nothing
+/// ever claims the preload at that MIME type. Matching the `as=`
+/// to the actual consumer fixes the warning and lets the browser
+/// dedupe the preload with the media element's range request.
+fn preload_as_attr(url: &str) -> &'static str {
+    let lower = url.to_lowercase();
+    const VIDEO: &[&str] = &[".mp4", ".webm", ".mov", ".m4v"];
+    const AUDIO: &[&str] = &[".mp3", ".wav", ".flac", ".ogg", ".oga", ".m4a"];
+    if VIDEO.iter().any(|ext| lower.ends_with(ext)) {
+        "video"
+    } else if AUDIO.iter().any(|ext| lower.ends_with(ext)) {
+        "audio"
+    } else {
+        "fetch"
+    }
+}
+
+/// True when the URL targets a `<video>` / `<audio>` element.
+/// Media is excluded from `WebAssetLoader::preload` because the
+/// media pipeline does its own HTTP range-request streaming — the
+/// `<video>.src = url` path doesn't need the bytes cached in the
+/// wasm-side `HashMap` first, and caching them there would
+/// duplicate a 50-MB download for no benefit.
+fn is_media_url(url: &str) -> bool {
+    preload_as_attr(url) != "fetch"
+}
+
 fn detect_image_assets(source: &str) -> Vec<String> {
     let mut raw_paths = std::collections::BTreeSet::new();
     let asset_prefix = "examples/blinc_app_examples/examples/assets/";
@@ -953,13 +986,22 @@ pub fn _start() {{
 "#,
         stem = stem,
         crate_name = crate_name,
-        preload_block = if image_assets.is_empty() {
-            String::new()
-        } else {
-            let urls: Vec<String> = image_assets
-                .iter()
-                .map(|p| format!("                        \"{}\"", p))
-                .collect();
+        preload_block = {
+            // Media URLs (video/audio) stream via `<video>.src` /
+            // `<audio>.src` — they don't need to be materialised in
+            // the wasm `WebAssetLoader` cache. Including them here
+            // would double-fetch a 50 MB clip on cold load, and
+            // still leave the `<link rel=preload as=video>` entry
+            // as the only consumer the browser ever sees.
+            let fetch_urls: Vec<&String> =
+                image_assets.iter().filter(|p| !is_media_url(p)).collect();
+            if fetch_urls.is_empty() {
+                String::new()
+            } else {
+                let urls: Vec<String> = fetch_urls
+                    .iter()
+                    .map(|p| format!("                        \"{}\"", p))
+                    .collect();
             // Background-spawn the preload instead of awaiting it.
             // Without this the setup closure blocks before the first
             // frame is painted, leaving the user staring at a blank
@@ -988,6 +1030,7 @@ pub fn _start() {{
 "#,
                 urls = urls.join(",\n")
             )
+            }
         },
     )
 }
@@ -1028,12 +1071,35 @@ fn render_index_html(
     // `WebAssetLoader::fetch_bytes`. The `crossorigin` attribute
     // must be present (even empty) for `as="fetch"` preloads to be
     // honored by the cache.
+    // Partition assets by consumer type so the `<link rel="preload">`
+    // `as=` attribute matches the later request — a mismatch means
+    // the browser discards the preload + re-fetches, or logs the
+    // "preloaded but not used" warning after the timeout.
+    //
+    // - Media (`.mp4` / `.webm` / `.mov` / `.mp3` / `.wav` /
+    //   `.flac` / `.ogg`): consumed via `<video>.src` or
+    //   `<audio>.src` streaming — `as="video"` / `as="audio"`. The
+    //   `crossorigin` attribute stays off because media elements
+    //   default to the no-credentials mode already.
+    // - Everything else: consumed via the wasm `fetch()` preload
+    //   path with `credentials=omit` — `as="fetch" crossorigin`,
+    //   matching `WebAssetLoader::fetch_bytes`.
     let preload_links = if image_assets.is_empty() {
         String::new()
     } else {
         image_assets
             .iter()
-            .map(|p| format!(r#"    <link rel="preload" as="fetch" crossorigin href="{p}" />"#))
+            .map(|p| match preload_as_attr(p) {
+                "video" => {
+                    format!(r#"    <link rel="preload" as="video" href="{p}" />"#)
+                }
+                "audio" => {
+                    format!(r#"    <link rel="preload" as="audio" href="{p}" />"#)
+                }
+                _ => format!(
+                    r#"    <link rel="preload" as="fetch" crossorigin href="{p}" />"#
+                ),
+            })
             .collect::<Vec<_>>()
             .join("\n")
     };
