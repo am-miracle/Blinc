@@ -160,10 +160,10 @@ blinc_media = { path = "../blinc_media", version = "0.5.1" }
 
 [features]
 default = ["windowed"]
-windowed = ["winit", "blinc_platform_desktop", "blinc_gpu/desktop", "rfd", "tray-icon", "muda", "notify-rust", "global-hotkey"]
-android = ["blinc_platform_android", "android-activity", "ndk", "jni", "android_logger", "log", "tracing-android", "tracing-subscriber", "blinc_gpu/android"]
-ios = ["blinc_platform_ios", "blinc_gpu/ios"]
-harmony = ["blinc_gpu/harmony"]  # blinc_platform_harmony when target is available
+windowed = ["winit", "blinc_platform_desktop", "blinc_gpu/desktop", "blinc_gpu/bc-encode", "rfd", "tray-icon", "muda", "notify-rust", "global-hotkey"]
+android = ["blinc_platform_android", "android-activity", "ndk", "jni", "android_logger", "log", "tracing-android", "tracing-subscriber", "blinc_gpu/android", "blinc_gpu/bc-encode"]
+ios = ["blinc_platform_ios", "blinc_gpu/ios", "blinc_gpu/bc-encode"]
+harmony = ["blinc_gpu/harmony", "blinc_gpu/bc-encode"]  # blinc_platform_harmony when target is available
 fuchsia = []
 # Web (wasm32) — `wasm-pack build --target web` against this feature.
 #

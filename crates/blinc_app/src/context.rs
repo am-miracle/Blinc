@@ -1143,10 +1143,18 @@ impl RenderContext {
                     if self.image_cache.get(placeholder_src).is_none() {
                         let source = blinc_image::ImageSource::from_uri(placeholder_src);
                         if let Ok(data) = blinc_image::ImageData::load(source) {
-                            let gpu_image = self.image_ctx.create_image_labeled(
+                            // `is_srgb = false` mirrors
+                            // `create_image_labeled`'s existing
+                            // behavior so we don't accidentally
+                            // change sampling here — the 2D image
+                            // pipeline treats bytes as linear.
+                            let has_bc = self.renderer.has_texture_compression_bc();
+                            let gpu_image = self.image_ctx.create_image_maybe_compressed(
                                 data.pixels(),
                                 data.width(),
                                 data.height(),
+                                false,
+                                has_bc,
                                 placeholder_src,
                             );
                             self.image_cache.put(placeholder_src.clone(), gpu_image);
@@ -1217,11 +1225,17 @@ impl RenderContext {
                 }
             };
 
-            // Create GPU texture
-            let gpu_image = self.image_ctx.create_image_labeled(
+            // Create GPU texture — compress to BC1/BC3 when the
+            // device supports it so the image cache's VRAM
+            // footprint scales with asset count instead of blowing
+            // past the LRU budget on 4K dashboards.
+            let has_bc = self.renderer.has_texture_compression_bc();
+            let gpu_image = self.image_ctx.create_image_maybe_compressed(
                 image_data.pixels(),
                 image_data.width(),
                 image_data.height(),
+                false,
+                has_bc,
                 &image.source,
             );
 

@@ -8801,13 +8801,23 @@ impl GpuRenderer {
         if self.mask_image_cache.contains_key(url) {
             return;
         }
-        let gpu_img = crate::image::GpuImage::from_rgba(
+        // Mask images are loaded once and sampled every frame the
+        // masked element is visible — a textbook case for BC. The
+        // auto encoder picks BC1 when the mask is effectively
+        // opaque (rare for masks but cheap to check) and BC3
+        // otherwise to preserve the alpha channel the mask depends
+        // on. Falls back to uncompressed upload on devices without
+        // BC support or in builds without the `bc-encode` feature.
+        let label = format!("mask:{}", url);
+        let gpu_img = crate::image::GpuImage::from_rgba_maybe_compressed(
             &self.device,
             &self.queue,
             pixels,
             width,
             height,
-            Some(&format!("mask:{}", url)),
+            false,
+            self.has_texture_compression_bc,
+            Some(&label),
         );
         self.mask_image_cache.insert(url.to_string(), gpu_img);
     }

@@ -26,11 +26,21 @@ ios = ["metal"]                         # iOS only uses Metal (native windowing)
 fuchsia = ["vulkan"]                    # Fuchsia uses Vulkan via Scenic (native windowing)
 harmony = ["vulkan"]                    # HarmonyOS prefers Vulkan (native windowing)
 web = ["webgpu", "webgl"]               # Browser: WebGPU primary, WebGL2 fallback
+# Runtime BC1/BC3 texture encoding for 2D images and masks. ~50-150 ms
+# encode per 2K × 2K RGBA at load, 4-8× GPU VRAM reduction for the
+# image cache. Off by default so the `tbc` dep is opt-in; enable
+# unconditionally from the app crate since tbc is pure Rust and
+# compiles everywhere Blinc ships.
+bc-encode = ["dep:tbc"]
 
 [dependencies]
 blinc_core = { path = "../blinc_core", version = "0.5.1" }
 blinc_paint = { path = "../blinc_paint", version = "0.5.1" }
 blinc_text = { path = "../blinc_text", version = "0.5.1" }
+
+# Optional BC encoder — only pulled in when `bc-encode` is enabled.
+# Same pure-Rust crate blinc_gltf uses for mesh-texture compression.
+tbc = { version = "0.3", optional = true }
 
 # GPU
 wgpu.workspace = true

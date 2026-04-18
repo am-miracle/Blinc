@@ -119,6 +119,97 @@ impl GpuImage {
         }
     }
 
+    /// Upload RGBA pixel data, compressing to BC1/BC3 when the
+    /// device supports `TEXTURE_COMPRESSION_BC` and the
+    /// `bc-encode` feature is enabled. Otherwise falls back to
+    /// [`Self::from_rgba`] or [`Self::from_rgba_srgb`] depending on
+    /// `is_srgb`.
+    ///
+    /// Intended for one-time-uploaded, many-frames-read images (the
+    /// 2D image widget cache, CSS mask images). BC1 for opaque,
+    /// BC3 for images with meaningful alpha — decided by
+    /// [`crate::bc_encode::is_effectively_opaque`]. Minimum 4×4
+    /// dimensions for block coverage; smaller images skip BC and
+    /// go through the uncompressed path.
+    ///
+    /// The encode happens inline — caller owns whatever thread the
+    /// latency lives on. Budget ~50-150 ms per 2K × 2K texture on
+    /// native; linear fallback when the feature is off means zero
+    /// added cost for callers who never opt in.
+    #[cfg(feature = "bc-encode")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_rgba_maybe_compressed(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        is_srgb: bool,
+        has_bc_support: bool,
+        label: Option<&str>,
+    ) -> Self {
+        // BC blocks are 4×4; anything smaller skips compression.
+        // Also bail if pixel length doesn't match width*height*4 —
+        // the encoder's debug_assert would fire otherwise, and in
+        // release builds we'd silently corrupt.
+        let can_compress = has_bc_support
+            && width >= 4
+            && height >= 4
+            && pixels.len() == (width as usize) * (height as usize) * 4;
+        if can_compress {
+            let td = crate::bc_encode::encode_auto(pixels, width, height);
+            let color_space = if is_srgb {
+                CompressedColorSpace::Srgb
+            } else {
+                CompressedColorSpace::Linear
+            };
+            // `td` was just produced above; `with_bytes` can only
+            // return None after a `drop_cpu_bytes()` call, which
+            // nothing between construction and here performs.
+            return td
+                .with_bytes(|bytes| {
+                    Self::from_compressed(
+                        device,
+                        queue,
+                        bytes,
+                        td.format,
+                        color_space,
+                        td.width,
+                        td.height,
+                        label,
+                    )
+                })
+                .expect("freshly encoded TextureData retains its CPU bytes");
+        }
+        if is_srgb {
+            Self::from_rgba_srgb(device, queue, pixels, width, height, label)
+        } else {
+            Self::from_rgba(device, queue, pixels, width, height, label)
+        }
+    }
+
+    /// Feature-disabled variant — mirrors the signature so call
+    /// sites can pin their dispatch logic regardless of whether
+    /// the downstream build has `bc-encode` turned on.
+    #[cfg(not(feature = "bc-encode"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_rgba_maybe_compressed(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        is_srgb: bool,
+        _has_bc_support: bool,
+        label: Option<&str>,
+    ) -> Self {
+        if is_srgb {
+            Self::from_rgba_srgb(device, queue, pixels, width, height, label)
+        } else {
+            Self::from_rgba(device, queue, pixels, width, height, label)
+        }
+    }
+
     /// Slot intent for a compressed upload — determines whether the
     /// sRGB variant of the matching wgpu `TextureFormat` is used.
     ///
@@ -490,6 +581,38 @@ impl ImageRenderingContext {
             pixels,
             width,
             height,
+            Some(label),
+        )
+    }
+
+    /// Create a labeled GPU image that is BC-compressed when
+    /// `has_bc_support` is true (and the `bc-encode` feature is
+    /// built in), otherwise falls back to the uncompressed upload.
+    /// Thin wrapper over [`GpuImage::from_rgba_maybe_compressed`]
+    /// so callers don't need to reach into raw device/queue.
+    ///
+    /// `is_srgb` selects between `Rgba8UnormSrgb` /
+    /// `Bc{1,3}RgbaUnormSrgb` (for color images the sampler should
+    /// decode sRGB→linear) and the linear variants. The 2D image
+    /// widget cache today treats image bytes as linear, matching
+    /// [`Self::create_image_labeled`]; pass `false` to keep parity.
+    pub fn create_image_maybe_compressed(
+        &self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        is_srgb: bool,
+        has_bc_support: bool,
+        label: &str,
+    ) -> GpuImage {
+        GpuImage::from_rgba_maybe_compressed(
+            &self.device,
+            &self.queue,
+            pixels,
+            width,
+            height,
+            is_srgb,
+            has_bc_support,
             Some(label),
         )
     }

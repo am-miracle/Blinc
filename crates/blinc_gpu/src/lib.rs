@@ -16,6 +16,8 @@
 //! - **Path Rendering**: Vector path tessellation via lyon
 
 pub mod backbuffer;
+#[cfg(feature = "bc-encode")]
+pub mod bc_encode;
 pub mod custom_pass;
 pub mod flow_codegen;
 pub mod flow_pipeline;
