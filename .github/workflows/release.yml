@@ -51,6 +51,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -126,6 +129,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4

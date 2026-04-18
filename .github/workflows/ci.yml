@@ -20,6 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -63,6 +66,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -79,6 +85,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -99,6 +108,9 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -172,6 +184,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -186,6 +201,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -231,6 +249,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Install Rust toolchain (with wasm32 target)
         uses: dtolnay/rust-toolchain@stable
@@ -298,6 +319,9 @@ jobs:
     needs: wasm32-check
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Install Rust toolchain (with wasm32 target)
         uses: dtolnay/rust-toolchain@stable
@@ -341,6 +365,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -397,6 +424,9 @@ jobs:
             target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

@@ -37,6 +37,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -101,6 +104,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Strip local-dev [patch] block (CI-only)
+        shell: bash
+        run: bash scripts/ci-strip-local-patch.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
