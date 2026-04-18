@@ -202,6 +202,15 @@ impl AsyncHandle {
                         get_scheduler().request_redraw();
                         break;
                     }
+                    // Stop polling once the platform loader declares
+                    // every preload settled. `try_load` already logs
+                    // the underlying error at `error!` in that branch;
+                    // without breaking here the loop keeps retrying
+                    // (and relogging) forever against a cache that
+                    // isn't going to fill.
+                    if blinc_platform::assets::preload_settled() {
+                        break;
+                    }
                     sleep_ms(100).await;
                 }
             });

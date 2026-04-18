@@ -249,6 +249,14 @@ impl AsyncHandle {
                         get_scheduler().request_redraw();
                         break;
                     }
+                    // Stop polling once the platform loader declares
+                    // every preload settled — otherwise a permanently
+                    // missing asset keeps the loop spinning forever
+                    // and the overlay never dismisses.
+                    if blinc_platform::assets::preload_settled() {
+                        tracing::error!("gltf_animation_demo: preload settled without scene resolving");
+                        break;
+                    }
                     sleep_ms(100).await;
                 }
             });

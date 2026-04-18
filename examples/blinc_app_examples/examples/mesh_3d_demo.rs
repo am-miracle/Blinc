@@ -208,6 +208,20 @@ impl AsyncAssets {
                         get_scheduler().request_redraw();
                         break;
                     }
+                    // Exit the retry loop once the platform loader
+                    // declares every preload fetch has landed (success
+                    // or failure). Without this the wasm task would
+                    // spin forever if any asset permanently 404s —
+                    // the overlay would never dismiss and the user
+                    // would have no feedback that something is wrong.
+                    if blinc_platform::assets::preload_settled() {
+                        tracing::error!(
+                            "mesh_3d_demo: preload settled but assets still missing — \
+                             check that DamagedHelmet/ and rogland_clear_night_2k.hdr \
+                             are served under examples/blinc_app_examples/examples/assets/"
+                        );
+                        break;
+                    }
                     sleep_ms(100).await;
                 }
             });
