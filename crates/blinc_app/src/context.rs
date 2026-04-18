@@ -58,6 +58,17 @@ fn bc_eligible(source_uri: &str, width: u32, height: u32) -> bool {
     if source_uri.starts_with("emoji://") {
         return false;
     }
+    // BC blocks are 4×4 — wgpu's `Device::create_texture` rejects
+    // any texture whose dimensions aren't multiples of 4 for the
+    // BC formats. Real photos (camera captures, album art, stock
+    // images) frequently land on odd dimensions like 1920×1201.
+    // Padding the source buffer + adjusting UVs would reclaim
+    // these, but the 2D image pipeline samples `[0,1]` across the
+    // texture with no slop — cheapest correct fix is to fall
+    // through to Rgba8 when the image isn't block-aligned.
+    if width % 4 != 0 || height % 4 != 0 {
+        return false;
+    }
     width >= MIN_DIM && height >= MIN_DIM
 }
 

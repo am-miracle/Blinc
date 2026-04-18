@@ -148,13 +148,21 @@ impl GpuImage {
         has_bc_support: bool,
         label: Option<&str>,
     ) -> Self {
-        // BC blocks are 4×4; anything smaller skips compression.
+        // BC formats quantize in 4×4 blocks, so wgpu's
+        // `Device::create_texture` rejects any texture whose
+        // dimensions aren't multiples of 4 for the BC formats. Most
+        // call sites already filter on alignment, but keep the
+        // check here as defense-in-depth — a missed guard upstream
+        // should fall back to Rgba8, not panic the render loop.
+        //
         // Also bail if pixel length doesn't match width*height*4 —
         // the encoder's debug_assert would fire otherwise, and in
         // release builds we'd silently corrupt.
         let can_compress = has_bc_support
             && width >= 4
             && height >= 4
+            && width % 4 == 0
+            && height % 4 == 0
             && pixels.len() == (width as usize) * (height as usize) * 4;
         if can_compress {
             let td = crate::bc_encode::encode_auto(pixels, width, height);

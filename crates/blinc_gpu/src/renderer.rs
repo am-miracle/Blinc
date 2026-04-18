@@ -8815,7 +8815,15 @@ impl GpuRenderer {
         // exactly the signal a mask carries. Large masks
         // (full-viewport gradient overlays, photo-style alpha
         // cutouts) still compress.
-        let bc_ok = self.has_texture_compression_bc && width >= 256 && height >= 256;
+        // Same alignment + size floor as the `bc_eligible` helper in
+        // blinc_app: BC formats need multiple-of-4 dimensions (wgpu
+        // validation), and sub-256 masks produce visible block
+        // banding in alpha ramps.
+        let bc_ok = self.has_texture_compression_bc
+            && width % 4 == 0
+            && height % 4 == 0
+            && width >= 256
+            && height >= 256;
         let label = format!("mask:{}", url);
         let gpu_img = crate::image::GpuImage::from_rgba_maybe_compressed(
             &self.device,
