@@ -308,7 +308,9 @@ pub fn load_asset_string(path: impl Into<AssetPath>) -> Result<String> {
 /// it returns `None` (embedded assets, absent remote paths).
 ///
 /// Intended for streaming media: hand the returned URL to
-/// [`blinc_media::VideoPlayer::load_url`] or an `<audio>` element.
+/// `blinc_media::VideoPlayer::load_url` or an `<audio>` element
+/// (backticked rather than linked — `blinc_platform` doesn't
+/// depend on `blinc_media`, so rustdoc can't resolve it).
 pub fn asset_url(path: impl Into<AssetPath>) -> Option<String> {
     global_asset_loader().and_then(|l| l.asset_url(&path.into()))
 }
