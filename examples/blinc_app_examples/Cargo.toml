@@ -38,7 +38,7 @@ blinc_platform_desktop = { path = "../../extensions/blinc_platform_desktop" }
 # these for `version = "..."` crates.io entries once the packages ship
 # stable releases.
 blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "12350122ce9fe5dd87b0cf4d8824dd699e2a9a10", features = ["platform-assets", "bc-encode"] }
-blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "cdf5a5d39fe47d3ba2ddad9699e1d7836fdb4be5" }
+blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "dc8026cae2bc55c7f07d43ed9377c223c6159ce3" }
 blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = "3e94941bd59bafcd23ad59e8db504a44fa85b4f5" }
 
 image.workspace = true
