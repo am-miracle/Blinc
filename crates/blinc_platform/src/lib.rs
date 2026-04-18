@@ -66,7 +66,8 @@ pub use assets::{AssetLoader, AssetPath, FilesystemAssetLoader};
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::assets::{
-        asset_exists, load_asset, load_asset_string, AssetLoader, AssetPath, FilesystemAssetLoader,
+        asset_exists, asset_url, load_asset, load_asset_string, AssetLoader, AssetPath,
+        FilesystemAssetLoader,
     };
     pub use crate::error::{PlatformError, Result};
     pub use crate::event::{ControlFlow, Event, EventLoop, LifecycleEvent, WindowEvent};

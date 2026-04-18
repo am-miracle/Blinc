@@ -282,6 +282,17 @@ pub fn load_asset_string(path: impl Into<AssetPath>) -> Result<String> {
     loader.load_string(&path.into())
 }
 
+/// Get a URL the platform's media stack can consume directly,
+/// bypassing any byte-level preload. Thin wrapper over the global
+/// loader's [`AssetLoader::asset_url`] — see that method for when
+/// it returns `None` (embedded assets, absent remote paths).
+///
+/// Intended for streaming media: hand the returned URL to
+/// [`blinc_media::VideoPlayer::load_url`] or an `<audio>` element.
+pub fn asset_url(path: impl Into<AssetPath>) -> Option<String> {
+    global_asset_loader().and_then(|l| l.asset_url(&path.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
