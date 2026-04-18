@@ -97,10 +97,18 @@ impl SceneState {
         let mut scene = match blinc_gltf::load_asset_with_options(path, &opts) {
             Ok(s) => s,
             Err(e) => {
-                tracing::error!(
-                    "cutegirl_g1 asset not loadable ({e:?}) — \
-                     see assets/3d/cutegirl_g1/README.md for install instructions"
-                );
+                // See note in `strangler_demo::SceneState::try_load`:
+                // retry-loop spam is suppressed while the preloader is
+                // still fetching, then escalated once everything has
+                // settled and the asset is genuinely missing.
+                if blinc_platform::assets::preload_settled() {
+                    tracing::error!(
+                        "cutegirl_g1 asset not loadable ({e:?}) — \
+                         see assets/3d/cutegirl_g1/README.md for install instructions"
+                    );
+                } else {
+                    tracing::debug!("cutegirl_g1 asset not loadable yet ({e:?})");
+                }
                 return None;
             }
         };

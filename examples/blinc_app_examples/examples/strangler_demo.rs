@@ -108,7 +108,19 @@ impl SceneState {
         let mut scene = match blinc_gltf::load_asset_with_options(path, &opts) {
             Ok(s) => s,
             Err(e) => {
-                tracing::error!("the_strangler asset not loadable ({e:?})");
+                // `try_load` runs in a 100 ms retry loop while the web
+                // preloader is still in flight — logging at `error`
+                // would spray the console with ~10 identical entries
+                // per second of startup. Only surface at `error` once
+                // the loader has declared every preload settled
+                // (success or failure), which is when a still-missing
+                // asset is genuinely a failure the user needs to act
+                // on. Otherwise downgrade to `debug`.
+                if blinc_platform::assets::preload_settled() {
+                    tracing::error!("the_strangler asset not loadable ({e:?})");
+                } else {
+                    tracing::debug!("the_strangler asset not loadable yet ({e:?})");
+                }
                 return None;
             }
         };

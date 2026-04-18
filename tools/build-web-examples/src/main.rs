@@ -647,7 +647,12 @@ fn generate_wrapper(workspace_root: &Path, meta: &ExampleMeta) -> std::io::Resul
     )?;
     fs::write(
         wrapper_dir.join("index.html"),
-        render_index_html(&meta.title, &crate_name, meta.window_size),
+        render_index_html(
+            &meta.title,
+            &crate_name,
+            meta.window_size,
+            &meta.image_assets,
+        ),
     )?;
 
     let serve_sh_path = wrapper_dir.join("serve.sh");
@@ -987,7 +992,12 @@ pub fn _start() {{
     )
 }
 
-fn render_index_html(title: &str, crate_name: &str, window_size: Option<(u32, u32)>) -> String {
+fn render_index_html(
+    title: &str,
+    crate_name: &str,
+    window_size: Option<(u32, u32)>,
+    image_assets: &[String],
+) -> String {
     // Convert crate name back to the JS import shim filename. wasm-pack
     // emits `<package_name_with_underscores>.js`, not hyphens.
     let js_name = crate_name.replace('-', "_");
@@ -1001,6 +1011,34 @@ fn render_index_html(title: &str, crate_name: &str, window_size: Option<(u32, u3
         Some(_) => "display: block; /* fixed size via data- attrs */",
         None => "display: block; width: 100vw; height: 100vh;",
     };
+
+    // `<link rel="preload" as="fetch" crossorigin>` lets the browser
+    // begin downloading each asset URL in parallel with the wasm
+    // bundle, rather than waiting until wasm initialises and calls
+    // `fetch()` itself. On a cached reload these are served from
+    // disk cache; on a cold load they overlap with the ~100–500 ms
+    // wasm compile window. The wasm code's later `fetch()` calls
+    // see the same URL and dedupe against the in-flight request —
+    // no double-download.
+    //
+    // `as="fetch"` matches the `RequestMode::Cors` + default
+    // `RequestCredentials::SameOrigin` the wasm preloader uses; any
+    // mismatch makes the browser discard the preload and re-fetch,
+    // so these attributes need to stay in lockstep with
+    // `WebAssetLoader::fetch_bytes`. The `crossorigin` attribute
+    // must be present (even empty) for `as="fetch"` preloads to be
+    // honored by the cache.
+    let preload_links = if image_assets.is_empty() {
+        String::new()
+    } else {
+        image_assets
+            .iter()
+            .map(|p| {
+                format!(r#"    <link rel="preload" as="fetch" crossorigin href="{p}" />"#)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -1008,6 +1046,7 @@ fn render_index_html(title: &str, crate_name: &str, window_size: Option<(u32, u3
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Blinc · {title}</title>
+{preload_links}
     <style>
       html, body {{
         margin: 0;
@@ -1075,6 +1114,7 @@ fn render_index_html(title: &str, crate_name: &str, window_size: Option<(u32, u3
         js_name = js_name,
         canvas_css = canvas_css,
         canvas_attrs = canvas_attrs,
+        preload_links = preload_links,
     )
 }
 

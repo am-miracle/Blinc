@@ -127,6 +127,26 @@ pub trait AssetLoader: Send + Sync {
     fn asset_url(&self, _path: &AssetPath) -> Option<String> {
         None
     }
+
+    /// Whether the loader has finished any background fetches it was
+    /// asked to perform. Callers use this to distinguish "asset
+    /// genuinely missing" from "asset still in flight":
+    ///
+    /// - Desktop / embedded / filesystem loaders return `true`
+    ///   unconditionally — they never fetch asynchronously, so
+    ///   [`Self::load`] is already authoritative.
+    /// - The web loader returns `false` until
+    ///   `PreloadProgress::is_complete()` flips, then `true`.
+    ///
+    /// Intended for callers with a retry loop over [`Self::load`]:
+    /// if `load` errors while `preload_settled()` is `false`, keep
+    /// retrying; if it errors *after* `preload_settled()` is `true`,
+    /// the asset isn't coming and it's safe to fall through to a
+    /// placeholder (e.g. `blinc_gltf` substituting a 1×1 white
+    /// texture for a 404'd diffuse map).
+    fn preload_settled(&self) -> bool {
+        true
+    }
 }
 
 /// Default filesystem-based asset loader for desktop platforms
@@ -291,6 +311,16 @@ pub fn load_asset_string(path: impl Into<AssetPath>) -> Result<String> {
 /// [`blinc_media::VideoPlayer::load_url`] or an `<audio>` element.
 pub fn asset_url(path: impl Into<AssetPath>) -> Option<String> {
     global_asset_loader().and_then(|l| l.asset_url(&path.into()))
+}
+
+/// Whether the global loader has finished all pending background
+/// fetches. Wrapper over [`AssetLoader::preload_settled`]; returns
+/// `true` when no loader is configured (nothing to wait on).
+///
+/// See the trait method for how callers use this to gate
+/// placeholder-fallback logic during a retry loop.
+pub fn preload_settled() -> bool {
+    global_asset_loader().map(|l| l.preload_settled()).unwrap_or(true)
 }
 
 #[cfg(test)]

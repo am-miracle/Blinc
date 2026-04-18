@@ -321,6 +321,16 @@ impl AssetLoader for WebAssetLoader {
             AssetPath::Embedded(_) => None,
         }
     }
+
+    /// `true` once every registered preload `fetch()` has resolved
+    /// (success or failure). Returns `true` before any preload pass
+    /// has been registered, which matches the semantics callers
+    /// want: "is it safe to assume what isn't in the cache never
+    /// will be?". A retry loop can stop retrying as soon as this
+    /// flips and missing assets can be substituted with placeholders.
+    fn preload_settled(&self) -> bool {
+        self.progress.is_complete()
+    }
 }
 
 // =============================================================================
