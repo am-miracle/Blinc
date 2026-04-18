@@ -103,12 +103,16 @@ cold.
 
 ## Cross-cutting — input plumbing
 
-- [ ] **Unified `ctx.input()` accessor**
-  - `capture_input(&InputState)` on a canvas element works but
-    is easy to forget, and every demo re-implements
-    `DivInputExt::on_ready(|_| input.frame_end())` wiring.
-  - Mirrored in `blinc_input/BACKLOG.md` → "SketchContext
-    integration" — this is the canvas_kit-side half.
+- [x] **Automate `capture_input` + `frame_end` wiring** — shipped as
+  `SceneKit3D::with_input(&InputState)` in 922cb316. Auto-calls
+  `capture_input` on the outer viewport `Div` and `frame_end()`
+  inside the inner canvas closure after the user's render closure
+  returns. The original backlog framing was `ctx.input() -> &InputState`,
+  but tracing actual demo usage showed readers already have
+  `InputState` via closure capture — the pain was in the two
+  error-prone wiring sites, not in accessing the state. API shape
+  matches the real pain: caller keeps owning the state, just
+  opts into `.with_input(&state)` to drop the boilerplate.
 
 - [ ] **Input-driven camera helper**
   - `SceneKit3D` already owns an `OrbitCamera` and wires pointer
