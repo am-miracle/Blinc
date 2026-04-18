@@ -81,20 +81,29 @@ struct Playback {
 }
 
 impl SceneState {
-    /// Load the scene. Returns `None` on failure — most notably the
-    /// web case where the asset hasn't been preloaded yet, so callers
-    /// poll until it becomes `Some`.
+    /// Native: synchronously load through `blinc_platform` + build.
+    /// Wasm goes through the async loader directly in `spawn_load`;
+    /// both paths converge on [`Self::from_scene`] afterward.
+    #[cfg(not(target_arch = "wasm32"))]
     fn try_load(path: &str) -> Option<Self> {
-        // Cap textures at 2K — buster_drone's 4K maps chew multi-GB of
-        // GPU memory with no quality gain at demo viewport sizes.
         let opts = blinc_gltf::LoadOptions {
             max_texture_size: Some(2048),
         };
-        let mut scene = match blinc_gltf::load_asset_with_options(path, &opts) {
-            Ok(s) => s,
-            Err(_) => return None,
-        };
+        match blinc_gltf::load_asset_with_options(path, &opts) {
+            Ok(scene) => Some(Self::from_scene(scene)),
+            Err(e) => {
+                tracing::error!("gltf_animation_demo asset not loadable ({e:?})");
+                None
+            }
+        }
+    }
 
+    /// Post-load processing shared between native (sync) and wasm
+    /// (async) paths. All the rotor-shadow, lens-emissive, and
+    /// animation-channel densify passes live here because they
+    /// operate on the parsed `GltfScene` regardless of how it
+    /// was fetched.
+    fn from_scene(mut scene: GltfScene) -> Self {
         // Densify rotation channels so fast-spinning rotors (>180°
         // per keyframe) slerp without picking the wrong hemisphere.
         let mut total_inserted = 0usize;
@@ -193,7 +202,7 @@ impl SceneState {
             })
             .collect();
         let animation = scene.animations.first().cloned();
-        Some(Self {
+        Self {
             scene: Arc::new(Mutex::new(scene)),
             arc_meshes: Arc::new(arc_meshes),
             animation: Arc::new(animation),
@@ -203,7 +212,7 @@ impl SceneState {
                 paused: true,
             })),
             duration,
-        })
+        }
     }
 }
 
@@ -240,26 +249,27 @@ impl AsyncHandle {
 
         #[cfg(target_arch = "wasm32")]
         {
+            // `blinc_gltf::load_asset_with_options_async` folds the
+            // preload-wait + retry-loop pattern this demo used to
+            // reimplement. It yields between stages so wasm's
+            // single-threaded executor can paint the loading overlay
+            // mid-load instead of freezing for the whole decode+build
+            // window — especially valuable for buster_drone, whose
+            // 4K textures have the highest decode cost of any demo.
             wasm_bindgen_futures::spawn_local(async move {
-                loop {
-                    if let Some(state) = SceneState::try_load(path) {
+                let opts = blinc_gltf::LoadOptions {
+                    max_texture_size: Some(2048),
+                };
+                match blinc_gltf::load_asset_with_options_async(path, &opts, |_| {}).await {
+                    Ok(scene) => {
                         register_scheduler_tick();
-                        let _ = slot.set(state);
+                        let _ = slot.set(SceneState::from_scene(scene));
                         scene_ready.set(true);
                         get_scheduler().request_redraw();
-                        break;
                     }
-                    // Stop polling once the platform loader declares
-                    // every preload settled — otherwise a permanently
-                    // missing asset keeps the loop spinning forever
-                    // and the overlay never dismisses.
-                    if blinc_platform::assets::preload_settled() {
-                        tracing::error!(
-                            "gltf_animation_demo: preload settled without scene resolving"
-                        );
-                        break;
+                    Err(e) => {
+                        tracing::error!("gltf_animation_demo async load failed: {e:?}");
                     }
-                    sleep_ms(100).await;
                 }
             });
         }
@@ -276,19 +286,6 @@ impl AsyncHandle {
             }
         }
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn sleep_ms(ms: u32) {
-    use wasm_bindgen::prelude::*;
-    use wasm_bindgen_futures::JsFuture;
-    let promise = js_sys::Promise::new(&mut |resolve: js_sys::Function, _reject| {
-        web_sys::window().and_then(|w| {
-            w.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32)
-                .ok()
-        });
-    });
-    let _ = JsFuture::from(promise).await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
