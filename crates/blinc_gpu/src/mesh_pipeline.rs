@@ -756,21 +756,30 @@ impl GpuRenderer {
         // Material uniform layout:
         //   base_color: vec4           16
         //   metallic_roughness: vec2    8
+        //   _pad_mr: f32 * 2            8
         //   emissive: vec3 + pad       16  (WGSL vec3 is 16-byte aligned)
-        //   unlit: f32                  4
         //   has_mr_texture: f32         4
         //   has_emissive_texture: f32   4
         //   has_occlusion_texture: f32  4
         //   occlusion_strength: f32     4
-        //   _pad: f32 * 3              12  (round up to 16-byte struct end)
-        //                              ─
-        //                              80 bytes total, safely rounded to 96.
+        //   alpha_mode: f32             4
+        //   alpha_cutoff: f32           4
+        //   _pad_am: f32 * 2            8
+        //   uv_transform_matrix: vec4  16  (KHR_texture_transform)
+        //   uv_transform_offset: vec2   8
+        //   _pad_uv: f32 * 2            8
+        //                              ──
+        //                             112 bytes total.
         //
-        // We size to 96 to leave headroom for one more vec4 without
-        // having to resize the buffer when the next PBR input lands.
+        // Must match `MaterialGpu` in the write path below AND
+        // `MaterialUniforms` in mesh.wgsl / mesh_dt.wgsl exactly —
+        // wgpu validates the buffer size against the write, so a
+        // missed bump here panics at the first `write_buffer` call
+        // (seen with the 96 → 112 jump when KHR_texture_transform
+        // shipped).
         let material_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Mesh Material"),
-            size: 96,
+            size: 112,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
