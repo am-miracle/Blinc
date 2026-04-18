@@ -1940,17 +1940,28 @@ impl GpuRenderer {
             if already_cached {
                 continue;
             }
-            // Upload pixels via `with_bytes`. We DO NOT call
-            // `drop_cpu_bytes()` here anymore — that was observed to
-            // break the texture bind group on multi-slot materials
-            // where the same image is referenced across slots
-            // (buster_drone's body material reuses body_metallic
-            // _roughness.png for both occlusion AND metallicRoughness),
-            // because the first slot's `drop_cpu_bytes()` would fire
-            // through the shared `Arc<TextureDataInner>` and leave a
-            // subsequent slot's `with_bytes` returning `None`. The
-            // CPU copy stays alive through the `Arc<MeshData>`'s
-            // lifetime; memory gain from dropping it is optional.
+            // Upload pixels via `with_bytes`, then drop the CPU copy.
+            //
+            // On the strangler rig this halves process RSS (~1 GB →
+            // ~500 MB) — each 2K × 2K RGBA8 texture weighs 16 MB on
+            // both sides of the CPU/GPU boundary, and the asset
+            // ships ~29 of them. Sketchfab / three.js / Babylon all
+            // free after upload; keeping the copy alive is only
+            // defensible when the CPU pixels are consulted again
+            // (they aren't here — `cached_gpu_images` caches the
+            // `GpuImage` directly, and the `already_cached` short-
+            // circuit above means multi-slot reuses of the same
+            // `TextureData` never re-enter `with_bytes`).
+            //
+            // Risk: if the cache evicts this entry (FIFO at
+            // MESH_CACHE_CAPACITY = 128 unique textures), a later
+            // upload attempt through `with_bytes` returns `None` and
+            // the continue below silently skips it — the mesh then
+            // binds the default 1×1 white placeholder. Scenes with
+            // >128 unique textures would degrade visually. Every
+            // Blinc example at the time of writing has ≤32; if that
+            // ever changes, move the cache to an LRU (the right
+            // answer) rather than un-dropping bytes here.
             let Some(img) = td.with_bytes(|bytes| {
                 crate::image::GpuImage::from_rgba(
                     &self.device,
@@ -1963,6 +1974,7 @@ impl GpuRenderer {
             }) else {
                 continue;
             };
+            td.drop_cpu_bytes();
             let mp_mut = self.mesh_pipeline.as_mut().unwrap();
             mp_mut.cached_gpu_images.insert(key, img);
             mp_mut.cached_gpu_image_keys.push_back(key);
