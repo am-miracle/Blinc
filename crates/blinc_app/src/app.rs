@@ -233,6 +233,16 @@ impl BlincApp {
             .render_tree_with_motion(tree, render_state, width, height, target)
     }
 
+    /// Set the alpha used when clearing the main render target.
+    ///
+    /// The desktop runner calls this before each window's render so that
+    /// transparent windows (whose wgpu surface is configured with a
+    /// premultiplied/postmultiplied alpha mode) get a fully clear
+    /// surface. Default is `1.0` (opaque).
+    pub fn set_clear_alpha(&mut self, alpha: f32) {
+        self.ctx.set_clear_alpha(alpha);
+    }
+
     /// Render an overlay tree on top of existing content (no clear)
     ///
     /// This is used for rendering modal/dialog/toast overlays on top of the main UI.

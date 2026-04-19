@@ -11,6 +11,11 @@ use winit::window::{Window as WinitWindow, WindowAttributes};
 pub struct DesktopWindow {
     window: Arc<WinitWindow>,
     focused: AtomicBool,
+    /// Whether this window was configured as transparent. Cached at
+    /// creation time because winit doesn't expose a way to query it
+    /// back, and the GPU runner needs it to pick the wgpu
+    /// `CompositeAlphaMode` at surface-config time.
+    transparent: bool,
 }
 
 impl DesktopWindow {
@@ -58,6 +63,7 @@ impl DesktopWindow {
         Ok(Self {
             window: Arc::new(window),
             focused: AtomicBool::new(true),
+            transparent: config.transparent,
         })
     }
 
@@ -69,6 +75,11 @@ impl DesktopWindow {
     /// Get an Arc to the winit window
     pub fn winit_window_arc(&self) -> Arc<WinitWindow> {
         Arc::clone(&self.window)
+    }
+
+    /// Whether this window was configured with a transparent surface.
+    pub fn is_transparent(&self) -> bool {
+        self.transparent
     }
 
     /// Set focus state (called by event loop)
@@ -185,6 +196,10 @@ impl Window for DesktopWindow {
         // by not requesting redraws. The actual close is handled by the event loop
         // when it receives CloseRequested.
         self.window.set_visible(false);
+    }
+
+    fn is_transparent(&self) -> bool {
+        self.transparent
     }
 }
 

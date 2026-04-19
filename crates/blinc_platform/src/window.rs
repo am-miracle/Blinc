@@ -210,6 +210,13 @@ pub trait Window: Send {
     /// Close the window
     fn close(&self) {}
 
+    /// Whether the window was configured with a transparent surface.
+    /// Default `false` for platforms where transparency isn't supported
+    /// or relevant.
+    fn is_transparent(&self) -> bool {
+        false
+    }
+
     /// Get safe area insets (top, right, bottom, left) in logical pixels.
     ///
     /// On mobile: accounts for notch, status bar, home indicator.

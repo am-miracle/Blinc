@@ -197,6 +197,11 @@ pub(crate) struct WindowState {
     pub active_touch_ids: std::collections::HashSet<u64>,
     /// UI builder for this window (None = default static UI)
     pub ui_builder: Option<WindowBuilder>,
+    /// Whether this window was created with a transparent surface.
+    /// Drives the wgpu `CompositeAlphaMode` selection at surface config
+    /// time and the per-frame clear-color alpha. Mirrors
+    /// `WindowConfig::transparent`.
+    pub transparent: bool,
 }
 
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
@@ -222,6 +227,7 @@ impl WindowState {
             last_frame_time_ms: 0,
             active_touch_ids: std::collections::HashSet::new(),
             ui_builder: None,
+            transparent: false,
         }
     }
 }
@@ -2106,6 +2112,34 @@ impl WindowedApp {
         );
     }
 
+    /// Pick the wgpu `CompositeAlphaMode` to configure the surface with.
+    ///
+    /// Transparent windows need an alpha mode that lets the OS compositor
+    /// see through to what's behind the window; opaque windows keep
+    /// `Opaque` to match historical behavior. We prefer `PostMultiplied`
+    /// because our shaders write non-premultiplied RGBA; macOS typically
+    /// supports it. `PreMultiplied` is the common fallback on Windows
+    /// DWM. If neither is supported we fall back to `Inherit`/`Auto` —
+    /// some drivers only expose those and will still composite alpha.
+    ///
+    /// Note: this doesn't query `surface.get_capabilities()` — it trusts
+    /// the platform choice. If surface config fails because the mode
+    /// isn't supported, wgpu will log a clear error.
+    #[cfg(all(feature = "windowed", not(target_os = "android")))]
+    fn pick_alpha_mode(transparent: bool) -> wgpu::CompositeAlphaMode {
+        if !transparent {
+            return wgpu::CompositeAlphaMode::Opaque;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            wgpu::CompositeAlphaMode::PreMultiplied
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            wgpu::CompositeAlphaMode::PostMultiplied
+        }
+    }
+
     #[cfg(all(feature = "windowed", not(target_os = "android")))]
     fn run_desktop<F, E>(config: WindowConfig, mut ui_builder: F) -> Result<()>
     where
@@ -2122,6 +2156,7 @@ impl WindowedApp {
         Self::init_theme();
 
         let platform = DesktopPlatform::new().map_err(|e| BlincError::Platform(e.to_string()))?;
+        let primary_transparent = config.transparent;
         let event_loop = platform
             .create_event_loop_with_config(config)
             .map_err(|e| BlincError::Platform(e.to_string()))?;
@@ -2265,6 +2300,7 @@ impl WindowedApp {
             Arc::clone(&css_anim_store),
             Arc::clone(&shared_motion_states),
         );
+        ws.transparent = primary_transparent;
         // Track primary window ID once known
         let mut primary_wid: Option<blinc_platform::WindowId> = None;
         // Secondary windows (opened via ctx.open_window())
@@ -2480,6 +2516,11 @@ impl WindowedApp {
                                                     let view = frame.texture.create_view(
                                                         &wgpu::TextureViewDescriptor::default(),
                                                     );
+                                                    blinc_app.set_clear_alpha(if sws.transparent {
+                                                        0.0
+                                                    } else {
+                                                        1.0
+                                                    });
                                                     let _ = blinc_app.render_tree_with_motion(
                                                         tree,
                                                         rs,
@@ -2516,10 +2557,14 @@ impl WindowedApp {
                             let winit_window = window.winit_window_arc();
 
                             match BlincApp::with_window(winit_window, None) {
-                                Ok((blinc_app, surf)) => {
+                                Ok((mut blinc_app, surf)) => {
                                     let (width, height) = window.size();
                                     // Use the same texture format that the renderer's pipelines use
                                     let format = blinc_app.texture_format();
+                                    let alpha_mode = Self::pick_alpha_mode(ws.transparent);
+                                    if ws.transparent {
+                                        blinc_app.set_clear_alpha(0.0);
+                                    }
                                     let config = wgpu::SurfaceConfiguration {
                                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                                             | wgpu::TextureUsages::COPY_SRC,
@@ -2527,7 +2572,7 @@ impl WindowedApp {
                                         width,
                                         height,
                                         present_mode: wgpu::PresentMode::AutoVsync,
-                                        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                                        alpha_mode,
                                         view_formats: vec![],
                                         desired_maximum_frame_latency: 2,
                                     };
@@ -2611,6 +2656,9 @@ impl WindowedApp {
                                         Ok(surf) => {
                                             let (w, h) = window.size();
                                             let format = blinc_app.texture_format();
+                                            let window_transparent = window.is_transparent();
+                                            let alpha_mode =
+                                                Self::pick_alpha_mode(window_transparent);
                                             let config = wgpu::SurfaceConfiguration {
                                                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                                                     | wgpu::TextureUsages::COPY_SRC,
@@ -2618,7 +2666,7 @@ impl WindowedApp {
                                                 width: w,
                                                 height: h,
                                                 present_mode: wgpu::PresentMode::AutoVsync,
-                                                alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                                                alpha_mode,
                                                 view_formats: vec![],
                                                 desired_maximum_frame_latency: 2,
                                             };
@@ -2628,6 +2676,7 @@ impl WindowedApp {
                                                 Arc::clone(&css_anim_store),
                                                 Arc::clone(&shared_motion_states),
                                             );
+                                            sws.transparent = window_transparent;
                                             sws.surface = Some(surf);
                                             sws.surface_config = Some(config);
 
@@ -4078,6 +4127,11 @@ impl WindowedApp {
                                         }
                                     }
                                 }
+
+                                // Clear alpha tracks per-window transparency so a
+                                // mix of opaque and transparent windows can share
+                                // the same BlincApp.
+                                blinc_app.set_clear_alpha(if ws.transparent { 0.0 } else { 1.0 });
 
                                 // Render with motion animations
                                 // Use physical pixel dimensions for the render surface

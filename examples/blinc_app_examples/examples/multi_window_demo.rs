@@ -150,6 +150,7 @@ fn build_primary_ui(ctx: &WindowedContext) -> impl ElementBuilder {
                         let config = WindowConfig::new("")
                             .size(400, 280)
                             .center()
+                            .transparent(true)
                             .decorations(false);
                         blinc_app::windowed::open_window_with(config, frameless_window_ui);
                     }),
@@ -269,14 +270,16 @@ fn frameless_window_ui(ctx: &mut WindowedContext) -> Div {
     div()
         .w(ctx.width)
         .h(ctx.height)
-        .bg(Color::rgba(0.08, 0.08, 0.1, 1.0))
-        .border(1.0, Color::rgba(0.25, 0.25, 0.3, 1.0))
+        .bg(Color::TRANSPARENT)
+        // .border(1.0, Color::rgba(0.25, 0.25, 0.3, 1.0))
         .flex_col()
+        // .rounded(32.0)
         // Custom title bar: drag zone + control buttons as siblings (no bubbling)
         .child(
             div()
                 .w_full()
                 .h(36.0)
+                .rounded_corners(24.0, 24.0, 0.0, 0.0)
                 .bg(title_bar_color)
                 .flex_row()
                 .items_center()
@@ -349,6 +352,8 @@ fn frameless_window_ui(ctx: &mut WindowedContext) -> Div {
         .child(
             div()
                 .flex_grow()
+                .bg(Color::rgba(0.2, 0.2, 0.3, 1.0))
+                .rounded_corners(0.0, 0.0, 24.0, 24.0)
                 .w_full()
                 .flex_col()
                 .justify_center()

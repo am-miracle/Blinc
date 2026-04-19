@@ -131,6 +131,13 @@ pub struct RenderContext {
     has_active_flows: bool,
     // Frame counter for periodic cache stats logging
     frame_count: u64,
+    // Alpha value used when clearing the main render target. 1.0 for
+    // opaque windows (the default); 0.0 when the window surface is
+    // configured for transparent composition. Set via
+    // [`Self::set_clear_alpha`] before each window's render — the
+    // desktop runner updates it per-window so a mix of opaque and
+    // transparent windows can share the same RenderContext.
+    clear_alpha: f32,
 }
 
 struct CachedTexture {
@@ -362,7 +369,19 @@ impl RenderContext {
             cursor_pos: [0.0; 2],
             has_active_flows: false,
             frame_count: 0,
+            clear_alpha: 1.0,
         }
+    }
+
+    /// Set the alpha component used when clearing the main render target.
+    ///
+    /// 1.0 (default) gives opaque clears — correct for regular windows
+    /// and any surface configured with `CompositeAlphaMode::Opaque`.
+    /// 0.0 is used for windows whose surface was created with a
+    /// premultiplied/postmultiplied alpha mode so the OS compositor
+    /// can see through to whatever is behind the window.
+    pub fn set_clear_alpha(&mut self, alpha: f32) {
+        self.clear_alpha = alpha;
     }
 
     /// Update the current cursor position in physical pixels (for @flow pointer input)
@@ -618,7 +637,15 @@ impl RenderContext {
                 let backdrop_tex = self.backdrop_texture.take().unwrap();
                 self.renderer
                     .clear_target(&backdrop_tex.view, wgpu::Color::TRANSPARENT);
-                self.renderer.clear_target(target, wgpu::Color::BLACK);
+                self.renderer.clear_target(
+                    target,
+                    wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: self.clear_alpha as f64,
+                    },
+                );
                 self.render_images_ref(&backdrop_tex.view, &bg_images);
                 self.render_images_ref(target, &bg_images);
                 self.backdrop_texture = Some(backdrop_tex);
@@ -735,10 +762,15 @@ impl RenderContext {
             // Background uses SDF rendering (no MSAA needed)
             // Foreground uses MSAA for smooth SVG edges
 
-            // Render background directly to target
-            // Use opaque black clear - transparent clear can cause issues with window surfaces
-            self.renderer
-                .render_with_clear(target, &bg_batch, [0.0, 0.0, 0.0, 1.0]);
+            // Render background directly to target. Alpha comes from
+            // `clear_alpha` so transparent windows get a fully clear
+            // surface (0.0) while opaque windows keep the historical
+            // opaque black (1.0) clear.
+            self.renderer.render_with_clear(
+                target,
+                &bg_batch,
+                [0.0, 0.0, 0.0, self.clear_alpha as f64],
+            );
 
             // Render background paths with MSAA for smooth edges on curved shapes like notch
             if use_msaa_overlay && bg_batch.has_paths() {
@@ -4311,7 +4343,15 @@ impl RenderContext {
                 let backdrop_tex = self.backdrop_texture.take().unwrap();
                 self.renderer
                     .clear_target(&backdrop_tex.view, wgpu::Color::TRANSPARENT);
-                self.renderer.clear_target(target, wgpu::Color::BLACK);
+                self.renderer.clear_target(
+                    target,
+                    wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: self.clear_alpha as f64,
+                    },
+                );
                 self.render_images_ref(&backdrop_tex.view, &bg_images);
                 self.render_images_ref(target, &bg_images);
                 self.backdrop_texture = Some(backdrop_tex);
@@ -4334,8 +4374,11 @@ impl RenderContext {
                 }
 
                 // Then use render_with_clear which handles layer effects
-                self.renderer
-                    .render_with_clear(target, &batch, [0.0, 0.0, 0.0, 1.0]);
+                self.renderer.render_with_clear(
+                    target,
+                    &batch,
+                    [0.0, 0.0, 0.0, self.clear_alpha as f64],
+                );
 
                 // Render dynamic images (video frames from draw_rgba_pixels)
                 if !batch.dynamic_images.is_empty() {
@@ -4471,8 +4514,11 @@ impl RenderContext {
                 let mut z0_batch = PrimitiveBatch::new();
                 z0_batch.primitives = z0_primitives;
                 z0_batch.paths = batch.paths.clone();
-                self.renderer
-                    .render_with_clear(target, &z0_batch, [0.0, 0.0, 0.0, 1.0]);
+                self.renderer.render_with_clear(
+                    target,
+                    &z0_batch,
+                    [0.0, 0.0, 0.0, self.clear_alpha as f64],
+                );
 
                 // Render dynamic images (video frames)
                 if !batch.dynamic_images.is_empty() {
@@ -4542,8 +4588,11 @@ impl RenderContext {
                 }
             } else {
                 // Fast path: render full batch (handles layer effects like backdrop-filter)
-                self.renderer
-                    .render_with_clear(target, &batch, [0.0, 0.0, 0.0, 1.0]);
+                self.renderer.render_with_clear(
+                    target,
+                    &batch,
+                    [0.0, 0.0, 0.0, self.clear_alpha as f64],
+                );
 
                 // Render dynamic images (video frames)
                 if !batch.dynamic_images.is_empty() {
