@@ -3525,9 +3525,13 @@ impl RenderTree {
                     // This avoids the stale-Arc problem where event handlers may capture
                     // a different physics instance than what's registered in the tree
                     // (happens when Stateful rebuilds create new physics during merge).
+                    // Route through the touch path so velocity is tracked from
+                    // the deltas — the physics tick uses that velocity to
+                    // decide when to trigger the rebound spring.
                     if let Some(physics) = self.scroll_physics.get(&node_id) {
                         let mut p = physics.lock().unwrap();
-                        p.apply_scroll_delta(dispatch_x, dispatch_y);
+                        let now_ms = crate::widgets::text_input::elapsed_ms() as f64;
+                        p.apply_touch_scroll_delta(dispatch_x, dispatch_y, now_ms);
                         p.on_scroll_activity();
                     }
 
@@ -4349,6 +4353,12 @@ impl RenderTree {
             };
 
             let mut physics = physics_arc.lock().unwrap();
+
+            // Detect "scroll ended" for inputs without an explicit end phase
+            // (mouse wheel, Windows/Linux trackpad drivers). If the user has
+            // been idle past the threshold while overscrolled, synthesise an
+            // `on_scroll_end` so the spring rebounds.
+            physics.check_idle_bounce(current_time_ms as f64);
 
             // Tick the physics
             if physics.tick(dt_secs) {

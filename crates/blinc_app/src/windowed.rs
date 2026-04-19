@@ -3501,10 +3501,15 @@ impl WindowedApp {
                                 }
                             }
 
-                            // If scroll momentum ended, notify scroll physics
+                            // Fire the rebound on `TouchPhase::Ended`. macOS
+                            // trackpads deliver Ended twice per gesture (once
+                            // at finger-lift, once at OS-momentum end); the
+                            // physics' `on_scroll_end` is idempotent — the
+                            // second call is a no-op because `is_overscrolling`
+                            // is false after the first spring has already
+                            // clamped the content to the edge.
                             if scroll_ended {
                                 tree.on_scroll_end();
-                                // Request redraw to animate bounce-back
                                 window.request_redraw();
                             }
                         }

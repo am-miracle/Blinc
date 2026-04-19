@@ -331,11 +331,21 @@ where
             }
 
             WinitWindowEvent::MouseWheel { delta, phase, .. } => {
+                // `LineDelta` is emitted by classic step-wheel mice; each tick
+                // is ±1 line. `PixelDelta` is emitted by trackpads / Magic Mouse
+                // and already gives pixel-accurate scroll distance per event
+                // (NSScrollView semantics on macOS, and equivalent on other
+                // platforms). Line-based events need to be converted to pixels
+                // using a per-line height — we use 40px to match what most
+                // native apps feel like. Pixel deltas must be passed through
+                // unchanged; a previous divide-by-10 here caused a perceptible
+                // drag on trackpads (only 10 % of the intended scroll applied).
+                const LINE_HEIGHT_PX: f32 = 40.0;
                 let (dx, dy) = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x, y),
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                        (pos.x as f32 / 10.0, pos.y as f32 / 10.0)
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => {
+                        (x * LINE_HEIGHT_PX, y * LINE_HEIGHT_PX)
                     }
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
                 };
                 let input_event = input::scroll_event(dx, dy, phase);
                 self.handle_event_for(winit_id, Event::Input(wid, input_event));
