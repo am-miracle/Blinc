@@ -997,6 +997,11 @@ struct SdfPrimitiveRanges {
     sdf_3d: std::ops::Range<u32>,
     notch: std::ops::Range<u32>,
     text: std::ops::Range<u32>,
+    /// Contiguous `(category, start, end)` runs covering the primitive
+    /// stream in instance-index order. `draw_split_sdf` issues one draw
+    /// per run so cross-category z-order is preserved (the split pipelines
+    /// otherwise lose it when each pipeline runs over the full range).
+    runs: Vec<(SdfPipelineCategory, u32, u32)>,
 }
 
 /// The GPU renderer using wgpu
@@ -1287,9 +1292,11 @@ impl GpuRenderer {
         if primitives.is_empty() {
             return SdfPrimitiveRanges::default();
         }
-        // Don't sort — preserve original z-order. Just scan for which
-        // categories are present so we know which pipelines to activate.
-        // Each split shader discards non-matching prim_types in fs_main.
+        // Preserve instance-index z-order. Scan once to (a) populate the
+        // per-category ranges (used for has-text / has-shadow checks) and
+        // (b) build the contiguous-run list that `draw_split_sdf` iterates
+        // in order so shadow/3D/notch don't get overdrawn by later core
+        // primitives (app backgrounds, section containers).
         let mut ranges = SdfPrimitiveRanges::default();
         let len = primitives.len() as u32;
         let full = 0..len;
@@ -1322,6 +1329,7 @@ impl GpuRenderer {
                 }
             }
         }
+        ranges.runs = Self::compute_category_runs(primitives);
         self.write_primitives_safe(primitives);
 
         // VERTEX_STORAGE fallback: build instance data and upload to VB
@@ -1381,85 +1389,60 @@ impl GpuRenderer {
         if let Some(buf) = vb_buffer {
             render_pass.set_vertex_buffer(0, buf.slice(..));
         }
-        // Draw the full primitive range through each pipeline that has
-        // matching primitives. Each split shader's fs_main checks prim_type
-        // and discards non-matching instances. This preserves z-order
-        // between categories (e.g., a notch parent at z=5 and its circle
-        // child at z=6 render in the correct order).
-        //
-        // The total range spans from the lowest to highest instance index
-        // across all non-empty categories.
-        let total_start = [&ranges.core, &ranges.shadow, &ranges.sdf_3d, &ranges.notch]
-            .iter()
-            .filter(|r| !r.is_empty())
-            .map(|r| r.start)
-            .min();
-        let total_end = [&ranges.core, &ranges.shadow, &ranges.sdf_3d, &ranges.notch]
-            .iter()
-            .filter(|r| !r.is_empty())
-            .map(|r| r.end)
-            .max();
-        let full_range = match (total_start, total_end) {
-            (Some(s), Some(e)) => s..e,
-            _ => return,
-        };
+        // Issue one draw per contiguous same-category run. That's how the
+        // monolithic shader preserved cross-type z-order: one pipeline,
+        // per-instance branching. The split pipelines enforce the same
+        // ordering by switching pipelines between runs. Drawing each
+        // pipeline over the full range (the old approach) lost ordering —
+        // e.g. a section background at index 5 would paint over a shadow at
+        // index 10 because the core pipeline ran after the shadow pipeline
+        // regardless of instance order.
+        for &(cat, start, end) in &ranges.runs {
+            if start >= end {
+                continue;
+            }
+            let pipeline = match (cat, overlay) {
+                (SdfPipelineCategory::Shadow, false) => &pipelines.sdf_shadow,
+                (SdfPipelineCategory::Shadow, true) => &pipelines.sdf_shadow_overlay,
+                (SdfPipelineCategory::Notch, false) => &pipelines.sdf_notch,
+                (SdfPipelineCategory::Notch, true) => &pipelines.sdf_notch_overlay,
+                (SdfPipelineCategory::Sdf3D, false) => &pipelines.sdf_3d,
+                (SdfPipelineCategory::Sdf3D, true) => &pipelines.sdf_3d_overlay,
+                // Core and Text both ride the sdf_core pipeline — its
+                // PRIM_TEXT branch samples the glyph atlas for prim_type=7.
+                (SdfPipelineCategory::Core, false) | (SdfPipelineCategory::Text, false) => {
+                    &pipelines.sdf_core
+                }
+                (SdfPipelineCategory::Core, true) | (SdfPipelineCategory::Text, true) => {
+                    &pipelines.sdf_core_overlay
+                }
+            };
+            render_pass.set_pipeline(pipeline);
+            render_pass.draw(0..6, start..end);
+        }
+    }
 
-        // Draw order: Shadow → Notch → 3D → Core (back to front).
-        // Shadows are backgrounds, notches are containers, core shapes
-        // (rects/circles) are foreground. This ensures children drawn
-        // by the core pipeline appear on top of notch parents.
-        if !ranges.shadow.is_empty() {
-            if overlay {
-                render_pass.set_pipeline(&pipelines.sdf_shadow_overlay);
-            } else {
-                render_pass.set_pipeline(&pipelines.sdf_shadow);
-            }
-            render_pass.draw(0..6, full_range.clone());
+    /// Walk the primitive slice and emit `(category, start_index, end_index)`
+    /// tuples covering every contiguous run of same-category primitives.
+    /// Drawing these in order preserves instance-index z-order across all
+    /// pipeline categories.
+    fn compute_category_runs(primitives: &[GpuPrimitive]) -> Vec<(SdfPipelineCategory, u32, u32)> {
+        let mut runs = Vec::new();
+        if primitives.is_empty() {
+            return runs;
         }
-        if !ranges.notch.is_empty() {
-            if overlay {
-                render_pass.set_pipeline(&pipelines.sdf_notch_overlay);
-            } else {
-                render_pass.set_pipeline(&pipelines.sdf_notch);
+        let mut start = 0u32;
+        let mut cat = primitives[0].pipeline_category();
+        for (i, p) in primitives.iter().enumerate().skip(1) {
+            let c = p.pipeline_category();
+            if c != cat {
+                runs.push((cat, start, i as u32));
+                start = i as u32;
+                cat = c;
             }
-            render_pass.draw(0..6, full_range.clone());
         }
-        if !ranges.sdf_3d.is_empty() {
-            if overlay {
-                render_pass.set_pipeline(&pipelines.sdf_3d_overlay);
-            } else {
-                render_pass.set_pipeline(&pipelines.sdf_3d);
-            }
-            render_pass.draw(0..6, full_range.clone());
-        }
-        if !ranges.core.is_empty() {
-            if overlay {
-                render_pass.set_pipeline(&pipelines.sdf_core_overlay);
-            } else {
-                render_pass.set_pipeline(&pipelines.sdf_core);
-            }
-            render_pass.draw(0..6, full_range.clone());
-        }
-        // Text primitives (prim_type 7) ride the core pipeline — its
-        // fragment shader has a `PRIM_TEXT` branch that samples from
-        // the glyph atlas. The dedicated `text_overlay` pipeline
-        // exists for the fast path that renders a pre-prepared
-        // `GpuGlyph` buffer directly, but glyph-sourced primitives
-        // (CSS-transformed text + canvas `draw_text` calls) go
-        // through the split path and would otherwise never draw.
-        // When `ranges.core` is already populated, its dispatch
-        // above already covers every instance (the shader filters
-        // by prim_type), so this branch only fires when the batch
-        // is text-only or contains text without any other core
-        // primitives — otherwise we'd waste a dispatch.
-        if !ranges.text.is_empty() && ranges.core.is_empty() {
-            if overlay {
-                render_pass.set_pipeline(&pipelines.sdf_core_overlay);
-            } else {
-                render_pass.set_pipeline(&pipelines.sdf_core);
-            }
-            render_pass.draw(0..6, ranges.text.clone());
-        }
+        runs.push((cat, start, primitives.len() as u32));
+        runs
     }
 
     /// Issue draw calls for split SDF pipelines using MSAA pipeline variants.
@@ -1491,33 +1474,24 @@ impl GpuRenderer {
             (Some(s), Some(e)) => s..e,
             _ => return,
         };
-        // Back-to-front: Shadow → Notch → 3D → Core
-        if !ranges.shadow.is_empty() {
-            render_pass.set_pipeline(&msaa.sdf_shadow);
-            render_pass.draw(0..6, full_range.clone());
-        }
-        if !ranges.notch.is_empty() {
-            render_pass.set_pipeline(&msaa.sdf_notch);
-            render_pass.draw(0..6, full_range.clone());
-        }
-        if !ranges.sdf_3d.is_empty() {
-            render_pass.set_pipeline(&msaa.sdf_3d);
-            render_pass.draw(0..6, full_range.clone());
-        }
-        if !ranges.core.is_empty() {
-            render_pass.set_pipeline(&msaa.sdf_core);
-            render_pass.draw(0..6, full_range.clone());
-        }
-        // Text-only batches (no core) would otherwise skip text
-        // entirely. sdf_core's fragment shader has a PRIM_TEXT
-        // branch; reuse the core pipeline over the text range so
-        // glyph-sourced primitives render. When core is already
-        // present its dispatch covers the full range (the shader
-        // filters by prim_type internally), so an extra dispatch
-        // here would be redundant.
-        if !ranges.text.is_empty() && ranges.core.is_empty() {
-            render_pass.set_pipeline(&msaa.sdf_core);
-            render_pass.draw(0..6, ranges.text.clone());
+        // Per-run draws preserve cross-category z-order (same approach as
+        // `draw_split_sdf`). `full_range` is now only used to short-circuit
+        // empty batches.
+        let _ = full_range;
+        for &(cat, start, end) in &ranges.runs {
+            if start >= end {
+                continue;
+            }
+            let pipeline = match cat {
+                SdfPipelineCategory::Shadow => &msaa.sdf_shadow,
+                SdfPipelineCategory::Notch => &msaa.sdf_notch,
+                SdfPipelineCategory::Sdf3D => &msaa.sdf_3d,
+                // Core + Text both ride sdf_core (its PRIM_TEXT branch
+                // samples the glyph atlas for prim_type=7).
+                SdfPipelineCategory::Core | SdfPipelineCategory::Text => &msaa.sdf_core,
+            };
+            render_pass.set_pipeline(pipeline);
+            render_pass.draw(0..6, start..end);
         }
     }
 
@@ -4378,7 +4352,6 @@ impl GpuRenderer {
 
         // Sort primitives by pipeline category and upload
         let sdf_ranges = self.upload_sorted_primitives(&visible_primitives);
-
 
         // Update auxiliary data buffer (group shapes, polygon clips)
         // This may call rebind_sdf_bind_group() if the buffer needs resizing.

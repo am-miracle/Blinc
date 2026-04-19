@@ -71,16 +71,24 @@ pub enum SdfPipelineCategory {
 
 impl GpuPrimitive {
     /// Determine which SDF pipeline should render this primitive.
-    /// 3D is detected by shape_type in `perspective[3]`, not by prim_type.
+    /// 3D is detected by shape_type in `perspective[3]`, but only promotes
+    /// *core* prim types (rect/circle/ellipse). Shadows, text, and notches
+    /// stay on their own pipelines even when `perspective[3]` is non-zero —
+    /// `current_perspective_params()` bleeds the active element's
+    /// `set_3d_shape` state onto every primitive built during that element's
+    /// render, and we don't want a shadow to be raymarched as a solid 3D
+    /// shape or have sdf_core overwrite it.
     pub fn pipeline_category(&self) -> SdfPipelineCategory {
         let prim_type = self.type_info[0];
-        // Check for 3D: perspective[3] = shape_3d_type (f32 encoding of 1-6)
         let shape_3d_type = self.perspective[3] as u32;
-        if shape_3d_type > 0 {
-            return SdfPipelineCategory::Sdf3D;
-        }
         match prim_type {
-            0..=2 => SdfPipelineCategory::Core,
+            0..=2 => {
+                if shape_3d_type > 0 {
+                    SdfPipelineCategory::Sdf3D
+                } else {
+                    SdfPipelineCategory::Core
+                }
+            }
             3..=6 => SdfPipelineCategory::Shadow,
             7 => SdfPipelineCategory::Text,
             8 => SdfPipelineCategory::Notch,
