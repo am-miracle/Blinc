@@ -179,21 +179,43 @@ impl WebAssetLoader {
         // the `join_all` below, and wasm's single-threaded runtime
         // means the concurrent `insert_raw` calls serialize through
         // the cache `Mutex` without contention.
+        // Each URL gets up to `MAX_ATTEMPTS` tries before we give up
+        // and mark it failed. Transient issues on larger assets (a
+        // timed-out chunk on a 60+ MB buffer, a flaky network) would
+        // otherwise silently leave a cache hole — `preload_settled()`
+        // still flips to `true` under the partial-failure tolerance
+        // branch below, so the async gltf loader thinks preload
+        // finished and then errors out with "not preloaded" when it
+        // reaches for the missing bytes. A small fixed retry recovers
+        // those cases without needing to wire per-URL diagnostics
+        // back to callers.
+        const MAX_ATTEMPTS: u32 = 3;
         let fetches = urls.iter().map(|u| {
             let progress = self.progress.clone();
             async move {
-                let fetch_result = Self::fetch_bytes(u).await;
-                match fetch_result {
-                    Ok(bytes) => {
-                        self.insert_raw(*u, bytes);
-                        progress.completed.fetch_add(1, Ordering::Release);
-                        Ok(())
-                    }
-                    Err(e) => {
-                        progress.failed.fetch_add(1, Ordering::Release);
-                        Err(e)
+                let mut last_err: Option<PlatformError> = None;
+                for attempt in 1..=MAX_ATTEMPTS {
+                    match Self::fetch_bytes(u).await {
+                        Ok(bytes) => {
+                            self.insert_raw(*u, bytes);
+                            progress.completed.fetch_add(1, Ordering::Release);
+                            if attempt > 1 {
+                                tracing::info!(
+                                    "preload recovered on attempt {attempt}: {u}"
+                                );
+                            }
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "preload attempt {attempt}/{MAX_ATTEMPTS} failed for {u}: {e}"
+                            );
+                            last_err = Some(e);
+                        }
                     }
                 }
+                progress.failed.fetch_add(1, Ordering::Release);
+                Err(last_err.expect("loop body always assigns last_err on failure"))
             }
         });
         let results = join_all(fetches).await;
