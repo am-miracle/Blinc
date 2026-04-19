@@ -200,9 +200,7 @@ impl WebAssetLoader {
                             self.insert_raw(*u, bytes);
                             progress.completed.fetch_add(1, Ordering::Release);
                             if attempt > 1 {
-                                tracing::info!(
-                                    "preload recovered on attempt {attempt}: {u}"
-                                );
+                                tracing::info!("preload recovered on attempt {attempt}: {u}");
                             }
                             return Ok(());
                         }
