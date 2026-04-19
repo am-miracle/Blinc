@@ -1440,7 +1440,26 @@ impl GpuRenderer {
             }
             render_pass.draw(0..6, full_range.clone());
         }
-        // Note: text range is NOT drawn here — text uses the separate text pipeline
+        // Text primitives (prim_type 7) ride the core pipeline — its
+        // fragment shader has a `PRIM_TEXT` branch that samples from
+        // the glyph atlas. The dedicated `text_overlay` pipeline
+        // exists for the fast path that renders a pre-prepared
+        // `GpuGlyph` buffer directly, but glyph-sourced primitives
+        // (CSS-transformed text + canvas `draw_text` calls) go
+        // through the split path and would otherwise never draw.
+        // When `ranges.core` is already populated, its dispatch
+        // above already covers every instance (the shader filters
+        // by prim_type), so this branch only fires when the batch
+        // is text-only or contains text without any other core
+        // primitives — otherwise we'd waste a dispatch.
+        if !ranges.text.is_empty() && ranges.core.is_empty() {
+            if overlay {
+                render_pass.set_pipeline(&pipelines.sdf_core_overlay);
+            } else {
+                render_pass.set_pipeline(&pipelines.sdf_core);
+            }
+            render_pass.draw(0..6, ranges.text.clone());
+        }
     }
 
     /// Issue draw calls for split SDF pipelines using MSAA pipeline variants.
@@ -1488,6 +1507,17 @@ impl GpuRenderer {
         if !ranges.core.is_empty() {
             render_pass.set_pipeline(&msaa.sdf_core);
             render_pass.draw(0..6, full_range.clone());
+        }
+        // Text-only batches (no core) would otherwise skip text
+        // entirely. sdf_core's fragment shader has a PRIM_TEXT
+        // branch; reuse the core pipeline over the text range so
+        // glyph-sourced primitives render. When core is already
+        // present its dispatch covers the full range (the shader
+        // filters by prim_type internally), so an extra dispatch
+        // here would be redundant.
+        if !ranges.text.is_empty() && ranges.core.is_empty() {
+            render_pass.set_pipeline(&msaa.sdf_core);
+            render_pass.draw(0..6, ranges.text.clone());
         }
     }
 
@@ -4273,6 +4303,19 @@ impl GpuRenderer {
             return true;
         }
 
+        // Text glyph primitives (prim_type 7) bypass the
+        // viewport AABB cull. A scroll / layer container translates
+        // its children at composite time, so glyph bounds live in
+        // content (pre-translate) space — a glyph at content y=2000
+        // that's visible on screen after a -1000 scroll would otherwise
+        // get dropped here. The fragment shader's clip / alpha already
+        // discards fragments outside the layer bounds, so skipping this
+        // cull is cheap: the primitive either clips to nothing (free)
+        // or renders at the correct place.
+        if prim.type_info[0] == 7 {
+            return true;
+        }
+
         // Account for shadow expansion (matches shader bounds computation)
         let shadow_blur = prim.shadow[2];
         let shadow_ox = prim.shadow[0].abs();
@@ -4335,6 +4378,7 @@ impl GpuRenderer {
 
         // Sort primitives by pipeline category and upload
         let sdf_ranges = self.upload_sorted_primitives(&visible_primitives);
+
 
         // Update auxiliary data buffer (group shapes, polygon clips)
         // This may call rebind_sdf_bind_group() if the buffer needs resizing.

@@ -783,12 +783,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
             text_result.a *= clip_alpha;
 
-            let edge_aa = 1.0;
-            let clip_edge_alpha = smoothstep(0.0, edge_aa, min(
-                min(p.x - prim.clip_bounds.x, prim.clip_bounds.x + prim.clip_bounds.z - p.x),
-                min(p.y - prim.clip_bounds.y, prim.clip_bounds.y + prim.clip_bounds.w - p.y)
-            ));
-            text_result.a *= clip_edge_alpha;
+            // Rect-edge AA from `clip_bounds`. Only apply when the
+            // primitive actually has a rect clip — when `clip_type`
+            // is None the bounds are padding / stale metadata and
+            // this smoothstep would discard every fragment for a
+            // degenerate (zero-width or zero-height) rectangle.
+            if clip_type == 1u {
+                let edge_aa = 1.0;
+                let clip_edge_alpha = smoothstep(0.0, edge_aa, min(
+                    min(p.x - prim.clip_bounds.x, prim.clip_bounds.x + prim.clip_bounds.z - p.x),
+                    min(p.y - prim.clip_bounds.y, prim.clip_bounds.y + prim.clip_bounds.w - p.y)
+                ));
+                text_result.a *= clip_edge_alpha;
+            }
 
             return text_result;
         }

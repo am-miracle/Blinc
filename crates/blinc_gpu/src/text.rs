@@ -404,16 +404,23 @@ impl TextRenderingContext {
             }
         };
 
-        // Calculate x offset based on alignment
-        // When max_width is set, the layout engine already aligns glyphs within that width.
-        // We just need to add the container's x position as base offset.
-        // When no width is provided, we manually apply alignment offset.
+        // Calculate x offset based on alignment.
+        // When `max_width` is set, the layout engine has already
+        // aligned glyphs within that width — just position by `x`.
+        // When no width is provided, fall back to shifting by the
+        // prepared text's measured width so `Center` / `Right`
+        // actually align the text around / past the anchor `x`
+        // instead of silently left-aligning. This matches HTML5
+        // Canvas semantics where `ctx.textAlign = 'center'` centres
+        // the measured string around the anchor.
         let x_offset = if width.is_some() {
-            // Layout engine already aligned within max_width, just offset by container x
             x
         } else {
-            // No container width - just position at x (left-aligned)
-            x
+            match alignment {
+                TextAlignment::Left => x,
+                TextAlignment::Center => x - prepared.width / 2.0,
+                TextAlignment::Right => x - prepared.width,
+            }
         };
 
         // Convert to GPU glyphs with position offset

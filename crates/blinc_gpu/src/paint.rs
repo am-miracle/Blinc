@@ -2319,14 +2319,31 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             return;
         }
 
-        // Transform origin by current transform
+        // Transform origin by current transform (includes DPI scale
+        // + any CSS / scroll translation from ancestors).
         let transformed_origin = self.transform_point(origin);
+
+        // Extract uniform scale (DPI + container scale) so the glyph
+        // rasterisation matches the post-transform size on screen.
+        // Without this the text_ctx rasterises at CSS-pixel size
+        // while the vertex shader places the quad at physical-pixel
+        // coordinates — text renders at roughly half-size on 2×
+        // retina and is horizontally offset because the glyph
+        // advances don't keep up with the transformed origin.
+        let uniform_scale = self.current_uniform_scale();
+        let scaled_size = style.size * uniform_scale;
 
         // Get current opacity
         let opacity = self.combined_opacity();
 
-        // Get clip data before borrowing text_ctx
-        let (clip_bounds, _, _) = self.get_clip_data();
+        // Resolve the current rect clip (if any) so glyphs outside
+        // the active scissor get clipped. `get_clip_data` returns a
+        // large default bound when the stack is empty; when a rect
+        // clip is active the third element carries its `ClipType`,
+        // and we propagate that onto each glyph so the shader's
+        // `PRIM_TEXT` branch gates `clip_edge_alpha` properly.
+        let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+        let clip_kind_u32 = clip_type as u32;
 
         // Convert TextStyle color to [f32; 4] with opacity applied
         let color = [
@@ -2357,7 +2374,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             text,
             transformed_origin.x,
             transformed_origin.y,
-            style.size,
+            scaled_size,
             color,
             anchor,
             alignment,
@@ -2371,9 +2388,30 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                 glyph.clip_fade = glyph_clip_fade;
             }
 
-            // Add glyphs to batch
+            // Route each glyph straight into the primitive stream
+            // instead of the `batch.glyphs` vec. That vec is only
+            // drained by `convert_glyphs_to_primitives` /
+            // `get_unified_foreground_primitives` on the *foreground*
+            // batch — canvas elements render in the background layer
+            // by default, so pushing into `glyphs` would silently
+            // drop their text. `GpuPrimitive::from_glyph` carries
+            // the glyph's texture coords + colour so the SDF
+            // pipeline that consumes `primitives` renders identical
+            // output. We also stamp the active clip onto each prim
+            // so the shader's PRIM_TEXT branch respects scroll /
+            // overflow-clip boundaries (canvas text used to spill
+            // past its element because the default was
+            // `ClipType::None` regardless of stack state).
             for glyph in glyphs {
-                self.batch.push_glyph(glyph);
+                let mut prim = GpuPrimitive::from_glyph(&glyph);
+                prim.type_info[2] = clip_kind_u32;
+                prim.clip_bounds = clip_bounds;
+                prim.clip_radius = clip_radius;
+                if self.is_foreground {
+                    self.batch.push_foreground(prim);
+                } else {
+                    self.batch.push(prim);
+                }
             }
         }
     }

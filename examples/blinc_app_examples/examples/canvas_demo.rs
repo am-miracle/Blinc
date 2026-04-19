@@ -16,7 +16,8 @@ use blinc_animation::SpringConfig;
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
 use blinc_core::{
-    Brush, Color, CornerRadius, DrawContext, Gradient, GradientStop, Point, Rect, TextStyle,
+    Brush, Color, CornerRadius, DrawContext, Gradient, GradientStop, Point, Rect, TextAlign,
+    TextBaseline, TextStyle,
 };
 use std::sync::Arc;
 
@@ -49,7 +50,8 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         .h(ctx.height)
         .bg(Color::rgba(0.08, 0.08, 0.12, 1.0))
         .flex_col()
-        .gap(10.0)
+        .items_center()
+        .gap_px(10.0)
         .p(10.0)
         // Title
         .child(text("Canvas Element Demo").size(28.0).color(Color::WHITE))
@@ -62,8 +64,10 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         .child(
             div()
                 .w_fit()
+                .h(ctx.height - 200.0)
                 .flex_row()
                 .flex_wrap()
+                .overflow_y_scroll()
                 .gap(10.0)
                 .child(demo_card("Simple Rectangle", simple_rectangle_canvas()))
                 .child(demo_card("Gradient Fill", gradient_canvas()))
@@ -71,6 +75,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                 .child(demo_card("Custom Cursor", cursor_demo_canvas()))
                 .child(demo_card("Progress Bar", progress_bar_canvas(0.65)))
                 .child(demo_card("Color Palette", color_palette_canvas()))
+                .child(demo_card("Canvas Text", text_in_canvas()))
                 .child(animated_demo_card(ctx)),
         )
 }
@@ -227,21 +232,31 @@ fn progress_bar_canvas(progress: f32) -> Canvas {
             );
         }
 
-        // Progress percentage indicator with text
+        // Progress percentage indicator — small pill above the bar
+        // with the percentage text centred inside it.
         let percent = (progress * 100.0) as i32;
-        let text_x = bounds.width / 2.0 - 15.0;
-        let text_bg = Rect::new(text_x - 5.0, bar_y - 25.0, 50.0, 18.0);
+        let bubble = Rect::new(
+            bounds.width / 2.0 - 25.0,
+            bar_y - 28.0,
+            50.0,
+            22.0,
+        );
         ctx.fill_rect(
-            text_bg,
+            bubble,
             CornerRadius::uniform(4.0),
             Brush::Solid(Color::rgba(0.1, 0.1, 0.15, 0.9)),
         );
 
-        // Draw the percentage text
+        // Anchor the text at the bubble's centre and render with
+        // `Middle` + `Center` alignment so "65%" stays perfectly
+        // centred regardless of the digit count.
         ctx.draw_text(
             &format!("{}%", percent),
-            Point::new(text_x, bar_y),
-            &TextStyle::new(18.0).with_color(Color::WHITE),
+            Point::new(bubble.x() + bubble.width() / 2.0, bubble.y() + bubble.height() / 2.0),
+            &TextStyle::new(13.0)
+                .with_color(Color::WHITE)
+                .with_align(TextAlign::Center)
+                .with_baseline(TextBaseline::Middle),
         );
     })
     .w(228.0)
@@ -276,6 +291,60 @@ fn color_palette_canvas() -> Canvas {
                 );
             }
         }
+    })
+    .w(228.0)
+    .h(90.0)
+}
+
+/// Demo 7: Text rendering via `DrawContext::draw_text` from inside
+/// a canvas callback. Exercises multiple sizes, colours, and
+/// alignments so any regression in canvas-pushed text is immediately
+/// visible.
+///
+/// Each `TextStyle` switches the baseline to `Top` so the `y`
+/// coordinate represents the top of the glyph bounds — most intuitive
+/// for layout-style positioning. The default `Alphabetic` baseline
+/// (matching HTML5 Canvas) treats `y` as the text's baseline, which
+/// is what typographers expect but trips up layout-style use. Both
+/// conventions are supported; `with_baseline` flips between them.
+fn text_in_canvas() -> Canvas {
+    canvas(|ctx: &mut dyn DrawContext, bounds| {
+        // Background plate so the text has obvious contrast.
+        ctx.fill_rect(
+            Rect::new(0.0, 0.0, bounds.width, bounds.height),
+            CornerRadius::uniform(8.0),
+            Brush::Solid(Color::rgba(0.1, 0.1, 0.15, 1.0)),
+        );
+
+        // Big heading — Top baseline so `y` is the top of the
+        // text bounds.
+        ctx.draw_text(
+            "Hello canvas!",
+            Point::new(12.0, 8.0),
+            &TextStyle::new(18.0)
+                .with_color(Color::WHITE)
+                .with_baseline(TextBaseline::Top),
+        );
+
+        // Smaller subtitle with a different colour.
+        ctx.draw_text(
+            "draw_text inside a canvas callback",
+            Point::new(12.0, 38.0),
+            &TextStyle::new(11.0)
+                .with_color(Color::rgba(0.55, 0.70, 0.95, 1.0))
+                .with_baseline(TextBaseline::Top),
+        );
+
+        // Digit + punctuation glyphs — regression guard for the
+        // "only alphabetic glyphs in atlas" case the progress-bar
+        // originally missed.
+        ctx.draw_text(
+            "0123456789 · %$@",
+            Point::new(12.0, 62.0),
+            &TextStyle::new(12.0)
+                .with_color(Color::rgba(0.9, 0.85, 0.5, 1.0))
+                .with_baseline(TextBaseline::Top),
+        );
     })
     .w(228.0)
     .h(90.0)

@@ -340,6 +340,20 @@ impl TextStyle {
         self.family = family.into();
         self
     }
+
+    /// Set the horizontal alignment relative to the anchor x.
+    pub fn with_align(mut self, align: TextAlign) -> Self {
+        self.align = align;
+        self
+    }
+
+    /// Set the vertical baseline — determines which reference point
+    /// the origin `y` coordinate represents (top of text, middle,
+    /// or text baseline — matches the HTML5 Canvas convention).
+    pub fn with_baseline(mut self, baseline: TextBaseline) -> Self {
+        self.baseline = baseline;
+        self
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -576,15 +576,21 @@ impl RenderContext {
 
         self.renderer.resize(width, height);
 
-        // If we have CSS-transformed text, push text prims into the background batch
-        // and bind the real glyph atlas to the SDF pipeline for ALL render paths.
-        if !css_transformed_text_prims.is_empty() {
-            if let (Some(atlas), Some(color_atlas)) =
-                (self.text_ctx.atlas_view(), self.text_ctx.color_atlas_view())
-            {
+        // Bind the real glyph atlas to the SDF pipeline whenever
+        // it's available — `set_glyph_atlas` no-ops on pointer
+        // equality so calling each frame is free. CSS-transformed
+        // text + canvas `draw_text` calls both land glyph-sourced
+        // primitives in `bg_batch.primitives`, and the SDF pipeline
+        // needs the real atlas bound to sample them; the old
+        // "only when CSS text exists" guard silently swallowed
+        // canvas text that reached this path any other way.
+        if let (Some(atlas), Some(color_atlas)) =
+            (self.text_ctx.atlas_view(), self.text_ctx.color_atlas_view())
+        {
+            if !css_transformed_text_prims.is_empty() {
                 bg_batch.primitives.append(&mut css_transformed_text_prims);
-                self.renderer.set_glyph_atlas(atlas, color_atlas);
             }
+            self.renderer.set_glyph_atlas(atlas, color_atlas);
         }
 
         let has_glass = bg_batch.glass_count() > 0;
@@ -4267,15 +4273,21 @@ impl RenderContext {
 
         self.renderer.resize(width, height);
 
-        // If we have CSS-transformed text, push text prims into the main batch
-        // and bind the real glyph atlas to the SDF pipeline for ALL render paths.
-        if !css_transformed_text_prims.is_empty() {
-            if let (Some(atlas), Some(color_atlas)) =
-                (self.text_ctx.atlas_view(), self.text_ctx.color_atlas_view())
-            {
+        // Bind the real glyph atlas to the SDF pipeline whenever
+        // it's available — `set_glyph_atlas` no-ops on pointer
+        // equality so calling each frame is free. CSS-transformed
+        // text + canvas `draw_text` calls both land glyph-sourced
+        // primitives in `batch.primitives`, and the SDF pipeline
+        // needs the real atlas bound to sample them; the old
+        // "only when CSS text exists" guard silently swallowed
+        // canvas text that reached this path any other way.
+        if let (Some(atlas), Some(color_atlas)) =
+            (self.text_ctx.atlas_view(), self.text_ctx.color_atlas_view())
+        {
+            if !css_transformed_text_prims.is_empty() {
                 batch.primitives.append(&mut css_transformed_text_prims);
-                self.renderer.set_glyph_atlas(atlas, color_atlas);
             }
+            self.renderer.set_glyph_atlas(atlas, color_atlas);
         }
 
         let has_glass = batch.glass_count() > 0;
@@ -5018,15 +5030,18 @@ impl RenderContext {
 
         self.renderer.resize(width, height);
 
-        // If we have CSS-transformed text, push text prims into the main batch
-        // and bind the real glyph atlas to the SDF pipeline.
-        if !css_transformed_text_prims.is_empty() {
-            if let (Some(atlas), Some(color_atlas)) =
-                (self.text_ctx.atlas_view(), self.text_ctx.color_atlas_view())
-            {
+        // Bind the real glyph atlas to the SDF pipeline whenever
+        // it's available. See the same block in `render_tree` for
+        // the rationale — canvas `draw_text` calls route glyph
+        // primitives through `batch.primitives`, which need the
+        // real atlas bound for the PRIM_TEXT shader path.
+        if let (Some(atlas), Some(color_atlas)) =
+            (self.text_ctx.atlas_view(), self.text_ctx.color_atlas_view())
+        {
+            if !css_transformed_text_prims.is_empty() {
                 batch.primitives.append(&mut css_transformed_text_prims);
-                self.renderer.set_glyph_atlas(atlas, color_atlas);
             }
+            self.renderer.set_glyph_atlas(atlas, color_atlas);
         }
 
         // For overlay rendering, we DON'T have glass effects (overlays are simple)
