@@ -235,12 +235,7 @@ fn progress_bar_canvas(progress: f32) -> Canvas {
         // Progress percentage indicator — small pill above the bar
         // with the percentage text centred inside it.
         let percent = (progress * 100.0) as i32;
-        let bubble = Rect::new(
-            bounds.width / 2.0 - 25.0,
-            bar_y - 28.0,
-            50.0,
-            22.0,
-        );
+        let bubble = Rect::new(bounds.width / 2.0 - 25.0, bar_y - 28.0, 50.0, 22.0);
         ctx.fill_rect(
             bubble,
             CornerRadius::uniform(4.0),
@@ -252,7 +247,10 @@ fn progress_bar_canvas(progress: f32) -> Canvas {
         // centred regardless of the digit count.
         ctx.draw_text(
             &format!("{}%", percent),
-            Point::new(bubble.x() + bubble.width() / 2.0, bubble.y() + bubble.height() / 2.0),
+            Point::new(
+                bubble.x() + bubble.width() / 2.0,
+                bubble.y() + bubble.height() / 2.0,
+            ),
             &TextStyle::new(13.0)
                 .with_color(Color::WHITE)
                 .with_align(TextAlign::Center)
