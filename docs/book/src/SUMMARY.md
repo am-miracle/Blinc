@@ -118,6 +118,14 @@
 - [Audio & Video](./widgets/audio-video.md)
 - [Markdown Rendering](./widgets/markdown.md)
 
+# Canvas Kit
+
+- [Overview](./canvas-kit/overview.md)
+- [Sketches](./canvas-kit/sketches.md)
+- [Players](./canvas-kit/players.md)
+- [CanvasKit: Interactive Canvases](./canvas-kit/interactive.md)
+- [SceneKit3D](./canvas-kit/scenekit-3d.md)
+
 # Advanced
 
 - [Routing & Navigation](./advanced/routing.md)
