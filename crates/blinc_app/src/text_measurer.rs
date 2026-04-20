@@ -163,17 +163,67 @@ impl TextMeasurer for FontTextMeasurer {
         };
         drop(registry); // Release lock before layout
 
-        // Convert our options to blinc_text options
-        let (max_width, line_break) = if let Some(mw) = options.max_width {
-            (Some(mw), blinc_text::LineBreakMode::Word)
+        // Convert our options to blinc_text options.
+        //
+        // `max_width: Some(0.0)` is how `blinc_layout::tree::text_measure_function`
+        // propagates taffy's `AvailableSpace::MinContent` to us — it's requesting
+        // the min-content width, which per CSS is the width of the longest
+        // unbreakable sequence (typically the longest word). If we forward `0.0`
+        // as-is to `blinc_text`'s layout engine with `LineBreakMode::Word`, no
+        // word fits in zero pixels and the engine falls back to character-level
+        // wrapping, reporting a height of chars × line_height. Taffy's flex-col
+        // then treats that inflated height as the item's hypothetical main size,
+        // pushes the container into multi-line wrap, and clamps the container's
+        // main-axis to `max(content, available)` — which at fullscreen makes
+        // `h_fit` cards balloon to the viewport height.
+        //
+        // Clamp any non-positive `max_width` to the min-content width
+        // (measured as the width of the layout with no wrap) so the engine
+        // keeps words whole.
+        let effective_max_width = match options.max_width {
+            Some(mw) if mw > 0.0 => Some(mw),
+            Some(_) => {
+                // min-content: measure without wrapping to get the natural
+                // width of the longest unbreakable run, then layout at that.
+                let probe = LayoutOptions {
+                    line_height: options.line_height,
+                    letter_spacing: options.letter_spacing,
+                    max_width: None,
+                    line_break: blinc_text::LineBreakMode::None,
+                    ..LayoutOptions::default()
+                };
+                let probe_layout = self
+                    .layout_engine
+                    .lock()
+                    .unwrap()
+                    .layout(text, &font, font_size, &probe);
+                // Use the widest word (by splitting on whitespace) as the
+                // practical min-content width. Fall back to total width if the
+                // text has no whitespace.
+                let word_widths: Vec<f32> = text
+                    .split_whitespace()
+                    .map(|word| {
+                        self.layout_engine
+                            .lock()
+                            .unwrap()
+                            .layout(word, &font, font_size, &probe)
+                            .width
+                    })
+                    .collect();
+                let longest_word = word_widths.into_iter().fold(0.0_f32, f32::max);
+                Some(longest_word.max(1.0).min(probe_layout.width.max(1.0)))
+            }
+            None => None,
+        };
+        let line_break = if effective_max_width.is_some() {
+            blinc_text::LineBreakMode::Word
         } else {
-            // No wrapping for single-line measurement
-            (None, blinc_text::LineBreakMode::None)
+            blinc_text::LineBreakMode::None
         };
         let layout_opts = LayoutOptions {
             line_height: options.line_height,
             letter_spacing: options.letter_spacing,
-            max_width,
+            max_width: effective_max_width,
             line_break,
             ..LayoutOptions::default()
         };

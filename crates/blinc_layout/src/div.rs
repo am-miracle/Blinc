@@ -1736,15 +1736,22 @@ impl Div {
         self
     }
 
-    /// Set width to fit content (shrink-wrap to children)
+    /// Set width to fit content (shrink-wrap to children).
     ///
-    /// This sets width to auto with flex_basis auto and prevents flex growing/shrinking,
-    /// so the element will size exactly to fit its content.
+    /// Sets `size.width = Auto`, `flex_grow = 0`, `flex_shrink = 0` so the
+    /// element doesn't grow or shrink from its intrinsic width along a
+    /// flex-row parent's main axis. Also forces `align_self = Start` so
+    /// that inside a flex-column parent — where width is the *cross*
+    /// axis — the parent's default `align_items: Stretch` doesn't
+    /// stretch the child back out to the container's width. Does NOT
+    /// touch `flex_basis`: that field is per-axis (main axis only) and
+    /// setting it here would clobber sibling-axis sizing when parent
+    /// direction and fit axis disagree.
     pub fn w_fit(mut self) -> Self {
         self.style.size.width = Dimension::Auto;
-        self.style.flex_basis = Dimension::Auto;
         self.style.flex_grow = 0.0;
         self.style.flex_shrink = 0.0;
+        self.style.align_self = Some(AlignSelf::Start);
         self
     }
 
@@ -1766,27 +1773,36 @@ impl Div {
         self
     }
 
-    /// Set height to fit content (shrink-wrap to children)
+    /// Set height to fit content (shrink-wrap to children).
     ///
-    /// This sets height to auto and prevents flex growing/shrinking, so the element
-    /// will size exactly to fit its content.
+    /// Sets `size.height = Auto`, `flex_grow = 0`, `flex_shrink = 0` so the
+    /// element doesn't grow or shrink from its intrinsic height along a
+    /// flex-column parent's main axis. Also forces `align_self = Start`
+    /// so that inside a flex-row parent — where height is the *cross*
+    /// axis — the parent's default `align_items: Stretch` doesn't
+    /// stretch the child back out to the container's height. Does NOT
+    /// touch `flex_basis`: that field is per-axis (main axis only) and
+    /// setting it here would clobber sibling-axis sizing when parent
+    /// direction and fit axis disagree.
     pub fn h_fit(mut self) -> Self {
         self.style.size.height = Dimension::Auto;
-        self.style.flex_basis = Dimension::Auto;
         self.style.flex_grow = 0.0;
         self.style.flex_shrink = 0.0;
+        self.style.align_self = Some(AlignSelf::Start);
         self
     }
 
-    /// Set both width and height to fit content
+    /// Set both width and height to fit content.
     ///
-    /// This makes the element shrink-wrap to its content in both dimensions.
+    /// Shrink-wraps in both dimensions regardless of parent flex
+    /// direction. See [`Self::w_fit`] / [`Self::h_fit`] for the
+    /// rationale on `align_self` and the `flex_basis` omission.
     pub fn size_fit(mut self) -> Self {
         self.style.size.width = Dimension::Auto;
         self.style.size.height = Dimension::Auto;
-        self.style.flex_basis = Dimension::Auto;
         self.style.flex_grow = 0.0;
         self.style.flex_shrink = 0.0;
+        self.style.align_self = Some(AlignSelf::Start);
         self
     }
 
@@ -4453,5 +4469,282 @@ mod tests {
         assert!(div_ref_clone.is_bound());
         let width = div_ref_clone.with(|d| d.style.size.width);
         assert!(matches!(width, Some(Dimension::Length(100.0))));
+    }
+
+    /// `h_fit()` on a child in a flex-row parent must actually shrink
+    /// the child to content. Regression for the Lottie gallery bug.
+    #[test]
+    fn test_h_fit_shrinks_in_flex_row_parent() {
+        let ui = div()
+            .w(800.0)
+            .h(600.0)
+            .flex_row()
+            .child(
+                div()
+                    .w(340.0)
+                    .h_fit()
+                    .flex_col()
+                    // Two fixed-height children totalling 140px.
+                    .child(div().w(340.0).h(100.0))
+                    .child(div().w(340.0).h(40.0)),
+            );
+
+        let mut tree = RenderTree::from_element(&ui);
+        tree.compute_layout(800.0, 600.0);
+
+        let root = tree.root().unwrap();
+        let children: Vec<_> = tree.layout_tree.children(root);
+        let card = tree
+            .layout_tree
+            .get_bounds(children[0], (0.0, 0.0))
+            .unwrap();
+
+        assert_eq!(
+            card.height, 140.0,
+            "h_fit child should be 140px (sum of children), not {} (parent's 600)",
+            card.height
+        );
+    }
+
+    /// Same as above but the parent is fullscreen-huge. If
+    /// `align-content: Stretch` on the wrap line grows the line to
+    /// fill and drags the child, this will also fail — captures the
+    /// fullscreen-regression reported by the user.
+    #[test]
+    fn test_h_fit_shrinks_in_large_flex_row_parent() {
+        let ui = div()
+            .w(2000.0)
+            .h(1400.0)
+            .flex_row()
+            .child(
+                div()
+                    .w(340.0)
+                    .h_fit()
+                    .flex_col()
+                    .child(div().w(340.0).h(100.0))
+                    .child(div().w(340.0).h(40.0)),
+            );
+
+        let mut tree = RenderTree::from_element(&ui);
+        tree.compute_layout(2000.0, 1400.0);
+
+        let root = tree.root().unwrap();
+        let children: Vec<_> = tree.layout_tree.children(root);
+        let card = tree
+            .layout_tree
+            .get_bounds(children[0], (0.0, 0.0))
+            .unwrap();
+
+        assert_eq!(
+            card.height, 140.0,
+            "h_fit child in huge flex-row parent should be 140px, not {}",
+            card.height
+        );
+    }
+
+    /// Reproduces the exact gallery-failure shape: the card itself
+    /// has both `flex_wrap()` and `h_fit()` on it (the user's
+    /// workaround-of-a-workaround). `flex_wrap` on a container with
+    /// an auto cross-size changes how taffy resolves the container's
+    /// main-axis size. Specifically — without explicit height — a
+    /// flex-column + wrap container can report its main axis as
+    /// whatever available space the parent handed down, instead of
+    /// the sum of its children. Regression guard.
+    #[test]
+    fn test_h_fit_with_flex_wrap_on_same_div() {
+        // Match the gallery exactly: TWO cards side-by-side in a
+        // fullscreen-sized flex-row parent. Every card has the same
+        // `.flex_col().flex_wrap().h_fit().overflow_clip()` stack.
+        // Children are 18 + 316 + 32 with 8px gaps and 12px padding,
+        // so each card should be 12+18+8+316+8+32+12 = 406 px.
+        let make_card = || {
+            div()
+                .w(340.0)
+                .h_fit()
+                .flex_col()
+                .flex_wrap()
+                .overflow_clip()
+                .gap_px(8.0)
+                .p_px(12.0)
+                .child(div().w(316.0).h(18.0))
+                .child(div().w(316.0).h(316.0))
+                .child(div().w(316.0).h(32.0))
+        };
+
+        let ui = div()
+            .w(2000.0)
+            .h(1400.0)
+            .flex_row()
+            .gap_px(20.0)
+            .child(make_card())
+            .child(make_card());
+
+        let mut tree = RenderTree::from_element(&ui);
+        tree.compute_layout(2000.0, 1400.0);
+
+        let root = tree.root().unwrap();
+        let children: Vec<_> = tree.layout_tree.children(root);
+        let card_0 = tree
+            .layout_tree
+            .get_bounds(children[0], (0.0, 0.0))
+            .unwrap();
+        let card_1 = tree
+            .layout_tree
+            .get_bounds(children[1], (0.0, 0.0))
+            .unwrap();
+
+        assert_eq!(
+            card_0.height, 406.0,
+            "card 0 should be 406px content height, got {}",
+            card_0.height
+        );
+        assert_eq!(
+            card_1.height, 406.0,
+            "card 1 should be 406px content height, got {}",
+            card_1.height
+        );
+    }
+
+    /// Same card shape but with a real `canvas()` element wrapped
+    /// inside a div with w_full/h_full (mirrors `sketch()`'s wrap).
+    /// This catches any interaction between canvas's layout_style
+    /// returning its own style (not using defaults) and the
+    /// surrounding flex-wrap container.
+    #[test]
+    fn test_h_fit_with_real_canvas_child() {
+        use crate::canvas::canvas;
+        let ui = div()
+            .w(2000.0)
+            .h(1400.0)
+            .flex_row()
+            .child(
+                div()
+                    .w(340.0)
+                    .h_fit()
+                    .flex_col()
+                    .flex_wrap()
+                    .overflow_clip()
+                    .gap_px(8.0)
+                    .p_px(12.0)
+                    .child(div().w(316.0).h(18.0))
+                    .child(
+                        div()
+                            .w(316.0)
+                            .h(316.0)
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h_full()
+                                    .child(canvas(|_ctx, _bounds| {}).w_full().h_full()),
+                            ),
+                    )
+                    .child(div().w(316.0).h(32.0)),
+            );
+
+        let mut tree = RenderTree::from_element(&ui);
+        tree.compute_layout(2000.0, 1400.0);
+
+        let root = tree.root().unwrap();
+        let children: Vec<_> = tree.layout_tree.children(root);
+        let card = tree
+            .layout_tree
+            .get_bounds(children[0], (0.0, 0.0))
+            .unwrap();
+
+        assert!(
+            card.height < 500.0,
+            "card with canvas child should not balloon; got {}",
+            card.height
+        );
+    }
+
+    /// Same card shape but using a real `text()` element for the
+    /// first child (wrap=true by default, so taffy uses the measure
+    /// function). If the text-measure is returning an unexpectedly
+    /// large main-axis size when queried at max-content, the card's
+    /// hypothetical-main-size exceeds available → multi-line wrap →
+    /// taffy inflates height to `max(content, available)`.
+    #[test]
+    fn test_h_fit_with_real_text_child() {
+        use crate::text::text;
+        let ui = div()
+            .w(2000.0)
+            .h(1400.0)
+            .flex_row()
+            .child(
+                div()
+                    .w(340.0)
+                    .h_fit()
+                    .flex_col()
+                    .flex_wrap()
+                    .overflow_clip()
+                    .gap_px(8.0)
+                    .p_px(12.0)
+                    .child(text("Sandy Loading (JSON)").size(13.0))
+                    .child(div().w(316.0).h(316.0))
+                    .child(div().w(316.0).h(32.0)),
+            );
+
+        let mut tree = RenderTree::from_element(&ui);
+        tree.compute_layout(2000.0, 1400.0);
+
+        let root = tree.root().unwrap();
+        let children: Vec<_> = tree.layout_tree.children(root);
+        let card = tree
+            .layout_tree
+            .get_bounds(children[0], (0.0, 0.0))
+            .unwrap();
+
+        assert!(
+            card.height < 500.0,
+            "card with text child should not balloon to available space, got {}",
+            card.height
+        );
+    }
+
+    /// Reproduce the Lottie-gallery shape: outer windowed div (flex-row
+    /// default) → an intermediate wrap container (`flex_row + gap`) →
+    /// card with `h_fit`. The user's gallery sees the card stretch.
+    /// This test pins whether the extra wrapping layer alone breaks
+    /// `h_fit`, without involving any Stateful or sketch.
+    #[test]
+    fn test_h_fit_through_gap_container() {
+        let ui = div()
+            .w(800.0)
+            .h(600.0)
+            .p_px(20.0)
+            .child(
+                div().flex_row().gap_px(20.0).child(
+                    div()
+                        .w(340.0)
+                        .h_fit()
+                        .flex_col()
+                        .gap_px(8.0)
+                        .p_px(12.0)
+                        .child(div().w(316.0).h(20.0))
+                        .child(div().w(316.0).h(316.0))
+                        .child(div().w(316.0).h(36.0)),
+                ),
+            );
+
+        let mut tree = RenderTree::from_element(&ui);
+        tree.compute_layout(800.0, 600.0);
+
+        let root = tree.root().unwrap();
+        let outer_children: Vec<_> = tree.layout_tree.children(root);
+        let wrap = outer_children[0];
+        let wrap_children: Vec<_> = tree.layout_tree.children(wrap);
+        let card = tree
+            .layout_tree
+            .get_bounds(wrap_children[0], (0.0, 0.0))
+            .unwrap();
+
+        // Card content: padding(12) + 20 + gap(8) + 316 + gap(8) + 36
+        // + padding(12) = 412
+        assert_eq!(
+            card.height, 412.0,
+            "gallery-shaped card in flex-row gap container should be 412px, not {}",
+            card.height
+        );
     }
 }
