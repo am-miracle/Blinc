@@ -596,15 +596,16 @@ fn form_inputs_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                 .flex_row()
                 .w_full()
                 .justify_between()
-                .gap(4.0)
+                .gap_px(4.0)
                 .h_fit()
                 // Column 1: Text inputs
                 .child(
                     div()
                         .flex_col()
                         .flex_wrap()
+                        .w(280.0)
                         .h_fit()
-                        .gap(16.0)
+                        .gap_px(16.0)
                         .child(
                             cn::input(&username_data)
                                 .label("Username")
@@ -629,7 +630,7 @@ fn form_inputs_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                         .flex_col()
                         .flex_wrap()
                         .h_fit()
-                        .gap(4.0)
+                        .gap_px(4.0)
                         .child(
                             cn::textarea(&bio_state)
                                 .label("Bio")
