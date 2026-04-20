@@ -77,6 +77,14 @@ pub struct SketchContext<'a> {
     pub width: f32,
     /// Height of the canvas in layout units.
     pub height: f32,
+    /// Full canvas bounds threaded from the layout pipeline. `x` / `y`
+    /// are the canvas origin in the current `DrawContext` transform
+    /// space — typically `0.0` because the layout pipeline has already
+    /// translated onto it, but surfaced explicitly so sketches that
+    /// forward a `Rect` to players / helpers written against absolute
+    /// coordinates can pass `bounds.x`, `bounds.y` rather than
+    /// assuming a zero origin.
+    pub bounds: CanvasBounds,
     /// Frames drawn since `setup()` — `0` inside `setup`, `0` on the
     /// first `draw()`, incrementing thereafter.
     pub frame_count: u64,
@@ -119,21 +127,32 @@ impl<'a> SketchContext<'a> {
 pub fn sketch<S: Sketch>(key: &str, s: S) -> Div {
     let handle = use_state_keyed(&format!("{key}_sketch"), move || SketchHandle::new(s));
 
-    div().w_full().h_full().child(
-        canvas(move |ctx: &mut dyn DrawContext, bounds: CanvasBounds| {
-            // `try_get` avoids the `T: Default` bound on `State::get`; the
-            // handle is guaranteed to exist after `use_state_keyed`.
-            if let Some(h) = handle.try_get() {
-                h.tick(ctx, bounds);
-            }
-            // Keep the redraw chain alive so `t` / `dt` keep advancing.
-            // Sketches are expected to animate; static sketches should
-            // use `canvas(...)` directly instead.
-            request_redraw();
-        })
+    // Give both the wrapper div and the canvas unique element ids
+    // derived from `key`. Without this, two sibling sketches end up
+    // with identical (id-less) wrapper divs and, depending on the
+    // diff / node-keying in the render pipeline, the second sketch's
+    // canvas can inherit the first sketch's paint state — the
+    // observed "second sketch doesn't render" bug. Stable ids keep
+    // each sketch's canvas a distinct node across rebuilds.
+    div()
+        .id(format!("{key}_sketch_wrapper"))
         .w_full()
-        .h_full(),
-    )
+        .h_full()
+        .child(
+            canvas(move |ctx: &mut dyn DrawContext, bounds: CanvasBounds| {
+                // `try_get` avoids the `T: Default` bound on `State::get`; the
+                // handle is guaranteed to exist after `use_state_keyed`.
+                if let Some(h) = handle.try_get() {
+                    h.tick(ctx, bounds);
+                }
+                // Keep the redraw chain alive so `t` / `dt` keep advancing.
+                // Sketches are expected to animate; static sketches should
+                // use `canvas(...)` directly instead.
+                request_redraw();
+            })
+            .w_full()
+            .h_full(),
+        )
 }
 
 /// Persistent, clonable handle to a sketch's runtime state. Stored inside
@@ -189,6 +208,7 @@ impl SketchInner {
             ctx,
             width: bounds.width,
             height: bounds.height,
+            bounds,
             frame_count: self.frame_count,
         };
 

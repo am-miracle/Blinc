@@ -42,12 +42,29 @@ use crate::div::{ElementBuilder, ElementTypeId};
 use crate::element::{RenderLayer, RenderProps};
 use crate::tree::{LayoutNodeId, LayoutTree};
 
-/// Bounds passed to canvas render callback
+/// Bounds passed to canvas render callback.
+///
+/// `x` / `y` are the canvas's offset inside the `DrawContext`'s current
+/// transform space — normally `0.0` because the render pipeline pushes a
+/// translate(bounds.x, bounds.y) before invoking the callback, so drawing
+/// at (0, 0) already lands at the canvas origin. They're surfaced
+/// explicitly so callbacks that need an absolute rect (media players,
+/// sketches, any code that forwards a `Rect` through to helpers not
+/// written against the canvas convention) can construct one without
+/// having to inspect the transform stack.
 #[derive(Clone, Copy, Debug)]
 pub struct CanvasBounds {
-    /// Width of the canvas element
+    /// Offset of the canvas element in the current `DrawContext` frame.
+    /// Normally `0.0` after the pipeline's own `translate(bounds.x,
+    /// bounds.y)` is applied, but propagated explicitly so the callback
+    /// never has to guess.
+    pub x: f32,
+    /// Offset of the canvas element in the current `DrawContext` frame.
+    /// See [`Self::x`].
+    pub y: f32,
+    /// Width of the canvas element.
     pub width: f32,
-    /// Height of the canvas element
+    /// Height of the canvas element.
     pub height: f32,
 }
 

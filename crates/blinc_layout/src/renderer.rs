@@ -11047,7 +11047,18 @@ impl RenderTree {
                         ctx.push_clip(ClipShape::rect(clip_rect));
                     }
 
+                    // `bounds.x` / `bounds.y` are already translated
+                    // onto the DrawContext by the `push_transform` at
+                    // the top of `render_node`, so in canvas-local
+                    // space the origin is (0, 0). Surfacing the
+                    // pre-translate offset to the callback is a
+                    // diagnostic breadcrumb, not a correction; forward
+                    // zero for x/y so `Rect::new(bounds.x, bounds.y,
+                    // …)` in callback code resolves to the canvas's
+                    // actual origin without double-offsetting.
                     let canvas_bounds = crate::canvas::CanvasBounds {
+                        x: 0.0,
+                        y: 0.0,
                         width: bounds.width,
                         height: bounds.height,
                     };
@@ -11948,7 +11959,18 @@ impl RenderTree {
                     let clip_rect = Rect::new(0.0, 0.0, bounds.width, bounds.height);
                     ctx.push_clip(ClipShape::rect(clip_rect));
 
+                    // `bounds.x` / `bounds.y` are already translated
+                    // onto the DrawContext by the `push_transform` at
+                    // the top of `render_node`, so in canvas-local
+                    // space the origin is (0, 0). Surfacing the
+                    // pre-translate offset to the callback is a
+                    // diagnostic breadcrumb, not a correction; forward
+                    // zero for x/y so `Rect::new(bounds.x, bounds.y,
+                    // …)` in callback code resolves to the canvas's
+                    // actual origin without double-offsetting.
                     let canvas_bounds = crate::canvas::CanvasBounds {
+                        x: 0.0,
+                        y: 0.0,
                         width: bounds.width,
                         height: bounds.height,
                     };
@@ -12528,6 +12550,8 @@ impl RenderTree {
                         ctx.push_clip(ClipShape::rect(clip_rect));
 
                         let canvas_bounds = crate::canvas::CanvasBounds {
+                            x: 0.0,
+                            y: 0.0,
                             width: bounds.width,
                             height: bounds.height,
                         };

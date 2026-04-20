@@ -1994,18 +1994,18 @@ impl WindowedApp {
             let bundle = platform_theme_bundle();
             let scheme = detect_system_color_scheme();
             ThemeState::init(bundle, scheme);
-        }
 
-        // Set up the redraw callback to trigger full UI rebuilds when theme changes
-        // We use request_full_rebuild() to trigger all three phases:
-        // 1. Tree rebuild - reconstruct UI with new theme values
-        // 2. Layout recompute - recalculate flexbox layout
-        // 3. Visual redraw - render the frame
-        set_redraw_callback(|| {
-            tracing::debug!("Theme changed - requesting full rebuild + CSS reparse");
-            blinc_layout::widgets::request_css_reparse();
-            blinc_layout::widgets::request_full_rebuild();
-        });
+            // Set up the redraw callback to trigger full UI rebuilds when theme changes
+            // We use request_full_rebuild() to trigger all three phases:
+            // 1. Tree rebuild - reconstruct UI with new theme values
+            // 2. Layout recompute - recalculate flexbox layout
+            // 3. Visual redraw - render the frame
+            set_redraw_callback(|| {
+                tracing::debug!("Theme changed - requesting full rebuild + CSS reparse");
+                blinc_layout::widgets::request_css_reparse();
+                blinc_layout::widgets::request_full_rebuild();
+            });
+        }
     }
 
     /// Run a windowed Blinc application on desktop platforms
@@ -2759,7 +2759,17 @@ impl WindowedApp {
                         if let (Some(ref blinc_app), Some(ref surf), Some(ref mut config)) =
                             (&ws.app, &ws.surface, &mut ws.surface_config)
                         {
-                            if width > 0 && height > 0 {
+                            // winit fires a spurious Resized event when the window is first
+                            // mapped, with the same dimensions used to configure the surface.
+                            // Rebuilding on that no-op resize triggers a double initial build
+                            // (visible as duplicated `build_ui` side effects) and — more
+                            // critically — clobbers Stateful-handle state from the first build
+                            // that downstream canvases depend on, so sketches wired up during
+                            // the initial build stop painting after the phantom rebuild.
+                            // Short-circuit when neither axis actually changed.
+                            let dims_changed =
+                                config.width != width || config.height != height;
+                            if width > 0 && height > 0 && dims_changed {
                                 config.width = width;
                                 config.height = height;
                                 surf.configure(blinc_app.device(), config);
