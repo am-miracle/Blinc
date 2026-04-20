@@ -368,7 +368,8 @@ fn section_container() -> Div {
     let radius = theme.radii().radius_xl;
 
     div()
-        .w_fit()
+        .w_full()
+        .h_fit()
         .bg(surface)
         .rounded(radius)
         .border(1.5, border)
