@@ -1452,6 +1452,31 @@ pub enum LayerCommand {
 pub struct LayerCommandEntry {
     /// The primitive index when this command was recorded
     pub primitive_index: usize,
+    /// The foreground primitive index when this command was recorded.
+    /// Needed so an effect layer composed of foreground primitives
+    /// can be ranged the same way background primitives are.
+    pub foreground_primitive_index: usize,
+    /// The path-vertex index when this command was recorded. Each
+    /// tessellated `fill_path` / `stroke_path` appends to
+    /// `PathBatch.vertices`; ranging by this index lets the effect
+    /// pipeline pull the exact path chunk that belongs to the
+    /// current layer into its offscreen texture. Without it, path
+    /// content (all of Lottie's shapes) bypassed the offscreen
+    /// composite and rendered directly onto the final framebuffer
+    /// — so layer-level opacity on a Lottie layer was visually
+    /// indistinguishable from per-fill alpha multiplication.
+    pub path_vertex_index: usize,
+    /// The path-index count (triangle-list index buffer position)
+    /// when this command was recorded. Paired with
+    /// `path_vertex_index` so the renderer can pull both the vertex
+    /// range and the index range for an effect layer without
+    /// scanning the index buffer to find which triangles reference
+    /// a given vertex window.
+    pub path_index_count: usize,
+    /// Foreground path-vertex index.
+    pub foreground_path_vertex_index: usize,
+    /// Foreground path-index count.
+    pub foreground_path_index_count: usize,
     /// The layer command
     pub command: LayerCommand,
 }
@@ -1558,6 +1583,11 @@ impl PrimitiveBatch {
     pub fn push_layer_command(&mut self, command: LayerCommand) {
         self.layer_commands.push(LayerCommandEntry {
             primitive_index: self.primitives.len(),
+            foreground_primitive_index: self.foreground_primitives.len(),
+            path_vertex_index: self.paths.vertices.len(),
+            path_index_count: self.paths.indices.len(),
+            foreground_path_vertex_index: self.foreground_paths.vertices.len(),
+            foreground_path_index_count: self.foreground_paths.indices.len(),
             command,
         });
     }

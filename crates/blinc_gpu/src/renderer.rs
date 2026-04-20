@@ -312,6 +312,31 @@ impl GpuMemoryBudget {
 }
 
 /// Render pipelines for different primitive types
+/// One stack frame for a pending `LayerCommand::Push`, holding the
+/// primitive / path indices at push time so the matching Pop can
+/// compute full ranges.
+#[derive(Copy, Clone)]
+struct LayerStackFrame {
+    primitive_start: usize,
+    path_index_start: usize,
+    path_vertex_start: usize,
+}
+
+/// A resolved effect layer (between Push and Pop) with its primitive
+/// range and path range. Processed by `render_with_layer_effects` to
+/// either skip its content in the first pass or composite it
+/// offscreen in the second pass.
+#[derive(Clone)]
+struct EffectLayerRange {
+    primitive_start: usize,
+    primitive_end: usize,
+    path_index_start: usize,
+    path_index_end: usize,
+    path_vertex_start: usize,
+    path_vertex_end: usize,
+    config: blinc_core::LayerConfig,
+}
+
 struct Pipelines {
     /// Pipeline for SDF primitives (rects, circles, etc.) — monolithic fallback (deprecated)
     #[allow(dead_code)]
@@ -4448,22 +4473,41 @@ impl GpuRenderer {
     ) {
         use crate::primitives::LayerCommand;
 
-        // Build list of effect layers with their primitive ranges
-        let mut effect_layers: Vec<(usize, usize, blinc_core::LayerConfig)> = Vec::new();
-        let mut layer_stack: Vec<(usize, blinc_core::LayerConfig)> = Vec::new();
+        // Build list of effect layers with their primitive AND path
+        // ranges. Tracking path ranges (not just primitive indices)
+        // is what lets translucent-opacity Lottie layers — whose
+        // shapes live entirely in `batch.paths` — reach the
+        // offscreen composite instead of bypassing it.
+        let mut effect_layers: Vec<EffectLayerRange> = Vec::new();
+        let mut layer_stack: Vec<(LayerStackFrame, blinc_core::LayerConfig)> = Vec::new();
 
         for entry in &batch.layer_commands {
             match &entry.command {
                 LayerCommand::Push { config } => {
-                    layer_stack.push((entry.primitive_index, config.clone()));
+                    layer_stack.push((
+                        LayerStackFrame {
+                            primitive_start: entry.primitive_index,
+                            path_index_start: entry.path_index_count,
+                            path_vertex_start: entry.path_vertex_index,
+                        },
+                        config.clone(),
+                    ));
                 }
                 LayerCommand::Pop => {
-                    if let Some((start_idx, config)) = layer_stack.pop() {
+                    if let Some((start, config)) = layer_stack.pop() {
                         if !config.effects.is_empty()
                             || config.blend_mode != blinc_core::BlendMode::Normal
                             || config.transform_3d.is_some()
                         {
-                            effect_layers.push((start_idx, entry.primitive_index, config));
+                            effect_layers.push(EffectLayerRange {
+                                primitive_start: start.primitive_start,
+                                primitive_end: entry.primitive_index,
+                                path_index_start: start.path_index_start,
+                                path_index_end: entry.path_index_count,
+                                path_vertex_start: start.path_vertex_start,
+                                path_vertex_end: entry.path_vertex_index,
+                                config,
+                            });
                         }
                     }
                 }
@@ -4477,30 +4521,70 @@ impl GpuRenderer {
             return;
         }
 
-        // Build set of primitive indices that belong to effect layers (to skip in first pass)
+        // Build set of primitive indices AND path-index ranges that
+        // belong to effect layers so the first pass knows what to
+        // skip. Paths are skipped as whole `[start..end)` ranges —
+        // the draw call is split around them rather than using a
+        // per-index hash set (index buffers are much larger than
+        // the primitive count).
         let mut effect_primitives = std::collections::HashSet::new();
-        for (start, end, _) in &effect_layers {
-            for i in *start..*end {
+        let mut path_skip_ranges: Vec<(u32, u32)> = Vec::new();
+        for layer in &effect_layers {
+            for i in layer.primitive_start..layer.primitive_end {
                 effect_primitives.insert(i);
             }
+            if layer.path_index_end > layer.path_index_start {
+                path_skip_ranges.push((
+                    layer.path_index_start as u32,
+                    layer.path_index_end as u32,
+                ));
+            }
         }
+        path_skip_ranges.sort_unstable();
 
-        // First pass: render primitives that are NOT in effect layers
-        self.render_primitives_excluding(target, batch, &effect_primitives, clear_color);
+        // First pass: render primitives + paths that are NOT in effect layers
+        self.render_primitives_excluding_with_paths(
+            target,
+            batch,
+            &effect_primitives,
+            &path_skip_ranges,
+            clear_color,
+        );
         drop(effect_primitives); // Free HashSet immediately - not needed after first pass
 
         // Process each effect layer
-        for (start_idx, end_idx, config) in effect_layers {
-            if start_idx >= end_idx || end_idx > batch.primitives.len() {
+        for layer in effect_layers {
+            let EffectLayerRange {
+                primitive_start: start_idx,
+                primitive_end: end_idx,
+                config,
+                ..
+            } = &layer;
+            let (start_idx, end_idx) = (*start_idx, *end_idx);
+            let config = config.clone();
+            let has_primitives = start_idx < end_idx && end_idx <= batch.primitives.len();
+            let has_paths = layer.path_index_end > layer.path_index_start
+                && layer.path_index_end <= batch.paths.indices.len();
+            if !has_primitives && !has_paths {
                 continue;
             }
 
-            // Config position/size are in local coordinates (relative to parent)
-            // But primitives are at screen-space coordinates after transforms
-            // We need to compute the actual bounding box from primitives
+            // Compute the layer's screen-space bounding box from its
+            // primitives + path vertices. Lottie layers contain only
+            // paths (tessellated by `fill_path`), no SDF primitives —
+            // so the bbox MUST include path vertices, otherwise the
+            // tight texture would be sized from the LayerConfig
+            // fallback (often viewport-sized) and the offscreen blit
+            // would be in the wrong position.
             let primitives = &batch.primitives[start_idx..end_idx];
-            let (layer_pos, layer_size, layer_clip) = if primitives.is_empty() {
-                // Fallback to config values if no primitives
+            let path_verts = if has_paths {
+                &batch.paths.vertices[layer.path_vertex_start..layer.path_vertex_end]
+            } else {
+                &[][..]
+            };
+            let (layer_pos, layer_size, layer_clip) = if primitives.is_empty()
+                && path_verts.is_empty()
+            {
                 let pos = config.position.map(|p| (p.x, p.y)).unwrap_or((0.0, 0.0));
                 let size = config
                     .size
@@ -4508,13 +4592,10 @@ impl GpuRenderer {
                     .unwrap_or((self.viewport_size.0 as f32, self.viewport_size.1 as f32));
                 (pos, size, None)
             } else {
-                // Compute bounding box from primitives (which are in screen coordinates)
                 let mut min_x = f32::MAX;
                 let mut min_y = f32::MAX;
                 let mut max_x = f32::MIN;
                 let mut max_y = f32::MIN;
-                // Extract clip bounds from the first primitive with a valid clip
-                // All primitives in a layer should have the same clip (from scroll container)
                 let mut clip: Option<([f32; 4], [f32; 4])> = None;
                 for p in primitives {
                     let (px, py, pw, ph) = (p.bounds[0], p.bounds[1], p.bounds[2], p.bounds[3]);
@@ -4522,10 +4603,17 @@ impl GpuRenderer {
                     min_y = min_y.min(py);
                     max_x = max_x.max(px + pw);
                     max_y = max_y.max(py + ph);
-                    // Check for valid clip bounds (not the default "no clip" values)
-                    // Default is [-10000, -10000, 100000, 100000]
                     if clip.is_none() && p.clip_bounds[0] > -5000.0 && p.clip_bounds[2] < 90000.0 {
                         clip = Some((p.clip_bounds, p.clip_radius));
+                    }
+                }
+                for v in path_verts {
+                    min_x = min_x.min(v.position[0]);
+                    min_y = min_y.min(v.position[1]);
+                    max_x = max_x.max(v.position[0]);
+                    max_y = max_y.max(v.position[1]);
+                    if clip.is_none() && v.clip_bounds[0] > -5000.0 && v.clip_bounds[2] < 90000.0 {
+                        clip = Some((v.clip_bounds, v.clip_radius));
                     }
                 }
                 let width = (max_x - min_x).max(1.0);
@@ -4550,13 +4638,20 @@ impl GpuRenderer {
             // Calculate effect expansion (how much effects extend beyond original bounds)
             let effect_expansion = Self::calculate_effect_expansion(&config.effects);
 
-            // Render layer primitives to a TIGHT texture (not viewport-sized!)
-            // This significantly reduces memory usage and effect processing time
-            // Returns both texture and content_size (which may differ from texture.size due to pool bucket rounding)
-            let (layer_texture, content_size) = self.render_primitive_range_tight(
+            // Render layer primitives + paths to a TIGHT texture
+            // (not viewport-sized!). Path range comes from the
+            // recorded `LayerCommandEntry`, so Lottie shapes —
+            // which only ever produce path geometry — get their
+            // own slice composed at full alpha into the offscreen
+            // before the blit applies the layer's opacity.
+            let (layer_texture, content_size) = self.render_layer_range_tight(
                 batch,
                 start_idx,
                 end_idx,
+                layer.path_vertex_start,
+                layer.path_vertex_end,
+                layer.path_index_start,
+                layer.path_index_end,
                 layer_pos,
                 layer_size,
                 effect_expansion,
@@ -4623,8 +4718,25 @@ impl GpuRenderer {
         exclude: &std::collections::HashSet<usize>,
         clear_color: [f64; 4],
     ) {
+        self.render_primitives_excluding_with_paths(target, batch, exclude, &[], clear_color)
+    }
+
+    /// Like [`Self::render_primitives_excluding`] but also skips a
+    /// set of path-index ranges from the single path draw call. The
+    /// ranges must be sorted by start index and non-overlapping —
+    /// callers get that from `EffectLayerRange` values built by
+    /// `render_with_layer_effects`, which emits layers in a
+    /// stack-ordered, non-overlapping manner.
+    fn render_primitives_excluding_with_paths(
+        &mut self,
+        target: &wgpu::TextureView,
+        batch: &PrimitiveBatch,
+        exclude: &std::collections::HashSet<usize>,
+        path_skip_ranges: &[(u32, u32)],
+        clear_color: [f64; 4],
+    ) {
         // If nothing to exclude, use simple path
-        if exclude.is_empty() {
+        if exclude.is_empty() && path_skip_ranges.is_empty() {
             self.render_with_clear_simple(target, batch, clear_color);
             return;
         }
@@ -4733,7 +4845,10 @@ impl GpuRenderer {
                 );
             }
 
-            // Render paths (always rendered - path filtering would be more complex)
+            // Render paths, skipping any index ranges that belong
+            // to translucent / effect layers (those are composited
+            // offscreen in the second pass). Paths in non-effect
+            // ranges still render here directly to the target.
             if has_paths {
                 if let (Some(vb), Some(ib)) =
                     (&self.buffers.path_vertices, &self.buffers.path_indices)
@@ -4742,7 +4857,17 @@ impl GpuRenderer {
                     render_pass.set_bind_group(0, &self.bind_groups.path, &[]);
                     render_pass.set_vertex_buffer(0, vb.slice(..));
                     render_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                    render_pass.draw_indexed(0..batch.paths.indices.len() as u32, 0, 0..1);
+                    let total = batch.paths.indices.len() as u32;
+                    let mut cursor = 0u32;
+                    for &(skip_start, skip_end) in path_skip_ranges {
+                        if skip_start > cursor {
+                            render_pass.draw_indexed(cursor..skip_start, 0, 0..1);
+                        }
+                        cursor = cursor.max(skip_end);
+                    }
+                    if cursor < total {
+                        render_pass.draw_indexed(cursor..total, 0, 0..1);
+                    }
                 }
             }
         }
@@ -9292,6 +9417,7 @@ impl GpuRenderer {
     ///
     /// Returns the texture AND the actual content size (which may differ from
     /// texture.size due to pool bucket rounding).
+    #[allow(clippy::too_many_arguments)]
     fn render_primitive_range_tight(
         &mut self,
         batch: &PrimitiveBatch,
@@ -9300,6 +9426,43 @@ impl GpuRenderer {
         layer_pos: (f32, f32),
         layer_size: (f32, f32),
         effect_expansion: (f32, f32, f32, f32), // (left, top, right, bottom)
+    ) -> (LayerTexture, (u32, u32)) {
+        // Forward to the path-aware variant with an empty path range.
+        self.render_layer_range_tight(
+            batch,
+            start_idx,
+            end_idx,
+            0,
+            0,
+            0,
+            0,
+            layer_pos,
+            layer_size,
+            effect_expansion,
+        )
+    }
+
+    /// Path-aware variant of `render_primitive_range_tight` — also
+    /// renders a slice of `batch.paths` (vertices `[pv_start..pv_end)`,
+    /// indices `[pi_start..pi_end)`) into the tight texture, with
+    /// vertex positions offset to the layer-local origin. Lottie
+    /// shapes go through the path pipeline (lyon-tessellated
+    /// triangles), so a layer that contains only paths needs this
+    /// variant — the primitive-only one would render an empty
+    /// offscreen even though the paths exist in the batch.
+    #[allow(clippy::too_many_arguments)]
+    fn render_layer_range_tight(
+        &mut self,
+        batch: &PrimitiveBatch,
+        start_idx: usize,
+        end_idx: usize,
+        pv_start: usize,
+        pv_end: usize,
+        pi_start: usize,
+        pi_end: usize,
+        layer_pos: (f32, f32),
+        layer_size: (f32, f32),
+        effect_expansion: (f32, f32, f32, f32),
     ) -> (LayerTexture, (u32, u32)) {
         // Calculate tight texture size including effect expansion
         let texture_width = (layer_size.0 + effect_expansion.0 + effect_expansion.2)
@@ -9322,13 +9485,23 @@ impl GpuRenderer {
             .layer_texture_cache
             .acquire(&self.device, content_size, false);
 
-        if start_idx >= end_idx {
-            return (layer_texture, content_size);
-        }
+        let primitives = if start_idx < end_idx {
+            &batch.primitives[start_idx..end_idx]
+        } else {
+            &[][..]
+        };
+        let path_verts = if pv_end > pv_start && pv_end <= batch.paths.vertices.len() {
+            &batch.paths.vertices[pv_start..pv_end]
+        } else {
+            &[][..]
+        };
+        let path_indices = if pi_end > pi_start && pi_end <= batch.paths.indices.len() {
+            &batch.paths.indices[pi_start..pi_end]
+        } else {
+            &[][..]
+        };
 
-        // Extract primitives and offset their positions
-        let primitives = &batch.primitives[start_idx..end_idx];
-        if primitives.is_empty() {
+        if primitives.is_empty() && path_verts.is_empty() {
             return (layer_texture, content_size);
         }
 
@@ -9344,8 +9517,6 @@ impl GpuRenderer {
                 op.bounds[0] -= offset_x;
                 op.bounds[1] -= offset_y;
                 // Also offset clip bounds if they're valid (not the "no clip" default)
-                // Default "no clip" is [-10000.0, -10000.0, 100000.0, 100000.0]
-                // A real clip has x > -5000 AND width < 90000 (reasonable viewport sizes)
                 let has_real_clip = op.clip_bounds[0] > -5000.0 && op.clip_bounds[2] < 90000.0;
                 if has_real_clip {
                     op.clip_bounds[0] -= offset_x;
@@ -9353,6 +9524,31 @@ impl GpuRenderer {
                 }
                 op
             })
+            .collect();
+
+        // Build the offset PathVertex slice + rebased index buffer.
+        // Indices in the source batch reference vertices in
+        // `batch.paths.vertices` directly; after slicing, the local
+        // vertex array starts at 0, so each index needs `pv_start`
+        // subtracted to point at the right vertex inside the slice.
+        let offset_path_vertices: Vec<crate::path::PathVertex> = path_verts
+            .iter()
+            .map(|v| {
+                let mut nv = *v;
+                nv.position[0] -= offset_x;
+                nv.position[1] -= offset_y;
+                let has_real_clip =
+                    nv.clip_bounds[0] > -5000.0 && nv.clip_bounds[2] < 90000.0;
+                if has_real_clip {
+                    nv.clip_bounds[0] -= offset_x;
+                    nv.clip_bounds[1] -= offset_y;
+                }
+                nv
+            })
+            .collect();
+        let offset_path_indices: Vec<u32> = path_indices
+            .iter()
+            .map(|&i| i.saturating_sub(pv_start as u32))
             .collect();
 
         // Update uniforms with content size (the viewport for this tight render)
@@ -9365,7 +9561,49 @@ impl GpuRenderer {
 
         // Sort and upload offset primitives
         let sdf_ranges = self.upload_sorted_primitives(&offset_primitives);
-        drop(offset_primitives); // Free Vec immediately - data is now on GPU
+        drop(offset_primitives);
+
+        // Upload offset path geometry to a transient buffer pair so
+        // the shared `path_vertices` / `path_indices` buffers used by
+        // the main pass aren't clobbered.
+        use wgpu::util::DeviceExt;
+        let path_vb = (!offset_path_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Tight Path VB"),
+                    contents: bytemuck::cast_slice(&offset_path_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let path_ib = (!offset_path_indices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Tight Path IB"),
+                    contents: bytemuck::cast_slice(&offset_path_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                })
+        });
+        let path_index_count = offset_path_indices.len() as u32;
+        drop(offset_path_vertices);
+        drop(offset_path_indices);
+
+        // Path uniforms: full opacity (the blit applies the layer's
+        // opacity), no clip, standard fill. CRITICAL — the path
+        // shader reads `uniforms.viewport_size` to convert the
+        // vertex position into NDC. The SDF-path `self.buffers.uniforms`
+        // we just wrote is a DIFFERENT binding; paths see
+        // `self.buffers.path_uniforms`. If we left it at the
+        // Default (`[800, 600]`) while rendering into a, say,
+        // 192×192 tight texture, the path would end up NDC-scaled
+        // by the wrong viewport and land off-centre at massive
+        // scale (visible as an oversized, drifted glass body).
+        let mut path_uniforms = crate::primitives::PathUniforms::default();
+        path_uniforms.viewport_size = [content_size.0 as f32, content_size.1 as f32];
+        self.queue.write_buffer(
+            &self.buffers.path_uniforms,
+            0,
+            bytemuck::bytes_of(&path_uniforms),
+        );
 
         // Create command encoder
         let mut encoder = self
@@ -9392,14 +9630,24 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
-            Self::draw_split_sdf(
-                &mut render_pass,
-                &self.pipelines,
-                &sdf_ranges,
-                false,
-                self.sdf_vb_buffer(),
-            );
+            if !primitives.is_empty() {
+                render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
+                Self::draw_split_sdf(
+                    &mut render_pass,
+                    &self.pipelines,
+                    &sdf_ranges,
+                    false,
+                    self.sdf_vb_buffer(),
+                );
+            }
+
+            if let (Some(vb), Some(ib)) = (&path_vb, &path_ib) {
+                render_pass.set_pipeline(&self.pipelines.path);
+                render_pass.set_bind_group(0, &self.bind_groups.path, &[]);
+                render_pass.set_vertex_buffer(0, vb.slice(..));
+                render_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..path_index_count, 0, 0..1);
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
