@@ -789,6 +789,24 @@ impl ScrollPhysics {
         }
     }
 
+    /// Stop any active scroll animation — momentum deceleration, bounce
+    /// spring, rebound — and pin the offset where it currently is.
+    ///
+    /// Intended for the pointer-down handler: when the user taps on a
+    /// scrolling list that's still coasting, the expected behaviour
+    /// (iOS / every native toolkit) is that the tap cancels the
+    /// deceleration so the user can grab and re-scroll immediately.
+    /// Without this, a tap lands on whatever is under the cursor a
+    /// few frames later (after the list has coasted further) — feels
+    /// unresponsive.
+    pub fn cancel_active_animation(&mut self) {
+        self.cancel_springs();
+        self.velocity_x = 0.0;
+        self.velocity_y = 0.0;
+        self.in_momentum_mode = false;
+        self.state = ScrollState::Idle;
+    }
+
     /// Cancel any active bounce springs
     fn cancel_springs(&mut self) {
         if let Some(scheduler) = self.scheduler.upgrade() {

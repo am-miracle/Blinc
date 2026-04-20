@@ -2887,7 +2887,7 @@ impl WindowedApp {
                         }
 
                         // First phase: collect events using immutable borrow
-                        let (pending_events, keyboard_events, scroll_ended, gesture_ended, scroll_info) = if let (Some(ref mut windowed_ctx), Some(ref tree)) =
+                        let (pending_events, keyboard_events, scroll_ended, gesture_ended, scroll_info, scroll_cancel_hit) = if let (Some(ref mut windowed_ctx), Some(ref tree)) =
                             (&mut ws.ctx, &ws.render_tree)
                         {
                             let router = &mut windowed_ctx.event_router;
@@ -2902,6 +2902,13 @@ impl WindowedApp {
                             let mut gesture_ended = false;
                             // Track scroll info for nested scroll dispatch (mouse_x, mouse_y, delta_x, delta_y)
                             let mut scroll_info: Option<(f32, f32, f32, f32)> = None;
+                            // Hit chain (leaf + ancestors) captured at mouse-down so the
+                            // mutable phase can cancel any active scroll animation under
+                            // the cursor — the "grab-to-stop" affordance.
+                            let mut scroll_cancel_hit: Option<(
+                                blinc_layout::LayoutNodeId,
+                                Vec<blinc_layout::LayoutNodeId>,
+                            )> = None;
 
                             // Set up callback to collect events
                             router.set_event_callback({
@@ -3003,6 +3010,15 @@ impl WindowedApp {
                                             // This mimics HTML behavior where clicking anywhere blurs inputs,
                                             // and clicking on an input then re-focuses it via its own handler
                                             blinc_layout::widgets::blur_all_text_inputs();
+
+                                            // "Grab-to-stop" — record the hit chain so the
+                                            // mutable phase below can cancel any scroll
+                                            // animation under the cursor before the click
+                                            // dispatches. Without this a coasting list keeps
+                                            // decelerating past the tap.
+                                            scroll_cancel_hit = router
+                                                .hit_test(tree, lx, ly)
+                                                .map(|h| (h.node, h.ancestors.clone()));
 
                                             // Route through main tree (includes overlay content)
                                             let _events = router.on_mouse_down(tree, lx, ly, btn);
@@ -3379,14 +3395,23 @@ impl WindowedApp {
                             }
 
                             router.clear_event_callback();
-                            (pending_events, keyboard_events, scroll_ended, gesture_ended, scroll_info)
+                            (pending_events, keyboard_events, scroll_ended, gesture_ended, scroll_info, scroll_cancel_hit)
                         } else {
-                            (Vec::new(), Vec::new(), false, false, None)
+                            (Vec::new(), Vec::new(), false, false, None, None)
                         };
 
                         // Second phase: dispatch events with mutable borrow
                         // This automatically marks the tree dirty when handlers fire
                         if let Some(ref mut tree) = ws.render_tree {
+                            // "Grab-to-stop": if mouse-down landed on an
+                            // animating scroll container, stop its
+                            // momentum/rebound before any other handler
+                            // runs. The target was captured in phase 1;
+                            // we apply here where the tree is mutable.
+                            if let Some((hit, ancestors)) = scroll_cancel_hit {
+                                tree.cancel_scroll_animation_in_chain(hit, &ancestors);
+                            }
+
                             // IMPORTANT: Process gesture_ended BEFORE scroll delta dispatch
                             // When gesture ends while overscrolling, we start bounce which
                             // sets state to Bouncing. Then apply_scroll_delta will early-return

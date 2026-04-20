@@ -4534,10 +4534,7 @@ impl GpuRenderer {
                 effect_primitives.insert(i);
             }
             if layer.path_index_end > layer.path_index_start {
-                path_skip_ranges.push((
-                    layer.path_index_start as u32,
-                    layer.path_index_end as u32,
-                ));
+                path_skip_ranges.push((layer.path_index_start as u32, layer.path_index_end as u32));
             }
         }
         path_skip_ranges.sort_unstable();
@@ -9537,8 +9534,7 @@ impl GpuRenderer {
                 let mut nv = *v;
                 nv.position[0] -= offset_x;
                 nv.position[1] -= offset_y;
-                let has_real_clip =
-                    nv.clip_bounds[0] > -5000.0 && nv.clip_bounds[2] < 90000.0;
+                let has_real_clip = nv.clip_bounds[0] > -5000.0 && nv.clip_bounds[2] < 90000.0;
                 if has_real_clip {
                     nv.clip_bounds[0] -= offset_x;
                     nv.clip_bounds[1] -= offset_y;
@@ -9597,8 +9593,10 @@ impl GpuRenderer {
         // 192×192 tight texture, the path would end up NDC-scaled
         // by the wrong viewport and land off-centre at massive
         // scale (visible as an oversized, drifted glass body).
-        let mut path_uniforms = crate::primitives::PathUniforms::default();
-        path_uniforms.viewport_size = [content_size.0 as f32, content_size.1 as f32];
+        let path_uniforms = crate::primitives::PathUniforms {
+            viewport_size: [content_size.0 as f32, content_size.1 as f32],
+            ..crate::primitives::PathUniforms::default()
+        };
         self.queue.write_buffer(
             &self.buffers.path_uniforms,
             0,

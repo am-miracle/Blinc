@@ -4475,19 +4475,15 @@ mod tests {
     /// the child to content. Regression for the Lottie gallery bug.
     #[test]
     fn test_h_fit_shrinks_in_flex_row_parent() {
-        let ui = div()
-            .w(800.0)
-            .h(600.0)
-            .flex_row()
-            .child(
-                div()
-                    .w(340.0)
-                    .h_fit()
-                    .flex_col()
-                    // Two fixed-height children totalling 140px.
-                    .child(div().w(340.0).h(100.0))
-                    .child(div().w(340.0).h(40.0)),
-            );
+        let ui = div().w(800.0).h(600.0).flex_row().child(
+            div()
+                .w(340.0)
+                .h_fit()
+                .flex_col()
+                // Two fixed-height children totalling 140px.
+                .child(div().w(340.0).h(100.0))
+                .child(div().w(340.0).h(40.0)),
+        );
 
         let mut tree = RenderTree::from_element(&ui);
         tree.compute_layout(800.0, 600.0);
@@ -4512,18 +4508,14 @@ mod tests {
     /// fullscreen-regression reported by the user.
     #[test]
     fn test_h_fit_shrinks_in_large_flex_row_parent() {
-        let ui = div()
-            .w(2000.0)
-            .h(1400.0)
-            .flex_row()
-            .child(
-                div()
-                    .w(340.0)
-                    .h_fit()
-                    .flex_col()
-                    .child(div().w(340.0).h(100.0))
-                    .child(div().w(340.0).h(40.0)),
-            );
+        let ui = div().w(2000.0).h(1400.0).flex_row().child(
+            div()
+                .w(340.0)
+                .h_fit()
+                .flex_col()
+                .child(div().w(340.0).h(100.0))
+                .child(div().w(340.0).h(40.0)),
+        );
 
         let mut tree = RenderTree::from_element(&ui);
         tree.compute_layout(2000.0, 1400.0);
@@ -4613,33 +4605,26 @@ mod tests {
     #[test]
     fn test_h_fit_with_real_canvas_child() {
         use crate::canvas::canvas;
-        let ui = div()
-            .w(2000.0)
-            .h(1400.0)
-            .flex_row()
-            .child(
-                div()
-                    .w(340.0)
-                    .h_fit()
-                    .flex_col()
-                    .flex_wrap()
-                    .overflow_clip()
-                    .gap_px(8.0)
-                    .p_px(12.0)
-                    .child(div().w(316.0).h(18.0))
-                    .child(
+        let ui = div().w(2000.0).h(1400.0).flex_row().child(
+            div()
+                .w(340.0)
+                .h_fit()
+                .flex_col()
+                .flex_wrap()
+                .overflow_clip()
+                .gap_px(8.0)
+                .p_px(12.0)
+                .child(div().w(316.0).h(18.0))
+                .child(
+                    div().w(316.0).h(316.0).child(
                         div()
-                            .w(316.0)
-                            .h(316.0)
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h_full()
-                                    .child(canvas(|_ctx, _bounds| {}).w_full().h_full()),
-                            ),
-                    )
-                    .child(div().w(316.0).h(32.0)),
-            );
+                            .w_full()
+                            .h_full()
+                            .child(canvas(|_ctx, _bounds| {}).w_full().h_full()),
+                    ),
+                )
+                .child(div().w(316.0).h(32.0)),
+        );
 
         let mut tree = RenderTree::from_element(&ui);
         tree.compute_layout(2000.0, 1400.0);
@@ -4667,23 +4652,19 @@ mod tests {
     #[test]
     fn test_h_fit_with_real_text_child() {
         use crate::text::text;
-        let ui = div()
-            .w(2000.0)
-            .h(1400.0)
-            .flex_row()
-            .child(
-                div()
-                    .w(340.0)
-                    .h_fit()
-                    .flex_col()
-                    .flex_wrap()
-                    .overflow_clip()
-                    .gap_px(8.0)
-                    .p_px(12.0)
-                    .child(text("Sandy Loading (JSON)").size(13.0))
-                    .child(div().w(316.0).h(316.0))
-                    .child(div().w(316.0).h(32.0)),
-            );
+        let ui = div().w(2000.0).h(1400.0).flex_row().child(
+            div()
+                .w(340.0)
+                .h_fit()
+                .flex_col()
+                .flex_wrap()
+                .overflow_clip()
+                .gap_px(8.0)
+                .p_px(12.0)
+                .child(text("Sandy Loading (JSON)").size(13.0))
+                .child(div().w(316.0).h(316.0))
+                .child(div().w(316.0).h(32.0)),
+        );
 
         let mut tree = RenderTree::from_element(&ui);
         tree.compute_layout(2000.0, 1400.0);
@@ -4709,23 +4690,19 @@ mod tests {
     /// `h_fit`, without involving any Stateful or sketch.
     #[test]
     fn test_h_fit_through_gap_container() {
-        let ui = div()
-            .w(800.0)
-            .h(600.0)
-            .p_px(20.0)
-            .child(
-                div().flex_row().gap_px(20.0).child(
-                    div()
-                        .w(340.0)
-                        .h_fit()
-                        .flex_col()
-                        .gap_px(8.0)
-                        .p_px(12.0)
-                        .child(div().w(316.0).h(20.0))
-                        .child(div().w(316.0).h(316.0))
-                        .child(div().w(316.0).h(36.0)),
-                ),
-            );
+        let ui = div().w(800.0).h(600.0).p_px(20.0).child(
+            div().flex_row().gap_px(20.0).child(
+                div()
+                    .w(340.0)
+                    .h_fit()
+                    .flex_col()
+                    .gap_px(8.0)
+                    .p_px(12.0)
+                    .child(div().w(316.0).h(20.0))
+                    .child(div().w(316.0).h(316.0))
+                    .child(div().w(316.0).h(36.0)),
+            ),
+        );
 
         let mut tree = RenderTree::from_element(&ui);
         tree.compute_layout(800.0, 600.0);
