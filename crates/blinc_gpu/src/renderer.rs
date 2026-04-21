@@ -5028,9 +5028,7 @@ impl GpuRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(
-                        &self.gradient_texture_cache.view,
-                    ),
+                    resource: wgpu::BindingResource::TextureView(&self.gradient_texture_cache.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,

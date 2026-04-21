@@ -1035,18 +1035,15 @@ impl<'a> GpuPaintContext<'a> {
         // matted layer was a precomp. The GPU still only evaluates one
         // non-rect shape per primitive, so we stop at the first one
         // found walking top-down.
-        let topmost_non_rect_idx = self
-            .clip_stack
-            .iter()
-            .rposition(|(c, _, _)| {
-                matches!(
-                    c,
-                    ClipShape::Circle { .. }
-                        | ClipShape::Ellipse { .. }
-                        | ClipShape::Polygon(_)
-                        | ClipShape::Path(_)
-                )
-            });
+        let topmost_non_rect_idx = self.clip_stack.iter().rposition(|(c, _, _)| {
+            matches!(
+                c,
+                ClipShape::Circle { .. }
+                    | ClipShape::Ellipse { .. }
+                    | ClipShape::Polygon(_)
+                    | ClipShape::Path(_)
+            )
+        });
         let topmost_is_non_rect = topmost_non_rect_idx.is_some();
 
         // If we have rect clips AND the topmost clip is rect-based, use the intersection
