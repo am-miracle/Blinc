@@ -44,8 +44,8 @@ use blinc_core::DrawContext;
 use blinc_layout::canvas::{canvas, CanvasBounds};
 use blinc_layout::div::{div, Div};
 use blinc_layout::event_handler::EventContext;
+use blinc_layout::get_global_scheduler;
 use blinc_layout::stateful::request_redraw;
-use web_time::Instant;
 
 use crate::painter::Painter2D;
 
@@ -127,6 +127,36 @@ impl<'a> SketchContext<'a> {
 pub fn sketch<S: Sketch>(key: &str, s: S) -> Div {
     let handle = use_state_keyed(&format!("{key}_sketch"), move || SketchHandle::new(s));
 
+    // Drive the sketch's clock off the animation scheduler rather
+    // than wall-clock deltas inside the render callback. The
+    // scheduler ticks on a dedicated cadence that's decoupled from
+    // render stutters, so `dt` stays steady and the sketch's own
+    // time accumulators (e.g. `CardSketch::current_time` driving
+    // a `LottiePlayer`) advance in lock-step with intent instead of
+    // jumping whenever a frame paints slow.
+    //
+    // Register the callback exactly once per sketch key, guarded by
+    // a keyed atomic flag that survives UI rebuilds the same way
+    // `SketchHandle` does. Without the guard every rebuild would
+    // leak a fresh tick callback into the scheduler.
+    let scheduler_registered = use_state_keyed(
+        &format!("{key}_sketch_sched_reg"),
+        || std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    if let Some(flag) = scheduler_registered.try_get() {
+        if !flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            if let Some(scheduler) = get_global_scheduler() {
+                let cb_handle = handle.clone();
+                scheduler.register_tick_callback(move |dt| {
+                    if let Some(h) = cb_handle.try_get() {
+                        h.accumulate(dt);
+                    }
+                    request_redraw();
+                });
+            }
+        }
+    }
+
     // Give both the wrapper div and the canvas unique element ids
     // derived from `key`. Without this, two sibling sketches end up
     // with identical (id-less) wrapper divs and, depending on the
@@ -145,10 +175,6 @@ pub fn sketch<S: Sketch>(key: &str, s: S) -> Div {
                 if let Some(h) = handle.try_get() {
                     h.tick(ctx, bounds);
                 }
-                // Keep the redraw chain alive so `t` / `dt` keep advancing.
-                // Sketches are expected to animate; static sketches should
-                // use `canvas(...)` directly instead.
-                request_redraw();
             })
             .w_full()
             .h_full(),
@@ -164,15 +190,28 @@ struct SketchHandle {
 
 impl SketchHandle {
     fn new<S: Sketch>(s: S) -> Self {
-        let now = Instant::now();
         Self {
             inner: Arc::new(Mutex::new(SketchInner {
                 sketch: Box::new(s),
-                start: now,
-                last: now,
+                accumulated_t: 0.0,
+                pending_dt: 0.0,
                 frame_count: 0,
                 did_setup: false,
             })),
+        }
+    }
+
+    /// Advance the sketch's internal clock. Called from the global
+    /// animation scheduler's tick callback on a steady cadence so
+    /// `dt` stays smooth even when the render thread stutters. The
+    /// accumulated value is drained on the next `tick()` (draw)
+    /// call, so a slow frame that skips several scheduler ticks
+    /// catches up with one big `dt` instead of silently dropping
+    /// time.
+    fn accumulate(&self, dt: f32) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.pending_dt += dt;
+            inner.accumulated_t += dt;
         }
     }
 
@@ -184,25 +223,30 @@ impl SketchHandle {
 
 struct SketchInner {
     sketch: Box<dyn Sketch>,
-    start: Instant,
-    last: Instant,
+    /// Total elapsed seconds fed in via `accumulate(dt)`. Grows
+    /// monotonically; passed to `Sketch::draw` as `t`.
+    accumulated_t: f32,
+    /// Unconsumed dt since the last draw. Drained every `tick`;
+    /// scheduler ticks in between renders stack into a single large
+    /// dt on the next render so no time is dropped when the render
+    /// thread is behind.
+    pending_dt: f32,
     frame_count: u64,
     did_setup: bool,
 }
 
 impl SketchInner {
     fn tick(&mut self, ctx: &mut dyn DrawContext, bounds: CanvasBounds) {
-        let now = Instant::now();
-        // First draw() sees dt = 0 rather than whatever elapsed between
-        // SketchHandle construction and the first render — keeps motion
-        // derived from `dt` from lurching on frame 1.
+        // First draw() sees dt = 0 rather than whatever time elapsed
+        // between SketchHandle construction and the first render —
+        // keeps motion derived from `dt` from lurching on frame 1.
         let dt = if self.did_setup {
-            now.duration_since(self.last).as_secs_f32()
+            std::mem::replace(&mut self.pending_dt, 0.0)
         } else {
+            self.pending_dt = 0.0;
             0.0
         };
-        let t = now.duration_since(self.start).as_secs_f32();
-        self.last = now;
+        let t = self.accumulated_t;
 
         let mut sctx = SketchContext {
             ctx,
@@ -215,9 +259,6 @@ impl SketchInner {
         if !self.did_setup {
             self.sketch.setup(&mut sctx);
             self.did_setup = true;
-            // Setup may have initialized state that draw() depends on; if
-            // it reset the clock somehow, the `t` we computed above is
-            // still correct relative to `self.start`.
         }
         self.sketch.draw(&mut sctx, t, dt);
         self.frame_count += 1;
