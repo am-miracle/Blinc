@@ -1529,13 +1529,48 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let opacity = self.combined_opacity();
         let brush = Self::apply_opacity_to_brush(brush, opacity);
 
-        // Extract brush info for advanced features (multi-stop gradients, images, glass)
+        // Solid-color fills route through the SDF primitive stream so
+        // they interleave with text (and any other SDF draws) in
+        // submission order. The tessellated-path pipeline sits in its
+        // own draw call after every SDF pipeline, so a shape filled
+        // through it would paint on top of text submitted earlier —
+        // Lottie layers whose stack put text on top of a shape came
+        // out with the text behind the shape. The SDF-stream route
+        // avoids that entirely by sharing the primitive dispatch.
+        //
+        // Gradients / glass / image fills stay on the path pipeline
+        // for now; adding those brush types to the Mesh fragment
+        // shader is a follow-up. Most Lottie shape fills are solid.
+        if let Brush::Solid(color) = brush {
+            let mut tessellated = tessellate_fill(path, &Brush::Solid(color));
+            let affine = self.current_affine();
+            for vertex in &mut tessellated.vertices {
+                let x = vertex.position[0];
+                let y = vertex.position[1];
+                vertex.position[0] =
+                    affine.elements[0] * x + affine.elements[2] * y + affine.elements[4];
+                vertex.position[1] =
+                    affine.elements[1] * x + affine.elements[3] * y + affine.elements[5];
+            }
+            if !tessellated.is_empty() {
+                let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+                self.push_mesh_primitives(
+                    &tessellated,
+                    color,
+                    clip_bounds,
+                    clip_radius,
+                    clip_type,
+                );
+            }
+            return;
+        }
+
+        // Non-solid brushes: fall back to the tessellated-path
+        // pipeline for now.
         let brush_info = extract_brush_info(&brush);
 
-        // Tessellate the path using lyon
         let mut tessellated = tessellate_fill(path, &brush);
 
-        // Transform vertices by current transform stack
         let affine = self.current_affine();
         for vertex in &mut tessellated.vertices {
             let x = vertex.position[0];
@@ -1547,7 +1582,6 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         }
 
         if !tessellated.is_empty() {
-            // Capture current clip state for paths
             let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
 
             if self.is_foreground {
@@ -1575,13 +1609,37 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let opacity = self.combined_opacity();
         let brush = Self::apply_opacity_to_brush(brush, opacity);
 
-        // Extract brush info for advanced features (multi-stop gradients, images, glass)
+        // Solid strokes share the same SDF-stream route as `fill_path`
+        // so submission order lines up with text. See the comment on
+        // `fill_path` for the rationale.
+        if let Brush::Solid(color) = brush {
+            let mut tessellated = tessellate_stroke(path, stroke, &Brush::Solid(color));
+            let affine = self.current_affine();
+            for vertex in &mut tessellated.vertices {
+                let x = vertex.position[0];
+                let y = vertex.position[1];
+                vertex.position[0] =
+                    affine.elements[0] * x + affine.elements[2] * y + affine.elements[4];
+                vertex.position[1] =
+                    affine.elements[1] * x + affine.elements[3] * y + affine.elements[5];
+            }
+            if !tessellated.is_empty() {
+                let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+                self.push_mesh_primitives(
+                    &tessellated,
+                    color,
+                    clip_bounds,
+                    clip_radius,
+                    clip_type,
+                );
+            }
+            return;
+        }
+
         let brush_info = extract_brush_info(&brush);
 
-        // Tessellate the stroke using lyon
         let mut tessellated = tessellate_stroke(path, stroke, &brush);
 
-        // Transform vertices by current transform stack
         let affine = self.current_affine();
         for vertex in &mut tessellated.vertices {
             let x = vertex.position[0];
@@ -1593,7 +1651,6 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         }
 
         if !tessellated.is_empty() {
-            // Capture current clip state for paths
             let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
 
             if self.is_foreground {
@@ -3168,6 +3225,144 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             .last()
             .copied()
             .unwrap_or(BlendMode::Normal)
+    }
+}
+
+impl<'a> GpuPaintContext<'a> {
+    /// Emit ONE `GpuPrimitive` for the entire tessellated path. The
+    /// fragment shader performs two walks per pixel:
+    ///
+    /// 1. Point-in-mesh test via the triangle list (first matching
+    ///    triangle claims the pixel, break).
+    /// 2. Euclidean distance to the nearest *silhouette* edge — edges
+    ///    that appear in exactly one triangle, identified here by
+    ///    counting each shared undirected edge. Interior edges (shared
+    ///    by two triangles) don't contribute, so the AA smoothstep
+    ///    lights up only the outer silhouette, not the internal
+    ///    tessellation seams.
+    ///
+    /// Per-vertex `edge_distance` interpolation was tried first but
+    /// collapsed to zero everywhere for simple tessellations whose
+    /// Steiner-free triangulations place every vertex on the
+    /// silhouette, which showed up as uniform ~50% alpha across the
+    /// whole fill. The min-distance-to-silhouette approach is
+    /// independent of tessellation topology.
+    ///
+    /// Memory layout (all at `aux_offset`):
+    ///   triangles: `[tri_count]` × 2 vec4 = `(v0.xy, v1.xy)`,
+    ///              `(v2.xy, 0, 0)`
+    ///   silhouette edges: `[edge_count]` × 1 vec4 = `(a.xy, b.xy)`
+    ///
+    /// `border[1]` = triangle count, `border[2]` = aux offset,
+    /// `shadow[0]` = silhouette edge count. `bounds` is the path
+    /// AABB so the SDF quad only covers reachable pixels.
+    fn push_mesh_primitives(
+        &mut self,
+        tessellated: &crate::path::TessellatedPath,
+        color: blinc_core::Color,
+        clip_bounds: [f32; 4],
+        clip_radius: [f32; 4],
+        clip_type: ClipType,
+    ) {
+        use crate::primitives::PrimitiveType;
+        use std::collections::HashMap;
+        let indices = &tessellated.indices;
+        let vertices = &tessellated.vertices;
+        if indices.len() < 3 {
+            return;
+        }
+
+        // Reserve the starting offset, then push triangles while
+        // tallying edge occurrences. Silhouette edges (count == 1)
+        // get appended to aux_data after the triangle block — the
+        // shader reads them at `aux_offset + tri_count * 2`.
+        let aux_offset = self.batch.aux_data.len() as u32;
+        let mut triangle_count: u32 = 0;
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+
+        // `edge_map[(lo, hi)] = (count, any_vertex_positions)`. We
+        // keep the triangle winding intact when emitting silhouette
+        // edges so the direction vector is well-defined (not that a
+        // distance-to-segment calc cares, but it keeps future debug
+        // visualisations stable).
+        let mut edge_map: HashMap<(u32, u32), u32> = HashMap::new();
+
+        let mut i = 0;
+        while i + 2 < indices.len() {
+            let i0 = indices[i];
+            let i1 = indices[i + 1];
+            let i2 = indices[i + 2];
+            i += 3;
+
+            let v0 = vertices[i0 as usize].position;
+            let v1 = vertices[i1 as usize].position;
+            let v2 = vertices[i2 as usize].position;
+
+            let ax = v1[0] - v0[0];
+            let ay = v1[1] - v0[1];
+            let bx = v2[0] - v0[0];
+            let by = v2[1] - v0[1];
+            let area2 = ax * by - ay * bx;
+            if area2.abs() < 1e-4 {
+                continue;
+            }
+
+            self.batch.aux_data.push([v0[0], v0[1], v1[0], v1[1]]);
+            self.batch.aux_data.push([v2[0], v2[1], 0.0, 0.0]);
+            triangle_count += 1;
+
+            for (a, b) in [(i0, i1), (i1, i2), (i2, i0)] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *edge_map.entry(key).or_insert(0) += 1;
+            }
+
+            min_x = min_x.min(v0[0]).min(v1[0]).min(v2[0]);
+            min_y = min_y.min(v0[1]).min(v1[1]).min(v2[1]);
+            max_x = max_x.max(v0[0]).max(v1[0]).max(v2[0]);
+            max_y = max_y.max(v0[1]).max(v1[1]).max(v2[1]);
+        }
+
+        if triangle_count == 0 {
+            return;
+        }
+
+        let mut edge_count: u32 = 0;
+        for ((a, b), count) in edge_map.iter() {
+            if *count == 1 {
+                let va = vertices[*a as usize].position;
+                let vb = vertices[*b as usize].position;
+                self.batch.aux_data.push([va[0], va[1], vb[0], vb[1]]);
+                edge_count += 1;
+            }
+        }
+
+        let color_arr = [color.r, color.g, color.b, color.a];
+        let clip_type_u = clip_type as u32;
+        let mut prim = GpuPrimitive {
+            bounds: [min_x, min_y, max_x - min_x, max_y - min_y],
+            color: color_arr,
+            border: [0.0, triangle_count as f32, aux_offset as f32, 0.0],
+            // `shadow` is unused for mesh (no drop shadow on a raw
+            // fill); repurpose `shadow[0]` for the silhouette edge
+            // count. The shadow render block only fires when
+            // `shadow.z > 0 || shadow.w != 0`, so carrying a count in
+            // `shadow[0]` is inert for that path.
+            shadow: [edge_count as f32, 0.0, 0.0, 0.0],
+            clip_bounds,
+            clip_radius,
+            type_info: [PrimitiveType::Mesh as u32, 0, clip_type_u, 0],
+            ..GpuPrimitive::default()
+        };
+        prim.local_affine = [1.0, 0.0, 0.0, 1.0];
+
+        if self.is_foreground {
+            self.batch.push_foreground(prim);
+        } else {
+            self.batch.push(prim);
+        }
     }
 }
 

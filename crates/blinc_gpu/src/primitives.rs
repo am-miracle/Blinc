@@ -37,6 +37,25 @@ pub enum PrimitiveType {
     /// need 3D rotation on a notched shape, fall back to `Path` for that
     /// draw call.
     Notch = 8,
+    /// Mesh triangle. Used to route tessellated path fills through
+    /// the SDF primitive stream so their submission order interleaves
+    /// naturally with text and other SDF primitives — text rendered
+    /// after a shape fill paints on top, matching the caller's draw
+    /// order instead of ending up behind every path draw (which is
+    /// what the separate tessellated-path pipeline does on its own).
+    ///
+    /// Each primitive represents ONE triangle. The three corners live
+    /// in the shared `aux_data` storage buffer starting at
+    /// `border[2]` (the same `aux_offset` slot the 3D compound shape
+    /// primitives reuse), packed as:
+    ///
+    /// - `aux_data[offset + 0] = (v0.x, v0.y, v1.x, v1.y)`
+    /// - `aux_data[offset + 1] = (v2.x, v2.y, 0, 0)`
+    ///
+    /// `bounds` is pre-computed to the triangle AABB so the vertex
+    /// shader still emits a tight quad and the fragment shader's
+    /// point-in-triangle test only runs over covered pixels.
+    Mesh = 9,
 }
 
 /// Corner style for notch primitives — matches `blinc_layout::notch::CornerStyle`
@@ -92,6 +111,10 @@ impl GpuPrimitive {
             3..=6 => SdfPipelineCategory::Shadow,
             7 => SdfPipelineCategory::Text,
             8 => SdfPipelineCategory::Notch,
+            // Mesh triangles share the Core pipeline — they reuse the
+            // same fragment-shader branching as rects / circles, just
+            // with a point-in-triangle check instead of an SDF.
+            9 => SdfPipelineCategory::Core,
             _ => SdfPipelineCategory::Core, // fallback
         }
     }

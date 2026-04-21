@@ -653,7 +653,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Early type filter — discard primitives handled by other split pipelines.
     // Allow prim_type 7 (text) — transformed text glyphs are rendered through
     // the SDF pipeline with css_affine, not the separate text pipeline.
-    if prim_type > 2u && prim_type != 7u { discard; }
+    // Allow prim_type 9 (mesh triangle) — tessellated path fills routed
+    // through the SDF stream so their submission order interleaves with
+    // text in the same draw dispatch.
+    if prim_type > 2u && prim_type != 7u && prim_type != 9u { discard; }
 
     // Early clip test - discard if completely outside clip region (screen space)
     let clip_alpha = calculate_clip_alpha(p, prim.clip_bounds, prim.clip_radius, clip_type, prim.clip_fade);
@@ -757,6 +760,61 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         case 2u /* PRIM_ELLIPSE */: {
             d = sd_ellipse(sp, center, size * 0.5);
         }
+        case 9u /* PRIM_MESH */: {
+            // Path fill routed through the SDF stream so submission
+            // order with text is preserved. Data layout at
+            // `aux_offset`:
+            //   triangles (2 vec4 each): (v0.xy, v1.xy), (v2.xy, _, _)
+            //   silhouette edges (1 vec4 each): (a.xy, b.xy)
+            // `border.y` = triangle count, `border.z` = aux offset,
+            // `shadow.x` = silhouette edge count.
+            //
+            // Distance to any silhouette edge drives the AA
+            // smoothstep; the triangle walk only decides the sign
+            // (negative inside, positive outside). Picking the sign
+            // from the whole-mesh in/out test instead of per-triangle
+            // SDF values is what keeps adjacent-triangle shared
+            // edges seam-free: interior edges aren't silhouette
+            // edges, so the distance the AA smoothstep sees in the
+            // interior always exceeds `aa_width` — no fractional
+            // alpha bleed.
+            let aux_off = u32(prim.border.z);
+            let tri_count = u32(prim.border.y);
+            let edge_count = u32(prim.shadow.x);
+
+            var inside = false;
+            for (var t: u32 = 0u; t < tri_count; t = t + 1u) {
+                let pack0 = aux_data[aux_off + t * 2u];
+                let pack1 = aux_data[aux_off + t * 2u + 1u];
+                let v0 = pack0.xy;
+                let v1 = pack0.zw;
+                let v2 = pack1.xy;
+                let s0 = (v1.x - v0.x) * (sp.y - v0.y) - (v1.y - v0.y) * (sp.x - v0.x);
+                let s1 = (v2.x - v1.x) * (sp.y - v1.y) - (v2.y - v1.y) * (sp.x - v1.x);
+                let s2 = (v0.x - v2.x) * (sp.y - v2.y) - (v0.y - v2.y) * (sp.x - v2.x);
+                if (s0 >= 0.0 && s1 >= 0.0 && s2 >= 0.0)
+                    || (s0 <= 0.0 && s1 <= 0.0 && s2 <= 0.0) {
+                    inside = true;
+                    break;
+                }
+            }
+
+            let edge_off = aux_off + tri_count * 2u;
+            var min_dist: f32 = 1e10;
+            for (var e: u32 = 0u; e < edge_count; e = e + 1u) {
+                let pack = aux_data[edge_off + e];
+                let a = pack.xy;
+                let b = pack.zw;
+                let ab = b - a;
+                let ab_len_sq = max(dot(ab, ab), 0.0001);
+                let tp = clamp(dot(sp - a, ab) / ab_len_sq, 0.0, 1.0);
+                let closest = a + tp * ab;
+                let diff = sp - closest;
+                let dist = sqrt(dot(diff, diff));
+                min_dist = min(min_dist, dist);
+            }
+            d = select(min_dist, -min_dist, inside);
+        }
         case 7u /* PRIM_TEXT */: {
             let uv_bounds = prim.gradient_params;
             let is_color = fill_type == 1u;
@@ -836,6 +894,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // because some upstream branches (shadow blur, etc.) read it.
     _ = d_fw_screen;
     let aa_width = 0.5;
+    // Mesh primitives already encode `d` as `-edge_distance` (the
+    // negated distance-to-silhouette interpolated via barycentrics);
+    // that shares the same smoothstep convention as the other
+    // primitive types and avoids the shared-edge seams the old
+    // per-triangle SDF produced.
     let fill_alpha = 1.0 - smoothstep(-aa_width, aa_width, d);
 
     if fill_alpha < 0.001 {
@@ -888,9 +951,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let border_bottom = prim.border.z;
     let border_left = prim.border.w;
 
-    // Check if any border is present (using max of all sides)
+    // Check if any border is present (using max of all sides).
+    // PRIM_MESH reuses `border[1]` for triangle count and `border[2]`
+    // for the aux_data offset — non-zero values that would otherwise
+    // trigger the border stroke below and paint `border_color`
+    // (default opaque black) over the whole fill. Mesh primitives
+    // have no border to render, so short-circuit past this block for
+    // them.
     let max_border = max(max(border_top, border_right), max(border_bottom, border_left));
-    if max_border > 0.0 {
+    if max_border > 0.0 && prim_type != 9u {
         // For uniform border (legacy: only .x set), use it for all sides
         let bt = select(border_top, border_top, border_right > 0.0 || border_bottom > 0.0 || border_left > 0.0);
         let br = select(border_top, border_right, border_right > 0.0 || border_bottom > 0.0 || border_left > 0.0);
