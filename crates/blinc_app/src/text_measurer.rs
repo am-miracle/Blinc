@@ -163,85 +163,95 @@ impl TextMeasurer for FontTextMeasurer {
         };
         drop(registry); // Release lock before layout
 
-        // Convert our options to blinc_text options.
+        // `blinc_layout::tree::text_measure_function` encodes taffy's
+        // three AvailableSpace variants as:
+        //   Definite(w)  → `max_width = Some(w)` with w > 0
+        //   MinContent   → `max_width = Some(0.0)`
+        //   MaxContent   → `max_width = None`
         //
-        // `max_width: Some(0.0)` is how `blinc_layout::tree::text_measure_function`
-        // propagates taffy's `AvailableSpace::MinContent` to us — it's requesting
-        // the min-content width, which per CSS is the width of the longest
-        // unbreakable sequence (typically the longest word). If we forward `0.0`
-        // as-is to `blinc_text`'s layout engine with `LineBreakMode::Word`, no
-        // word fits in zero pixels and the engine falls back to character-level
-        // wrapping, reporting a height of chars × line_height. Taffy's flex-col
-        // then treats that inflated height as the item's hypothetical main size,
-        // pushes the container into multi-line wrap, and clamps the container's
-        // main-axis to `max(content, available)` — which at fullscreen makes
-        // `h_fit` cards balloon to the viewport height.
+        // Each path needs distinct handling so taffy's flex sizing
+        // doesn't end up inflating `h_fit` parents.
         //
-        // Clamp any non-positive `max_width` to the min-content width
-        // (measured as the width of the layout with no wrap) so the engine
-        // keeps words whole.
-        let effective_max_width = match options.max_width {
-            Some(mw) if mw > 0.0 => Some(mw),
-            Some(_) => {
-                // min-content: measure without wrapping to get the natural
-                // width of the longest unbreakable run, then layout at that.
-                let probe = LayoutOptions {
-                    line_height: options.line_height,
-                    letter_spacing: options.letter_spacing,
-                    max_width: None,
-                    line_break: blinc_text::LineBreakMode::None,
-                    ..LayoutOptions::default()
-                };
-                let probe_layout = self
-                    .layout_engine
-                    .lock()
-                    .unwrap()
-                    .layout(text, &font, font_size, &probe);
-                // Use the widest word (by splitting on whitespace) as the
-                // practical min-content width. Fall back to total width if the
-                // text has no whitespace.
-                let word_widths: Vec<f32> = text
-                    .split_whitespace()
-                    .map(|word| {
-                        self.layout_engine
-                            .lock()
-                            .unwrap()
-                            .layout(word, &font, font_size, &probe)
-                            .width
-                    })
-                    .collect();
-                let longest_word = word_widths.into_iter().fold(0.0_f32, f32::max);
-                Some(longest_word.max(1.0).min(probe_layout.width.max(1.0)))
-            }
-            None => None,
-        };
-        let line_break = if effective_max_width.is_some() {
-            blinc_text::LineBreakMode::Word
-        } else {
-            blinc_text::LineBreakMode::None
-        };
-        let layout_opts = LayoutOptions {
+        // - Definite: normal layout at `w`, wrap on word boundaries.
+        //   Reports the actual multi-line height for a known width —
+        //   what the visible layout will use.
+        //
+        // - MinContent: return the height of a SINGLE rendered line
+        //   at no-wrap width, PLUS the width of the longest
+        //   unbreakable run (longest word). The legacy behaviour laid
+        //   out the whole text at `max_width = longest_word` which,
+        //   for multi-word text, returned a height of `word_count ×
+        //   line_height`. Two cards with differently-worded titles
+        //   (e.g. "Coffee (.lottie)" → 2 words, "Sandy Loading
+        //   (JSON)" → 3 words) then reported min-content heights
+        //   proportional to their word counts, which taffy fed into
+        //   the cross-axis sizing and produced visibly unequal card
+        //   heights even though the definite-width layout would have
+        //   given each a single line.
+        //
+        //   CSS's min-content height technically *is* the height at
+        //   min-content width (potentially many lines), but taffy's
+        //   flex algorithm uses this hint to bound the container,
+        //   not to commit to a rendered height. Returning a single
+        //   line here matches the height the actual layout pass
+        //   will use whenever the container can fit the text on one
+        //   row at its definite width — i.e. the common case for
+        //   single-line titles — without affecting real multi-line
+        //   content (it gets wrapped at the Definite pass). The
+        //   alternative (CSS-correct multi-line min-content height)
+        //   propagates through taffy as "this text needs N lines"
+        //   and pushes every `h_fit` ancestor wider, which is the
+        //   exact bug this block exists to prevent.
+        //
+        // - MaxContent: no wrap, single line height. Unchanged.
+        let layout_engine = self.layout_engine.lock().unwrap();
+
+        let probe = LayoutOptions {
             line_height: options.line_height,
             letter_spacing: options.letter_spacing,
-            max_width: effective_max_width,
-            line_break,
+            max_width: None,
+            line_break: blinc_text::LineBreakMode::None,
             ..LayoutOptions::default()
         };
+        let single_line = layout_engine.layout(text, &font, font_size, &probe);
 
-        let layout_engine = self.layout_engine.lock().unwrap();
-        let layout = layout_engine.layout(text, &font, font_size, &layout_opts);
+        let (width, height, line_count) = match options.max_width {
+            Some(mw) if mw > 0.0 => {
+                let layout_opts = LayoutOptions {
+                    line_height: options.line_height,
+                    letter_spacing: options.letter_spacing,
+                    max_width: Some(mw),
+                    line_break: blinc_text::LineBreakMode::Word,
+                    ..LayoutOptions::default()
+                };
+                let laid = layout_engine.layout(text, &font, font_size, &layout_opts);
+                (laid.width, laid.height, laid.lines.len() as u32)
+            }
+            Some(_) => {
+                // MinContent: width = longest word, height = one line.
+                let longest_word = text
+                    .split_whitespace()
+                    .map(|w| layout_engine.layout(w, &font, font_size, &probe).width)
+                    .fold(0.0_f32, f32::max);
+                let mc_width = longest_word.max(1.0).min(single_line.width.max(1.0));
+                (mc_width, single_line.height, 1)
+            }
+            None => {
+                // MaxContent: no-wrap single line.
+                (single_line.width, single_line.height, 1)
+            }
+        };
 
-        // Get font metrics
         let metrics = font.metrics();
         let ascender = metrics.ascender_px(font_size);
         let descender = metrics.descender_px(font_size);
 
         TextMetrics {
-            width: layout.width,
-            height: layout.height,
+            width,
+            height,
             ascender,
             descender,
-            line_count: layout.lines.len() as u32,
+            line_count,
         }
     }
 }
