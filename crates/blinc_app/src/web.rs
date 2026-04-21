@@ -1433,7 +1433,7 @@ impl WebApp {
                         // in rubber-band territory snaps back
                         // immediately rather than waiting for the
                         // 180 ms wheel debounce to elapse.
-                        if let Some(ref tree) = app.current_tree {
+                        if let Some(ref mut tree) = app.current_tree {
                             tree.on_gesture_end();
                         }
                         // Cancel any armed long-press timer the
