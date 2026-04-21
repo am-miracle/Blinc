@@ -6736,16 +6736,36 @@ impl GpuRenderer {
             });
         }
 
-        // Update uniforms
+        // Update uniforms. `_padding.x = 1.0` signals the SDF fragment
+        // shader that hardware multisample coverage is driving
+        // silhouette AA for this pass — see `render_primitives_overlay_msaa`
+        // for the longer rationale on why stacking the shader's
+        // per-edge fade on top of MSAA resolve under-fills every
+        // partially-covered pixel. The flag is only honoured by the
+        // mesh-primitive branch inside `sdf_core`; every other branch
+        // ignores `_padding`.
+        let msaa_flag = if sample_count > 1 { 1.0 } else { 0.0 };
         let uniforms = Uniforms {
             viewport_size: [width as f32, height as f32],
-            _padding: [0.0; 2],
+            _padding: [msaa_flag, 0.0],
         };
         self.queue
             .write_buffer(&self.buffers.uniforms, 0, bytemuck::bytes_of(&uniforms));
 
         // Sort and upload primitives
         let sdf_ranges = self.upload_sorted_primitives(&batch.primitives);
+
+        // Upload auxiliary data buffer so PRIM_MESH triangle corners and
+        // polygon-clip vertices resolve to live GPU data. The
+        // single-sampled overlay path piggybacks on the upload that
+        // `render_with_clear_simple` does at the top of the frame, but
+        // callers that enter this MSAA path *in place of*
+        // `render_with_clear` skip that upload and the GPU buffer then
+        // carries stale data from the previous frame — every mesh
+        // triangle indexes into random `aux_data` and either renders as
+        // nothing or as a degenerate sliver. Updating here keeps the
+        // MSAA overlay self-sufficient.
+        self.update_aux_data_buffer(batch);
 
         // Update path buffers
         let has_paths = !batch.paths.vertices.is_empty() && !batch.paths.indices.is_empty();
@@ -7108,6 +7128,279 @@ impl GpuRenderer {
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Path Blend Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(&self.pipelines.composite_overlay);
+            render_pass.set_bind_group(0, &cached.composite_bind_group, &[]);
+            render_pass.draw(0..3, 0..1);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Render a slice of SDF primitives with MSAA anti-aliasing.
+    ///
+    /// Mirrors [`Self::render_primitives_overlay`] but dispatches through
+    /// the MSAA-enabled split SDF pipelines so mesh primitives
+    /// (`PRIM_MESH` — tessellated path solid fills) and the other SDF
+    /// categories get the same hardware-resolved smoothing that paths
+    /// and gradients already receive via
+    /// [`Self::render_paths_overlay_msaa`].
+    ///
+    /// Without this, unified-text mode routed solid path fills through
+    /// `render_unified` (single-sampled) and only the gradient / stroke
+    /// paths took the MSAA overlay, which left vector animation output
+    /// visibly rougher than the rasterized-SVG path even though both
+    /// tessellate cubic Beziers at the same tolerance.
+    ///
+    /// Pattern matches `render_paths_overlay_msaa`: render into the
+    /// cached MSAA texture (or directly into the single-sampled resolve
+    /// view when `sample_count == 1`, required by WebGPU spec so Safari
+    /// doesn't reject the pass), then blend the resolved texture onto
+    /// `target` via the composite overlay pipeline.
+    pub fn render_primitives_overlay_msaa(
+        &mut self,
+        target: &wgpu::TextureView,
+        primitives: &[GpuPrimitive],
+        sample_count: u32,
+    ) {
+        if primitives.is_empty() {
+            return;
+        }
+
+        // Ensure MSAA pipelines exist at the requested sample count.
+        let need_new_pipelines = match &self.msaa_pipelines {
+            Some(p) => p.sample_count != sample_count,
+            None => true,
+        };
+        if need_new_pipelines && sample_count > 1 {
+            self.msaa_pipelines = Some(Self::create_msaa_pipelines(
+                &self.device,
+                &self.bind_group_layouts,
+                self.texture_format,
+                sample_count,
+                self.has_vertex_storage,
+                self.has_storage_buffers,
+            ));
+        }
+
+        let (width, height) = self.viewport_size;
+
+        // Reuse the shared MSAA texture cache used by the paths / overlay
+        // MSAA paths. When the viewport or sample count changes we rebuild
+        // it; otherwise every MSAA pass this frame shares the same
+        // texture pair + composite bind group.
+        let need_new_textures = match &self.cached_msaa {
+            Some(cached) => {
+                cached.width != width
+                    || cached.height != height
+                    || cached.sample_count != sample_count
+            }
+            None => true,
+        };
+
+        if need_new_textures {
+            let msaa_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Primitives MSAA Texture"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.texture_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let msaa_view = msaa_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let resolve_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Primitives Resolve Texture"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.texture_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let resolve_view =
+                resolve_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("Primitives Blend Sampler"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            });
+
+            #[repr(C)]
+            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+            struct CompositeUniforms {
+                opacity: f32,
+                blend_mode: u32,
+                _padding: [f32; 2],
+            }
+            let composite_uniforms = CompositeUniforms {
+                opacity: 1.0,
+                blend_mode: 0,
+                _padding: [0.0; 2],
+            };
+            let composite_uniform_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Primitives Composite Uniforms Buffer"),
+                        contents: bytemuck::bytes_of(&composite_uniforms),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+
+            let composite_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Primitives Composite Bind Group"),
+                layout: &self.bind_group_layouts.composite,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: composite_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&resolve_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                ],
+            });
+
+            self.cached_msaa = Some(CachedMsaaTextures {
+                msaa_texture,
+                msaa_view,
+                resolve_texture,
+                resolve_view,
+                width,
+                height,
+                sample_count,
+                sampler,
+                composite_uniform_buffer,
+                composite_bind_group,
+            });
+        }
+
+        // Update viewport uniform for this pass.
+        //
+        // `_padding.x` carries an MSAA flag: 1.0 here tells the SDF
+        // fragment shader that hardware multisample coverage is driving
+        // silhouette AA, so the mesh-primitive branch should skip its
+        // own per-edge barycentric fade. The fade works well on
+        // single-sampled targets (web fallback) but stacks with MSAA
+        // resolve to under-fill partially-covered pixels — a pixel with
+        // 50 % coverage resolves to ~0.05 alpha instead of 0.5 because
+        // each rendered sample already carries a faded-down value
+        // before the average. Removing the redundant shader fade
+        // restores the resolve to hardware-accurate coverage.
+        let msaa_flag = if sample_count > 1 { 1.0 } else { 0.0 };
+        let uniforms = Uniforms {
+            viewport_size: [width as f32, height as f32],
+            _padding: [msaa_flag, 0.0],
+        };
+        self.queue
+            .write_buffer(&self.buffers.uniforms, 0, bytemuck::bytes_of(&uniforms));
+
+        // Sort + upload primitives into the shared instance / aux buffers
+        // exactly the way `render_primitives_overlay` does.
+        let sdf_ranges = self.upload_sorted_primitives(primitives);
+
+        let cached = self.cached_msaa.as_ref().unwrap();
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Primitives MSAA Render Encoder"),
+            });
+
+        // Pass 1: draw into MSAA (or single-sampled resolve) texture.
+        // WebGPU: `resolve_target` must be None when the color
+        // attachment is single-sampled, so branch on `sample_count`.
+        let (pass1_view, pass1_resolve, pass1_store) = if sample_count > 1 {
+            (
+                &cached.msaa_view,
+                Some(&cached.resolve_view),
+                wgpu::StoreOp::Discard,
+            )
+        } else {
+            (&cached.resolve_view, None, wgpu::StoreOp::Store)
+        };
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Primitives MSAA Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: pass1_view,
+                    resolve_target: pass1_resolve,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: pass1_store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
+            if sample_count > 1 {
+                if let Some(ref msaa) = self.msaa_pipelines {
+                    Self::draw_split_sdf_msaa(
+                        &mut render_pass,
+                        msaa,
+                        &sdf_ranges,
+                        self.sdf_vb_buffer(),
+                    );
+                } else {
+                    Self::draw_split_sdf(
+                        &mut render_pass,
+                        &self.pipelines,
+                        &sdf_ranges,
+                        true,
+                        self.sdf_vb_buffer(),
+                    );
+                }
+            } else {
+                Self::draw_split_sdf(
+                    &mut render_pass,
+                    &self.pipelines,
+                    &sdf_ranges,
+                    true,
+                    self.sdf_vb_buffer(),
+                );
+            }
+        }
+
+        // Pass 2: composite the resolved MSAA texture over `target`,
+        // preserving existing content (LoadOp::Load).
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Primitives Blend Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,

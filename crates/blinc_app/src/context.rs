@@ -1026,6 +1026,27 @@ impl RenderContext {
             return;
         }
 
+        // MSAA route: draw the SDF primitive stream (including the
+        // mesh triangles tessellated from solid path fills) through the
+        // MSAA-enabled split pipelines so path fills get the same
+        // hardware-resolved smoothing that gradient and stroke paths
+        // already receive via `render_paths_overlay_msaa`. Without
+        // this, unified-text mode bypassed MSAA for every `PRIM_MESH`
+        // primitive, leaving tessellated vector output visibly rougher
+        // than the rasterized-SVG path.
+        //
+        // The glyph atlas bind group is already attached to
+        // `self.bind_groups.sdf` via `set_glyph_atlas()` at the start
+        // of the frame (the same way
+        // `render_primitives_overlay_with_glyphs` uses it), so
+        // `PRIM_TEXT` primitives in the same stream still sample the
+        // real atlas here.
+        if self.sample_count > 1 {
+            self.renderer
+                .render_primitives_overlay_msaa(target, primitives, self.sample_count);
+            return;
+        }
+
         if let (Some(atlas_view), Some(color_atlas_view)) =
             (self.text_ctx.atlas_view(), self.text_ctx.color_atlas_view())
         {
@@ -4547,11 +4568,24 @@ impl RenderContext {
 
                 // Render subsequent layers interleaved (primitives, images, text per layer)
                 for z in 1..=max_layer {
-                    // Render primitives for this layer
+                    // Render primitives for this layer. MSAA route for
+                    // silhouette smoothing on stacked vector content
+                    // (scroll overlays, stacked components, etc.). The
+                    // z=0 batch still flows through `render_with_clear`
+                    // below — wiring that one up takes a different
+                    // helper because it fuses clearing with drawing.
                     let layer_primitives = batch.primitives_for_layer(z);
                     if !layer_primitives.is_empty() {
-                        self.renderer
-                            .render_primitives_overlay(target, &layer_primitives);
+                        if use_msaa_overlay {
+                            self.renderer.render_primitives_overlay_msaa(
+                                target,
+                                &layer_primitives,
+                                self.sample_count,
+                            );
+                        } else {
+                            self.renderer
+                                .render_primitives_overlay(target, &layer_primitives);
+                        }
                     }
 
                     // Render images for this layer
@@ -4587,12 +4621,39 @@ impl RenderContext {
                     self.render_text_decorations_for_layer(target, &fg_decorations_by_layer, z);
                 }
             } else {
-                // Fast path: render full batch (handles layer effects like backdrop-filter)
-                self.renderer.render_with_clear(
-                    target,
-                    &batch,
-                    [0.0, 0.0, 0.0, self.clear_alpha as f64],
-                );
+                // Fast path: render full batch (handles layer effects like
+                // backdrop-filter). When MSAA is configured, split the
+                // clear-and-draw into (1) a target clear and (2) an MSAA
+                // overlay that renders both primitives and paths in the
+                // same multisampled pass. That routes solid path fills
+                // (PRIM_MESH triangles) through the same hardware coverage
+                // the path pipeline already gets, instead of leaving them
+                // on the single-sampled `render_with_clear` path.
+                //
+                // `render_overlay_msaa` now uploads `aux_data` internally,
+                // so it no longer depends on a preceding single-sampled
+                // render_with_clear to have primed the GPU buffer — the
+                // silent reason the earlier swap blanked every mesh
+                // primitive.
+                if use_msaa_overlay {
+                    self.renderer.clear_target(
+                        target,
+                        wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: self.clear_alpha as f64,
+                        },
+                    );
+                    self.renderer
+                        .render_overlay_msaa(target, &batch, self.sample_count);
+                } else {
+                    self.renderer.render_with_clear(
+                        target,
+                        &batch,
+                        [0.0, 0.0, 0.0, self.clear_alpha as f64],
+                    );
+                }
 
                 // Render dynamic images (video frames)
                 if !batch.dynamic_images.is_empty() {
@@ -4600,8 +4661,11 @@ impl RenderContext {
                         .render_dynamic_images(target, &batch.dynamic_images);
                 }
 
-                // Render paths with MSAA for smooth edges on curved shapes like notch
-                if use_msaa_overlay && batch.has_paths() {
+                // Render paths with MSAA for smooth edges on curved shapes
+                // like notch. Skipped when the MSAA overlay above already
+                // handled both primitives and paths together — re-running
+                // would double the path draws on the target.
+                if !use_msaa_overlay && batch.has_paths() && self.sample_count > 1 {
                     self.renderer
                         .render_paths_overlay_msaa(target, &batch, self.sample_count);
                 }

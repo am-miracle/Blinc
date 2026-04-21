@@ -919,20 +919,38 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // `fwidth` runs in uniform control flow here (computed
     // unconditionally before any prim_type branch) to satisfy WGSL's
     // derivative-uniformity rule.
+    // `uniforms._padding.x` is the MSAA-active flag: 1.0 when the
+    // render pass is writing into a multisampled target, 0.0 on
+    // single-sampled paths. When hardware MSAA is doing the silhouette
+    // coverage, stacking the shader's per-edge barycentric fade on
+    // top under-fills partially-covered pixels — each rendered sample
+    // carries a faded-down value before the hardware resolver
+    // averages them, so a 2/4-covered pixel that should resolve to
+    // 0.5 alpha comes out closer to 0.05. Skip the fade in that case;
+    // keep it on single-sampled paths where it's the only AA we have.
+    //
+    // `fwidth` still runs in uniform control flow so the derivative
+    // queries stay valid regardless of which branch the fragment
+    // actually takes.
     let mb = in.mesh_bary;
     let mb_fw = fwidth(mb);
+    let mesh_msaa_active = uniforms._padding.x > 0.5;
     if prim.type_info.x == 9u {
-        let flags = prim.corner_radius.xyz;
-        let d_x = mb.x / max(mb_fw.x, 1e-5);
-        let d_y = mb.y / max(mb_fw.y, 1e-5);
-        let d_z = mb.z / max(mb_fw.z, 1e-5);
-        let a_x = saturate(d_x + 0.5);
-        let a_y = saturate(d_y + 0.5);
-        let a_z = saturate(d_z + 0.5);
-        let m_x = mix(1.0, a_x, flags.y);
-        let m_y = mix(1.0, a_y, flags.z);
-        let m_z = mix(1.0, a_z, flags.x);
-        fill_alpha = min(m_x, min(m_y, m_z));
+        if mesh_msaa_active {
+            fill_alpha = 1.0;
+        } else {
+            let flags = prim.corner_radius.xyz;
+            let d_x = mb.x / max(mb_fw.x, 1e-5);
+            let d_y = mb.y / max(mb_fw.y, 1e-5);
+            let d_z = mb.z / max(mb_fw.z, 1e-5);
+            let a_x = saturate(d_x + 0.5);
+            let a_y = saturate(d_y + 0.5);
+            let a_z = saturate(d_z + 0.5);
+            let m_x = mix(1.0, a_x, flags.y);
+            let m_y = mix(1.0, a_y, flags.z);
+            let m_z = mix(1.0, a_z, flags.x);
+            fill_alpha = min(m_x, min(m_y, m_z));
+        }
     }
 
     if fill_alpha < 0.001 {
