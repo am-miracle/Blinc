@@ -3900,11 +3900,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             color = mix(in.color, in.end_color, t);
         }
     } else {
-        // Radial gradient - params: (cx, cy, r, 0) in ObjectBoundingBox space
+        // Radial gradient - params: (cx, cy, rx, ry) all in
+        // ObjectBoundingBox space. `rx` = radius / bounds_width, `ry` =
+        // radius / bounds_height. The per-axis radius lets a circle in
+        // path-space stay a circle when the bounding box isn't square —
+        // a single scalar radius would stretch the gradient to match
+        // the OBB aspect ratio, making the Flair halo read as an
+        // ellipse on wide paths.
         let center = in.gradient_params.xy;
-        let radius = in.gradient_params.z;
-        let dist = length(in.uv - center);
-        let t = clamp(dist / max(radius, 0.001), 0.0, 1.0);
+        let radius_xy = max(in.gradient_params.zw, vec2<f32>(0.001));
+        let d = (in.uv - center) / radius_xy;
+        let t = clamp(length(d), 0.0, 1.0);
 
         // Sample from gradient texture or mix vertex colors
         if (uniforms.use_gradient_texture == 1u) {

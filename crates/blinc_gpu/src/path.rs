@@ -758,6 +758,57 @@ fn extract_gradient_info(brush: &Brush) -> (u32, Color, Color, [f32; 4]) {
     )
 }
 
+/// Convert path-space gradient parameters into the object-bounding-box
+/// (OBB) space the path shader expects.
+///
+/// The path fragment shader compares `gradient_params` against `in.uv`,
+/// which is per-vertex `(pos - bounds_min) / bounds_size` — so the
+/// gradient descriptor must live in the same normalized space. Before
+/// this conversion the tessellator stored raw Lottie coordinates on
+/// every vertex and the shader's `length(uv - center) / radius` collapsed
+/// to values near zero for every fragment, making a multi-stop gradient
+/// sample only its first stop (what made Flair's radial halo render as
+/// a solid disc instead of a fading glow).
+///
+/// Layouts:
+/// - gradient_type == 1 (linear): `[x1, y1, x2, y2]` are both endpoints,
+///   each shifted and divided per-axis.
+/// - gradient_type == 2 (radial/conic): `[cx, cy, radius, unused]` is
+///   centre + scalar radius. The radius is packed twice — once divided
+///   by `bounds_width` and once by `bounds_height` — so the fragment
+///   shader can rescale x/y independently and the visible isoline stays
+///   a true circle in path-space even when the bounding box isn't
+///   square. The `.w` slot therefore stops being "unused" and now
+///   carries `ry`.
+/// - other types fall through unchanged; solids don't read
+///   gradient_params and the conic code still uses `.w` as start angle,
+///   but conic is currently rasterized as a radial, so treating its
+///   params the same is correct.
+fn normalize_gradient_params_to_obb(
+    gradient_type: u32,
+    raw: [f32; 4],
+    min_x: f32,
+    min_y: f32,
+    bounds_width: f32,
+    bounds_height: f32,
+) -> [f32; 4] {
+    match gradient_type {
+        1 => [
+            (raw[0] - min_x) / bounds_width,
+            (raw[1] - min_y) / bounds_height,
+            (raw[2] - min_x) / bounds_width,
+            (raw[3] - min_y) / bounds_height,
+        ],
+        2 => [
+            (raw[0] - min_x) / bounds_width,
+            (raw[1] - min_y) / bounds_height,
+            raw[2] / bounds_width,
+            raw[2] / bounds_height,
+        ],
+        _ => raw,
+    }
+}
+
 /// Tessellate a path for filling
 pub fn tessellate_fill(path: &Path, brush: &Brush) -> TessellatedPath {
     let events = path_to_lyon_events(path);
@@ -766,20 +817,50 @@ pub fn tessellate_fill(path: &Path, brush: &Brush) -> TessellatedPath {
         return TessellatedPath::new();
     }
 
-    let (gradient_type, start_color, end_color, gradient_params) = extract_gradient_info(brush);
+    let (gradient_type, start_color, end_color, raw_gradient_params) =
+        extract_gradient_info(brush);
     let (min_x, min_y, max_x, max_y) = compute_path_bounds(path);
     let bounds_width = (max_x - min_x).max(1.0);
     let bounds_height = (max_y - min_y).max(1.0);
+    // Normalize gradient params from path-space to the object-bounding-box
+    // space the shader compares against `in.uv`. Without this, `uv - center`
+    // mixes a [0,1] UV with raw path coords, `t` lands near zero everywhere,
+    // and a multi-stop gradient collapses to its first stop — the "solid
+    // disc instead of soft halo" symptom visible in Dark Mode Button's
+    // Flair layer. Linear: both endpoints shift to OBB; radial: centre
+    // shifts and the single radius splits into per-axis (rx, ry) so
+    // non-square bounds keep the gradient circular in path-space.
+    let gradient_params = normalize_gradient_params_to_obb(
+        gradient_type,
+        raw_gradient_params,
+        min_x,
+        min_y,
+        bounds_width,
+        bounds_height,
+    );
 
     // Build edge segments for anti-aliasing edge distance computation
     // Use same tolerance as tessellation for accurate edge distances
-    let edges = PathEdges::from_path(path, 0.025);
+    let edges = PathEdges::from_path(path, 0.2);
 
     let mut geometry: VertexBuffers<PathVertex, u32> = VertexBuffers::new();
     let mut tessellator = FillTessellator::new();
 
-    // Lower tolerance = more triangles = smoother curves (at cost of more vertices)
-    let options = FillOptions::default().with_tolerance(0.025);
+    // Tolerance is the max distance (in source pixels) between the
+    // true curve and its flattened polyline. 0.2 keeps curves visually
+    // smooth on 2× retina (≈ 0.4 screen-px deviation — below the
+    // perceptibility threshold) while staying ~5× coarser than the
+    // old 0.025 default, which used to explode triangle counts on
+    // curve-heavy paths.
+    let mut options = FillOptions::default().with_tolerance(0.2);
+    // Debug toggle: `BLINC_FILL_RULE_EVENODD=1` switches from the
+    // Lottie-default non-zero rule to even-odd. Useful for diagnosing
+    // authored self-intersecting shapes (e.g. Dark Mode Button's
+    // `Crease`) whose non-zero interior doesn't match the reference
+    // render's expected crescent/ring silhouette.
+    if std::env::var("BLINC_FILL_RULE_EVENODD").ok().as_deref() == Some("1") {
+        options = options.with_fill_rule(lyon::tessellation::FillRule::EvenOdd);
+    }
 
     let result = tessellator.tessellate(
         events.iter().cloned(),
@@ -834,19 +915,29 @@ pub fn tessellate_stroke(path: &Path, stroke: &Stroke, brush: &Brush) -> Tessell
         return TessellatedPath::new();
     }
 
-    let (gradient_type, start_color, end_color, gradient_params) = extract_gradient_info(brush);
+    let (gradient_type, start_color, end_color, raw_gradient_params) =
+        extract_gradient_info(brush);
     let (min_x, min_y, max_x, max_y) = compute_path_bounds(path);
     let bounds_width = (max_x - min_x).max(1.0);
     let bounds_height = (max_y - min_y).max(1.0);
+    let gradient_params = normalize_gradient_params_to_obb(
+        gradient_type,
+        raw_gradient_params,
+        min_x,
+        min_y,
+        bounds_width,
+        bounds_height,
+    );
 
     let mut geometry: VertexBuffers<PathVertex, u32> = VertexBuffers::new();
     let mut tessellator = StrokeTessellator::new();
 
     let half_width = stroke.width * 0.5;
 
+    // See `tessellate_fill` for the rationale on 0.2 tolerance.
     let mut options = StrokeOptions::default()
         .with_line_width(stroke.width)
-        .with_tolerance(0.025);
+        .with_tolerance(0.2);
 
     // Convert line cap
     options = options.with_line_cap(match stroke.cap {
