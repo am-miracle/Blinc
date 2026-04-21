@@ -187,6 +187,34 @@ pub use context::{DebugMode, RenderContext};
 pub use error::{BlincError, Result};
 pub use text_measurer::{init_text_measurer, init_text_measurer_with_registry, FontTextMeasurer};
 
+/// Register a font face into the process-wide `blinc_text` font
+/// registry. The returned count is the number of faces fontdb
+/// parsed from the bytes — typically `1` for a plain `.ttf` / `.otf`
+/// and higher for a `.ttc` collection. Callable before
+/// `WindowedApp::run` (or any other runner) so the UI can depend on
+/// the font being available from the very first frame.
+///
+/// Thin wrapper over `blinc_text::global_font_registry().lock()`.
+/// `BlincApp` / `WindowedContext` / `TextRenderer::new()` all back
+/// themselves with the same shared registry, so a face registered
+/// here is immediately visible to every text renderer the process
+/// spins up — no further plumbing required.
+///
+/// # Example
+///
+/// ```ignore
+/// fn main() -> blinc_app::Result<()> {
+///     blinc_app::register_font(include_bytes!("assets/Inter.ttf").to_vec());
+///     blinc_app::windowed::WindowedApp::run(config, build_ui)
+/// }
+/// ```
+pub fn register_font(data: Vec<u8>) -> usize {
+    match blinc_text::global_font_registry().lock() {
+        Ok(mut reg) => reg.load_font_data(data),
+        Err(_) => 0,
+    }
+}
+
 // Re-export layout API for convenience
 pub use blinc_layout::prelude::*;
 pub use blinc_layout::RenderTree;
@@ -202,6 +230,7 @@ pub mod prelude {
     pub use crate::app::{BlincApp, BlincConfig};
     pub use crate::context::{DebugMode, RenderContext};
     pub use crate::error::{BlincError, Result};
+    pub use crate::register_font;
     pub use crate::text_measurer::{init_text_measurer, init_text_measurer_with_registry};
 
     // Layout builders

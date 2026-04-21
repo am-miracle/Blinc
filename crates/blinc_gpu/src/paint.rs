@@ -2441,9 +2441,32 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             TextBaseline::Bottom => TextAnchor::Baseline, // Approximate with baseline
         };
 
+        // Map `TextStyle::family` onto the font name that
+        // `prepare_text_with_style` passes into
+        // `blinc_text::Renderer::resolve_font_with_style`. The
+        // previous `prepare_text_with_options` route always passed
+        // `font_name=None`, so any caller-set family on `TextStyle`
+        // (e.g. a Lottie text layer asking for "Cal Sans") silently
+        // dropped through to the default SansSerif fallback. Treat
+        // the blinc_core default "system-ui" as "no preference" so
+        // Blinc's own generic-font routing still kicks in.
+        let family_opt = if style.family == "system-ui" || style.family.is_empty() {
+            None
+        } else {
+            Some(style.family.as_str())
+        };
+        let (weight_u16, italic_flag) = match style.weight {
+            blinc_core::FontWeight::Thin => (100u16, false),
+            blinc_core::FontWeight::Light => (300u16, false),
+            blinc_core::FontWeight::Regular => (400u16, false),
+            blinc_core::FontWeight::Medium => (500u16, false),
+            blinc_core::FontWeight::Bold => (700u16, false),
+            blinc_core::FontWeight::Black => (900u16, false),
+        };
+
         // Now borrow text_ctx and prepare glyphs
         let text_ctx = self.text_ctx.as_mut().unwrap();
-        if let Ok(mut glyphs) = text_ctx.prepare_text_with_options(
+        if let Ok(mut glyphs) = text_ctx.prepare_text_with_style(
             text,
             transformed_origin.x,
             transformed_origin.y,
@@ -2453,6 +2476,12 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             alignment,
             None,  // No width constraint
             false, // No wrap for canvas text
+            family_opt,
+            blinc_text::GenericFont::SansSerif,
+            weight_u16,
+            italic_flag,
+            None,
+            style.letter_spacing,
         ) {
             // Apply current clip bounds and fade to all glyphs
             let glyph_clip_fade = self.get_clip_fade();
