@@ -813,42 +813,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             d = sd_ellipse(sp, center, size * 0.5);
         }
         case 9u /* PRIM_MESH */: {
+            // DT fallback: same per-pixel point-in-triangle as the
+            // VB shader — the vertex stage can't access aux_data
+            // here either, so the quad geometry still covers the
+            // triangle's AABB and the fragment has to filter.
             let aux_off = u32(prim.border.z);
-            let tri_count = u32(prim.border.y);
-            let edge_count = u32(prim.shadow.x);
-
-            var inside = false;
-            for (var t: u32 = 0u; t < tri_count; t = t + 1u) {
-                let pack0 = load_aux(aux_off + t * 2u);
-                let pack1 = load_aux(aux_off + t * 2u + 1u);
-                let v0 = pack0.xy;
-                let v1 = pack0.zw;
-                let v2 = pack1.xy;
-                let s0 = (v1.x - v0.x) * (sp.y - v0.y) - (v1.y - v0.y) * (sp.x - v0.x);
-                let s1 = (v2.x - v1.x) * (sp.y - v1.y) - (v2.y - v1.y) * (sp.x - v1.x);
-                let s2 = (v0.x - v2.x) * (sp.y - v2.y) - (v0.y - v2.y) * (sp.x - v2.x);
-                if (s0 >= 0.0 && s1 >= 0.0 && s2 >= 0.0)
-                    || (s0 <= 0.0 && s1 <= 0.0 && s2 <= 0.0) {
-                    inside = true;
-                    break;
-                }
-            }
-
-            let edge_off = aux_off + tri_count * 2u;
-            var min_dist: f32 = 1e10;
-            for (var e: u32 = 0u; e < edge_count; e = e + 1u) {
-                let pack = load_aux(edge_off + e);
-                let a = pack.xy;
-                let b = pack.zw;
-                let ab = b - a;
-                let ab_len_sq = max(dot(ab, ab), 0.0001);
-                let tp = clamp(dot(sp - a, ab) / ab_len_sq, 0.0, 1.0);
-                let closest = a + tp * ab;
-                let diff = sp - closest;
-                let dist = sqrt(dot(diff, diff));
-                min_dist = min(min_dist, dist);
-            }
-            d = select(min_dist, -min_dist, inside);
+            let pack0 = load_aux(aux_off);
+            let pack1 = load_aux(aux_off + 1u);
+            let v0 = pack0.xy;
+            let v1 = pack0.zw;
+            let v2 = pack1.xy;
+            let s0 = (v1.x - v0.x) * (sp.y - v0.y) - (v1.y - v0.y) * (sp.x - v0.x);
+            let s1 = (v2.x - v1.x) * (sp.y - v1.y) - (v2.y - v1.y) * (sp.x - v1.x);
+            let s2 = (v0.x - v2.x) * (sp.y - v2.y) - (v0.y - v2.y) * (sp.x - v2.x);
+            let inside = (s0 >= 0.0 && s1 >= 0.0 && s2 >= 0.0)
+                      || (s0 <= 0.0 && s1 <= 0.0 && s2 <= 0.0);
+            d = select(1.0, -1.0, inside);
         }
         case 7u /* PRIM_TEXT */: {
             let uv_bounds = prim.gradient_params;

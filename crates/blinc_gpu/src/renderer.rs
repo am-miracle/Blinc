@@ -2312,7 +2312,17 @@ impl GpuRenderer {
         let binding_5_entry = if has_storage_buffers {
             wgpu::BindGroupLayoutEntry {
                 binding: 5,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                // VERTEX as well as FRAGMENT: `PRIM_MESH` routes
+                // tessellated path fills through this pipeline and
+                // has the vertex shader pull each triangle's three
+                // corners from `aux_data` at the primitive's
+                // `border.z` offset so hardware rasterises the
+                // real triangle (instead of a per-pixel point-in-
+                // triangle walk over an AABB-covering quad). Without
+                // VERTEX visibility wgpu rejects the pipeline
+                // layout because the shader reads a binding the
+                // layout didn't authorise for that stage.
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,

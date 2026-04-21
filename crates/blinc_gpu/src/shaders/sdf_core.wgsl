@@ -9,6 +9,12 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) instance_index: u32,
+    // Per-vertex barycentric weights; PRIM_MESH vertex stage emits
+    // (1,0,0), (0,1,0), (0,0,1) for triangle corners 0/1/2 so the
+    // hardware-interpolated value at any fragment tells us how far
+    // that fragment is from each of the triangle's three edges. The
+    // fragment shader then feathers alpha at silhouette edges only.
+    @location(2) mesh_bary: vec3<f32>,
 }
 
 struct Uniforms {
@@ -219,10 +225,41 @@ fn vs_main(
         case 4u: { uv = vec2<f32>(1.0, 1.0); } // 2 - bottom-right
         default: { uv = vec2<f32>(0.0, 1.0); } // 3 - bottom-left
     }
-    let pos = vec2<f32>(
+    var pos = vec2<f32>(
         bounds.x + uv.x * bounds.z,
         bounds.y + uv.y * bounds.w
     );
+
+    // PRIM_MESH replaces the quad geometry with the triangle's
+    // three corners pulled from aux_data. Vertex indices 0..2
+    // emit the real triangle; 3..5 collapse onto vertex 0 so
+    // the second triangle of the underlying 6-vertex draw
+    // degenerates to zero area and the rasteriser skips it.
+    // Hardware rasterises the real triangle edge-to-edge, which
+    // is the point of the SDF-stream rework: the fragment shader
+    // no longer does a per-pixel triangle walk.
+    //
+    // `mesh_bary` emits (1,0,0), (0,1,0), (0,0,1) at the three
+    // corners; hardware interpolates linearly across the
+    // triangle so the fragment's `mesh_bary.x` == 0 exactly on
+    // edge v1→v2, `mesh_bary.y` == 0 on edge v2→v0, and
+    // `mesh_bary.z` == 0 on edge v0→v1. Paired with the per-edge
+    // silhouette flags in `prim.corner_radius`, the fragment
+    // shader can feather alpha at outer edges only and leave
+    // interior tessellation seams fully opaque.
+    var mesh_bary = vec3<f32>(0.0);
+    if prim.type_info.x == 9u {
+        let aux_off = u32(prim.border.z);
+        let pack0 = aux_data[aux_off];
+        let pack1 = aux_data[aux_off + 1u];
+        switch vertex_index {
+            case 0u: { pos = pack0.xy; mesh_bary = vec3<f32>(1.0, 0.0, 0.0); }
+            case 1u: { pos = pack0.zw; mesh_bary = vec3<f32>(0.0, 1.0, 0.0); }
+            case 2u: { pos = pack1.xy; mesh_bary = vec3<f32>(0.0, 0.0, 1.0); }
+            default: { pos = pack0.xy; mesh_bary = vec3<f32>(1.0, 0.0, 0.0); }
+        }
+    }
+    out.mesh_bary = mesh_bary;
 
     // Convert to clip space (-1 to 1)
     let clip_pos = vec2<f32>(
@@ -761,59 +798,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             d = sd_ellipse(sp, center, size * 0.5);
         }
         case 9u /* PRIM_MESH */: {
-            // Path fill routed through the SDF stream so submission
-            // order with text is preserved. Data layout at
-            // `aux_offset`:
-            //   triangles (2 vec4 each): (v0.xy, v1.xy), (v2.xy, _, _)
-            //   silhouette edges (1 vec4 each): (a.xy, b.xy)
-            // `border.y` = triangle count, `border.z` = aux offset,
-            // `shadow.x` = silhouette edge count.
-            //
-            // Distance to any silhouette edge drives the AA
-            // smoothstep; the triangle walk only decides the sign
-            // (negative inside, positive outside). Picking the sign
-            // from the whole-mesh in/out test instead of per-triangle
-            // SDF values is what keeps adjacent-triangle shared
-            // edges seam-free: interior edges aren't silhouette
-            // edges, so the distance the AA smoothstep sees in the
-            // interior always exceeds `aa_width` — no fractional
-            // alpha bleed.
-            let aux_off = u32(prim.border.z);
-            let tri_count = u32(prim.border.y);
-            let edge_count = u32(prim.shadow.x);
-
-            var inside = false;
-            for (var t: u32 = 0u; t < tri_count; t = t + 1u) {
-                let pack0 = aux_data[aux_off + t * 2u];
-                let pack1 = aux_data[aux_off + t * 2u + 1u];
-                let v0 = pack0.xy;
-                let v1 = pack0.zw;
-                let v2 = pack1.xy;
-                let s0 = (v1.x - v0.x) * (sp.y - v0.y) - (v1.y - v0.y) * (sp.x - v0.x);
-                let s1 = (v2.x - v1.x) * (sp.y - v1.y) - (v2.y - v1.y) * (sp.x - v1.x);
-                let s2 = (v0.x - v2.x) * (sp.y - v2.y) - (v0.y - v2.y) * (sp.x - v2.x);
-                if (s0 >= 0.0 && s1 >= 0.0 && s2 >= 0.0)
-                    || (s0 <= 0.0 && s1 <= 0.0 && s2 <= 0.0) {
-                    inside = true;
-                    break;
-                }
-            }
-
-            let edge_off = aux_off + tri_count * 2u;
-            var min_dist: f32 = 1e10;
-            for (var e: u32 = 0u; e < edge_count; e = e + 1u) {
-                let pack = aux_data[edge_off + e];
-                let a = pack.xy;
-                let b = pack.zw;
-                let ab = b - a;
-                let ab_len_sq = max(dot(ab, ab), 0.0001);
-                let tp = clamp(dot(sp - a, ab) / ab_len_sq, 0.0, 1.0);
-                let closest = a + tp * ab;
-                let diff = sp - closest;
-                let dist = sqrt(dot(diff, diff));
-                min_dist = min(min_dist, dist);
-            }
-            d = select(min_dist, -min_dist, inside);
+            // Hardware already clipped this fragment to the
+            // triangle; `d` just needs to read as "inside" for the
+            // downstream smoothstep. Silhouette AA is folded in
+            // below, after `fill_alpha` is computed — see the
+            // comment on `fill_alpha` and the `mesh_bary`
+            // smoothstep block.
+            d = -1.0;
         }
         case 7u /* PRIM_TEXT */: {
             let uv_bounds = prim.gradient_params;
@@ -894,12 +885,55 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // because some upstream branches (shadow blur, etc.) read it.
     _ = d_fw_screen;
     let aa_width = 0.5;
-    // Mesh primitives already encode `d` as `-edge_distance` (the
-    // negated distance-to-silhouette interpolated via barycentrics);
-    // that shares the same smoothstep convention as the other
-    // primitive types and avoids the shared-edge seams the old
-    // per-triangle SDF produced.
-    let fill_alpha = 1.0 - smoothstep(-aa_width, aa_width, d);
+    var fill_alpha = 1.0 - smoothstep(-aa_width, aa_width, d);
+
+    // Mesh primitive silhouette AA. `mesh_bary` is (1,0,0) at v0,
+    // (0,1,0) at v1, (0,0,1) at v2 — so the component opposite
+    // each edge drops to 0 on that edge. `prim.corner_radius`
+    // carries the per-edge silhouette flag (1.0 = silhouette edge,
+    // 0.0 = interior tessellation seam) in the order
+    //   [0] = edge v0→v1  (bary.z drops to 0 here)
+    //   [1] = edge v1→v2  (bary.x drops)
+    //   [2] = edge v2→v0  (bary.y drops)
+    //
+    // Convert each barycentric to pixel-distance-to-edge via
+    // `bary / fwidth(bary)` — this is the signed distance from the
+    // fragment centre to the edge measured in screen-space pixels
+    // (positive inside, 0 on the edge). We then use
+    // `saturate(d_px + 0.5)` — a linear ramp centred on the edge
+    // such that a pixel whose centre sits exactly on the edge gets
+    // 50 % coverage, a pixel half a pixel inside is fully opaque,
+    // and anything further inside stays at 1.0. This is closer to
+    // true geometric coverage than `smoothstep(0, fw, bary)`, which
+    // fades INWARD from the edge (shrinking triangles by half a
+    // pixel) and gives dithered-looking edges because the alpha at
+    // boundary pixels depends on exactly how close each pixel's
+    // centre is to the edge.
+    //
+    // Interior (non-silhouette) edges have flag = 0, so `mix` keeps
+    // the coverage at 1.0 — tessellation seams stay fully opaque.
+    // Combining via `min()` gives distance-to-nearest-silhouette-edge
+    // semantics, avoiding the double-darkening that `a * b * c` causes
+    // at vertices where two silhouette edges meet.
+    //
+    // `fwidth` runs in uniform control flow here (computed
+    // unconditionally before any prim_type branch) to satisfy WGSL's
+    // derivative-uniformity rule.
+    let mb = in.mesh_bary;
+    let mb_fw = fwidth(mb);
+    if prim.type_info.x == 9u {
+        let flags = prim.corner_radius.xyz;
+        let d_x = mb.x / max(mb_fw.x, 1e-5);
+        let d_y = mb.y / max(mb_fw.y, 1e-5);
+        let d_z = mb.z / max(mb_fw.z, 1e-5);
+        let a_x = saturate(d_x + 0.5);
+        let a_y = saturate(d_y + 0.5);
+        let a_z = saturate(d_z + 0.5);
+        let m_x = mix(1.0, a_x, flags.y);
+        let m_y = mix(1.0, a_y, flags.z);
+        let m_z = mix(1.0, a_z, flags.x);
+        fill_alpha = min(m_x, min(m_y, m_z));
+    }
 
     if fill_alpha < 0.001 {
         return result;

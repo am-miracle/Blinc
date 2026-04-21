@@ -3258,33 +3258,26 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
 }
 
 impl<'a> GpuPaintContext<'a> {
-    /// Emit ONE `GpuPrimitive` for the entire tessellated path. The
-    /// fragment shader performs two walks per pixel:
+    /// Emit one `GpuPrimitive` per tessellated triangle. Each
+    /// primitive's three corners live at `aux_data[off+0].xy`,
+    /// `aux_data[off+0].zw`, `aux_data[off+1].xy`; the SDF vertex
+    /// shader pulls them directly for `vertex_index` 0..2 and
+    /// collapses 3..5 to a zero-area degenerate so the underlying
+    /// 6-vertex quad draw still works. Hardware rasterises each
+    /// triangle the same way the old tessellated-path pipeline did,
+    /// so the fragment shader only needs solid fill + silhouette AA
+    /// — no per-pixel triangle walk.
     ///
-    /// 1. Point-in-mesh test via the triangle list (first matching
-    ///    triangle claims the pixel, break).
-    /// 2. Euclidean distance to the nearest *silhouette* edge — edges
-    ///    that appear in exactly one triangle, identified here by
-    ///    counting each shared undirected edge. Interior edges (shared
-    ///    by two triangles) don't contribute, so the AA smoothstep
-    ///    lights up only the outer silhouette, not the internal
-    ///    tessellation seams.
-    ///
-    /// Per-vertex `edge_distance` interpolation was tried first but
-    /// collapsed to zero everywhere for simple tessellations whose
-    /// Steiner-free triangulations place every vertex on the
-    /// silhouette, which showed up as uniform ~50% alpha across the
-    /// whole fill. The min-distance-to-silhouette approach is
-    /// independent of tessellation topology.
-    ///
-    /// Memory layout (all at `aux_offset`):
-    ///   triangles: `[tri_count]` × 2 vec4 = `(v0.xy, v1.xy)`,
-    ///              `(v2.xy, 0, 0)`
-    ///   silhouette edges: `[edge_count]` × 1 vec4 = `(a.xy, b.xy)`
-    ///
-    /// `border[1]` = triangle count, `border[2]` = aux offset,
-    /// `shadow[0]` = silhouette edge count. `bounds` is the path
-    /// AABB so the SDF quad only covers reachable pixels.
+    /// For anti-aliasing, each triangle also carries which of its
+    /// three edges lie on the mesh silhouette (edges that appear in
+    /// exactly one triangle, identified here via a shared-edge
+    /// count pass). The vertex shader emits a per-vertex barycentric
+    /// varying; hardware interpolates it across the triangle, and
+    /// the fragment shader uses `fwidth` on the relevant barycentric
+    /// component to produce a 1-pixel smoothstep at each silhouette
+    /// edge. Interior tessellation seams carry a zero flag, so the
+    /// fragment keeps full alpha across them and adjacent triangles
+    /// don't leave visible bands.
     fn push_mesh_primitives(
         &mut self,
         tessellated: &crate::path::TessellatedPath,
@@ -3301,23 +3294,31 @@ impl<'a> GpuPaintContext<'a> {
             return;
         }
 
-        // Reserve the starting offset, then push triangles while
-        // tallying edge occurrences. Silhouette edges (count == 1)
-        // get appended to aux_data after the triangle block — the
-        // shader reads them at `aux_offset + tri_count * 2`.
-        let aux_offset = self.batch.aux_data.len() as u32;
-        let mut triangle_count: u32 = 0;
-        let mut min_x = f32::INFINITY;
-        let mut min_y = f32::INFINITY;
-        let mut max_x = f32::NEG_INFINITY;
-        let mut max_y = f32::NEG_INFINITY;
+        // Edge-occurrence count: (low_index, high_index) → count.
+        // Silhouette edges appear exactly once across the whole
+        // tessellation; interior edges appear twice.
+        let mut edge_counts: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut i = 0;
+        while i + 2 < indices.len() {
+            let i0 = indices[i];
+            let i1 = indices[i + 1];
+            let i2 = indices[i + 2];
+            i += 3;
+            for (a, b) in [(i0, i1), (i1, i2), (i2, i0)] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *edge_counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        let is_silhouette = |a: u32, b: u32| -> f32 {
+            let key = if a < b { (a, b) } else { (b, a) };
+            match edge_counts.get(&key).copied().unwrap_or(0) {
+                1 => 1.0,
+                _ => 0.0,
+            }
+        };
 
-        // `edge_map[(lo, hi)] = (count, any_vertex_positions)`. We
-        // keep the triangle winding intact when emitting silhouette
-        // edges so the direction vector is well-defined (not that a
-        // distance-to-segment calc cares, but it keeps future debug
-        // visualisations stable).
-        let mut edge_map: HashMap<(u32, u32), u32> = HashMap::new();
+        let color_arr = [color.r, color.g, color.b, color.a];
+        let clip_type_u = clip_type as u32;
 
         let mut i = 0;
         while i + 2 < indices.len() {
@@ -3339,58 +3340,42 @@ impl<'a> GpuPaintContext<'a> {
                 continue;
             }
 
+            let aux_offset = self.batch.aux_data.len() as u32;
             self.batch.aux_data.push([v0[0], v0[1], v1[0], v1[1]]);
             self.batch.aux_data.push([v2[0], v2[1], 0.0, 0.0]);
-            triangle_count += 1;
 
-            for (a, b) in [(i0, i1), (i1, i2), (i2, i0)] {
-                let key = if a < b { (a, b) } else { (b, a) };
-                *edge_map.entry(key).or_insert(0) += 1;
+            let min_x = v0[0].min(v1[0]).min(v2[0]);
+            let min_y = v0[1].min(v1[1]).min(v2[1]);
+            let max_x = v0[0].max(v1[0]).max(v2[0]);
+            let max_y = v0[1].max(v1[1]).max(v2[1]);
+
+            // Silhouette flags per edge. `corner_radius` is otherwise
+            // unused for mesh primitives (no rounded corners on a
+            // raw triangle), so repurpose its three spare slots:
+            //   [0] = edge v0→v1 (bary.z == 0)
+            //   [1] = edge v1→v2 (bary.x == 0)
+            //   [2] = edge v2→v0 (bary.y == 0)
+            let s01 = is_silhouette(i0, i1);
+            let s12 = is_silhouette(i1, i2);
+            let s20 = is_silhouette(i2, i0);
+
+            let mut prim = GpuPrimitive {
+                bounds: [min_x, min_y, max_x - min_x, max_y - min_y],
+                color: color_arr,
+                border: [0.0, 0.0, aux_offset as f32, 0.0],
+                corner_radius: [s01, s12, s20, 0.0],
+                clip_bounds,
+                clip_radius,
+                type_info: [PrimitiveType::Mesh as u32, 0, clip_type_u, 0],
+                ..GpuPrimitive::default()
+            };
+            prim.local_affine = [1.0, 0.0, 0.0, 1.0];
+
+            if self.is_foreground {
+                self.batch.push_foreground(prim);
+            } else {
+                self.batch.push(prim);
             }
-
-            min_x = min_x.min(v0[0]).min(v1[0]).min(v2[0]);
-            min_y = min_y.min(v0[1]).min(v1[1]).min(v2[1]);
-            max_x = max_x.max(v0[0]).max(v1[0]).max(v2[0]);
-            max_y = max_y.max(v0[1]).max(v1[1]).max(v2[1]);
-        }
-
-        if triangle_count == 0 {
-            return;
-        }
-
-        let mut edge_count: u32 = 0;
-        for ((a, b), count) in edge_map.iter() {
-            if *count == 1 {
-                let va = vertices[*a as usize].position;
-                let vb = vertices[*b as usize].position;
-                self.batch.aux_data.push([va[0], va[1], vb[0], vb[1]]);
-                edge_count += 1;
-            }
-        }
-
-        let color_arr = [color.r, color.g, color.b, color.a];
-        let clip_type_u = clip_type as u32;
-        let mut prim = GpuPrimitive {
-            bounds: [min_x, min_y, max_x - min_x, max_y - min_y],
-            color: color_arr,
-            border: [0.0, triangle_count as f32, aux_offset as f32, 0.0],
-            // `shadow` is unused for mesh (no drop shadow on a raw
-            // fill); repurpose `shadow[0]` for the silhouette edge
-            // count. The shadow render block only fires when
-            // `shadow.z > 0 || shadow.w != 0`, so carrying a count in
-            // `shadow[0]` is inert for that path.
-            shadow: [edge_count as f32, 0.0, 0.0, 0.0],
-            clip_bounds,
-            clip_radius,
-            type_info: [PrimitiveType::Mesh as u32, 0, clip_type_u, 0],
-            ..GpuPrimitive::default()
-        };
-        prim.local_affine = [1.0, 0.0, 0.0, 1.0];
-
-        if self.is_foreground {
-            self.batch.push_foreground(prim);
-        } else {
-            self.batch.push(prim);
         }
     }
 }
