@@ -3539,6 +3539,11 @@ struct Uniforms {
 @group(0) @binding(4) var image_sampler: sampler;
 @group(0) @binding(5) var backdrop_texture: texture_2d<f32>;
 @group(0) @binding(6) var backdrop_sampler: sampler;
+// Shared with the SDF pipeline — holds polygon clip vertices packed as
+// vec4(x0, y0, x1, y1). Exposed to the path pipeline so Lottie track
+// mattes (rendered as `ClipShape::Polygon` by `blinc_lottie`) affect
+// tessellated shape fills, not just SDF-drawn primitives.
+@group(0) @binding(7) var<storage, read> aux_data: array<vec4<f32>>;
 
 struct VertexInput {
     @location(0) position: vec2<f32>,
@@ -3649,9 +3654,76 @@ fn calculate_clip_alpha(p: vec2<f32>, clip_bounds: vec4<f32>, clip_radius: vec4<
             let shape_alpha = 1.0 - smoothstep(-aa_width, aa_width, clip_d);
             return scissor_alpha * shape_alpha;
         }
+        case 4u /* CLIP_POLYGON */: {
+            let scissor_d = sd_rounded_rect(p, clip_bounds.xy, clip_bounds.zw, vec4<f32>(0.0));
+            let scissor_alpha = 1.0 - smoothstep(-aa_width, aa_width, scissor_d);
+            let vertex_count = u32(clip_radius.z);
+            let aux_offset = u32(clip_radius.w);
+            let shape_alpha = calculate_polygon_clip_alpha(p, vertex_count, aux_offset);
+            return scissor_alpha * shape_alpha;
+        }
         default: {
             return 1.0;
         }
+    }
+}
+
+// Polygon winding-number test. Vertices are packed 2-per-vec4 in the
+// shared aux_data storage buffer; `aux_offset` is the starting vec4
+// index and `vertex_count` is the polygon vertex count. Mirrors the
+// implementation used by the SDF pipeline — kept in sync so a
+// polygon clip pushed at the `DrawContext` level clips fills and
+// shape primitives identically.
+fn calculate_polygon_clip_alpha(p: vec2<f32>, vertex_count: u32, aux_offset: u32) -> f32 {
+    if vertex_count < 3u {
+        return 1.0;
+    }
+
+    var winding: i32 = 0;
+
+    for (var i: u32 = 0u; i < vertex_count; i = i + 1u) {
+        let vec_idx = aux_offset + (i / 2u);
+        let data = aux_data[vec_idx];
+        var vi: vec2<f32>;
+        if (i % 2u) == 0u {
+            vi = data.xy;
+        } else {
+            vi = data.zw;
+        }
+
+        let j = (i + 1u) % vertex_count;
+        let vec_idx_j = aux_offset + (j / 2u);
+        let data_j = aux_data[vec_idx_j];
+        var vj: vec2<f32>;
+        if (j % 2u) == 0u {
+            vj = data_j.xy;
+        } else {
+            vj = data_j.zw;
+        }
+
+        // Cast a horizontal ray from `p` to the right; accumulate +1 / -1
+        // at each crossing based on edge direction.
+        if (vi.y <= p.y) {
+            if (vj.y > p.y) {
+                let cross = (vj.x - vi.x) * (p.y - vi.y) - (p.x - vi.x) * (vj.y - vi.y);
+                if (cross > 0.0) {
+                    winding = winding + 1;
+                }
+            }
+        } else {
+            if (vj.y <= p.y) {
+                let cross = (vj.x - vi.x) * (p.y - vi.y) - (p.x - vi.x) * (vj.y - vi.y);
+                if (cross < 0.0) {
+                    winding = winding - 1;
+                }
+            }
+        }
+    }
+
+    if winding != 0 {
+        return 1.0;
+    } else {
+        return 0.0;
     }
 }
 

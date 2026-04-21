@@ -2618,6 +2618,22 @@ impl GpuRenderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // Aux data storage buffer — carries polygon clip vertices
+                // packed 2-per-vec4. Shared with the SDF pipeline's
+                // binding(5) so tessellated path fills honour the same
+                // `ClipShape::Polygon` clips (Lottie track mattes are
+                // built this way). Re-bound via `recreate_path_bind_group`
+                // whenever the aux buffer gets resized.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -3668,6 +3684,11 @@ impl GpuRenderer {
                     binding: 6,
                     resource: wgpu::BindingResource::Sampler(path_image_sampler),
                 },
+                // Aux data (binding 7) — shared with the SDF pipeline.
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: buffers.aux_data.as_entire_binding(),
+                },
             ],
         });
 
@@ -4419,7 +4440,7 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            // Render SDF primitives via split pipelines
+            // Render SDF primitives via split pipelines.
             if !visible_primitives.is_empty() {
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
                 Self::draw_split_sdf(
@@ -4431,7 +4452,19 @@ impl GpuRenderer {
                 );
             }
 
-            // Render paths
+            // Render tessellated paths in a single monolithic draw. This
+            // places every path on top of every SDF primitive regardless
+            // of submission order, which is the right default for most
+            // Blinc UI (SVG icons over background cards, canvas fills
+            // over SDF text, etc). For Lottie scenes whose layer stack
+            // interleaves text (SDF primitive stream via `draw_text`)
+            // with shape fills (tessellated path pipeline), this order
+            // can bury text under later shape fills even though Lottie's
+            // back-to-front order would put the text on top. The
+            // follow-up is to route path fills through the SDF pipeline
+            // as a new primitive type so the existing submission-order
+            // dispatch handles them the same way it handles text — see
+            // BACKLOG.md for the plan.
             if has_paths {
                 if let (Some(vb), Some(ib)) =
                     (&self.buffers.path_vertices, &self.buffers.path_indices)
@@ -4900,8 +4933,11 @@ impl GpuRenderer {
                 mapped_at_creation: false,
             });
 
-            // Must recreate the SDF bind group since the buffer changed
+            // Must recreate the SDF and path bind groups since the
+            // buffer changed — path binding(7) references aux_data too
+            // so the same handle-invalidation applies.
             self.rebind_sdf_bind_group();
+            self.rebind_path_bind_group();
         }
 
         self.queue.write_buffer(
@@ -4973,6 +5009,55 @@ impl GpuRenderer {
                 },
             );
         }
+    }
+
+    /// Recreate the path bind group. Needed when the aux_data storage
+    /// buffer is resized (binding 7 references the buffer by handle,
+    /// so the old bind group keeps pointing at the freed buffer). Uses
+    /// the placeholder path-image view — glass backdrops are applied
+    /// through a separate bind group set that carries the real
+    /// backdrop texture, so binding 5 here stays a placeholder.
+    fn rebind_path_bind_group(&mut self) {
+        self.bind_groups.path = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Path Bind Group (rebound)"),
+            layout: &self.bind_group_layouts.path,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.buffers.path_uniforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(
+                        &self.gradient_texture_cache.view,
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.gradient_texture_cache.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.placeholder_path_image_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.path_image_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&self.placeholder_path_image_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(&self.path_image_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.buffers.aux_data.as_entire_binding(),
+                },
+            ],
+        });
     }
 
     /// Recreate the SDF bind group (needed when aux_data buffer is resized).

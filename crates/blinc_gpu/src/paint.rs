@@ -1024,18 +1024,30 @@ impl<'a> GpuPaintContext<'a> {
             }
         }
 
-        // Check if the topmost clip is non-rect (circle, ellipse, polygon).
-        // If so, the topmost non-rect clip takes priority over rect clip intersection,
-        // since the GPU shader can only evaluate one clip type per primitive.
-        let topmost_is_non_rect = matches!(
-            self.clip_stack.last().map(|(c, _, _)| c),
-            Some(
-                ClipShape::Circle { .. }
-                    | ClipShape::Ellipse { .. }
-                    | ClipShape::Polygon(_)
-                    | ClipShape::Path(_)
-            )
-        );
+        // Find the topmost non-rect clip anywhere in the stack (circle,
+        // ellipse, polygon, path). When one exists it becomes the shape
+        // clip for the primitive and any rect clips contribute only to
+        // the scissor bounds. Previously this scanned only
+        // `clip_stack.last()`, so pushing a rect clip on top of a
+        // polygon (e.g. a precomp's inner canvas rect stacked on a
+        // matte polygon) silently dropped the polygon — which is what
+        // made `blinc_lottie`'s track mattes look unclipped when the
+        // matted layer was a precomp. The GPU still only evaluates one
+        // non-rect shape per primitive, so we stop at the first one
+        // found walking top-down.
+        let topmost_non_rect_idx = self
+            .clip_stack
+            .iter()
+            .rposition(|(c, _, _)| {
+                matches!(
+                    c,
+                    ClipShape::Circle { .. }
+                        | ClipShape::Ellipse { .. }
+                        | ClipShape::Polygon(_)
+                        | ClipShape::Path(_)
+                )
+            });
+        let topmost_is_non_rect = topmost_non_rect_idx.is_some();
 
         // If we have rect clips AND the topmost clip is rect-based, use the intersection
         if has_rect_clips && !topmost_is_non_rect {
@@ -1112,7 +1124,14 @@ impl<'a> GpuPaintContext<'a> {
             [-10000.0, -10000.0, 100000.0, 100000.0]
         };
 
-        let (clip, poly_meta, _fade) = self.clip_stack.last().unwrap();
+        // Prefer the topmost non-rect clip (if any) for the shape
+        // entry; otherwise fall back to the topmost clip outright
+        // (which will be a rect / rounded-rect and lands in the rect-
+        // intersection branches below). Scanning instead of just
+        // `last()` is what lets a rect clip stacked on top of a
+        // polygon matte still resolve to the polygon as the shape.
+        let shape_idx = topmost_non_rect_idx.unwrap_or(self.clip_stack.len() - 1);
+        let (clip, poly_meta, _fade) = &self.clip_stack[shape_idx];
         match clip {
             ClipShape::Rect(rect) => (
                 [rect.x(), rect.y(), rect.width(), rect.height()],
