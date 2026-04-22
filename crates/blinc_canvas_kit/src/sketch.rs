@@ -139,10 +139,9 @@ pub fn sketch<S: Sketch>(key: &str, s: S) -> Div {
     // a keyed atomic flag that survives UI rebuilds the same way
     // `SketchHandle` does. Without the guard every rebuild would
     // leak a fresh tick callback into the scheduler.
-    let scheduler_registered = use_state_keyed(
-        &format!("{key}_sketch_sched_reg"),
-        || std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
+    let scheduler_registered = use_state_keyed(&format!("{key}_sketch_sched_reg"), || {
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+    });
     if let Some(flag) = scheduler_registered.try_get() {
         if !flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
             if let Some(scheduler) = get_global_scheduler() {

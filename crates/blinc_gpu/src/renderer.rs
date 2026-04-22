@@ -7243,8 +7243,7 @@ impl GpuRenderer {
                     | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
-            let resolve_view =
-                resolve_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let resolve_view = resolve_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
             let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("Primitives Blend Sampler"),

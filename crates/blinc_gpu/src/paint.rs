@@ -1253,8 +1253,7 @@ impl<'a> GpuPaintContext<'a> {
                     let dy = end.y - start.y;
                     let len_sq = dx * dx + dy * dy;
                     if len_sq > 1e-6 {
-                        (((p[0] - start.x) * dx + (p[1] - start.y) * dy) / len_sq)
-                            .clamp(0.0, 1.0)
+                        (((p[0] - start.x) * dx + (p[1] - start.y) * dy) / len_sq).clamp(0.0, 1.0)
                     } else {
                         0.0
                     }
@@ -3402,6 +3401,7 @@ impl<'a> GpuPaintContext<'a> {
     /// edge. Interior tessellation seams carry a zero flag, so the
     /// fragment keeps full alpha across them and adjacent triangles
     /// don't leave visible bands.
+    #[allow(clippy::too_many_arguments)]
     fn push_mesh_primitives_brush(
         &mut self,
         tessellated: &crate::path::TessellatedPath,
@@ -3580,7 +3580,12 @@ impl<'a> GpuPaintContext<'a> {
                 corner_radius: [s01, s12, s20, 0.0],
                 clip_bounds,
                 clip_radius,
-                type_info: [PrimitiveType::Mesh as u32, fill_type, clip_type_u, mesh_flag],
+                type_info: [
+                    PrimitiveType::Mesh as u32,
+                    fill_type,
+                    clip_type_u,
+                    mesh_flag,
+                ],
                 ..GpuPrimitive::default()
             };
             prim.local_affine = [1.0, 0.0, 0.0, 1.0];

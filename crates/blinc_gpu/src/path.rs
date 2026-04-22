@@ -921,8 +921,7 @@ pub fn tessellate_fill(path: &Path, brush: &Brush) -> TessellatedPath {
         return TessellatedPath::new();
     }
 
-    let (gradient_type, start_color, end_color, raw_gradient_params) =
-        extract_gradient_info(brush);
+    let (gradient_type, start_color, end_color, raw_gradient_params) = extract_gradient_info(brush);
     let (min_x, min_y, max_x, max_y) = compute_path_bounds(path);
     let bounds_width = (max_x - min_x).max(1.0);
     let bounds_height = (max_y - min_y).max(1.0);
@@ -1015,8 +1014,7 @@ pub fn tessellate_stroke(path: &Path, stroke: &Stroke, brush: &Brush) -> Tessell
         return TessellatedPath::new();
     }
 
-    let (gradient_type, start_color, end_color, raw_gradient_params) =
-        extract_gradient_info(brush);
+    let (gradient_type, start_color, end_color, raw_gradient_params) = extract_gradient_info(brush);
     let (min_x, min_y, max_x, max_y) = compute_path_bounds(path);
     let bounds_width = (max_x - min_x).max(1.0);
     let bounds_height = (max_y - min_y).max(1.0);
