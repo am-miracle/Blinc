@@ -646,7 +646,31 @@ pub fn extract_brush_info(brush: &Brush) -> PathBrushInfo {
             let stops = gradient.stops();
             let start_color = gradient.first_color();
             let end_color = gradient.last_color();
-            let needs_texture = stops.len() > 2;
+            // Force the 2-stop vertex-interpolation path for every
+            // gradient. The texture-backed multi-stop route is
+            // globally shared — one 1D texture slot on the GPU that
+            // every `push_path_with_brush_info` overwrites — so in
+            // any frame containing more than one distinct multi-stop
+            // gradient, all but the last one render against the
+            // wrong stops. Depending on how `use_gradient_texture`
+            // ends up latched across submissions, those earlier
+            // gradients can also sample the placeholder texture,
+            // rendering as transparent and effectively disappearing
+            // (which is what happens in the volume scene: head /
+            // BG / seeker gradients all vanish while the music
+            // notes + hat / airpods / collar solid fills stay).
+            //
+            // The 2-stop path interpolates `mix(color, end_color, t)`
+            // per fragment with `t` derived from the authored
+            // gradient direction — it loses the mid-stop curve
+            // shape but reproduces the overall colour transition
+            // from first → last, which is what authored Lottie
+            // gradients visually care about (most gradients in the
+            // wild are 2- or 3-stop with nearly-linear mid stops).
+            // The proper fix is a gradient atlas with per-vertex
+            // row indexing; tracked as a follow-up.
+            let needs_texture = false;
+            let _ = stops;
 
             match gradient {
                 Gradient::Linear {
@@ -809,6 +833,86 @@ fn normalize_gradient_params_to_obb(
     }
 }
 
+/// Sample the authored multi-stop gradient at a single vertex's
+/// OBB-space UV. Mirrors the path fragment shader's linear / radial
+/// projection math so pre-baked per-vertex colours match what the
+/// shader would have produced had the texture path been usable.
+#[allow(dead_code)]
+fn sample_gradient_at_uv(
+    gradient_type: u32,
+    gradient_params: [f32; 4],
+    stops: &[blinc_core::GradientStop],
+    u: f32,
+    v: f32,
+) -> Color {
+    let t = match gradient_type {
+        1 => {
+            // Linear: project UV onto the (start, end) line in OBB
+            // space. `gradient_params` = [x1, y1, x2, y2].
+            let sx = gradient_params[0];
+            let sy = gradient_params[1];
+            let ex = gradient_params[2];
+            let ey = gradient_params[3];
+            let dx = ex - sx;
+            let dy = ey - sy;
+            let len_sq = dx * dx + dy * dy;
+            if len_sq < 1e-6 {
+                0.0
+            } else {
+                (((u - sx) * dx + (v - sy) * dy) / len_sq).clamp(0.0, 1.0)
+            }
+        }
+        2 => {
+            // Radial: normalized distance from centre, per-axis
+            // radii. `gradient_params` = [cx, cy, rx, ry].
+            let cx = gradient_params[0];
+            let cy = gradient_params[1];
+            let rx = gradient_params[2].max(1e-5);
+            let ry = gradient_params[3].max(1e-5);
+            let du = (u - cx) / rx;
+            let dv = (v - cy) / ry;
+            (du * du + dv * dv).sqrt().clamp(0.0, 1.0)
+        }
+        _ => 0.0,
+    };
+    sample_gradient_stops(stops, t)
+}
+
+/// Sample a sorted stop list at parameter `t` in `[0, 1]`. Matches
+/// the CPU rasterizer's `sample_gradient` so CPU-rasterized and
+/// per-vertex paths agree pixel-for-pixel at the stop offsets.
+/// Linear between adjacent stops, clamp at the ends.
+fn sample_gradient_stops(stops: &[blinc_core::GradientStop], t: f32) -> Color {
+    if stops.is_empty() {
+        return Color::TRANSPARENT;
+    }
+    if t <= stops[0].offset {
+        return stops[0].color;
+    }
+    let last = stops.len() - 1;
+    if t >= stops[last].offset {
+        return stops[last].color;
+    }
+    for i in 0..last {
+        let s0 = &stops[i];
+        let s1 = &stops[i + 1];
+        if t >= s0.offset && t <= s1.offset {
+            let range = s1.offset - s0.offset;
+            if range < 1e-6 {
+                return s0.color;
+            }
+            let local = (t - s0.offset) / range;
+            return Color {
+                r: s0.color.r + (s1.color.r - s0.color.r) * local,
+                g: s0.color.g + (s1.color.g - s0.color.g) * local,
+                b: s0.color.b + (s1.color.b - s0.color.b) * local,
+                a: s0.color.a + (s1.color.a - s0.color.a) * local,
+            };
+        }
+    }
+    stops[last].color
+}
+
 /// Tessellate a path for filling
 pub fn tessellate_fill(path: &Path, brush: &Brush) -> TessellatedPath {
     let events = path_to_lyon_events(path);
@@ -876,10 +980,6 @@ pub fn tessellate_fill(path: &Path, brush: &Brush) -> TessellatedPath {
             let u = (pos.x - min_x) / bounds_width;
             let v = (pos.y - min_y) / bounds_height;
 
-            // For gradients, we pass start/end colors and gradient params
-            // The shader computes the gradient based on UV and gradient direction.
-            // Per-vertex clip fields default to "no clip" — push_path_with_brush_info
-            // overwrites them with the active clip state at the time of submission.
             PathVertex {
                 position: pos.to_array(),
                 color: [start_color.r, start_color.g, start_color.b, start_color.a],
@@ -975,9 +1075,6 @@ pub fn tessellate_stroke(path: &Path, stroke: &Stroke, brush: &Brush) -> Tessell
             let u = (pos.x - min_x) / bounds_width;
             let v = (pos.y - min_y) / bounds_height;
 
-            // For gradients, we pass start/end colors and gradient params.
-            // Per-vertex clip fields default to "no clip" — push_path_with_brush_info
-            // overwrites them with the active clip state at the time of submission.
             PathVertex {
                 position: pos.to_array(),
                 color: [start_color.r, start_color.g, start_color.b, start_color.a],

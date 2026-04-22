@@ -1221,6 +1221,105 @@ impl<'a> GpuPaintContext<'a> {
     }
 
     /// Apply opacity to a brush by modifying the color's alpha channel
+    /// Pre-sample a multi-stop gradient at every tessellated vertex's
+    /// path-local position. Returns `None` for solids, 2-stop
+    /// gradients (the SDF shader's `mix(color, color2, t)` path
+    /// handles them precisely per-fragment), or non-gradient
+    /// brushes. Output aligns with `tessellated.vertices`.
+    fn sample_per_vertex_gradient(
+        tessellated: &crate::path::TessellatedPath,
+        brush: &Brush,
+    ) -> Option<Vec<blinc_core::Color>> {
+        let Brush::Gradient(gradient) = brush else {
+            return None;
+        };
+        let stops = gradient.stops();
+        if stops.len() <= 2 {
+            return None;
+        }
+        // Multi-stop per-vertex sampling is gated behind an opt-in
+        // env flag until the layer-ordering regression it introduced
+        // in the interactive_volume scene is root-caused. Without
+        // this gate, the default 2-stop `mix(first, last, t)`
+        // fallback keeps rendering order identical to the
+        // known-working baseline.
+        if std::env::var("BLINC_MULTISTOP_VERTEX").ok().as_deref() != Some("1") {
+            return None;
+        }
+        let sample = |p: [f32; 2]| -> blinc_core::Color {
+            let t = match gradient {
+                blinc_core::Gradient::Linear { start, end, .. } => {
+                    let dx = end.x - start.x;
+                    let dy = end.y - start.y;
+                    let len_sq = dx * dx + dy * dy;
+                    if len_sq > 1e-6 {
+                        (((p[0] - start.x) * dx + (p[1] - start.y) * dy) / len_sq)
+                            .clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                }
+                blinc_core::Gradient::Radial { center, radius, .. } => {
+                    let dx = p[0] - center.x;
+                    let dy = p[1] - center.y;
+                    let d = (dx * dx + dy * dy).sqrt();
+                    (d / radius.max(1e-5)).clamp(0.0, 1.0)
+                }
+                blinc_core::Gradient::Conic { center, .. } => {
+                    // Approximate conic as radial until we add conic shader
+                    // support — mirrors `extract_brush_info`'s handling.
+                    let dx = p[0] - center.x;
+                    let dy = p[1] - center.y;
+                    let d = (dx * dx + dy * dy).sqrt();
+                    (d / 100.0).clamp(0.0, 1.0)
+                }
+            };
+            Self::sample_stops(stops, t)
+        };
+        Some(
+            tessellated
+                .vertices
+                .iter()
+                .map(|v| sample(v.position))
+                .collect(),
+        )
+    }
+
+    /// Piecewise-linear interpolation through a sorted gradient stop
+    /// list at parameter `t`. Clamps outside the first/last stop
+    /// offsets. Mirrors `blinc_gpu::path::sample_gradient_stops`
+    /// without re-exporting it.
+    fn sample_stops(stops: &[blinc_core::GradientStop], t: f32) -> blinc_core::Color {
+        if stops.is_empty() {
+            return blinc_core::Color::TRANSPARENT;
+        }
+        if t <= stops[0].offset {
+            return stops[0].color;
+        }
+        let last = stops.len() - 1;
+        if t >= stops[last].offset {
+            return stops[last].color;
+        }
+        for i in 0..last {
+            let s0 = &stops[i];
+            let s1 = &stops[i + 1];
+            if t >= s0.offset && t <= s1.offset {
+                let range = s1.offset - s0.offset;
+                if range < 1e-6 {
+                    return s0.color;
+                }
+                let local = (t - s0.offset) / range;
+                return blinc_core::Color {
+                    r: s0.color.r + (s1.color.r - s0.color.r) * local,
+                    g: s0.color.g + (s1.color.g - s0.color.g) * local,
+                    b: s0.color.b + (s1.color.b - s0.color.b) * local,
+                    a: s0.color.a + (s1.color.a - s0.color.a) * local,
+                };
+            }
+        }
+        stops[last].color
+    }
+
     fn apply_opacity_to_brush(brush: Brush, opacity: f32) -> Brush {
         if opacity >= 1.0 {
             return brush;
@@ -1538,12 +1637,31 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         // out with the text behind the shape. The SDF-stream route
         // avoids that entirely by sharing the primitive dispatch.
         //
-        // Gradients / glass / image fills stay on the path pipeline
-        // for now; adding those brush types to the Mesh fragment
-        // shader is a follow-up. Most Lottie shape fills are solid.
-        if let Brush::Solid(color) = brush {
-            let mut tessellated = tessellate_fill(path, &Brush::Solid(color));
+        // Gradients take the same SDF-stream route via the PRIM_MESH
+        // fill_type path: the SDF core shader already rasterises
+        // linear and radial gradients per-fragment; routing them
+        // through `push_mesh_primitives_brush` keeps gradient fills
+        // in submission order with solids. Previously gradients went
+        // to the path pipeline which drew in a single batch AFTER
+        // every SDF primitive, so solids authored later in the
+        // Lottie stack covered gradients authored earlier — the
+        // "brown face / purple BG / seeker invisible" symptom on
+        // the interactive_volume scene.
+        if matches!(brush, Brush::Solid(_) | Brush::Gradient(_)) {
+            let mut tessellated = tessellate_fill(path, &brush);
             let affine = self.current_affine();
+            // Pre-sample per-vertex colours for multi-stop gradients
+            // BEFORE the affine transform — gradient stops are
+            // defined in the path's local coordinate space, so
+            // sampling has to happen there. The SDF shader's built-in
+            // linear / radial math only handles 2 stops (color +
+            // color2); per-vertex sampling + barycentric interpolation
+            // reproduces the authored multi-stop ramp at a fidelity
+            // that tracks tessellation density (lyon's 0.2 px
+            // tolerance keeps triangles small enough that per-vertex
+            // Gouraud-style colour is visually close to true
+            // multi-stop).
+            let per_vertex_colors = Self::sample_per_vertex_gradient(&tessellated, &brush);
             for vertex in &mut tessellated.vertices {
                 let x = vertex.position[0];
                 let y = vertex.position[1];
@@ -1554,9 +1672,11 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             }
             if !tessellated.is_empty() {
                 let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
-                self.push_mesh_primitives(
+                self.push_mesh_primitives_brush(
                     &tessellated,
-                    color,
+                    &brush,
+                    &affine,
+                    per_vertex_colors.as_deref(),
                     clip_bounds,
                     clip_radius,
                     clip_type,
@@ -1565,8 +1685,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             return;
         }
 
-        // Non-solid brushes: fall back to the tessellated-path
-        // pipeline for now.
+        // Glass / image / other brush types: fall back to the
+        // tessellated-path pipeline. These are rare in Lottie and
+        // the path pipeline handles them today.
         let brush_info = extract_brush_info(&brush);
 
         let mut tessellated = tessellate_fill(path, &brush);
@@ -1609,12 +1730,13 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let opacity = self.combined_opacity();
         let brush = Self::apply_opacity_to_brush(brush, opacity);
 
-        // Solid strokes share the same SDF-stream route as `fill_path`
-        // so submission order lines up with text. See the comment on
-        // `fill_path` for the rationale.
-        if let Brush::Solid(color) = brush {
-            let mut tessellated = tessellate_stroke(path, stroke, &Brush::Solid(color));
+        // Solid + gradient strokes share the SDF-stream route so
+        // submission order lines up with text. See `fill_path` for
+        // the rationale.
+        if matches!(brush, Brush::Solid(_) | Brush::Gradient(_)) {
+            let mut tessellated = tessellate_stroke(path, stroke, &brush);
             let affine = self.current_affine();
+            let per_vertex_colors = Self::sample_per_vertex_gradient(&tessellated, &brush);
             for vertex in &mut tessellated.vertices {
                 let x = vertex.position[0];
                 let y = vertex.position[1];
@@ -1625,9 +1747,11 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             }
             if !tessellated.is_empty() {
                 let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
-                self.push_mesh_primitives(
+                self.push_mesh_primitives_brush(
                     &tessellated,
-                    color,
+                    &brush,
+                    &affine,
+                    per_vertex_colors.as_deref(),
                     clip_bounds,
                     clip_radius,
                     clip_type,
@@ -3278,10 +3402,12 @@ impl<'a> GpuPaintContext<'a> {
     /// edge. Interior tessellation seams carry a zero flag, so the
     /// fragment keeps full alpha across them and adjacent triangles
     /// don't leave visible bands.
-    fn push_mesh_primitives(
+    fn push_mesh_primitives_brush(
         &mut self,
         tessellated: &crate::path::TessellatedPath,
-        color: blinc_core::Color,
+        brush: &Brush,
+        affine: &blinc_core::Affine2D,
+        per_vertex_colors: Option<&[blinc_core::Color]>,
         clip_bounds: [f32; 4],
         clip_radius: [f32; 4],
         clip_type: ClipType,
@@ -3317,7 +3443,76 @@ impl<'a> GpuPaintContext<'a> {
             }
         };
 
-        let color_arr = [color.r, color.g, color.b, color.a];
+        // Encode brush into gradient fields shared across every
+        // triangle emitted for this fill. The SDF core shader reads
+        // `color` + `color2` + `gradient_params` via `fill_type`
+        // (PRIM_MESH honours the same fill_type branches as rect /
+        // circle / ellipse), so we transform gradient endpoints from
+        // path-local to screen space once and reuse them per
+        // triangle.
+        let apply = |pt: [f32; 2]| -> [f32; 2] {
+            [
+                affine.elements[0] * pt[0] + affine.elements[2] * pt[1] + affine.elements[4],
+                affine.elements[1] * pt[0] + affine.elements[3] * pt[1] + affine.elements[5],
+            ]
+        };
+        let scale = {
+            let a = affine.elements[0];
+            let b = affine.elements[1];
+            let c = affine.elements[2];
+            let d = affine.elements[3];
+            let sx = (a * a + b * b).sqrt();
+            let sy = (c * c + d * d).sqrt();
+            (sx + sy) * 0.5
+        };
+        let (fill_type, color_arr, color2_arr, grad_params) = match brush {
+            Brush::Solid(c) => (
+                0u32,
+                [c.r, c.g, c.b, c.a],
+                [c.r, c.g, c.b, c.a],
+                [0.0, 0.0, 0.0, 0.0],
+            ),
+            Brush::Gradient(g) => {
+                let first = g.first_color();
+                let last = g.last_color();
+                match g {
+                    blinc_core::Gradient::Linear { start, end, .. } => {
+                        let s = apply([start.x, start.y]);
+                        let e = apply([end.x, end.y]);
+                        (
+                            1u32,
+                            [first.r, first.g, first.b, first.a],
+                            [last.r, last.g, last.b, last.a],
+                            [s[0], s[1], e[0], e[1]],
+                        )
+                    }
+                    blinc_core::Gradient::Radial { center, radius, .. } => {
+                        let c = apply([center.x, center.y]);
+                        (
+                            2u32,
+                            [first.r, first.g, first.b, first.a],
+                            [last.r, last.g, last.b, last.a],
+                            [c[0], c[1], radius * scale, 0.0],
+                        )
+                    }
+                    blinc_core::Gradient::Conic { center, .. } => {
+                        let c = apply([center.x, center.y]);
+                        (
+                            2u32,
+                            [first.r, first.g, first.b, first.a],
+                            [last.r, last.g, last.b, last.a],
+                            [c[0], c[1], 100.0 * scale, 0.0],
+                        )
+                    }
+                }
+            }
+            _ => (
+                0u32,
+                [1.0, 1.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0, 1.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ),
+        };
         let clip_type_u = clip_type as u32;
 
         let mut i = 0;
@@ -3343,6 +3538,21 @@ impl<'a> GpuPaintContext<'a> {
             let aux_offset = self.batch.aux_data.len() as u32;
             self.batch.aux_data.push([v0[0], v0[1], v1[0], v1[1]]);
             self.batch.aux_data.push([v2[0], v2[1], 0.0, 0.0]);
+            // Multi-stop gradient: append 3 per-vertex colours right
+            // after the triangle positions. The shader reads them at
+            // `aux_data[aux_offset + 2..+5]` when
+            // `type_info.w == 1u` and does barycentric interpolation
+            // via `mesh_bary`, bypassing the fill_type switch so the
+            // authored ramp is reproduced smoothly across the
+            // triangle.
+            if let Some(colors) = per_vertex_colors {
+                let c0 = colors[i0 as usize];
+                let c1 = colors[i1 as usize];
+                let c2 = colors[i2 as usize];
+                self.batch.aux_data.push([c0.r, c0.g, c0.b, c0.a]);
+                self.batch.aux_data.push([c1.r, c1.g, c1.b, c1.a]);
+                self.batch.aux_data.push([c2.r, c2.g, c2.b, c2.a]);
+            }
 
             let min_x = v0[0].min(v1[0]).min(v2[0]);
             let min_y = v0[1].min(v1[1]).min(v2[1]);
@@ -3359,14 +3569,18 @@ impl<'a> GpuPaintContext<'a> {
             let s12 = is_silhouette(i1, i2);
             let s20 = is_silhouette(i2, i0);
 
+            let mesh_flag: u32 = if per_vertex_colors.is_some() { 1 } else { 0 };
+
             let mut prim = GpuPrimitive {
                 bounds: [min_x, min_y, max_x - min_x, max_y - min_y],
                 color: color_arr,
+                color2: color2_arr,
+                gradient_params: grad_params,
                 border: [0.0, 0.0, aux_offset as f32, 0.0],
                 corner_radius: [s01, s12, s20, 0.0],
                 clip_bounds,
                 clip_radius,
-                type_info: [PrimitiveType::Mesh as u32, 0, clip_type_u, 0],
+                type_info: [PrimitiveType::Mesh as u32, fill_type, clip_type_u, mesh_flag],
                 ..GpuPrimitive::default()
             };
             prim.local_affine = [1.0, 0.0, 0.0, 1.0];

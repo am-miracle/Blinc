@@ -959,38 +959,54 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Determine fill color
     var fill_color: vec4<f32>;
-    switch fill_type {
-        case 0u /* FILL_SOLID */: {
-            fill_color = prim.color;
-        }
-        case 1u /* FILL_LINEAR_GRADIENT */: {
-            // Linear gradient using gradient_params (x1, y1, x2, y2) in user space
-            let g_start = prim.gradient_params.xy;
-            let g_end = prim.gradient_params.zw;
-            let g_dir = g_end - g_start;
-            let g_len_sq = dot(g_dir, g_dir);
-
-            var t: f32;
-            if (g_len_sq > 0.0001) {
-                // Project current position onto gradient line
-                let proj = sp - g_start;
-                t = clamp(dot(proj, g_dir) / g_len_sq, 0.0, 1.0);
-            } else {
-                t = 0.0;
+    // PRIM_MESH with `type_info.w == 1u` carries per-vertex colours
+    // packed into `aux_data[offset+2..+5]` right after the triangle
+    // positions. Barycentric interpolation reproduces authored
+    // multi-stop gradients across the triangle without needing a
+    // gradient atlas — fidelity tracks tessellation density. Honour
+    // this before the fill_type switch so the 2-stop `mix` path
+    // stays the precise per-fragment default.
+    if prim.type_info.x == 9u && prim.type_info.w == 1u {
+        let aux_off = u32(prim.border.z);
+        let c0 = aux_data[aux_off + 2u];
+        let c1 = aux_data[aux_off + 3u];
+        let c2 = aux_data[aux_off + 4u];
+        let mb = in.mesh_bary;
+        fill_color = c0 * mb.x + c1 * mb.y + c2 * mb.z;
+    } else {
+        switch fill_type {
+            case 0u /* FILL_SOLID */: {
+                fill_color = prim.color;
             }
-            fill_color = mix(prim.color, prim.color2, t);
-        }
-        case 2u /* FILL_RADIAL_GRADIENT */: {
-            // Radial gradient using gradient_params (cx, cy, radius, 0) in user space
-            let g_center = prim.gradient_params.xy;
-            let g_radius = prim.gradient_params.z;
+            case 1u /* FILL_LINEAR_GRADIENT */: {
+                // Linear gradient using gradient_params (x1, y1, x2, y2) in user space
+                let g_start = prim.gradient_params.xy;
+                let g_end = prim.gradient_params.zw;
+                let g_dir = g_end - g_start;
+                let g_len_sq = dot(g_dir, g_dir);
 
-            let dist = length(sp - g_center);
-            let t = clamp(dist / max(g_radius, 0.001), 0.0, 1.0);
-            fill_color = mix(prim.color, prim.color2, t);
-        }
-        default: {
-            fill_color = prim.color;
+                var t: f32;
+                if (g_len_sq > 0.0001) {
+                    // Project current position onto gradient line
+                    let proj = sp - g_start;
+                    t = clamp(dot(proj, g_dir) / g_len_sq, 0.0, 1.0);
+                } else {
+                    t = 0.0;
+                }
+                fill_color = mix(prim.color, prim.color2, t);
+            }
+            case 2u /* FILL_RADIAL_GRADIENT */: {
+                // Radial gradient using gradient_params (cx, cy, radius, 0) in user space
+                let g_center = prim.gradient_params.xy;
+                let g_radius = prim.gradient_params.z;
+
+                let dist = length(sp - g_center);
+                let t = clamp(dist / max(g_radius, 0.001), 0.0, 1.0);
+                fill_color = mix(prim.color, prim.color2, t);
+            }
+            default: {
+                fill_color = prim.color;
+            }
         }
     }
 
