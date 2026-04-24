@@ -3190,6 +3190,28 @@ impl WindowedApp {
                                         Key::S => 83, Key::T => 84, Key::U => 85,
                                         Key::V => 86, Key::W => 87, Key::X => 88,
                                         Key::Y => 89, Key::Z => 90,
+                                        // Digit row — match standard JS
+                                        // KeyboardEvent.keyCode for parity
+                                        // with web-convention chord tables.
+                                        Key::Num0 => 48, Key::Num1 => 49, Key::Num2 => 50,
+                                        Key::Num3 => 51, Key::Num4 => 52, Key::Num5 => 53,
+                                        Key::Num6 => 54, Key::Num7 => 55, Key::Num8 => 56,
+                                        Key::Num9 => 57,
+                                        // Punctuation / symbol keys — JS
+                                        // keyCode values so chord tables
+                                        // that bind `,` / `=` / `-` etc
+                                        // resolve cleanly.
+                                        Key::Semicolon => 186,
+                                        Key::Equals => 187,
+                                        Key::Comma => 188,
+                                        Key::Minus => 189,
+                                        Key::Period => 190,
+                                        Key::Slash => 191,
+                                        Key::Grave => 192,
+                                        Key::LeftBracket => 219,
+                                        Key::Backslash => 220,
+                                        Key::RightBracket => 221,
+                                        Key::Quote => 222,
                                         Key::Back => {
                                             // System back button — dispatch through back handler
                                             if blinc_layout::back_handler::dispatch_back() {
