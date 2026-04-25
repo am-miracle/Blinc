@@ -683,6 +683,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // https://www.w3.org/TR/WGSL/#uniformity for the spec rule.
     let d_fw_screen = length(vec2<f32>(fwidth(p.x), fwidth(p.y)));
 
+    // Mesh-triangle barycentric derivatives — only used by `prim_type
+    // == 9u` below, but `fwidth` must be evaluated in uniform control
+    // flow. Hoist it here, alongside `d_fw_screen`, before any
+    // `discard` or early `return` that depends on the non-uniform
+    // `prim_type` / `clip_alpha`. Dawn (Chrome's WebGPU validator)
+    // rejects the previous in-place `fwidth(mb)` call after the
+    // `prim_type` switch returns from `case 7u`. See
+    // https://www.w3.org/TR/WGSL/#uniformity.
+    let mb_uniform = in.mesh_bary;
+    let mb_fw_uniform = fwidth(mb_uniform);
+
     let prim_type = prim.type_info.x;
     let fill_type = prim.type_info.y;
     let clip_type = prim.type_info.z;
@@ -932,8 +943,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // `fwidth` still runs in uniform control flow so the derivative
     // queries stay valid regardless of which branch the fragment
     // actually takes.
-    let mb = in.mesh_bary;
-    let mb_fw = fwidth(mb);
+    let mb = mb_uniform;
+    let mb_fw = mb_fw_uniform;
     let mesh_msaa_active = uniforms._padding.x > 0.5;
     if prim.type_info.x == 9u {
         if mesh_msaa_active {
