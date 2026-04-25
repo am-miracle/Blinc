@@ -9908,6 +9908,37 @@ impl GpuRenderer {
             })
             .collect();
 
+        // Mesh primitives (`type_info[0] == 9`) read their triangle
+        // vertex positions from `aux_data[aux_offset..aux_offset + 2]`,
+        // not from `bounds`. Those positions are screen-space at push
+        // time, so the `bounds` offset above doesn't translate them
+        // into the tight texture's coordinate frame — vertices land
+        // outside the texture viewport and the rasteriser clips the
+        // triangle, leaving the tight texture empty. Build a translated
+        // copy of `aux_data` for this pass: clone the original, then
+        // subtract the offset from the position vec4s of every mesh
+        // primitive in the layer range. The optional per-vertex colour
+        // entries that follow (when `type_info[3] == 1`) stay unchanged.
+        let mut tight_aux_data: Vec<[f32; 4]> = batch.aux_data.clone();
+        let mut needs_aux_upload = false;
+        for op in &offset_primitives {
+            if op.type_info[0] != 9 {
+                continue;
+            }
+            let aux_off = op.border[2] as usize;
+            if aux_off + 1 >= tight_aux_data.len() {
+                continue;
+            }
+            tight_aux_data[aux_off][0] -= offset_x;
+            tight_aux_data[aux_off][1] -= offset_y;
+            tight_aux_data[aux_off][2] -= offset_x;
+            tight_aux_data[aux_off][3] -= offset_y;
+            tight_aux_data[aux_off + 1][0] -= offset_x;
+            tight_aux_data[aux_off + 1][1] -= offset_y;
+            // pack1.zw is unused (padding) — leave alone.
+            needs_aux_upload = true;
+        }
+
         // Build the offset PathVertex slice + rebased index buffer.
         // Indices in the source batch reference vertices in
         // `batch.paths.vertices` directly; after slicing, the local
@@ -9943,6 +9974,25 @@ impl GpuRenderer {
         // Sort and upload offset primitives
         let sdf_ranges = self.upload_sorted_primitives(&offset_primitives);
         drop(offset_primitives);
+
+        // Upload the offset-translated `aux_data` if any mesh
+        // primitive needed translation. Same `self.buffers.aux_data`
+        // the main pass uses — we restore it after `queue.submit`
+        // so subsequent passes see the original screen-space data.
+        // The buffer is already sized for `batch.aux_data`'s length
+        // (the main pass uploaded the same vec earlier), so the
+        // write fits without resizing or rebinding.
+        if needs_aux_upload {
+            if self.has_storage_buffers {
+                self.queue.write_buffer(
+                    &self.buffers.aux_data,
+                    0,
+                    bytemuck::cast_slice(&tight_aux_data),
+                );
+            } else {
+                self.update_aux_data_texture(&tight_aux_data);
+            }
+        }
 
         // Upload offset path geometry to a transient buffer pair so
         // the shared `path_vertices` / `path_indices` buffers used by
@@ -10045,6 +10095,22 @@ impl GpuRenderer {
             0,
             bytemuck::bytes_of(&restore_uniforms),
         );
+
+        // Restore the screen-space `aux_data` so subsequent passes
+        // (next layer's tight render, post-effect overlays, etc.)
+        // see the original mesh vertex positions instead of the
+        // tight-translated copy we wrote above.
+        if needs_aux_upload {
+            if self.has_storage_buffers {
+                self.queue.write_buffer(
+                    &self.buffers.aux_data,
+                    0,
+                    bytemuck::cast_slice(&batch.aux_data),
+                );
+            } else {
+                self.update_aux_data_texture(&batch.aux_data);
+            }
+        }
 
         (layer_texture, content_size)
     }
