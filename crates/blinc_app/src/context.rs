@@ -4621,48 +4621,35 @@ impl RenderContext {
                     self.render_text_decorations_for_layer(target, &fg_decorations_by_layer, z);
                 }
             } else {
-                // Fast path: render full batch (handles layer effects like
-                // backdrop-filter). When MSAA is configured, split the
-                // clear-and-draw into (1) a target clear and (2) an MSAA
-                // overlay that renders both primitives and paths in the
-                // same multisampled pass. That routes solid path fills
-                // (PRIM_MESH triangles) through the same hardware coverage
-                // the path pipeline already gets, instead of leaving them
-                // on the single-sampled `render_with_clear` path.
+                // Fast path: render the full batch through
+                // `render_with_clear`, which dispatches into
+                // `render_with_layer_effects` when the batch carries
+                // any `LayerCommand::Push { effects: !empty }` and
+                // falls through to the simple SDF path otherwise.
                 //
-                // `render_overlay_msaa` now uploads `aux_data` internally,
-                // so it no longer depends on a preceding single-sampled
-                // render_with_clear to have primed the GPU buffer — the
-                // silent reason the earlier swap blanked every mesh
-                // primitive.
-                //
-                // Layer-effect dispatch: `render_overlay_msaa` doesn't
-                // walk `batch.layer_commands`, so MSAA + layer effects
-                // (e.g. ruffle's per-node `Node::effects` blur) silently
-                // drops the offscreen passes. Fall back to
-                // `render_with_clear` whenever effects are present —
-                // it dispatches into `render_with_layer_effects` which
-                // honours the layer stack. Path-AA is reapplied below
-                // via `render_paths_overlay_msaa` when MSAA is on.
-                if use_msaa_overlay && !has_layer_effects {
-                    self.renderer.clear_target(
-                        target,
-                        wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: self.clear_alpha as f64,
-                        },
-                    );
-                    self.renderer
-                        .render_overlay_msaa(target, &batch, self.sample_count);
-                } else {
-                    self.renderer.render_with_clear(
-                        target,
-                        &batch,
-                        [0.0, 0.0, 0.0, self.clear_alpha as f64],
-                    );
-                }
+                // This branch used to flip between
+                // `render_overlay_msaa` (when no layer effects) and
+                // `render_with_clear` (when effects were present),
+                // which gave mesh primitives hardware-coverage AA on
+                // the no-effect frames. The flip ran per frame, so an
+                // animated effect — e.g. ruffle's `breathe-blur`
+                // sweeping radius 0 → 32 → 0 — toggled the rendering
+                // path twice per cycle. Mesh primitives' silhouette AA
+                // shifts subtly between hardware-MSAA and the SDF
+                // shader's barycentric ramp, and the toggle reads as
+                // a flash on the affected node. Pinning the path to
+                // `render_with_clear` keeps the visual stable, and
+                // the path overlay below still applies hardware MSAA
+                // to actual `Path` geometry. Mesh primitives lose the
+                // hardware-coverage refinement on no-effect frames,
+                // but the shader-side edge AA they fall back to is
+                // already 1 px wide and is the same path that runs
+                // when effects DO exist — no per-frame discontinuity.
+                self.renderer.render_with_clear(
+                    target,
+                    &batch,
+                    [0.0, 0.0, 0.0, self.clear_alpha as f64],
+                );
 
                 // Render dynamic images (video frames)
                 if !batch.dynamic_images.is_empty() {
@@ -4670,17 +4657,11 @@ impl RenderContext {
                         .render_dynamic_images(target, &batch.dynamic_images);
                 }
 
-                // Render paths with MSAA for smooth edges on curved shapes
-                // like notch. Skipped when the MSAA overlay above already
-                // handled both primitives and paths together — re-running
-                // would double the path draws on the target.
-                //
-                // When `has_layer_effects` is true the MSAA overlay was
-                // skipped (we routed through `render_with_clear` to honour
-                // the layer stack), so the path overlay still needs to
-                // run to recover path-edge AA on this frame.
-                let used_msaa_main = use_msaa_overlay && !has_layer_effects;
-                if !used_msaa_main && batch.has_paths() && self.sample_count > 1 {
+                // Path overlay MSAA. The main pass above is always
+                // single-sampled now, so this runs whenever MSAA is
+                // configured — no more conditional skip for the
+                // (previously) MSAA main path.
+                if batch.has_paths() && self.sample_count > 1 {
                     self.renderer
                         .render_paths_overlay_msaa(target, &batch, self.sample_count);
                 }
