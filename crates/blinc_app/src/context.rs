@@ -4635,7 +4635,16 @@ impl RenderContext {
                 // render_with_clear to have primed the GPU buffer — the
                 // silent reason the earlier swap blanked every mesh
                 // primitive.
-                if use_msaa_overlay {
+                //
+                // Layer-effect dispatch: `render_overlay_msaa` doesn't
+                // walk `batch.layer_commands`, so MSAA + layer effects
+                // (e.g. ruffle's per-node `Node::effects` blur) silently
+                // drops the offscreen passes. Fall back to
+                // `render_with_clear` whenever effects are present —
+                // it dispatches into `render_with_layer_effects` which
+                // honours the layer stack. Path-AA is reapplied below
+                // via `render_paths_overlay_msaa` when MSAA is on.
+                if use_msaa_overlay && !has_layer_effects {
                     self.renderer.clear_target(
                         target,
                         wgpu::Color {
@@ -4665,7 +4674,13 @@ impl RenderContext {
                 // like notch. Skipped when the MSAA overlay above already
                 // handled both primitives and paths together — re-running
                 // would double the path draws on the target.
-                if !use_msaa_overlay && batch.has_paths() && self.sample_count > 1 {
+                //
+                // When `has_layer_effects` is true the MSAA overlay was
+                // skipped (we routed through `render_with_clear` to honour
+                // the layer stack), so the path overlay still needs to
+                // run to recover path-edge AA on this frame.
+                let used_msaa_main = use_msaa_overlay && !has_layer_effects;
+                if !used_msaa_main && batch.has_paths() && self.sample_count > 1 {
                     self.renderer
                         .render_paths_overlay_msaa(target, &batch, self.sample_count);
                 }
