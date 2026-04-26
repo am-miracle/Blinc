@@ -555,6 +555,220 @@ fn test_music_player() {
     );
 }
 
+/// Read the rendered texture back as an `RgbaImage`, mirroring the
+/// inner half of `save_to_png`. Lets pixel-asserting tests inspect
+/// the GPU output directly without round-tripping through the
+/// filesystem.
+fn read_rendered_pixels(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> RgbaImage {
+    let bytes_per_row = padded_bytes_per_row(width);
+    let buffer_size = (bytes_per_row * height) as u64;
+
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Pixel Readback Buffer"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Pixel Readback Encoder"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let buffer_slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+        tx.send(result).unwrap();
+    });
+    let _ = device.poll(wgpu::PollType::Wait);
+    rx.recv().unwrap().expect("Failed to map buffer");
+
+    let data = buffer_slice.get_mapped_range();
+    let mut img: RgbaImage = ImageBuffer::new(width, height);
+    for y in 0..height {
+        let row_start = (y * bytes_per_row) as usize;
+        let row_end = row_start + (width * 4) as usize;
+        let row = &data[row_start..row_end];
+        for x in 0..width {
+            let i = (x * 4) as usize;
+            // Convert BGRA → RGBA. `Bgra8UnormSrgb` is the test
+            // texture's format (see `create_test_texture`).
+            img.put_pixel(
+                x,
+                y,
+                Rgba([row[i + 2], row[i + 1], row[i], row[i + 3]]),
+            );
+        }
+    }
+    drop(data);
+    buffer.unmap();
+    img
+}
+
+/// Regression test for the no-glass MSAA layer-effect bug.
+///
+/// Pre-fix: `RenderContext::render_tree_with_motion`'s no-glass
+/// fast path dispatched to `render_overlay_msaa` whenever
+/// `sample_count > 1`. `render_overlay_msaa` doesn't walk
+/// `batch.layer_commands`, so `LayerEffect::Blur` (and friends)
+/// pushed via `Div::blur` were silently dropped on the default
+/// 4× MSAA configuration. The blur radius reached the renderer
+/// in `batch.layer_commands` but never reached
+/// `apply_layer_effects`, so the rect rendered as if no filter
+/// were set — sharp edges instead of softened ones.
+///
+/// Post-fix (commits `da29258b` + `8d92007c`): the no-glass fast
+/// path always routes through `render_with_clear`, which honours
+/// the layer stack regardless of MSAA. Path overlay MSAA still
+/// runs after to recover path-edge AA.
+///
+/// Test asserts that a pixel just outside the inner rect's
+/// authored boundary picks up colour from the rect (i.e. the
+/// blur softened the edge into the surrounding white). Without
+/// the fix, pixels outside the sharp boundary stay pure white
+/// because the blur was dropped.
+#[test]
+fn test_layer_blur_visible_on_msaa_path() {
+    let Ok(mut app) = BlincApp::with_config(BlincConfig {
+        sample_count: 4, // The configuration that exposed the bug.
+        ..Default::default()
+    }) else {
+        eprintln!("Skipping test_layer_blur_visible_on_msaa_path: no GPU");
+        return;
+    };
+
+    let canvas = 200.0_f32;
+    let inner_size = 100.0_f32;
+    let blur_radius = 8.0_f32;
+    let inset = (canvas - inner_size) / 2.0; // 50.0 — inner rect at (50, 50)..(150, 150)
+
+    let ui = div()
+        .w(canvas)
+        .h(canvas)
+        .bg(Color::WHITE)
+        .child(
+            div()
+                .w(inner_size)
+                .h(inner_size)
+                .absolute()
+                .left(inset)
+                .top(inset)
+                .blur(blur_radius)
+                .bg(Color::RED),
+        );
+
+    // The bug lives in `render_tree_with_motion`'s no-glass fast
+    // path — `app.render` / `RenderContext::render_tree` skip layer
+    // effects entirely, so reproducing through that path would
+    // pass even with the bug regressed. Build the motion tree +
+    // empty render state by hand and route through the right
+    // entry point.
+    let mut tree = RenderTree::from_element(&ui);
+    tree.compute_layout(canvas, canvas);
+    let scheduler = std::sync::Arc::new(std::sync::Mutex::new(
+        blinc_animation::AnimationScheduler::new(),
+    ));
+    let render_state = blinc_layout::RenderState::new(scheduler);
+
+    let (texture, view) = create_test_texture(app.device(), canvas as u32, canvas as u32);
+    app.render_tree_with_motion(&tree, &render_state, &view, canvas as u32, canvas as u32)
+        .expect("Render failed");
+
+    let img = read_rendered_pixels(
+        app.device(),
+        app.queue(),
+        &texture,
+        canvas as u32,
+        canvas as u32,
+    );
+
+    // Save for visual debugging — expected output is a soft-edged
+    // red blob in the centre of a white square.
+    let path = Path::new(OUTPUT_DIR).join("layer_blur_visible_on_msaa_path.png");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    img.save(&path).expect("Failed to save PNG");
+
+    // Sample a pixel `expand` pixels outside the inner rect's
+    // authored sharp edge along the horizontal centerline. With
+    // an 8 px blur the edge falloff extends well past 4 px, so
+    // this pixel should pick up significant red and reduced
+    // green/blue. Without the fix it would be pure white
+    // (the rect's primitives never made it onto the target
+    // because `render_overlay_msaa` swallowed the layer push,
+    // so the surrounding white shows through unmodified).
+    let expand = 4_u32;
+    let probe_x = (inset as u32) - expand; // 46
+    let probe_y = (canvas as u32) / 2; // 100
+    let p = img.get_pixel(probe_x, probe_y);
+    let red = p[0] as i32;
+    let green = p[1] as i32;
+    let blue = p[2] as i32;
+
+    // Pure-white sentinel: r=g=b=255. If the bug regressed, all
+    // three channels would be saturated. The blurred-rect signal
+    // is "red elevated relative to the others" — at least 25 over
+    // the green/blue channels at this probe point on the fixed
+    // implementation.
+    assert!(
+        red - green > 25 && red - blue > 25,
+        "Layer blur not visible on MSAA path: probe at ({probe_x}, {probe_y}) = \
+         (r={red}, g={green}, b={blue}); expected red elevated by >25 vs green/blue. \
+         Saved at {path:?}.",
+    );
+
+    // Sanity: a pixel deep inside the rect should be near-pure red.
+    let mid = canvas as u32 / 2;
+    let inside = img.get_pixel(mid, mid);
+    assert!(
+        inside[0] > 200 && inside[1] < 100 && inside[2] < 100,
+        "Inner rect not red at centre: ({}, {}, {}) at ({mid}, {mid}). \
+         Saved at {path:?}.",
+        inside[0],
+        inside[1],
+        inside[2],
+    );
+
+    // Sanity: a pixel in the corner should be near-pure white
+    // (well outside the blur falloff).
+    let far = img.get_pixel(5, 5);
+    assert!(
+        far[0] > 240 && far[1] > 240 && far[2] > 240,
+        "Corner pixel not white: ({}, {}, {}). Saved at {path:?}.",
+        far[0],
+        far[1],
+        far[2],
+    );
+}
+
 #[test]
 fn test_render_tree_reuse() {
     require_gpu!(app);
