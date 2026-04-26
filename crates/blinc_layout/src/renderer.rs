@@ -11525,6 +11525,72 @@ impl RenderTree {
         let is_foreground = render_node.props.layer == RenderLayer::Foreground;
         let children_inside_foreground = inside_foreground || is_foreground;
 
+        // Compute the effective layer for the layer-effect push gate
+        // below — children inside glass / foreground render through the
+        // foreground layer regardless of this node's authored setting.
+        // (Same precedence the per-node render gate uses further down.)
+        let effective_layer_for_push = if (glass_depth > 0 && !is_glass) || inside_foreground {
+            RenderLayer::Foreground
+        } else if is_glass {
+            RenderLayer::Glass
+        } else {
+            render_node.props.layer
+        };
+
+        // Push a Blinc layer for any node that authored
+        // `layer_effects` — `Div::blur` / `Div::layer_effect` and
+        // anything reading `props.layer_effects`. Without this push
+        // the effect entries on this node ride into the batch as
+        // dead data and `apply_layer_effects` never runs (no
+        // `LayerCommand::Push { effects: !empty }` is queued).
+        // Symmetric with `render_layer_with_motion`'s richer push,
+        // minus the motion-opacity / blend-mode / 3D plumbing this
+        // simpler path doesn't track. Effect radii are scaled by
+        // the DPI factor so CSS px line up with physical px in the
+        // GPU effect kernels.
+        let has_layer_effects_node = !render_node.props.layer_effects.is_empty();
+        let should_push_layer = has_layer_effects_node
+            && effective_layer_for_push == target_layer;
+        if should_push_layer {
+            let scaled_effects: Vec<blinc_core::LayerEffect> = render_node
+                .props
+                .layer_effects
+                .iter()
+                .map(|e| match e {
+                    blinc_core::LayerEffect::Blur { radius, quality } => {
+                        blinc_core::LayerEffect::Blur {
+                            radius: radius * self.scale_factor,
+                            quality: *quality,
+                        }
+                    }
+                    blinc_core::LayerEffect::DropShadow {
+                        offset_x,
+                        offset_y,
+                        blur,
+                        spread,
+                        color,
+                    } => blinc_core::LayerEffect::DropShadow {
+                        offset_x: offset_x * self.scale_factor,
+                        offset_y: offset_y * self.scale_factor,
+                        blur: blur * self.scale_factor,
+                        spread: spread * self.scale_factor,
+                        color: *color,
+                    },
+                    other => other.clone(),
+                })
+                .collect();
+            ctx.push_layer(blinc_core::LayerConfig {
+                id: None,
+                position: Some(blinc_core::Point::new(bounds.x, bounds.y)),
+                size: Some(blinc_core::Size::new(bounds.width, bounds.height)),
+                blend_mode: blinc_core::BlendMode::Normal,
+                opacity: 1.0,
+                depth: false,
+                effects: scaled_effects,
+                transform_3d: None,
+            });
+        }
+
         // Push clip BEFORE rendering content if this element clips its children
         // Clip to content area (inset by border width so children don't render over border)
         // This matches CSS overflow:hidden behavior which clips to the padding box
@@ -12063,6 +12129,14 @@ impl RenderTree {
         // Pop clip if we pushed one
         if clips_content {
             ctx.pop_clip();
+        }
+
+        // Pop the layer-effects layer (must be after the clip pop so
+        // primitives clipped by `clips_content` still land inside the
+        // layer's offscreen, but before the element-transform pop so
+        // the GPU effect bounds calc reads the right transform stack).
+        if should_push_layer {
+            ctx.pop_layer();
         }
 
         // Pop element-specific transforms if we pushed them (3 transforms for centering)

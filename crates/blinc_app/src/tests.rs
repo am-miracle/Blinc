@@ -769,6 +769,78 @@ fn test_layer_blur_visible_on_msaa_path() {
     );
 }
 
+/// Companion to `test_layer_blur_visible_on_msaa_path` — same
+/// blur scenario, but routed through `app.render`. That entry
+/// point goes through `RenderContext::render_tree` →
+/// `tree.render_to_layer` → `render_layer`, which historically
+/// dropped layer effects entirely (the simpler render path
+/// didn't push a layer for nodes carrying `props.layer_effects`).
+/// Now that `render_layer` mirrors `render_layer_with_motion`'s
+/// layer-effect push, the convenience entry point produces the
+/// same blurred output as the motion path. Without the fix the
+/// rect renders as a sharp square and the probe pixel sits at
+/// pure white.
+#[test]
+fn test_layer_blur_visible_via_app_render() {
+    let Ok(mut app) = BlincApp::with_config(BlincConfig {
+        sample_count: 4,
+        ..Default::default()
+    }) else {
+        eprintln!("Skipping test_layer_blur_visible_via_app_render: no GPU");
+        return;
+    };
+
+    let canvas = 200.0_f32;
+    let inner_size = 100.0_f32;
+    let blur_radius = 8.0_f32;
+    let inset = (canvas - inner_size) / 2.0;
+
+    let ui = div()
+        .w(canvas)
+        .h(canvas)
+        .bg(Color::WHITE)
+        .child(
+            div()
+                .w(inner_size)
+                .h(inner_size)
+                .absolute()
+                .left(inset)
+                .top(inset)
+                .blur(blur_radius)
+                .bg(Color::RED),
+        );
+
+    let (texture, view) = create_test_texture(app.device(), canvas as u32, canvas as u32);
+    app.render(&ui, &view, canvas, canvas).expect("Render failed");
+
+    let img = read_rendered_pixels(
+        app.device(),
+        app.queue(),
+        &texture,
+        canvas as u32,
+        canvas as u32,
+    );
+
+    let path = Path::new(OUTPUT_DIR).join("layer_blur_visible_via_app_render.png");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    img.save(&path).expect("Failed to save PNG");
+
+    let probe_x = (inset as u32) - 4;
+    let probe_y = (canvas as u32) / 2;
+    let p = img.get_pixel(probe_x, probe_y);
+    let red = p[0] as i32;
+    let green = p[1] as i32;
+    let blue = p[2] as i32;
+    assert!(
+        red - green > 25 && red - blue > 25,
+        "Layer blur not visible via app.render: probe at ({probe_x}, {probe_y}) = \
+         (r={red}, g={green}, b={blue}); expected red elevated by >25 vs green/blue. \
+         Saved at {path:?}.",
+    );
+}
+
 #[test]
 fn test_render_tree_reuse() {
     require_gpu!(app);
