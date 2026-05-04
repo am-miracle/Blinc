@@ -2,6 +2,17 @@
 
 All notable changes to `blinc_animation` will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `AnimationScheduler::wake()` — hint the bg thread that activity has changed, called from `add_spring` / `add_keyframe` / `add_timeline` / `add_tick_callback` / `set_continuous_redraw(true)` / `request_redraw` / `set_target_fps` and the equivalent `SchedulerHandle` paths
+- `target_fps` is read fresh on every iteration so `set_target_fps` takes effect immediately
+
+### Changed
+- The desktop background thread parks on a `Condvar` whenever `has_active` and `wants_continuous` are both false. Idle apps now sit at zero CPU; previously the loop spun unconditionally at 120 fps even on a static UI (issue #28).
+- When `wants_continuous` is the only reason to tick (e.g. cursor blink), the bg thread runs at half `target_fps` instead of full rate. Cuts the CPU floor for any focused text input by ~50%.
+- `stop_background` wakes the parked thread before joining so it observes the stop flag.
+
 ## [0.4.0] - 2026-04-05
 
 ### Added

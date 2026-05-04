@@ -40,6 +40,21 @@ All notable changes to `blinc_layout` will be documented in this file.
 - `placeholder_image` and `fade_duration_ms` now flow through `ImageData` to renderer
 - Placeholder images preloaded eagerly so they're ready when type 2 placeholder renders
 
+#### Performance / memory
+
+- `Scroll::viewport_cull(true)` opts the scroll into per-frame paint culling. The renderer skips painting any descendant whose post-scroll absolute bounds (plus a 200 px overscan) don't intersect the visible viewport. Layout still runs for every child — this only affects the paint walker. Saves GPU primitive memory and draw cost on long lists where most children are off-screen.
+- `RustHighlighter` and `JsonHighlighter` share their compiled regex tables across all instances via `OnceLock<Arc<[TokenRule]>>`. An app with multiple `code()` blocks no longer pays the regex DFA build cost (and resident size) N times.
+- `Text::new` skips `decode_html_entities` entirely when the input contains no `&` — drops one `String` allocation per text element per build for the common no-entity case.
+- Motion-binding lookups in `render_layer_with_motion` are batched: one `motion_bindings.get(&node)` per node-pass instead of four. Non-bound nodes (the ~95% case) short-circuit before reaching the mutex-locked field accessors.
+- Class-name storage migrated from `Vec<String>` to `Vec<Arc<str>>` end-to-end, interned through `blinc_core::intern`. Affects `Div`, `Text`, `Svg`, `Stateful`, link / list / blockquote / button widgets, and `ElementRegistry::classes`. The `element_classes()` trait method now returns `&[Arc<str>]`. Repeated class names share one allocation across all nodes.
+
+### Changed
+- `ElementRegistry::register_element_type` takes `&'static str` (was `String`). Element types come from `ElementBuilder::semantic_type_name`'s compile-time literals, so the per-build `String` allocation per element was unnecessary.
+- `Div::class` / `Text::class` / `.class()` builders take `impl AsRef<str>` instead of `impl Into<String>`. Slightly more permissive and avoids the unconditional `String` allocation.
+
+### Fixed
+- Several intra-doc links in `selector::registry`, `widgets::scroll`, `widgets::rich_text_editor::render`, and `css_parser` that were rejected by `cargo doc -D rustdoc::broken-intra-doc-links`.
+
 ## [0.4.0] - 2026-04-05
 
 ### Added

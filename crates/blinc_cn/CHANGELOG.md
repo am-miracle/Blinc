@@ -2,6 +2,12 @@
 
 All notable changes to `blinc_cn` will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- All component `.class()` builders take `impl AsRef<str>` (was `impl Into<String>`), and per-component `classes` / `css_classes` storage is now `Vec<Arc<str>>` interned through `blinc_core::intern`. A class repeated across hundreds of nodes now allocates exactly once.
+- `element_classes()` overrides return `&[Arc<str>]` to match the trait change in `blinc_layout`.
+
 ## [0.4.0] - 2026-04-05
 
 ### Changed

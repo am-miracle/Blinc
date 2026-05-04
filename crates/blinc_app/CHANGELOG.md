@@ -2,7 +2,18 @@
 
 All notable changes to `blinc_app` will be documented in this file.
 
-## [0.5.1] - 2026-04-13
+## [Unreleased]
+
+### Added
+- Display refresh rate detection at window resume — feeds `WindowConfig.max_frame_latency`-clamped `set_target_fps` so the scheduler doesn't burn 120 ticks/sec on a 60 Hz panel.
+- `WindowConfig::max_frame_latency` is honoured for the primary surface (cap captured pre-move as `primary_max_frame_latency`).
+- `tracing::trace!` target `blinc_app::redraw_signals` logs which of the nine end-of-frame signals (animation / cursor / motion / scroll / overlay / theme / css / pointer-query / flow) drove a redraw — silent on a quiet idle.
+
+### Changed
+- Removed the perpetual no-op tick callback that kept the animation scheduler thread alive at 120 fps. Combined with the scheduler park/wake change, idle apps now use ~0% CPU (issue #28).
+- `needs_overlay_redraw` derived from `has_animating_overlays()` instead of `has_visible_overlays()` — a static popover no longer pins the redraw chain at vsync.
+- `SvgAtlas` allocates its 1024×1024 RGBA texture and CPU shadow buffer (~8 MB total) lazily on first SVG insert. Apps that never render an SVG never pay it.
+- Scrollbar-state diagnostic logs in `render_node` downgraded from `info` to `trace` (was firing every frame for every scroll container).
 
 ### Added
 - `BlincApp::has_storage_buffers()` API for platform capability detection

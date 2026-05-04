@@ -2,6 +2,11 @@
 
 All notable changes to `blinc_core` will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `blinc_core::intern` module with process-wide `Arc<str>` pool. `intern(s: &str) -> Arc<str>` deduplicates repeated identifier strings (CSS class names, type names, stable keys). Pool is append-only; only feed bounded sources into it.
+
 ## [0.4.0] - 2026-04-05
 
 ### Added

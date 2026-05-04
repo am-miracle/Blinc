@@ -2,6 +2,11 @@
 
 All notable changes to `blinc_gpu` will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- `LayerTextureCache::evict_oversized` now also drives idle-frame eviction. After 60 frames without an `acquire()` it drops one texture per pool (largest first); after 120 it flushes all four pools. Reclaims GPU memory held by glass / blur intermediates when the UI is sitting still.
+
 ## [0.5.1] - 2026-04-13
 
 ### Changed
