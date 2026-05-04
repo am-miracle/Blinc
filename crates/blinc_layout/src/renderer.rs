@@ -10332,9 +10332,18 @@ impl RenderTree {
             render_state.get_motion_values(node)
         };
 
-        // Get motion bindings from RenderTree (for continuous AnimatedValue animations)
-        let binding_transform = self.get_motion_transform(node);
-        let binding_opacity = self.get_motion_opacity(node);
+        // Get motion bindings from RenderTree (for continuous AnimatedValue animations).
+        //
+        // Single HashMap lookup, then field-level queries on the reference.
+        // Previously each of `get_motion_transform/opacity/scale/rotation`
+        // did its own `motion_bindings.get(&node)` — for the ~95% of
+        // nodes without bindings we paid 4 lookups every render pass to
+        // get four `None`s. The `and_then` chains short-circuit at the
+        // outer Option so non-bound nodes never reach the mutex-locked
+        // accessors at all.
+        let motion_bindings_ref = self.motion_bindings.get(&node);
+        let binding_transform = motion_bindings_ref.and_then(|b| b.get_transform());
+        let binding_opacity = motion_bindings_ref.and_then(|b| b.get_opacity());
 
         // Calculate this node's motion opacity (combine motion values, bindings, and element opacity)
         let node_motion_opacity = motion_values
@@ -10386,8 +10395,9 @@ impl RenderTree {
             ctx.push_transform(transform.clone());
         }
 
-        // Apply motion binding scale if present (centered around element)
-        let binding_scale = self.get_motion_scale(node);
+        // Apply motion binding scale if present (centered around element).
+        // Reuses the bindings reference fetched above — no extra HashMap lookup.
+        let binding_scale = motion_bindings_ref.and_then(|b| b.get_scale());
         let has_binding_scale = binding_scale.is_some();
         if let Some((sx, sy)) = binding_scale {
             let center_x = bounds.width / 2.0;
@@ -10397,8 +10407,9 @@ impl RenderTree {
             ctx.push_transform(Transform::translate(-center_x, -center_y));
         }
 
-        // Apply motion binding rotation if present (centered around element)
-        let binding_rotation = self.get_motion_rotation(node);
+        // Apply motion binding rotation if present (centered around element).
+        // Reuses the bindings reference fetched above — no extra HashMap lookup.
+        let binding_rotation = motion_bindings_ref.and_then(|b| b.get_rotation());
         let has_binding_rotation = binding_rotation.is_some();
         if let Some(deg) = binding_rotation {
             let center_x = bounds.width / 2.0;
