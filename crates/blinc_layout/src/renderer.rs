@@ -1293,7 +1293,7 @@ impl RenderTree {
         // Register semantic element type for CSS type selector matching
         if let Some(type_name) = element.semantic_type_name() {
             self.element_registry
-                .register_element_type(node_id, type_name.to_string());
+                .register_element_type(node_id, type_name);
         }
 
         // Bind ScrollRef if present (for scroll containers)
@@ -1517,7 +1517,7 @@ impl RenderTree {
         // Register semantic element type for CSS type selector matching
         if let Some(type_name) = element.semantic_type_name() {
             self.element_registry
-                .register_element_type(node_id, type_name.to_string());
+                .register_element_type(node_id, type_name);
         }
 
         // Bind ScrollRef if present (for scroll containers)
@@ -1811,7 +1811,7 @@ impl RenderTree {
         // Register semantic element type for CSS type selector matching
         if let Some(type_name) = element.semantic_type_name() {
             self.element_registry
-                .register_element_type(node_id, type_name.to_string());
+                .register_element_type(node_id, type_name);
         }
 
         // Bind ScrollRef if present (for scroll containers)
