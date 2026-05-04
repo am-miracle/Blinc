@@ -5972,9 +5972,7 @@ impl RenderTree {
                 .render_nodes
                 .keys()
                 .copied()
-                .filter(|&nid| {
-                    self.element_registry.get_element_type(nid).as_deref() == Some("svg")
-                })
+                .filter(|&nid| self.element_registry.get_element_type(nid) == Some("svg"))
                 .collect();
 
             for &svg_node in &svg_nodes {
@@ -6459,7 +6457,7 @@ impl RenderTree {
             match part {
                 SelectorPart::Type(type_name) => {
                     let node_type = self.element_registry.get_element_type(node_id);
-                    if node_type.as_deref() != Some(type_name.as_str()) {
+                    if node_type != Some(type_name.as_str()) {
                         return false;
                     }
                 }
@@ -7042,7 +7040,7 @@ impl RenderTree {
             .render_nodes
             .keys()
             .copied()
-            .filter(|&nid| self.element_registry.get_element_type(nid).as_deref() == Some("svg"))
+            .filter(|&nid| self.element_registry.get_element_type(nid) == Some("svg"))
             .collect();
 
         if svg_nodes.is_empty() {
@@ -8631,9 +8629,7 @@ impl RenderTree {
                 .render_nodes
                 .keys()
                 .copied()
-                .filter(|&nid| {
-                    self.element_registry.get_element_type(nid).as_deref() == Some("svg")
-                })
+                .filter(|&nid| self.element_registry.get_element_type(nid) == Some("svg"))
                 .collect();
 
             for &svg_node in &svg_nodes {
@@ -11651,8 +11647,7 @@ impl RenderTree {
         // the DPI factor so CSS px line up with physical px in the
         // GPU effect kernels.
         let has_layer_effects_node = !render_node.props.layer_effects.is_empty();
-        let should_push_layer = has_layer_effects_node
-            && effective_layer_for_push == target_layer;
+        let should_push_layer = has_layer_effects_node && effective_layer_for_push == target_layer;
         if should_push_layer {
             let scaled_effects: Vec<blinc_core::LayerEffect> = render_node
                 .props

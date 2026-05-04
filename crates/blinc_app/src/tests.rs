@@ -620,11 +620,7 @@ fn read_rendered_pixels(
             let i = (x * 4) as usize;
             // Convert BGRA → RGBA. `Bgra8UnormSrgb` is the test
             // texture's format (see `create_test_texture`).
-            img.put_pixel(
-                x,
-                y,
-                Rgba([row[i + 2], row[i + 1], row[i], row[i + 3]]),
-            );
+            img.put_pixel(x, y, Rgba([row[i + 2], row[i + 1], row[i], row[i + 3]]));
         }
     }
     drop(data);
@@ -669,20 +665,16 @@ fn test_layer_blur_visible_on_msaa_path() {
     let blur_radius = 8.0_f32;
     let inset = (canvas - inner_size) / 2.0; // 50.0 — inner rect at (50, 50)..(150, 150)
 
-    let ui = div()
-        .w(canvas)
-        .h(canvas)
-        .bg(Color::WHITE)
-        .child(
-            div()
-                .w(inner_size)
-                .h(inner_size)
-                .absolute()
-                .left(inset)
-                .top(inset)
-                .blur(blur_radius)
-                .bg(Color::RED),
-        );
+    let ui = div().w(canvas).h(canvas).bg(Color::WHITE).child(
+        div()
+            .w(inner_size)
+            .h(inner_size)
+            .absolute()
+            .left(inset)
+            .top(inset)
+            .blur(blur_radius)
+            .bg(Color::RED),
+    );
 
     // The bug lives in `render_tree_with_motion`'s no-glass fast
     // path — `app.render` / `RenderContext::render_tree` skip layer
@@ -795,23 +787,20 @@ fn test_layer_blur_visible_via_app_render() {
     let blur_radius = 8.0_f32;
     let inset = (canvas - inner_size) / 2.0;
 
-    let ui = div()
-        .w(canvas)
-        .h(canvas)
-        .bg(Color::WHITE)
-        .child(
-            div()
-                .w(inner_size)
-                .h(inner_size)
-                .absolute()
-                .left(inset)
-                .top(inset)
-                .blur(blur_radius)
-                .bg(Color::RED),
-        );
+    let ui = div().w(canvas).h(canvas).bg(Color::WHITE).child(
+        div()
+            .w(inner_size)
+            .h(inner_size)
+            .absolute()
+            .left(inset)
+            .top(inset)
+            .blur(blur_radius)
+            .bg(Color::RED),
+    );
 
     let (texture, view) = create_test_texture(app.device(), canvas as u32, canvas as u32);
-    app.render(&ui, &view, canvas, canvas).expect("Render failed");
+    app.render(&ui, &view, canvas, canvas)
+        .expect("Render failed");
 
     let img = read_rendered_pixels(
         app.device(),

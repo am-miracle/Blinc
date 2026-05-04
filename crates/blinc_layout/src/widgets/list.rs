@@ -231,7 +231,7 @@ impl UnorderedList {
 
     /// Add a CSS class for selector matching
     pub fn class(mut self, name: &str) -> Self {
-        self.css_classes.push(blinc_core::intern::intern(name.as_ref()));
+        self.css_classes.push(blinc_core::intern::intern(name));
         self
     }
 }
@@ -384,7 +384,7 @@ impl OrderedList {
 
     /// Add a CSS class for selector matching
     pub fn class(mut self, name: &str) -> Self {
-        self.css_classes.push(blinc_core::intern::intern(name.as_ref()));
+        self.css_classes.push(blinc_core::intern::intern(name));
         self
     }
 }

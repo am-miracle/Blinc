@@ -363,7 +363,7 @@ impl Sidebar {
         // Apply user classes and id
         let mut inner = stateful_container;
         for c in &builder.classes {
-            inner = inner.class(&*c);
+            inner = inner.class(c);
         }
         if let Some(ref id) = builder.user_id {
             inner = inner.id(id);

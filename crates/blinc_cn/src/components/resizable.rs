@@ -711,7 +711,9 @@ impl ResizableGroupBuilder {
 
     /// Add a CSS class for selector matching
     pub fn class(mut self, name: impl AsRef<str>) -> Self {
-        self.config.classes.push(blinc_core::intern::intern(name.as_ref()));
+        self.config
+            .classes
+            .push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 

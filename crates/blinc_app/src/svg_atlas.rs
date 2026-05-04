@@ -287,13 +287,11 @@ impl SvgAtlas {
                     let row_bytes = region.width as usize * 4;
                     let mut px = vec![0u8; row_bytes * region.height as usize];
                     for y in 0..region.height {
-                        let src = ((region.y + y) as usize * self.width as usize
-                            + region.x as usize)
-                            * 4;
+                        let src =
+                            ((region.y + y) as usize * self.width as usize + region.x as usize) * 4;
                         let dst = y as usize * row_bytes;
                         if src + row_bytes <= pixels.len() {
-                            px[dst..dst + row_bytes]
-                                .copy_from_slice(&pixels[src..src + row_bytes]);
+                            px[dst..dst + row_bytes].copy_from_slice(&pixels[src..src + row_bytes]);
                         }
                     }
                     (key, px, region.width, region.height)

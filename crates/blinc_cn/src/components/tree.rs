@@ -596,7 +596,7 @@ impl TreeViewBuilder {
         // Apply user classes and id
         let mut inner = inner;
         for c in &self.classes {
-            inner = inner.class(&*c);
+            inner = inner.class(c);
         }
         if let Some(ref id) = self.user_id {
             inner = inner.id(id);

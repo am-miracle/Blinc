@@ -590,8 +590,7 @@ impl Div {
     /// Names are interned so a class like `"cn-button"` used by
     /// hundreds of nodes shares a single underlying allocation.
     pub fn class(mut self, name: impl AsRef<str>) -> Self {
-        self.classes
-            .push(blinc_core::intern::intern(name.as_ref()));
+        self.classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 

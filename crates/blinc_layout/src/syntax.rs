@@ -448,7 +448,9 @@ pub struct JsonHighlighter {
 impl JsonHighlighter {
     /// Create a new JSON highlighter
     pub fn new() -> Self {
-        Self { rules: json_rules() }
+        Self {
+            rules: json_rules(),
+        }
     }
 }
 

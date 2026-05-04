@@ -92,26 +92,31 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                 .color(theme.color(ColorToken::TextSecondary)),
         )
         .child(
-            scroll().w_full().h(ctx.height).viewport_cull(true).justify_center().child(
-                div()
-                    .flex_col()
-                    .gap(10.0)
-                    .items_center()
-                    .child(
-                        div()
-                            .w_full()
-                            .flex_row()
-                            .justify_center()
-                            .gap(5.0)
-                            .flex_wrap()
-                            .child(pull_to_refresh_demo(ctx))
-                            .child(single_element_demo())
-                            .child(stagger_forward_demo())
-                            .child(stagger_reverse_demo())
-                            .child(stagger_center_demo()),
-                    )
-                    .child(api_showcase()),
-            ),
+            scroll()
+                .w_full()
+                .h(ctx.height)
+                .viewport_cull(true)
+                .justify_center()
+                .child(
+                    div()
+                        .flex_col()
+                        .gap(10.0)
+                        .items_center()
+                        .child(
+                            div()
+                                .w_full()
+                                .flex_row()
+                                .justify_center()
+                                .gap(5.0)
+                                .flex_wrap()
+                                .child(pull_to_refresh_demo(ctx))
+                                .child(single_element_demo())
+                                .child(stagger_forward_demo())
+                                .child(stagger_reverse_demo())
+                                .child(stagger_center_demo()),
+                        )
+                        .child(api_showcase()),
+                ),
         )
 }
 

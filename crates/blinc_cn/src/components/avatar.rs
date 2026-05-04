@@ -404,7 +404,10 @@ impl AvatarBuilder {
 
     /// Add a CSS class for selector matching
     pub fn class(self, name: impl AsRef<str>) -> Self {
-        self.config.borrow_mut().classes.push(blinc_core::intern::intern(name.as_ref()));
+        self.config
+            .borrow_mut()
+            .classes
+            .push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
@@ -740,7 +743,10 @@ impl AvatarGroupBuilder {
 
     /// Add a CSS class for selector matching
     pub fn class(self, name: impl AsRef<str>) -> Self {
-        self.config.borrow_mut().classes.push(blinc_core::intern::intern(name.as_ref()));
+        self.config
+            .borrow_mut()
+            .classes
+            .push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 

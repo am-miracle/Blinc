@@ -2822,7 +2822,7 @@ impl TextInput {
     /// Add a CSS class name for selector matching
     pub fn class(mut self, name: &str) -> Self {
         if let Ok(mut d) = self.data.lock() {
-            d.css_classes.push(blinc_core::intern::intern(name.as_ref()));
+            d.css_classes.push(blinc_core::intern::intern(name));
         }
         self.inner = std::mem::take(&mut self.inner).class(name);
         self

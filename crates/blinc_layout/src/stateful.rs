@@ -2986,7 +2986,10 @@ impl<S: StateTransitions> Stateful<S> {
 
     /// Add a CSS class name for selector matching
     pub fn class(self, name: &str) -> Self {
-        self.inner.borrow_mut().classes.push(blinc_core::intern::intern(name.as_ref()));
+        self.inner
+            .borrow_mut()
+            .classes
+            .push(blinc_core::intern::intern(name));
         // Mirror into shared_state so refresh_props_internal can re-seed temp_div
         // on subtree rebuild. Without this, classes set on the Stateful container
         // are wiped from the element_registry the first time the on_state callback
@@ -2995,7 +2998,7 @@ impl<S: StateTransitions> Stateful<S> {
             .lock()
             .unwrap()
             .base_classes
-            .push(blinc_core::intern::intern(name.as_ref()));
+            .push(blinc_core::intern::intern(name));
         self
     }
 
