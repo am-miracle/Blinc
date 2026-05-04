@@ -2157,6 +2157,7 @@ impl WindowedApp {
 
         let platform = DesktopPlatform::new().map_err(|e| BlincError::Platform(e.to_string()))?;
         let primary_transparent = config.transparent;
+        let primary_max_frame_latency = config.max_frame_latency.clamp(1, 3);
         let event_loop = platform
             .create_event_loop_with_config(config)
             .map_err(|e| BlincError::Platform(e.to_string()))?;
@@ -2203,24 +2204,15 @@ impl WindowedApp {
             blinc_animation::set_global_scheduler(scheduler_handle);
         }
 
-        // Shared CSS animation/transition store
-        // The scheduler's background thread keeps the redraw loop alive at 120fps
-        // via the tick callback below (acts as keep-alive signal). Actual ticking
-        // happens synchronously on the main thread to avoid phase jitter between
-        // the bg thread's tick timing and the frame's render timing.
+        // Shared CSS animation/transition store. CSS ticking happens
+        // synchronously on the main thread (Phase 3 of the frame loop)
+        // to avoid phase jitter; the bg scheduler thread does not drive
+        // it. Once a CSS animation/transition is live, the main thread
+        // self-perpetuates via `request_redraw()` at the end of the
+        // frame as long as `css_needs_redraw` is true (see Phase 5).
+        // No keep-alive scheduler callback is needed — the bg thread
+        // can stay parked while only CSS work is in flight.
         let css_anim_store = Arc::new(Mutex::new(blinc_layout::CssAnimationStore::new()));
-        {
-            animations
-                .lock()
-                .unwrap()
-                .add_tick_callback(move |_dt_secs| {
-                    // Keep-alive no-op: the callback's existence ensures the scheduler
-                    // considers tick_callbacks as "active", triggering wake_callback()
-                    // at 120fps so the main thread gets continuous frame requests
-                    // while CSS animations are running.
-                    // Actual ticking happens on the main thread to avoid phase jitter.
-                });
-        }
 
         // Shared element registry for query API
         let element_registry: SharedElementRegistry =
@@ -2574,7 +2566,7 @@ impl WindowedApp {
                                         present_mode: wgpu::PresentMode::AutoVsync,
                                         alpha_mode,
                                         view_formats: vec![],
-                                        desired_maximum_frame_latency: 2,
+                                        desired_maximum_frame_latency: primary_max_frame_latency,
                                     };
                                     surf.configure(blinc_app.device(), &config);
 
@@ -2582,6 +2574,27 @@ impl WindowedApp {
                                     crate::text_measurer::init_text_measurer_with_registry(
                                         blinc_app.font_registry(),
                                     );
+
+                                    // Adapt the scheduler's tick rate to the display's
+                                    // refresh rate. Winit returns refresh in millihertz;
+                                    // clamp to a sane range so a 240/360 Hz display
+                                    // doesn't pin a CPU and a missing/zero report
+                                    // doesn't drop us to 0 fps.
+                                    {
+                                        let refresh = window
+                                            .winit_window()
+                                            .current_monitor()
+                                            .and_then(|m| m.refresh_rate_millihertz())
+                                            .map(|mhz| (mhz / 1000).clamp(30, 120))
+                                            .unwrap_or(60);
+                                        if let Ok(mut sched) = animations.lock() {
+                                            sched.set_target_fps(refresh);
+                                            tracing::debug!(
+                                                "Scheduler target_fps adapted to display refresh: {} Hz",
+                                                refresh
+                                            );
+                                        }
+                                    }
 
                                     ws.surface = Some(surf);
                                     ws.surface_config = Some(config);

@@ -3886,6 +3886,14 @@ pub trait ElementBuilder {
         None
     }
 
+    /// Whether this element opts in to viewport culling for its
+    /// descendants. The renderer skips painting any descendant whose
+    /// post-scroll bounds don't intersect the visible viewport (plus a
+    /// small overscan buffer). Only meaningful on scroll containers.
+    fn viewport_cull(&self) -> bool {
+        false
+    }
+
     /// Get motion animation config for a child at given index
     ///
     /// This is only implemented by Motion containers. The index corresponds

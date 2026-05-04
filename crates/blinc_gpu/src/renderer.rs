@@ -714,7 +714,20 @@ pub struct LayerTextureCache {
     max_per_bucket: usize,
     /// Cache statistics
     stats: TextureCacheStats,
+    /// Number of consecutive frames without a successful `acquire()`.
+    /// `evict_oversized()` (called once per frame from the renderer)
+    /// increments this; `acquire()` resets it. After
+    /// `IDLE_DROP_THRESHOLD` frames, drop one texture from each pool.
+    /// After `IDLE_FULL_FLUSH` frames, drop everything. This reclaims
+    /// the GPU memory held by layer/glass/blur intermediates when the
+    /// UI hasn't needed them for a while.
+    idle_frames: u32,
 }
+
+/// Drop one texture per pool after this many idle frames (~1 s at 60fps).
+const IDLE_DROP_THRESHOLD: u32 = 60;
+/// Drop the entire pool after this many idle frames (~2 s at 60fps).
+const IDLE_FULL_FLUSH: u32 = 120;
 
 impl LayerTextureCache {
     /// Create a new layer texture cache
@@ -728,6 +741,7 @@ impl LayerTextureCache {
             format,
             max_per_bucket: 2,
             stats: TextureCacheStats::default(),
+            idle_frames: 0,
         }
     }
 
@@ -795,6 +809,7 @@ impl LayerTextureCache {
 
         if let Some(index) = found_in_primary {
             self.stats.hits += 1;
+            self.idle_frames = 0;
             let texture = match bucket {
                 TextureSizeBucket::Small => self.pool_small.swap_remove(index),
                 TextureSizeBucket::Medium => self.pool_medium.swap_remove(index),
@@ -820,6 +835,7 @@ impl LayerTextureCache {
 
         if let Some((larger_bucket, index)) = found_in_larger {
             self.stats.hits += 1;
+            self.idle_frames = 0;
             let texture = match larger_bucket {
                 TextureSizeBucket::Medium => self.pool_medium.swap_remove(index),
                 TextureSizeBucket::Large => self.pool_large.swap_remove(index),
@@ -831,6 +847,7 @@ impl LayerTextureCache {
 
         // No suitable texture in pool, create a new one
         self.stats.misses += 1;
+        self.idle_frames = 0;
 
         // Round up for better future reuse
         let rounded_size = if bucket == TextureSizeBucket::XLarge {
@@ -891,6 +908,11 @@ impl LayerTextureCache {
     /// Clear oversized textures from the pool
     ///
     /// Call this at frame start to evict any large textures that accumulated.
+    /// Also drives idle-frame eviction: pools that haven't been used in
+    /// `IDLE_DROP_THRESHOLD`+ frames shrink by one per frame; after
+    /// `IDLE_FULL_FLUSH` they're emptied entirely. This reclaims GPU
+    /// memory held by glass/blur intermediates when the UI is sitting
+    /// still.
     pub fn evict_oversized(&mut self) {
         // Trim pools that are over capacity
         while self.pool_small.len() > self.max_per_bucket {
@@ -905,6 +927,27 @@ impl LayerTextureCache {
         while self.pool_xlarge.len() > self.max_per_bucket {
             self.pool_xlarge.pop();
         }
+
+        // Idle-frame eviction. Saturating add keeps us at u32::MAX after
+        // long idle without overflow, which is fine — the comparison
+        // against thresholds still holds.
+        self.idle_frames = self.idle_frames.saturating_add(1);
+        if self.idle_frames >= IDLE_FULL_FLUSH {
+            // Drop everything pooled. Next frame's `acquire` will pay
+            // a single allocation. XLarge is the priority — biggest
+            // memory win.
+            self.pool_xlarge.clear();
+            self.pool_large.clear();
+            self.pool_medium.clear();
+            self.pool_small.clear();
+        } else if self.idle_frames >= IDLE_DROP_THRESHOLD {
+            // Drop one entry per pool per frame. Largest first.
+            self.pool_xlarge.pop();
+            self.pool_large.pop();
+            self.pool_medium.pop();
+            self.pool_small.pop();
+        }
+
         self.update_pool_stats();
     }
 

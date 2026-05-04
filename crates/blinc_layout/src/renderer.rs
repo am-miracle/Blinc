@@ -4,6 +4,7 @@
 //! and the DrawContext rendering API.
 
 use std::any::Any;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -366,6 +367,19 @@ pub struct RenderTree {
     scroll_offsets: HashMap<LayoutNodeId, (f32, f32)>,
     /// Scroll physics for scroll containers (keyed by node_id)
     scroll_physics: HashMap<LayoutNodeId, crate::scroll::SharedScrollPhysics>,
+    /// Scroll containers that opted in to viewport culling. The paint
+    /// walker skips any descendant whose post-scroll bounds don't
+    /// intersect the viewport (plus a small overscan buffer). Layout
+    /// is still computed for every child — only paint is culled.
+    viewport_cull_scrolls: std::collections::HashSet<LayoutNodeId>,
+    /// Active cull rect (in tree-local coords) for the current paint
+    /// walk. Set when a viewport-cull scroll is entered, restored on
+    /// exit. Read by the child-recursion sites in `render_layer_with_motion`
+    /// / `render_node` to skip subtrees whose bounds (offset by the
+    /// cumulative scroll the child will inherit) don't intersect.
+    /// `Cell` not `RefCell` because the value is `Copy` — read/write
+    /// is one atomic load/store, no borrow tracking needed.
+    cull_viewport: Cell<Option<(f32, f32, f32, f32)>>,
     /// Motion bindings for continuous animations (keyed by node_id)
     motion_bindings: HashMap<LayoutNodeId, crate::motion::MotionBindings>,
     /// Last tick time for scroll physics (in milliseconds)
@@ -510,6 +524,8 @@ impl RenderTree {
             node_states: HashMap::new(),
             scroll_offsets: HashMap::new(),
             scroll_physics: HashMap::new(),
+            viewport_cull_scrolls: std::collections::HashSet::new(),
+            cull_viewport: Cell::new(None),
             motion_bindings: HashMap::new(),
             last_scroll_tick_ms: None,
             scale_factor: 1.0,
@@ -1024,6 +1040,9 @@ impl RenderTree {
                 physics.lock().unwrap().set_scheduler(&scheduler);
             }
             self.scroll_physics.insert(node_id, physics);
+            if element.viewport_cull() {
+                self.viewport_cull_scrolls.insert(node_id);
+            }
         }
 
         // Update motion bindings if this element has continuous animations
@@ -1102,6 +1121,9 @@ impl RenderTree {
                 physics.lock().unwrap().set_scheduler(&scheduler);
             }
             self.scroll_physics.insert(node_id, physics);
+            if element.viewport_cull() {
+                self.viewport_cull_scrolls.insert(node_id);
+            }
         }
 
         // Update motion bindings if this element has continuous animations
@@ -1224,6 +1246,9 @@ impl RenderTree {
                 physics.lock().unwrap().set_scheduler(&scheduler);
             }
             self.scroll_physics.insert(node_id, physics);
+            if element.viewport_cull() {
+                self.viewport_cull_scrolls.insert(node_id);
+            }
         }
 
         // Store motion bindings if this element has continuous animations
@@ -1445,6 +1470,9 @@ impl RenderTree {
                 physics.lock().unwrap().set_scheduler(&scheduler);
             }
             self.scroll_physics.insert(node_id, physics);
+            if element.viewport_cull() {
+                self.viewport_cull_scrolls.insert(node_id);
+            }
         }
 
         // Store motion bindings if this element has continuous animations
@@ -1745,6 +1773,9 @@ impl RenderTree {
                 physics.lock().unwrap().set_scheduler(&scheduler);
             }
             self.scroll_physics.insert(node_id, physics);
+            if element.viewport_cull() {
+                self.viewport_cull_scrolls.insert(node_id);
+            }
         }
 
         // Store motion bindings if this element has continuous animations
@@ -4270,6 +4301,9 @@ impl RenderTree {
     pub fn transfer_scroll_physics_from(&mut self, other: &RenderTree) {
         for (node_id, physics) in &other.scroll_physics {
             self.scroll_physics.insert(*node_id, physics.clone());
+        }
+        for node_id in &other.viewport_cull_scrolls {
+            self.viewport_cull_scrolls.insert(*node_id);
         }
     }
 
@@ -9512,6 +9546,9 @@ impl RenderTree {
                         physics.lock().unwrap().set_scheduler(&scheduler);
                     }
                     self.scroll_physics.insert(rebuild.parent_id, physics);
+                    if rebuild.new_child.viewport_cull() {
+                        self.viewport_cull_scrolls.insert(rebuild.parent_id);
+                    }
                 }
                 {
                     let handlers = rebuild.new_child.event_handlers();
@@ -11200,6 +11237,23 @@ impl RenderTree {
             )
         };
 
+        // Viewport culling: when this node opted in (`scroll().viewport_cull(true)`),
+        // set the cull rect to its absolute layout bounds. The intersect
+        // test below also reads absolute bounds for each child, so both
+        // sides live in the same coordinate frame regardless of how
+        // deeply nested the child is. The scroll's *offset* (which moves
+        // children visually but not their layout coords) is applied to
+        // each child's absolute position before the test — that's what
+        // makes scrolled-out children fall outside the rect.
+        let prev_cull_viewport = self.cull_viewport.get();
+        let entered_cull = self.viewport_cull_scrolls.contains(&node);
+        if entered_cull {
+            if let Some(abs) = self.layout_tree.get_absolute_bounds(node) {
+                self.cull_viewport
+                    .set(Some((abs.x, abs.y, abs.width, abs.height)));
+            }
+        }
+
         for child_id in self.layout_tree.children(node) {
             // Skip 3D children of a group node — they're composed into the group SDF
             if is_3d_group && group_3d_children.contains(&child_id) {
@@ -11209,6 +11263,37 @@ impl RenderTree {
             let child_render = self.render_nodes.get(&child_id);
             let child_is_fixed = child_render.map(|n| n.props.is_fixed).unwrap_or(false);
             let child_is_sticky = child_render.map(|n| n.props.is_sticky).unwrap_or(false);
+
+            // Viewport cull: skip painting children whose post-scroll
+            // *visual* position falls outside the active cull viewport.
+            // Both `cb` and the cull rect are in absolute layout coords;
+            // `new_cumulative_scroll` is the offset that the renderer
+            // will apply via the transform stack when drawing this
+            // descendant, so adding it to the absolute layout position
+            // gives the child's actual on-screen rect. Fixed and sticky
+            // children opt out — their visual position isn't determined
+            // by `new_cumulative_scroll` alone.
+            if let Some((cx, cy, cw, ch)) = self.cull_viewport.get() {
+                if !child_is_fixed && !child_is_sticky {
+                    if let Some(cb) = self.layout_tree.get_absolute_bounds(child_id) {
+                        // 200 px overscan on each axis so a smooth scroll
+                        // doesn't pop content in/out at the viewport edge.
+                        const OVERSCAN: f32 = 200.0;
+                        let vx0 = cx - OVERSCAN;
+                        let vy0 = cy - OVERSCAN;
+                        let vx1 = cx + cw + OVERSCAN;
+                        let vy1 = cy + ch + OVERSCAN;
+                        let bx0 = cb.x + new_cumulative_scroll.0;
+                        let by0 = cb.y + new_cumulative_scroll.1;
+                        let bx1 = bx0 + cb.width;
+                        let by1 = by0 + cb.height;
+                        let intersects = bx1 > vx0 && bx0 < vx1 && by1 > vy0 && by0 < vy1;
+                        if !intersects {
+                            continue;
+                        }
+                    }
+                }
+            }
 
             // Fixed: push counter-scroll to cancel ALL accumulated scroll
             let has_fixed_counter = child_is_fixed
@@ -11263,6 +11348,12 @@ impl RenderTree {
             if has_fixed_counter {
                 ctx.pop_transform();
             }
+        }
+
+        // Restore the parent scope's cull viewport now that this
+        // subtree is fully rendered. Pairs with the `set` above.
+        if entered_cull {
+            self.cull_viewport.set(prev_cull_viewport);
         }
 
         // Pop scroll transform (reverse of push order: scroll was pushed after children clip)

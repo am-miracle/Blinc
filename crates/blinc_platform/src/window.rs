@@ -43,6 +43,14 @@ pub struct WindowConfig {
     pub modal: bool,
     /// Parent window ID for modal relationships (None = top-level)
     pub parent: Option<WindowId>,
+    /// How many frames the GPU is allowed to queue ahead of the
+    /// currently-presented frame. `2` is the wgpu default and gives
+    /// the smoothest pacing under vsync. `1` halves the GPU memory
+    /// dedicated to in-flight command buffers, vertex/uniform buffers,
+    /// and bind groups — useful for memory-constrained or low-end
+    /// devices, at the cost of slightly higher input latency and a
+    /// greater chance of dropped frames under load. Clamped to `1..=3`.
+    pub max_frame_latency: u32,
 }
 
 impl Default for WindowConfig {
@@ -62,6 +70,7 @@ impl Default for WindowConfig {
             center: false,
             modal: false,
             parent: None,
+            max_frame_latency: 2,
         }
     }
 }
@@ -151,6 +160,14 @@ impl WindowConfig {
     /// Set the parent window for modal relationships
     pub fn parent(mut self, parent_id: WindowId) -> Self {
         self.parent = Some(parent_id);
+        self
+    }
+
+    /// Cap how many frames the GPU may queue ahead. `2` is the smooth
+    /// default; `1` halves in-flight GPU memory at the cost of latency
+    /// and occasional frame drops. Clamped to `1..=3`.
+    pub fn max_frame_latency(mut self, frames: u32) -> Self {
+        self.max_frame_latency = frames.clamp(1, 3);
         self
     }
 }

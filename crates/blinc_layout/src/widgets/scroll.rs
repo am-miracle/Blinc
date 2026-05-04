@@ -1741,6 +1741,12 @@ pub struct Scroll {
     handlers: EventHandlers,
     /// Optional scroll reference for programmatic control
     scroll_ref: Option<ScrollRef>,
+    /// When true, the renderer skips painting any descendant whose
+    /// post-scroll bounds don't intersect the visible viewport (plus a
+    /// small overscan buffer). Saves GPU primitive memory and draw calls
+    /// for long scrolls with many off-screen children. Layout is still
+    /// computed for all children — this only culls paint.
+    viewport_cull: bool,
 }
 
 // Deref to Div gives Scroll ALL Div methods for reading
@@ -1784,6 +1790,7 @@ impl Scroll {
             physics,
             handlers,
             scroll_ref: None,
+            viewport_cull: false,
         }
     }
 
@@ -1802,6 +1809,7 @@ impl Scroll {
             physics,
             handlers,
             scroll_ref: None,
+            viewport_cull: false,
         }
     }
 
@@ -1819,6 +1827,7 @@ impl Scroll {
             physics,
             handlers,
             scroll_ref: None,
+            viewport_cull: false,
         }
     }
 
@@ -2371,6 +2380,16 @@ impl Scroll {
         self.content(child)
     }
 
+    /// Cull descendants whose post-scroll bounds fall outside the
+    /// visible viewport (with a small overscan buffer for smooth scroll
+    /// preroll). Skips paint only — layout is still computed for every
+    /// child. Use for scroll containers with many children where most
+    /// are off-screen at any time (long lists, dashboards).
+    pub fn viewport_cull(mut self, on: bool) -> Self {
+        self.viewport_cull = on;
+        self
+    }
+
     // Event handlers
     pub fn on_scroll<F>(mut self, handler: F) -> Self
     where
@@ -2515,6 +2534,10 @@ impl ElementBuilder for Scroll {
 
     fn scroll_physics(&self) -> Option<SharedScrollPhysics> {
         Some(Arc::clone(&self.physics))
+    }
+
+    fn viewport_cull(&self) -> bool {
+        self.viewport_cull
     }
 
     fn layout_style(&self) -> Option<&taffy::Style> {

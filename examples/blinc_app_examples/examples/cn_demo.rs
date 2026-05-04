@@ -66,6 +66,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
             scroll()
                 .w_full()
                 .h(ctx.height - 80.0)
+                .viewport_cull(true)
                 .bind(&scroll_ref)
                 .child(
                     div()
