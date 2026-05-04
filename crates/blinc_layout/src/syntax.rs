@@ -24,6 +24,8 @@
 //!     .config(SyntaxConfig::new(MyHighlighter { rules: vec![...] }))
 //! ```
 
+use std::sync::{Arc, OnceLock};
+
 use blinc_core::Color;
 use regex::Regex;
 
@@ -347,56 +349,76 @@ impl SyntaxHighlighter for PlainHighlighter {
 }
 
 /// A basic Rust syntax highlighter
+///
+/// `rules` is shared via `Arc<[TokenRule]>` across all instances of
+/// `RustHighlighter::new()` — each fresh instance bumps a refcount
+/// instead of re-compiling the ~12 regex patterns. For a typical
+/// app with several `code()` blocks this is the difference between
+/// paying the regex DFA tables once or N times. `bg_color` stays
+/// per-instance so callers can still override it.
 pub struct RustHighlighter {
-    rules: Vec<TokenRule>,
+    rules: Arc<[TokenRule]>,
     bg_color: Color,
 }
 
 impl RustHighlighter {
     /// Create a new Rust highlighter with default colors
     pub fn new() -> Self {
-        // Color palette (VS Code Dark+ inspired)
-        let keyword_color = Color::rgba(0.77, 0.56, 0.82, 1.0); // Purple
-        let string_color = Color::rgba(0.81, 0.54, 0.44, 1.0); // Orange/brown
-        let comment_color = Color::rgba(0.42, 0.54, 0.35, 1.0); // Green
-        let number_color = Color::rgba(0.71, 0.82, 0.57, 1.0); // Light green
-        let function_color = Color::rgba(0.86, 0.82, 0.65, 1.0); // Yellow
-        let type_color = Color::rgba(0.31, 0.76, 0.77, 1.0); // Cyan
-        let macro_color = Color::rgba(0.31, 0.76, 0.77, 1.0); // Cyan
-        let lifetime_color = Color::rgba(0.77, 0.56, 0.82, 1.0); // Purple
-
-        let rules = vec![
-            // Comments (must be early to capture before other rules)
-            TokenRule::new(r"//.*$", comment_color).token_type(TokenType::Comment),
-            // Strings (double-quoted)
-            TokenRule::new(r#""[^"]*""#, string_color).token_type(TokenType::String),
-            // Characters (single quoted, simplified)
-            TokenRule::new(r"'[^']{1,2}'", string_color).token_type(TokenType::String),
-            // Lifetimes
-            TokenRule::new(r"'[a-zA-Z_][a-zA-Z0-9_]*", lifetime_color).token_type(TokenType::Lifetime),
-            // Macros
-            TokenRule::new(r"\b[a-z_][a-zA-Z0-9_]*!", macro_color).token_type(TokenType::Macro),
-            // Keywords
-            TokenRule::new(
-                r"\b(fn|let|mut|const|static|pub|use|mod|struct|enum|trait|impl|for|while|loop|if|else|match|return|break|continue|async|await|move|ref|self|Self|super|crate|where|type|dyn|unsafe|extern)\b",
-                keyword_color,
-            ).bold().token_type(TokenType::Keyword),
-            // Types (PascalCase)
-            TokenRule::new(r"\b[A-Z][a-zA-Z0-9_]*\b", type_color).token_type(TokenType::Type),
-            // Numbers
-            TokenRule::new(r"\b\d+(\.\d+)?([eE][+-]?\d+)?[fiu]?(8|16|32|64|128|size)?\b", number_color).token_type(TokenType::Number),
-            TokenRule::new(r"\b0x[0-9a-fA-F_]+\b", number_color).token_type(TokenType::Number),
-            TokenRule::new(r"\b0b[01_]+\b", number_color).token_type(TokenType::Number),
-            TokenRule::new(r"\b0o[0-7_]+\b", number_color).token_type(TokenType::Number),
-            // Function calls
-            TokenRule::new(r"\b([a-z_][a-zA-Z0-9_]*)\s*\(", function_color).token_type(TokenType::Function),
-        ];
-
         Self {
-            rules,
+            rules: rust_rules(),
             bg_color: Color::rgba(0.12, 0.12, 0.14, 1.0),
         }
     }
+}
+
+/// Shared, lazily-built Rust token rule set.
+///
+/// First call compiles every regex; subsequent calls hand out cheap
+/// `Arc::clone`s. Safe across threads — `Regex` and `Arc<[T]>` are both
+/// `Send + Sync`.
+fn rust_rules() -> Arc<[TokenRule]> {
+    static CACHE: OnceLock<Arc<[TokenRule]>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            // Color palette (VS Code Dark+ inspired)
+            let keyword_color = Color::rgba(0.77, 0.56, 0.82, 1.0); // Purple
+            let string_color = Color::rgba(0.81, 0.54, 0.44, 1.0); // Orange/brown
+            let comment_color = Color::rgba(0.42, 0.54, 0.35, 1.0); // Green
+            let number_color = Color::rgba(0.71, 0.82, 0.57, 1.0); // Light green
+            let function_color = Color::rgba(0.86, 0.82, 0.65, 1.0); // Yellow
+            let type_color = Color::rgba(0.31, 0.76, 0.77, 1.0); // Cyan
+            let macro_color = Color::rgba(0.31, 0.76, 0.77, 1.0); // Cyan
+            let lifetime_color = Color::rgba(0.77, 0.56, 0.82, 1.0); // Purple
+
+            let rules: Vec<TokenRule> = vec![
+                // Comments (must be early to capture before other rules)
+                TokenRule::new(r"//.*$", comment_color).token_type(TokenType::Comment),
+                // Strings (double-quoted)
+                TokenRule::new(r#""[^"]*""#, string_color).token_type(TokenType::String),
+                // Characters (single quoted, simplified)
+                TokenRule::new(r"'[^']{1,2}'", string_color).token_type(TokenType::String),
+                // Lifetimes
+                TokenRule::new(r"'[a-zA-Z_][a-zA-Z0-9_]*", lifetime_color).token_type(TokenType::Lifetime),
+                // Macros
+                TokenRule::new(r"\b[a-z_][a-zA-Z0-9_]*!", macro_color).token_type(TokenType::Macro),
+                // Keywords
+                TokenRule::new(
+                    r"\b(fn|let|mut|const|static|pub|use|mod|struct|enum|trait|impl|for|while|loop|if|else|match|return|break|continue|async|await|move|ref|self|Self|super|crate|where|type|dyn|unsafe|extern)\b",
+                    keyword_color,
+                ).bold().token_type(TokenType::Keyword),
+                // Types (PascalCase)
+                TokenRule::new(r"\b[A-Z][a-zA-Z0-9_]*\b", type_color).token_type(TokenType::Type),
+                // Numbers
+                TokenRule::new(r"\b\d+(\.\d+)?([eE][+-]?\d+)?[fiu]?(8|16|32|64|128|size)?\b", number_color).token_type(TokenType::Number),
+                TokenRule::new(r"\b0x[0-9a-fA-F_]+\b", number_color).token_type(TokenType::Number),
+                TokenRule::new(r"\b0b[01_]+\b", number_color).token_type(TokenType::Number),
+                TokenRule::new(r"\b0o[0-7_]+\b", number_color).token_type(TokenType::Number),
+                // Function calls
+                TokenRule::new(r"\b([a-z_][a-zA-Z0-9_]*)\s*\(", function_color).token_type(TokenType::Function),
+            ];
+            Arc::from(rules)
+        })
+        .clone()
 }
 
 impl Default for RustHighlighter {
@@ -416,31 +438,42 @@ impl SyntaxHighlighter for RustHighlighter {
 }
 
 /// A basic JSON syntax highlighter
+///
+/// Like [`RustHighlighter`], the rule set is interned — every
+/// `JsonHighlighter::new()` shares the same compiled regex tables.
 pub struct JsonHighlighter {
-    rules: Vec<TokenRule>,
+    rules: Arc<[TokenRule]>,
 }
 
 impl JsonHighlighter {
     /// Create a new JSON highlighter
     pub fn new() -> Self {
-        let string_color = Color::rgba(0.81, 0.54, 0.44, 1.0); // Orange/brown
-        let number_color = Color::rgba(0.71, 0.82, 0.57, 1.0); // Light green
-        let keyword_color = Color::rgba(0.77, 0.56, 0.82, 1.0); // Purple
-        let key_color = Color::rgba(0.61, 0.78, 0.92, 1.0); // Light blue
-
-        let rules = vec![
-            // Keys (strings followed by colon)
-            TokenRule::new(r#""[^"]*"\s*:"#, key_color),
-            // Strings
-            TokenRule::new(r#""(?:[^"\\]|\\.)*""#, string_color),
-            // Numbers
-            TokenRule::new(r"-?\b\d+(\.\d+)?([eE][+-]?\d+)?\b", number_color),
-            // Keywords
-            TokenRule::new(r"\b(true|false|null)\b", keyword_color),
-        ];
-
-        Self { rules }
+        Self { rules: json_rules() }
     }
+}
+
+fn json_rules() -> Arc<[TokenRule]> {
+    static CACHE: OnceLock<Arc<[TokenRule]>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let string_color = Color::rgba(0.81, 0.54, 0.44, 1.0); // Orange/brown
+            let number_color = Color::rgba(0.71, 0.82, 0.57, 1.0); // Light green
+            let keyword_color = Color::rgba(0.77, 0.56, 0.82, 1.0); // Purple
+            let key_color = Color::rgba(0.61, 0.78, 0.92, 1.0); // Light blue
+
+            let rules: Vec<TokenRule> = vec![
+                // Keys (strings followed by colon)
+                TokenRule::new(r#""[^"]*"\s*:"#, key_color),
+                // Strings
+                TokenRule::new(r#""(?:[^"\\]|\\.)*""#, string_color),
+                // Numbers
+                TokenRule::new(r"-?\b\d+(\.\d+)?([eE][+-]?\d+)?\b", number_color),
+                // Keywords
+                TokenRule::new(r"\b(true|false|null)\b", keyword_color),
+            ];
+            Arc::from(rules)
+        })
+        .clone()
 }
 
 impl Default for JsonHighlighter {
