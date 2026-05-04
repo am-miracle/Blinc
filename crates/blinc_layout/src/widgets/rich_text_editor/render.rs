@@ -835,7 +835,7 @@ fn emit_paragraph_geometry(
     }
 }
 
-/// Decompose a wrapped visual line into [`RunGeometry`] runs, splitting
+/// Decompose a wrapped visual line into `RunGeometry` runs, splitting
 /// at every transition between code and non-code coverage. Each run is
 /// measured with its own font so the cursor x stays correct on
 /// mixed-font lines.

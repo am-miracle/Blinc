@@ -144,7 +144,7 @@ impl ElementRegistry {
     /// Register a semantic element type for CSS type selector matching.
     ///
     /// Takes `&'static str` because element types come from
-    /// [`ElementBuilder::semantic_type_name`], which is itself
+    /// `ElementBuilder::semantic_type_name`, which is itself
     /// `Option<&'static str>` — these are compile-time literals like
     /// `"div"` / `"scroll"` / `"stateful"`. Storing the static slice
     /// directly avoids one `String` allocation per element on every

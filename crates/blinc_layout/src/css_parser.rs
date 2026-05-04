@@ -2270,7 +2270,7 @@ fn parse_complex_selector(input: &str) -> ParseResult<ComplexSelector> {
 
 /// Parse a compound selector: one or more simple selector parts with no combinator.
 /// e.g. `#id.class:hover:first-child`
-/// Find the index of the matching closing parenthesis for the opening paren at input[0].
+/// Find the index of the matching closing parenthesis for the opening paren at `input[0]`.
 fn find_matching_paren(input: &str) -> Option<usize> {
     if !input.starts_with('(') {
         return None;
@@ -7267,7 +7267,7 @@ fn split_whitespace_respecting_parens(input: &str) -> Vec<String> {
     parts
 }
 
-/// Parse explicit shadow: offset-x offset-y blur [spread] color
+/// Parse explicit shadow: `offset-x offset-y blur [spread] color`
 fn parse_explicit_shadow(input: &str) -> Option<Shadow> {
     let parts = split_whitespace_respecting_parens(input);
     if parts.len() >= 4 {
@@ -8907,8 +8907,8 @@ fn split_gradient_parts(input: &str) -> Vec<String> {
     parts
 }
 
-/// Parse gradient direction (angle or "to <direction>")
-/// Returns (angle_in_degrees, color_start_index)
+/// Parse gradient direction (angle or `to <direction>`).
+/// Returns `(angle_in_degrees, color_start_index)`.
 fn parse_gradient_direction(first_part: &str) -> (f32, usize) {
     let part = first_part.trim().to_lowercase();
 

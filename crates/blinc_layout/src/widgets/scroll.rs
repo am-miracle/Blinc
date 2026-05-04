@@ -2594,7 +2594,7 @@ thread_local! {
 }
 
 /// Look up (or insert) the `SharedScrollPhysics` for a given
-/// [`InstanceKey`]. The first call at a given source location
+/// `InstanceKey`. The first call at a given source location
 /// allocates fresh physics; every subsequent call (across rebuilds)
 /// returns the same `Arc<Mutex<…>>`.
 fn physics_for_key(key: &crate::key::InstanceKey) -> SharedScrollPhysics {
