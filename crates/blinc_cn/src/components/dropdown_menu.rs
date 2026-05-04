@@ -120,7 +120,7 @@ pub struct DropdownMenuBuilder {
     /// Unique instance key (UUID-based for loop/closure safety)
     key: InstanceKey,
     /// User-added CSS classes
-    classes: Vec<String>,
+    classes: Vec<std::sync::Arc<str>>,
     /// User-set element ID
     user_id: Option<String>,
     /// Built component cache
@@ -275,8 +275,8 @@ impl DropdownMenuBuilder {
     }
 
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
-        self.classes.push(name.into());
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
+        self.classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
@@ -1078,7 +1078,7 @@ impl ElementBuilder for DropdownMenuBuilder {
         self.get_or_build().inner.event_handlers()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.get_or_build().inner.element_classes()
     }
 

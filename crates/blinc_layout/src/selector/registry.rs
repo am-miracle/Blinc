@@ -31,8 +31,9 @@ pub struct ElementRegistry {
     /// Cached element bounds (populated after layout computation)
     /// Maps string ID → computed bounds
     bounds_cache: RwLock<HashMap<String, Bounds>>,
-    /// CSS classes for each node (for .class selector matching)
-    classes: RwLock<HashMap<LayoutNodeId, Vec<String>>>,
+    /// CSS classes for each node (for .class selector matching).
+    /// Stored as `Arc<str>` so repeated names share one allocation.
+    classes: RwLock<HashMap<LayoutNodeId, Vec<Arc<str>>>>,
     /// Child index within parent (0-based) for :nth-child/:first-child/:last-child
     child_indices: RwLock<HashMap<LayoutNodeId, usize>>,
     /// Total sibling count for :last-child/:only-child
@@ -123,8 +124,9 @@ impl ElementRegistry {
         }
     }
 
-    /// Register CSS classes for a node
-    pub fn register_classes(&self, node_id: LayoutNodeId, classes: Vec<String>) {
+    /// Register CSS classes for a node. Classes are interned
+    /// `Arc<str>` so repeated names share one heap allocation.
+    pub fn register_classes(&self, node_id: LayoutNodeId, classes: Vec<Arc<str>>) {
         if !classes.is_empty() {
             if let Ok(mut map) = self.classes.write() {
                 map.insert(node_id, classes);
@@ -171,7 +173,7 @@ impl ElementRegistry {
 
     /// Check if a node has a specific CSS class
     /// Get the CSS classes registered for a node
-    pub fn get_classes(&self, node_id: LayoutNodeId) -> Option<Vec<String>> {
+    pub fn get_classes(&self, node_id: LayoutNodeId) -> Option<Vec<Arc<str>>> {
         self.classes
             .read()
             .ok()
@@ -182,7 +184,7 @@ impl ElementRegistry {
         self.classes
             .read()
             .ok()
-            .and_then(|map| map.get(&node_id).map(|c| c.iter().any(|s| s == class)))
+            .and_then(|map| map.get(&node_id).map(|c| c.iter().any(|s| &**s == class)))
             .unwrap_or(false)
     }
 
@@ -190,12 +192,16 @@ impl ElementRegistry {
     ///
     /// Takes a single read lock on the classes map and builds the full index.
     /// Used by stylesheet application to avoid O(rules × nodes) iteration.
+    /// The index is keyed by `String` for ergonomic lookup with stylesheet
+    /// rule selectors (which are themselves `String`); since classes are
+    /// interned the per-class allocation here is a single string copy
+    /// per unique class name, not per node.
     pub fn class_to_nodes_index(&self) -> HashMap<String, Vec<LayoutNodeId>> {
         let mut index: HashMap<String, Vec<LayoutNodeId>> = HashMap::new();
         if let Ok(guard) = self.classes.read() {
             for (&node_id, classes) in guard.iter() {
                 for class in classes {
-                    index.entry(class.clone()).or_default().push(node_id);
+                    index.entry(class.to_string()).or_default().push(node_id);
                 }
             }
         }

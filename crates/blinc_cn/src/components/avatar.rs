@@ -169,7 +169,7 @@ struct AvatarConfig {
     /// Custom text color for fallback
     fallback_color: Option<Color>,
     /// User-added CSS classes
-    classes: Vec<String>,
+    classes: Vec<std::sync::Arc<str>>,
     /// User-set element ID
     user_id: Option<String>,
 }
@@ -322,7 +322,7 @@ impl ElementBuilder for Avatar {
         self.inner.children_builders()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 
@@ -403,8 +403,8 @@ impl AvatarBuilder {
     }
 
     /// Add a CSS class for selector matching
-    pub fn class(self, name: impl Into<String>) -> Self {
-        self.config.borrow_mut().classes.push(name.into());
+    pub fn class(self, name: impl AsRef<str>) -> Self {
+        self.config.borrow_mut().classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
@@ -502,7 +502,7 @@ impl ElementBuilder for AvatarBuilder {
         self.get_or_build().children_builders()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.get_or_build().element_classes()
     }
 
@@ -566,7 +566,7 @@ struct AvatarGroupConfig {
     /// Overlap amount in pixels
     overlap: f32,
     /// User-added CSS classes
-    classes: Vec<String>,
+    classes: Vec<std::sync::Arc<str>>,
     /// User-set element ID
     user_id: Option<String>,
 }
@@ -682,7 +682,7 @@ impl ElementBuilder for AvatarGroup {
         self.inner.children_builders()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 
@@ -739,8 +739,8 @@ impl AvatarGroupBuilder {
     }
 
     /// Add a CSS class for selector matching
-    pub fn class(self, name: impl Into<String>) -> Self {
-        self.config.borrow_mut().classes.push(name.into());
+    pub fn class(self, name: impl AsRef<str>) -> Self {
+        self.config.borrow_mut().classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
@@ -777,7 +777,7 @@ impl ElementBuilder for AvatarGroupBuilder {
         self.get_or_build().children_builders()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.get_or_build().element_classes()
     }
 

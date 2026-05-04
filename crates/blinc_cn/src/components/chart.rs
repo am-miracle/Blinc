@@ -114,7 +114,7 @@ pub struct LineChart {
 
 impl LineChart {
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
         self.inner = self.inner.class(name);
         self
     }
@@ -147,7 +147,7 @@ impl ElementBuilder for LineChart {
         self.inner.layout_style()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 }
@@ -395,7 +395,7 @@ pub struct BarChart {
 
 impl BarChart {
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
         self.inner = self.inner.class(name);
         self
     }
@@ -428,7 +428,7 @@ impl ElementBuilder for BarChart {
         self.inner.layout_style()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 }
@@ -640,7 +640,7 @@ pub struct SparkLine {
 
 impl SparkLine {
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
         self.inner = self.inner.class(name);
         self
     }
@@ -673,7 +673,7 @@ impl ElementBuilder for SparkLine {
         self.inner.layout_style()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 }
@@ -844,7 +844,7 @@ pub struct ThresholdLineChart {
 
 impl ThresholdLineChart {
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
         self.inner = self.inner.class(name);
         self
     }
@@ -877,7 +877,7 @@ impl ElementBuilder for ThresholdLineChart {
         self.inner.layout_style()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 }
@@ -1210,7 +1210,7 @@ pub struct Histogram {
 
 impl Histogram {
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
         self.inner = self.inner.class(name);
         self
     }
@@ -1243,7 +1243,7 @@ impl ElementBuilder for Histogram {
         self.inner.layout_style()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 }
@@ -1471,7 +1471,7 @@ pub struct ComparisonBarChart {
 
 impl ComparisonBarChart {
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
         self.inner = self.inner.class(name);
         self
     }
@@ -1504,7 +1504,7 @@ impl ElementBuilder for ComparisonBarChart {
         self.inner.layout_style()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 }

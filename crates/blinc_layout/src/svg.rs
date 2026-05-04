@@ -88,7 +88,7 @@ pub struct Svg {
     /// Element ID for CSS selector targeting
     element_id: Option<String>,
     /// CSS class names for selector matching
-    classes: Vec<String>,
+    classes: Vec<std::sync::Arc<str>>,
     /// Internal SVGs (widget checkmarks, icons) don't match type selectors
     is_internal: bool,
 }
@@ -208,8 +208,8 @@ impl Svg {
     }
 
     /// Add a CSS class name for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
-        self.classes.push(name.into());
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
+        self.classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
@@ -375,7 +375,7 @@ impl ElementBuilder for Svg {
         self.element_id.as_deref()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         &self.classes
     }
 

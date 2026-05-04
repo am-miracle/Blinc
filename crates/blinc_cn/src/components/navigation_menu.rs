@@ -423,7 +423,7 @@ impl ElementBuilder for NavigationMenu {
         ElementBuilder::element_type_id(&self.inner)
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 
@@ -438,7 +438,7 @@ pub struct NavigationMenuBuilder {
     items: Vec<NavMenuItem>,
     min_content_width: f32,
     /// User-added CSS classes
-    classes: Vec<String>,
+    classes: Vec<std::sync::Arc<str>>,
     /// User-set element ID
     user_id: Option<String>,
     built: OnceCell<NavigationMenu>,
@@ -459,8 +459,8 @@ impl NavigationMenuBuilder {
     }
 
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
-        self.classes.push(name.into());
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
+        self.classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
@@ -538,7 +538,7 @@ impl ElementBuilder for NavigationMenuBuilder {
         self.get_or_build().element_type_id()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.get_or_build().element_classes()
     }
 
@@ -655,7 +655,7 @@ impl ElementBuilder for NavigationLink {
         ElementBuilder::element_type_id(&self.inner)
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 
@@ -671,7 +671,7 @@ pub struct NavigationLinkBuilder {
     description: Option<String>,
     on_click: Option<Arc<dyn Fn() + Send + Sync>>,
     /// User-added CSS classes
-    classes: Vec<String>,
+    classes: Vec<std::sync::Arc<str>>,
     /// User-set element ID
     user_id: Option<String>,
     built: OnceCell<NavigationLink>,
@@ -693,8 +693,8 @@ impl NavigationLinkBuilder {
     }
 
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
-        self.classes.push(name.into());
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
+        self.classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
@@ -751,7 +751,7 @@ impl ElementBuilder for NavigationLinkBuilder {
         self.get_or_build().element_type_id()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.get_or_build().element_classes()
     }
 

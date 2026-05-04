@@ -52,7 +52,7 @@ pub struct ButtonConfig {
     pub disabled_color: Color,
     pub disabled: bool,
     /// CSS class names for stylesheet matching
-    pub css_classes: Vec<String>,
+    pub css_classes: Vec<std::sync::Arc<str>>,
 }
 
 impl Default for ButtonConfig {
@@ -462,7 +462,7 @@ impl Button {
             .lock()
             .unwrap()
             .css_classes
-            .push(class.to_string());
+            .push(blinc_core::intern::intern(class));
         self.inner = self.inner.class(class);
         self
     }
@@ -635,7 +635,7 @@ impl ElementBuilder for Button {
         self.inner.element_id()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 

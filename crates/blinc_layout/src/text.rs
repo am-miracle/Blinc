@@ -81,7 +81,7 @@ pub struct Text {
     /// Semantic type name for CSS type selectors (e.g., "h1", "p", "span")
     semantic_type: Option<&'static str>,
     /// CSS class names for selector matching
-    classes: Vec<String>,
+    classes: Vec<std::sync::Arc<str>>,
 }
 
 impl Text {
@@ -155,8 +155,8 @@ impl Text {
     ///
     /// Classes can be used with `.class` selectors in stylesheets.
     /// Multiple classes can be added by chaining `.class()` calls.
-    pub fn class(mut self, name: impl Into<String>) -> Self {
-        self.classes.push(name.into());
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
+        self.classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
@@ -655,7 +655,7 @@ impl ElementBuilder for Text {
         self.element_id.as_deref()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         &self.classes
     }
 

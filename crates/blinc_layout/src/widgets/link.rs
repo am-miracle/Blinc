@@ -86,7 +86,7 @@ pub struct Link {
     inner: Div,
     url: String,
     css_element_id: Option<String>,
-    css_classes: Vec<String>,
+    css_classes: Vec<std::sync::Arc<str>>,
 }
 
 impl Link {
@@ -214,7 +214,7 @@ impl Link {
 
     /// Add a CSS class for selector matching
     pub fn class(mut self, name: &str) -> Self {
-        self.css_classes.push(name.to_string());
+        self.css_classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
@@ -305,7 +305,7 @@ impl ElementBuilder for Link {
         self.css_element_id.as_deref()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         &self.css_classes
     }
 

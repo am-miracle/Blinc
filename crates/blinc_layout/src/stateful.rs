@@ -1145,7 +1145,7 @@ pub struct StatefulInner<S: StateTransitions> {
     /// because the rebuild path replaces the parent node's classes/style with
     /// whatever the on_state callback returned — and that callback has no way
     /// to know about classes the user attached to the outer Stateful.
-    pub(crate) base_classes: Vec<String>,
+    pub(crate) base_classes: Vec<std::sync::Arc<str>>,
 
     /// Container-level element id set via `.id()` on the Stateful itself.
     /// Mirrors `base_classes` for the same reason.
@@ -2986,7 +2986,7 @@ impl<S: StateTransitions> Stateful<S> {
 
     /// Add a CSS class name for selector matching
     pub fn class(self, name: &str) -> Self {
-        self.inner.borrow_mut().classes.push(name.to_string());
+        self.inner.borrow_mut().classes.push(blinc_core::intern::intern(name.as_ref()));
         // Mirror into shared_state so refresh_props_internal can re-seed temp_div
         // on subtree rebuild. Without this, classes set on the Stateful container
         // are wiped from the element_registry the first time the on_state callback
@@ -2995,7 +2995,7 @@ impl<S: StateTransitions> Stateful<S> {
             .lock()
             .unwrap()
             .base_classes
-            .push(name.to_string());
+            .push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
@@ -4165,7 +4165,7 @@ impl<S: StateTransitions> ElementBuilder for Stateful<S> {
         unsafe { (*self.inner.as_ptr()).element_id.as_deref() }
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         // SAFETY: Same pattern as children_builders/layout_style - stable during rendering
         unsafe { &(*self.inner.as_ptr()).classes }
     }

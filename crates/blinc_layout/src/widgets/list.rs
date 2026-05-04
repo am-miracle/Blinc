@@ -166,7 +166,7 @@ pub struct UnorderedList {
     marker: ListMarker,
     item_count: usize,
     css_element_id: Option<String>,
-    css_classes: Vec<String>,
+    css_classes: Vec<std::sync::Arc<str>>,
 }
 
 impl UnorderedList {
@@ -231,7 +231,7 @@ impl UnorderedList {
 
     /// Add a CSS class for selector matching
     pub fn class(mut self, name: &str) -> Self {
-        self.css_classes.push(name.to_string());
+        self.css_classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 }
@@ -281,7 +281,7 @@ impl ElementBuilder for UnorderedList {
         self.css_element_id.as_deref()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         &self.css_classes
     }
 }
@@ -298,7 +298,7 @@ pub struct OrderedList {
     start: usize,
     item_count: usize,
     css_element_id: Option<String>,
-    css_classes: Vec<String>,
+    css_classes: Vec<std::sync::Arc<str>>,
 }
 
 impl OrderedList {
@@ -384,7 +384,7 @@ impl OrderedList {
 
     /// Add a CSS class for selector matching
     pub fn class(mut self, name: &str) -> Self {
-        self.css_classes.push(name.to_string());
+        self.css_classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 }
@@ -434,7 +434,7 @@ impl ElementBuilder for OrderedList {
         self.css_element_id.as_deref()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         &self.css_classes
     }
 }
@@ -565,7 +565,7 @@ impl ElementBuilder for ListItem {
         self.inner.element_id()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 }
@@ -711,7 +711,7 @@ impl ElementBuilder for TaskListItem {
         self.inner.element_id()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 }

@@ -219,7 +219,7 @@ pub struct ScrollArea {
 
 impl ScrollArea {
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
         self.inner = self.inner.class(name);
         self
     }
@@ -248,7 +248,7 @@ impl ElementBuilder for ScrollArea {
         ElementBuilder::event_handlers(&self.inner)
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 }
@@ -409,7 +409,7 @@ impl ElementBuilder for ScrollAreaBuilder {
         self.get_or_build().event_handlers()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.get_or_build().element_classes()
     }
 }

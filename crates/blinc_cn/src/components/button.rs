@@ -451,8 +451,8 @@ impl Button {
     }
 
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
-        self.inner = self.inner.class(&name.into());
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
+        self.inner = self.inner.class(name.as_ref());
         self
     }
 
@@ -488,7 +488,7 @@ impl ElementBuilder for Button {
         self.inner.layout_style()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 
@@ -617,7 +617,7 @@ impl ElementBuilder for ButtonBuilder {
         self.get_or_build().layout_style()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.get_or_build().element_classes()
     }
 

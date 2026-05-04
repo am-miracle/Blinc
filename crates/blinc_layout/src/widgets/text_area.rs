@@ -56,7 +56,7 @@ fn apply_css_overrides_textarea(
     cfg: &mut TextAreaConfig,
     stylesheet: &Stylesheet,
     element_id: Option<&str>,
-    css_classes: &[String],
+    css_classes: &[std::sync::Arc<str>],
     visual: &TextFieldState,
 ) {
     let state = match visual {
@@ -406,7 +406,7 @@ pub struct TextAreaState {
     /// CSS element ID for stylesheet matching (set via TextArea::id())
     pub(crate) css_element_id: Option<String>,
     /// CSS class names for stylesheet matching (set via TextArea::class())
-    pub(crate) css_classes: Vec<String>,
+    pub(crate) css_classes: Vec<std::sync::Arc<str>>,
 }
 
 impl std::fmt::Debug for TextAreaState {
@@ -2646,7 +2646,7 @@ impl TextArea {
     /// Add a CSS class name for selector matching
     pub fn class(mut self, name: &str) -> Self {
         if let Ok(mut d) = self.state.lock() {
-            d.css_classes.push(name.to_string());
+            d.css_classes.push(blinc_core::intern::intern(name.as_ref()));
         }
         self.inner = std::mem::take(&mut self.inner).class(name);
         self

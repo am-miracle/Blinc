@@ -521,7 +521,7 @@ impl ElementBuilder for Pagination {
         ElementBuilder::element_type_id(&self.inner)
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 
@@ -540,7 +540,7 @@ pub struct PaginationBuilder {
     size: PaginationSize,
     on_page_change: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     /// User-added CSS classes
-    classes: Vec<String>,
+    classes: Vec<std::sync::Arc<str>>,
     /// User-set element ID
     user_id: Option<String>,
     built: std::cell::OnceCell<Pagination>,
@@ -600,8 +600,8 @@ impl PaginationBuilder {
     }
 
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
-        self.classes.push(name.into());
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
+        self.classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
@@ -646,7 +646,7 @@ impl ElementBuilder for PaginationBuilder {
         self.get_or_build().element_type_id()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.get_or_build().element_classes()
     }
 

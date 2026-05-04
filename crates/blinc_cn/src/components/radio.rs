@@ -444,7 +444,7 @@ struct RadioGroupConfig {
     on_change: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     css_group_id: Option<String>,
     /// User-added CSS classes
-    classes: Vec<String>,
+    classes: Vec<std::sync::Arc<str>>,
 }
 
 impl RadioGroupConfig {
@@ -490,8 +490,8 @@ impl RadioGroupBuilder {
     }
 
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
-        self.config.classes.push(name.into());
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
+        self.config.classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
@@ -619,7 +619,7 @@ impl ElementBuilder for RadioGroup {
         self.inner.element_type_id()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 }
@@ -641,7 +641,7 @@ impl ElementBuilder for RadioGroupBuilder {
         self.get_or_build().element_type_id()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.get_or_build().element_classes()
     }
 }

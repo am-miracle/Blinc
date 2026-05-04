@@ -881,7 +881,7 @@ pub struct TextInputData {
     /// CSS element ID for stylesheet matching (set via TextInput::id())
     pub(crate) css_element_id: Option<String>,
     /// CSS class names for stylesheet matching (set via TextInput::class())
-    pub(crate) css_classes: Vec<String>,
+    pub(crate) css_classes: Vec<std::sync::Arc<str>>,
     /// Last click timestamp for double-click detection
     pub(crate) last_click_time: Option<web_time::Instant>,
     /// Anchor position for drag-to-select
@@ -1525,7 +1525,7 @@ fn apply_css_overrides(
     cfg: &mut TextInputConfig,
     stylesheet: &Stylesheet,
     element_id: Option<&str>,
-    css_classes: &[String],
+    css_classes: &[std::sync::Arc<str>],
     visual: &TextFieldState,
 ) {
     // Determine the element state for state-specific lookups
@@ -2822,7 +2822,7 @@ impl TextInput {
     /// Add a CSS class name for selector matching
     pub fn class(mut self, name: &str) -> Self {
         if let Ok(mut d) = self.data.lock() {
-            d.css_classes.push(name.to_string());
+            d.css_classes.push(blinc_core::intern::intern(name.as_ref()));
         }
         self.inner = std::mem::take(&mut self.inner).class(name);
         self

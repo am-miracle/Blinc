@@ -100,7 +100,7 @@ pub struct HoverCardBuilder {
     /// Unique instance key
     key: InstanceKey,
     /// User-added CSS classes
-    classes: Vec<String>,
+    classes: Vec<std::sync::Arc<str>>,
     /// User-set element ID
     user_id: Option<String>,
     /// Built component cache
@@ -180,8 +180,8 @@ impl HoverCardBuilder {
     }
 
     /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl Into<String>) -> Self {
-        self.classes.push(name.into());
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
+        self.classes.push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
@@ -573,7 +573,7 @@ impl ElementBuilder for HoverCardBuilder {
         self.get_or_build().inner.layout_style()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.get_or_build().inner.element_classes()
     }
 
@@ -607,7 +607,7 @@ impl ElementBuilder for HoverCard {
         self.inner.layout_style()
     }
 
-    fn element_classes(&self) -> &[String] {
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
 
