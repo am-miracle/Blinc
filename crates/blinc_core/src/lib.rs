@@ -40,6 +40,7 @@ pub mod draw;
 pub mod events;
 pub mod flow;
 pub mod fsm;
+pub mod intern;
 pub mod layer;
 pub mod native_bridge;
 pub mod reactive;

@@ -92,9 +92,21 @@ impl Text {
     /// - Decimal entities: `&#65;`, `&#8364;`, etc.
     /// - Hexadecimal entities: `&#x41;`, `&#x20AC;`, etc.
     pub fn new(content: impl Into<String>) -> Self {
-        // Decode HTML entities (e.g., &amp; -> &, &copy; -> ©)
+        // Decode HTML entities (e.g., &amp; -> &, &copy; -> ©).
+        //
+        // Fast path: most text has no `&` at all. `decode_html_entities`
+        // is a Cow returner — `Cow::Borrowed` when nothing changed —
+        // but the previous `.into_owned()` allocated a fresh String even
+        // in the borrowed case. Skip the call entirely when there's
+        // nothing it could possibly change. For a UI with hundreds of
+        // text labels rebuilt on every state change, this drops one
+        // allocation per text element per build.
         let raw_content = content.into();
-        let decoded_content = decode_html_entities(&raw_content).into_owned();
+        let decoded_content = if raw_content.contains('&') {
+            decode_html_entities(&raw_content).into_owned()
+        } else {
+            raw_content
+        };
 
         let mut text = Self {
             content: decoded_content,
