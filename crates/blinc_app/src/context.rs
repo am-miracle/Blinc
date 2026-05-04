@@ -2557,11 +2557,15 @@ impl RenderContext {
             instances.push(instance);
         }
 
-        // Upload atlas to GPU if dirty, then batch-render all SVG instances
+        // Upload atlas to GPU if dirty, then batch-render all SVG instances.
+        // The atlas is lazily allocated on first insert; if we have
+        // instances we must have inserted at least one this frame, so the
+        // view is guaranteed to exist by the time we read it.
         if !instances.is_empty() {
             self.svg_atlas.upload(&self.queue);
-            self.renderer
-                .render_images(target, self.svg_atlas.view(), &instances);
+            if let Some(view) = self.svg_atlas.view() {
+                self.renderer.render_images(target, view, &instances);
+            }
         }
     }
 

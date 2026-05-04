@@ -38,15 +38,23 @@ const INITIAL_SIZE: u32 = 1024;
 const MAX_SIZE: u32 = 4096;
 const PADDING: u32 = 2;
 
-/// SVG texture atlas — packs rasterized SVGs into a single GPU texture
+/// SVG texture atlas — packs rasterized SVGs into a single GPU texture.
+///
+/// The texture and CPU shadow buffer are **lazily allocated** on first
+/// `insert()`. An app with no `svg()` elements pays nothing — this used
+/// to allocate a 1024×1024 RGBA texture (4 MB GPU + 4 MB CPU shadow)
+/// at startup whether the atlas was ever used or not.
 pub struct SvgAtlas {
     width: u32,
     height: u32,
-    pixels: Vec<u8>,
+    /// Lazily allocated. `None` until first `insert()` call.
+    pixels: Option<Vec<u8>>,
     shelves: Vec<Shelf>,
     entries: HashMap<u64, SvgAtlasRegion>,
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
+    /// Lazily allocated. `None` until first `insert()` call.
+    texture: Option<wgpu::Texture>,
+    /// Lazily allocated. `None` until first `insert()` call.
+    view: Option<wgpu::TextureView>,
     dirty: bool,
     /// Cache keys accessed since the last `end_frame()` call.
     /// Used by the mark-and-sweep eviction: when the atlas is full,
@@ -58,23 +66,42 @@ pub struct SvgAtlas {
 }
 
 impl SvgAtlas {
-    pub fn new(device: &wgpu::Device) -> Self {
-        let (texture, view) = create_atlas_texture(device, INITIAL_SIZE, INITIAL_SIZE);
+    pub fn new(_device: &wgpu::Device) -> Self {
+        // Don't allocate the texture / shadow buffer yet. `ensure_alloc`
+        // creates them on the first `insert()` call. For apps that
+        // never render an SVG (a substantial fraction of the demos and
+        // most production UIs), this saves ~8 MB of resident memory.
         Self {
             width: INITIAL_SIZE,
             height: INITIAL_SIZE,
-            pixels: vec![0u8; (INITIAL_SIZE * INITIAL_SIZE * 4) as usize],
+            pixels: None,
             shelves: Vec::new(),
             entries: HashMap::new(),
-            texture,
-            view,
+            texture: None,
+            view: None,
             dirty: false,
             used_this_frame: HashSet::new(),
         }
     }
 
-    pub fn view(&self) -> &wgpu::TextureView {
-        &self.view
+    /// Allocate the texture + CPU shadow buffer if they haven't been
+    /// allocated yet. Idempotent.
+    fn ensure_alloc(&mut self, device: &wgpu::Device) {
+        if self.texture.is_some() {
+            return;
+        }
+        let (texture, view) = create_atlas_texture(device, self.width, self.height);
+        self.pixels = Some(vec![0u8; (self.width * self.height * 4) as usize]);
+        self.texture = Some(texture);
+        self.view = Some(view);
+    }
+
+    /// Returns the GPU texture view for binding. Returns `None` when
+    /// the atlas hasn't been allocated yet (no SVG rendered). Callers
+    /// already gate on `instances.is_empty()` before binding, so this
+    /// stays in sync with whether anything's been inserted.
+    pub fn view(&self) -> Option<&wgpu::TextureView> {
+        self.view.as_ref()
     }
 
     pub fn width(&self) -> u32 {
@@ -119,6 +146,11 @@ impl SvgAtlas {
         rgba_pixels: &[u8],
         device: &wgpu::Device,
     ) -> Option<SvgAtlasRegion> {
+        // First-time allocation: lazily create the texture + CPU shadow
+        // buffer the first time anything is inserted. Apps that never
+        // render an SVG never pay the ~8 MB cost.
+        self.ensure_alloc(device);
+
         // Try to allocate — grow if needed, but never repack mid-frame.
         // Eviction runs in `begin_frame()` at the top of the render
         // pass so UV coordinates stay stable for the entire loop.
@@ -148,19 +180,24 @@ impl SvgAtlas {
         Some(region)
     }
 
-    /// Upload dirty pixels to the GPU texture
+    /// Upload dirty pixels to the GPU texture. No-op when the atlas
+    /// hasn't been lazily allocated yet (`upload` runs unconditionally
+    /// from the renderer, but the atlas may be untouched).
     pub fn upload(&mut self, queue: &wgpu::Queue) {
         if !self.dirty {
             return;
         }
+        let (Some(texture), Some(pixels)) = (self.texture.as_ref(), self.pixels.as_ref()) else {
+            return;
+        };
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &self.pixels,
+            pixels,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(self.width * 4),
@@ -175,11 +212,14 @@ impl SvgAtlas {
         self.dirty = false;
     }
 
-    /// Clear all entries and shelves (full eviction)
+    /// Clear all entries and shelves (full eviction). The pixel shadow
+    /// buffer is only zeroed if it was ever allocated.
     pub fn clear(&mut self) {
         self.entries.clear();
         self.shelves.clear();
-        self.pixels.fill(0);
+        if let Some(pixels) = self.pixels.as_mut() {
+            pixels.fill(0);
+        }
         self.used_this_frame.clear();
         self.dirty = true;
     }
@@ -237,29 +277,36 @@ impl SvgAtlas {
         // Repack: save the pixel data for surviving entries, clear
         // the atlas, then re-insert them. This reclaims fragmented
         // space from the shelf packer.
-        let surviving: Vec<(u64, Vec<u8>, u32, u32)> = self
-            .entries
-            .iter()
-            .map(|(&key, region)| {
-                let row_bytes = region.width as usize * 4;
-                let mut px = vec![0u8; row_bytes * region.height as usize];
-                for y in 0..region.height {
-                    let src =
-                        ((region.y + y) as usize * self.width as usize + region.x as usize) * 4;
-                    let dst = y as usize * row_bytes;
-                    if src + row_bytes <= self.pixels.len() {
-                        px[dst..dst + row_bytes]
-                            .copy_from_slice(&self.pixels[src..src + row_bytes]);
+        let surviving: Vec<(u64, Vec<u8>, u32, u32)> = {
+            let Some(pixels) = self.pixels.as_ref() else {
+                return false;
+            };
+            self.entries
+                .iter()
+                .map(|(&key, region)| {
+                    let row_bytes = region.width as usize * 4;
+                    let mut px = vec![0u8; row_bytes * region.height as usize];
+                    for y in 0..region.height {
+                        let src = ((region.y + y) as usize * self.width as usize
+                            + region.x as usize)
+                            * 4;
+                        let dst = y as usize * row_bytes;
+                        if src + row_bytes <= pixels.len() {
+                            px[dst..dst + row_bytes]
+                                .copy_from_slice(&pixels[src..src + row_bytes]);
+                        }
                     }
-                }
-                (key, px, region.width, region.height)
-            })
-            .collect();
+                    (key, px, region.width, region.height)
+                })
+                .collect()
+        };
 
         // Full reset of the packing state
         self.shelves.clear();
         self.entries.clear();
-        self.pixels.fill(0);
+        if let Some(pixels) = self.pixels.as_mut() {
+            pixels.fill(0);
+        }
 
         // Re-insert surviving entries
         for (key, px, w, h) in surviving {
@@ -337,15 +384,20 @@ impl SvgAtlas {
         Some(region)
     }
 
-    /// Blit RGBA pixel data into the atlas at the given region
+    /// Blit RGBA pixel data into the atlas at the given region.
+    /// Caller must have called `ensure_alloc` first (every public path
+    /// to `write_pixels` goes through `insert` which does so).
     fn write_pixels(&mut self, region: &SvgAtlasRegion, rgba: &[u8]) {
+        let Some(pixels) = self.pixels.as_mut() else {
+            return;
+        };
         let row_bytes = region.width as usize * 4;
         for y in 0..region.height {
             let src_offset = y as usize * row_bytes;
             let dst_offset =
                 ((region.y + y) as usize * self.width as usize + region.x as usize) * 4;
-            if src_offset + row_bytes <= rgba.len() && dst_offset + row_bytes <= self.pixels.len() {
-                self.pixels[dst_offset..dst_offset + row_bytes]
+            if src_offset + row_bytes <= rgba.len() && dst_offset + row_bytes <= pixels.len() {
+                pixels[dst_offset..dst_offset + row_bytes]
                     .copy_from_slice(&rgba[src_offset..src_offset + row_bytes]);
             }
         }
@@ -353,7 +405,9 @@ impl SvgAtlas {
     }
 
     /// Double atlas dimensions, copy old pixels into top-left quadrant.
-    /// Creates a new GPU texture. Returns false if already at max size.
+    /// Creates a new GPU texture. Returns false if already at max size
+    /// or if the atlas hasn't been allocated yet (caller must
+    /// `ensure_alloc` before invoking grow).
     fn grow(&mut self, device: &wgpu::Device) -> bool {
         let new_w = (self.width * 2).min(MAX_SIZE);
         let new_h = (self.height * 2).min(MAX_SIZE);
@@ -362,22 +416,26 @@ impl SvgAtlas {
             return false;
         }
 
+        let Some(old_pixels) = self.pixels.as_ref() else {
+            return false;
+        };
+
         let mut new_pixels = vec![0u8; (new_w * new_h * 4) as usize];
         for y in 0..self.height {
             let src_start = (y * self.width * 4) as usize;
             let src_end = src_start + (self.width * 4) as usize;
             let dst_start = (y * new_w * 4) as usize;
             let dst_end = dst_start + (self.width * 4) as usize;
-            new_pixels[dst_start..dst_end].copy_from_slice(&self.pixels[src_start..src_end]);
+            new_pixels[dst_start..dst_end].copy_from_slice(&old_pixels[src_start..src_end]);
         }
 
-        self.pixels = new_pixels;
+        self.pixels = Some(new_pixels);
         self.width = new_w;
         self.height = new_h;
 
         let (texture, view) = create_atlas_texture(device, new_w, new_h);
-        self.texture = texture;
-        self.view = view;
+        self.texture = Some(texture);
+        self.view = Some(view);
         self.dirty = true;
 
         tracing::info!(
