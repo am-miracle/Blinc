@@ -440,9 +440,21 @@ impl AnimationScheduler {
                 // callers (e.g. `add_spring`) always hold `inner.lock()`
                 // before locking `wakeup`, so the bg thread must mirror that
                 // order to avoid deadlock.
+                //
+                // When `wants_continuous` is the *only* reason we're awake
+                // (no real animations are playing — has_active is false),
+                // tick at half rate. The classic consumer of continuous
+                // redraw is text-input cursor blink, which doesn't need
+                // 60+ fps to look right. Cuts the CPU floor for any
+                // focused text input in half.
                 let frame_duration = if active {
                     let target_fps = inner.lock().unwrap().target_fps.max(1);
-                    Duration::from_micros(1_000_000 / target_fps as u64)
+                    let effective_fps = if !has_active && wants_continuous {
+                        (target_fps / 2).max(1)
+                    } else {
+                        target_fps
+                    };
+                    Duration::from_micros(1_000_000 / effective_fps as u64)
                 } else {
                     Duration::ZERO // unused in idle branch
                 };

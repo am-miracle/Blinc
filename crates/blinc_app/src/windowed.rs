@@ -4291,6 +4291,25 @@ impl WindowedApp {
                             // @flow shaders using time/animation builtins need continuous redraws
                             let flow_needs_redraw = blinc_app.has_active_flows();
 
+                            // Log which signal(s) kept the redraw chain alive at trace
+                            // level. Run with `RUST_LOG=blinc_app=trace` to see what's
+                            // pinning a stuck-busy frame loop. Writes nothing in normal
+                            // builds — the format args aren't even evaluated when the
+                            // trace target is disabled.
+                            tracing::trace!(
+                                target: "blinc_app::redraw_signals",
+                                animation = needs_animation_redraw,
+                                cursor = needs_cursor_redraw,
+                                motion = needs_motion_redraw,
+                                scroll = scroll_animating,
+                                overlay = needs_overlay_redraw,
+                                theme = theme_animating,
+                                css = css_needs_redraw,
+                                pointer_query = pointer_query_active,
+                                flow = flow_needs_redraw,
+                                "redraw chain"
+                            );
+
                             if needs_animation_redraw || needs_cursor_redraw || needs_motion_redraw || scroll_animating || needs_overlay_redraw || theme_animating || css_needs_redraw || pointer_query_active || flow_needs_redraw {
                                 // Request another frame to render updated animation values
                                 // For cursor blink, also re-request continuous redraw for next frame
