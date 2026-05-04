@@ -10096,7 +10096,7 @@ impl RenderTree {
         if let Some(physics) = self.scroll_physics.get(&node) {
             if let Ok(p) = physics.try_lock() {
                 let info = p.scrollbar_render_info();
-                tracing::info!(
+                tracing::trace!(
                     "Scrollbar: opacity={:.2}, show_v={}, show_h={}, state={:?}, content_h={:.0}, viewport_h={:.0}",
                     info.opacity,
                     info.show_vertical,
@@ -10107,7 +10107,7 @@ impl RenderTree {
                 );
                 // Only render if scrollbar is visible (opacity > 0)
                 if info.opacity > 0.01 {
-                    tracing::info!("Rendering scrollbar with opacity {:.2}", info.opacity);
+                    tracing::trace!("Rendering scrollbar with opacity {:.2}", info.opacity);
                     self.render_scrollbar(ctx, bounds.width, bounds.height, &info);
                 }
             }

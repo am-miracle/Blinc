@@ -4263,10 +4263,16 @@ impl WindowedApp {
                                 false
                             };
 
-                            // Check if overlays changed (modal opened/closed, toast appeared, etc.)
+                            // Check if overlays changed (modal opened/closed, toast
+                            // appeared, etc.) or are mid-animation. The presence of a
+                            // *visible* overlay is NOT a redraw signal — a static
+                            // popover should sit quiet between input events. Use
+                            // `has_animating_overlays` (enter/exit motion) instead;
+                            // any overlay-internal redraws (hover css, contained
+                            // motion) flow through their own signals below.
                             let needs_overlay_redraw = {
                                 let mgr = windowed_ctx.overlay_manager.lock().unwrap();
-                                mgr.take_dirty() || mgr.has_visible_overlays()
+                                mgr.take_dirty() || mgr.has_animating_overlays()
                             };
 
                             // Check if CSS animations/transitions/FLIP need continued redraws
