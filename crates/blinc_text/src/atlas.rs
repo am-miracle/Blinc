@@ -327,13 +327,19 @@ impl std::fmt::Debug for GlyphAtlas {
 ///
 /// Similar to GlyphAtlas but stores RGBA pixel data (4 bytes per pixel)
 /// for color emoji and other color glyphs.
+///
+/// The CPU shadow buffer is **lazily allocated** on first
+/// `insert_glyph`. An app that never renders a color emoji pays
+/// nothing — this used to allocate 512×512×4 = 1 MB at startup
+/// regardless. The companion GPU texture in `blinc_gpu::text` is also
+/// lazy; both stay `None` together until the first insert.
 pub struct ColorGlyphAtlas {
     /// Atlas width in pixels
     width: u32,
     /// Atlas height in pixels
     height: u32,
-    /// Pixel data (RGBA, 4 bytes per pixel)
-    pixels: Vec<u8>,
+    /// Pixel data (RGBA, 4 bytes per pixel). `None` until first insert.
+    pixels: Option<Vec<u8>>,
     /// Cached glyph information
     glyphs: FxHashMap<GlyphKey, GlyphInfo>,
     /// Shelves for skyline packing
@@ -348,16 +354,27 @@ impl ColorGlyphAtlas {
     /// Maximum atlas dimension (4096×4096 = 64 MB for RGBA)
     const MAX_SIZE: u32 = 4096;
 
-    /// Create a new color glyph atlas
+    /// Create a new color glyph atlas. The pixel buffer is not
+    /// allocated until first `insert_glyph` — see struct doc.
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             width,
             height,
-            pixels: vec![0; (width * height * 4) as usize], // RGBA = 4 bytes per pixel
+            pixels: None,
             glyphs: FxHashMap::default(),
             shelves: Vec::new(),
             padding: 2,
-            dirty: true,
+            // `dirty` stays false until something is actually inserted.
+            // Was previously `true` because `new` allocated a fresh
+            // (empty) buffer; with lazy alloc there is nothing to upload.
+            dirty: false,
+        }
+    }
+
+    /// Allocate the CPU pixel buffer if not yet allocated. Idempotent.
+    fn ensure_alloc(&mut self) {
+        if self.pixels.is_none() {
+            self.pixels = Some(vec![0u8; (self.width * self.height * 4) as usize]);
         }
     }
 
@@ -366,9 +383,10 @@ impl ColorGlyphAtlas {
         (self.width, self.height)
     }
 
-    /// Get raw pixel data (RGBA format)
+    /// Get raw pixel data (RGBA format). Returns an empty slice when
+    /// the atlas hasn't been touched (no color glyph ever inserted).
     pub fn pixels(&self) -> &[u8] {
-        &self.pixels
+        self.pixels.as_deref().unwrap_or(&[])
     }
 
     /// Check if atlas has been modified
@@ -462,18 +480,21 @@ impl ColorGlyphAtlas {
             return Ok(*info);
         }
 
+        // Lazy: allocate the 1 MB pixel buffer only on first insert.
+        self.ensure_alloc();
+
         // Allocate region
         let region = self.allocate(width, height)?;
 
         // Copy RGBA bitmap to atlas (4 bytes per pixel)
+        let pixels = self.pixels.as_mut().expect("ensure_alloc above");
         for y in 0..height {
             let src_offset = (y * width * 4) as usize;
             let dst_offset = ((region.y + y) * self.width * 4 + region.x * 4) as usize;
             let row_bytes = (width * 4) as usize;
 
-            if src_offset + row_bytes <= bitmap.len() && dst_offset + row_bytes <= self.pixels.len()
-            {
-                self.pixels[dst_offset..dst_offset + row_bytes]
+            if src_offset + row_bytes <= bitmap.len() && dst_offset + row_bytes <= pixels.len() {
+                pixels[dst_offset..dst_offset + row_bytes]
                     .copy_from_slice(&bitmap[src_offset..src_offset + row_bytes]);
             }
         }
@@ -495,7 +516,9 @@ impl ColorGlyphAtlas {
     /// Double the atlas dimensions and repack existing pixel data (RGBA).
     ///
     /// Same approach as `GlyphAtlas::grow()` but with 4 bytes per pixel.
-    /// Returns `true` if growth succeeded, `false` if already at max size.
+    /// Returns `true` if growth succeeded, `false` if already at max
+    /// size or if the atlas is still unallocated (`new` was called but
+    /// no `insert_glyph` ever ran — nothing to grow).
     pub fn grow(&mut self) -> bool {
         let new_width = (self.width * 2).min(Self::MAX_SIZE);
         let new_height = (self.height * 2).min(Self::MAX_SIZE);
@@ -504,27 +527,34 @@ impl ColorGlyphAtlas {
             return false;
         }
 
+        let Some(old_pixels) = self.pixels.as_ref() else {
+            return false;
+        };
+
         let mut new_pixels = vec![0u8; (new_width * new_height * 4) as usize];
         for y in 0..self.height {
             let src_start = (y * self.width * 4) as usize;
             let row_bytes = (self.width * 4) as usize;
             let dst_start = (y * new_width * 4) as usize;
             new_pixels[dst_start..dst_start + row_bytes]
-                .copy_from_slice(&self.pixels[src_start..src_start + row_bytes]);
+                .copy_from_slice(&old_pixels[src_start..src_start + row_bytes]);
         }
 
-        self.pixels = new_pixels;
+        self.pixels = Some(new_pixels);
         self.width = new_width;
         self.height = new_height;
         self.dirty = true;
         true
     }
 
-    /// Clear all cached glyphs
+    /// Clear all cached glyphs. Pixel buffer is zeroed only if it was
+    /// ever allocated.
     pub fn clear(&mut self) {
         self.glyphs.clear();
         self.shelves.clear();
-        self.pixels.fill(0);
+        if let Some(pixels) = self.pixels.as_mut() {
+            pixels.fill(0);
+        }
         self.dirty = true;
     }
 
