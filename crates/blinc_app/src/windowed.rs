@@ -2346,7 +2346,20 @@ impl WindowedApp {
                 // render rather than skip. Frame events are the OS asking
                 // us to render; whether we should is decided below by the
                 // `frame_dirty` swap at the top of `Event::Frame`.
-                if !matches!(event, Event::Frame(_)) {
+                //
+                // Exception: bare mouse moves are too frequent to flip
+                // unconditionally (60–120 events/s during drag and hover).
+                // For those we let the input handler decide whether anything
+                // visible changed; if a hover handler / Stateful dispatch
+                // fires, it sets `NEEDS_REDRAW`, which the `Event::Frame`
+                // gate also honours. Skipping the blanket flip here keeps
+                // a static UI from re-rendering at vsync just because the
+                // pointer is in motion.
+                let is_bare_mouse_move = matches!(
+                    event,
+                    Event::Input(_, InputEvent::Mouse(MouseEvent::Moved { .. }))
+                );
+                if !matches!(event, Event::Frame(_)) && !is_bare_mouse_move {
                     frame_dirty.store(true, Ordering::Release);
                 }
 
@@ -3023,6 +3036,24 @@ impl WindowedApp {
                                             overlay_layer_id,
                                         );
 
+                                        // Hover delta or active drag means something visible
+                                        // could change (CSS `:hover` styling, drag-driven UI).
+                                        // The prelude no longer flips `frame_dirty` for bare
+                                        // moves, so do it here once we know the move actually
+                                        // crossed an element boundary or is part of a drag.
+                                        let hover_or_drag_dirty = pending_events.iter().any(|e| {
+                                            matches!(
+                                                e.event_type,
+                                                blinc_core::events::event_types::POINTER_ENTER
+                                                    | blinc_core::events::event_types::POINTER_LEAVE
+                                                    | blinc_core::events::event_types::DRAG
+                                                    | blinc_core::events::event_types::DRAG_END
+                                            )
+                                        });
+                                        if hover_or_drag_dirty {
+                                            frame_dirty.store(true, Ordering::Release);
+                                        }
+
                                         // Get drag delta from router (for DRAG events)
                                         let (drag_dx, drag_dy) = router.drag_delta();
 
@@ -3686,12 +3717,23 @@ impl WindowedApp {
                         // asked for it or not; without this gate a static
                         // focused UI burns CPU re-rendering an identical scene
                         // every vsync interval. `frame_dirty` is flipped back
-                        // to `true` by any input event (in the prelude above),
-                        // by the scheduler wake callback (set during init),
-                        // and by the end-of-frame redraw chain when any
-                        // animation / cursor / transition / etc. signal
-                        // indicates ongoing work.
-                        if !frame_dirty.swap(false, Ordering::AcqRel) {
+                        // to `true` by any input event (in the prelude above,
+                        // bare mouse-moves excluded), by the scheduler wake
+                        // callback (set during init), and by the end-of-frame
+                        // redraw chain when any animation / cursor / transition
+                        // / etc. signal indicates ongoing work.
+                        //
+                        // We also honour the layout-side stateful redraw
+                        // signals here — a hover handler firing
+                        // `stateful::request_redraw()` mid-mouse-move would
+                        // otherwise be dropped now that bare moves don't
+                        // flip `frame_dirty`. Peek-without-clear so the
+                        // start-of-frame `take_needs_redraw()` still fires
+                        // its normal prop-update / subtree-rebuild path.
+                        let dirty = frame_dirty.swap(false, Ordering::AcqRel);
+                        let stateful_dirty = blinc_layout::peek_needs_redraw()
+                            || blinc_layout::has_pending_subtree_rebuilds();
+                        if !dirty && !stateful_dirty {
                             return ControlFlow::Continue;
                         }
 

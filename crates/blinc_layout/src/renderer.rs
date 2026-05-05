@@ -10384,8 +10384,7 @@ impl RenderTree {
         // chain at vsync because the scheduler's needs_redraw stays
         // true regardless of visibility.
         if !self.visible_anim_active.get() {
-            let canvas_paints =
-                matches!(render_node.element_type, ElementType::Canvas(_));
+            let canvas_paints = matches!(render_node.element_type, ElementType::Canvas(_));
             let has_bindings = motion_bindings_ref.is_some();
             let has_active_motion = motion_values.is_some();
             if canvas_paints || has_bindings || has_active_motion {

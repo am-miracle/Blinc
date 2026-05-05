@@ -531,6 +531,13 @@ impl ScrollPhysics {
             self.state = new_state;
         }
 
+        // Stamp last activity. `apply_touch_scroll_delta` already does
+        // this with a caller-supplied time, but the bare desktop path
+        // (mouse wheel, scrollbar drag) didn't — which left
+        // `check_idle_bounce` unable to detect quiescence and pinned
+        // the FSM in `Scrolling` forever.
+        self.last_scroll_time = Some(crate::widgets::text_input::elapsed_ms() as f64);
+
         let old_offset_y = self.offset_y;
 
         // Apply vertical delta based on direction
@@ -699,31 +706,34 @@ impl ScrollPhysics {
         self.last_scroll_time = Some(current_time_ms);
     }
 
-    /// Fire a bounce-back if the user has been idle past the threshold
-    /// while the content is overscrolled. Called once per frame from
+    /// Settle a quiescent `Scrolling` state. Called once per frame from
     /// `RenderTree::tick_scroll_physics`.
     ///
     /// Inputs that emit an explicit `ScrollPhase::Ended` (macOS trackpad,
-    /// touch) already call `on_scroll_end` / `on_gesture_end` synchronously;
-    /// this covers the mouse-wheel / no-phase inputs that would otherwise
-    /// leave the content stretched forever.
+    /// touch) already call `on_scroll_end` / `on_gesture_end` synchronously,
+    /// so this only fires for mouse-wheel / no-phase inputs that would
+    /// otherwise leave the FSM latched in `Scrolling` forever — which kept
+    /// `tick()` returning `true` and pinned a continuous redraw loop at
+    /// 80–90% CPU after every wheel event.
+    ///
+    /// After the idle threshold, two cases:
+    /// - Overscrolled & bounce enabled → fire the rebound spring.
+    /// - Otherwise → transition straight to `Idle` so the redraw loop stops.
     pub fn check_idle_bounce(&mut self, current_time_ms: f64) {
-        // Fallback rebound trigger for inputs that don't emit an explicit
-        // end phase — classic mouse wheels, Windows/Linux trackpad drivers
-        // that never send `TouchPhase::Ended`. On trackpads that DO emit
-        // it, `apply_scroll_delta` rejects these checks by short-circuiting
-        // via the `Bouncing` state before we reach here.
         if self.state != ScrollState::Scrolling {
-            return;
-        }
-        if !self.is_overscrolling() || !self.config.bounce_enabled {
             return;
         }
         let Some(last) = self.last_scroll_time else {
             return;
         };
-        if current_time_ms - last > 200.0 {
+        if current_time_ms - last <= 200.0 {
+            return;
+        }
+        if self.is_overscrolling() && self.config.bounce_enabled {
             self.on_scroll_end();
+        } else {
+            self.last_scroll_time = None;
+            self.state = ScrollState::Idle;
         }
     }
 
