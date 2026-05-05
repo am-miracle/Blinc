@@ -2355,12 +2355,22 @@ impl WindowedApp {
                 // gate also honours. Skipping the blanket flip here keeps
                 // a static UI from re-rendering at vsync just because the
                 // pointer is in motion.
+                //
+                // We pair the dirty flip with a `request_redraw()` because
+                // under `ControlFlow::Wait` (set by the desktop platform
+                // shim — Linux/Wayland/X11 had no other pacing and burned
+                // 25% CPU just spinning the loop in Poll) `frame_dirty`
+                // alone does nothing; winit only delivers the next
+                // `RedrawRequested → Event::Frame` if someone actually
+                // asks for it. macOS used to coast on Poll's
+                // request_redraw spam, which we removed at the same time.
                 let is_bare_mouse_move = matches!(
                     event,
                     Event::Input(_, InputEvent::Mouse(MouseEvent::Moved { .. }))
                 );
                 if !matches!(event, Event::Frame(_)) && !is_bare_mouse_move {
                     frame_dirty.store(true, Ordering::Release);
+                    window.request_redraw();
                 }
 
                 // Check if this event is for a secondary window
@@ -3052,6 +3062,13 @@ impl WindowedApp {
                                         });
                                         if hover_or_drag_dirty {
                                             frame_dirty.store(true, Ordering::Release);
+                                            // Under `ControlFlow::Wait` (Linux/Wayland/X11)
+                                            // flipping `frame_dirty` alone doesn't schedule
+                                            // anything — we need to actually ask winit to
+                                            // deliver a `RedrawRequested` event. macOS happens
+                                            // to render anyway because Poll's auto-redraw was
+                                            // there; on Linux this is the only path.
+                                            window.request_redraw();
                                         }
 
                                         // Get drag delta from router (for DRAG events)

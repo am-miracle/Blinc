@@ -12,7 +12,9 @@ use blinc_platform::{
 };
 use winit::application::ApplicationHandler;
 use winit::event::{StartCause, WindowEvent as WinitWindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop as WinitEventLoop, EventLoopProxy};
+use winit::event_loop::{
+    ActiveEventLoop, ControlFlow as WinitControlFlow, EventLoop as WinitEventLoop, EventLoopProxy,
+};
 use winit::keyboard::ModifiersState;
 use winit::window::WindowId as WinitWindowId;
 
@@ -194,6 +196,19 @@ where
     F: FnMut(Event, &DesktopWindow) -> ControlFlow,
 {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Wait until something actually happens. winit 0.30 defaults to
+        // `ControlFlow::Poll`, which on X11 / Wayland makes the event
+        // loop spin as fast as the kernel will schedule it (issue #28
+        // — 25 % idle CPU on Ubuntu 25.10 / Intel HD 520). macOS hides
+        // this because NSApp.run is event-driven even under Poll, so
+        // the bug never showed up there. Under `Wait` the loop blocks
+        // until input arrives, the scheduler's `wake_proxy.wake()`
+        // fires (delivered as `StartCause::WaitCancelled`), or a
+        // window asks for a redraw — none of which happen on a static
+        // focused UI, so the loop sleeps and the process drops to
+        // ~0 % CPU.
+        event_loop.set_control_flow(WinitControlFlow::Wait);
+
         // Create the primary window if we don't have one
         if self.primary_winit_id.is_none() {
             let config = self.window_config.clone();
@@ -211,8 +226,15 @@ where
     }
 
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
-        // Request redraw on wait timeout (frame tick) for all windows
-        if matches!(cause, StartCause::WaitCancelled { .. } | StartCause::Poll) {
+        // Wake from the scheduler / external `wake_proxy` arrives as
+        // `WaitCancelled`. Schedule a redraw so the next event loop
+        // iteration delivers `RedrawRequested` → `Event::Frame`, which
+        // the windowed-app handler's per-frame chain decides to render
+        // or skip. We deliberately do NOT match `Poll` here — under
+        // `ControlFlow::Wait` (set in `resumed`) it never fires, and
+        // matching it on the off chance someone re-enables Poll would
+        // pull the old infinite-redraw bug right back.
+        if matches!(cause, StartCause::WaitCancelled { .. }) {
             for window in self.windows.values() {
                 window.request_redraw();
             }
