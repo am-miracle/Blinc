@@ -782,7 +782,7 @@ wasm-opt = false
 # crate is `#![cfg(target_arch = "wasm32")]`-gated inside `src/lib.rs`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 blinc_app = {{ path = "../../../crates/blinc_app", default-features = false, features = ["web"] }}
-blinc_layout = {{ path = "../../../crates/blinc_layout" }}
+blinc_layout = {{ path = "../../../crates/blinc_layout", features=["media"] }}
 blinc_core = {{ path = "../../../crates/blinc_core" }}
 {extra_deps}wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
