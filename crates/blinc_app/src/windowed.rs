@@ -2167,6 +2167,18 @@ impl WindowedApp {
         // Clone for the open_window callback
         let wake_proxy_for_windows = event_loop.wake_proxy();
 
+        // Frame-dirty flag. The OS sends `Event::Frame` at vsync to focused
+        // windows whether or not we asked for a redraw, which means a
+        // statically-rendered focused UI was burning CPU re-rendering an
+        // identical scene every ~16 ms. We now skip the entire frame
+        // handler when this flag is `false` at frame entry. Any mutation
+        // we care about — input event, lifecycle event, scheduler wake
+        // (set by the wake callback below), end-of-frame signal indicating
+        // ongoing work — flips it back to `true`. Initial value is `true`
+        // so the first frame always renders.
+        let frame_dirty = Arc::new(AtomicBool::new(true));
+        let frame_dirty_for_wake = Arc::clone(&frame_dirty);
+
         // Shared dirty flag for element refs
         let ref_dirty_flag: RefDirtyFlag = Arc::new(AtomicBool::new(false));
         // Shared reactive graph for signal-based state management
@@ -2193,8 +2205,14 @@ impl WindowedApp {
         // Shared animation scheduler for spring/keyframe animations
         // Runs on background thread so animations continue even when window loses focus
         let mut scheduler = AnimationScheduler::new();
-        // Set up wake callback so animation thread can wake the event loop
-        scheduler.set_wake_callback(move || wake_proxy.wake());
+        // Set up wake callback so animation thread can wake the event loop.
+        // Marks `frame_dirty` so the resulting Event::Frame actually renders
+        // — without this the bg thread's wake races with the start-of-frame
+        // skip check.
+        scheduler.set_wake_callback(move || {
+            frame_dirty_for_wake.store(true, Ordering::Release);
+            wake_proxy.wake();
+        });
         scheduler.start_background();
         let animations: SharedAnimationScheduler = Arc::new(Mutex::new(scheduler));
 
@@ -2305,6 +2323,16 @@ impl WindowedApp {
 
         event_loop
             .run(move |event, window| {
+                // Mark the next frame dirty for any non-Frame event. Input,
+                // lifecycle changes, drag/drop, etc. are all "something
+                // happened" signals — the next OS frame should actually
+                // render rather than skip. Frame events are the OS asking
+                // us to render; whether we should is decided below by the
+                // `frame_dirty` swap at the top of `Event::Frame`.
+                if !matches!(event, Event::Frame(_)) {
+                    frame_dirty.store(true, Ordering::Release);
+                }
+
                 // Check if this event is for a secondary window
                 let event_wid = match &event {
                     Event::Window(wid, _) | Event::Input(wid, _) | Event::Frame(wid) => Some(*wid),
@@ -3635,6 +3663,21 @@ impl WindowedApp {
                     }
 
                     Event::Frame(_) => {
+                        // Skip the frame entirely if nothing has changed since
+                        // the last render. The OS sends `Event::Frame` at the
+                        // display refresh rate to focused windows whether we
+                        // asked for it or not; without this gate a static
+                        // focused UI burns CPU re-rendering an identical scene
+                        // every vsync interval. `frame_dirty` is flipped back
+                        // to `true` by any input event (in the prelude above),
+                        // by the scheduler wake callback (set during init),
+                        // and by the end-of-frame redraw chain when any
+                        // animation / cursor / transition / etc. signal
+                        // indicates ongoing work.
+                        if !frame_dirty.swap(false, Ordering::AcqRel) {
+                            return ControlFlow::Continue;
+                        }
+
                         if let (
                             Some(ref mut blinc_app),
                             Some(ref surf),
@@ -3830,7 +3873,11 @@ impl WindowedApp {
                                     tracing::trace!("Visual-only prop updates, skipping layout");
                                 }
 
-                                // Request window redraw without rebuild
+                                // Visual-only updates (e.g. hover state flip)
+                                // happened mid-frame — make sure the next
+                                // frame renders rather than getting skipped
+                                // by the start-of-frame dirty gate.
+                                frame_dirty.store(true, Ordering::Release);
                                 window.request_redraw();
                             }
 
@@ -4319,6 +4366,13 @@ impl WindowedApp {
                                         blinc_layout::widgets::text_input::request_continuous_redraw_pub();
                                     }
                                 }
+                                // The next frame should render — pair the
+                                // `request_redraw` call with a dirty flip so
+                                // the start-of-frame skip check doesn't drop
+                                // it. Without this the redraw chain would
+                                // request a frame that then immediately
+                                // returns early.
+                                frame_dirty.store(true, Ordering::Release);
                                 window.request_redraw();
                             }
                         }
