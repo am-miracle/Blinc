@@ -14,7 +14,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("fuchsia
 [dependencies]
 blinc_app = { path = "../../crates/blinc_app", features = ["windowed"] }
 blinc_core = { path = "../../crates/blinc_core" }
-blinc_layout = { path = "../../crates/blinc_layout" }
+blinc_layout = { path = "../../crates/blinc_layout", features = ["media"] }
 blinc_theme = { path = "../../crates/blinc_theme" }
 blinc_gpu = { path = "../../crates/blinc_gpu" }
 blinc_svg = { path = "../../crates/blinc_svg" }

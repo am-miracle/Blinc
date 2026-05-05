@@ -41,8 +41,12 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 
-# Image comparison for visual regression tests
-image = "0.25"
+# Image comparison for visual regression tests.
+# Inherit the workspace's `default-features = false, features = ["png"]`
+# pin so the test suite doesn't drag in `image`'s default decoders —
+# avoiding `ravif` / `rav1e` / `av-scenechange` (the AV1 encoder)
+# and ~25 transitive crates we never touch from comparison harnesses.
+image.workspace = true
 png = "0.17"
 
 # Benchmarks (uncomment when ready)

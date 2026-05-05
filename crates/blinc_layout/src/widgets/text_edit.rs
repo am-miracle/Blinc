@@ -418,25 +418,39 @@ pub fn clipboard_write(text: &str) -> bool {
 /// Read image from the system clipboard as RGBA pixels.
 /// Returns (rgba_data, width, height) or None.
 /// Desktop: cross-platform via arboard (macOS, Windows, Linux).
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+/// Requires the `clipboard_image` crate feature; otherwise stubs to None.
+#[cfg(all(
+    feature = "clipboard_image",
+    not(any(target_arch = "wasm32", target_os = "android", target_os = "ios"))
+))]
 pub fn clipboard_read_image() -> Option<(Vec<u8>, u32, u32)> {
     let mut cb = arboard::Clipboard::new().ok()?;
     let img = cb.get_image().ok()?;
     Some((img.bytes.into_owned(), img.width as u32, img.height as u32))
 }
 
-/// Stub for wasm32 + Android + iOS. The native bridge clipboard
-/// namespace currently only handles strings; image clipboard support
-/// would need separate `clipboard.copy_image` / `clipboard.paste_image`
-/// handlers on the Swift / Kotlin sides.
-#[cfg(any(target_arch = "wasm32", target_os = "android", target_os = "ios"))]
+/// Stub when image clipboard is unavailable: feature off, or wasm32 /
+/// Android / iOS where the native bridge currently only routes strings.
+/// Mobile image clipboard would need separate
+/// `clipboard.copy_image` / `clipboard.paste_image` handlers on the
+/// Swift / Kotlin sides.
+#[cfg(any(
+    not(feature = "clipboard_image"),
+    target_arch = "wasm32",
+    target_os = "android",
+    target_os = "ios"
+))]
 pub fn clipboard_read_image() -> Option<(Vec<u8>, u32, u32)> {
     None
 }
 
 /// Write image to the system clipboard from RGBA pixels.
 /// Desktop: cross-platform via arboard (macOS, Windows, Linux).
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+/// Requires the `clipboard_image` crate feature; otherwise stubs to false.
+#[cfg(all(
+    feature = "clipboard_image",
+    not(any(target_arch = "wasm32", target_os = "android", target_os = "ios"))
+))]
 pub fn clipboard_write_image(rgba: &[u8], width: u32, height: u32) -> bool {
     let img = arboard::ImageData {
         width: width as usize,
@@ -449,8 +463,13 @@ pub fn clipboard_write_image(rgba: &[u8], width: u32, height: u32) -> bool {
         .is_some()
 }
 
-/// Stub for wasm32 + Android + iOS. See [`clipboard_read_image`] for rationale.
-#[cfg(any(target_arch = "wasm32", target_os = "android", target_os = "ios"))]
+/// Stub when image clipboard is unavailable. See [`clipboard_read_image`].
+#[cfg(any(
+    not(feature = "clipboard_image"),
+    target_arch = "wasm32",
+    target_os = "android",
+    target_os = "ios"
+))]
 pub fn clipboard_write_image(_rgba: &[u8], _width: u32, _height: u32) -> bool {
     false
 }
