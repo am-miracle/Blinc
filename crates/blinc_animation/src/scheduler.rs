@@ -191,6 +191,13 @@ pub struct AnimationScheduler {
     /// it on every loop iteration so a wake that races with the start
     /// of a wait isn't lost.
     wakeup: Arc<(Mutex<bool>, Condvar)>,
+    /// Tracks whether the bg thread was active on its previous tick.
+    /// Used to edge-trigger `wake_callback` only on idle→active
+    /// transitions: once the main thread has been kicked into rendering,
+    /// the per-frame `request_redraw` chain takes over so we don't need
+    /// to keep poking it from the bg thread on every tick. Reset to
+    /// `false` whenever the bg thread ticks while inactive.
+    last_active: Arc<AtomicBool>,
 }
 
 // SAFETY: On wasm32 the wake callback is `Arc<dyn Fn()>` (no `Send +
@@ -227,6 +234,7 @@ impl AnimationScheduler {
             thread_handle: None,
             wake_callback: None,
             wakeup: Arc::new((Mutex::new(false), Condvar::new())),
+            last_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -297,6 +305,7 @@ impl AnimationScheduler {
         needs_redraw: &Arc<AtomicBool>,
         wants_continuous: bool,
         wake_callback: Option<&WakeCallback>,
+        last_active: &Arc<AtomicBool>,
     ) -> (bool, f32) {
         let (has_active, tick_callbacks_to_call, dt) = {
             let mut inner = inner.lock().unwrap();
@@ -352,27 +361,34 @@ impl AnimationScheduler {
 
         // Signal main thread that it needs to redraw
         // Either from active animations OR continuous redraw request (cursor blink)
-        if has_active || wants_continuous {
+        let now_active = has_active || wants_continuous;
+        let was_active = last_active.swap(now_active, Ordering::AcqRel);
+        if now_active {
             needs_redraw.store(true, Ordering::Release);
 
-            // Wake up the event loop if a callback is set
-            if let Some(callback) = wake_callback {
-                // Only log occasionally to avoid spam
-                static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let count = COUNTER.fetch_add(1, Ordering::Relaxed);
-                if count % 120 == 0 {
-                    // Log once per second at 120fps
+            // Wake the event loop only on idle→active transitions. Once
+            // the main thread is rendering, its end-of-frame
+            // `request_redraw` chain decides whether to keep going (and
+            // gates that on visibility — off-screen-only animations
+            // settle to a quiet bg-thread tick with no main-thread
+            // wakes). Without the edge trigger, the bg thread would
+            // call `wake_callback()` 60–120 times/sec for the entire
+            // duration of any animation, which on cn_demo with three
+            // infinite-loop spinners pinned the main thread at full
+            // refresh rate even when the user wasn't looking at them.
+            if !was_active {
+                if let Some(callback) = wake_callback {
                     tracing::debug!(
-                        "Animation tick: waking driver (continuous={}, active={})",
+                        "Animation tick: waking driver (transition idle→active, continuous={}, active={})",
                         wants_continuous,
                         has_active
                     );
+                    callback();
                 }
-                callback();
             }
         }
 
-        (has_active || wants_continuous, dt)
+        (now_active, dt)
     }
 
     /// Start the scheduler on a background thread
@@ -405,6 +421,7 @@ impl AnimationScheduler {
         let continuous_redraw = Arc::clone(&self.continuous_redraw);
         let wake_callback = self.wake_callback.clone();
         let wakeup = Arc::clone(&self.wakeup);
+        let last_active = Arc::clone(&self.last_active);
 
         self.thread_handle = Some(thread::spawn(move || {
             // Adaptive FPS scheduler:
@@ -433,6 +450,7 @@ impl AnimationScheduler {
                     &needs_redraw,
                     wants_continuous,
                     wake_callback.as_ref(),
+                    &last_active,
                 );
                 let active = has_active || wants_continuous;
 
@@ -547,6 +565,7 @@ impl AnimationScheduler {
         let needs_redraw = Arc::clone(&self.needs_redraw);
         let continuous_redraw = Arc::clone(&self.continuous_redraw);
         let wake_callback = self.wake_callback.clone();
+        let last_active = Arc::clone(&self.last_active);
 
         // Self-referential closure cell. The outer `Rc` is what the
         // closure schedules itself with via
@@ -570,6 +589,7 @@ impl AnimationScheduler {
                 &needs_redraw,
                 wants_continuous,
                 wake_callback.as_ref(),
+                &last_active,
             );
 
             // Schedule the next frame. Borrowing closure_cell here is
@@ -922,6 +942,7 @@ impl Clone for AnimationScheduler {
             thread_handle: None,
             wake_callback: self.wake_callback.clone(),
             wakeup: Arc::clone(&self.wakeup),
+            last_active: Arc::clone(&self.last_active),
         }
     }
 }

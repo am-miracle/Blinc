@@ -2179,6 +2179,18 @@ impl WindowedApp {
         let frame_dirty = Arc::new(AtomicBool::new(true));
         let frame_dirty_for_wake = Arc::clone(&frame_dirty);
 
+        // Cross-thread mirror of the renderer's `visible_anim_active`
+        // flag. The end-of-frame chain (main thread) writes the
+        // current frame's value here; the scheduler's wake callback
+        // (bg thread) reads it. When `false`, the scheduler's
+        // periodic ticks for off-screen-only animations don't kick
+        // the main thread — the chain dies until input or scroll
+        // brings the animation back into view. Starts `true` so the
+        // very first scheduler activity wakes the main thread to
+        // render the initial frame.
+        let visible_anim_for_wake = Arc::new(AtomicBool::new(true));
+        let visible_anim_for_wake_cb = Arc::clone(&visible_anim_for_wake);
+
         // Shared dirty flag for element refs
         let ref_dirty_flag: RefDirtyFlag = Arc::new(AtomicBool::new(false));
         // Shared reactive graph for signal-based state management
@@ -2205,10 +2217,15 @@ impl WindowedApp {
         // Shared animation scheduler for spring/keyframe animations
         // Runs on background thread so animations continue even when window loses focus
         let mut scheduler = AnimationScheduler::new();
-        // Set up wake callback so animation thread can wake the event loop.
-        // Marks `frame_dirty` so the resulting Event::Frame actually renders
-        // — without this the bg thread's wake races with the start-of-frame
-        // skip check.
+        // Set up wake callback so animation thread can wake the event
+        // loop. Marks `frame_dirty` so the resulting Event::Frame
+        // actually renders. The scheduler edge-triggers this callback
+        // (only fires on idle→active transitions, not every bg tick)
+        // so steady-state animation cadence is driven by the main
+        // thread's end-of-frame `request_redraw` chain — which gates
+        // on visibility — rather than by the bg thread waking us
+        // unconditionally.
+        let _ = visible_anim_for_wake_cb; // wake gate moved into scheduler edge trigger
         scheduler.set_wake_callback(move || {
             frame_dirty_for_wake.store(true, Ordering::Release);
             wake_proxy.wake();
@@ -4291,14 +4308,49 @@ impl WindowedApp {
                             // The background thread runs at 120fps and sets this flag when
                             // there are active animations (springs, keyframes, timelines)
                             let scheduler = windowed_ctx.animations.lock().unwrap();
-                            let needs_animation_redraw = scheduler.take_needs_redraw();
+                            let needs_animation_redraw_raw = scheduler.take_needs_redraw();
                             drop(scheduler); // Release lock before request_redraw
 
                             // Check if stateful elements have active spring animations
-                            // If so, re-run their callbacks to get updated animation values
-                            if needs_animation_redraw && blinc_layout::has_animating_statefuls() {
+                            // and re-run their callbacks to get updated animation values.
+                            //
+                            // CRUCIAL: drive this off the *raw* scheduler signal, not
+                            // the visibility-gated one below. `check_stateful_animations`
+                            // is what unregisters settled statefuls. If we skip it
+                            // when the gate suppresses rendering, the registry never
+                            // shrinks — which makes `has_animating_statefuls()` return
+                            // a sticky `true`, which then keeps re-asserting the gate
+                            // (because we OR it into `visible_anim`), and we never
+                            // recover. The bookkeeping has to run on every animation
+                            // tick regardless of whether we'll actually paint.
+                            if needs_animation_redraw_raw && blinc_layout::has_animating_statefuls() {
                                 blinc_layout::check_stateful_animations();
                             }
+
+                            // Gate the animation signal on visibility. The scheduler
+                            // ticks unconditionally for any active spring / keyframe /
+                            // timeline — including ones tied to off-screen nodes. The
+                            // paint walker sets `visible_anim_active` when it paints
+                            // a node that drives a per-frame redraw (Canvas, motion
+                            // bindings, active motion state). Stateful-driven
+                            // animations (springs that mutate state and trigger
+                            // rebuilds — e.g. `cn_demo`'s `animated_progress`)
+                            // bypass the per-node check and surface via the global
+                            // `has_animating_statefuls()` instead, so we conservatively
+                            // OR them in. End result: an off-screen spinner whose
+                            // canvas is culled lets the chain die; a Stateful spring
+                            // whose value drives a `cn::progress` rebuild keeps it
+                            // alive even though the rebuilt div has no motion bindings.
+                            let visible_anim_paint = ws.render_tree
+                                .as_ref()
+                                .map_or(true, |t| t.visible_anim_active());
+                            let visible_anim = visible_anim_paint
+                                || blinc_layout::has_animating_statefuls();
+                            // Mirror the flag to the scheduler-side atomic so the
+                            // wake callback (bg thread) skips waking the main
+                            // thread when the only active animations are off-screen.
+                            visible_anim_for_wake.store(visible_anim, Ordering::Release);
+                            let needs_animation_redraw = needs_animation_redraw_raw && visible_anim;
 
                             // Check if text widgets need continuous redraws (cursor blink)
                             let needs_cursor_redraw = blinc_layout::widgets::take_needs_continuous_redraw();
@@ -4322,15 +4374,26 @@ impl WindowedApp {
                                 mgr.take_dirty() || mgr.has_animating_overlays()
                             };
 
-                            // Check if CSS animations/transitions/FLIP need continued redraws
-                            // (includes transitions created during apply_complex_selector_styles)
+                            // Check if CSS animations/transitions/FLIP/visual-animations need
+                            // continued redraws. Both `flip_animations` (older `animate_layout`)
+                            // and `visual_animations` (newer `animate_bounds`, used by the cn
+                            // accordion among others) drive bounds animation but live in
+                            // separate maps. Missing the visual_animations check here was the
+                            // cause of accordion jank: once the scheduler stopped waking the
+                            // main thread on every tick, the only thing keeping the chain
+                            // alive during an accordion expand was *no* signal at all, so the
+                            // animation only progressed when some other event (scroll, hover)
+                            // happened to fire `frame_dirty`.
                             let css_needs_redraw = css_active
                                 || !ws.render_tree
                                     .as_ref()
                                     .map_or(true, |t| t.css_transitions_empty())
                                 || ws.render_tree
                                     .as_ref()
-                                    .is_some_and(|t| t.has_active_flip_animations());
+                                    .is_some_and(|t| t.has_active_flip_animations())
+                                || ws.render_tree
+                                    .as_ref()
+                                    .is_some_and(|t| t.has_active_visual_animations());
 
                             // Check if pointer query elements need continuous redraws
                             let pointer_query_active = !windowed_ctx.pointer_query.is_empty();

@@ -380,6 +380,17 @@ pub struct RenderTree {
     /// `Cell` not `RefCell` because the value is `Copy` — read/write
     /// is one atomic load/store, no borrow tracking needed.
     cull_viewport: Cell<Option<(f32, f32, f32, f32)>>,
+    /// Whether the current paint pass touched any node that drives a
+    /// per-frame redraw — a `Canvas` element, a node with motion
+    /// bindings, or a node with an active motion state. Reset to
+    /// `false` at the start of `render_with_motion`, set to `true`
+    /// from inside `render_layer_with_motion` whenever such a node
+    /// is actually painted (i.e. not skipped by viewport culling).
+    /// Read at the end of the frame to decide whether the redraw
+    /// chain should fire: if the only active animations are tied to
+    /// off-screen nodes, the chain stops until something brings them
+    /// back into view.
+    visible_anim_active: Cell<bool>,
     /// Motion bindings for continuous animations (keyed by node_id)
     motion_bindings: HashMap<LayoutNodeId, crate::motion::MotionBindings>,
     /// Last tick time for scroll physics (in milliseconds)
@@ -526,6 +537,7 @@ impl RenderTree {
             scroll_physics: HashMap::new(),
             viewport_cull_scrolls: std::collections::HashSet::new(),
             cull_viewport: Cell::new(None),
+            visible_anim_active: Cell::new(false),
             motion_bindings: HashMap::new(),
             last_scroll_tick_ms: None,
             scale_factor: 1.0,
@@ -2014,6 +2026,20 @@ impl RenderTree {
     /// Get the root node ID
     pub fn root(&self) -> Option<LayoutNodeId> {
         self.root
+    }
+
+    /// Whether the most recently completed paint pass touched any
+    /// node that drives a per-frame redraw — Canvas elements,
+    /// motion-bound elements, or elements with an active motion
+    /// state. Reset to `false` at the start of `render_with_motion`
+    /// and set during the paint walk for any non-culled node that
+    /// matches the criteria above. Callers (typically the event
+    /// loop's end-of-frame redraw decision) use this to gate the
+    /// animation-redraw signal: if all active animations are tied
+    /// to off-screen (viewport-culled) subtrees, the chain stops
+    /// until input or scroll brings them back into view.
+    pub fn visible_anim_active(&self) -> bool {
+        self.visible_anim_active.get()
     }
 
     /// Update root node dimensions for window resize.
@@ -10207,6 +10233,14 @@ impl RenderTree {
         ctx: &mut dyn DrawContext,
         render_state: &crate::render_state::RenderState,
     ) {
+        // Reset the visible-animation flag for this frame. Set inside
+        // `render_layer_with_motion` whenever a node that drives a
+        // per-frame redraw (Canvas, motion bindings, active motion
+        // state) is actually painted. Read by callers via
+        // `visible_anim_active()` after this returns to gate the
+        // end-of-frame redraw chain.
+        self.visible_anim_active.set(false);
+
         if let Some(root) = self.root {
             // Apply DPI scale factor if set (for HiDPI display support)
             let has_scale = self.scale_factor != 1.0;
@@ -10340,6 +10374,24 @@ impl RenderTree {
         let motion_bindings_ref = self.motion_bindings.get(&node);
         let binding_transform = motion_bindings_ref.and_then(|b| b.get_transform());
         let binding_opacity = motion_bindings_ref.and_then(|b| b.get_opacity());
+
+        // We've passed all the cull / visibility / motion-removed
+        // gates; this node is going to paint. Record whether it
+        // drives a per-frame redraw — that flag is consulted at end
+        // of frame to decide whether the animation-redraw signal
+        // should keep the chain alive. Without this gate, an
+        // off-screen spinner whose paint is culled still pinned the
+        // chain at vsync because the scheduler's needs_redraw stays
+        // true regardless of visibility.
+        if !self.visible_anim_active.get() {
+            let canvas_paints =
+                matches!(render_node.element_type, ElementType::Canvas(_));
+            let has_bindings = motion_bindings_ref.is_some();
+            let has_active_motion = motion_values.is_some();
+            if canvas_paints || has_bindings || has_active_motion {
+                self.visible_anim_active.set(true);
+            }
+        }
 
         // Calculate this node's motion opacity (combine motion values, bindings, and element opacity)
         let node_motion_opacity = motion_values
