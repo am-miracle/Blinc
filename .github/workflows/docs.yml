@@ -91,6 +91,33 @@ jobs:
         with:
           tool: wasm-bindgen-cli@0.2.106
 
+      # wasm-pack 0.13 looks for `wasm-bindgen` exclusively in its
+      # own cache directory under `~/.cache/.wasm-pack/wasm-bindgen-VERSION/`
+      # — even when a matching binary is on PATH, the binary-install
+      # crate it uses does NOT consult PATH. Symptom in CI logs:
+      # "[INFO]: ⬇️  Installing wasm-bindgen..." printed once per
+      # wasm-pack invocation, with the actual download repeating.
+      #
+      # Pre-populate the cache slot by symlinking the
+      # `taiki-e/install-action`-installed binary (already on PATH)
+      # into the path wasm-pack expects. Both layouts that wasm-pack
+      # has used historically (`wasm-bindgen-VERSION/wasm-bindgen`
+      # for prebuilt downloads, `wasm-bindgen-cargo-install-VERSION/
+      # bin/wasm-bindgen` for source builds) get a symlink so this
+      # works across wasm-pack version bumps without further edits.
+      - name: Pre-populate wasm-pack tool cache
+        run: |
+          set -euo pipefail
+          WASM_BINDGEN_VERSION=0.2.106
+          BIN=$(command -v wasm-bindgen)
+          test -n "$BIN"
+          CACHE="$HOME/.cache/.wasm-pack"
+          mkdir -p "$CACHE/wasm-bindgen-$WASM_BINDGEN_VERSION"
+          mkdir -p "$CACHE/wasm-bindgen-cargo-install-$WASM_BINDGEN_VERSION/bin"
+          ln -sf "$BIN" "$CACHE/wasm-bindgen-$WASM_BINDGEN_VERSION/wasm-bindgen"
+          ln -sf "$BIN" "$CACHE/wasm-bindgen-cargo-install-$WASM_BINDGEN_VERSION/bin/wasm-bindgen"
+          ls -la "$CACHE"
+
       # wasm-pack 0.13 ships its own bundled `wasm-opt` (binaryen
       # 116). That binary segfaults on the larger generated wasm
       # modules (e.g. `cn_demo` — 1666 generated icon constants +
