@@ -10436,10 +10436,16 @@ impl RenderTree {
         // far below the fold — kept the redraw chain alive at idle
         // even though the user couldn't see any of them.
         //
-        // `bounds` is in window-space (parent_offset + node layout
-        // pos). `cumulative_scroll` is the accumulated scroll offset
-        // from ancestor scroll containers; adding it gives this
-        // node's actual on-screen rect.
+        // We MUST use absolute bounds here (`get_absolute_bounds`),
+        // not the `bounds` variable above. `bounds` comes from
+        // `get_render_bounds(node, parent_offset)` which the recursion
+        // calls with `parent_offset = (0, 0)` — the parent's actual
+        // offset is captured in the draw context's transform stack,
+        // not in the bounds value. Comparing parent-relative bounds
+        // against the absolute window viewport produced false
+        // negatives for nested elements (an `#anim-pulse` deep inside
+        // a section was excluded even when visually on screen),
+        // breaking every keyframe animation.
         //
         // If the viewport hasn't been initialised yet (rect is empty
         // — true on the very first frame, before
@@ -10448,13 +10454,18 @@ impl RenderTree {
         // filter the entire tree out and the chain would never start.
         let viewport = render_state.viewport();
         let viewport_known = viewport.width() > 0.0 && viewport.height() > 0.0;
-        let on_screen_x = bounds.x + cumulative_scroll.0;
-        let on_screen_y = bounds.y + cumulative_scroll.1;
         let intersects_viewport = !viewport_known
-            || (on_screen_x < viewport.x() + viewport.width()
-                && on_screen_x + bounds.width > viewport.x()
-                && on_screen_y < viewport.y() + viewport.height()
-                && on_screen_y + bounds.height > viewport.y());
+            || self
+                .layout_tree
+                .get_absolute_bounds(node)
+                .is_none_or(|abs| {
+                    let on_screen_x = abs.x + cumulative_scroll.0;
+                    let on_screen_y = abs.y + cumulative_scroll.1;
+                    on_screen_x < viewport.x() + viewport.width()
+                        && on_screen_x + abs.width > viewport.x()
+                        && on_screen_y < viewport.y() + viewport.height()
+                        && on_screen_y + abs.height > viewport.y()
+                });
         if intersects_viewport {
             self.painted_node_ids.borrow_mut().insert(node);
         }
