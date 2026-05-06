@@ -4,7 +4,7 @@
 //! morphism effect (refracted bevel borders). All visual styling is driven
 //! by CSS via `ctx.add_css()`.
 //!
-//! Run with: cargo run -p blinc_app_examples --example music_player --features windowed
+//! Run with: cargo run -p blinc_app_examples --example music_player --features icons
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;

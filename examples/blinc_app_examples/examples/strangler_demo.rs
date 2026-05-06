@@ -43,7 +43,7 @@
 //!
 //! ```sh
 //! cargo run -p blinc_app_examples --example strangler_demo \
-//!     --features windowed --release
+//!     --features gltf --release
 //! ```
 //!
 //! [`blinc_canvas_kit::SceneKit3D`]: https://docs.rs/blinc_canvas_kit/latest/blinc_canvas_kit/struct.SceneKit3D.html

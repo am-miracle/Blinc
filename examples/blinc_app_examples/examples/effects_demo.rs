@@ -6,7 +6,7 @@
 //! - Glow effects
 //! - Color matrix transforms (grayscale, sepia, saturation, brightness, contrast)
 //!
-//! Run with: cargo run -p blinc_app_examples --example effects_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example effects_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

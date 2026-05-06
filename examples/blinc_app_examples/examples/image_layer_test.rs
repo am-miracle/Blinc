@@ -7,7 +7,7 @@
 //! Use `.foreground()` on any element that needs to render above images.
 //! The render order is: Background primitives → Images → Foreground primitives
 //!
-//! Run with: cargo run -p blinc_app_examples --example image_layer_test --features windowed
+//! Run with: cargo run -p blinc_app_examples --example image_layer_test
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

@@ -11,10 +11,42 @@ publish = false
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("fuchsia", "ohos"))', 'cfg(target_env, values("ohos"))'] }
 
+# Demo-specific features. Heavy subsystems are opt-in so a developer
+# iterating on `hello_blinc` (or any of the ~40 lightweight demos)
+# doesn't compile the canvas-kit / glTF / media / cn / icon-set
+# chains. Enable per-demo via `cargo run --example NAME --features F`;
+# `required-features` on the [[example]] entries below makes Cargo
+# emit a clear error when the flag is missing instead of a silent
+# unresolved-import build failure.
+[features]
+default = []
+
+# Canvas + GPU primitives (canvas_kit_demo, mesh_3d_demo, and the
+# 3D-pipeline base used by every glTF demo).
+canvas = ["dep:blinc_canvas_kit"]
+
+# Audio + video playback. Enables the `media` widgets in
+# `blinc_layout` (which themselves pull `blinc_media`).
+media = ["dep:blinc_media", "blinc_layout/media"]
+
+# `blinc_cn` component library (cn_demo).
+cn = ["dep:blinc_cn"]
+
+# Tabler icon set (tabler_icons_demo).
+tabler-icons = ["dep:blinc_tabler_icons"]
+
+# Lucide icon set (music_player).
+icons = ["dep:blinc_icons"]
+
+# glTF model loading + skeletal animation. Implies `canvas` because
+# every glTF demo renders through canvas_kit's 3D pipeline.
+gltf = ["canvas", "dep:blinc_gltf", "dep:blinc_skeleton", "dep:blinc_input"]
+
 [dependencies]
+# Always-on — every demo touches at least these.
 blinc_app = { path = "../../crates/blinc_app", features = ["windowed"] }
 blinc_core = { path = "../../crates/blinc_core" }
-blinc_layout = { path = "../../crates/blinc_layout", features = ["media"] }
+blinc_layout = { path = "../../crates/blinc_layout" }
 blinc_theme = { path = "../../crates/blinc_theme" }
 blinc_gpu = { path = "../../crates/blinc_gpu" }
 blinc_svg = { path = "../../crates/blinc_svg" }
@@ -22,24 +54,28 @@ blinc_text = { path = "../../crates/blinc_text" }
 blinc_animation = { path = "../../crates/blinc_animation" }
 blinc_paint = { path = "../../crates/blinc_paint" }
 blinc_router = { path = "../../crates/blinc_router" }
-blinc_cn = { path = "../../crates/blinc_cn" }
 blinc_image = { path = "../../crates/blinc_image" }
-blinc_icons = { path = "../../crates/blinc_icons" }
-blinc_tabler_icons = { path = "../../crates/blinc_tabler_icons" }
-blinc_canvas_kit = { path = "../../crates/blinc_canvas_kit" }
-blinc_media = { path = "../../crates/blinc_media" }
 blinc_platform = { path = "../../crates/blinc_platform" }
 blinc_platform_desktop = { path = "../../extensions/blinc_platform_desktop" }
+
+# Optional — gated behind feature flags above. Heavy enough that
+# pulling them by default made `cargo run --example hello_blinc` slow
+# even though hello_blinc doesn't use any of them.
+blinc_canvas_kit = { path = "../../crates/blinc_canvas_kit", optional = true }
+blinc_cn = { path = "../../crates/blinc_cn", optional = true }
+blinc_tabler_icons = { path = "../../crates/blinc_tabler_icons", optional = true }
+blinc_icons = { path = "../../crates/blinc_icons", optional = true }
+blinc_media = { path = "../../crates/blinc_media", optional = true }
 
 # Downstream packages — each lives in its own upstream repo under the
 # `project-blinc` org, colocated locally under the gitignored `/packages/`
 # directory during development. Pinned to current `main` commits so CI
 # (which doesn't have the path-only checkout) can resolve them. Swap
 # these for `version = "..."` crates.io entries once the packages ship
-# stable releases.
-blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "e510f26f627b9e7a3c4455e889a041940a530975", features = ["platform-assets", "bc-encode"] }
-blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "33d4fbd9655fe4cfd38d8e18004c978d020ed6e2" }
-blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = "3e94941bd59bafcd23ad59e8db504a44fa85b4f5" }
+# stable releases. All three are part of the `gltf` feature group.
+blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "e510f26f627b9e7a3c4455e889a041940a530975", features = ["platform-assets", "bc-encode"], optional = true }
+blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "33d4fbd9655fe4cfd38d8e18004c978d020ed6e2", optional = true }
+blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = "3e94941bd59bafcd23ad59e8db504a44fa85b4f5", optional = true }
 
 image.workspace = true
 tracing.workspace = true
@@ -64,3 +100,50 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window"] }
+
+# ============================================================================
+# Per-example feature gates. Demos that import a feature-gated crate
+# declare `required-features` so `cargo run --example NAME` fails fast
+# with a clear "needs feature X" error instead of an unresolved import.
+# Lightweight demos (no entry below) compile against the default deps.
+# ============================================================================
+
+[[example]]
+name = "canvas_kit_demo"
+required-features = ["canvas"]
+
+[[example]]
+name = "mesh_3d_demo"
+required-features = ["canvas"]
+
+[[example]]
+name = "cutegirl_morph_demo"
+required-features = ["gltf"]
+
+[[example]]
+name = "gltf_animation_demo"
+required-features = ["gltf"]
+
+[[example]]
+name = "strangler_demo"
+required-features = ["gltf"]
+
+[[example]]
+name = "texture_transform_demo"
+required-features = ["gltf"]
+
+[[example]]
+name = "video_demo"
+required-features = ["media"]
+
+[[example]]
+name = "cn_demo"
+required-features = ["cn"]
+
+[[example]]
+name = "tabler_icons_demo"
+required-features = ["tabler-icons"]
+
+[[example]]
+name = "music_player"
+required-features = ["icons"]

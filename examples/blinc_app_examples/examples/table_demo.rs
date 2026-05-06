@@ -2,7 +2,7 @@
 //!
 //! This example demonstrates the TableBuilder API for declarative table creation.
 //!
-//! Run with: cargo run -p blinc_app_examples --example table_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example table_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

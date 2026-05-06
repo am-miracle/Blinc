@@ -4,7 +4,7 @@
 //! horizontally between icons. The dropdown maintains a seamless visual
 //! connection to the menu bar via concave curves.
 //!
-//! Run with: cargo run -p blinc_app_examples --example notch_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example notch_demo
 
 use blinc_animation::SpringConfig;
 use blinc_app::prelude::*;

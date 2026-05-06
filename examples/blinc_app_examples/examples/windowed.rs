@@ -8,7 +8,7 @@
 //! - Window resize/focus events via context properties
 //! - Image element with hover glow effect
 //!
-//! Run with: cargo run -p blinc_app_examples --example windowed --features windowed
+//! Run with: cargo run -p blinc_app_examples --example windowed
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

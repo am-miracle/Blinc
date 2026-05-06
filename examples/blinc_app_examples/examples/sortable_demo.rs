@@ -5,7 +5,7 @@
 //! - Swipe to delete: horizontal drag to dismiss items (stack overlay)
 //! - Sortable grid: 3x3 drag-to-reorder grid
 //!
-//! Run with: cargo run -p blinc_app_examples --example sortable_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example sortable_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;

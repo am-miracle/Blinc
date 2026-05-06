@@ -8,7 +8,7 @@
 //! - Click, drag, and hover callbacks on canvas-drawn elements
 //! - Viewport state HUD overlay
 //!
-//! Run with: cargo run -p blinc_app_examples --example canvas_kit_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example canvas_kit_demo --features canvas
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

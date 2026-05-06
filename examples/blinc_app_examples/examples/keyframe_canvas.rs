@@ -6,7 +6,7 @@
 //! - Progress bar with eased fill
 //! - Bouncing ball animation
 //!
-//! Run with: cargo run -p blinc_app_examples --example keyframe_canvas --features windowed
+//! Run with: cargo run -p blinc_app_examples --example keyframe_canvas
 
 use blinc_animation::context::SharedAnimatedTimeline;
 use blinc_animation::timeline::TimelineEntryId;

@@ -8,7 +8,7 @@
 //! 2. Text auto-wraps when exceeding container width
 //! 3. .no_wrap() keeps text on single line
 //!
-//! Run with: cargo run -p blinc_app_examples --example text_wrap_test --features windowed
+//! Run with: cargo run -p blinc_app_examples --example text_wrap_test
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

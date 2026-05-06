@@ -2,7 +2,7 @@
 //!
 //! Tests that text is correctly centered within parent containers.
 //!
-//! Run with: cargo run -p blinc_app_examples --example text_position_test --features windowed
+//! Run with: cargo run -p blinc_app_examples --example text_position_test
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

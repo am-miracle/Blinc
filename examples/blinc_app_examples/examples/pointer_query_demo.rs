@@ -17,7 +17,7 @@
 //!   border-width: calc(env(pointer-*));          — dynamic borders
 //!   rotate: calc(env(pointer-*));                — subtle rotation
 //!
-//! Run with: cargo run -p blinc_app_examples --example pointer_query_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example pointer_query_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;

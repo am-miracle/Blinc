@@ -4,7 +4,7 @@
 //! A central card renders a pointer-reactive fluid shader, while surrounding
 //! labels respond to cursor proximity via `calc(env(pointer-distance))`.
 //!
-//! Run with: cargo run -p blinc_app_examples --example fluid_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example fluid_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;

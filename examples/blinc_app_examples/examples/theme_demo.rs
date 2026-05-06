@@ -8,7 +8,7 @@
 //! - Border radius tokens
 //! - Platform-native theme detection
 //!
-//! Run with: cargo run -p blinc_app_examples --example theme_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example theme_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

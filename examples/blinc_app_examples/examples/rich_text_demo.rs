@@ -11,7 +11,7 @@
 //! - Range-based programmatic styling API
 //! - Entity decoding (&lt;, &gt;, &amp;, etc.)
 //!
-//! Run with: cargo run -p blinc_app_examples --example rich_text_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example rich_text_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

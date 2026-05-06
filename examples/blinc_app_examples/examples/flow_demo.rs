@@ -4,7 +4,7 @@
 //! Custom GPU fragment shaders are defined in CSS via `@flow` blocks
 //! and applied to elements with `flow: <name>`.
 //!
-//! Run with: cargo run -p blinc_app_examples --example flow_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example flow_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;

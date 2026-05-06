@@ -23,7 +23,7 @@
 //! Run with:
 //!
 //! ```sh
-//! cargo run -p blinc_app_examples --example mesh_3d_demo --features windowed
+//! cargo run -p blinc_app_examples --example mesh_3d_demo --features canvas
 //! ```
 //!
 //! Controls: drag the viewport to orbit, scroll to zoom.

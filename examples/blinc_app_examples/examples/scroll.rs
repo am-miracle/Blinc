@@ -11,7 +11,7 @@
 //! - Toggle between vertical and horizontal scroll directions
 //! - Using reactive state system (`ctx.use_state`) for state persistence
 //!
-//! Run with: cargo run -p blinc_app_examples --example scroll --features windowed
+//! Run with: cargo run -p blinc_app_examples --example scroll
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

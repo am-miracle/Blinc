@@ -6,7 +6,7 @@
 //! - scroll_to() to scroll to elements by ID
 //! - ScrollOptions with ScrollBlock::Center for centering cards
 //!
-//! Run with: cargo run -p blinc_app_examples --example carousel_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example carousel_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

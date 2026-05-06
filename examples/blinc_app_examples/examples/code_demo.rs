@@ -10,7 +10,7 @@
 //! - Word navigation (Cmd+Left/Right), select all (Cmd+A)
 //! - Vertical scrolling in the editor
 //!
-//! Run with: cargo run -p blinc_app_examples --example code_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example code_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

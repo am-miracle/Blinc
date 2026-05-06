@@ -10,7 +10,7 @@
 //! - CSS transitions and @keyframes animation
 //! - Works with scroll containers
 //!
-//! Run with: cargo run -p blinc_app_examples --example overflow_fade_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example overflow_fade_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;

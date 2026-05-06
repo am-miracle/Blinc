@@ -2,7 +2,7 @@
 //!
 //! Showcases outline and filled icons from the blinc_tabler_icons crate.
 //!
-//! Run with: cargo run -p blinc_app_examples --example tabler_icons_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example tabler_icons_demo --features tabler-icons
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;

@@ -11,7 +11,7 @@
 //! - Block quote
 //! - Horizontal divider
 //!
-//! Run with: `cargo run -p blinc_app_examples --example rich_text_editor_demo --features windowed`
+//! Run with: `cargo run -p blinc_app_examples --example rich_text_editor_demo`
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

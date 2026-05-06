@@ -2,7 +2,7 @@
 //!
 //! Showcases all available blinc_cn components in a scrollable grid layout.
 //!
-//! Run with: cargo run -p blinc_app_examples --example cn_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example cn_demo --features cn
 
 use blinc_animation::SpringConfig;
 use blinc_app::prelude::*;

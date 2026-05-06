@@ -9,7 +9,7 @@
 //! Images are wrapped in divs with IDs for CSS targeting, since Image elements
 //! inherit CSS properties from their parent container's RenderProps.
 //!
-//! Run with: cargo run -p blinc_app_examples --example image_css_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example image_css_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;

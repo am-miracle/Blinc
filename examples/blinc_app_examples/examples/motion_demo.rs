@@ -12,7 +12,7 @@
 //! Note: Enter/exit animations require RenderTree integration (pending).
 //! This example showcases the API design and stagger delay calculations.
 //!
-//! Run with: cargo run -p blinc_app_examples --example motion_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example motion_demo
 
 use blinc_animation::{AnimationPreset, SpringConfig};
 use blinc_app::prelude::*;

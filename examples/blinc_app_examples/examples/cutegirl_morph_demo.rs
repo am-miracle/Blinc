@@ -28,7 +28,7 @@
 //!
 //! ```sh
 //! cargo run -p blinc_app_examples --example cutegirl_morph_demo \
-//!     --features windowed --release
+//!     --features gltf --release
 //! ```
 
 use std::sync::atomic::{AtomicBool, Ordering};

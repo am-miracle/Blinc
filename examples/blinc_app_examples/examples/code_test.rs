@@ -3,7 +3,7 @@
 //! no-web: minimal diagnostic test — code_demo covers the same features
 //! in the web gallery.
 //!
-//! Run with: cargo run -p blinc_app_examples --example code_test --features windowed
+//! Run with: cargo run -p blinc_app_examples --example code_test
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

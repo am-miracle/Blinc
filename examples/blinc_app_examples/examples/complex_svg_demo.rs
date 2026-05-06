@@ -3,7 +3,7 @@
 //! Displays an SVG at various sizes to test rasterization quality,
 //! anti-aliasing, and HiDPI scaling.
 //!
-//! Run with: cargo run -p blinc_app_examples --example complex_svg_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example complex_svg_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

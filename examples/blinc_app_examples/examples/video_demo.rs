@@ -4,7 +4,7 @@
 //!
 //! Run with:
 //! ```sh
-//! cargo run -p blinc_app_examples --example video_demo --features windowed
+//! cargo run -p blinc_app_examples --example video_demo --features media
 //! ```
 
 use std::rc::Rc;

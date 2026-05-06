@@ -5,7 +5,7 @@
 //! - `ctx.use_signal()` - Scoped signals for local state
 //! - `ctx.use_animated_value()` - Spring-animated values
 //!
-//! Run with: cargo run -p blinc_app_examples --example stateful_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example stateful_demo
 
 use blinc_animation::SpringConfig;
 use blinc_app::prelude::*;

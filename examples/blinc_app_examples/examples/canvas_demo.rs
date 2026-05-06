@@ -10,7 +10,7 @@
 //! - Canvas for cursor/indicator rendering
 //! - BlincComponent derive macro for type-safe animation hooks
 //!
-//! Run with: cargo run -p blinc_app_examples --example canvas_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example canvas_demo
 
 use blinc_animation::SpringConfig;
 use blinc_app::prelude::*;

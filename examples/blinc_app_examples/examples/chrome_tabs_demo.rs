@@ -7,7 +7,7 @@
 //! giving the active tab its signature smooth connection to the toolbar
 //! edge.
 //!
-//! Run with: cargo run -p blinc_app_examples --example chrome_tabs_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example chrome_tabs_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;

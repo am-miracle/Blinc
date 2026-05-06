@@ -18,7 +18,7 @@
 //! Run with:
 //!
 //! ```sh
-//! cargo run -p blinc_app_examples --example texture_transform_demo --features windowed
+//! cargo run -p blinc_app_examples --example texture_transform_demo --features gltf
 //! ```
 //!
 //! # License

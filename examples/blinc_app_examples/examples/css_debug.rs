@@ -5,7 +5,7 @@
 //! 2. width/height percentage not working
 //! 3. Text not inheriting color from parent div
 //!
-//! Run with: cargo run -p blinc_app_examples --example css_debug --features windowed
+//! Run with: cargo run -p blinc_app_examples --example css_debug
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;

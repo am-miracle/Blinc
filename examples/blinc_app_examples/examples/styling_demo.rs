@@ -8,7 +8,7 @@
 //!
 //! All approaches produce `ElementStyle` - a unified schema for visual properties.
 //!
-//! Run with: cargo run -p blinc_app_examples --example styling_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example styling_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;

@@ -7,7 +7,7 @@
 //! - Path morphing (d-attribute animation)
 //! - Hamburger Menus: 9 food-themed icons (morph, dash, pulse, orbit)
 //!
-//! Run with: cargo run -p blinc_app_examples --example svg_animation_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example svg_animation_demo
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;

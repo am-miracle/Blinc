@@ -5,7 +5,7 @@
 //! - Multiple animated values with staggered delays
 //! - Continuous looping animations with easing
 //!
-//! Run with: cargo run -p blinc_app_examples --example timeline_demo --features windowed
+//! Run with: cargo run -p blinc_app_examples --example timeline_demo
 
 use blinc_animation::Easing;
 use blinc_app::prelude::*;
