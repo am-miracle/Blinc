@@ -1804,8 +1804,22 @@ fn build_wrappers_with_wasm_pack(
         }
 
         println!("  wasm-pack build {}", meta.name);
+        // `--mode no-install` keeps wasm-pack from re-checking
+        // / re-downloading `wasm-bindgen-cli` on every wrapper
+        // build. CI installs a matching binary up-front (see
+        // `.github/workflows/docs.yml`); locally, devs already have
+        // one on PATH from previous runs. With ~40 wrappers in the
+        // loop and one redundant install per invocation, this saved
+        // tens of minutes off the docs workflow.
         let status = std::process::Command::new("wasm-pack")
-            .args(["build", "--target", "web", "--release"])
+            .args([
+                "build",
+                "--target",
+                "web",
+                "--release",
+                "--mode",
+                "no-install",
+            ])
             .current_dir(&wrapper_dir)
             .status();
         match status {

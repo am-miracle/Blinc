@@ -73,6 +73,24 @@ jobs:
             curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
           fi
 
+      # Pre-install `wasm-bindgen-cli` once, at the exact version the
+      # workspace's `Cargo.lock` resolves `wasm-bindgen` to. Without
+      # this, every `wasm-pack build` invocation in the loop below
+      # re-checks for a matching CLI on PATH and downloads/installs
+      # it into `~/.cache/.wasm-pack/` if absent — across 40+
+      # wrappers that's tens of minutes of redundant install steps,
+      # most of which we'd amortise away by having a single binary
+      # on PATH already.
+      #
+      # `taiki-e/install-action` ships prebuilt binaries so this is
+      # ~10 seconds vs `cargo install --locked wasm-bindgen-cli`'s
+      # ~5 minutes from source. Version pinned manually — bump in
+      # lockstep with the workspace `wasm-bindgen` dep when it moves.
+      - name: Install wasm-bindgen-cli (matches workspace 0.2.106)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.106
+
       # wasm-pack 0.13 ships its own bundled `wasm-opt` (binaryen
       # 116). That binary segfaults on the larger generated wasm
       # modules (e.g. `cn_demo` — 1666 generated icon constants +
