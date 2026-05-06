@@ -61,16 +61,33 @@ pub struct WindowConfig {
     /// the right setting for games, video players, scrubbing UIs,
     /// and anything where frame-perfect motion is non-negotiable.
     ///
-    /// `Some(N)` caps animation-only redraws to roughly `N` fps by
-    /// using `ControlFlow::WaitUntil(now + 1000/N ms)` between
-    /// frames. Halves wake-ups at `N = 30`, slightly stair-steps
-    /// fast keyframes — generally invisible on slow keyframes
-    /// (3-second pulses, color cycles, fade-ins).
+    /// `Some(N)` caps animation-only redraws to roughly `N` fps via
+    /// a deferred wake. Halves wake-ups at `N = 30` for animations
+    /// that don't visibly stair-step at sub-vsync rates — color
+    /// cycles, opacity fades, blur pulses, gradient morphs.
     ///
     /// User-input frames (typing, scrolling, dragging) are NEVER
-    /// throttled by this cap; they always render on the next vsync.
-    /// The cap only applies when the chain would otherwise re-arm
-    /// itself purely because of an active animation signal.
+    /// throttled — they always ship at native vsync. The cap only
+    /// applies when the chain would otherwise re-arm purely because
+    /// of an active animation signal.
+    ///
+    /// **Per-property smoothness override (automatic).** Even when
+    /// the cap would otherwise apply, the chain bypasses to native
+    /// vsync if any visible animation is touching a property
+    /// classified as `needs_vsync_for_smoothness` — transforms
+    /// (translate / scale / rotate / skew), 3D rotation, layout
+    /// sizing (width / height / padding / margin / gap / inset),
+    /// font-size, or clip-path geometry. FLIP and `animate_bounds`
+    /// also always run vsync because they animate position/size by
+    /// definition. So setting `Some(30)` on a screen mixing slow
+    /// fades with a rotate-y keyframe gets you 30 fps for the fade
+    /// and 60+ fps for the rotation, frame-by-frame.
+    ///
+    /// Stateful animations are opaque to this classification — they
+    /// dispatch through user callbacks and the framework can't see
+    /// which property they ultimately move — so they fall on the
+    /// cap-OK side. Apps with Stateful-driven transforms that need
+    /// vsync should leave the cap off.
     pub animation_fps_cap: Option<u32>,
 }
 

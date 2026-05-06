@@ -2,6 +2,21 @@
 
 All notable changes to `blinc_layout` will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `RenderTree::painted_node_ids()` — set of node ids the paint walker actually rendered this frame (clipped against the window viewport even on scrolls without `viewport_cull` opt-in). Exposes the source of truth for visibility-gated redraw decisions.
+- `RenderTree::has_active_visible_visual_animations(painted)` and `has_active_visible_flip_animations(painted)` — visibility-gated counterparts of the existing `has_active_*` predicates. Used by the windowed redraw chain so off-screen `animate_bounds` / FLIP entries don't pin the chain alive.
+- `RenderTree::css_has_visible_transitions(painted)` — companion to `css_transitions_empty`, returns true when at least one CSS transition has a painted target.
+- `CssAnimationStore::has_visible_active(painted)` and `has_visible_vsync_class(painted)` — visibility-gated keyframe/transition checks. The `vsync_class` variant additionally filters on `KeyframeProperties::needs_vsync_for_smoothness` so the windowed app's animation FPS cap can bypass to native vsync when a visible transform / layout / clip-path keyframe is mid-cycle.
+- `RenderTree::has_any_cursor_style()` and `HandlerRegistry::has_any_pointer_handler()` — short-circuit gates for the mouse-move pipeline; UIs with no pointer handlers, no `:hover`/`:active` rules, and no `cursor:` styles skip the per-move hit_test entirely.
+- `Stylesheet::has_pointer_state_rules()` — detects `:hover` / `:active` selectors so the mouse-move skip path knows when CSS state styling is at risk.
+- `stateful::has_visible_animating_statefuls(painted)` — registry of animating Statefuls now carries a `node_id_fn` so the windowed app can intersect with painted nodes. An off-screen spinner whose Stateful is mid-animation no longer pins the redraw chain.
+
+### Changed
+- Mouse-move hit-test pipeline short-circuits when nothing in the tree could react. Pure-static views (e.g. `hello_blinc`) no longer hit_test on every cursor move; cursor styling still works via a single one-shot resolve.
+- Scroll FSM settles `Scrolling → Idle` after 200ms idle even when not overscrolling. Wheel-scroll inputs without `ScrollPhase::Ended` (mouse wheel, many Linux trackpad drivers) no longer leave `scroll_animating=true` permanently.
+
 ## [0.5.1] - 2026-04-13
 
 ### Added

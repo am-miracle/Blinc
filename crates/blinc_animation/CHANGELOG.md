@@ -7,6 +7,7 @@ All notable changes to `blinc_animation` will be documented in this file.
 ### Added
 - `AnimationScheduler::wake()` — hint the bg thread that activity has changed, called from `add_spring` / `add_keyframe` / `add_timeline` / `add_tick_callback` / `set_continuous_redraw(true)` / `request_redraw` / `set_target_fps` and the equivalent `SchedulerHandle` paths
 - `target_fps` is read fresh on every iteration so `set_target_fps` takes effect immediately
+- `KeyframeProperties::needs_vsync_for_smoothness()` classifies which animated properties demand native-vsync timing to look right (transforms, 3D rotation, layout sizing, font-size, clip-path geometry) versus which tolerate sub-vsync rates (opacity, colors, shadows, filters, light, corner radius/shape, border / outline widths). Backs `WindowConfig::animation_fps_cap`'s automatic per-property override in the windowed app.
 
 ### Changed
 - The desktop background thread parks on a `Condvar` whenever `has_active` and `wants_continuous` are both false. Idle apps now sit at zero CPU; previously the loop spun unconditionally at 120 fps even on a static UI (issue #28).

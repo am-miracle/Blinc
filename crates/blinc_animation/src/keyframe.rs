@@ -290,6 +290,65 @@ pub struct KeyframeProperties {
 }
 
 impl KeyframeProperties {
+    /// Whether any property tracked here demands native-vsync smoothness
+    /// to look right.
+    ///
+    /// "Yes" properties cause visible stair-stepping or layout-shift
+    /// jank if rendered below the display refresh rate — transforms
+    /// (translate / scale / rotate / skew), 3D rotation, layout
+    /// sizing (width / height / padding / margin / gap / inset),
+    /// font-size, and clip-path animations all fall here.
+    ///
+    /// "No" properties (the default for fields not listed below) are
+    /// gentle visual changes — opacity, colors, shadows, filters,
+    /// border/outline thickness, corner radius/shape, light shading.
+    /// They look indistinguishable at 30 fps vs 60 fps for slow
+    /// animation durations and tolerate `WindowConfig::animation_fps_cap`
+    /// without visible degradation.
+    ///
+    /// Used by the windowed app to decide, per frame, whether the
+    /// configured animation FPS cap should apply: if any visible
+    /// animation is touching a vsync-class property, the cap is
+    /// bypassed and that frame ships at native vsync. Capped frames
+    /// only happen when every visible animation is gentle.
+    pub fn needs_vsync_for_smoothness(&self) -> bool {
+        // Transforms (motion / orientation / size).
+        self.translate_x.is_some()
+            || self.translate_y.is_some()
+            || self.translate_z.is_some()
+            || self.scale_x.is_some()
+            || self.scale_y.is_some()
+            || self.rotate.is_some()
+            || self.rotate_x.is_some()
+            || self.rotate_y.is_some()
+            || self.skew_x.is_some()
+            || self.skew_y.is_some()
+            || self.perspective.is_some()
+            || self.depth.is_some()
+            // Layout sizing & positioning (any change is a layout shift).
+            || self.width.is_some()
+            || self.height.is_some()
+            || self.min_width.is_some()
+            || self.max_width.is_some()
+            || self.min_height.is_some()
+            || self.max_height.is_some()
+            || self.padding.is_some()
+            || self.margin.is_some()
+            || self.gap.is_some()
+            || self.flex_grow.is_some()
+            || self.flex_shrink.is_some()
+            || self.inset_top.is_some()
+            || self.inset_right.is_some()
+            || self.inset_bottom.is_some()
+            || self.inset_left.is_some()
+            // Font size — text reflow is layout-shift jank.
+            || self.font_size.is_some()
+            // Clip-path reveals — geometry change, jank visible.
+            || self.clip_inset.is_some()
+            || self.clip_circle_radius.is_some()
+            || self.clip_ellipse_radii.is_some()
+    }
+
     /// Create properties with only opacity set
     pub fn opacity(value: f32) -> Self {
         Self {

@@ -338,6 +338,32 @@ impl CssAnimationStore {
             || self.transitions.keys().any(|n| painted.contains(n))
     }
 
+    /// Whether any visible animation or transition is currently
+    /// touching a property classified as
+    /// [`KeyframeProperties::needs_vsync_for_smoothness`] — transforms,
+    /// 3D rotation, layout sizing, font-size, clip-path geometry.
+    ///
+    /// Used by the windowed app to decide whether the configured
+    /// `animation_fps_cap` should bypass for the next frame: if a
+    /// visible rotate-y / grow-shrink / clip-reveal keyframe is
+    /// mid-cycle, capping to 30 fps would visibly stair-step;
+    /// opacity and color cycles elsewhere on the same screen
+    /// tolerate the cap fine.
+    pub fn has_visible_vsync_class(
+        &self,
+        painted: &std::collections::HashSet<LayoutNodeId>,
+    ) -> bool {
+        self.animations
+            .iter()
+            .filter(|(n, _)| painted.contains(*n))
+            .any(|(_, a)| a.current_properties.needs_vsync_for_smoothness())
+            || self
+                .transitions
+                .iter()
+                .filter(|(n, _)| painted.contains(*n))
+                .any(|(_, a)| a.current_properties.needs_vsync_for_smoothness())
+    }
+
     /// Tick all active CSS animations and transitions
     ///
     /// Called from the AnimationScheduler's background thread via tick callback.

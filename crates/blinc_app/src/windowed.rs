@@ -4650,7 +4650,36 @@ impl WindowedApp {
                                     || scroll_animating
                                     || needs_overlay_redraw
                                     || pointer_query_active;
+                                // Per-property smoothness gate (option B).
+                                // Even when only animation signals are firing,
+                                // if any visible animation is touching a
+                                // vsync-class property — transforms, 3D
+                                // rotation, layout sizing, font-size,
+                                // clip-path geometry — capping to 30 fps
+                                // would visibly stair-step. Bounds
+                                // animations (FLIP, animate_bounds) are
+                                // always vsync because they animate
+                                // position/size by definition. Stateful
+                                // animations are opaque; we treat them as
+                                // cap-OK and accept the trade-off — apps
+                                // that drive transforms via Stateful and
+                                // need vsync should leave the cap off.
+                                let needs_vsync_for_animation = ws
+                                    .render_tree
+                                    .as_ref()
+                                    .is_some_and(|t| {
+                                        let painted = t.painted_node_ids();
+                                        let store = t.css_anim_store();
+                                        let store_guard = store.lock().unwrap();
+                                        let store_vsync =
+                                            store_guard.has_visible_vsync_class(&painted);
+                                        drop(store_guard);
+                                        store_vsync
+                                            || t.has_active_visible_flip_animations(&painted)
+                                            || t.has_active_visible_visual_animations(&painted)
+                                    });
                                 let cap_applies = !interactive
+                                    && !needs_vsync_for_animation
                                     && (needs_animation_redraw
                                         || needs_motion_redraw
                                         || theme_animating
