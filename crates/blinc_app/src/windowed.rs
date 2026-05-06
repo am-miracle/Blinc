@@ -202,6 +202,11 @@ pub(crate) struct WindowState {
     /// time and the per-frame clear-color alpha. Mirrors
     /// `WindowConfig::transparent`.
     pub transparent: bool,
+    /// Last cursor style we asked the OS to display, so per-frame
+    /// `set_cursor()` calls become a no-op when the cursor hasn't
+    /// changed (the mouse-move handler may run hundreds of times a
+    /// second during a drag — we don't want to syscall every iteration).
+    pub last_cursor: Option<blinc_platform::Cursor>,
 }
 
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
@@ -228,6 +233,7 @@ impl WindowState {
             active_touch_ids: std::collections::HashSet::new(),
             ui_builder: None,
             transparent: false,
+            last_cursor: None,
         }
     }
 }
@@ -3033,27 +3039,49 @@ impl WindowedApp {
                                         // hover-set diff, POINTER_ENTER / LEAVE emission,
                                         // drag-delta tracking) if nothing in the tree could
                                         // react to it: no node with a registered pointer
-                                        // handler, and no CSS rule keyed on `:hover` /
-                                        // `:active`. `hello_blinc` and similar static views
-                                        // drop to a true zero-CPU idle even while the cursor
-                                        // is continuously moving over the window — the
-                                        // ~30 % CPU spike from a held-button drag in a
-                                        // handler-less UI was traced to this exact path.
+                                        // handler, no CSS rule keyed on `:hover` / `:active`,
+                                        // and no node carries a custom `cursor:` style that
+                                        // would need re-resolving when the pointer crosses
+                                        // an element boundary.
                                         //
-                                        // Cursor styling still works: we run a single
-                                        // `get_cursor_at` (one cheap hit_test, not the
-                                        // full ancestor walk) so `cursor: pointer` etc.
-                                        // applies on mouseover.
+                                        // `hello_blinc` and similar static views now stay
+                                        // at near-zero CPU even during a continuous drag.
+                                        // Per-move cost was previously: hit_test_all +
+                                        // hover diff + DRAG emission + cursor hit_test +
+                                        // OS `set_cursor` syscall. With nothing listening,
+                                        // all of that is wasted work.
                                         let needs_pointer_dispatch =
                                             tree.handler_registry().has_any_pointer_handler()
                                                 || tree.stylesheet().is_some_and(|s| {
                                                     s.has_pointer_state_rules()
                                                 });
+                                        let needs_cursor_resolve = tree.has_any_cursor_style();
+                                        if !needs_pointer_dispatch && !needs_cursor_resolve {
+                                            // Reset the OS cursor to Default (only if we
+                                            // previously asked for something else — `Default`
+                                            // is the OS's idle state). Caches the last
+                                            // request so the syscall fires at most once
+                                            // when the UI transitions from "had a styled
+                                            // cursor" to "no longer does".
+                                            let want = blinc_platform::Cursor::Default;
+                                            if ws.last_cursor != Some(want) {
+                                                window.set_cursor(want);
+                                                ws.last_cursor = Some(want);
+                                            }
+                                            return ControlFlow::Continue;
+                                        }
                                         if !needs_pointer_dispatch {
+                                            // Cursor-only path: do the cheap one-shot
+                                            // `hit_test` to resolve `cursor:` styles, but
+                                            // skip the full hover-diff machinery.
                                             let cursor = tree
                                                 .get_cursor_at(router, lx, ly)
                                                 .unwrap_or(CursorStyle::Default);
-                                            window.set_cursor(convert_cursor_style(cursor));
+                                            let want = convert_cursor_style(cursor);
+                                            if ws.last_cursor != Some(want) {
+                                                window.set_cursor(want);
+                                                ws.last_cursor = Some(want);
+                                            }
                                             return ControlFlow::Continue;
                                         }
 
@@ -3136,11 +3164,18 @@ impl WindowedApp {
                                             }
                                         }
 
-                                        // Update cursor based on hovered element
+                                        // Update cursor based on hovered element. Cached
+                                        // against `last_cursor` so a long drag over an
+                                        // element with a stable cursor doesn't syscall
+                                        // every move.
                                         let cursor = tree
                                             .get_cursor_at(router, lx, ly)
                                             .unwrap_or(CursorStyle::Default);
-                                        window.set_cursor(convert_cursor_style(cursor));
+                                        let want = convert_cursor_style(cursor);
+                                        if ws.last_cursor != Some(want) {
+                                            window.set_cursor(want);
+                                            ws.last_cursor = Some(want);
+                                        }
                                     }
                                     MouseEvent::ButtonPressed { button, x, y } => {
                                         let lx = x / scale;
@@ -3222,7 +3257,11 @@ impl WindowedApp {
                                         // This handles the case where mouse leaves window while dragging
                                         router.on_mouse_leave();
                                         // Reset cursor to default when mouse leaves window
-                                        window.set_cursor(blinc_platform::Cursor::Default);
+                                        let want = blinc_platform::Cursor::Default;
+                                        if ws.last_cursor != Some(want) {
+                                            window.set_cursor(want);
+                                            ws.last_cursor = Some(want);
+                                        }
                                         // Events are collected via the callback set above
                                     }
                                     MouseEvent::Entered => {
@@ -3246,11 +3285,16 @@ impl WindowedApp {
                                             event.mouse_y = my;
                                         }
 
-                                        // Update cursor based on hovered element
+                                        // Update cursor based on hovered element. See the
+                                        // `MouseEvent::Moved` branch for the cache rationale.
                                         let cursor = tree
                                             .get_cursor_at(router, mx, my)
                                             .unwrap_or(CursorStyle::Default);
-                                        window.set_cursor(convert_cursor_style(cursor));
+                                        let want = convert_cursor_style(cursor);
+                                        if ws.last_cursor != Some(want) {
+                                            window.set_cursor(want);
+                                            ws.last_cursor = Some(want);
+                                        }
                                     }
                                 },
                                 InputEvent::Keyboard(kb_event) => {

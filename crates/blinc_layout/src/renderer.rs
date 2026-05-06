@@ -12376,6 +12376,17 @@ impl RenderTree {
         self.render_nodes.get(&node).and_then(|n| n.props.cursor)
     }
 
+    /// Whether any node in the tree has a non-default cursor style.
+    ///
+    /// Lets the windowed app skip the per-mouse-move cursor hit_test
+    /// entirely on UIs that don't customise the cursor anywhere — the
+    /// `hello_blinc` baseline now stays at near-zero CPU even during a
+    /// continuous drag because we no longer hit_test + syscall per move.
+    /// Bounded O(N) over render nodes with early exit on first match.
+    pub fn has_any_cursor_style(&self) -> bool {
+        self.render_nodes.values().any(|n| n.props.cursor.is_some())
+    }
+
     /// Get the cursor style for the topmost hovered element at a point
     ///
     /// Walks up the ancestor chain starting from the topmost element,
