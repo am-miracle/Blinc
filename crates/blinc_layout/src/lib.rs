@@ -156,10 +156,11 @@ pub use render_state::{
 pub use stateful::{
     check_stateful_animations, check_stateful_deps, clear_stateful_animations,
     clear_stateful_base_updaters, clear_stateful_deps, has_animating_statefuls,
-    has_pending_subtree_rebuilds, has_stateful_base_updater, peek_needs_redraw, queue_prop_update,
-    queue_subtree_rebuild, request_redraw, take_needs_redraw, take_pending_prop_updates,
-    take_pending_subtree_rebuilds, update_stateful_base_props, use_shared_state,
-    use_shared_state_with, PendingSubtreeRebuild, SharedState, StateTransitions, StatefulInner,
+    has_pending_subtree_rebuilds, has_stateful_base_updater, has_visible_animating_statefuls,
+    peek_needs_redraw, queue_prop_update, queue_subtree_rebuild, request_redraw, take_needs_redraw,
+    take_pending_prop_updates, take_pending_subtree_rebuilds, update_stateful_base_props,
+    use_shared_state, use_shared_state_with, PendingSubtreeRebuild, SharedState, StateTransitions,
+    StatefulInner,
 };
 
 // Animation integration

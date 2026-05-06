@@ -4491,20 +4491,33 @@ impl WindowedApp {
                             // timeline — including ones tied to off-screen nodes. The
                             // paint walker sets `visible_anim_active` when it paints
                             // a node that drives a per-frame redraw (Canvas, motion
-                            // bindings, active motion state). Stateful-driven
-                            // animations (springs that mutate state and trigger
-                            // rebuilds — e.g. `cn_demo`'s `animated_progress`)
-                            // bypass the per-node check and surface via the global
-                            // `has_animating_statefuls()` instead, so we conservatively
-                            // OR them in. End result: an off-screen spinner whose
-                            // canvas is culled lets the chain die; a Stateful spring
-                            // whose value drives a `cn::progress` rebuild keeps it
-                            // alive even though the rebuilt div has no motion bindings.
+                            // bindings, active motion state).
+                            //
+                            // Stateful-driven animations (springs that mutate state and
+                            // trigger rebuilds — e.g. cn_demo's spinner / accordion's
+                            // `animated_progress`) bypass the per-node motion-binding
+                            // check, so we additionally OR in the global "any animating
+                            // stateful?" signal — but **filtered to those whose node
+                            // was painted this frame**. The paint walker records every
+                            // node it actually rendered into `painted_node_ids`;
+                            // `has_visible_animating_statefuls` intersects that with
+                            // the registry. Without this intersection a spinner
+                            // scrolled off-screen pinned the redraw chain forever
+                            // (cn_demo regression). Brand-new Statefuls whose node
+                            // hasn't been bound yet are conservatively counted as
+                            // visible by the predicate, so the very first frame still
+                            // renders.
                             let visible_anim_paint = ws.render_tree
                                 .as_ref()
                                 .map_or(true, |t| t.visible_anim_active());
-                            let visible_anim = visible_anim_paint
-                                || blinc_layout::has_animating_statefuls();
+                            let visible_anim_stateful = ws.render_tree
+                                .as_ref()
+                                .is_some_and(|t| {
+                                    blinc_layout::has_visible_animating_statefuls(
+                                        &t.painted_node_ids(),
+                                    )
+                                });
+                            let visible_anim = visible_anim_paint || visible_anim_stateful;
                             // Mirror the flag to the scheduler-side atomic so the
                             // wake callback (bg thread) skips waking the main
                             // thread when the only active animations are off-screen.

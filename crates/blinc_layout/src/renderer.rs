@@ -4,7 +4,7 @@
 //! and the DrawContext rendering API.
 
 use std::any::Any;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -391,6 +391,18 @@ pub struct RenderTree {
     /// off-screen nodes, the chain stops until something brings them
     /// back into view.
     visible_anim_active: Cell<bool>,
+    /// Set of node ids that the paint walker actually rendered in the
+    /// current frame (after viewport culling, motion-skip, and
+    /// occlusion gates). Read by the windowed app at the end of the
+    /// frame to decide which animating Statefuls are visible — an
+    /// off-screen spinner whose node didn't make it into this set
+    /// stops keeping the redraw chain alive.
+    ///
+    /// `RefCell` rather than `Cell` because `HashSet` isn't `Copy`;
+    /// the paint walker is single-threaded so the borrow contract is
+    /// trivially upheld. Cleared at the top of each `render_with_motion`
+    /// pass and grown back during the recursive walk.
+    painted_node_ids: RefCell<HashSet<LayoutNodeId>>,
     /// Motion bindings for continuous animations (keyed by node_id)
     motion_bindings: HashMap<LayoutNodeId, crate::motion::MotionBindings>,
     /// Last tick time for scroll physics (in milliseconds)
@@ -538,6 +550,7 @@ impl RenderTree {
             viewport_cull_scrolls: std::collections::HashSet::new(),
             cull_viewport: Cell::new(None),
             visible_anim_active: Cell::new(false),
+            painted_node_ids: RefCell::new(HashSet::new()),
             motion_bindings: HashMap::new(),
             last_scroll_tick_ms: None,
             scale_factor: 1.0,
@@ -2040,6 +2053,18 @@ impl RenderTree {
     /// until input or scroll brings them back into view.
     pub fn visible_anim_active(&self) -> bool {
         self.visible_anim_active.get()
+    }
+
+    /// Borrow the set of node ids that the paint walker rendered in
+    /// the most recent frame.
+    ///
+    /// Use the returned guard to filter `STATEFUL_ANIMATIONS` registry
+    /// entries down to those whose node is on screen — see
+    /// `stateful::has_visible_animating_statefuls`. The set is rebuilt
+    /// fresh by every `render_with_motion` call, so callers should
+    /// read it after the paint pass and before the next frame begins.
+    pub fn painted_node_ids(&self) -> std::cell::Ref<'_, HashSet<LayoutNodeId>> {
+        self.painted_node_ids.borrow()
     }
 
     /// Update root node dimensions for window resize.
@@ -10240,6 +10265,11 @@ impl RenderTree {
         // `visible_anim_active()` after this returns to gate the
         // end-of-frame redraw chain.
         self.visible_anim_active.set(false);
+        // Same lifecycle for the painted-node set: cleared here, grown
+        // by the walk, queried via `painted_node_ids()` to filter
+        // animating Statefuls down to those whose node is actually on
+        // screen this frame.
+        self.painted_node_ids.borrow_mut().clear();
 
         if let Some(root) = self.root {
             // Apply DPI scale factor if set (for HiDPI display support)
@@ -10353,6 +10383,14 @@ impl RenderTree {
         if !render_node.props.visible {
             return;
         }
+
+        // Past every cull/skip gate above — this node is being painted
+        // this frame. Record it so the windowed app can intersect with
+        // animating Statefuls and skip the redraw chain when their
+        // node is off-screen (e.g. a spinner scrolled out of view in
+        // cn_demo, which previously kept the chain alive at full
+        // refresh rate forever).
+        self.painted_node_ids.borrow_mut().insert(node);
 
         // Get motion values from RenderState (for entry/exit animations)
         // For stable-keyed motions (overlays), look up by key; otherwise by node_id

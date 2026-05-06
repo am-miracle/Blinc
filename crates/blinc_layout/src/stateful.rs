@@ -515,29 +515,46 @@ pub fn check_stateful_deps(changed_signals: &[SignalId]) -> bool {
 // Animation-Driven Refresh Registry
 // =========================================================================
 
+/// Closure that resolves a Stateful's current `node_id`, if it has been
+/// rendered into the tree yet. Returning `None` means "not yet bound",
+/// not "settled" — callers conservatively treat that as visible.
+pub(crate) type StatefulNodeIdFn = Arc<dyn Fn() -> Option<LayoutNodeId> + Send + Sync>;
+
 /// Registry of stateful elements with active animations
 ///
-/// Maps stateful_key -> (animation_keys, refresh_fn) where animation_keys are
-/// the persisted animated value keys and refresh_fn triggers a callback re-run.
-/// The windowed app checks these on animation frames to update animating statefuls.
+/// Maps stateful_key -> (animation_keys, refresh_fn, node_id_fn). The
+/// `animation_keys` are the persisted animated value keys, `refresh_fn`
+/// triggers a callback re-run, and `node_id_fn` resolves the Stateful's
+/// current node in the render tree so the windowed app can gate the
+/// redraw chain on viewport visibility (off-screen spinners shouldn't
+/// pin the chain at full refresh rate — issue #28's spinner-scrolled-
+/// out-of-view regression).
 #[allow(clippy::type_complexity, clippy::incompatible_msrv)]
 static STATEFUL_ANIMATIONS: LazyLock<
-    Mutex<std::collections::HashMap<u64, (Vec<String>, Arc<dyn Fn() + Send + Sync>)>>,
+    Mutex<
+        std::collections::HashMap<
+            u64,
+            (Vec<String>, Arc<dyn Fn() + Send + Sync>, StatefulNodeIdFn),
+        >,
+    >,
 > = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// Register a stateful element for animation-driven refresh
 ///
 /// Called internally when `use_spring()` or `use_animated_value()` is used
-/// and the animation is active (not settled).
+/// and the animation is active (not settled). `node_id_fn` should resolve
+/// the Stateful's current node in the tree (returns `None` if not yet
+/// rendered) so visibility-based gating can filter off-screen entries.
 pub(crate) fn register_stateful_animation(
     stateful_key: u64,
     animation_keys: Vec<String>,
     refresh_fn: Arc<dyn Fn() + Send + Sync>,
+    node_id_fn: StatefulNodeIdFn,
 ) {
     STATEFUL_ANIMATIONS
         .lock()
         .unwrap()
-        .insert(stateful_key, (animation_keys, refresh_fn));
+        .insert(stateful_key, (animation_keys, refresh_fn, node_id_fn));
 }
 
 /// Unregister a stateful element from animation refresh
@@ -559,7 +576,9 @@ pub fn check_stateful_animations() -> bool {
         let registry = STATEFUL_ANIMATIONS.lock().unwrap();
         registry
             .iter()
-            .map(|(key, (anim_keys, refresh_fn))| (*key, anim_keys.clone(), Arc::clone(refresh_fn)))
+            .map(|(key, (anim_keys, refresh_fn, _node_id_fn))| {
+                (*key, anim_keys.clone(), Arc::clone(refresh_fn))
+            })
             .collect()
     };
 
@@ -637,6 +656,31 @@ pub fn check_stateful_animations() -> bool {
 /// Check if there are stateful elements registered for animation refresh
 pub fn has_animating_statefuls() -> bool {
     !STATEFUL_ANIMATIONS.lock().unwrap().is_empty()
+}
+
+/// Same as `has_animating_statefuls`, but only counts entries whose
+/// associated render node was painted in the most recent frame.
+///
+/// `painted` should be the set of node ids the paint walker actually
+/// rendered (after viewport culling and motion-skip filtering). A
+/// Stateful that hasn't been bound to a node yet (`node_id_fn` returns
+/// `None`) is treated as visible — it's mid-rebuild and shouldn't get
+/// its animations frozen on the very first frame.
+///
+/// Used by the windowed app's redraw chain so that a continuous-spin
+/// spinner scrolled out of view stops keeping the frame loop alive.
+/// `has_animating_statefuls` is preserved for the cleanup-only path
+/// in `check_stateful_animations` (which still needs to walk every
+/// entry regardless of visibility, otherwise settled off-screen
+/// statefuls would never get unregistered).
+pub fn has_visible_animating_statefuls(painted: &std::collections::HashSet<LayoutNodeId>) -> bool {
+    let registry = STATEFUL_ANIMATIONS.lock().unwrap();
+    registry
+        .values()
+        .any(|(_, _, node_id_fn)| match node_id_fn() {
+            Some(id) => painted.contains(&id),
+            None => true,
+        })
 }
 
 /// Take all pending prop updates
@@ -2264,7 +2308,19 @@ impl<S: StateTransitions + Default> StatefulBuilder<S> {
         // This ensures the callback re-runs while springs are animating
         let anim_keys = stateful.shared_state.lock().unwrap().animation_keys.clone();
         if !anim_keys.is_empty() {
-            register_stateful_animation(stateful_key, anim_keys, Arc::clone(&refresh_callback));
+            let shared_for_node_id = Arc::clone(&shared);
+            let node_id_fn: StatefulNodeIdFn = Arc::new(move || {
+                shared_for_node_id
+                    .lock()
+                    .ok()
+                    .and_then(|inner| inner.node_id)
+            });
+            register_stateful_animation(
+                stateful_key,
+                anim_keys,
+                Arc::clone(&refresh_callback),
+                node_id_fn,
+            );
         }
 
         stateful
@@ -2789,7 +2845,14 @@ impl<S: StateTransitions> Stateful<S> {
             if !anim_keys.is_empty() {
                 if let Some(refresh_cb) = refresh_cb {
                     let stateful_key = Arc::as_ptr(shared) as u64;
-                    register_stateful_animation(stateful_key, anim_keys, refresh_cb);
+                    let shared_for_node_id = Arc::clone(shared);
+                    let node_id_fn: StatefulNodeIdFn = Arc::new(move || {
+                        shared_for_node_id
+                            .lock()
+                            .ok()
+                            .and_then(|inner| inner.node_id)
+                    });
+                    register_stateful_animation(stateful_key, anim_keys, refresh_cb, node_id_fn);
                 }
             }
         }
@@ -2906,7 +2969,14 @@ impl<S: StateTransitions> Stateful<S> {
         if !anim_keys.is_empty() {
             if let Some(refresh_cb) = refresh_callback {
                 let stateful_key = Arc::as_ptr(shared) as u64;
-                register_stateful_animation(stateful_key, anim_keys, refresh_cb);
+                let shared_for_node_id = Arc::clone(shared);
+                let node_id_fn: StatefulNodeIdFn = Arc::new(move || {
+                    shared_for_node_id
+                        .lock()
+                        .ok()
+                        .and_then(|inner| inner.node_id)
+                });
+                register_stateful_animation(stateful_key, anim_keys, refresh_cb, node_id_fn);
             }
         }
 
