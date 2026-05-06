@@ -340,8 +340,9 @@ impl CssAnimationStore {
 
     /// Whether any visible animation or transition is currently
     /// touching a property classified as
-    /// [`KeyframeProperties::needs_vsync_for_smoothness`] — transforms,
-    /// 3D rotation, layout sizing, font-size, clip-path geometry.
+    /// [`needs_vsync_for_smoothness`](blinc_animation::KeyframeProperties::needs_vsync_for_smoothness)
+    /// — transforms, 3D rotation, layout sizing, font-size, clip-path
+    /// geometry.
     ///
     /// Used by the windowed app to decide whether the configured
     /// `animation_fps_cap` should bypass for the next frame: if a
