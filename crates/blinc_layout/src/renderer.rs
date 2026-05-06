@@ -10455,17 +10455,20 @@ impl RenderTree {
         let viewport = render_state.viewport();
         let viewport_known = viewport.width() > 0.0 && viewport.height() > 0.0;
         let intersects_viewport = !viewport_known
-            || self
-                .layout_tree
-                .get_absolute_bounds(node)
-                .is_none_or(|abs| {
+            || match self.layout_tree.get_absolute_bounds(node) {
+                Some(abs) => {
                     let on_screen_x = abs.x + cumulative_scroll.0;
                     let on_screen_y = abs.y + cumulative_scroll.1;
                     on_screen_x < viewport.x() + viewport.width()
                         && on_screen_x + abs.width > viewport.x()
                         && on_screen_y < viewport.y() + viewport.height()
                         && on_screen_y + abs.height > viewport.y()
-                });
+                }
+                // No absolute bounds resolved — conservatively include
+                // the node rather than filtering it out. Same posture
+                // as the `viewport_known == false` branch above.
+                None => true,
+            };
         if intersects_viewport {
             self.painted_node_ids.borrow_mut().insert(node);
         }

@@ -2164,6 +2164,13 @@ impl WindowedApp {
         let platform = DesktopPlatform::new().map_err(|e| BlincError::Platform(e.to_string()))?;
         let primary_transparent = config.transparent;
         let primary_max_frame_latency = config.max_frame_latency.clamp(1, 3);
+        // Snapshot the animation FPS cap before `config` moves into the
+        // event loop. `None` keeps every animation frame at native vsync
+        // (the existing behaviour, right for games / video / scrubbing
+        // UIs); `Some(N)` paces animation-only redraws via
+        // `wake_proxy.wake_at(1000/N ms)` so the chain doesn't loop at
+        // full refresh just because a slow CSS keyframe is on screen.
+        let animation_fps_cap = config.animation_fps_cap;
         let event_loop = platform
             .create_event_loop_with_config(config)
             .map_err(|e| BlincError::Platform(e.to_string()))?;
@@ -2172,6 +2179,11 @@ impl WindowedApp {
         let wake_proxy = event_loop.wake_proxy();
         // Clone for the open_window callback
         let wake_proxy_for_windows = event_loop.wake_proxy();
+        // Clone for the redraw-chain pacing path. When `animation_fps_cap`
+        // is set, the chain calls `wake_at` on this proxy instead of
+        // `request_redraw`, so the platform shim's lazy timer thread
+        // delivers the next frame after the configured delay.
+        let wake_proxy_for_pacing = event_loop.wake_proxy();
 
         // Frame-dirty flag. The OS sends `Event::Frame` at vsync to focused
         // windows whether or not we asked for a redraw, which means a
@@ -4607,23 +4619,69 @@ impl WindowedApp {
                                 "redraw chain"
                             );
 
-                            if needs_animation_redraw || needs_cursor_redraw || needs_motion_redraw || scroll_animating || needs_overlay_redraw || theme_animating || css_needs_redraw || pointer_query_active || flow_needs_redraw {
-                                // Request another frame to render updated animation values
-                                // For cursor blink, also re-request continuous redraw for next frame
+                            let any_redraw_signal = needs_animation_redraw
+                                || needs_cursor_redraw
+                                || needs_motion_redraw
+                                || scroll_animating
+                                || needs_overlay_redraw
+                                || theme_animating
+                                || css_needs_redraw
+                                || pointer_query_active
+                                || flow_needs_redraw;
+                            if any_redraw_signal {
                                 if needs_cursor_redraw {
                                     // Keep requesting redraws as long as a text input is focused
                                     if blinc_layout::widgets::has_focused_text_input() {
                                         blinc_layout::widgets::text_input::request_continuous_redraw_pub();
                                     }
                                 }
-                                // The next frame should render — pair the
-                                // `request_redraw` call with a dirty flip so
-                                // the start-of-frame skip check doesn't drop
-                                // it. Without this the redraw chain would
-                                // request a frame that then immediately
-                                // returns early.
-                                frame_dirty.store(true, Ordering::Release);
-                                window.request_redraw();
+
+                                // Animation-only paths get throttled when the
+                                // app opted into a sub-vsync animation cap.
+                                // "Animation-only" means none of the signals
+                                // tied to direct user interaction or
+                                // physics-driven scroll are active — those
+                                // need vsync responsiveness to feel right.
+                                // `pointer_query_active` also bypasses the
+                                // cap because env() pointer queries already
+                                // depend on cursor coordinates that arrive
+                                // at vsync rate.
+                                let interactive = needs_cursor_redraw
+                                    || scroll_animating
+                                    || needs_overlay_redraw
+                                    || pointer_query_active;
+                                let cap_applies = !interactive
+                                    && (needs_animation_redraw
+                                        || needs_motion_redraw
+                                        || theme_animating
+                                        || css_needs_redraw
+                                        || flow_needs_redraw);
+
+                                if let (true, Some(fps)) = (cap_applies, animation_fps_cap) {
+                                    // Defer the next frame instead of
+                                    // requesting it immediately. The platform
+                                    // shim's lazy timer thread sends a Wake
+                                    // event after `delay`, which the shim's
+                                    // `user_event` handler turns into
+                                    // `request_redraw()` for every window.
+                                    // We flip `frame_dirty` ahead of time so
+                                    // the deferred `Event::Frame` actually
+                                    // renders instead of hitting the skip
+                                    // gate at the top of the Frame handler.
+                                    let delay =
+                                        std::time::Duration::from_millis(1000 / fps as u64);
+                                    frame_dirty.store(true, Ordering::Release);
+                                    wake_proxy_for_pacing.wake_at(delay);
+                                } else {
+                                    // The next frame should render — pair the
+                                    // `request_redraw` call with a dirty flip so
+                                    // the start-of-frame skip check doesn't drop
+                                    // it. Without this the redraw chain would
+                                    // request a frame that then immediately
+                                    // returns early.
+                                    frame_dirty.store(true, Ordering::Release);
+                                    window.request_redraw();
+                                }
                             }
                         }
                     }

@@ -51,6 +51,27 @@ pub struct WindowConfig {
     /// devices, at the cost of slightly higher input latency and a
     /// greater chance of dropped frames under load. Clamped to `1..=3`.
     pub max_frame_latency: u32,
+    /// Frame-rate cap applied to the redraw chain when the *only*
+    /// reason a frame is being scheduled is animation progress
+    /// (no input, no scroll, no drag, no Stateful state change).
+    ///
+    /// `None` (the default) disables the cap — animation frames are
+    /// scheduled immediately, so visible animations run at the
+    /// display's native vsync rate (typically 60–120 Hz). This is
+    /// the right setting for games, video players, scrubbing UIs,
+    /// and anything where frame-perfect motion is non-negotiable.
+    ///
+    /// `Some(N)` caps animation-only redraws to roughly `N` fps by
+    /// using `ControlFlow::WaitUntil(now + 1000/N ms)` between
+    /// frames. Halves wake-ups at `N = 30`, slightly stair-steps
+    /// fast keyframes — generally invisible on slow keyframes
+    /// (3-second pulses, color cycles, fade-ins).
+    ///
+    /// User-input frames (typing, scrolling, dragging) are NEVER
+    /// throttled by this cap; they always render on the next vsync.
+    /// The cap only applies when the chain would otherwise re-arm
+    /// itself purely because of an active animation signal.
+    pub animation_fps_cap: Option<u32>,
 }
 
 impl Default for WindowConfig {
@@ -71,6 +92,7 @@ impl Default for WindowConfig {
             modal: false,
             parent: None,
             max_frame_latency: 2,
+            animation_fps_cap: None,
         }
     }
 }
@@ -168,6 +190,17 @@ impl WindowConfig {
     /// and occasional frame drops. Clamped to `1..=3`.
     pub fn max_frame_latency(mut self, frames: u32) -> Self {
         self.max_frame_latency = frames.clamp(1, 3);
+        self
+    }
+
+    /// Cap the animation-only redraw rate. See
+    /// [`WindowConfig::animation_fps_cap`] for the full semantics —
+    /// in short, `Some(30)` halves wake-ups while a CSS keyframe or
+    /// transition is the only thing driving the chain, `None` (the
+    /// default) keeps animation frames at native vsync. Input,
+    /// scroll, and drag frames are never throttled.
+    pub fn animation_fps_cap(mut self, fps: Option<u32>) -> Self {
+        self.animation_fps_cap = fps.map(|f| f.max(1));
         self
     }
 }

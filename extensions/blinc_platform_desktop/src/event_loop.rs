@@ -3,6 +3,8 @@
 //! Supports multiple windows via `AppCommand::CreateWindow`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::input;
 use crate::window::DesktopWindow;
@@ -39,12 +41,82 @@ pub enum AppCommand {
 #[derive(Clone)]
 pub struct WakeProxy {
     proxy: EventLoopProxy<AppCommand>,
+    /// Shared deadline + lazy timer thread for `wake_at`. Lazily
+    /// initialised on first deadline-based wake to avoid spawning a
+    /// timer thread for apps that never use the animation FPS cap.
+    timer: Arc<TimerState>,
+}
+
+/// State for the lazy timer thread that backs `WakeProxy::wake_at`.
+struct TimerState {
+    /// `(deadline, condvar)`. Setting the deadline + notifying the
+    /// condvar wakes the timer thread which then sleeps via
+    /// `wait_timeout` until the deadline expires.
+    deadline: std::sync::Mutex<Option<std::time::Instant>>,
+    cv: std::sync::Condvar,
+    started: AtomicBool,
 }
 
 impl WakeProxy {
     /// Wake up the event loop, causing it to process events and potentially redraw
     pub fn wake(&self) {
         let _ = self.proxy.send_event(AppCommand::Wake);
+    }
+
+    /// Schedule a `wake()` to fire after `delay`. If a wake is already
+    /// pending and would fire sooner, this call is a no-op (we never
+    /// extend an earlier deadline).
+    ///
+    /// Backs the windowed app's `animation_fps_cap` — the redraw
+    /// chain uses this instead of `request_redraw()` when the only
+    /// reason to schedule a frame is animation progress and the app
+    /// has asked for a sub-vsync animation rate. A single dedicated
+    /// timer thread is started lazily on first call; subsequent
+    /// calls just update the deadline.
+    pub fn wake_at(&self, delay: std::time::Duration) {
+        let target = std::time::Instant::now() + delay;
+        let mut guard = self.timer.deadline.lock().unwrap();
+        match *guard {
+            Some(existing) if existing <= target => {
+                // An earlier wake is already pending — keep it.
+                return;
+            }
+            _ => *guard = Some(target),
+        }
+        self.timer.cv.notify_one();
+        drop(guard);
+
+        if !self.timer.started.swap(true, Ordering::AcqRel) {
+            let timer = Arc::clone(&self.timer);
+            let proxy = self.proxy.clone();
+            std::thread::Builder::new()
+                .name("blinc-wake-timer".to_string())
+                .spawn(move || {
+                    let mut guard = timer.deadline.lock().unwrap();
+                    loop {
+                        match *guard {
+                            None => {
+                                // Park until a deadline is set.
+                                guard = timer.cv.wait(guard).unwrap();
+                            }
+                            Some(d) => {
+                                let now = std::time::Instant::now();
+                                if d <= now {
+                                    *guard = None;
+                                    drop(guard);
+                                    let _ = proxy.send_event(AppCommand::Wake);
+                                    guard = timer.deadline.lock().unwrap();
+                                } else {
+                                    let timeout = d - now;
+                                    let (g, _) = timer.cv.wait_timeout(guard, timeout).unwrap();
+                                    guard = g;
+                                }
+                            }
+                        }
+                    }
+                })
+                .expect("spawn blinc-wake-timer");
+        }
     }
 
     /// Request creation of a new window on the next event loop tick
@@ -74,6 +146,11 @@ impl DesktopEventLoop {
 
         let wake_proxy = WakeProxy {
             proxy: event_loop.create_proxy(),
+            timer: Arc::new(TimerState {
+                deadline: std::sync::Mutex::new(None),
+                cv: std::sync::Condvar::new(),
+                started: AtomicBool::new(false),
+            }),
         };
 
         Ok(Self {
