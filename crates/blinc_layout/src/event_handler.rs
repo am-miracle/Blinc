@@ -486,6 +486,36 @@ impl HandlerRegistry {
         self.nodes.clear();
     }
 
+    /// Check whether any node has a pointer-related handler registered.
+    ///
+    /// Used to short-circuit mouse-move hit testing on UIs that don't
+    /// listen for pointer interaction at all (most static views, splash
+    /// screens, etc.). Walks every node's handler map but stops at the
+    /// first match — bounded O(N) where N is the count of nodes that
+    /// have *any* handler.
+    pub fn has_any_pointer_handler(&self) -> bool {
+        use blinc_core::events::event_types::*;
+        const POINTER_EVENTS: &[EventType] = &[
+            POINTER_DOWN,
+            POINTER_UP,
+            POINTER_MOVE,
+            POINTER_ENTER,
+            POINTER_LEAVE,
+            DRAG,
+            DRAG_END,
+            SCROLL,
+            SCROLL_END,
+            PINCH,
+            ROTATE,
+            DOUBLE_TAP,
+            FILE_DRAG_OVER,
+            FILE_DROP,
+        ];
+        self.nodes
+            .values()
+            .any(|h| POINTER_EVENTS.iter().any(|t| h.has_handler(*t)))
+    }
+
     /// Broadcast an event to ALL nodes that have handlers for the given event type
     ///
     /// This is used for keyboard events (TEXT_INPUT, KEY_DOWN) after a tree rebuild,

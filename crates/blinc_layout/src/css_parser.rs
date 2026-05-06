@@ -1616,6 +1616,41 @@ impl Stylesheet {
         self.styles.get(&key)
     }
 
+    /// Whether the stylesheet contains any rule keyed on a pointer state
+    /// (`:hover` or `:active`).
+    ///
+    /// Used by the windowed app's mouse-move path to skip hit testing
+    /// entirely when no element has a pointer-driven style or handler —
+    /// turns "static UI with no interaction" into a true zero-CPU idle
+    /// even while the cursor is moving over the window.
+    ///
+    /// Walks the simple-rule and class-rule HashMaps for keys with the
+    /// `:hover` / `:active` suffix that the parser produces, plus the
+    /// complex-selector list for any compound that carries a state
+    /// pseudo-class. Cheap enough to call per-frame on a static stylesheet
+    /// (workspaces with very large CSS should still consider caching it
+    /// alongside the parse result).
+    pub fn has_pointer_state_rules(&self) -> bool {
+        let suffix_match = |key: &str| key.ends_with(":hover") || key.ends_with(":active");
+        if self.styles.keys().any(|k| suffix_match(k)) {
+            return true;
+        }
+        if self.class_styles.keys().any(|k| suffix_match(k)) {
+            return true;
+        }
+        self.complex_rules.iter().any(|(sel, _)| {
+            sel.segments.iter().any(|(compound, _)| {
+                compound.parts.iter().any(|p| {
+                    matches!(
+                        p,
+                        SelectorPart::State(ElementState::Hover)
+                            | SelectorPart::State(ElementState::Active)
+                    )
+                })
+            })
+        })
+    }
+
     /// Get all styles for an element, including state variants
     ///
     /// Returns a tuple of (base_style, state_styles) where state_styles is a Vec

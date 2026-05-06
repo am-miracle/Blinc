@@ -3029,6 +3029,34 @@ impl WindowedApp {
                                         let lx = x / scale;
                                         let ly = y / scale;
 
+                                        // Skip the heavy mouse-move pipeline (hit_test_all,
+                                        // hover-set diff, POINTER_ENTER / LEAVE emission,
+                                        // drag-delta tracking) if nothing in the tree could
+                                        // react to it: no node with a registered pointer
+                                        // handler, and no CSS rule keyed on `:hover` /
+                                        // `:active`. `hello_blinc` and similar static views
+                                        // drop to a true zero-CPU idle even while the cursor
+                                        // is continuously moving over the window — the
+                                        // ~30 % CPU spike from a held-button drag in a
+                                        // handler-less UI was traced to this exact path.
+                                        //
+                                        // Cursor styling still works: we run a single
+                                        // `get_cursor_at` (one cheap hit_test, not the
+                                        // full ancestor walk) so `cursor: pointer` etc.
+                                        // applies on mouseover.
+                                        let needs_pointer_dispatch =
+                                            tree.handler_registry().has_any_pointer_handler()
+                                                || tree.stylesheet().is_some_and(|s| {
+                                                    s.has_pointer_state_rules()
+                                                });
+                                        if !needs_pointer_dispatch {
+                                            let cursor = tree
+                                                .get_cursor_at(router, lx, ly)
+                                                .unwrap_or(CursorStyle::Default);
+                                            window.set_cursor(convert_cursor_style(cursor));
+                                            return ControlFlow::Continue;
+                                        }
+
                                         // Get overlay bounds and layer ID for occlusion-aware hit testing
                                         // This prevents background elements from receiving hover events
                                         // when they are visually occluded by overlay content
@@ -3046,21 +3074,32 @@ impl WindowedApp {
                                             overlay_layer_id,
                                         );
 
-                                        // Hover delta or active drag means something visible
-                                        // could change (CSS `:hover` styling, drag-driven UI).
-                                        // The prelude no longer flips `frame_dirty` for bare
-                                        // moves, so do it here once we know the move actually
-                                        // crossed an element boundary or is part of a drag.
-                                        let hover_or_drag_dirty = pending_events.iter().any(|e| {
+                                        // Crossing an element boundary changes CSS `:hover`
+                                        // styling and may switch which Stateful is in
+                                        // its `Hover` state — flip dirty so the next
+                                        // Event::Frame paints the new look.
+                                        //
+                                        // We deliberately do NOT include `DRAG` /
+                                        // `DRAG_END` here: the router emits a `DRAG`
+                                        // event for every mouse move while a button is
+                                        // held, regardless of whether any handler is
+                                        // attached. Including them turned a bare
+                                        // mouse-down + drag in `hello_blinc` (no
+                                        // handlers anywhere) into a 60–120 Hz redraw
+                                        // loop pinning ~30 % CPU. Stateful-driven drag
+                                        // (sliders, sortable, splitter panes) is
+                                        // already covered by the post-dispatch
+                                        // peek-needs-redraw check below — the drag
+                                        // handler mutates `State`/`Stateful`, that
+                                        // sets `NEEDS_REDRAW`, and we honour it.
+                                        let hover_changed = pending_events.iter().any(|e| {
                                             matches!(
                                                 e.event_type,
                                                 blinc_core::events::event_types::POINTER_ENTER
                                                     | blinc_core::events::event_types::POINTER_LEAVE
-                                                    | blinc_core::events::event_types::DRAG
-                                                    | blinc_core::events::event_types::DRAG_END
                                             )
                                         });
-                                        if hover_or_drag_dirty {
+                                        if hover_changed {
                                             frame_dirty.store(true, Ordering::Release);
                                             // Under `ControlFlow::Wait` (Linux/Wayland/X11)
                                             // flipping `frame_dirty` alone doesn't schedule
@@ -3722,6 +3761,23 @@ impl WindowedApp {
                             // clamped the content to the edge.
                             if scroll_ended {
                                 tree.on_scroll_end();
+                                window.request_redraw();
+                            }
+
+                            // After every input dispatch, check whether any
+                            // handler set `NEEDS_REDRAW` (via
+                            // `stateful::request_redraw()` from a `dispatch`
+                            // / state-change path) or queued a subtree
+                            // rebuild. On Linux's `ControlFlow::Wait` the
+                            // event loop doesn't deliver `Event::Frame` on
+                            // its own; we must explicitly request a
+                            // redraw so the queued work actually runs.
+                            // Sliders, sortable lists, splitter panes — any
+                            // Stateful-driven drag — flow through here.
+                            if blinc_layout::peek_needs_redraw()
+                                || blinc_layout::has_pending_subtree_rebuilds()
+                            {
+                                frame_dirty.store(true, Ordering::Release);
                                 window.request_redraw();
                             }
                         }
