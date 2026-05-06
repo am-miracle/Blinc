@@ -249,6 +249,7 @@ fn main() -> Result<()> {
         title: "The Strangler — full-body skin + morph demo".to_string(),
         width: 1024,
         height: 768,
+        animation_fps_cap: Some(60),
         ..Default::default()
     };
 
