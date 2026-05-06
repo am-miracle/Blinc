@@ -10504,9 +10504,15 @@ impl RenderTree {
         // true regardless of visibility.
         if !self.visible_anim_active.get() {
             let canvas_paints = matches!(render_node.element_type, ElementType::Canvas(_));
-            let has_bindings = motion_bindings_ref.is_some();
+            // Bindings only count as a redraw signal when the
+            // underlying animated value is *actually* mid-flight.
+            // A settled spring binding (e.g. `cn::progress_animated`
+            // after it reached 75 %) leaves the binding in place but
+            // the value is now constant — including it here pinned
+            // the chain at vsync forever.
+            let has_active_binding = motion_bindings_ref.is_some_and(|b| b.is_any_animating());
             let has_active_motion = motion_values.is_some();
-            if canvas_paints || has_bindings || has_active_motion {
+            if canvas_paints || has_active_binding || has_active_motion {
                 self.visible_anim_active.set(true);
             }
         }

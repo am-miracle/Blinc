@@ -294,6 +294,41 @@ impl MotionBindings {
             && self.opacity.is_none()
     }
 
+    /// Whether any of the bound animated values is currently mid-flight.
+    ///
+    /// Distinct from [`Self::is_empty`]: bindings can be present but
+    /// settled (the spring has reached its target and clamped). The
+    /// paint walker uses this to decide whether to set
+    /// `RenderTree::visible_anim_active` — without it a settled
+    /// `cn::progress_animated` (the value is now constant 75 %) kept
+    /// the redraw chain alive forever because the binding itself
+    /// never goes away even after the underlying spring stops moving.
+    ///
+    /// Timeline-based bindings count as animating whenever the
+    /// timeline is still playing (keyframe-driven, not spring-driven,
+    /// so they don't have a "settled" state). All spring-driven
+    /// bindings consult `is_animating()` on the underlying
+    /// `SharedAnimatedValue`.
+    pub fn is_any_animating(&self) -> bool {
+        let spring_animating = |v: &Option<SharedAnimatedValue>| {
+            v.as_ref()
+                .and_then(|s| s.lock().ok())
+                .is_some_and(|g| g.is_animating())
+        };
+        spring_animating(&self.translate_x)
+            || spring_animating(&self.translate_y)
+            || spring_animating(&self.scale)
+            || spring_animating(&self.scale_x)
+            || spring_animating(&self.scale_y)
+            || spring_animating(&self.rotation)
+            || spring_animating(&self.opacity)
+            || self
+                .rotation_timeline
+                .as_ref()
+                .and_then(|t| t.timeline.lock().ok())
+                .is_some_and(|g| g.is_playing())
+    }
+
     /// Get the current translation from animated values
     ///
     /// Returns a translation transform for the tx/ty bindings.
