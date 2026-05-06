@@ -10424,11 +10424,40 @@ impl RenderTree {
 
         // Past every cull/skip gate above — this node is being painted
         // this frame. Record it so the windowed app can intersect with
-        // animating Statefuls and skip the redraw chain when their
-        // node is off-screen (e.g. a spinner scrolled out of view in
-        // cn_demo, which previously kept the chain alive at full
-        // refresh rate forever).
-        self.painted_node_ids.borrow_mut().insert(node);
+        // animating Statefuls / CSS animations and skip the redraw
+        // chain when their node is off-screen.
+        //
+        // We additionally clip the recorded set against the window
+        // viewport: scroll containers without `viewport_cull(true)`
+        // still walk and paint their off-screen children (the GPU
+        // clips them at draw time), but for redraw-gating purposes
+        // those children are NOT visible. Without this filter the
+        // styling_demo — which has ~25 `infinite` keyframes laid out
+        // far below the fold — kept the redraw chain alive at idle
+        // even though the user couldn't see any of them.
+        //
+        // `bounds` is in window-space (parent_offset + node layout
+        // pos). `cumulative_scroll` is the accumulated scroll offset
+        // from ancestor scroll containers; adding it gives this
+        // node's actual on-screen rect.
+        //
+        // If the viewport hasn't been initialised yet (rect is empty
+        // — true on the very first frame, before
+        // `RenderState::set_viewport_size` is called) we fall back to
+        // recording every painted node. Otherwise the gate would
+        // filter the entire tree out and the chain would never start.
+        let viewport = render_state.viewport();
+        let viewport_known = viewport.width() > 0.0 && viewport.height() > 0.0;
+        let on_screen_x = bounds.x + cumulative_scroll.0;
+        let on_screen_y = bounds.y + cumulative_scroll.1;
+        let intersects_viewport = !viewport_known
+            || (on_screen_x < viewport.x() + viewport.width()
+                && on_screen_x + bounds.width > viewport.x()
+                && on_screen_y < viewport.y() + viewport.height()
+                && on_screen_y + bounds.height > viewport.y());
+        if intersects_viewport {
+            self.painted_node_ids.borrow_mut().insert(node);
+        }
 
         // Get motion values from RenderState (for entry/exit animations)
         // For stable-keyed motions (overlays), look up by key; otherwise by node_id
