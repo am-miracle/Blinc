@@ -7,6 +7,7 @@ All notable changes to `blinc_app` will be documented in this file.
 ### Added
 - Display refresh rate detection at window resume — feeds `WindowConfig.max_frame_latency`-clamped `set_target_fps` so the scheduler doesn't burn 120 ticks/sec on a 60 Hz panel.
 - `WindowConfig::max_frame_latency` is honoured for the primary surface (cap captured pre-move as `primary_max_frame_latency`).
+- `WindowConfig::animation_fps_cap` is honoured by the redraw chain. When the only active redraw signals are animation progress (CSS keyframes / transitions / motion / theme / flow), the chain calls `WakeProxy::wake_at(1000/N ms)` instead of `request_redraw()` — pacing animation-only frames at the configured rate while leaving input / scroll / drag / cursor frames at native vsync. Halved idle CPU on `styling_demo` at `Some(30)`.
 - `tracing::trace!` target `blinc_app::redraw_signals` logs which of the nine end-of-frame signals (animation / cursor / motion / scroll / overlay / theme / css / pointer-query / flow) drove a redraw — silent on a quiet idle.
 
 ### Changed
