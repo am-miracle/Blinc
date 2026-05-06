@@ -322,6 +322,22 @@ impl CssAnimationStore {
         Self::default()
     }
 
+    /// Whether any tracked animation or transition belongs to a node
+    /// in the supplied `painted` set.
+    ///
+    /// The unfiltered "any active animation?" check used to keep the
+    /// redraw chain alive for every `infinite` keyframe in the
+    /// stylesheet, even when the animated element was scrolled
+    /// off-screen — `styling_demo`, with ~25 infinite animations,
+    /// pinned ~73 % CPU at idle. Filtering by visibility lets the
+    /// chain die when the user isn't looking at the moving parts;
+    /// when they scroll back, `tick(dt_ms)` catches up by elapsed
+    /// time so the visible state is still correct.
+    pub fn has_visible_active(&self, painted: &std::collections::HashSet<LayoutNodeId>) -> bool {
+        self.animations.keys().any(|n| painted.contains(n))
+            || self.transitions.keys().any(|n| painted.contains(n))
+    }
+
     /// Tick all active CSS animations and transitions
     ///
     /// Called from the AnimationScheduler's background thread via tick callback.

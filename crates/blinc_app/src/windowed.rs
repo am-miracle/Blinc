@@ -4556,16 +4556,31 @@ impl WindowedApp {
                             // alive during an accordion expand was *no* signal at all, so the
                             // animation only progressed when some other event (scroll, hover)
                             // happened to fire `frame_dirty`.
-                            let css_needs_redraw = css_active
-                                || !ws.render_tree
-                                    .as_ref()
-                                    .map_or(true, |t| t.css_transitions_empty())
-                                || ws.render_tree
-                                    .as_ref()
-                                    .is_some_and(|t| t.has_active_flip_animations())
-                                || ws.render_tree
-                                    .as_ref()
-                                    .is_some_and(|t| t.has_active_visual_animations());
+                            // Visibility-gated CSS-redraw signal. Same shape as the
+                            // four-way OR above used to be, but every term is now
+                            // intersected with `painted_node_ids`. Off-screen
+                            // `infinite` keyframes (the styling_demo had ~25 of
+                            // them, pinning ~73 % CPU at idle even with the cursor
+                            // parked) no longer keep the chain alive — they
+                            // continue ticking so progress stays in sync, but the
+                            // signal that drives request_redraw stops.
+                            //
+                            // The unfiltered `css_active`/`has_active_*` calls
+                            // are still made above (we want to advance every
+                            // animation regardless) — what changed is the GATE
+                            // that triggers another frame.
+                            let _ = css_active; // keep tick side-effects, drop signal
+                            let css_needs_redraw = ws.render_tree.as_ref().is_some_and(|t| {
+                                let painted = t.painted_node_ids();
+                                let store = t.css_anim_store();
+                                let store_guard = store.lock().unwrap();
+                                let store_visible = store_guard.has_visible_active(&painted);
+                                drop(store_guard);
+                                store_visible
+                                    || t.css_has_visible_transitions(&painted)
+                                    || t.has_active_visible_flip_animations(&painted)
+                                    || t.has_active_visible_visual_animations(&painted)
+                            });
 
                             // Check if pointer query elements need continuous redraws
                             let pointer_query_active = !windowed_ctx.pointer_query.is_empty();

@@ -2949,6 +2949,21 @@ impl RenderTree {
         self.visual_animations.values().any(|a| a.is_animating())
     }
 
+    /// Visibility-gated counterpart of `has_active_visual_animations`.
+    /// Only counts animations whose target node was painted in the
+    /// most recent frame (i.e. the node id is present in `painted`).
+    /// See `CssAnimationStore::has_visible_active` for the rationale.
+    pub fn has_active_visible_visual_animations(&self, painted: &HashSet<LayoutNodeId>) -> bool {
+        self.visual_animations.iter().any(|(key, anim)| {
+            if !anim.is_animating() {
+                return false;
+            }
+            self.visual_animation_key_to_node
+                .get(key)
+                .is_some_and(|n| painted.contains(n))
+        })
+    }
+
     /// Check if a specific node has an active visual animation
     pub fn is_visual_animating(&self, node_id: LayoutNodeId) -> bool {
         // Find the key for this node (reverse lookup)
@@ -9238,6 +9253,29 @@ impl RenderTree {
     /// Check if any FLIP animations are currently active.
     pub fn has_active_flip_animations(&self) -> bool {
         !self.flip_animations.is_empty()
+    }
+
+    /// Visibility-gated counterpart of `has_active_flip_animations`.
+    /// FLIP entries are keyed by `element_id: String` (they survive
+    /// subtree rebuilds), so resolve to the current `LayoutNodeId`
+    /// through the element registry before checking visibility.
+    /// Element ids without a current binding are skipped — if the
+    /// node is gone, the animation can't be on screen anyway.
+    pub fn has_active_visible_flip_animations(&self, painted: &HashSet<LayoutNodeId>) -> bool {
+        self.flip_animations.keys().any(|element_id| {
+            self.element_registry
+                .get(element_id)
+                .is_some_and(|nid| painted.contains(&nid))
+        })
+    }
+
+    /// Visibility-gated counterpart of `css_transitions_empty`.
+    /// Returns `true` when there's at least one transition whose
+    /// target node was painted in the most recent frame, i.e. the
+    /// chain should keep firing for it.
+    pub fn css_has_visible_transitions(&self, painted: &HashSet<LayoutNodeId>) -> bool {
+        let store = self.css_anim_store.lock().unwrap();
+        store.transitions.keys().any(|n| painted.contains(n))
     }
 
     /// Apply stylesheet state styles based on EventRouter state
