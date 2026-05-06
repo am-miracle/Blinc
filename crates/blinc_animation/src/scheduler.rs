@@ -584,13 +584,22 @@ impl AnimationScheduler {
 
         *closure_cell_for_init.borrow_mut() = Some(Closure::wrap(Box::new(move || {
             let wants_continuous = continuous_redraw.load(Ordering::Relaxed);
-            Self::tick_frame_inner(
-                &inner,
-                &needs_redraw,
-                wants_continuous,
-                wake_callback.as_ref(),
-                &last_active,
-            );
+            // Pass `None` for the wake callback — the edge-trigger
+            // logic inside `tick_frame_inner` is for the native
+            // `start_background` thread, where it stops the bg thread
+            // from spamming the main thread once the chain is alive.
+            // On wasm the wake callback IS the per-frame driver
+            // (`WebApp::run_one_frame`), and RAF itself is browser-paced
+            // — we want to fire it on every tick, not just idle→active
+            // transitions. (Without this fix, only the very first
+            // RAF tick called the callback; everything else was frozen
+            // — scrolling, hover, mouse, animations, image rendering.)
+            Self::tick_frame_inner(&inner, &needs_redraw, wants_continuous, None, &last_active);
+
+            // Drive the per-frame work directly from the RAF closure.
+            if let Some(ref cb) = wake_callback {
+                cb();
+            }
 
             // Schedule the next frame. Borrowing closure_cell here is
             // safe because the prior borrow_mut at install time has
