@@ -5,7 +5,10 @@
 //! # Features
 //!
 //! - Load images from file paths, URLs, and base64 data
-//! - Support for PNG, JPEG, GIF, WebP, BMP formats
+//! - Pluggable per-format decoders (PNG, JPEG, GIF, WebP, BMP, TIFF,
+//!   AVIF) gated by cargo features — only the ones an app needs get
+//!   compiled in. See [`decoder`] for the [`ImageDecoder`] trait and
+//!   [`DecoderRegistry`] used to plug in custom decoders.
 //! - CSS-style object-fit options (cover, contain, fill, etc.)
 //! - Image filters: grayscale, sepia, brightness, contrast, blur, etc.
 //!
@@ -23,14 +26,29 @@
 //! // Load from URL (requires "network" feature)
 //! let data = ImageData::load_async(ImageSource::Url("https://example.com/image.png".into())).await?;
 //! ```
+//!
+//! [`ImageDecoder`]: decoder::ImageDecoder
+//! [`DecoderRegistry`]: decoder::DecoderRegistry
 
+#[cfg(any(
+    feature = "png",
+    feature = "jpeg",
+    feature = "gif",
+    feature = "webp",
+    feature = "bmp",
+    feature = "tiff",
+    feature = "avif",
+))]
+mod builtin;
+pub mod decoder;
 mod error;
 mod loader;
 mod source;
 
+pub use decoder::{DecodedImage, DecoderRegistry, ImageDecoder};
 pub use error::{ImageError, Result};
 pub use loader::ImageData;
-pub use source::ImageSource;
+pub use source::{ImageFormat, ImageSource};
 
 // ============================================================================
 // CSS-style Object Fit (equivalent to CSS object-fit)

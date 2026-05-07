@@ -11,8 +11,15 @@ keywords = ["ui", "gui", "image", "blinc"]
 categories = ["gui", "multimedia::images"]
 
 [dependencies]
-# Image decoding
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+# Image decoding. Per-format decoders are gated by the cargo features
+# below — by default only PNG + JPEG are pulled in (most UI apps need
+# nothing else, and avoiding the rest saves ~30 transitive crates on
+# Linux). Apps that need GIF/WebP/BMP/TIFF/AVIF turn on the matching
+# feature; apps that want every built-in format use `all-formats`.
+# Apps that need a different decoder entirely (zune-image, libvips, a
+# headless stub for tests) build with `default-features = false` and
+# register a custom `ImageDecoder` via `DecoderRegistry`.
+image = { version = "0.25", default-features = false }
 
 # Async/networking for URL loading
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
@@ -34,7 +41,28 @@ blinc_platform = { path = "../blinc_platform", version = "0.5.1", optional = tru
 blinc_text = { path = "../blinc_text", version = "0.5.1", optional = true }
 
 [features]
-default = ["platform", "emoji"]
+# `png` + `jpeg` cover almost every UI-image use case (icons, logos,
+# illustrations, photos). Apps that need `gif` / `webp` / `bmp` /
+# `tiff` / `avif` opt in explicitly. Apps that need none of these
+# (e.g. they fetch already-decoded RGBA, or register their own
+# `ImageDecoder`) use `default-features = false`.
+default = ["platform", "emoji", "png", "jpeg"]
 network = ["reqwest", "tokio"]
 platform = ["blinc_platform"]
 emoji = ["blinc_text"]
+
+# Per-format built-in decoders. Each enables the matching feature on
+# the upstream `image` crate and compiles in a `BuiltinDecoder`
+# implementation that gets registered with the default
+# `DecoderRegistry`. Off by default unless listed in `default` above.
+png = ["image/png"]
+jpeg = ["image/jpeg"]
+gif = ["image/gif"]
+webp = ["image/webp"]
+bmp = ["image/bmp"]
+tiff = ["image/tiff"]
+avif = ["image/avif"]
+
+# Umbrella that matches the pre-split set of built-in formats —
+# enables every format that previously shipped with `default`.
+all-formats = ["png", "jpeg", "gif", "webp", "bmp"]

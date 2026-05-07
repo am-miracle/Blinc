@@ -170,13 +170,15 @@ impl From<&std::path::Path> for ImageSource {
 }
 
 /// Image format hint
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ImageFormat {
     Png,
     Jpeg,
     Gif,
     WebP,
     Bmp,
+    Tiff,
+    Avif,
 }
 
 impl ImageFormat {
@@ -188,6 +190,8 @@ impl ImageFormat {
             "gif" => Some(Self::Gif),
             "webp" => Some(Self::WebP),
             "bmp" => Some(Self::Bmp),
+            "tif" | "tiff" => Some(Self::Tiff),
+            "avif" => Some(Self::Avif),
             _ => None,
         }
     }
@@ -200,6 +204,8 @@ impl ImageFormat {
             "image/gif" => Some(Self::Gif),
             "image/webp" => Some(Self::WebP),
             "image/bmp" => Some(Self::Bmp),
+            "image/tiff" => Some(Self::Tiff),
+            "image/avif" => Some(Self::Avif),
             _ => None,
         }
     }

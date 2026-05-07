@@ -14,11 +14,51 @@ Image loading and rendering for Blinc UI.
 ## Features
 
 - **Multiple Sources**: Load from files, URLs, and base64 data
-- **Format Support**: PNG, JPEG, GIF, WebP, BMP
+- **Pluggable Decoders**: PNG + JPEG by default; opt in to GIF, WebP, BMP, TIFF, AVIF via per-format cargo features. BYO decoder via the `ImageDecoder` trait.
 - **Object Fit**: CSS-style object-fit options
 - **Image Filters**: Grayscale, sepia, brightness, contrast, blur
 - **Async Loading**: Non-blocking URL loading (with `network` feature)
 - **Platform Assets**: Load from app bundles
+
+## Decoder feature flags
+
+```toml
+[dependencies]
+# Defaults: PNG + JPEG (covers most UI use cases — icons, photos)
+blinc_image = "0.5"
+
+# Add WebP + GIF
+blinc_image = { version = "0.5", features = ["webp", "gif"] }
+
+# All built-in formats (matches the pre-0.5.2 default)
+blinc_image = { version = "0.5", features = ["all-formats"] }
+
+# No built-in decoders — register your own via `DecoderRegistry`
+blinc_image = { version = "0.5", default-features = false, features = ["platform"] }
+```
+
+Per-format features: `png`, `jpeg`, `gif`, `webp`, `bmp`, `tiff`, `avif`. Each pulls only the matching codec into the `image` crate, so a PNG-only app drops ~30 transitive crates compared to the all-formats umbrella.
+
+### Custom decoder
+
+```rust
+use std::sync::Arc;
+use blinc_image::{ImageDecoder, ImageFormat, DecodedImage};
+use blinc_image::decoder::{DecoderRegistry, set_global_registry};
+
+struct MyZuneDecoder;
+impl ImageDecoder for MyZuneDecoder {
+    fn formats(&self) -> &[ImageFormat] { &[ImageFormat::Jpeg] }
+    fn decode(&self, bytes: &[u8]) -> blinc_image::Result<DecodedImage> {
+        // ... call zune-image, return DecodedImage
+        # unimplemented!()
+    }
+}
+
+let mut registry = DecoderRegistry::empty();
+registry.register(Arc::new(MyZuneDecoder));
+set_global_registry(registry);
+```
 
 ## Quick Start
 

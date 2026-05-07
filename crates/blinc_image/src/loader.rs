@@ -1,9 +1,9 @@
 //! Image loading and data management
 
+use crate::decoder::{decode_with_global_registry, DecodedImage};
 use crate::error::{ImageError, Result};
 use crate::source::ImageSource;
 use base64::Engine;
-use image::{DynamicImage, GenericImageView};
 
 /// Decoded image data ready for GPU upload
 #[derive(Debug, Clone)]
@@ -176,10 +176,50 @@ impl ImageData {
         }
     }
 
-    /// Decode image from raw bytes
+    /// Decode image from raw bytes through the global decoder registry.
+    ///
+    /// Format detection is best-effort: when an `image`-crate feature
+    /// is on, magic-byte sniffing picks the matching decoder first;
+    /// otherwise every registered decoder is tried in order.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        let img = image::load_from_memory(data)?;
-        Self::from_dynamic_image(img)
+        // Best-effort format detection. `detect_format` only resolves
+        // formats whose `image`-crate feature is enabled; without
+        // any built-in features it always returns `None` and the
+        // registry falls back to trying every decoder.
+        #[cfg(any(
+            feature = "png",
+            feature = "jpeg",
+            feature = "gif",
+            feature = "webp",
+            feature = "bmp",
+            feature = "tiff",
+            feature = "avif",
+        ))]
+        let format = crate::builtin::detect_format(data);
+        #[cfg(not(any(
+            feature = "png",
+            feature = "jpeg",
+            feature = "gif",
+            feature = "webp",
+            feature = "bmp",
+            feature = "tiff",
+            feature = "avif",
+        )))]
+        let format = None;
+
+        let decoded = decode_with_global_registry(data, format)?;
+        Self::from_decoded(decoded)
+    }
+
+    /// Build `ImageData` from a [`DecodedImage`] returned by an
+    /// [`ImageDecoder`](crate::decoder::ImageDecoder). Useful for
+    /// callers that decode through the registry directly.
+    pub fn from_decoded(decoded: DecodedImage) -> Result<Self> {
+        Ok(Self {
+            pixels: decoded.pixels,
+            width: decoded.width,
+            height: decoded.height,
+        })
     }
 
     /// Decode image from base64 string
@@ -201,19 +241,6 @@ impl ImageData {
         // Decode base64
         let bytes = base64::engine::general_purpose::STANDARD.decode(base64_data)?;
         Self::from_bytes(&bytes)
-    }
-
-    /// Convert a DynamicImage to ImageData
-    fn from_dynamic_image(img: DynamicImage) -> Result<Self> {
-        let (width, height) = img.dimensions();
-        let rgba = img.to_rgba8();
-        let pixels = rgba.into_raw();
-
-        Ok(Self {
-            pixels,
-            width,
-            height,
-        })
     }
 
     /// Get the raw RGBA pixel data
