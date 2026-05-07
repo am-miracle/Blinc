@@ -46,6 +46,7 @@ mod cursor;
 mod events;
 mod queries;
 mod registries;
+mod transfers;
 mod types;
 
 // Re-export the type surface so existing `crate::renderer::TextData`
@@ -3646,22 +3647,8 @@ impl RenderTree {
         (can_x, can_y)
     }
 
-    /// Transfer scroll offsets from another tree (preserves scroll position across rebuilds)
-    pub fn transfer_scroll_offsets_from(&mut self, other: &RenderTree) {
-        for (node_id, offset) in &other.scroll_offsets {
-            self.scroll_offsets.insert(*node_id, *offset);
-        }
-    }
-
-    /// Transfer scroll physics from another tree (preserves scroll physics across rebuilds)
-    pub fn transfer_scroll_physics_from(&mut self, other: &RenderTree) {
-        for (node_id, physics) in &other.scroll_physics {
-            self.scroll_physics.insert(*node_id, physics.clone());
-        }
-        for node_id in &other.viewport_cull_scrolls {
-            self.viewport_cull_scrolls.insert(*node_id);
-        }
-    }
+    // `transfer_scroll_offsets_from` and `transfer_scroll_physics_from`
+    // moved to `renderer/transfers.rs`.
 
     /// Cancel any running scroll animation (momentum deceleration,
     /// bounce spring, rebound) on the first scrollable in the hit
@@ -9047,15 +9034,7 @@ impl RenderTree {
         self.apply_stylesheet_base_styles_for_subtree(parent_id);
     }
 
-    /// Transfer node states from another tree
-    ///
-    /// This preserves state across rebuilds by copying the state storage
-    /// from the old tree to the new one.
-    pub fn transfer_states_from(&mut self, other: &RenderTree) {
-        for (node_id, state) in &other.node_states {
-            self.node_states.insert(*node_id, Arc::clone(state));
-        }
-    }
+    // `transfer_states_from` moved to `renderer/transfers.rs`.
 
     // `node_states` moved to `renderer/queries.rs`.
 
