@@ -10,9 +10,12 @@
 //! - [`collect`] — non-painting walkers that gather per-node
 //!   artefacts into flat `Vec`s (`text_elements`, `svg_elements`,
 //!   the deprecated `collect_glass_panels`).
+//! - [`helpers`] — small shared helpers (`extract_mask_alphas`,
+//!   `has_glass`, `apply_opacity_to_brush`).
 //!
 //! Other paint-side concerns (the `render` / `render_layer*` /
 //! `render_to` / `render_layer_with_motion` walkers) still live in
 //! `renderer/mod.rs` and will migrate here.
 
 pub mod collect;
+pub mod helpers;

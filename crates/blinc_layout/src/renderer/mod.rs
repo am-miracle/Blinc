@@ -2397,7 +2397,7 @@ impl RenderTree {
                     // When using opacity layer, draw at full opacity (layer handles it)
                     // Otherwise, apply motion opacity to brush for fallback
                     let brush = if !has_opacity_layer && motion_opacity < 1.0 {
-                        apply_opacity_to_brush(bg, motion_opacity)
+                        paint::helpers::apply_opacity_to_brush(bg, motion_opacity)
                     } else {
                         bg.clone()
                     };
@@ -3001,24 +3001,6 @@ impl RenderTree {
 
         // Pop position transform
         ctx.pop_transform();
-    }
-
-    /// Extract start and end alpha values from gradient stops for mask gradient
-    fn extract_mask_alphas(stops: &[blinc_core::GradientStop], luminance: bool) -> (f32, f32) {
-        if stops.is_empty() {
-            return (1.0, 0.0);
-        }
-        let first = &stops[0].color;
-        let last = &stops[stops.len() - 1].color;
-        if luminance {
-            // Luminance mode: use perceived luminance * alpha
-            let lum_first = (0.2126 * first.r + 0.7152 * first.g + 0.0722 * first.b) * first.a;
-            let lum_last = (0.2126 * last.r + 0.7152 * last.g + 0.0722 * last.b) * last.a;
-            (lum_first, lum_last)
-        } else {
-            // Alpha mode: use color's alpha channel directly
-            (first.a, last.a)
-        }
     }
 
     /// Render with layer separation and explicit context control
@@ -3782,13 +3764,6 @@ impl RenderTree {
     // `get_cursor`, `has_any_cursor_style`, `get_cursor_at` moved to
     // `renderer/cursor.rs`.
 
-    /// Check if this tree contains any glass elements
-    pub fn has_glass(&self) -> bool {
-        self.render_nodes
-            .values()
-            .any(|node| matches!(node.props.material, Some(Material::Glass(_))))
-    }
-
     /// Render the tree using a LayoutRenderer
     ///
     /// This is the primary rendering method. The LayoutRenderer handles:
@@ -4547,36 +4522,6 @@ impl RenderTree {
                 children_inside_foreground,
                 child_cumulative,
             );
-        }
-    }
-}
-
-/// Apply opacity to a brush by modifying its alpha component
-fn apply_opacity_to_brush(brush: &Brush, opacity: f32) -> Brush {
-    match brush {
-        Brush::Solid(color) => {
-            Brush::Solid(Color::rgba(color.r, color.g, color.b, color.a * opacity))
-        }
-        Brush::Gradient(gradient) => {
-            // For gradients, we'd need to modify both start and end colors
-            // For now, just return the gradient as-is
-            // TODO: Apply opacity to gradient stops
-            Brush::Gradient(gradient.clone())
-        }
-        Brush::Glass(glass) => {
-            // Glass already has its own opacity handling
-            Brush::Glass(*glass)
-        }
-        Brush::Image(image) => {
-            // Image brushes - return as-is for now
-            // TODO: Apply opacity to image brush
-            Brush::Image(image.clone())
-        }
-        Brush::Blur(blur) => {
-            // Blur with adjusted opacity
-            let mut blur_adjusted = *blur;
-            blur_adjusted.opacity *= opacity;
-            Brush::Blur(blur_adjusted)
         }
     }
 }
