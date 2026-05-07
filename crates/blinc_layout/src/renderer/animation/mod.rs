@@ -15,3 +15,4 @@
 //! struct definition + fields stay in `renderer/mod.rs`.
 
 pub mod flip;
+pub mod visual;
