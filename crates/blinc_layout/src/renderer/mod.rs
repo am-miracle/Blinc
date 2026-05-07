@@ -340,136 +340,6 @@ impl RenderTree {
         self.element_registry = registry;
     }
 
-    /// Build a render tree from an element builder
-    pub fn from_element<E: ElementBuilder>(element: &E) -> Self {
-        let mut tree = Self::new();
-        // Compute tree hash for change detection
-        tree.tree_hash = Some(DivHash::compute_element_tree(element));
-        tree.root = Some(tree.build_element(element));
-        tree
-    }
-
-    /// Build a render tree from an element builder with a shared element registry
-    ///
-    /// This ensures element IDs are registered to the shared registry during build,
-    /// rather than to an internal registry that gets replaced later.
-    pub fn from_element_with_registry<E: ElementBuilder>(
-        element: &E,
-        registry: Arc<ElementRegistry>,
-    ) -> Self {
-        let mut tree = Self::new();
-        // Clear the shared registry before building to avoid duplicate ID warnings
-        registry.clear();
-        // Set shared registry BEFORE building so IDs are registered correctly
-        tree.element_registry = registry;
-        // Compute tree hash for change detection
-        tree.tree_hash = Some(DivHash::compute_element_tree(element));
-        tree.root = Some(tree.build_element(element));
-        tree
-    }
-
-    // `tree_hash`, `matches_element` moved to `renderer/queries.rs`.
-
-    /// Update the render tree from a new element if it has changed
-    ///
-    /// Returns `true` if the tree was updated, `false` if no changes were detected.
-    /// This is an optimization to skip full rebuilds when the UI hasn't changed.
-    pub fn update_if_changed<E: ElementBuilder>(&mut self, element: &E) -> bool {
-        let new_hash = DivHash::compute_element_tree(element);
-
-        // If hash matches, no changes - skip rebuild
-        if self.tree_hash == Some(new_hash) {
-            return false;
-        }
-
-        // Hash differs - need to rebuild
-        // For now, do a full rebuild. Future optimization: use diff for incremental updates
-        self.tree_hash = Some(new_hash);
-
-        // Clear existing data that will be repopulated during rebuild
-        self.render_nodes.clear();
-        self.handler_registry = crate::event_handler::HandlerRegistry::new();
-        self.element_registry.clear();
-        // Clear scroll_refs HashMap (node_id keyed) - it will be repopulated during rebuild
-        // but active_scroll_refs persists for process_pending_scroll_refs
-        self.scroll_refs.clear();
-
-        // Preserve node_states, scroll_offsets, scroll_physics, motion_bindings, active_scroll_refs
-        // as these should survive rebuilds
-
-        // Rebuild the layout tree
-        self.layout_tree = LayoutTree::new();
-        self.root = Some(self.build_element(element));
-
-        true
-    }
-
-    /// Incrementally update the render tree from a new element
-    ///
-    /// This method attempts to apply minimal updates based on what changed:
-    /// - If nothing changed: returns NoChanges, no work done
-    /// - If only visual props changed: updates render props, returns VisualOnly
-    /// - If layout changed: updates props + needs relayout, returns LayoutChanged
-    /// - If children changed: rebuilds affected subtrees, returns ChildrenChanged
-    ///
-    /// The caller should:
-    /// - NoChanges: skip layout and just render
-    /// - VisualOnly: skip layout, just render with updated props
-    /// - LayoutChanged: call compute_layout(), then render
-    /// - ChildrenChanged: call compute_layout(), then render
-    pub fn incremental_update<E: ElementBuilder>(&mut self, element: &E) -> UpdateResult {
-        let new_tree_hash = DivHash::compute_element_tree(element);
-
-        // Quick path: if tree hash matches, nothing changed
-        if self.tree_hash == Some(new_tree_hash) {
-            return UpdateResult::NoChanges;
-        }
-
-        // Tree hash differs - analyze what kind of changes occurred
-        // Walk the tree comparing per-node hashes to detect change categories
-        let Some(root_id) = self.root else {
-            // No existing tree - build it (this is initial build, not an update)
-            self.tree_hash = Some(new_tree_hash);
-            self.root = Some(self.build_element(element));
-            return UpdateResult::ChildrenChanged;
-        };
-
-        // Analyze changes by comparing stored hashes with new element
-        let changes = self.analyze_changes(element, root_id);
-
-        tracing::trace!(
-            "incremental_update: layout={}, visual={}, children={}, handlers={}",
-            changes.layout,
-            changes.visual,
-            changes.children,
-            changes.handlers
-        );
-
-        // Update tree hash
-        self.tree_hash = Some(new_tree_hash);
-
-        // Determine update strategy based on change category
-        if changes.children {
-            // Children changed - rebuild affected subtrees in place
-            // Walk tree and rebuild nodes with changed children
-            self.rebuild_changed_subtrees(element, root_id);
-            // Also update props for nodes that didn't get rebuilt
-            self.update_render_props_in_place(element, root_id);
-            UpdateResult::ChildrenChanged
-        } else if changes.layout {
-            // Layout changed - update props and need relayout
-            self.update_render_props_in_place(element, root_id);
-            UpdateResult::LayoutChanged
-        } else if changes.visual || changes.handlers {
-            // Only visual/handler changes - update props in place, no layout needed
-            self.update_render_props_in_place(element, root_id);
-            UpdateResult::VisualOnly
-        } else {
-            // No changes detected (shouldn't happen if tree hash differed)
-            UpdateResult::NoChanges
-        }
-    }
-
     /// Set the DPI scale factor for this render tree
     ///
     /// This scales all layout positions and sizes by the given factor
@@ -2265,17 +2135,17 @@ impl RenderTree {
 
         // Render if this node matches target layer
         // Debug: see what layers we're checking
-        let is_canvas = matches!(&render_node.element_type, ElementType::Canvas(_));
-        if is_canvas {
-            let matches = effective_layer == target_layer;
-            // eprintln!(
-            //     "render_layer_with_motion: Canvas node {:?}, effective_layer={:?}, target_layer={:?}, matches={}",
-            //     node, effective_layer, target_layer, matches
-            // );
-            // if matches {
-            //     eprintln!("  >>> Canvas layer MATCHES - will invoke callback");
-            // }
-        }
+        // let is_canvas = matches!(&render_node.element_type, ElementType::Canvas(_));
+        // if is_canvas {
+        //     let matches = effective_layer == target_layer;
+        //     // eprintln!(
+        //     //     "render_layer_with_motion: Canvas node {:?}, effective_layer={:?}, target_layer={:?}, matches={}",
+        //     //     node, effective_layer, target_layer, matches
+        //     // );
+        //     // if matches {
+        //     //     eprintln!("  >>> Canvas layer MATCHES - will invoke callback");
+        //     // }
+        // }
         // Set up 3D transform params on the paint context if this element has any.
         // When use_3d_layer is true, 3D CSS rotation is handled by layer compositing
         // (perspective distortion applied to the blit quad), NOT per-primitive.
