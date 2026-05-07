@@ -20,4 +20,5 @@
 pub mod basic;
 pub mod collect;
 pub mod helpers;
+pub mod layered;
 pub mod layout_renderer;
