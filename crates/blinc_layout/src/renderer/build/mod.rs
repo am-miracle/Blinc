@@ -13,5 +13,6 @@
 //! analyze_changes / update_render_props_in_place, subtree rebuild
 //! flow) still live in `renderer/mod.rs` and will migrate here.
 
+pub mod diff;
 pub mod element_type;
 pub mod text;
