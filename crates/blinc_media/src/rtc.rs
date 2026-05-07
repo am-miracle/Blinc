@@ -203,8 +203,13 @@ impl Drop for CameraStream {
 /// Drop to stop recording.
 pub struct AudioRecorder {
     latest: SharedSamples,
+    /// Native audio capture stream. Sourced via `rodio::cpal` (the
+    /// re-exported `cpal` from rodio's `recording` feature) so the
+    /// workspace winds up with a single cpal version instead of the
+    /// pre-rodio-0.22 split between rodio's bundled cpal and a
+    /// standalone cpal dep.
     #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
-    _stream: Option<cpal::Stream>,
+    _stream: Option<rodio::cpal::Stream>,
     #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
     _bridge_stream: Option<blinc_core::native_bridge::NativeStream>,
     active: Arc<std::sync::atomic::AtomicBool>,
@@ -218,7 +223,8 @@ impl AudioRecorder {
 
         #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         {
-            use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+            use rodio::cpal;
+            use rodio::cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
             let host = cpal::default_host();
             let device = host.default_input_device();

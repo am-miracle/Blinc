@@ -14,13 +14,21 @@ blinc_platform = { path = "../blinc_platform", version = "0.5.1" }
 blinc_animation = { path = "../blinc_animation", version = "0.5.1" }
 tracing.workspace = true
 
-# Audio playback (desktop) — Vorbis, Opus, WAV, FLAC
+# Audio playback + capture (desktop) — Vorbis, WAV, FLAC.
+#
+# Pinned to rodio 0.22 because:
+#   - Its decoders route through `symphonia` (`vorbis` →
+#     `symphonia/vorbis`, `wav` → `symphonia/wav`, `flac` →
+#     `symphonia/flac`), so any other consumer in the workspace that
+#     pulls symphonia for its own reasons converges on a single set.
+#   - The `recording` feature pulls `cpal` directly, and rodio
+#     re-exports it as `rodio::cpal` — `rtc.rs`'s audio capture path
+#     uses that re-export instead of a standalone `cpal` dep, so the
+#     workspace winds up with a single cpal version (was duplicated
+#     between rodio 0.19's cpal 0.15 and the standalone cpal 0.17 we
+#     pinned for rtc.rs).
 [target.'cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))'.dependencies]
-rodio = { version = "0.19", default-features = false, features = ["vorbis", "wav", "flac"] }
-
-# Audio capture (desktop)
-[target.'cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))'.dependencies.cpal]
-version = "0.17"
+rodio = { version = "0.22", default-features = false, features = ["playback", "recording", "vorbis", "wav", "flac"] }
 
 # Video decode (desktop) — OpenH264 (royalty-free, Cisco covers patents)
 [target.'cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))'.dependencies.openh264]

@@ -66,12 +66,16 @@ struct AudioPlayerInner {
     play_start: Option<std::time::Instant>,
     /// Position offset (from seek or pause)
     position_offset_ms: u64,
+    /// rodio 0.22 Player (renamed from Sink in 0.19); appended sources
+    /// play sequentially, volume + transport ops route through here.
     #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
-    sink: Option<rodio::Sink>,
+    sink: Option<rodio::Player>,
+    /// MixerDeviceSink (renamed from OutputStream in 0.19). Owns the
+    /// audio device handle; dropped when the player goes away. The
+    /// `mixer()` accessor returns the `&Mixer` we connect new
+    /// `Player`s to.
     #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
-    _stream: Option<rodio::OutputStream>,
-    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
-    stream_handle: Option<rodio::OutputStreamHandle>,
+    _stream: Option<rodio::MixerDeviceSink>,
 }
 
 impl AudioPlayer {
@@ -79,9 +83,7 @@ impl AudioPlayer {
     pub fn new() -> Self {
         #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         {
-            let (stream, handle) = rodio::OutputStream::try_default()
-                .map(|(s, h)| (Some(s), Some(h)))
-                .unwrap_or((None, None));
+            let stream = rodio::DeviceSinkBuilder::open_default_sink().ok();
 
             Self {
                 inner: Rc::new(RefCell::new(AudioPlayerInner {
@@ -92,7 +94,6 @@ impl AudioPlayer {
                     position_offset_ms: 0,
                     sink: None,
                     _stream: stream,
-                    stream_handle: handle,
                 })),
             }
         }
@@ -117,37 +118,35 @@ impl AudioPlayer {
 
         #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         {
-            if let Some(ref handle) = inner.stream_handle {
-                let sink = rodio::Sink::try_new(handle).ok();
-                if let Some(ref sink) = sink {
-                    match &source {
-                        AudioSource::File(path) => {
-                            if let Ok(file) = std::fs::File::open(path) {
-                                let reader = std::io::BufReader::new(file);
-                                if let Ok(decoder) = rodio::Decoder::new(reader) {
-                                    sink.append(decoder);
-                                }
+            if let Some(ref stream) = inner._stream {
+                let sink = rodio::Player::connect_new(stream.mixer());
+                match &source {
+                    AudioSource::File(path) => {
+                        if let Ok(file) = std::fs::File::open(path) {
+                            let reader = std::io::BufReader::new(file);
+                            if let Ok(decoder) = rodio::Decoder::new(reader) {
+                                sink.append(decoder);
                             }
                         }
-                        AudioSource::Bytes(data) => {
-                            let cursor = std::io::Cursor::new(data.as_ref().clone());
+                    }
+                    AudioSource::Bytes(data) => {
+                        let cursor = std::io::Cursor::new(data.as_ref().clone());
+                        if let Ok(decoder) = rodio::Decoder::new(cursor) {
+                            sink.append(decoder);
+                        }
+                    }
+                    AudioSource::Asset(path) => {
+                        // Try loading via platform asset loader
+                        if let Ok(data) = blinc_platform::assets::load_asset(path) {
+                            let cursor = std::io::Cursor::new(data);
                             if let Ok(decoder) = rodio::Decoder::new(cursor) {
                                 sink.append(decoder);
                             }
                         }
-                        AudioSource::Asset(path) => {
-                            // Try loading via platform asset loader
-                            if let Ok(data) = blinc_platform::assets::load_asset(path) {
-                                let cursor = std::io::Cursor::new(data);
-                                if let Ok(decoder) = rodio::Decoder::new(cursor) {
-                                    sink.append(decoder);
-                                }
-                            }
-                        }
                     }
-                    sink.set_volume(inner.volume);
                 }
-                inner.sink = sink;
+                sink.set_volume(inner.volume);
+                inner.sink = Some(sink);
             }
         }
 

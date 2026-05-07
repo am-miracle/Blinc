@@ -2,6 +2,17 @@
 
 All notable changes to `blinc_media` will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Bumped `rodio` 0.19 → 0.22** (closes #31). Decoders route through `symphonia` (`vorbis` / `wav` / `flac` features map to `symphonia/{vorbis,wav,flac}`); the `recording` feature pulls `cpal` directly and rodio re-exports it as `rodio::cpal`.
+- Dropped the standalone `cpal = "0.17"` direct dep — `rtc.rs` now consumes `cpal` through `rodio::cpal`. The workspace consequently sees a single `cpal` version (was duplicated between rodio 0.19's bundled `cpal 0.15.3` and the standalone `cpal 0.17.1`). Saves ~14 transitive crates workspace-wide.
+- `AudioPlayerInner` field shape: dropped `stream_handle: Option<OutputStreamHandle>` (handle is now intrinsic to the device sink); renamed `_stream` from `OutputStream` to `MixerDeviceSink`; renamed the active sink type from `rodio::Sink` to `rodio::Player` (rodio 0.22's terminology).
+- API call updates inside `audio.rs`:
+  - `rodio::OutputStream::try_default()` (returned a tuple) → `rodio::DeviceSinkBuilder::open_default_sink()` (returns `MixerDeviceSink` directly).
+  - `rodio::Sink::try_new(&handle)` → `rodio::Player::connect_new(stream.mixer())`.
+  - `rodio::Decoder::new(reader)` kept; format autodetect now goes through symphonia.
+
 ## [0.5.1] - 2026-04-13
 
 ### Added
