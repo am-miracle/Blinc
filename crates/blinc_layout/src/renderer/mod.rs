@@ -43,6 +43,8 @@ use crate::visual_animation::{AnimatedRenderBounds, VisualAnimation, VisualAnima
 // are unaffected.
 
 mod cursor;
+mod queries;
+mod registries;
 
 /// A computed glass panel ready for GPU rendering
 ///
@@ -666,20 +668,7 @@ impl RenderTree {
         tree
     }
 
-    /// Get the tree hash for this render tree
-    pub fn tree_hash(&self) -> Option<DivHash> {
-        self.tree_hash
-    }
-
-    /// Check if a new element tree would produce the same render tree
-    ///
-    /// Returns true if the element tree hash matches, meaning no rebuild is needed.
-    pub fn matches_element<E: ElementBuilder>(&self, element: &E) -> bool {
-        match self.tree_hash {
-            Some(hash) => hash == DivHash::compute_element_tree(element),
-            None => false,
-        }
-    }
+    // `tree_hash`, `matches_element` moved to `renderer/queries.rs`.
 
     /// Update the render tree from a new element if it has changed
     ///
@@ -1203,20 +1192,7 @@ impl RenderTree {
         self.scale_factor
     }
 
-    /// Get debug statistics for the render tree
-    ///
-    /// Returns counts of active animations and other debug info.
-    /// Used by `BLINC_DEBUG=motion` to display animation stats.
-    pub fn debug_stats(&self) -> RenderTreeDebugStats {
-        RenderTreeDebugStats {
-            visual_animation_count: self.visual_animations.len(),
-            visual_animation_config_count: self.visual_animation_configs.len(),
-            layout_animation_count: self.layout_animations_by_key.len(),
-            animated_bounds_count: self.animated_render_bounds.len(),
-            render_node_count: self.render_nodes.len(),
-            scroll_physics_count: self.scroll_physics.len(),
-        }
-    }
+    // `debug_stats` moved to `renderer/queries.rs`.
 
     /// Recursively build elements into the tree
     ///
@@ -2284,100 +2260,9 @@ impl RenderTree {
         }
     }
 
-    /// Register a layout bounds storage for a node
-    ///
-    /// After layout is computed, the storage will be updated with the node's
-    /// computed bounds. This allows elements to react to layout changes.
-    pub fn register_layout_bounds_storage(
-        &mut self,
-        node_id: LayoutNodeId,
-        storage: LayoutBoundsStorage,
-    ) {
-        self.layout_bounds_storages.insert(
-            node_id,
-            LayoutBoundsEntry {
-                storage,
-                on_change: None,
-            },
-        );
-    }
-
-    /// Register a layout bounds storage with a change callback
-    ///
-    /// The callback is invoked when the computed bounds change (width or height differ).
-    /// This is useful for elements that need to react to layout changes, like TextInput
-    /// which needs to recalculate scroll offset when its width changes.
-    pub fn register_layout_bounds_storage_with_callback(
-        &mut self,
-        node_id: LayoutNodeId,
-        storage: LayoutBoundsStorage,
-        on_change: LayoutBoundsCallback,
-    ) {
-        self.layout_bounds_storages.insert(
-            node_id,
-            LayoutBoundsEntry {
-                storage,
-                on_change: Some(on_change),
-            },
-        );
-    }
-
-    /// Unregister a layout bounds storage
-    pub fn unregister_layout_bounds_storage(&mut self, node_id: LayoutNodeId) {
-        self.layout_bounds_storages.remove(&node_id);
-    }
-
-    /// Register layout bounds storage from an element builder
-    ///
-    /// This helper checks both layout_bounds_storage() and layout_bounds_callback()
-    /// from the ElementBuilder trait and registers them together.
-    fn register_element_bounds_storage(
-        &mut self,
-        node_id: LayoutNodeId,
-        element: &dyn ElementBuilder,
-    ) {
-        if let Some(storage) = element.layout_bounds_storage() {
-            let callback = element.layout_bounds_callback();
-            self.layout_bounds_storages.insert(
-                node_id,
-                LayoutBoundsEntry {
-                    storage,
-                    on_change: callback,
-                },
-            );
-        }
-    }
-
-    /// Update all registered layout bounds storages after layout computation
-    ///
-    /// When bounds change (width or height differ), the on_change callback is invoked.
-    fn update_layout_bounds_storages(&self) {
-        for (&node_id, entry) in &self.layout_bounds_storages {
-            if let Some(bounds) = self.layout_tree.get_bounds(node_id, (0.0, 0.0)) {
-                let should_notify = if let Ok(mut guard) = entry.storage.lock() {
-                    // Check if bounds changed (compare width and height)
-                    let changed = match guard.as_ref() {
-                        Some(old_bounds) => {
-                            (old_bounds.width - bounds.width).abs() > 0.01
-                                || (old_bounds.height - bounds.height).abs() > 0.01
-                        }
-                        None => true, // First time getting bounds
-                    };
-                    *guard = Some(bounds);
-                    changed
-                } else {
-                    false
-                };
-
-                // Invoke callback if bounds changed and callback exists
-                if should_notify {
-                    if let Some(ref callback) = entry.on_change {
-                        callback(bounds);
-                    }
-                }
-            }
-        }
-    }
+    // Layout-bounds-storage methods (`register_layout_bounds_storage*`,
+    // `unregister_*`, `register_element_bounds_storage`,
+    // `update_layout_bounds_storages`) moved to `renderer/registries.rs`.
 
     /// Update layout animations for nodes with changed bounds
     ///
@@ -2675,18 +2560,7 @@ impl RenderTree {
         false
     }
 
-    /// Clear all layout bounds storages to force fresh calculations
-    ///
-    /// This should be called on window resize to ensure that cached bounds
-    /// don't influence the new layout computation. Each element will get
-    /// fresh bounds on the next `compute_layout` call.
-    pub fn clear_layout_bounds_storages(&self) {
-        for entry in self.layout_bounds_storages.values() {
-            if let Ok(mut guard) = entry.storage.lock() {
-                *guard = None;
-            }
-        }
-    }
+    // `clear_layout_bounds_storages` moved to `renderer/registries.rs`.
 
     // =========================================================================
     // Visual Animation System (FLIP-style, read-only layout)
@@ -3126,12 +3000,7 @@ impl RenderTree {
         &self.element_registry
     }
 
-    /// Query an element by ID
-    ///
-    /// Returns the node ID if an element with the given ID exists.
-    pub fn query_by_id(&self, id: &str) -> Option<LayoutNodeId> {
-        self.element_registry.get(id)
-    }
+    // `query_by_id` moved to `renderer/queries.rs`.
 
     /// Get a bound ScrollRef by node ID
     pub fn scroll_ref(&self, node_id: LayoutNodeId) -> Option<&ScrollRef> {
@@ -9780,10 +9649,7 @@ impl RenderTree {
         }
     }
 
-    /// Get the node states map (for transferring to a new tree)
-    pub fn node_states(&self) -> &HashMap<LayoutNodeId, NodeStateStorage> {
-        &self.node_states
-    }
+    // `node_states` moved to `renderer/queries.rs`.
 
     /// Render the entire tree to a DrawContext
     pub fn render(&self, ctx: &mut dyn DrawContext) {
@@ -12435,85 +12301,10 @@ impl RenderTree {
         ctx.pop_transform();
     }
 
-    /// Get bounds for a specific node
-    pub fn get_bounds(&self, node: LayoutNodeId) -> Option<ElementBounds> {
-        self.layout_tree.get_bounds(node, (0.0, 0.0))
-    }
-
-    /// Get absolute bounds for a node (traversing up the tree, accounting for scroll)
-    pub fn get_absolute_bounds(&self, node: LayoutNodeId) -> Option<ElementBounds> {
-        let mut bounds = self.layout_tree.get_absolute_bounds(node)?;
-        // Walk up ancestors and apply scroll offsets from scroll containers.
-        //
-        // Touch scrolling on mobile (and momentum / bounce on desktop)
-        // updates the per-container `scroll_physics` state, which is the
-        // SOURCE OF TRUTH for "where this container is currently
-        // scrolled to". The legacy `scroll_offsets` HashMap is only
-        // written for code paths that don't use physics
-        // (`set_scroll_offset`, immediate scroll commands). Reading
-        // only the HashMap here would return stale offsets after a
-        // touch scroll, which silently broke
-        // `scroll_focused_text_input_above_keyboard` — the helper
-        // saw the focused input's *original* on-screen position
-        // (pre-scroll) and concluded it was already visible above the
-        // keyboard, even though the user had scrolled it under the
-        // keyboard.
-        //
-        // We mirror `get_scroll_offset`'s precedence: physics first,
-        // HashMap fallback. The `try_lock` is intentional — under
-        // contention we'd rather get a slightly-stale value than
-        // block on a paint thread; the next frame catches up.
-        for ancestor in self.layout_tree.ancestors(node) {
-            let (sx, sy) = if let Some(physics) = self.scroll_physics.get(&ancestor) {
-                if let Ok(p) = physics.try_lock() {
-                    (p.offset_x, p.offset_y)
-                } else {
-                    self.scroll_offsets
-                        .get(&ancestor)
-                        .copied()
-                        .unwrap_or((0.0, 0.0))
-                }
-            } else if let Some(&offset) = self.scroll_offsets.get(&ancestor) {
-                offset
-            } else {
-                continue;
-            };
-            bounds.x += sx;
-            bounds.y += sy;
-        }
-        Some(bounds)
-    }
-
-    /// Get render node data
-    pub fn get_render_node(&self, node: LayoutNodeId) -> Option<&RenderNode> {
-        self.render_nodes.get(&node)
-    }
-
-    /// Get the resolved padding for a layout node as [top, right, bottom, left] in px.
-    pub fn get_node_padding(&self, node: LayoutNodeId) -> [f32; 4] {
-        if let Some(style) = self.layout_tree.get_style(node) {
-            let to_px = |lp: &taffy::LengthPercentage| match lp {
-                taffy::LengthPercentage::Length(v) => *v,
-                taffy::LengthPercentage::Percent(_) => 0.0, // approx
-            };
-            [
-                to_px(&style.padding.top),
-                to_px(&style.padding.right),
-                to_px(&style.padding.bottom),
-                to_px(&style.padding.left),
-            ]
-        } else {
-            [0.0; 4]
-        }
-    }
-
+    // `get_bounds`, `get_absolute_bounds`, `get_render_node`,
+    // `get_node_padding`, `iter_nodes` moved to `renderer/queries.rs`.
     // `get_cursor`, `has_any_cursor_style`, `get_cursor_at` moved to
-    // `renderer/cursor.rs` as the first leaf-module extraction.
-
-    /// Iterate over all nodes with their bounds and render props
-    pub fn iter_nodes(&self) -> impl Iterator<Item = (LayoutNodeId, &RenderNode)> {
-        self.render_nodes.iter().map(|(&id, node)| (id, node))
-    }
+    // `renderer/cursor.rs`.
 
     /// Check if this tree contains any glass elements
     pub fn has_glass(&self) -> bool {
