@@ -14,5 +14,6 @@
 //! Methods in each submodule are extra `impl RenderTree` blocks; the
 //! struct definition + fields stay in `renderer/mod.rs`.
 
+pub mod css;
 pub mod flip;
 pub mod visual;
