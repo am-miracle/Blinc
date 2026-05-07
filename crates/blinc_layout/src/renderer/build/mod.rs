@@ -15,4 +15,5 @@
 
 pub mod diff;
 pub mod element_type;
+pub mod subtree;
 pub mod text;
