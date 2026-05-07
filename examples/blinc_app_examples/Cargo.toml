@@ -61,7 +61,6 @@ blinc_platform_desktop = { path = "../../extensions/blinc_platform_desktop" }
 # Optional — gated behind feature flags above. Heavy enough that
 # pulling them by default made `cargo run --example hello_blinc` slow
 # even though hello_blinc doesn't use any of them.
-blinc_canvas_kit = { path = "../../crates/blinc_canvas_kit", optional = true }
 blinc_cn = { path = "../../crates/blinc_cn", optional = true }
 blinc_tabler_icons = { path = "../../crates/blinc_tabler_icons", optional = true }
 blinc_icons = { path = "../../crates/blinc_icons", optional = true }
@@ -69,10 +68,18 @@ blinc_media = { path = "../../crates/blinc_media", optional = true }
 
 # Downstream packages — each lives in its own upstream repo under the
 # `project-blinc` org, colocated locally under the gitignored `/packages/`
-# directory during development. Pinned to current `main` commits so CI
-# (which doesn't have the path-only checkout) can resolve them. Swap
-# these for `version = "..."` crates.io entries once the packages ship
-# stable releases. All three are part of the `gltf` feature group.
+# directory during development. The Blinc workspace `[patch]` block
+# redirects each git URL to `packages/<name>/` for local iteration; CI
+# uses the real git revs.
+#
+# `blinc_canvas_kit` joined this set after issue #28 — when it lived
+# in `crates/`, every workspace resolution pulled its non-optional
+# `blinc_input` dep, which forced the patch table to validate
+# `packages/blinc_input/Cargo.toml` and broke fresh checkouts that
+# didn't have `/packages/`. Moving it out of the workspace means the
+# whole 3D / glTF stack is opt-in via the `canvas` and `gltf`
+# features below; default builds don't touch any of these git URLs.
+blinc_canvas_kit = { git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "5dbdad2bfdf7189446ee211da9cbd28b3edd4186", optional = true }
 blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "e510f26f627b9e7a3c4455e889a041940a530975", features = ["platform-assets", "bc-encode"], optional = true }
 blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "33d4fbd9655fe4cfd38d8e18004c978d020ed6e2", optional = true }
 blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = "3e94941bd59bafcd23ad59e8db504a44fa85b4f5", optional = true }

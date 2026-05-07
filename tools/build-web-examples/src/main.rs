@@ -137,7 +137,11 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
     (
         "blinc_canvas_kit::",
         "blinc_canvas_kit",
-        r#"{ path = "../../../crates/blinc_canvas_kit" }"#,
+        // Standalone downstream package (lives at `packages/blinc_canvas_kit/`,
+        // gitignored). Workspace `[patch]` redirects the git URL to the local
+        // path so wasm wrappers iterate without a push/rev cycle. Bump the
+        // rev when the published repo gets new releases.
+        r#"{ git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "5dbdad2bfdf7189446ee211da9cbd28b3edd4186" }"#,
     ),
     (
         "blinc_theme::",

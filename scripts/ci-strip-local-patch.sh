@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Strip the local-dev `[patch."https://github.com/project-blinc/blinc_{gltf,skeleton,input}.git"]`
+# Strip the local-dev `[patch."https://github.com/project-blinc/blinc_{gltf,skeleton,input,canvas_kit}.git"]`
 # block from Cargo.toml before running cargo on CI.
 #
 # The patches redirect those git deps to `packages/blinc_*/` which are

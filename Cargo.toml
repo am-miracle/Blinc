@@ -22,7 +22,6 @@ members = [
     "crates/blinc_router",
     "crates/blinc_media",
     "crates/blinc_runtime",
-    "crates/blinc_canvas_kit",
     "crates/blinc_test_suite",
     "extensions/blinc_platform_desktop",
     "extensions/blinc_platform_android",
@@ -217,7 +216,6 @@ strip = "symbols"
 # resolver only applies patches whose `path` exists).
 [patch."https://github.com/project-blinc/Blinc.git"]
 blinc_core = { path = "crates/blinc_core" }
-blinc_canvas_kit = { path = "crates/blinc_canvas_kit" }
 blinc_layout = { path = "crates/blinc_layout" }
 blinc_platform = { path = "crates/blinc_platform" }
 
@@ -244,4 +242,7 @@ blinc_skeleton = { path = "packages/blinc_skeleton" }
 
 [patch."https://github.com/project-blinc/blinc_input.git"]
 blinc_input = { path = "packages/blinc_input" }
+
+[patch."https://github.com/project-blinc/blinc_canvas_kit.git"]
+blinc_canvas_kit = { path = "packages/blinc_canvas_kit" }
 
