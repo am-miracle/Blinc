@@ -102,8 +102,8 @@ impl StateTransitions for SliderThumbState {
 
 /// BlincComponent for slider state and animations
 /// Generates type-safe hooks that persist across UI rebuilds:
-/// - SliderState::use_thumb_offset(ctx, initial, config) -> SharedAnimatedValue
-/// - SliderState::use_drag_start_x(ctx, 0.0) -> State<f32>
+/// - `SliderState::use_thumb_offset(ctx, initial, config) -> SharedAnimatedValue`
+/// - `SliderState::use_drag_start_x(ctx, 0.0) -> State<f32>`
 #[derive(BlincComponent)]
 struct SliderState {
     /// Animated X offset for thumb position

@@ -46,7 +46,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
-/// Check if a field has the #[animation] attribute
+/// Check if a field has the `#[animation]` attribute
 fn has_animation_attr(field: &syn::Field) -> bool {
     field
         .attrs

@@ -9,11 +9,11 @@
 //!
 //! # Default registry
 //!
-//! `ImageData::from_bytes` consults a process-wide
-//! [`global_registry()`]. The first call materialises it via
-//! [`DecoderRegistry::with_builtins`], registering every decoder
-//! whose feature flag is enabled at compile time. Apps that want
-//! non-default behaviour install their registry early —
+//! `ImageData::from_bytes` consults a process-wide registry routed
+//! through [`decode_with_global_registry`]. The first call
+//! materialises it via [`DecoderRegistry::with_builtins`], registering
+//! every decoder whose feature flag is enabled at compile time. Apps
+//! that want non-default behaviour install their registry early —
 //! before any image load — with [`set_global_registry`].
 //!
 //! ```ignore

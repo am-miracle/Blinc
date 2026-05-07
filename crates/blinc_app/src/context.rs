@@ -256,9 +256,9 @@ struct ImageElement {
     css_affine: Option<[f32; 6]>,
     /// Drop shadow from CSS
     shadow: Option<blinc_core::Shadow>,
-    /// CSS filter A (grayscale, invert, sepia, hue_rotate_rad) — identity = [0,0,0,0]
+    /// CSS filter A (grayscale, invert, sepia, hue_rotate_rad) — identity = `[0,0,0,0]`
     filter_a: [f32; 4],
-    /// CSS filter B (brightness, contrast, saturate, unused) — identity = [1,1,1,0]
+    /// CSS filter B (brightness, contrast, saturate, unused) — identity = `[1,1,1,0]`
     filter_b: [f32; 4],
     /// Secondary clip (scroll container boundary) — sharp rect, no radius.
     /// Kept separate from primary clip_bounds so rounded corners don't morph
@@ -1374,9 +1374,9 @@ impl RenderContext {
     }
 
     /// Convert a CssFilter into filter_a/filter_b arrays for the image shader.
-    /// Returns (filter_a, filter_b) where identity = ([0,0,0,0], [1,1,1,0]).
+    /// Returns (filter_a, filter_b) where identity = (`[0,0,0,0]`, `[1,1,1,0]`).
     /// Extract mask gradient params and info from a MaskImage gradient.
-    /// Returns ([mask_params], [mask_info]) or zero arrays if not a gradient.
+    /// Returns (`mask_params`, `mask_info`) or zero arrays if not a gradient.
     fn mask_image_to_arrays(mask: Option<&blinc_core::MaskImage>) -> ([f32; 4], [f32; 4]) {
         match mask {
             Some(blinc_core::MaskImage::Gradient(gradient)) => match gradient {
@@ -1459,10 +1459,10 @@ impl RenderContext {
         (new_clip, new_radius)
     }
 
-    /// Decompose a CSS affine [a,b,c,d,tx,ty] into position and 2x2 transform for image rendering.
+    /// Decompose a CSS affine `[a,b,c,d,tx,ty]` into position and 2x2 transform for image rendering.
     /// Input: original rect (already DPI-scaled), affine (layout coords), scale_factor.
     /// Returns: (draw_x, draw_y, draw_w, draw_h, transform_a, transform_b, transform_c, transform_d)
-    /// The 2x2 matrix [a, b, c, d] is passed to the shader for full affine support (rotation, scale, skew).
+    /// The 2x2 matrix `[a, b, c, d]` is passed to the shader for full affine support (rotation, scale, skew).
     fn decompose_image_affine(
         x: f32,
         y: f32,

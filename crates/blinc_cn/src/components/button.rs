@@ -229,7 +229,7 @@ pub enum IconPosition {
     End,
 }
 
-/// Get or create a persistent SharedState<ButtonState> for the given key
+/// Get or create a persistent `SharedState<ButtonState>` for the given key
 ///
 /// This is a convenience wrapper around `use_shared_state::<ButtonState>`.
 /// Used by dropdown menus, menubars, and navigation menus.
