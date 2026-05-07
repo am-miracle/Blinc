@@ -159,7 +159,29 @@ blinc_media = { path = "../blinc_media", version = "0.5.1" }
 
 [features]
 default = ["windowed"]
-windowed = ["winit", "blinc_platform_desktop", "blinc_gpu/desktop", "blinc_gpu/bc-encode", "rfd", "tray-icon", "muda", "notify-rust", "global-hotkey"]
+# Lean desktop runtime: window + GPU + platform plumbing only.
+# Convenience surfaces (file dialogs, tray, notifications, global
+# hotkeys) live behind their own feature flags so apps that don't
+# use them don't compile the gtk/dbus/zbus/ashpd transitive trees
+# (~130 fewer crates on Linux). The matching `tray::`, `notify::`,
+# `hotkey::`, `dialog::` modules in blinc_app fall back to no-op
+# stubs when their feature is off, so existing code keeps compiling
+# — calls just do nothing until the flag is enabled.
+windowed = ["winit", "blinc_platform_desktop", "blinc_gpu/desktop", "blinc_gpu/bc-encode"]
+# Native file/folder pickers via `rfd`. ~130 transitive deps on Linux.
+dialogs = ["rfd"]
+# System tray icon + native context menus via `tray-icon` + `muda`.
+# Bundled together because every realistic tray surface needs both.
+# ~100 transitive deps on Linux (gtk-rs ecosystem).
+tray = ["tray-icon", "muda"]
+# Native OS notifications via `notify-rust`. ~95 transitive deps on
+# Linux (dbus / zbus stack).
+notifications = ["notify-rust"]
+# Global keyboard shortcuts via `global-hotkey`. ~25 transitive deps.
+hotkeys = ["global-hotkey"]
+# Umbrella for users who want every desktop convenience surface
+# enabled — matches the pre-split default behaviour.
+windowed-full = ["windowed", "dialogs", "tray", "notifications", "hotkeys"]
 android = ["blinc_platform_android", "android-activity", "ndk", "jni", "android_logger", "log", "tracing-android", "tracing-subscriber", "blinc_gpu/android", "blinc_gpu/bc-encode"]
 ios = ["blinc_platform_ios", "blinc_gpu/ios", "blinc_gpu/bc-encode"]
 harmony = ["blinc_gpu/harmony", "blinc_gpu/bc-encode"]  # blinc_platform_harmony when target is available

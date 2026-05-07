@@ -16,6 +16,7 @@ All notable changes to `blinc_app` will be documented in this file.
 - `needs_overlay_redraw` derived from `has_animating_overlays()` instead of `has_visible_overlays()` — a static popover no longer pins the redraw chain at vsync.
 - `SvgAtlas` allocates its 1024×1024 RGBA texture and CPU shadow buffer (~8 MB total) lazily on first SVG insert. Apps that never render an SVG never pay it.
 - Scrollbar-state diagnostic logs in `render_node` downgraded from `info` to `trace` (was firing every frame for every scroll container).
+- **Default `windowed` feature is now lean** (issue #29). Convenience surfaces — file dialogs (`rfd`), tray + menus (`tray-icon`, `muda`), notifications (`notify-rust`), global hotkeys (`global-hotkey`) — moved out of the `windowed` umbrella into their own opt-in features: `dialogs`, `tray`, `notifications`, `hotkeys`. Saves ~130 transitive crates on Linux for apps that don't use them (404 → 270 deps via `cargo tree`). Existing code keeps compiling thanks to the no-op stubs in each module — calls become silent no-ops until the corresponding feature is enabled. To restore the pre-split behaviour, depend on `blinc_app` with `features = ["windowed-full"]`.
 
 ### Added
 - `BlincApp::has_storage_buffers()` API for platform capability detection
