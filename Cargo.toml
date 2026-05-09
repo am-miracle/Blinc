@@ -23,6 +23,9 @@ members = [
     "crates/blinc_media",
     "crates/blinc_runtime",
     "crates/blinc_test_suite",
+    # Blinc DSL — Zyntax-embedding crate, behind risk-reduction
+    # prototype. See ROADMAP §3 for the staged plan.
+    "crates/blinc_dsl_core",
     "extensions/blinc_platform_desktop",
     "extensions/blinc_platform_android",
     "extensions/blinc_platform_ios",
@@ -101,9 +104,13 @@ repository = "https://github.com/project-blinc/Blinc"
 rust-version = "1.75"
 
 [workspace.dependencies]
-# Zyntax integration (disabled until Grammar2/Runtime2 is ready)
-# zyntax_embed = { git = "https://github.com/darmie/zyntax" }
-# zyntax_zrtl = { git = "https://github.com/darmie/zyntax" }
+# Zyntax integration. Grammar2 + tiered runtime are now available; we pin
+# to a sibling path during prototyping. Once zyntax_embed publishes to
+# crates.io we'll switch to a versioned dep and lock by semver. The
+# `0.1.0` upstream has `#![allow(unused, dead_code, deprecated)]` and
+# makes no semver guarantees yet, so expect occasional breakage and
+# track upstream commits when the Blinc DSL prototype lands.
+zyntax_embed = { path = "../zyntax/crates/zyntax_embed" }
 
 # GPU rendering
 #

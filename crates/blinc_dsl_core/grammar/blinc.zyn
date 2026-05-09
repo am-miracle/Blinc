@@ -1,0 +1,89 @@
+// blinc.zyn — Blinc UI DSL grammar (prototype scope, ZynPEG 2.0)
+//
+// Status: risk-reduction prototype. Covers only the `view { ... }`
+// + `text("...")` slice needed to validate the embed-runtime round-trip
+// end-to-end. The full grammar (component / state / style / events /
+// interpolation / if / for) lands in phase 2 of the Blinc DSL plan
+// (ROADMAP §3.9).
+//
+// Host glue lives in `crates/blinc_dsl_core/src/lib.rs`. Builtins
+// resolve to functions registered via `runtime.register_function(...)`
+// in the host (no `.zrtl` plugin loading — Blinc statically links).
+
+@language {
+    name: "Blinc",
+    version: "0.1.0-prototype",
+    file_extensions: [".blinc"],
+    entry_point: "render_view"
+}
+
+// No @builtin aliasing: the grammar lowers `text("...")` directly to
+// a call against the symbol `$Blinc$text`, and the host injects an
+// extern declaration with that exact name into every parsed program
+// (see `BlincDsl::compile_source` in `src/lib.rs`). This keeps the
+// extern surface to one decl per builtin instead of two (alias +
+// symbol) and matches the static-link distribution shape — the
+// alias-via-`@builtin` path exists for `.zrtl` plugins that need a
+// shorter DSL name than the mangled symbol.
+
+// =====================================================================
+// Program structure
+// =====================================================================
+
+// Entry: a single `view { ... }` block becomes the body of a
+// `render_view()` function the host invokes per frame.
+program = { SOI ~ "view" ~ "{" ~ stmts:statements ~ "}" ~ EOI }
+  -> TypedProgram {
+      declarations: [
+          TypedDeclaration::Function {
+              name: intern("render_view"),
+              params: [],
+              return_type: Type::Unit,
+              body: Some(TypedBlock { statements: stmts }),
+          },
+      ],
+  }
+
+// Collect all statements inside the view block.
+statements = { stmt:statement* }
+  -> stmt
+
+// Statement choice — only `text` for the prototype.
+statement = {
+    text_stmt
+}
+
+// =====================================================================
+// text("literal")
+// =====================================================================
+//
+// Lowers to a `TypedStatement::Expression` calling `$Blinc$text`. The
+// `text` identifier on the callee is resolved through the `@builtin`
+// table at compile time.
+text_stmt = { "text" ~ "(" ~ s:string_literal ~ ")" }
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Call {
+          callee: Box::new(TypedExpression::Variable { name: intern("$Blinc$text") }),
+          args: [s],
+      },
+  }
+
+// =====================================================================
+// Terminals
+// =====================================================================
+
+// String literal — the raw matched text including quotes lands in
+// `value`. The host's `$Blinc$text` is responsible for unescaping.
+// Mirrors the imagepipe convention — see ml.zyn / imagepipe.zyn.
+string_literal = @{ "\"" ~ string_inner* ~ "\"" }
+  -> TypedExpression::StringLiteral { value: text() }
+
+string_inner = { !("\"" | "\\") ~ ANY | "\\" ~ ANY }
+
+// Identifiers (unused in the prototype slice but kept here so we don't
+// have to redo the grammar header when we expand).
+identifier = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
+
+// Whitespace + comments are skipped wherever they appear.
+WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
+COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }

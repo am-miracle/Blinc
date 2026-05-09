@@ -1,0 +1,31 @@
+[package]
+name = "blinc_dsl_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Blinc DSL core — Zyntax-embedded grammar, runtime engine, and codegen primitives shared by the Rust embed crate, the AOT codegen pipeline, and the standalone CLI"
+publish = false
+
+[dependencies]
+# Zyntax SDK. See workspace dep notes in /Cargo.toml — this is path-pinned
+# during prototyping because upstream is 0.1.0 with no semver guarantees.
+zyntax_embed = { workspace = true }
+# Direct dep on the typed-AST crate so we can inject extern function
+# declarations into a parsed `TypedProgram` from Rust before passing
+# it to `compile_typed_program`. The grammar-action interpreter
+# doesn't expose `is_external` / `link_name` (see
+# zyntax/crates/zyn_peg/src/runtime2/interpreter.rs:866-899), so any
+# host that wants statically-registered builtins to round-trip
+# through type inference has to add the extern decls programmatically.
+zyntax_typed_ast = { path = "../../../zyntax/crates/typed_ast" }
+
+# Logging
+tracing = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
