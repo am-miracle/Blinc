@@ -87,6 +87,22 @@ Each window's builder closure goes through its own `subsecond::call`
 patch point, so a code change is picked up on the next frame of
 every open window.
 
+## CLI: `blinc dev` (in development)
+
+The future native driver lives at `blinc dev`. It accepts a `--mode`
+flag to pick the compilation path:
+
+```bash
+blinc dev                  # default: --mode rust (subsecond)
+blinc dev --mode rust      # explicit Rust hot-patch mode
+blinc dev --mode dsl       # Blinc DSL via Zyntax (in plan)
+```
+
+Today both modes are stubs that print a friendly "not yet" message —
+the Rust path waits on the websocket-driver work tracked under
+issue #30 level 2; the DSL path waits on Zyntax Grammar2 + Runtime2.
+For now, use `dx serve --hotpatch` (above) to drive Rust hot-patches.
+
 ## Troubleshooting
 
 - **"Patch had no effect."** Double-check that the change is in
