@@ -2185,6 +2185,24 @@ impl WindowedApp {
         let wake_proxy = event_loop.wake_proxy();
         // Clone for the open_window callback
         let wake_proxy_for_windows = event_loop.wake_proxy();
+
+        // If the `hot-reload` feature is on AND we're a child of
+        // `dx serve --hot-patch`, spawn the websocket client that
+        // sends our ASLR offset to the dev-server and applies
+        // incoming jump-table patches. The wake closure is what lets
+        // the patch thread nudge the event loop out of
+        // `ControlFlow::Wait` after a patch lands — without it the
+        // render tree only refreshes on the next natural redraw
+        // (mouse move, focus change, etc.), which is not what the
+        // user wants from a hot-reload signal. No-op when the dx env
+        // vars aren't set, which is every normal `cargo run`
+        // invocation, so the call is safe to make unconditionally
+        // here.
+        #[cfg(feature = "hot-reload")]
+        {
+            let wp = event_loop.wake_proxy();
+            crate::hot_reload::connect(move || wp.wake());
+        }
         // Clone for the redraw-chain pacing path. When `animation_fps_cap`
         // is set, the chain calls `wake_at` on this proxy instead of
         // `request_redraw`, so the platform shim's lazy timer thread
@@ -4184,6 +4202,17 @@ impl WindowedApp {
                             // Begin stable motion frame tracking
                             // This clears the "used" set so we can detect which motions are no longer in the tree
                             rs.begin_stable_motion_frame();
+
+                            // Hot-reload: a `subsecond::apply_patch` succeeded since
+                            // the last frame, so the user's UI closure body has been
+                            // swapped underneath us. Force a full tree rebuild so the
+                            // closure (wrapped in `subsecond::call`) gets re-invoked
+                            // — otherwise we'd keep painting the cached pre-patch tree.
+                            #[cfg(feature = "hot-reload")]
+                            if crate::hot_reload::take_rebuild_pending() {
+                                tracing::info!("hot-reload: forcing tree rebuild");
+                                ws.needs_rebuild = true;
+                            }
 
                             if ws.needs_rebuild || ws.render_tree.is_none() {
                                 // Reset call counters for stable key generation

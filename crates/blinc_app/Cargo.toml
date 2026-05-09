@@ -76,9 +76,18 @@ global-hotkey = { version = "0.7", optional = true }
 # library is gated by `debug_assertions` upstream so release
 # builds carry no overhead even with the feature on. Drives
 # patches via the Dioxus `dx` CLI's websocket protocol — Blinc
-# will optionally wire its own driver in a future milestone, but
-# Level 1 just installs the in-process patch points.
+# will optionally wire its own driver in a future milestone.
 subsecond = { version = "0.7", optional = true }
+# Plain `ws://` websocket client used by the hot-reload runtime
+# to talk to `dx serve --hot-patch`'s dev-server. Default features
+# (rustls / native-tls) are dropped — dx serves over `ws://localhost`
+# so we only need the handshake + framing layer. ~5 transitive deps.
+tungstenite = { version = "0.27", default-features = false, features = ["handshake"], optional = true }
+# Reads the `DIOXUS_DEVSERVER_IP` / `DIOXUS_DEVSERVER_PORT` /
+# `DIOXUS_BUILD_ID` env vars that `dx` sets for the spawned app. Tiny
+# crate (~zero deps on native). Pinning to the same convention means
+# Blinc speaks dx's protocol without re-engineering the env layout.
+dioxus-cli-config = { version = "0.7", optional = true }
 
 # Desktop platform - exclude mobile/embedded targets
 [target.'cfg(not(any(target_os = "android", target_os = "ios", target_os = "fuchsia")))'.dependencies]
@@ -189,12 +198,14 @@ notifications = ["notify-rust"]
 hotkeys = ["global-hotkey"]
 # Experimental hot-reload via the `subsecond` crate. Wraps the
 # user UI closure in `subsecond::call` so changes to the binary
-# crate's UI code can be hot-patched while running. Subsecond
-# itself is gated by `debug_assertions` upstream, so release
-# builds carry zero overhead even when this feature is on.
-# Currently driven by Dioxus's `dx serve --hotpatch` CLI — see
-# `docs/book/src/advanced/hot-reload.md` for the workflow.
-hot-reload = ["subsecond"]
+# crate's UI code can be hot-patched while running, and spawns a
+# small websocket client that talks to `dx serve --hot-patch`'s
+# dev-server (sends the running process's ASLR offset, applies
+# incoming jump-table patches via `subsecond::apply_patch`).
+# Subsecond itself is gated by `debug_assertions` upstream, so
+# release builds carry zero overhead even when this feature is
+# on. See `docs/book/src/advanced/hot-reload.md` for the workflow.
+hot-reload = ["subsecond", "tungstenite", "dioxus-cli-config"]
 # Umbrella for users who want every desktop convenience surface
 # enabled — matches the pre-split default behaviour.
 windowed-full = ["windowed", "dialogs", "tray", "notifications", "hotkeys"]

@@ -128,6 +128,15 @@ mod error;
 mod svg_atlas;
 mod text_measurer;
 
+/// Subsecond hot-reload websocket client.
+///
+/// Compiled only when the `hot-reload` feature is on. Spawns a thread
+/// that connects to `dx serve --hot-patch`'s dev-server and applies
+/// incoming jump-table patches. See module docs for the wire format
+/// and dep-tree rationale.
+#[cfg(feature = "hot-reload")]
+pub mod hot_reload;
+
 // Windowed module is compiled for desktop (windowed feature), Android, iOS, Fuchsia, HarmonyOS,
 // AND web — since `WindowedContext` and the shared scheduler / overlay / registry types are
 // used by every platform runner. The web runner also lives behind a wasm32 cfg gate (see below).

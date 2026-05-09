@@ -2,10 +2,11 @@
 
 > **Status:** Experimental, debug-only. Currently driven by Dioxus's
 > [`dx`](https://github.com/DioxusLabs/dioxus) CLI through its
-> `--hotpatch` mode. A native `blinc dev` driver that vendors the
-> websocket protocol is on the roadmap (issue #30, level 2). This
-> page documents the level-1 integration: the in-process patch
-> point is wired, but the daemon side is borrowed from `dx`.
+> `--hot-patch` mode. The patch points and the websocket client
+> that talks to dx's dev-server both live inside `blinc_app` —
+> Blinc apps don't depend on Dioxus at runtime. A native `blinc
+> dev` driver that vendors the dev-server side too is on the
+> roadmap (issue #30, level 2).
 
 Blinc can hot-patch the body of your UI builder closure while the
 app is running, so iterating on a layout or styling tweak doesn't
@@ -19,6 +20,13 @@ crate. `subsecond` is itself gated on `debug_assertions`, so even if
 you ship a release binary with the `hot-reload` feature enabled, the
 patch points compile down to direct calls and there is zero runtime
 overhead.
+
+When you enable the `hot-reload` feature, Blinc also pulls in
+[`tungstenite`](https://crates.io/crates/tungstenite) (websocket
+client, no TLS — dx serves over `ws://localhost`) and
+[`dioxus-cli-config`](https://crates.io/crates/dioxus-cli-config)
+(tiny env-var convention crate, zero deps on native). Both stay
+out of default builds; they only show up when the feature is on.
 
 ## Setup
 
@@ -38,14 +46,29 @@ overhead.
 3. Run your binary crate under `dx`:
 
    ```bash
-   dx serve --hotpatch
+   dx serve --hot-patch \
+       --package my_app \
+       --features blinc_app/hot-reload \
+       --platform macos
    ```
 
    `dx` builds your binary, launches it, and watches the source
-   tree. When it detects a change in the binary crate it compiles a
-   patch, ships it over a local websocket, and `subsecond` applies
-   it in place. The next frame Blinc renders will pick up the new
-   closure body.
+   tree. The Blinc runtime opens a websocket back to dx as soon as
+   the window is ready (announcing the running process's ASLR
+   offset, build id, and pid as query parameters), so dx can
+   compute jump-table offsets when it ships a patch. When dx
+   detects a change in the binary crate it compiles a patch, ships
+   it over the websocket, and `subsecond::apply_patch` applies it
+   in place. The next frame Blinc renders picks up the new closure
+   body.
+
+> The websocket protocol matches `dx` CLI 0.7+. Blinc keeps a
+> small mirror of the relevant `DevserverMsg` subset locally; if
+> a future dx release changes the schema for the fields we read
+> (`jump_table`, `for_pid`), the `hot-reload` feature will need a
+> compatibility bump. Other fields (template patches, asset
+> reloads, etc.) deserialise opaquely so dx can add new fields
+> without breaking us.
 
 ## What gets hot-reloaded
 
@@ -101,14 +124,23 @@ blinc dev --mode dsl       # Blinc DSL via Zyntax (in plan)
 Today both modes are stubs that print a friendly "not yet" message —
 the Rust path waits on the websocket-driver work tracked under
 issue #30 level 2; the DSL path waits on Zyntax Grammar2 + Runtime2.
-For now, use `dx serve --hotpatch` (above) to drive Rust hot-patches.
+For now, use `dx serve --hot-patch` (above) to drive Rust hot-patches.
 
 ## Troubleshooting
 
 - **"Patch had no effect."** Double-check that the change is in
   your binary crate, not in a workspace dependency. `dx serve
-  --hotpatch` prints which crate it patched; if the line doesn't
+  --hot-patch` prints which crate it patched; if the line doesn't
   mention your binary, the edit was outside the patchable scope.
+- **dx logs `Ignoring hotpatch since there is no ASLR reference`.**
+  The app didn't open the websocket back to dx, so dx couldn't
+  compute jump-table offsets. Check that you compiled the app
+  with the `hot-reload` feature on (`--features
+  blinc_app/hot-reload`) and that you're running the resulting
+  binary as a child of `dx serve --hot-patch` (which sets the
+  `DIOXUS_DEVSERVER_*` env vars the client reads). On startup
+  the client logs `hot-reload: connected` at info level when the
+  websocket opens.
 - **State got cleared after a patch.** This means `subsecond`
   detected a structural change (a captured struct's fields moved)
   and forced a full re-instance. The next frame rebuilds from
@@ -123,12 +155,14 @@ For now, use `dx serve --hotpatch` (above) to drive Rust hot-patches.
 
 ## Roadmap
 
-Level 1 (this milestone) installs the in-process patch points
-behind a feature flag so the integration can be exercised against
-the Dioxus CLI today.
+Level 1 (shipped) installs the in-process patch points behind a
+feature flag *and* the websocket client that talks to `dx serve
+--hot-patch`. Editing a UI body in your binary crate now triggers
+an in-place patch without restart. Blinc apps don't link any of
+the Dioxus reactive runtime at runtime — only `subsecond`,
+`tungstenite`, and the env-var convention crate.
 
-Level 2 will vendor the websocket protocol so `blinc dev` becomes
-a first-party command — no `dx` install, no Dioxus dependency at
-runtime, and a chance to tighten the rebuild-detection rules to
-Blinc's tree (e.g. invalidate `Stylesheet` caches when CSS-only
-files change).
+Level 2 will vendor the dev-server side so `blinc dev` becomes a
+first-party command — no `dx` install required, and a chance to
+tighten the rebuild-detection rules to Blinc's tree (e.g.
+invalidate `Stylesheet` caches when CSS-only files change).
