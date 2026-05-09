@@ -718,12 +718,13 @@ impl AnimationScheduler {
     ///
     /// # Threading
     ///
-    /// In [`AnimationThreadMode::Main`] (the default in `WindowConfig`)
-    /// this is the sole tick path: the windowed runner calls it once
-    /// per rendered frame in Phase 3, so animation values read at
-    /// paint time are exactly in phase with the frame being drawn.
+    /// In `AnimationThreadMode::Main` (defined in `blinc_platform`,
+    /// not linkable here; the default in `WindowConfig`) this is the
+    /// sole tick path: the windowed runner calls it once per rendered
+    /// frame in Phase 3, so animation values read at paint time are
+    /// exactly in phase with the frame being drawn.
     ///
-    /// In [`AnimationThreadMode::Background`] the dedicated bg thread
+    /// In `AnimationThreadMode::Background` the dedicated bg thread
     /// owns ticking; calling `tick` from the main thread under that
     /// mode would race the bg thread on `inner.last_frame` and
     /// double-step every animation. To prevent that, this method

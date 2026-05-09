@@ -232,8 +232,10 @@ struct HotReloadMsg {
 /// Spawn the hot-reload client thread.
 ///
 /// `wake` is invoked after every successful patch — the windowed
-/// runner passes its [`WakeProxy::wake`] so the event loop comes out
-/// of `ControlFlow::Wait` and looks at [`take_rebuild_pending`]. If
+/// runner passes its `WakeProxy::wake` (from
+/// `blinc_platform_desktop`, not linkable here) so the event loop
+/// comes out of `ControlFlow::Wait` and looks at
+/// [`take_rebuild_pending`]. If
 /// the app is a non-windowed runner (or for whatever reason has no
 /// wake mechanism) pass `|| {}` and the patch will still apply but
 /// won't visibly update the UI until the next natural redraw.
