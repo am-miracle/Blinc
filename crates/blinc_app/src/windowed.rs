@@ -1761,6 +1761,32 @@ impl WindowedContext {
         }
     }
 
+    /// Drop every accumulated stylesheet and reset `rebuild_count` so a
+    /// subsequent rebuild looks like the very first one.
+    ///
+    /// Called by the hot-reload runner before re-invoking the user's UI
+    /// closure under the freshly-applied subsecond patch. Without this:
+    ///
+    /// - `add_css` cascades, so deleted rules from the pre-patch run
+    ///   would linger in the merged stylesheet.
+    /// - `css_sources` would grow unboundedly across every patch.
+    /// - The common `if ctx.rebuild_count == 0 { ctx.add_css(...) }`
+    ///   guard in app code would skip re-registration entirely, so
+    ///   even live rules wouldn't refresh.
+    ///
+    /// Also drops the global `ACTIVE_STYLESHEET` so widgets reaching
+    /// for CSS overrides during the rebuild don't see a stale Arc.
+    /// Outside hot-reload this would throw away cascaded user state;
+    /// the method is `#[doc(hidden)]` and only invoked from the
+    /// hot-reload trigger.
+    #[doc(hidden)]
+    pub fn reset_for_hot_reload(&mut self) {
+        self.stylesheet = None;
+        self.css_sources.clear();
+        self.rebuild_count = 0;
+        blinc_layout::css_parser::clear_active_stylesheet();
+    }
+
     /// Reparse all stored CSS sources with fresh theme variables.
     ///
     /// Called automatically when the theme color scheme changes to ensure
@@ -2186,23 +2212,6 @@ impl WindowedApp {
         // Clone for the open_window callback
         let wake_proxy_for_windows = event_loop.wake_proxy();
 
-        // If the `hot-reload` feature is on AND we're a child of
-        // `dx serve --hot-patch`, spawn the websocket client that
-        // sends our ASLR offset to the dev-server and applies
-        // incoming jump-table patches. The wake closure is what lets
-        // the patch thread nudge the event loop out of
-        // `ControlFlow::Wait` after a patch lands — without it the
-        // render tree only refreshes on the next natural redraw
-        // (mouse move, focus change, etc.), which is not what the
-        // user wants from a hot-reload signal. No-op when the dx env
-        // vars aren't set, which is every normal `cargo run`
-        // invocation, so the call is safe to make unconditionally
-        // here.
-        #[cfg(feature = "hot-reload")]
-        {
-            let wp = event_loop.wake_proxy();
-            crate::hot_reload::connect(move || wp.wake());
-        }
         // Clone for the redraw-chain pacing path. When `animation_fps_cap`
         // is set, the chain calls `wake_at` on this proxy instead of
         // `request_redraw`, so the platform shim's lazy timer thread
@@ -2220,6 +2229,38 @@ impl WindowedApp {
         // so the first frame always renders.
         let frame_dirty = Arc::new(AtomicBool::new(true));
         let frame_dirty_for_wake = Arc::clone(&frame_dirty);
+
+        // If the `hot-reload` feature is on AND we're a child of
+        // `dx serve --hot-patch`, spawn the websocket client that
+        // sends our ASLR offset to the dev-server and applies
+        // incoming jump-table patches. The wake closure is what lets
+        // the patch thread nudge the event loop out of
+        // `ControlFlow::Wait` after a patch lands — without it the
+        // render tree only refreshes on the next natural redraw
+        // (mouse move, focus change, etc.), which is not what the
+        // user wants from a hot-reload signal.
+        //
+        // The closure also flips `frame_dirty` because Event::Frame
+        // returns early when both `frame_dirty` and `peek_needs_redraw`
+        // are false. Without that flip, `wake_proxy.wake()` reaches
+        // the event loop and `request_redraw()` fires, but the
+        // resulting Event::Frame bails before our rebuild check at
+        // line ~4244 ever runs — the patch lands silently and the
+        // window doesn't update until something else happens to
+        // dirty the frame.
+        //
+        // No-op when the dx env vars aren't set, which is every
+        // normal `cargo run` invocation, so the call is safe to make
+        // unconditionally here.
+        #[cfg(feature = "hot-reload")]
+        {
+            let wp = event_loop.wake_proxy();
+            let frame_dirty_hr = Arc::clone(&frame_dirty);
+            crate::hot_reload::connect(move || {
+                frame_dirty_hr.store(true, Ordering::Release);
+                wp.wake();
+            });
+        }
 
         // Cross-thread mirror of the renderer's `visible_anim_active`
         // flag. The end-of-frame chain (main thread) writes the
@@ -4208,10 +4249,27 @@ impl WindowedApp {
                             // swapped underneath us. Force a full tree rebuild so the
                             // closure (wrapped in `subsecond::call`) gets re-invoked
                             // — otherwise we'd keep painting the cached pre-patch tree.
+                            //
+                            // Also reset accumulated stylesheet state so `ctx.add_css`
+                            // calls in the patched closure produce a fresh sheet. The
+                            // common `rebuild_count == 0` guard around `add_css` would
+                            // otherwise skip re-registration, and `add_css` itself
+                            // cascades — deleted CSS rules would linger forever.
                             #[cfg(feature = "hot-reload")]
                             if crate::hot_reload::take_rebuild_pending() {
                                 tracing::info!("hot-reload: forcing tree rebuild");
                                 ws.needs_rebuild = true;
+                                // Drop the cached tree so the rebuild path takes the
+                                // "no existing tree" branch — that one calls
+                                // `apply_all_stylesheet_styles()` which actually
+                                // re-runs CSS application against the freshly-parsed
+                                // sheet. The incremental-update branch only diffs
+                                // visual props on the existing tree and would skip
+                                // CSS rule re-application entirely, so an edit to a
+                                // CSS string would land in the stylesheet but never
+                                // surface visually.
+                                ws.render_tree = None;
+                                windowed_ctx.reset_for_hot_reload();
                             }
 
                             if ws.needs_rebuild || ws.render_tree.is_none() {

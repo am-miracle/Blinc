@@ -2173,6 +2173,17 @@ pub fn active_stylesheet() -> Option<Arc<Stylesheet>> {
     ACTIVE_STYLESHEET.read().ok()?.clone()
 }
 
+/// Drop the global active stylesheet. Used by hot-reload's
+/// `WindowedContext::reset_for_hot_reload` so the next `ctx.add_css`
+/// call repopulates a fresh sheet — without this, stateful widgets
+/// looking up CSS overrides during the rebuild would briefly see
+/// stale rules from the pre-patch run.
+pub fn clear_active_stylesheet() {
+    if let Ok(mut guard) = ACTIVE_STYLESHEET.write() {
+        *guard = None;
+    }
+}
+
 // ============================================================================
 // Nom Parsers with VerboseError for diagnostics
 // ============================================================================

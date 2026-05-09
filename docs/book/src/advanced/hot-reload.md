@@ -75,6 +75,17 @@ out of default builds; they only show up when the feature is on.
 - **Code in the binary crate** — i.e. the crate where `main.rs`
   lives. `subsecond` only patches the "tip" crate; this is a
   hard limitation of the dynamic-linking approach it uses.
+- **CSS strings inlined in your UI builder.** The patched closure
+  sees the new string literal and re-registers the stylesheet on
+  the rebuild that follows the patch. Blinc's hot-reload runtime
+  clears the accumulated stylesheet, drops `css_sources`, and
+  resets `rebuild_count` to zero before re-invoking the closure,
+  so the common
+  ```rust
+  if ctx.rebuild_count == 0 { ctx.add_css(MY_CSS); }
+  ```
+  guard fires again with the new content and the result is a
+  fresh sheet — no stale rules from the pre-patch run.
 - **State held by `Stateful` widgets and hooks**. Blinc's
   `InstanceKey` is derived from `#[track_caller]` + a per-frame
   call counter, so the same logical widget gets the same key
@@ -86,6 +97,15 @@ out of default builds; they only show up when the feature is on.
 - **Code in workspace dependencies** (`blinc_layout`, `blinc_app`,
   `blinc_gpu`, etc.). Editing the framework itself still requires
   a full rebuild.
+- **CSS in `const` strings.** `subsecond` patches function bodies,
+  not the binary's read-only data segment. A
+  `const STYLESHEET: &str = "..."` referenced from your UI builder
+  will keep pointing at the *original* string after a patch, so
+  edits to the const won't be picked up. Inline the CSS directly
+  in the `ctx.add_css(r#"..."#)` call — that string literal lives
+  in the patched function body, so subsecond rewrites it
+  alongside the rest of the closure. Same reasoning applies to
+  `static` strings and `&'static [u8]` font assets.
 - **Static initialisers in the patched crate.** `subsecond`
   tracks statics across patches but does not re-run their
   destructors, and thread-locals get reset. If your binary crate
@@ -141,6 +161,13 @@ For now, use `dx serve --hot-patch` (above) to drive Rust hot-patches.
   `DIOXUS_DEVSERVER_*` env vars the client reads). On startup
   the client logs `hot-reload: connected` at info level when the
   websocket opens.
+- **CSS edit doesn't show up.** If your stylesheet lives in a
+  `const STYLESHEET: &str = ...` (or other binary-resident static),
+  the patched closure references the pre-patch address and never
+  sees the new string — see *What doesn't* above. Inline the CSS
+  in the `ctx.add_css(r#"..."#)` call instead. Once the closure
+  body owns the literal, edits round-trip through the patch
+  without restart.
 - **State got cleared after a patch.** This means `subsecond`
   detected a structural change (a captured struct's fields moved)
   and forced a full re-instance. The next frame rebuilds from
