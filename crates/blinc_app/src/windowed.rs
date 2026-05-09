@@ -2411,8 +2411,21 @@ impl WindowedApp {
                         Event::Input(_, InputEvent::Pinch { .. }) => "input.pinch",
                         Event::Input(_, InputEvent::Rotation { .. }) => "input.rotation",
                         Event::Input(_, _) => "input.other",
-                        Event::Window(_, _) => "window",
-                        Event::Lifecycle(_) => "lifecycle",
+                        Event::Window(_, WindowEvent::Resized { .. }) => "window.resized",
+                        Event::Window(_, WindowEvent::Moved { .. }) => "window.moved",
+                        Event::Window(_, WindowEvent::CloseRequested) => "window.close_requested",
+                        Event::Window(_, WindowEvent::Focused(_)) => "window.focused",
+                        Event::Window(_, WindowEvent::ScaleFactorChanged { .. }) =>
+                            "window.scale_factor_changed",
+                        Event::Window(_, WindowEvent::DroppedFileHovered { .. }) =>
+                            "window.dropped_file_hovered",
+                        Event::Window(_, WindowEvent::DroppedFile { .. }) =>
+                            "window.dropped_file",
+                        Event::Window(_, WindowEvent::DroppedFileCancelled) =>
+                            "window.dropped_file_cancelled",
+                        Event::Lifecycle(LifecycleEvent::Resumed) => "lifecycle.resumed",
+                        Event::Lifecycle(LifecycleEvent::Suspended) => "lifecycle.suspended",
+                        Event::Lifecycle(LifecycleEvent::LowMemory) => "lifecycle.low_memory",
                     },
                     "blinc event"
                 );
