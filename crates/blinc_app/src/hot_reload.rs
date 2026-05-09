@@ -142,8 +142,8 @@ pub fn watch_dir(dir: impl AsRef<std::path::Path>) -> Option<WatcherHandle> {
         return None;
     }
 
-    let mut watcher = match notify::recommended_watcher(
-        |res: notify::Result<notify::Event>| match res {
+    let mut watcher =
+        match notify::recommended_watcher(|res: notify::Result<notify::Event>| match res {
             Ok(event) => {
                 // Only fire on data-change kinds — `Create`, `Modify`,
                 // `Remove`. `Access` events are noise (open / close /
@@ -159,14 +159,13 @@ pub fn watch_dir(dir: impl AsRef<std::path::Path>) -> Option<WatcherHandle> {
                 }
             }
             Err(e) => tracing::warn!(error = ?e, "hot-reload: watcher error"),
-        },
-    ) {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(error = ?e, "hot-reload: failed to create file watcher");
-            return None;
-        }
-    };
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(error = ?e, "hot-reload: failed to create file watcher");
+                return None;
+            }
+        };
 
     if let Err(e) = watcher.watch(&dir, RecursiveMode::Recursive) {
         tracing::warn!(error = ?e, dir = %dir.display(), "hot-reload: failed to watch dir");

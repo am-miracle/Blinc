@@ -1000,7 +1000,10 @@ impl RenderContext {
         if svg_n > 0 {
             self.svg_cache.clear();
             self.svg_atlas.clear();
-            tracing::info!("hot-reload: cleared {} SVG doc cache entries + atlas", svg_n);
+            tracing::info!(
+                "hot-reload: cleared {} SVG doc cache entries + atlas",
+                svg_n
+            );
         }
     }
 
