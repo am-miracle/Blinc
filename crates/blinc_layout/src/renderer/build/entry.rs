@@ -66,6 +66,7 @@ impl RenderTree {
     /// Returns `true` if the tree was updated, `false` if no changes were detected.
     /// This is an optimization to skip full rebuilds when the UI hasn't changed.
     pub fn update_if_changed<E: ElementBuilder>(&mut self, element: &E) -> bool {
+        self.invalidate_mouse_move_pipeline_cache();
         let new_hash = DivHash::compute_element_tree(element);
 
         // If hash matches, no changes - skip rebuild
@@ -115,6 +116,12 @@ impl RenderTree {
         if self.tree_hash == Some(new_tree_hash) {
             return UpdateResult::NoChanges;
         }
+
+        // Tree hash diverged — handlers / cursor styles / stylesheet
+        // rules may all change as part of this update. Invalidate the
+        // bare-mouse-move pipeline cache so the windowed app's prelude
+        // re-derives the early-return predicate on the next move.
+        self.invalidate_mouse_move_pipeline_cache();
 
         // Tree hash differs - analyze what kind of changes occurred
         // Walk the tree comparing per-node hashes to detect change categories

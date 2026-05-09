@@ -130,6 +130,12 @@ impl RenderTree {
         parent_id: LayoutNodeId,
         new_child: &E,
     ) -> LayoutNodeId {
+        // The rebuild registers fresh handlers + applies stylesheet
+        // base styles for the new subtree. Invalidate the
+        // bare-mouse-move pipeline cache so the next mouse-move
+        // re-derives the early-return predicate.
+        self.invalidate_mouse_move_pipeline_cache();
+
         // 1. Remove old children from layout tree and render nodes
         let old_children = self.layout_tree.children(parent_id);
         for child_id in &old_children {
@@ -204,6 +210,12 @@ impl RenderTree {
         if pending.is_empty() {
             return false;
         }
+
+        // Subtree rebuilds register/unregister handlers and may apply
+        // CSS overrides that change cursor styles. Invalidate the
+        // bare-mouse-move pipeline cache so the next mouse-move
+        // re-derives the early-return predicate.
+        self.invalidate_mouse_move_pipeline_cache();
 
         tracing::debug!("Processing {} pending subtree rebuilds", pending.len());
 

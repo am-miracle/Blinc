@@ -230,6 +230,28 @@ pub struct RenderTree {
     /// Unlike css_anim_store.transitions (keyed by LayoutNodeId), these survive node recreation
     /// because they resolve string IDs → LayoutNodeIds at apply time via element_registry.
     flip_animations: HashMap<String, crate::render_state::ActiveCssAnimation>,
+
+    /// Cached "does the pointer pipeline need to run on a bare mouse-move?"
+    /// predicate. Equivalent to:
+    ///
+    ///   handler_registry.has_any_pointer_handler()
+    ///     || stylesheet.is_some_and(|s| s.has_pointer_state_rules())
+    ///     || has_any_cursor_style()
+    ///
+    /// Encoded as `i8`: `0` = stale (recompute on next read), `1` = no
+    /// pipeline needed, `2` = pipeline needed. The windowed app's
+    /// pre-Event::Input prelude reads this once per mouse-move; on a
+    /// static UI like `hello_blinc` with no handlers / no `:hover` /
+    /// no `cursor:` styles, the read returns `1` and the entire
+    /// `Event::Input` branch (including its `Box<dyn FnMut>` callback
+    /// allocation) is skipped. Mouse drags over the window stay at
+    /// near-zero CPU on Linux high-rate mice that fire 1 kHz cursor
+    /// events.
+    ///
+    /// Invalidated by every tree mutation that could affect any of
+    /// the three predicate inputs — see
+    /// `invalidate_mouse_move_pipeline_cache`.
+    mouse_move_pipeline_cache: std::sync::atomic::AtomicI8,
 }
 
 /// Result of an incremental update attempt
@@ -300,7 +322,45 @@ impl RenderTree {
             complex_state_affected: HashSet::new(),
             flip_previous_bounds: HashMap::new(),
             flip_animations: HashMap::new(),
+            mouse_move_pipeline_cache: std::sync::atomic::AtomicI8::new(0),
         }
+    }
+
+    /// Invalidate the cached `mouse_move_pipeline_needed` predicate.
+    /// Call from any mutation site that could change handler
+    /// registration, stylesheet pointer-state rules, or per-node
+    /// `cursor:` props. Cheap (one relaxed atomic store).
+    pub fn invalidate_mouse_move_pipeline_cache(&self) {
+        self.mouse_move_pipeline_cache
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns `true` when a bare mouse-move event needs the full
+    /// pointer pipeline (hit_test, hover diff, drag delta, cursor
+    /// resolve). Returns `false` for static UIs with no handlers,
+    /// no `:hover`/`:active`/`:focus` rules, and no `cursor:` styles
+    /// — those can skip the entire `Event::Input` branch on every
+    /// move.
+    ///
+    /// Lazily computed on first read after invalidation; subsequent
+    /// reads are a single relaxed atomic load. The recompute walks
+    /// the handler registry once and the render-node map once, so
+    /// even invalidating per frame is cheap.
+    pub fn mouse_move_pipeline_needed(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        let cached = self.mouse_move_pipeline_cache.load(Ordering::Relaxed);
+        if cached != 0 {
+            return cached == 2;
+        }
+        let needed = self.handler_registry.has_any_pointer_handler()
+            || self
+                .stylesheet
+                .as_ref()
+                .is_some_and(|s| s.has_pointer_state_rules())
+            || self.has_any_cursor_style();
+        self.mouse_move_pipeline_cache
+            .store(if needed { 2 } else { 1 }, Ordering::Relaxed);
+        needed
     }
 
     /// Set the animation scheduler for scroll bounce animations
@@ -1100,6 +1160,7 @@ impl RenderTree {
     /// ```
     pub fn set_stylesheet(&mut self, stylesheet: Stylesheet) {
         self.stylesheet = Some(Arc::new(stylesheet));
+        self.invalidate_mouse_move_pipeline_cache();
     }
 
     /// Set a shared stylesheet reference
@@ -1107,6 +1168,7 @@ impl RenderTree {
         // Also update the global stylesheet for form widget CSS override resolution
         crate::css_parser::set_active_stylesheet(Arc::clone(&stylesheet));
         self.stylesheet = Some(stylesheet);
+        self.invalidate_mouse_move_pipeline_cache();
     }
 
     /// Get the current stylesheet, if any

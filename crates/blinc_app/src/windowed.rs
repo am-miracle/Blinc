@@ -2382,6 +2382,41 @@ impl WindowedApp {
                 // `RedrawRequested → Event::Frame` if someone actually
                 // asks for it. macOS used to coast on Poll's
                 // request_redraw spam, which we removed at the same time.
+                // Per-event trace for debugging idle-CPU / mouse-move
+                // hot paths. Silent in normal builds (`tracing::trace!`
+                // doesn't evaluate args when the target is disabled).
+                // Run with
+                //   RUST_LOG=blinc_app::events=trace
+                // and the output gets one line per event; pipe through
+                //   `grep -oE 'kind=[^ ]+' | sort | uniq -c`
+                // to see counts per event-kind over a sampling window.
+                tracing::trace!(
+                    target: "blinc_app::events",
+                    kind = match &event {
+                        Event::Frame(_) => "frame",
+                        Event::Input(_, InputEvent::Mouse(MouseEvent::Moved { .. })) =>
+                            "input.mouse.moved",
+                        Event::Input(_, InputEvent::Mouse(MouseEvent::ButtonPressed { .. })) =>
+                            "input.mouse.pressed",
+                        Event::Input(_, InputEvent::Mouse(MouseEvent::ButtonReleased { .. })) =>
+                            "input.mouse.released",
+                        Event::Input(_, InputEvent::Mouse(MouseEvent::Entered)) =>
+                            "input.mouse.entered",
+                        Event::Input(_, InputEvent::Mouse(MouseEvent::Left)) =>
+                            "input.mouse.left",
+                        Event::Input(_, InputEvent::Scroll { .. }) => "input.scroll",
+                        Event::Input(_, InputEvent::ScrollEnd) => "input.scroll_end",
+                        Event::Input(_, InputEvent::Keyboard(_)) => "input.keyboard",
+                        Event::Input(_, InputEvent::Touch(_)) => "input.touch",
+                        Event::Input(_, InputEvent::Pinch { .. }) => "input.pinch",
+                        Event::Input(_, InputEvent::Rotation { .. }) => "input.rotation",
+                        Event::Input(_, _) => "input.other",
+                        Event::Window(_, _) => "window",
+                        Event::Lifecycle(_) => "lifecycle",
+                    },
+                    "blinc event"
+                );
+
                 let is_bare_mouse_move = matches!(
                     event,
                     Event::Input(_, InputEvent::Mouse(MouseEvent::Moved { .. }))
@@ -2389,6 +2424,39 @@ impl WindowedApp {
                 if !matches!(event, Event::Frame(_)) && !is_bare_mouse_move {
                     frame_dirty.store(true, Ordering::Release);
                     window.request_redraw();
+                }
+
+                // Bare-mouse-move fast path. Linux high-rate mice
+                // (gaming mice on Hyprland in particular) deliver
+                // 1 kHz `CursorMoved` events; running the full input
+                // pipeline (Vec scratch alloc, `Box<dyn FnMut>`
+                // event-callback alloc, hit_test, hover diff, cursor
+                // resolve) once per move puts the process at ~60% of
+                // a CPU on `hello_blinc` even though no element in
+                // the tree could react. The Moved branch already
+                // had an early-return guard with the same predicate,
+                // but the prelude that gets us there allocated and
+                // destructed unconditionally — so the branch ran
+                // 1000 times/sec on a UI that needs zero pointer
+                // work.
+                //
+                // The cached predicate on `RenderTree` is one
+                // relaxed atomic load; recomputed lazily on next
+                // read after a tree mutation invalidates it. For a
+                // static UI with no handlers / no `:hover` / no
+                // `cursor:` styles it stays `false` from the first
+                // call after build until the next rebuild, so this
+                // branch returns ~immediately and the closure exits
+                // without touching `ws.ctx`, `ws.render_tree`, or
+                // any allocator.
+                if is_bare_mouse_move {
+                    let pipeline_needed = ws
+                        .render_tree
+                        .as_ref()
+                        .is_some_and(|tree| tree.mouse_move_pipeline_needed());
+                    if !pipeline_needed {
+                        return ControlFlow::Continue;
+                    }
                 }
 
                 // Check if this event is for a secondary window

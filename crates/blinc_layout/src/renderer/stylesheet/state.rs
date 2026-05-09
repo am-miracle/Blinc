@@ -206,6 +206,12 @@ impl RenderTree {
             return false;
         }
 
+        // State-style apply can change `props.cursor` via `:hover`/
+        // `:active`/`:focus` rules, so the bare-mouse-move cache may
+        // be stale. Invalidate eagerly — the cache recomputes on the
+        // next read.
+        self.invalidate_mouse_move_pipeline_cache();
+
         let mut any_applied = false;
 
         // Get all registered element IDs and their node IDs

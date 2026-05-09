@@ -41,6 +41,11 @@ impl RenderTree {
             None => return,
         };
 
+        // Base-style apply can change `props.cursor` on any node, so
+        // invalidate the bare-mouse-move pipeline cache to force a
+        // recompute on next read.
+        self.invalidate_mouse_move_pipeline_cache();
+
         // CSS specificity order: type(0,0,1) < class(0,1,0) < id(1,0,0)
         // Apply complex base rules FIRST (lower specificity: type, class selectors)
         // sorted by ascending specificity so higher-specificity rules overwrite lower.
