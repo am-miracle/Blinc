@@ -141,14 +141,14 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 
 ---
 
-## Phase 3: Zyntax DSL (`.blinc` files)
+## Phase 3: Blinc DSL (`.blinc` files via Zyntax)
 
-> Goal: A domain-specific language for Blinc UIs that compiles to optimized Rust, enabling hot reload, visual tooling, and a gentler learning curve.
+> Goal: a declarative, hot-reloadable UI language that drops onto the existing Blinc renderer without replacing the Rust builder API. Implemented by embedding Zyntax — its tiered Cranelift+LLVM JIT for development and its LLVM AOT path for shipping mobile binaries.
 
-### 3.1 Language Design
+### 3.1 Language design
 
 ```blinc
-// zyntax: declarative UI with embedded logic
+// .blinc: declarative UI with embedded logic
 
 import { Color, SpringConfig } from "blinc"
 
@@ -163,12 +163,8 @@ component Counter {
         .animate(spring: SpringConfig::bouncy)
 
       row(gap: 8) {
-        button("- Decrement") {
-          on_click: count -= 1
-        }
-        button("+ Increment") {
-          on_click: count += 1
-        }
+        button("- Decrement") { on_click: count -= 1 }
+        button("+ Increment") { on_click: count += 1 }
       }
     }
   }
@@ -183,58 +179,142 @@ component Counter {
 }
 ```
 
-### 3.2 Compiler Pipeline
+### 3.2 Architecture
 
-| Stage | Description | Status |
-|-------|-------------|--------|
-| Lexer / tokenizer | `.blinc` source to token stream | Planned |
-| Parser | Tokens to Zyntax AST | Planned |
-| Type checker | Validate state, props, expressions | Planned |
-| Code generator | AST to Rust builder API calls | Planned |
-| Optimizer | Dead code elimination, const folding, static layout pre-computation | Planned |
-| Build integration | `build.rs` or proc-macro for compile-time processing | Planned |
-
-### 3.3 Features
-
-| Feature | Priority | Notes |
-|---------|----------|-------|
-| Component definitions | P0 | `component Name { state, view, style }` |
-| Reactive state | P0 | `state` block with typed fields |
-| Template expressions | P0 | `{variable}` interpolation in text/attributes |
-| Scoped CSS | P0 | `style` block compiled to stylesheet |
-| Props / inputs | P0 | Typed component parameters |
-| Conditional rendering | P0 | `if/else` in template |
-| List rendering | P0 | `for item in list { ... }` |
-| Event handlers | P0 | `on_click`, `on_change`, etc. |
-| Slot / children | P1 | `<slot>` for composition |
-| Animation declarations | P1 | `animate`, `transition` in style block |
-| Import system | P1 | Cross-file component references |
-| Hot reload | P2 | File watcher + incremental recompile |
-| LSP server | P2 | Autocomplete, diagnostics, go-to-definition |
-| VS Code extension | P2 | Syntax highlighting, inline preview |
-
-### 3.4 Compilation Strategy
+The DSL is **not** transpiled to Rust. The grammar lives in Zyntax (`.zyn` PEG with semantic actions), and the runtime lifts Zyntax's tiered backend whole-cloth — no parallel compiler. Two distribution modes share the same core:
 
 ```text
 .blinc source
     |
     v
-[Zyntax Lexer] -> tokens
+[Zyntax Grammar2] -> TypedProgram
     |
     v
-[Zyntax Parser] -> AST
+[HIR lowering]    -> HirModule
     |
-    v
-[Type Checker] -> validated AST
-    |
-    v
-[Rust Codegen] -> fn component_name(ctx) -> impl ElementBuilder { ... }
-    |
-    v
-[Cargo Build] -> native binary (zero runtime overhead)
+    +-----------------+----------------+
+    |                                  |
+    v                                  v
+[Cranelift JIT]                  [LLVM backend]
+  RuntimeEngine::Tiered            compile_module() -> .o
+  hot-reload via                   ar / cc link -> .a or executable
+  runtime.hot_reload(...)          (mobile static-link, desktop AOT)
+    |                                  |
+    v                                  v
+[Live UI, dev hot-reload]      [Shipping binary, no JIT at runtime]
 ```
 
-Key principle: **zero-cost abstraction**. The DSL compiles entirely at build time. No interpreter, no runtime template engine. The output is the same Rust builder API calls a developer would write by hand.
+The join point is the `HirModule` produced by Zyntax's typed-AST → HIR lowering. Above it everything is shared (grammar, builtins, plugin registration). Below it the backend choice depends on platform and profile.
+
+### 3.3 Crate layout
+
+| Crate | Role |
+|---|---|
+| `blinc_dsl_core` | Grammar (`include_str!("../grammars/blinc.zyn")`), `RuntimeEngine` enum wrapping `ZyntaxRuntime`/`TieredRuntime`, codegen helpers. Shared by every consumer. |
+| `zrtl_blinc` | Zyntax runtime library — `$Blinc$div` / `$Blinc$text` / `$Blinc$image` / `$Blinc$state_get`,`set` / `$Blinc$on_click_register` / `$Blinc$add_css` registered against existing `Div`/`Text`/`Image` builders + `BlincContextState`. Statically linked, not loaded from disk. |
+| `blinc_dsl` | Rust embed API: `dsl::component(path) -> impl ElementBuilder`, `inline!` macro (P1), hot-reload integration via the existing `hot_reload::watch_dir` watcher. |
+| `blinc_dsl_codegen` | LLVM AOT pipeline, lifted from `zyntax_cli/src/backends/llvm_aot.rs`. Emits `.o` via `target_machine.write_to_file(.., FileType::Object, ..)`, packages into `.a` (mobile static link) or links to executable (desktop AOT). |
+| `blinc_cli` (extended) | Standalone driver — `blinc init`, `blinc dev`, `blinc build --target …`. Bundles LLVM (via inkwell) + per-platform pre-built `libblinc_<platform>.a` so non-Rust users don't need cargo on their machine. Same shape as `flutter build`. |
+
+### 3.4 Distribution modes
+
+**Rust embed mode** — for existing Blinc projects. `cargo add blinc_dsl`, then mix `.blinc` components with hand-written builders:
+
+```rust
+fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+    div()
+        .child(text("Hand-written"))
+        .child(blinc_dsl::component("ui/login.blinc")?)  // embed
+}
+```
+
+**Standalone CLI mode** — for non-Rust users. Download the `blinc` CLI binary (no cargo install required); scaffold a pure-`.blinc` project and ship it:
+
+```bash
+blinc init my_app          # scaffolds .blinc files, no Cargo.toml
+blinc dev                  # JIT runtime + watcher
+blinc build --target ios   # AOT, statically linked, .ipa-ready
+```
+
+Both modes consume the same `blinc_dsl_core` and `zrtl_blinc`.
+
+### 3.5 Platform matrix
+
+| Target | Mode | Engine | Artifact |
+|---|---|---|---|
+| Desktop dev | JIT, watcher hot-reload | `TieredRuntime::development()` | `.blinc` source loaded at launch |
+| Desktop release | JIT or AOT (user picks) | `TieredRuntime::production()` or LLVM AOT | JIT: `.blinc` shipped as resources / AOT: native binary, no DSL deps at runtime |
+| iOS | AOT only (JIT forbidden) | LLVM AOT | `libblinc_dsl_aot.a` linked into Xcode build |
+| Android | AOT only | LLVM AOT | `libblinc_dsl_aot.a` linked via NDK |
+| Wasm | Deferred | — | Tracking Zyntax's wasm AOT story |
+
+### 3.6 Type checking and diagnostics — leverage Zyntax
+
+Zyntax already produces typed ASTs with type inference, validates call signatures against registered `NativeSignature`s, and surfaces parse / lowering / compile errors with file:line:col spans. Blinc relays those — we **do not** add a parallel check layer.
+
+What we get for free by registering `$Blinc$*` builtins with proper signatures:
+
+- **Call-site arity / type checking.** A `text(42)` call where the grammar declares `text(s: string) -> Element` becomes a Zyntax type error at compile time, not a runtime panic.
+- **State field type inference.** `state count = 0` infers `i32`; `count -= 1` is checked against that type. Mismatches surface at `compile_typed_program` time, before any HIR lowering runs.
+- **Interpolation type checking.** `"Count: {count}"` requires `count` to satisfy `ToString` (or whatever trait the interpolation builtin asks for); Zyntax's resolver enforces it.
+- **Diagnostics with spans.** Parse errors carry `(file, line, col, len)`; lowering errors do too. We surface them through `BlincDslError` with the original span preserved, so the watcher / dev mode can paint a fallback overlay showing the failing file region.
+
+What this means for the plan:
+
+- Phase 1 prototype lists "type checker" was the wrong framing; the prototype validates that **registering builtin signatures correctly** propagates Zyntax's checks to the user.
+- The risk-reduction probe should specifically exercise: (a) signature-mismatch errors land with usable spans, (b) `state` field reactivity types round-trip cleanly through the typed AST (is `count` exposed as `i32` or `State<i32>` to subsequent expressions? — needs probing), (c) diagnostics from a hot-reloaded `.blinc` file are catchable and actionable, not panics.
+
+The `BlincDslError` type wraps `zyntax_embed::GrammarError` / `RuntimeError` and exposes a `.diagnostics() -> Vec<Diagnostic { file, span, severity, message }>` so the dev-mode overlay can render them inline. No custom error machinery for type inference itself.
+
+### 3.7 Hot reload
+
+Reuses the watcher infra shipped in `92d46b48`. The `.blinc` extension gets a branch in `RenderContext::invalidate_asset_path`: re-parse the changed file, lower per-component to HIR, call `runtime.hot_reload(name, &hir_function)` per affected function (atomic pointer swap). Other components untouched. Same `REBUILD_PENDING` → wake → frame-loop rebuild trigger fires.
+
+Hot-reload is JIT-only by construction. iOS users always restart for code changes.
+
+### 3.8 Features
+
+| Feature | Priority | Notes |
+|---------|----------|-------|
+| Component definitions | P0 | `component Name { state, view, style }` |
+| Reactive state | P0 | DSL declares; `BlincContextState` owns the actual `State<T>` keyed by `(InstanceKey, field)` |
+| Template expressions | P0 | `{variable}` interpolation lowered to `Call("$Blinc$concat", …)` |
+| Scoped CSS | P0 | `style` block lowered to `Call("$Blinc$add_css", "…")` at instantiation |
+| Props / inputs | P0 | Typed component parameters; map to Rust function args at the host boundary |
+| Conditional rendering | P0 | `if/else` blocks lower to Zyntax `TypedStatement::If` |
+| List rendering | P0 | `for x in xs` lowers to Zyntax iterator pattern |
+| Event handlers | P0 | Each `on_click: { … }` becomes a named function `Component$handler_N`; host wires `Div::on_click(move \|_\| runtime.call::<()>("Component$handler_N", &args))` |
+| Slot / children | P1 | Component composition via host-side child arrays |
+| Animation declarations | P1 | `animate`, `transition` lowered to existing Blinc animation builders |
+| Import system | P1 | Cross-file component references via Zyntax's import resolver |
+| Hot reload | P0 (dev) / N/A (mobile) | `.blinc` watcher → `runtime.hot_reload()`; reuses CSS/asset hot-reload infra |
+| Standalone CLI build | P1 | `blinc build --target` produces deployable binaries without cargo |
+| LSP server | P2 | Autocomplete, diagnostics, go-to-definition |
+| VS Code extension | P2 | Syntax highlighting, inline preview |
+
+### 3.9 Implementation sequencing
+
+1. **Risk-reduction prototype** (1–2 weeks). Counter component, two builtins (`$Blinc$text`, `$Blinc$on_click_register`), JIT only, Rust embed only. Validates:
+    - Grammar → `TypedProgram` → `runtime.call` round-trip
+    - Host-Rust closures invoking DSL functions and vice versa
+    - `runtime.hot_reload` semantics for stateful UI (does swapping a `view` fn invalidate widget state in `BlincContextState`?)
+    - Grammar startup cost — target <50 ms; if higher, switch to pre-compiled `.zpeg` via `include_bytes!`
+    - **Diagnostic channel end-to-end.** Force a type error (`text(42)`), an arity error (`text()`), a state-field-type mismatch (`count: i32 = 0; count = "x"`), and a parse error in a hot-reloaded file. Confirm each surfaces with usable file:line:col spans, not panics. This is what tells us whether Zyntax's type-checking and diagnostics are production-grade for our use case or whether we'll need to wrap them.
+    - **Reactivity round-trip through the typed AST.** Does Zyntax see `count` (declared as `state count: i32`) as `i32` or as some `State<i32>`-shaped wrapper inside expressions? Determines whether reactivity is a host-only concern or whether we need Zyntax-side type sugar.
+2. **Core language + Rust embed v1** (3–4 weeks). Full grammar covering `state`/`view`/`style`/`if`/`for`/imports/events. `zrtl_blinc` covers all P0 builders. Hot-reload integration via the `.blinc` watcher branch. End state: any P0 Rust example portable to `.blinc`. **Ships first** — Rust users get value before standalone CLI lands.
+3. **AOT pipeline + mobile** (3–4 weeks). LLVM AOT lifted from `zyntax_cli/src/backends/llvm_aot.rs`, cross-compile triples driven by `CARGO_CFG_TARGET_OS`, `.a` packaging via `ar`, iOS/Android runner integration. Validate iOS no-JIT compliance.
+4. **Standalone CLI mode** (4–6 weeks). `blinc init`, project scaffolder, `blinc dev` for `.blinc`-only projects, `blinc build` driving the AOT pipeline, framework-prebuild CI producing per-platform `libblinc_<platform>.a`.
+5. **Tooling + polish** — error reporting with file:line spans, `optimize_function` warm-up of view fns at first frame, profiling, LSP / VS Code extension.
+
+### 3.10 Patterns lifted from Zyntax codebase
+
+- Grammar embedding via `include_str!` — see `zyntax/crates/zynml/src/lib.rs:77`
+- Stdlib resolver closure for framework modules — `zynml/src/lib.rs:186-197`, install before module load
+- Plugins → grammar → module load order — `zynml/src/lib.rs:199-246`
+- `RuntimeEngine` backend-agnostic enum — `zynml/src/lib.rs:141-144`
+- AOT pipeline shape — `zyntax_cli/src/backends/llvm_aot.rs:103-278` (adapt `cc` linker step to `ar` for mobile `.a` output)
+
+Patterns explicitly rejected: `.zrtl` plugin discovery from disk (Blinc statically links), env-var runtime profile dispatch, "find first function" entry-point heuristic, REPL.
 
 ---
 
@@ -357,7 +437,9 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 | 0.4.0 | Q3 2026 | GPU & rendering — 3D mesh pipeline (PBR, shadows, normal maps, skeletal animation), custom shaders (bind groups, compute, post-processing), render culling, memory budget | **Complete** (pulled forward from 0.5.0) |
 | 0.5.0 | Q2 2026 | Web/WASM platform (WebGPU), rich text editor, virtualized list, lazy image loading, mobile soft keyboard + edit menu | **Complete** |
 | 0.5.1 | Q2 2026 | WebGL2 fallback (data textures, vertex storage fallback), split SDF pipelines, video player fixes (wasm duration/pacing), platform capability detection | **Complete** |
-| 0.6.0 | Q4 2026 | Zyntax DSL v1 — lexer, parser, type checker, Rust codegen, build.rs integration | Planned |
+| 0.6.0 | Q4 2026 | Blinc DSL v1 — Zyntax embed, Rust embed API (`blinc_dsl::component(path)`), JIT hot-reload, P0 grammar surface | Planned |
+| 0.6.1 | Q1 2027 | LLVM AOT for mobile — iOS/Android static-lib pipeline, no-JIT compliance | Planned |
+| 0.6.2 | Q1 2027 | Standalone `blinc` CLI — `blinc init`/`dev`/`build` for non-Rust users, framework-prebuild CI | Planned |
 | 0.7.0 | Q1 2027 | Developer experience — hot reload, visual inspector, layout/animation debugger, performance profiler | Planned |
 | 0.8.0 | Q1 2027 | Accessibility v1 — semantic roles, screen reader, keyboard navigation, ARIA-like attributes, high contrast, reduced motion | Planned |
 | 0.9.0 | Q2 2027 | Platform expansion — HarmonyOS stable | In progress |
@@ -370,7 +452,7 @@ Key principle: **zero-cost abstraction**. The DSL compiles entirely at build tim
 See individual crate READMEs for architecture details. The most impactful areas to contribute:
 
 1. **Missing widgets** (Phase 1.4) — date picker, color picker, data grid
-2. **Zyntax DSL** (Phase 3) — lexer, parser, codegen
+2. **Blinc DSL** (Phase 3) — Zyntax grammar (`grammars/blinc.zyn`), `zrtl_blinc` builtins, Rust embed API, AOT pipeline, standalone CLI
 3. **Accessibility** (Phase 6) — screen reader, keyboard nav, ARIA
 4. **Developer tooling** (Phase 5) — hot reload, visual inspector, debugger
 5. **Documentation** — API docs, tutorials, interactive examples
