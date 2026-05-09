@@ -4,6 +4,10 @@ All notable changes to `blinc_app` will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Residual idle CPU on Linux out-of-focus** (issue #28). The desktop platform shim's `new_events(WaitCancelled)` handler was calling `request_redraw()` on every window for every event-loop wake — including spurious wakes from Wayland / X11 compositors (focus subscriptions, configure events, raw input shifts). Each wake fired a redraw the windowed app's frame gate immediately threw away because `frame_dirty` was false; the wakeup-and-skip cycle showed up as a few percent of a CPU on a static, out-of-focus hello-world. The blanket `request_redraw` was redundant — `wake_proxy.wake()` arrives via `user_event(AppCommand::Wake)` which has its own `request_redraw`, and real input events flow through the windowed-app prelude which decides per-event whether to flip `frame_dirty`. Fix is to drop the `new_events` `request_redraw` entirely.
+- `tracing::trace!` target `blinc_platform_desktop::wakes` added — one line per event-loop wake with the `StartCause`. Use `RUST_LOG=blinc_platform_desktop::wakes=trace` to count wakeups/sec on a static UI when diagnosing idle-CPU regressions.
+
 ### Added
 - Display refresh rate detection at window resume — feeds `WindowConfig.max_frame_latency`-clamped `set_target_fps` so the scheduler doesn't burn 120 ticks/sec on a 60 Hz panel.
 - `WindowConfig::max_frame_latency` is honoured for the primary surface (cap captured pre-move as `primary_max_frame_latency`).

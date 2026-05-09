@@ -303,19 +303,53 @@ where
     }
 
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
-        // Wake from the scheduler / external `wake_proxy` arrives as
-        // `WaitCancelled`. Schedule a redraw so the next event loop
-        // iteration delivers `RedrawRequested` → `Event::Frame`, which
-        // the windowed-app handler's per-frame chain decides to render
-        // or skip. We deliberately do NOT match `Poll` here — under
-        // `ControlFlow::Wait` (set in `resumed`) it never fires, and
-        // matching it on the off chance someone re-enables Poll would
-        // pull the old infinite-redraw bug right back.
-        if matches!(cause, StartCause::WaitCancelled { .. }) {
-            for window in self.windows.values() {
-                window.request_redraw();
-            }
-        }
+        // Wake-cause telemetry. Silent in normal builds (the format
+        // args aren't even evaluated when the trace target is
+        // disabled). For idle-CPU diagnosis on Linux, run with
+        // `RUST_LOG=blinc_platform_desktop::wakes=trace` and the
+        // output shows one line per event-loop wake — useful for
+        // counting wakeups/sec on a static UI.
+        tracing::trace!(
+            target: "blinc_platform_desktop::wakes",
+            ?cause,
+            "event loop woke"
+        );
+
+        // Intentionally no `request_redraw` here.
+        //
+        // Earlier this handler called `request_redraw()` on every
+        // window for every `WaitCancelled` cause. That blanket wake
+        // showed up as residual idle CPU on Linux (issue #28): Wayland
+        // / X11 compositors deliver more spurious wakes than macOS
+        // — focus subscriptions, configure events, raw input shifts
+        // — and each wake fired a redraw the windowed app's frame
+        // gate then immediately threw away because `frame_dirty` was
+        // false. The wakeup-and-skip cycle is cheap individually but
+        // the OS overhead added up to a few percent of a CPU even on
+        // a static, out-of-focus hello-world.
+        //
+        // Two paths actually need the redraw, and both arrive at it
+        // without our help here:
+        //
+        // - `wake_proxy.wake()` (animation scheduler bg thread, FPS
+        //   cap timer, external wake calls) sends
+        //   `AppCommand::Wake`. winit delivers that as `user_event`
+        //   below, which already calls `request_redraw` on every
+        //   window. The bg-thread side also flips `frame_dirty` to
+        //   `true` before sending, so the resulting `Event::Frame`
+        //   actually paints.
+        //
+        // - Real `WindowEvent` / `DeviceEvent` wakes flow through
+        //   `window_event` (and the windowed-app handler's prelude),
+        //   which decides per-event whether to flip `frame_dirty`
+        //   and call `request_redraw`. Bare mouse-moves are
+        //   intentionally skipped; everything else paints exactly
+        //   once.
+        //
+        // Anything reaching `WaitCancelled` that *isn't* one of the
+        // two above is by definition a wake we don't need to act
+        // on. Letting it return through `about_to_wait` and back to
+        // `ControlFlow::Wait` keeps the process at ~0% CPU.
     }
 
     fn window_event(
