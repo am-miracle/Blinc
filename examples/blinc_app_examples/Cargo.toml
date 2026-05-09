@@ -42,6 +42,11 @@ icons = ["dep:blinc_icons"]
 # every glTF demo renders through canvas_kit's 3D pipeline.
 gltf = ["canvas", "dep:blinc_gltf", "dep:blinc_skeleton", "dep:blinc_input"]
 
+# Experimental hot-reload — forwards to `blinc_app/hot-reload`.
+# Run examples under `dx serve --hotpatch` (see
+# `docs/book/src/advanced/hot-reload.md`).
+hot-reload = ["blinc_app/hot-reload"]
+
 [dependencies]
 # Always-on — every demo touches at least these.
 blinc_app = { path = "../../crates/blinc_app", features = ["windowed"] }

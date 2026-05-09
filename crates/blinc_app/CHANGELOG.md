@@ -4,6 +4,9 @@ All notable changes to `blinc_app` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Experimental hot-reload** via the `hot-reload` cargo feature on `blinc_app`. Wraps the user UI closure in `subsecond::call` so changes to the binary crate's UI code can be hot-patched at runtime. Currently driven by Dioxus's `dx serve --hotpatch` CLI; a native `blinc dev` driver is on the roadmap. Debug-only — release builds carry zero overhead even with the feature enabled. See `docs/book/src/advanced/hot-reload.md` for setup. Resolves issue #30 (Level 1 — minimum viable).
+
 ### Changed
 - **Animation scheduler ticks on the main thread by default** (`AnimationThreadMode::Main`). Springs, keyframe animations, timelines, and `tick_callback`s now advance synchronously inside Phase 3 of each rendered frame, in lockstep with paint. Eliminates the half-frame jitter the bg-thread tick can introduce — animation values read at paint time are exactly in phase with the frame being drawn — and removes one thread from the runtime. Idle cost drops to zero (no thread to park). Apps that need fixed-rate ticking independent of rendering (game physics, audio sequencers, telemetry) opt into `AnimationThreadMode::Background` via `WindowConfig::animation_thread_mode(AnimationThreadMode::Background)` to get the prior bg-thread behaviour back.
 - `AnimationScheduler::tick()` is now safe to call from the main thread under any mode — when a bg thread is running, it returns the latest activity state without advancing animations (preventing the double-tick race that existed before, where the bg thread and `RenderState::tick`'s call to `scheduler.tick()` both re-stepped springs every frame).

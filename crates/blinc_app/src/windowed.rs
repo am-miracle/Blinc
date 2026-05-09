@@ -2648,7 +2648,7 @@ impl WindowedApp {
                                         let ui: Div =
                                             if let Some(ref mut builder) = sws.ui_builder {
                                                 if let Some(ref mut sctx) = sws.ctx {
-                                                    builder(sctx)
+                                                    invoke_window_builder(builder, sctx)
                                                 } else {
                                                     div().w(w).h(h)
                                                 }
@@ -4200,7 +4200,7 @@ impl WindowedApp {
                                 // so build_overlay_layer() has correct dimensions
 
                                 // Build UI element tree
-                                let user_ui = ui_builder(windowed_ctx);
+                                let user_ui = invoke_ui_builder(&mut ui_builder, windowed_ctx);
 
                                 // Compose user UI with overlay layer using a regular Div container
                                 // We use position:relative with the overlay absolutely positioned on top.
@@ -4902,4 +4902,49 @@ where
         ..Default::default()
     };
     WindowedApp::run(config, ui_builder)
+}
+
+/// Invoke the user's primary-window UI builder closure, optionally
+/// routing the call through `subsecond::call` so changes to the
+/// closure body can be hot-patched in development. Without the
+/// `hot-reload` feature this is a direct call and gets inlined away.
+///
+/// Subsecond itself is gated on `debug_assertions` upstream, so even
+/// with the `hot-reload` feature on a release build still pays no
+/// runtime cost.
+#[cfg(all(feature = "windowed", not(target_os = "android")))]
+#[inline]
+fn invoke_ui_builder<F, E>(ui_builder: &mut F, ctx: &mut WindowedContext) -> E
+where
+    F: FnMut(&mut WindowedContext) -> E,
+    E: ElementBuilder,
+{
+    #[cfg(feature = "hot-reload")]
+    {
+        // `subsecond::call` takes a `FnOnce() -> O`. The captured
+        // `&mut` borrows live only for this call, so the closure
+        // satisfies `FnOnce` regardless of `F`'s `FnMut` bound.
+        subsecond::call(move || ui_builder(ctx))
+    }
+    #[cfg(not(feature = "hot-reload"))]
+    {
+        ui_builder(ctx)
+    }
+}
+
+/// Secondary-window variant of [`invoke_ui_builder`]. Secondary
+/// windows store their builder as a boxed `WindowBuilder` returning
+/// `Div` directly (rather than the generic `E: ElementBuilder` of
+/// the primary), so they need a separate helper.
+#[cfg(all(feature = "windowed", not(target_os = "android")))]
+#[inline]
+fn invoke_window_builder(builder: &mut WindowBuilder, ctx: &mut WindowedContext) -> Div {
+    #[cfg(feature = "hot-reload")]
+    {
+        subsecond::call(move || builder(ctx))
+    }
+    #[cfg(not(feature = "hot-reload"))]
+    {
+        builder(ctx)
+    }
 }
