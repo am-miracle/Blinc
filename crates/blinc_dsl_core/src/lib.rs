@@ -567,6 +567,30 @@ mod tests {
         }
     }
 
+    /// Component-form round-trip: `component Name { view { … } }`.
+    /// Currently lowers to the same `render_view` symbol as the bare
+    /// form (see grammar comment), so the runtime side is unchanged
+    /// — this test pins the parser side: the new `component_program`
+    /// alternate matches and produces a typed AST the runtime can
+    /// compile + call.
+    #[test]
+    fn round_trip_component_view() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"component Greeting { view { text("Hi from a component") } }"#,
+            "component_smoke.blinc",
+        )
+        .expect("compile");
+        let ops = dsl.render_view().expect("render_view");
+
+        assert_eq!(ops.len(), 1, "expected 1 op, got {ops:?}");
+        match &ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "Hi from a component"),
+        }
+    }
+
     // =================================================================
     // Diagnostic-channel probes (ROADMAP §3.9 prototype goals)
     //
@@ -590,9 +614,7 @@ mod tests {
             .expect_err("expected compile to fail on stray closing brace");
         let lower = err.to_lowercase();
         assert!(
-            lower.contains("parse")
-                || lower.contains("error")
-                || lower.contains("expected"),
+            lower.contains("parse") || lower.contains("error") || lower.contains("expected"),
             "expected diagnostic to mention parse / error / expected; got: {err}"
         );
     }
@@ -607,9 +629,7 @@ mod tests {
             .expect_err("expected compile to fail on text() with no args");
         let lower = err.to_lowercase();
         assert!(
-            lower.contains("error")
-                || lower.contains("expected")
-                || lower.contains("parse"),
+            lower.contains("error") || lower.contains("expected") || lower.contains("parse"),
             "expected diagnostic to mention error / expected / parse; got: {err}"
         );
     }

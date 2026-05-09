@@ -29,10 +29,35 @@
 // =====================================================================
 // Program structure
 // =====================================================================
+//
+// Two forms accepted at the top level for the prototype:
+//
+//   1. Bare `view { ... }` — quick-test shape.
+//   2. `component <Name> { view { ... } }` — production shape.
+//
+// Both lower to a function named `render_view`. The component name is
+// captured but not yet used to scope the function symbol — ZynPEG's
+// semantic-action syntax doesn't support string concatenation (e.g.
+// `intern(name + "$render_view")` parses with "Expected ')', found '+'"),
+// so we'd need a host-side rename pass to namespace it. That's worth
+// doing once we actually have two components sharing a file. Until
+// then, multi-component support is a phase-2 grammar item.
 
-// Entry: a single `view { ... }` block becomes the body of a
-// `render_view()` function the host invokes per frame.
-program = { SOI ~ "view" ~ "{" ~ stmts:statements ~ "}" ~ EOI }
+program = { component_program | bare_program }
+
+bare_program = { SOI ~ "view" ~ "{" ~ stmts:statements ~ "}" ~ EOI }
+  -> TypedProgram {
+      declarations: [
+          TypedDeclaration::Function {
+              name: intern("render_view"),
+              params: [],
+              return_type: Type::Unit,
+              body: Some(TypedBlock { statements: stmts }),
+          },
+      ],
+  }
+
+component_program = { SOI ~ "component" ~ name:identifier ~ "{" ~ "view" ~ "{" ~ stmts:statements ~ "}" ~ "}" ~ EOI }
   -> TypedProgram {
       declarations: [
           TypedDeclaration::Function {
