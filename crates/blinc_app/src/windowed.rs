@@ -4256,20 +4256,34 @@ impl WindowedApp {
                             // otherwise skip re-registration, and `add_css` itself
                             // cascades — deleted CSS rules would linger forever.
                             #[cfg(feature = "hot-reload")]
-                            if crate::hot_reload::take_rebuild_pending() {
-                                tracing::info!("hot-reload: forcing tree rebuild");
-                                ws.needs_rebuild = true;
-                                // Drop the cached tree so the rebuild path takes the
-                                // "no existing tree" branch — that one calls
-                                // `apply_all_stylesheet_styles()` which actually
-                                // re-runs CSS application against the freshly-parsed
-                                // sheet. The incremental-update branch only diffs
-                                // visual props on the existing tree and would skip
-                                // CSS rule re-application entirely, so an edit to a
-                                // CSS string would land in the stylesheet but never
-                                // surface visually.
-                                ws.render_tree = None;
-                                windowed_ctx.reset_for_hot_reload();
+                            {
+                                // Drain dx asset invalidations FIRST, so cached
+                                // decoded copies are gone before the rebuild
+                                // re-loads anything. Path-keyed: image cache,
+                                // SVG cache, SVG atlas. Glyph caches and font
+                                // faces aren't path-keyed and would need
+                                // separate plumbing — out of scope for this
+                                // pass.
+                                let asset_paths = crate::hot_reload::take_invalidations();
+                                for path in &asset_paths {
+                                    blinc_app.context().invalidate_asset_path(path);
+                                }
+
+                                if crate::hot_reload::take_rebuild_pending() {
+                                    tracing::info!("hot-reload: forcing tree rebuild");
+                                    ws.needs_rebuild = true;
+                                    // Drop the cached tree so the rebuild path takes the
+                                    // "no existing tree" branch — that one calls
+                                    // `apply_all_stylesheet_styles()` which actually
+                                    // re-runs CSS application against the freshly-parsed
+                                    // sheet. The incremental-update branch only diffs
+                                    // visual props on the existing tree and would skip
+                                    // CSS rule re-application entirely, so an edit to a
+                                    // CSS string would land in the stylesheet but never
+                                    // surface visually.
+                                    ws.render_tree = None;
+                                    windowed_ctx.reset_for_hot_reload();
+                                }
                             }
 
                             if ws.needs_rebuild || ws.render_tree.is_none() {

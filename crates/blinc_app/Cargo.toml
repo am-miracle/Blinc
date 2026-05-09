@@ -88,6 +88,13 @@ tungstenite = { version = "0.27", default-features = false, features = ["handsha
 # crate (~zero deps on native). Pinning to the same convention means
 # Blinc speaks dx's protocol without re-engineering the env layout.
 dioxus-cli-config = { version = "0.7", optional = true }
+# Filesystem watcher that drives the asset side of hot-reload. dx's
+# asset channel is gated on Dioxus's `asset!()` macro and never fires
+# for Blinc apps, so we run our own watcher: the user tells us which
+# directory to tail via `hot_reload::watch_dir(...)`, `notify` reports
+# changed paths, and we push them onto the same invalidation queue
+# the dx wire format would have populated.
+notify = { workspace = true, optional = true }
 
 # Desktop platform - exclude mobile/embedded targets
 [target.'cfg(not(any(target_os = "android", target_os = "ios", target_os = "fuchsia")))'.dependencies]
@@ -205,7 +212,7 @@ hotkeys = ["global-hotkey"]
 # Subsecond itself is gated by `debug_assertions` upstream, so
 # release builds carry zero overhead even when this feature is
 # on. See `docs/book/src/advanced/hot-reload.md` for the workflow.
-hot-reload = ["subsecond", "tungstenite", "dioxus-cli-config"]
+hot-reload = ["subsecond", "tungstenite", "dioxus-cli-config", "notify"]
 # Umbrella for users who want every desktop convenience surface
 # enabled — matches the pre-split default behaviour.
 windowed-full = ["windowed", "dialogs", "tray", "notifications", "hotkeys"]

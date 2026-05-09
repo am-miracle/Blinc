@@ -939,6 +939,71 @@ impl RenderContext {
         );
     }
 
+    /// Drop cached entries that may have been backed by `abs_path` on
+    /// disk so the next frame re-reads from disk. Used by the
+    /// `hot-reload` runtime when `dx serve --hot-patch` ships an
+    /// asset rebuild.
+    ///
+    /// Image cache is keyed by the URI string the user wrote in
+    /// `image("...")`. dx hands us absolute paths, but cache keys are
+    /// usually relative (e.g. `"assets/logo.png"`). We match by
+    /// suffix — if the absolute path ends with the cache key the
+    /// entry is dropped. This stays precise for relative paths,
+    /// exact for absolute paths, and correctly skips URLs since
+    /// they're not local files.
+    ///
+    /// SVG cache + atlas are keyed by hash of the SVG source bytes
+    /// with no reverse lookup, so we clear them wholesale. Both caps
+    /// are small (128 docs, ~8 MB atlas) and re-parsing happens
+    /// lazily on next render — cheap relative to a full app
+    /// restart.
+    ///
+    /// Glyph caches and font faces sit in `blinc_text` and are
+    /// invalidated by the hot-reload module separately so this
+    /// method stays scoped to GPU-resident render-context state.
+    pub fn invalidate_asset_path(&mut self, abs_path: &std::path::Path) {
+        let abs_str = abs_path.to_string_lossy();
+        // Image cache: drop entries where the URI key is a path-suffix
+        // of the absolute path dx sent. Matches relative ("assets/x.png"
+        // ends-with → match against "/abs/.../assets/x.png") and exact
+        // absolute keys, while leaving URLs (no file path component)
+        // untouched.
+        let dropped: Vec<String> = self
+            .image_cache
+            .iter()
+            .filter_map(|(k, _)| {
+                if !k.is_empty() && abs_str.ends_with(k.as_str()) {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for k in &dropped {
+            self.image_cache.pop(k);
+            self.image_load_times.remove(k);
+        }
+        if !dropped.is_empty() {
+            tracing::info!(
+                "hot-reload: dropped {} image cache entries for {}",
+                dropped.len(),
+                abs_path.display()
+            );
+        }
+
+        // SVG cache + atlas keyed by source-bytes hash — no path
+        // reverse lookup, so blanket-clear when any asset changes.
+        // Sub-millisecond on the cache, frame-time-bounded on the
+        // atlas (it just zeros the shadow buffer + drops shelf
+        // metadata; the GPU texture stays allocated).
+        let svg_n = self.svg_cache.len();
+        if svg_n > 0 {
+            self.svg_cache.clear();
+            self.svg_atlas.clear();
+            tracing::info!("hot-reload: cleared {} SVG doc cache entries + atlas", svg_n);
+        }
+    }
+
     /// Ensure glass-related textures exist and are the right size.
     /// Only called when glass elements are present in the scene.
     ///

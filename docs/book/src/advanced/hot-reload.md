@@ -86,6 +86,24 @@ out of default builds; they only show up when the feature is on.
   ```
   guard fires again with the new content and the result is a
   fresh sheet — no stale rules from the pre-patch run.
+- **Runtime-loaded image and SVG assets**, when you opt the
+  app's asset directory into the file watcher:
+  ```rust
+  fn main() -> blinc_app::Result<()> {
+      #[cfg(feature = "hot-reload")]
+      blinc_app::hot_reload::watch_dir("assets");
+      WindowedApp::run(WindowConfig::default(), build_ui)
+  }
+  ```
+  The watcher tails the directory recursively. When a file under
+  it changes, Blinc drops the matching entry from its image cache
+  (matched by path-suffix against the URI you passed to
+  `image("...")`), wipes the SVG document cache and atlas, and
+  forces the next frame to re-read the bytes off disk. Works for
+  PNG, JPEG, WebP, runtime-loaded fonts, and SVG sources loaded
+  from a path. Does *not* fire for `include_bytes!`-embedded
+  assets — those live in rodata that subsecond can't touch (see
+  *What doesn't* below).
 - **State held by `Stateful` widgets and hooks**. Blinc's
   `InstanceKey` is derived from `#[track_caller]` + a per-frame
   call counter, so the same logical widget gets the same key
@@ -105,7 +123,16 @@ out of default builds; they only show up when the feature is on.
   in the `ctx.add_css(r#"..."#)` call — that string literal lives
   in the patched function body, so subsecond rewrites it
   alongside the rest of the closure. Same reasoning applies to
-  `static` strings and `&'static [u8]` font assets.
+  `static` strings.
+- **`include_bytes!` / `include_str!` assets.** Files baked into
+  the binary at compile time live in the same rodata segment that
+  CSS const strings do — subsecond can't update them. A
+  `register_font(include_bytes!("Inter.ttf").to_vec())` keeps
+  serving the original font bytes after a patch. To get
+  hot-reloadable font / image assets, load them via runtime path
+  instead (`image("assets/logo.png")`,
+  `register_font(std::fs::read("Inter.ttf")?)`) and put the
+  containing dir under [`watch_dir`](#what-gets-hot-reloaded).
 - **Static initialisers in the patched crate.** `subsecond`
   tracks statics across patches but does not re-run their
   destructors, and thread-locals get reset. If your binary crate

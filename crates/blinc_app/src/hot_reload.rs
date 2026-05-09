@@ -32,9 +32,10 @@
 //! dx ever changes a field we do read (`jump_table`, `for_pid`),
 //! we'll need to update this file.
 
+use std::path::PathBuf;
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 use subsecond::JumpTable;
@@ -64,6 +65,124 @@ pub fn take_rebuild_pending() -> bool {
     REBUILD_PENDING.swap(false, Ordering::AcqRel)
 }
 
+/// Queue of absolute paths the dev-server has rebuilt since the last
+/// frame. Pushed by the websocket thread on receipt of a
+/// `HotReloadMsg.assets` list, drained by the frame loop via
+/// [`take_invalidations`] so cached decoded copies (image LRU, SVG
+/// atlas, etc.) can be dropped before the rebuild paints.
+static ASSET_QUEUE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Drain the queued asset invalidations. Returns the list of
+/// absolute paths the dev-server has rebuilt since this method was
+/// last called; the queue is left empty.
+///
+/// Called once per frame by the windowed runner alongside
+/// [`take_rebuild_pending`]. Returning `Vec` rather than a slice
+/// keeps the lock window to a single `mem::take` — callers iterate
+/// the result without holding the mutex.
+pub fn take_invalidations() -> Vec<PathBuf> {
+    ASSET_QUEUE
+        .lock()
+        .map(|mut g| std::mem::take(&mut *g))
+        .unwrap_or_default()
+}
+
+/// Push paths onto the invalidation queue and signal a rebuild. Used
+/// by the dx websocket handler and the local file watcher; exposed
+/// pub-crate so both can share the rebuild trigger logic.
+fn enqueue_invalidations(paths: impl IntoIterator<Item = PathBuf>) {
+    let paths: Vec<_> = paths.into_iter().collect();
+    if paths.is_empty() {
+        return;
+    }
+    if let Ok(mut q) = ASSET_QUEUE.lock() {
+        q.extend(paths);
+    }
+    REBUILD_PENDING.store(true, Ordering::Release);
+    if let Some(wake) = WAKE_FN.get() {
+        wake();
+    }
+}
+
+/// Watch a directory for asset changes. The watcher runs on its own
+/// background thread, watches `dir` recursively, and pushes any file
+/// that changes onto the same queue [`take_invalidations`] drains.
+///
+/// Multiple calls are additive — each call spawns a watcher for the
+/// given directory; existing watchers stay running. Pass each
+/// directory at most once: re-watching the same path doesn't
+/// deduplicate events, just doubles them.
+///
+/// Typical use: call once at app startup, before
+/// `WindowedApp::run`, with the project's asset directory.
+///
+/// ```ignore
+/// fn main() -> blinc_app::Result<()> {
+///     #[cfg(feature = "hot-reload")]
+///     blinc_app::hot_reload::watch_dir("assets");
+///     blinc_app::windowed::WindowedApp::run(WindowConfig::default(), build_ui)
+/// }
+/// ```
+///
+/// In release builds the call is harmless — `notify`'s thread spins
+/// up but the cache invalidations it triggers are no-ops since the
+/// renderer just re-reads the asset on next render either way.
+/// Apps that want zero overhead in release should gate the call
+/// behind `#[cfg(debug_assertions)]`.
+///
+/// Returns the watcher handle so the caller can keep it alive (or
+/// let it drop, in which case the watcher thread exits). The handle
+/// is `Send + Sync` so storing it in a static / `Arc` works fine.
+pub fn watch_dir(dir: impl AsRef<std::path::Path>) -> Option<WatcherHandle> {
+    use notify::{RecursiveMode, Watcher};
+
+    let dir = dir.as_ref().to_path_buf();
+    if !dir.exists() {
+        tracing::warn!(dir = %dir.display(), "hot-reload: watch_dir target does not exist, skipping");
+        return None;
+    }
+
+    let mut watcher = match notify::recommended_watcher(
+        |res: notify::Result<notify::Event>| match res {
+            Ok(event) => {
+                // Only fire on data-change kinds — `Create`, `Modify`,
+                // `Remove`. `Access` events are noise (open / close /
+                // touch), `Other` is platform-specific filler. notify's
+                // event-kind classifier hides this distinction behind
+                // its `EventKind` variants.
+                use notify::EventKind;
+                if matches!(
+                    event.kind,
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                ) {
+                    enqueue_invalidations(event.paths);
+                }
+            }
+            Err(e) => tracing::warn!(error = ?e, "hot-reload: watcher error"),
+        },
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(error = ?e, "hot-reload: failed to create file watcher");
+            return None;
+        }
+    };
+
+    if let Err(e) = watcher.watch(&dir, RecursiveMode::Recursive) {
+        tracing::warn!(error = ?e, dir = %dir.display(), "hot-reload: failed to watch dir");
+        return None;
+    }
+
+    tracing::info!(dir = %dir.display(), "hot-reload: watching directory");
+    Some(WatcherHandle(Box::new(watcher)))
+}
+
+/// Opaque watcher handle returned by [`watch_dir`]. Drop it to stop
+/// watching. `Box<dyn Watcher>` under the hood — exposing the
+/// concrete type would force callers to depend on `notify`, which
+/// the public API otherwise doesn't require.
+pub struct WatcherHandle(Box<dyn notify::Watcher + Send + Sync>);
+
 /// Subset of `dx` CLI's `DevserverMsg` we deserialise. The full
 /// upstream enum carries Dioxus VDOM template patches, asset
 /// reload notifications, and various lifecycle pings — we only
@@ -87,7 +206,7 @@ enum DevserverMsg {
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 struct HotReloadMsg {
-    /// Subsecond binary patch — the only field this client acts on.
+    /// Subsecond binary patch — function-body swap.
     jump_table: Option<JumpTable>,
     /// PID guard the dev-server stamps so apps in a multi-window /
     /// multi-process build don't apply each other's patches.
@@ -96,9 +215,13 @@ struct HotReloadMsg {
     /// so we don't pull `dioxus-core` into the deserialiser.
     #[allow(dead_code)]
     templates: serde_json::Value,
-    /// Asset reload list. Not consumed.
-    #[allow(dead_code)]
-    assets: serde_json::Value,
+    /// Absolute paths of assets dx has rebuilt out-of-band (e.g. an
+    /// image the user edited that dx detected via the file watcher).
+    /// Drives the runtime cache invalidation pass — see
+    /// [`take_invalidations`] for how the frame loop consumes this.
+    /// dx 0.7+ ships them as `Vec<PathBuf>`; older / variant servers
+    /// that omit the field land here as the empty default.
+    assets: Vec<PathBuf>,
     /// Build id stamp for de-duping patches across rebuilds.
     #[allow(dead_code)]
     for_build_id: Option<u64>,
@@ -184,18 +307,44 @@ fn handle_text(text: &str) {
     let DevserverMsg::HotReload(hot) = parsed else {
         return;
     };
-    let Some(jump_table) = hot.jump_table else {
-        return;
-    };
-    if hot.for_pid != Some(process::id()) {
-        tracing::trace!(
-            for_pid = ?hot.for_pid,
-            our_pid = process::id(),
-            "hot-reload: patch was for a different process, skipping"
-        );
-        return;
+
+    // `for_pid` filter applies uniformly: a patch for another process
+    // would be unsafe, an asset list for another process would
+    // pointlessly thrash our caches.
+    let our_pid = process::id();
+    if let Some(target) = hot.for_pid {
+        if target != our_pid {
+            tracing::trace!(
+                for_pid = target,
+                our_pid,
+                "hot-reload: message was for a different process, skipping"
+            );
+            return;
+        }
     }
 
+    // Asset rebuilds (image / font / SVG / glTF / ...). Pushed to a
+    // queue so the frame loop can drop matching cache entries before
+    // the rebuild paints — the next render reads fresh bytes off disk.
+    //
+    // Note: dx 0.7's wire format only populates this for files
+    // registered through Dioxus's `asset!()` macro (see
+    // `dioxus-cli/src/build/builder.rs::hotreload_bundled_assets`).
+    // Blinc apps don't use that macro, so this branch is effectively
+    // dead in the dx-driven path today. The Blinc-side
+    // [`watch_dir`] watcher fills the same queue, which is how
+    // image / SVG hot-reload actually fires for our users.
+    if !hot.assets.is_empty() {
+        tracing::info!(
+            count = hot.assets.len(),
+            "hot-reload: dx ws delivered asset invalidations"
+        );
+        enqueue_invalidations(hot.assets);
+    }
+
+    // Code patch. Done after assets so the rebuild that follows runs
+    // with both the new code and the invalidated caches in lockstep.
+    //
     // SAFETY: `subsecond::apply_patch` is unsafe because the patcher
     // and the running process must agree on layout / linkage. The dx
     // CLI on the other end is what guarantees that contract — it
@@ -204,25 +353,76 @@ fn handle_text(text: &str) {
     // Outside that contract the call would be undefined behaviour;
     // we trust the `for_pid` guard above + the build-id stamp the
     // server already filtered on to keep us in scope.
-    unsafe {
-        match subsecond::apply_patch(jump_table) {
-            Ok(()) => {
-                tracing::info!("hot-reload: patch applied");
-                // Mark the next event-loop tick as a forced rebuild so
-                // the user-supplied UI closure gets re-invoked under
-                // `subsecond::call`. Without this the patched function
-                // body is loaded but never executed — the renderer
-                // keeps painting the cached render tree.
-                REBUILD_PENDING.store(true, Ordering::Release);
-                if let Some(wake) = WAKE_FN.get() {
-                    wake();
-                } else {
-                    tracing::debug!(
-                        "hot-reload: no wake callback registered, UI will refresh on next natural redraw"
-                    );
+    if let Some(jump_table) = hot.jump_table {
+        unsafe {
+            match subsecond::apply_patch(jump_table) {
+                Ok(()) => {
+                    tracing::info!("hot-reload: patch applied");
+                    REBUILD_PENDING.store(true, Ordering::Release);
+                    if let Some(wake) = WAKE_FN.get() {
+                        wake();
+                    } else {
+                        tracing::debug!(
+                            "hot-reload: no wake callback registered, UI will refresh on next natural redraw"
+                        );
+                    }
                 }
+                Err(e) => tracing::warn!(error = ?e, "hot-reload: patch failed"),
             }
-            Err(e) => tracing::warn!(error = ?e, "hot-reload: patch failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Verifies the watcher → queue path: drop a file into a watched
+    /// dir and the path lands in ASSET_QUEUE within a reasonable
+    /// timeout. Polls because notify dispatches on its own thread
+    /// with platform-dependent latency (FSEvents on macOS coalesces
+    /// over ~250ms).
+    #[test]
+    fn watch_dir_pushes_changes_onto_queue() {
+        // Drain any leftover state from prior tests in the same process.
+        let _ = take_invalidations();
+        REBUILD_PENDING.store(false, Ordering::Release);
+
+        let tmp = std::env::temp_dir().join(format!(
+            "blinc-watch-test-{}-{}",
+            process::id(),
+            // small unique suffix so concurrent test runs don't collide
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).expect("create test dir");
+
+        let _handle = watch_dir(&tmp).expect("watcher should start");
+        // Give notify a moment to register the watch on macOS / Linux
+        // — notify doesn't have a "ready" signal, so we just wait
+        // briefly. 200ms is enough for FSEvents / inotify in practice.
+        std::thread::sleep(Duration::from_millis(200));
+
+        let test_file = tmp.join("hello.txt");
+        std::fs::write(&test_file, b"first").expect("write");
+
+        // Poll the queue for up to 2s.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut got = Vec::new();
+        while Instant::now() < deadline {
+            got.extend(take_invalidations());
+            if got.iter().any(|p| p.ends_with("hello.txt")) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        std::fs::remove_dir_all(&tmp).ok();
+
+        assert!(
+            got.iter().any(|p| p.ends_with("hello.txt")),
+            "expected hello.txt in queue, got: {got:?}"
+        );
+        assert!(REBUILD_PENDING.load(Ordering::Acquire));
     }
 }
