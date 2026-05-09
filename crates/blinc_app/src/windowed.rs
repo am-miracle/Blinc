@@ -2171,6 +2171,12 @@ impl WindowedApp {
         // `wake_proxy.wake_at(1000/N ms)` so the chain doesn't loop at
         // full refresh just because a slow CSS keyframe is on screen.
         let animation_fps_cap = config.animation_fps_cap;
+        // Capture animation_thread_mode pre-move (config gets moved
+        // into `create_event_loop_with_config` below). Drives whether
+        // the AnimationScheduler spawns its bg thread or relies on
+        // the main thread's per-frame `tick()` call (Phase 3) to
+        // advance springs / keyframes / timelines / tick_callbacks.
+        let animation_thread_mode = config.animation_thread_mode;
         let event_loop = platform
             .create_event_loop_with_config(config)
             .map_err(|e| BlincError::Platform(e.to_string()))?;
@@ -2235,20 +2241,40 @@ impl WindowedApp {
         // Shared animation scheduler for spring/keyframe animations
         // Runs on background thread so animations continue even when window loses focus
         let mut scheduler = AnimationScheduler::new();
-        // Set up wake callback so animation thread can wake the event
-        // loop. Marks `frame_dirty` so the resulting Event::Frame
-        // actually renders. The scheduler edge-triggers this callback
-        // (only fires on idle→active transitions, not every bg tick)
-        // so steady-state animation cadence is driven by the main
-        // thread's end-of-frame `request_redraw` chain — which gates
-        // on visibility — rather than by the bg thread waking us
-        // unconditionally.
+        // The wake callback gets installed in either thread mode.
+        // Used by:
+        //   * Bg thread (when `start_background()` is called below) —
+        //     fires on idle→active edge so the main thread wakes up
+        //     and starts rendering.
+        //   * `notify_active()` paths inside the scheduler
+        //     (`add_spring` / `add_keyframe` / etc.) — fires whenever
+        //     an animation gets registered. Necessary in
+        //     `AnimationThreadMode::Main` for off-thread registrations
+        //     (custom timer thread, async task) to trigger a render;
+        //     redundant-but-harmless in `Background` since the bg
+        //     thread also fires it on its idle→active edge.
+        // Marks `frame_dirty` so the resulting Event::Frame actually
+        // renders.
         let _ = visible_anim_for_wake_cb; // wake gate moved into scheduler edge trigger
         scheduler.set_wake_callback(move || {
             frame_dirty_for_wake.store(true, Ordering::Release);
             wake_proxy.wake();
         });
-        scheduler.start_background();
+        // Spawn the bg ticking thread only in `Background` mode. In
+        // `Main` (default), the windowed app's Phase 3 calls
+        // `RenderState::tick` which in turn calls
+        // `AnimationScheduler::tick` synchronously — eliminating phase
+        // jitter and removing one thread from the runtime. The
+        // `tick()` method itself is a no-op when a bg thread is
+        // running, so the two paths are mutually exclusive.
+        match animation_thread_mode {
+            blinc_platform::AnimationThreadMode::Background => {
+                scheduler.start_background();
+            }
+            blinc_platform::AnimationThreadMode::Main => {
+                // No bg thread. Main-thread tick handles it.
+            }
+        }
         let animations: SharedAnimationScheduler = Arc::new(Mutex::new(scheduler));
 
         // Set global scheduler handle for StateContext and component access

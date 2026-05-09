@@ -12,6 +12,42 @@ impl WindowId {
     pub const PRIMARY: WindowId = WindowId(0);
 }
 
+/// Where animation scheduler ticking happens.
+///
+/// Blinc's animation scheduler advances springs, keyframe animations,
+/// timelines, and `tick_callback`s once per frame. This enum picks
+/// which thread does that work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AnimationThreadMode {
+    /// Tick scheduler animations synchronously on the main thread,
+    /// in lockstep with rendering. No background thread is spawned.
+    ///
+    /// **Default.** Eliminates phase jitter between animation state
+    /// and rendered output, simplifies cross-thread reasoning, drops
+    /// to fully zero-cost on idle (no thread to park).
+    ///
+    /// Right for: standard UIs, dashboards, content viewers,
+    /// canvas/3D demos where the render closure is the limiting
+    /// factor and animation values are read at paint time.
+    #[default]
+    Main,
+
+    /// Tick scheduler animations on a dedicated background thread at
+    /// the configured target FPS, independent of rendering. The main
+    /// thread reads the latest computed values during render.
+    ///
+    /// Right for: apps with `tick_callback`s that need fixed-rate
+    /// execution regardless of rendering load — game physics fixed
+    /// step, audio sequencer callbacks, telemetry sampling.
+    ///
+    /// Most apps don't need this. CSS animations, motion
+    /// containers, FLIP, theme transitions, and visual / animate_bounds
+    /// are always main-thread regardless of this setting; this only
+    /// controls the `blinc_animation::AnimationScheduler` family
+    /// (springs / keyframes / timelines / tick_callbacks).
+    Background,
+}
+
 /// Window configuration
 #[derive(Clone, Debug)]
 pub struct WindowConfig {
@@ -89,6 +125,25 @@ pub struct WindowConfig {
     /// cap-OK side. Apps with Stateful-driven transforms that need
     /// vsync should leave the cap off.
     pub animation_fps_cap: Option<u32>,
+    /// Where the animation scheduler ticks (springs, keyframes,
+    /// timelines, tick_callbacks).
+    ///
+    /// Defaults to [`AnimationThreadMode::Main`] — animations advance
+    /// synchronously inside Phase 3 of each rendered frame, in
+    /// lockstep with paint. Eliminates phase jitter and removes one
+    /// thread from the runtime; cost on idle is zero.
+    ///
+    /// Set to [`AnimationThreadMode::Background`] only if your app
+    /// registers `tick_callback`s that need to fire at the
+    /// configured target FPS regardless of rendering — e.g. a fixed
+    /// step game-physics tick, an audio sequencer, telemetry
+    /// sampling.
+    ///
+    /// CSS animations, motion containers, FLIP, theme transitions,
+    /// visual / `animate_bounds` are always ticked on the main
+    /// thread regardless of this setting; this only controls the
+    /// `blinc_animation::AnimationScheduler` family.
+    pub animation_thread_mode: AnimationThreadMode,
 }
 
 impl Default for WindowConfig {
@@ -110,6 +165,7 @@ impl Default for WindowConfig {
             parent: None,
             max_frame_latency: 2,
             animation_fps_cap: None,
+            animation_thread_mode: AnimationThreadMode::default(),
         }
     }
 }
@@ -218,6 +274,16 @@ impl WindowConfig {
     /// scroll, and drag frames are never throttled.
     pub fn animation_fps_cap(mut self, fps: Option<u32>) -> Self {
         self.animation_fps_cap = fps.map(|f| f.max(1));
+        self
+    }
+
+    /// Pick where the animation scheduler ticks. See
+    /// [`AnimationThreadMode`] for the full trade-off — the short
+    /// version is `Main` (default) is right for almost everything;
+    /// `Background` only matters if you have `tick_callback`s that
+    /// need fixed-rate execution regardless of rendering load.
+    pub fn animation_thread_mode(mut self, mode: AnimationThreadMode) -> Self {
+        self.animation_thread_mode = mode;
         self
     }
 }
