@@ -101,6 +101,14 @@ thread_local! {
     /// from the worker thread that's about to issue a call.
     static SIGNAL_TABLE_I32: RefCell<std::collections::HashMap<String, i32>> =
         RefCell::new(std::collections::HashMap::new());
+
+    /// Per-thread f64-signal table. Same shape as `SIGNAL_TABLE_I32`
+    /// but for `signal <name>: f64` declarations. Read by
+    /// `blinc_signal_get_f64`, populated by `set_signal_f64`.
+    /// Useful for guards like `progress.get() >= 1.0` where the
+    /// signal value drives a Harel-style data transition.
+    static SIGNAL_TABLE_F64: RefCell<std::collections::HashMap<String, f64>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
 /// Drain and return everything pushed onto the scene buffer since the
@@ -197,6 +205,36 @@ extern "C" fn blinc_signal_get_i32(name_ptr: *const i32) -> i32 {
         .unwrap_or(name);
 
     SIGNAL_TABLE_I32.with(|t| t.borrow().get(stripped).copied().unwrap_or(0))
+}
+
+/// `__signal_get_f64` — host implementation of the f64 signal
+/// accessor. Mirrors `blinc_signal_get_i32` in shape; the only
+/// differences are the lookup table and the return type.
+/// Default fallback is `0.0` for unset signals.
+///
+/// # Safety
+///
+/// Same contract as [`blinc_signal_get_i32`]. The runtime
+/// guarantees `name_ptr` points at a Zyntax length-prefixed
+/// UTF-8 buffer.
+extern "C" fn blinc_signal_get_f64(name_ptr: *const i32) -> f64 {
+    if name_ptr.is_null() {
+        tracing::warn!("__signal_get_f64 called with null name pointer");
+        return 0.0;
+    }
+
+    let name = unsafe {
+        let len = std::ptr::read_unaligned(name_ptr) as usize;
+        let body = (name_ptr as *const u8).add(std::mem::size_of::<i32>());
+        let bytes = std::slice::from_raw_parts(body, len);
+        std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
+    };
+    let stripped = name
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(name);
+
+    SIGNAL_TABLE_F64.with(|t| t.borrow().get(stripped).copied().unwrap_or(0.0))
 }
 
 /// `$Blinc$text_int` — integer arm of `text(...)`. Pushes an integer
@@ -703,6 +741,7 @@ fn resolve_signal_calls(program: &mut TypedProgram) {
     fn typed_signal_extern_name(ty: &Type) -> Option<&'static str> {
         match ty {
             Type::Primitive(PrimitiveType::I32) => Some("__signal_get_i32"),
+            Type::Primitive(PrimitiveType::F64) => Some("__signal_get_f64"),
             Type::Primitive(PrimitiveType::String) => Some("__signal_get_string"),
             // Add a match arm + a matching host builtin to extend.
             _ => None,
@@ -1756,6 +1795,22 @@ impl BlincDsl {
     pub fn get_signal_i32(&self, name: &str) -> Option<i32> {
         SIGNAL_TABLE_I32.with(|t| t.borrow().get(name).copied())
     }
+
+    /// Set the current value of an f64-typed signal. Same shape
+    /// as `set_signal_i32` but for `signal <name>: f64`
+    /// declarations. Useful for floating-point guards — progress
+    /// fractions, timing values, normalised positions.
+    pub fn set_signal_f64(&self, name: &str, value: f64) {
+        SIGNAL_TABLE_F64.with(|t| {
+            t.borrow_mut().insert(name.to_string(), value);
+        });
+    }
+
+    /// Read the current value of an f64-typed signal. `None`
+    /// when unset; `Some(0.0)` when explicitly seeded to zero.
+    pub fn get_signal_f64(&self, name: &str) -> Option<f64> {
+        SIGNAL_TABLE_F64.with(|t| t.borrow().get(name).copied())
+    }
 }
 
 /// Builtin descriptor — pairs a DSL-visible symbol name with the
@@ -1827,6 +1882,15 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             return_type: Type::Primitive(PrimitiveType::I32),
             ptr: blinc_signal_get_i32 as *const u8,
         },
+        BuiltinDescriptor {
+            // f64 mirror of `__signal_get_i32`. Same DSL surface
+            // (`<name>.get()`) routed by `resolve_signal_calls` to
+            // this extern when the signal's declared type is `f64`.
+            name: "__signal_get_f64",
+            param_types: &[Type::Primitive(PrimitiveType::String)],
+            return_type: Type::Primitive(PrimitiveType::F64),
+            ptr: blinc_signal_get_f64 as *const u8,
+        },
     ]
 }
 
@@ -1844,6 +1908,7 @@ fn type_to_tag(ty: &Type) -> TypeTag {
         Type::Primitive(PrimitiveType::String) => TypeTag::STRING,
         Type::Primitive(PrimitiveType::I32) => TypeTag::I32,
         Type::Primitive(PrimitiveType::I64) => TypeTag::I64,
+        Type::Primitive(PrimitiveType::F64) => TypeTag::F64,
         // Add more as the builtin surface grows. Falling through to
         // VOID rather than guessing would silently break codegen, so
         // panic loudly to surface the gap during prototype iteration.
@@ -4961,6 +5026,241 @@ mod tests {
     // No widget integration or Stateful coupling — just the live
     // string-keyed state that embedders can wrap however they want.
     // -----------------------------------------------------------------
+
+    // -----------------------------------------------------------------
+    // Float-literal + f64-signal tests. Verify the new
+    // primary_expr alternate produces a FloatLiteral, the
+    // `signal <name>: f64` decl routes `.get()` to
+    // `__signal_get_f64`, and a guard like
+    // `progress.get() >= 1.0` fires the JIT path correctly.
+    // -----------------------------------------------------------------
+
+    /// `1.0` parses as a `TypedLiteral::Float(f64)`. Pinning the
+    /// new `float` rule against the existing `integer` rule
+    /// (which would otherwise consume `1` as the longer prefix
+    /// without the dot, breaking ambiguity).
+    #[test]
+    fn parse_float_literal() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state x: f64
+                    view {}
+                    fn step() { let p = 1.5 }
+                }
+                "#,
+                "float_literal.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let body = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("step"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+        let TypedStatement::Let(let_node) = &body.statements[0].node else {
+            panic!("expected Let");
+        };
+        let init = let_node.initializer.as_ref().unwrap();
+        let TypedExpression::Literal(TypedLiteral::Float(v)) = &init.node else {
+            panic!("expected Float literal, got {:?}", init.node);
+        };
+        assert!(
+            (*v - 1.5_f64).abs() < f64::EPSILON,
+            "expected 1.5, got {v}"
+        );
+    }
+
+    /// Negative float `-0.25` and scientific notation `1e3` both
+    /// parse via the same `float` rule. Pinning both shapes so a
+    /// future rule simplification doesn't regress.
+    #[test]
+    fn parse_float_literal_signed_and_scientific() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        for (label, src, expected) in [
+            ("negative", "-0.25", -0.25_f64),
+            ("scientific", "1e3", 1000.0_f64),
+        ] {
+            let program = dsl
+                .parse_to_typed_ast(
+                    &format!(
+                        "component C {{ state x: f64 view {{}} fn step() {{ let p = {src} }} }}"
+                    ),
+                    &format!("float_{label}.blinc"),
+                )
+                .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            let imp = program
+                .declarations
+                .iter()
+                .find_map(|d| match &d.node {
+                    zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                    _ => None,
+                })
+                .unwrap();
+            let body = imp
+                .methods
+                .iter()
+                .find(|m| m.name.resolve_global().as_deref() == Some("step"))
+                .unwrap()
+                .body
+                .as_ref()
+                .unwrap();
+            let TypedStatement::Let(let_node) = &body.statements[0].node else {
+                panic!("{label}: expected Let");
+            };
+            let init = let_node.initializer.as_ref().unwrap();
+            let TypedExpression::Literal(TypedLiteral::Float(v)) = &init.node else {
+                panic!("{label}: expected Float, got {:?}", init.node);
+            };
+            assert!(
+                (*v - expected).abs() < 1e-9,
+                "{label}: expected {expected}, got {v}"
+            );
+        }
+    }
+
+    /// `signal progress: f64` + `progress.get()` should rewrite
+    /// to `__signal_get_f64("progress")`, mirroring the i32 path.
+    #[test]
+    fn signal_get_rewrites_to_typed_extern_f64() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                signal progress: f64
+                fsm SignalProbeF64 {
+                    state Loading
+                    state Done
+                    initial Loading
+                    tick Loading -> Done when progress.get() >= 1.0
+                }
+                "#,
+                "signal_f64.blinc",
+            )
+            .expect("parse");
+
+        // Locate the __fsm_meta__ body on the SignalProbeF64 impl.
+        let imp = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i)
+                    if i.trait_name.resolve_global().as_deref() == Some("SignalProbeF64") =>
+                {
+                    Some(i)
+                }
+                _ => None,
+            })
+            .expect("SignalProbeF64 Impl");
+        let meta = imp
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("__fsm_meta__"))
+            .unwrap();
+        let body = meta.body.as_ref().unwrap();
+
+        // Find the __fsm_tick__ marker; arg[1] is the rewritten
+        // guard expression `Binary(Call(__signal_get_f64, "progress"), Ge, FloatLit(1.0))`.
+        let tick_call = body
+            .statements
+            .iter()
+            .find_map(|s| {
+                let TypedStatement::Expression(e) = &s.node else {
+                    return None;
+                };
+                let TypedExpression::Call(c) = &e.node else {
+                    return None;
+                };
+                let TypedExpression::Variable(callee) = &c.callee.node else {
+                    return None;
+                };
+                (callee.resolve_global().as_deref() == Some("__fsm_tick__")).then_some(c)
+            })
+            .expect("__fsm_tick__ marker");
+
+        let guard = &tick_call.positional_args[1];
+        let TypedExpression::Binary(cmp) = &guard.node else {
+            panic!("guard should be Binary, got {:?}", guard.node);
+        };
+        assert!(matches!(cmp.op, zyntax_typed_ast::BinaryOp::Ge));
+        let TypedExpression::Call(sig_call) = &cmp.left.node else {
+            panic!("LHS should be Call after rewrite");
+        };
+        let TypedExpression::Variable(callee) = &sig_call.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_eq!(
+            callee.resolve_global().as_deref(),
+            Some("__signal_get_f64"),
+            "f64 signal should rewrite to __signal_get_f64"
+        );
+        let TypedExpression::Literal(TypedLiteral::Float(v)) = &cmp.right.node else {
+            panic!("RHS should be FloatLit, got {:?}", cmp.right.node);
+        };
+        assert!((*v - 1.0_f64).abs() < f64::EPSILON);
+    }
+
+    /// End-to-end: compile a fsm with a float-signal guard,
+    /// move the signal across the threshold, watch step_tick
+    /// fire. Verifies the i32-handling pattern extends cleanly
+    /// to f64 — same dispatch, different table.
+    #[test]
+    fn float_signal_guard_fires_on_threshold() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.set_signal_f64("e2e_progress", 0.0);
+        dsl.compile_source(
+            r#"
+            signal e2e_progress: f64
+            fsm FloatGuardProbe {
+                state Loading
+                state Done
+                initial Loading
+                tick Loading -> Done when e2e_progress.get() >= 1.0
+            }
+            "#,
+            "float_e2e.blinc",
+        )
+        .expect("compile");
+
+        let module = InternedString::new_global("main");
+        let id = with_fsm_registry(|r| r.find_by_name(module, "FloatGuardProbe"))
+            .expect("FloatGuardProbe registered");
+
+        // Below threshold → no transition.
+        let next = dsl.step_tick(&id, "Loading").expect("step_tick");
+        assert!(next.is_none(), "0.0 < 1.0, should not fire");
+
+        // Cross the threshold.
+        dsl.set_signal_f64("e2e_progress", 1.0);
+        let next = dsl.step_tick(&id, "Loading").expect("step_tick");
+        assert_eq!(
+            next.and_then(|n| n.resolve_global()).as_deref(),
+            Some("Done"),
+            "1.0 >= 1.0, guard fires"
+        );
+    }
+
 
     /// Lifecycle: construct from a registered fsm, dispatch a
     /// sequence of events, watch `current()` follow each

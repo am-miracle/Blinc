@@ -33,6 +33,7 @@
     // host registers the implementations via
     // `register_function_typed` and the JIT calls into Rust.
     __signal_get_i32: "__signal_get_i32",
+    __signal_get_f64: "__signal_get_f64",
 }
 
 // =====================================================================
@@ -290,10 +291,22 @@ plain_field = { name:identifier ~ ":" ~ ty:state_type }
 // `prim_*` shape: each primitive is its own rule so the action
 // constructs `Type::Primitive { name: intern("...") }` with the
 // right tag. Extend as the prototype grows.
-state_type = { state_type_i32 | state_type_string }
+state_type = { state_type_f64 | state_type_i32 | state_type_string }
 
 state_type_i32 = { "i32" }
   -> Type::Primitive { name: intern("i32") }
+
+// `f64` — double-precision float, used for guard expressions
+// against signal values like `progress.get() >= 1.0`. Maps to
+// Zyntax's `PrimitiveType::F64` (interpreter.rs:2015). f64 (not
+// f32) because the typed-AST `TypedLiteral::Float` variant is
+// f64-only — using f32 would force every literal-vs-signal
+// comparison to cross types. Adding f32 alongside requires
+// either grammar-level type suffixes (`1.0f32`) or
+// explicit-cast support. f64 covers the common case (UI
+// progress, normalised positions) without coercion risk.
+state_type_f64 = { "f64" }
+  -> Type::Primitive { name: intern("f64") }
 
 // DSL surface uses `string` (most-natural keyword) but the typed AST
 // is built as `Type::Primitive { name: intern("str") }` because
@@ -681,6 +694,21 @@ string_inner = { !("\"" | "\\") ~ ANY | "\\" ~ ANY }
 integer = @{ ("+" | "-")? ~ ASCII_DIGIT+ }
   -> TypedExpression::IntLiteral { value: parse_int(text()) }
 
+// Float literal. Mirrors ml.zyn:2846 — accepts both `1.0`-style
+// and scientific (`1e-3`) forms. Must come before `integer` in
+// `primary_expr` because `1` alone is a valid prefix of `1.0`,
+// and PEG ordered alternates pick the first match. The parsed
+// value is a `f64` at the typed-AST level; signal accessors
+// (`__signal_get_f32`) downcast where needed.
+float = @{
+    ("+" | "-")? ~ ASCII_DIGIT+ ~
+    (
+        "." ~ ASCII_DIGIT+ ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+)?
+      | ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+
+    )
+}
+  -> TypedExpression::FloatLiteral { value: parse_float(text()) }
+
 // =====================================================================
 // F-strings
 // =====================================================================
@@ -845,16 +873,20 @@ call_args_tail = { ","? ~ e:expr }
 //   1. `paren_expr` first because `(` is unambiguous.
 //   2. `f_string_literal` before `string_literal` — `f"` is a
 //      stronger prefix than `"`.
-//   3. `string_literal` before `integer` — quotes vs digits.
-//   4. `integer` before `variable_expr` — digits start with a
+//   3. `string_literal` before `float`/`integer` — quotes vs digits.
+//   4. `float` before `integer` — both start with digits, and the
+//      float rule consumes the longer prefix (`1.0` matches float;
+//      `1` alone falls through to integer).
+//   5. `integer` before `variable_expr` — digits start with a
 //      digit character which `identifier`'s `ASCII_ALPHA` head
 //      can't match, so the order here is mostly cosmetic, but
 //      keeping literals together feels right.
-//   5. `variable_expr` last as the catch-all bare-name shape.
+//   6. `variable_expr` last as the catch-all bare-name shape.
 primary_expr = {
     paren_expr |
     f_string_literal |
     string_literal |
+    float |
     integer |
     variable_expr
 }
