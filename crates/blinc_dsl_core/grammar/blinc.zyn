@@ -248,8 +248,67 @@ statements = { stmt:statement* }
 // — interpolate via `text(f"{count}")` instead. f-string parts now
 // accept full expressions (see `f_string_expr` below).
 statement = {
-    text_string_stmt | text_int_stmt | assign_stmt
+    text_string_stmt | text_int_stmt | if_stmt | let_stmt | assign_stmt
 }
+
+// `let <name> = <expr>` — immutable local binding. Lowers to
+// `TypedStatement::Let` with `is_mutable: false` and no
+// `type_annotation` (the compiler infers from the initializer; see
+// `interpreter.rs:381-403`'s "Let" construction). Mutable lets
+// (`let mut x = ...`) and typed lets (`let x: T = ...`) aren't in
+// the prototype slice — the design intent is that mutation flows
+// through component `state` fields, and typed lets only matter
+// when inference can't pin a type, which doesn't happen at the
+// expression shapes the prototype supports today.
+//
+// Why we use `let` for plain locals AND `state ...` for reactive
+// fields: a `let` inside a method body is just a stack-local binding
+// with no UI-rebuild semantics. State that drives the view lives at
+// the component level (declared via `state name: T` in the field
+// list). Keeping them syntactically distinct prevents the
+// "everything is reactive" trap — most computed values in event
+// handlers don't need to trigger renders.
+let_stmt = { "let" ~ name:identifier ~ "=" ~ init:expr }
+  -> TypedStatement::Let {
+      name: intern(name),
+      type_annotation: None,
+      initializer: Some(init),
+      is_mutable: false,
+  }
+
+// `if <expr> { <stmts> }` and `if <expr> { <stmts> } else { <stmts> }`.
+// PEG ordered alternates: try the with-else form first because it
+// matches a longer prefix. `else if` chains aren't sugar yet —
+// authors write `else { if ... }` for now.
+//
+// Both branches use the `block` rule (curly-delimited statement
+// list) which produces a `TypedBlock` directly. The interpreter's
+// "If" construction at runtime2/interpreter.rs:433-443 picks up
+// `condition`, `then_branch`, and optional `else_branch` from the
+// action fields.
+if_stmt = { if_else_stmt | if_simple_stmt }
+
+if_else_stmt = { "if" ~ cond:expr ~ then_body:block ~ "else" ~ else_body:block }
+  -> TypedStatement::If {
+      condition: cond,
+      then_branch: then_body,
+      else_branch: else_body,
+  }
+
+if_simple_stmt = { "if" ~ cond:expr ~ then_body:block }
+  -> TypedStatement::If {
+      condition: cond,
+      then_branch: then_body,
+      else_branch: None,
+  }
+
+// Curly-delimited statement block. Distinct from the bare
+// `statements` rule because top-level `view { ... }` and
+// `fn name() { ... }` already provide the surrounding braces. This
+// rule is what `if` / `else` / future loops need: a self-contained
+// brace-delimited stmt sequence that lowers to a `TypedBlock`.
+block = { "{" ~ stmts:statement* ~ "}" }
+  -> TypedBlock { statements: stmts }
 
 // `<target> = <expr>` — assignment statement, lowered as a
 // TypedExpression::Binary with BinaryOp::Assign wrapped in a
@@ -407,7 +466,36 @@ f_string_text = @{ (!("\"" | "{" | "}") ~ ANY)+ }
 // yet for state mutation + interpolated rendering — we'll extend
 // outward as components grow conditionals and method dispatch.
 
-expr = { e:additive_expr } -> e
+expr = { e:comparison_expr } -> e
+
+// Comparison layer. Single-shot, non-chainable — `a < b < c` is
+// a parse error, not `(a < b) < c`. Mirrors ml.zyn:2384-2396 with
+// the `comparison_with_op | comparison_no_op` shape: when there's
+// a comparison operator we build a Binary, otherwise we fall
+// through to `additive_expr`.
+//
+// Comparison binds looser than additive (`a + b < c + d` →
+// `Binary(a + b, Lt, c + d)`), matching every C-family precedence
+// table. The interpreter's `string_to_binary_op`
+// (interpreter.rs:4430-4435) already maps `<` / `>` / `==` / `!=`
+// / `<=` / `>=` to the corresponding `BinaryOp` variants.
+comparison_expr = { comparison_with_op | comparison_no_op }
+
+comparison_with_op = { left:additive_expr ~ op:comparison_op ~ right:additive_expr }
+  -> TypedExpression::Binary {
+      op: op,
+      left: Box::new(left),
+      right: Box::new(right),
+  }
+
+comparison_no_op = { inner:additive_expr }
+  -> inner
+
+// Order matters within `comparison_op`: `<=` / `>=` / `==` / `!=`
+// must come before `<` / `>` / `=` so PEG doesn't greedy-match the
+// shorter prefix. Quoted as an atomic rule (`@`) so the matched
+// text is what the action's `op:` field receives.
+comparison_op = @{ "==" | "!=" | "<=" | ">=" | "<" | ">" }
 
 // `a + b - c` → Binary(Binary(a, +, b), -, c). `fold_left_ops` is
 // the standard Zyntax helper at runtime2/interpreter.rs:2148 — it

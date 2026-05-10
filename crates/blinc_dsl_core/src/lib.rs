@@ -1373,6 +1373,185 @@ mod tests {
         assert!(matches!(add.op, zyntax_typed_ast::BinaryOp::Add));
     }
 
+    /// `let derived = count + 1` — immutable local binding.
+    /// Lowers to `TypedStatement::Let` with `mutability ==
+    /// Immutable`, `ty == Type::Any` (no annotation, compiler
+    /// infers), and an initializer Binary expression.
+    ///
+    /// Why we test this end-to-end: the grammar action reads
+    /// `is_mutable: false` / `type_annotation: None`, but the
+    /// interpreter's "Let" construction
+    /// (runtime2/interpreter.rs:381-403) rewrites those into the
+    /// real TypedLet shape. Easy to break by changing field names.
+    #[test]
+    fn parse_let_binding() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state count: i32
+                    view {}
+                    fn step() {
+                        let derived = count + 1
+                    }
+                }
+                "#,
+                "let_binding.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .expect("expected Impl");
+        let body = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("step"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(body.statements.len(), 1, "expected one let stmt");
+        let TypedStatement::Let(let_node) = &body.statements[0].node else {
+            panic!("expected Let, got {:?}", body.statements[0].node);
+        };
+        assert_eq!(let_node.name.resolve_global().as_deref(), Some("derived"));
+        assert!(
+            matches!(let_node.mutability, zyntax_typed_ast::Mutability::Immutable),
+            "phase-2 let is immutable, got {:?}",
+            let_node.mutability
+        );
+        let init = let_node
+            .initializer
+            .as_ref()
+            .expect("let must have initializer");
+        let TypedExpression::Binary(add) = &init.node else {
+            panic!("expected Binary initializer, got {:?}", init.node);
+        };
+        assert!(matches!(add.op, zyntax_typed_ast::BinaryOp::Add));
+    }
+
+    /// `if count > 0 { text("positive") } else { text("zero") }` —
+    /// conditional rendering. Asserts (a) `>` parses as a
+    /// comparison Binary at the condition, (b) both branches
+    /// produce TypedBlocks with the right number of statements,
+    /// (c) the else_block is populated.
+    #[test]
+    fn parse_if_else_with_comparison() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state count: i32
+                    view {
+                        if count > 0 {
+                            text("positive")
+                        } else {
+                            text("zero")
+                        }
+                    }
+                }
+                "#,
+                "if_else.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let view = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("view"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(view.statements.len(), 1);
+        let TypedStatement::If(if_stmt) = &view.statements[0].node else {
+            panic!("expected If, got {:?}", view.statements[0].node);
+        };
+
+        // Condition is `count > 0` — Binary with BinaryOp::Gt.
+        let TypedExpression::Binary(cond) = &if_stmt.condition.node else {
+            panic!("expected Binary condition");
+        };
+        assert!(
+            matches!(cond.op, zyntax_typed_ast::BinaryOp::Gt),
+            "expected Gt, got {:?}",
+            cond.op
+        );
+
+        // then-branch has one text("positive") stmt.
+        assert_eq!(if_stmt.then_block.statements.len(), 1);
+        // else-branch present, also one stmt.
+        let else_block = if_stmt
+            .else_block
+            .as_ref()
+            .expect("expected else branch");
+        assert_eq!(else_block.statements.len(), 1);
+    }
+
+    /// `if count > 0 { ... }` with no else — `else_block` is None.
+    /// Pinning the simple form so a future "always emit empty
+    /// else" refactor doesn't sneak in.
+    #[test]
+    fn parse_if_no_else() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state count: i32
+                    view { if count > 0 { text("yes") } }
+                }
+                "#,
+                "if_no_else.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let view = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("view"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+        let TypedStatement::If(if_stmt) = &view.statements[0].node else {
+            panic!("expected If");
+        };
+        assert!(if_stmt.else_block.is_none(), "no-else form should leave else_block None");
+    }
+
     /// Mixed-statement view exercises both `text(...)` arg shapes
     /// (string + integer) coexisting in the same compiled function
     /// and routing to distinct host builtins via the grammar's PEG
