@@ -104,13 +104,15 @@ repository = "https://github.com/project-blinc/Blinc"
 rust-version = "1.75"
 
 [workspace.dependencies]
-# Zyntax integration. Grammar2 + tiered runtime are now available; we pin
-# to a sibling path during prototyping. Once zyntax_embed publishes to
-# crates.io we'll switch to a versioned dep and lock by semver. The
-# `0.1.0` upstream has `#![allow(unused, dead_code, deprecated)]` and
-# makes no semver guarantees yet, so expect occasional breakage and
-# track upstream commits when the Blinc DSL prototype lands.
-zyntax_embed = { path = "../zyntax/crates/zyntax_embed" }
+# Zyntax integration. Grammar2 + tiered runtime are now available;
+# we pin to an upstream commit because `zyntax_embed` isn't published
+# to crates.io yet. Bump the `rev` when pulling in upstream changes
+# — the `0.1.0` upstream has `#![allow(unused, dead_code, deprecated)]`
+# and makes no semver guarantees, so expect occasional breakage and
+# track upstream commits when the Blinc DSL prototype lands. The
+# previous `path = "../zyntax/..."` worked locally during early
+# prototyping but broke CI runners that don't clone the sibling repo.
+zyntax_embed = { git = "https://github.com/darmie/zyntax", rev = "a4dfa215d7664ce08b96052bf3de2f4c38a429f0" }
 
 # GPU rendering
 #
