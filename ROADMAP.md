@@ -268,9 +268,11 @@ The `BlincDslError` type wraps `zyntax_embed::GrammarError` / `RuntimeError` and
 
 ### 3.7 Hot reload
 
-Reuses the watcher infra shipped in `92d46b48`. The `.blinc` extension gets a branch in `RenderContext::invalidate_asset_path`: re-parse the changed file, lower per-component to HIR, call `runtime.hot_reload(name, &hir_function)` per affected function (atomic pointer swap). Other components untouched. Same `REBUILD_PENDING` → wake → frame-loop rebuild trigger fires.
+Zyntax's tiered backend uses **beadie** for on-stack replacement (see `zyntax/crates/compiler/BEADIE_INTEGRATION.md`). When a `.blinc` file is recompiled via `runtime.compile_typed_program(...)`, beadie's `TieredAdapter` atomically swaps the function pointers via `Bead::swap_compiled` — including OSR for in-flight invocations of long-running functions. **No per-component `runtime.hot_reload(name, hir)` call required from Blinc; the runtime handles state preservation across the swap on its own.**
 
-Hot-reload is JIT-only by construction. iOS users always restart for code changes.
+Plumbing on the Blinc side reduces to: `.blinc` file watcher (already shipped in `92d46b48`'s `hot_reload::watch_dir`) → re-parse + recompile via the same path used at first load. The frame loop calls the same component entry points; beadie hands them the new code on the next invocation.
+
+Hot-reload is JIT-only by construction. iOS users always restart for code changes (LLVM AOT, no JIT).
 
 ### 3.8 Features
 
