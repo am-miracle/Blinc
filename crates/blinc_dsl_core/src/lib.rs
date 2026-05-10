@@ -192,6 +192,110 @@ pub type BlincDslResult<T> = std::result::Result<T, BlincDslError>;
 // FSM dispatch synthesis (post-parse)
 // =====================================================================
 
+/// Wrap every fsm's `__fsm_meta__` body with `__fsm_begin__("FsmName")`
+/// at the front and `__fsm_end__()` at the back. The host registers
+/// these markers as builtins that push/pop a "current FSM" name on
+/// a stack, so the `__fsm_initial__` / `__fsm_transition__` calls
+/// inside the body know which fsm they're configuring.
+///
+/// Why a post-parse pass and not grammar action: same reason the
+/// `<FSM>Event` synthesis is post-parse — the action language can't
+/// string-concat or reach into the surrounding rule's bindings to
+/// pull the FSM name into a child rule's emit. Building the wrapper
+/// stmts in Rust is simpler.
+///
+/// The pass is idempotent in the sense that it only fires on
+/// `__fsm_meta__` methods (synthesised by the `fsm` grammar rule);
+/// programs without an fsm decl pass through untouched.
+fn inject_fsm_context_markers(program: &mut TypedProgram) {
+    use zyntax_typed_ast::typed_ast::{
+        TypedCall, TypedDeclaration, TypedExpression, TypedLiteral, TypedStatement,
+    };
+    use zyntax_typed_ast::{InternedString, TypedNode};
+
+    fn make_marker_call(callee: &str, str_args: &[&str]) -> TypedNode<TypedStatement> {
+        let args: Vec<TypedNode<TypedExpression>> = str_args
+            .iter()
+            .map(|s| {
+                TypedNode::new(
+                    TypedExpression::Literal(TypedLiteral::String(
+                        InternedString::new_global(s),
+                    )),
+                    Type::Primitive(PrimitiveType::String),
+                    Span::default(),
+                )
+            })
+            .collect();
+
+        let call = TypedExpression::Call(TypedCall {
+            callee: Box::new(TypedNode::new(
+                TypedExpression::Variable(InternedString::new_global(callee)),
+                Type::Unknown,
+                Span::default(),
+            )),
+            positional_args: args,
+            named_args: vec![],
+            type_args: vec![],
+        });
+
+        TypedNode::new(
+            TypedStatement::Expression(Box::new(TypedNode::new(
+                call,
+                Type::Primitive(PrimitiveType::Unit),
+                Span::default(),
+            ))),
+            Type::Primitive(PrimitiveType::Unit),
+            Span::default(),
+        )
+    }
+
+    for decl in &mut program.declarations {
+        let TypedDeclaration::Impl(imp) = &mut decl.node else {
+            continue;
+        };
+        let Some(fsm_name) = imp.trait_name.resolve_global() else {
+            continue;
+        };
+
+        for method in &mut imp.methods {
+            if method.name.resolve_global().as_deref() != Some("__fsm_meta__") {
+                continue;
+            }
+            let Some(body) = method.body.as_mut() else {
+                continue;
+            };
+
+            // Skip if begin marker already present — defensive
+            // against double-application if this pass is ever run
+            // twice on the same program.
+            let already_wrapped = body
+                .statements
+                .first()
+                .map(|s| {
+                    let TypedStatement::Expression(e) = &s.node else {
+                        return false;
+                    };
+                    let TypedExpression::Call(c) = &e.node else {
+                        return false;
+                    };
+                    let TypedExpression::Variable(callee) = &c.callee.node else {
+                        return false;
+                    };
+                    callee.resolve_global().as_deref() == Some("__fsm_begin__")
+                })
+                .unwrap_or(false);
+            if already_wrapped {
+                continue;
+            }
+
+            let begin = make_marker_call("__fsm_begin__", &[&fsm_name]);
+            let end = make_marker_call("__fsm_end__", &[]);
+            body.statements.insert(0, begin);
+            body.statements.push(end);
+        }
+    }
+}
+
 /// Walk a parsed `TypedProgram` and synthesize a sibling `<FSM>Event`
 /// enum for every fsm declaration that has at least one
 /// `__fsm_transition__` marker. The synthesized enum's variants are
@@ -464,11 +568,24 @@ impl BlincDsl {
             .parse_with_signatures(source, filename, runtime.plugin_signatures())
             .map_err(|e| BlincDslError::Compile(e.to_string()))?;
 
-        // Post-parse synthesis: walk `__fsm_meta__` markers and emit
-        // a sibling `<FSM>Event` enum for every fsm with at least one
-        // event-driven transition. Keeps the grammar minimal (it
-        // can't string-concat at action time) and puts the runtime
-        // dispatch concern where it belongs — at the host boundary.
+        // Post-parse FSM passes — both run regardless of whether
+        // the source contains an fsm; they no-op on programs that
+        // don't have `__fsm_meta__` impls.
+        //
+        //   1. Inject `__fsm_begin__("FsmName")` / `__fsm_end__()`
+        //      around each `__fsm_meta__` body so the host knows
+        //      which FSM owns each marker call when the body is
+        //      executed by Zyntax (the markers are stateful — they
+        //      manipulate a host-side context stack).
+        //   2. Synthesise a `<FSM>Event` enum from the unique event
+        //      names referenced by `__fsm_transition__` markers.
+        //
+        // The marker calls inside `__fsm_meta__` are then ordinary
+        // function calls; Zyntax compiles them like any other call,
+        // and the host registers `__fsm_begin__` / `__fsm_end__` /
+        // `__fsm_initial__` / `__fsm_transition__` as builtins. No
+        // codegen pass — Zyntax owns compilation.
+        inject_fsm_context_markers(&mut program);
         synthesize_fsm_event_enums(&mut program);
 
         Ok(program)
@@ -2116,10 +2233,18 @@ mod tests {
         );
     }
 
-    /// First statement in `__fsm_meta__` is the `__fsm_initial__`
-    /// marker carrying the initial state name as a string literal.
-    /// Pinning this so a refactor that re-orders the prepend doesn't
-    /// silently move the initial declaration.
+    /// `__fsm_meta__` body layout after both post-parse passes:
+    ///
+    ///     [0] __fsm_begin__("FsmName")
+    ///     [1] __fsm_initial__("InitialState")
+    ///     [2..n-1] __fsm_transition__ / __fsm_tick__ markers
+    ///     [n-1] __fsm_end__()
+    ///
+    /// Begin/end wrap the body so the host knows which fsm owns
+    /// the markers in between. This test pins (a) the begin
+    /// marker is at body[0] with the right FSM name, (b) the
+    /// initial marker is at body[1] with the right state name,
+    /// (c) the end marker is at the last index.
     #[test]
     fn parse_fsm_initial_marker() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -2151,27 +2276,43 @@ mod tests {
         let meta = &impl_block.methods[0];
         let body = meta.body.as_ref().expect("__fsm_meta__ body");
 
-        // Body[0] should be `__fsm_initial__("Off")`.
-        let TypedStatement::Expression(node) = &body.statements[0].node else {
-            panic!("expected Expression stmt at [0]");
+        // Helper to extract (callee, args) at a given index.
+        let extract = |idx: usize| -> (String, Vec<String>) {
+            let TypedStatement::Expression(node) = &body.statements[idx].node else {
+                panic!("expected Expression stmt at [{idx}]");
+            };
+            let TypedExpression::Call(call) = &node.node else {
+                panic!("expected Call at [{idx}]");
+            };
+            let TypedExpression::Variable(callee) = &call.callee.node else {
+                panic!("expected Variable callee at [{idx}]");
+            };
+            let str_args = call
+                .positional_args
+                .iter()
+                .filter_map(|a| {
+                    if let TypedExpression::Literal(TypedLiteral::String(s)) = &a.node {
+                        s.resolve_global()
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            (callee.resolve_global().unwrap_or_default(), str_args)
         };
-        let TypedExpression::Call(call) = &node.node else {
-            panic!("expected Call");
-        };
-        let TypedExpression::Variable(callee) = &call.callee.node else {
-            panic!("expected Variable callee");
-        };
-        assert_eq!(
-            callee.resolve_global().as_deref(),
-            Some("__fsm_initial__"),
-            "first marker should be __fsm_initial__"
-        );
-        assert_eq!(call.positional_args.len(), 1);
-        let TypedExpression::Literal(TypedLiteral::String(name)) = &call.positional_args[0].node
-        else {
-            panic!("expected String arg, got {:?}", call.positional_args[0].node);
-        };
-        assert_eq!(name.resolve_global().as_deref(), Some("Off"));
+
+        let (begin_callee, begin_args) = extract(0);
+        assert_eq!(begin_callee, "__fsm_begin__");
+        assert_eq!(begin_args, vec!["Toggle".to_string()]);
+
+        let (initial_callee, initial_args) = extract(1);
+        assert_eq!(initial_callee, "__fsm_initial__");
+        assert_eq!(initial_args, vec!["Off".to_string()]);
+
+        let last = body.statements.len() - 1;
+        let (end_callee, end_args) = extract(last);
+        assert_eq!(end_callee, "__fsm_end__");
+        assert!(end_args.is_empty(), "__fsm_end__ takes no args");
     }
 
     /// Each `on State.Event -> Next` lowers to one
@@ -2212,11 +2353,11 @@ mod tests {
             .unwrap();
         let body = impl_block.methods[0].body.as_ref().unwrap();
 
-        // 1 initial marker + 3 transition markers = 4 stmts.
+        // begin + initial + 3 transitions + end = 6 stmts.
         assert_eq!(
             body.statements.len(),
-            4,
-            "expected 4 marker stmts, got {}",
+            6,
+            "expected begin + initial + 3 transitions + end, got {}",
             body.statements.len()
         );
 
@@ -2227,9 +2368,9 @@ mod tests {
         ];
 
         for (i, (from, event, to)) in expected_transitions.iter().enumerate() {
-            // Skip the initial marker at body[0]; transitions start at
-            // body[1].
-            let stmt = &body.statements[i + 1].node;
+            // Body layout: [0]=begin, [1]=initial, [2..]=transitions,
+            // [last]=end. Transitions start at body[2].
+            let stmt = &body.statements[i + 2].node;
             let TypedStatement::Expression(node) = stmt else {
                 panic!("expected Expression stmt at index {}", i + 1);
             };
@@ -2304,10 +2445,10 @@ mod tests {
             .unwrap();
         let body = impl_block.methods[0].body.as_ref().unwrap();
 
-        // body[0] is the initial marker; body[1] is the tick marker.
-        assert_eq!(body.statements.len(), 2);
-        let TypedStatement::Expression(node) = &body.statements[1].node else {
-            panic!("expected Expression stmt at body[1]");
+        // begin + initial + tick + end = 4 stmts. Tick is at body[2].
+        assert_eq!(body.statements.len(), 4);
+        let TypedStatement::Expression(node) = &body.statements[2].node else {
+            panic!("expected Expression stmt at body[2]");
         };
         let TypedExpression::Call(call) = &node.node else {
             panic!("expected Call");
@@ -2398,8 +2539,8 @@ mod tests {
             .unwrap();
         let body = impl_block.methods[0].body.as_ref().unwrap();
 
-        // 1 initial + 3 transitions = 4.
-        assert_eq!(body.statements.len(), 4);
+        // begin + initial + 3 transitions + end = 6.
+        assert_eq!(body.statements.len(), 6);
 
         // Helper to read a marker callee name from a stmt.
         let callee_at = |idx: usize| -> String {
@@ -2415,10 +2556,87 @@ mod tests {
             callee.resolve_global().unwrap_or_default()
         };
 
-        assert_eq!(callee_at(0), "__fsm_initial__");
-        assert_eq!(callee_at(1), "__fsm_transition__");
-        assert_eq!(callee_at(2), "__fsm_tick__");
-        assert_eq!(callee_at(3), "__fsm_transition__");
+        assert_eq!(callee_at(0), "__fsm_begin__");
+        assert_eq!(callee_at(1), "__fsm_initial__");
+        assert_eq!(callee_at(2), "__fsm_transition__");
+        assert_eq!(callee_at(3), "__fsm_tick__");
+        assert_eq!(callee_at(4), "__fsm_transition__");
+        assert_eq!(callee_at(5), "__fsm_end__");
+    }
+
+    /// `__fsm_meta__` body is wrapped with `__fsm_begin__("FsmName")`
+    /// at the front and `__fsm_end__()` at the back so the host's
+    /// stateful marker runtime knows which fsm scopes the markers
+    /// in between. Pins the wrapping behaviour against future
+    /// refactors that might split the `inject_fsm_context_markers`
+    /// pass.
+    #[test]
+    fn parse_fsm_begin_end_wrapping() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                fsm Loader {
+                    state Idle
+                    state Loading
+                    initial Idle
+                    on Idle.Start -> Loading
+                }
+                "#,
+                "fsm_begin_end.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let body = impl_block.methods[0].body.as_ref().unwrap();
+
+        // Body[0] = __fsm_begin__("Loader")
+        let TypedStatement::Expression(begin_node) = &body.statements[0].node else {
+            panic!("expected Expression at body[0]");
+        };
+        let TypedExpression::Call(begin_call) = &begin_node.node else {
+            panic!("expected Call at body[0]");
+        };
+        let TypedExpression::Variable(begin_callee) = &begin_call.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_eq!(begin_callee.resolve_global().as_deref(), Some("__fsm_begin__"));
+        let TypedExpression::Literal(TypedLiteral::String(name)) =
+            &begin_call.positional_args[0].node
+        else {
+            panic!("expected string arg to __fsm_begin__");
+        };
+        assert_eq!(
+            name.resolve_global().as_deref(),
+            Some("Loader"),
+            "__fsm_begin__ should carry the fsm's own name"
+        );
+
+        // Last stmt = __fsm_end__()
+        let last = body.statements.len() - 1;
+        let TypedStatement::Expression(end_node) = &body.statements[last].node else {
+            panic!("expected Expression at last");
+        };
+        let TypedExpression::Call(end_call) = &end_node.node else {
+            panic!("expected Call");
+        };
+        let TypedExpression::Variable(end_callee) = &end_call.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_eq!(end_callee.resolve_global().as_deref(), Some("__fsm_end__"));
+        assert!(
+            end_call.positional_args.is_empty(),
+            "__fsm_end__ takes no args"
+        );
     }
 
     /// Post-parse synthesis: an fsm with event-driven transitions
@@ -2609,10 +2827,11 @@ mod tests {
             })
             .unwrap();
         let body = impl_block.methods[0].body.as_ref().unwrap();
+        // begin + initial + end = 3.
         assert_eq!(
             body.statements.len(),
-            1,
-            "stub fsm should have only the initial marker"
+            3,
+            "stub fsm body should be begin + initial + end"
         );
     }
 
