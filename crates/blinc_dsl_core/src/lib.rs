@@ -230,16 +230,32 @@ pub struct FsmId {
     pub type_id: zyntax_typed_ast::type_registry::TypeId,
 }
 
-/// Tick-driven guard transition record. The `guard_expr` slot is
-/// populated with a host-callable thunk in a future commit (the
-/// pass that lowers the DSL `<expr>` to a Rust callable lives
-/// alongside the host-builtin work). For now the slot holds the
-/// `from`/`to` pair; the guard expression is skipped until tick
-/// dispatch lands.
+/// Tick-driven guard transition record. The original DSL guard
+/// expression (the `<expr>` after `when`) is lifted into a
+/// stand-alone top-level function during the post-parse pass so
+/// it survives compile and is callable at dispatch time as an
+/// ordinary Zyntax-compiled symbol. `guard_fn` carries the
+/// generated function's symbol name; resolving it through
+/// `runtime.call::<bool>(name, &[])` evaluates the guard with
+/// current signal values.
+///
+/// Why a generated function rather than carrying the AST node
+/// directly: Zyntax's runtime exposes `call(symbol, args)` for
+/// invocation, but no general-purpose "evaluate this AST" entry
+/// point. Wrapping the expression in a function gives us a
+/// callable symbol with no extra runtime infrastructure. The
+/// generated name is `__fsm_tick_guard_<FsmName>_<idx>__`, where
+/// `<idx>` is the guard's position in the fsm's declaration order
+/// (deterministic, stable across runs of the same source).
 #[derive(Debug, Clone)]
 pub struct TickGuard {
     pub from: zyntax_typed_ast::InternedString,
     pub to: zyntax_typed_ast::InternedString,
+    /// Synthesised guard-function symbol name. `None` only when
+    /// the parse-time pass couldn't extract an expression (a
+    /// malformed `__fsm_tick__` marker). In normal flow this is
+    /// always `Some`.
+    pub guard_fn: Option<zyntax_typed_ast::InternedString>,
 }
 
 /// One event-driven transition. Names match the DSL surface:
@@ -588,9 +604,15 @@ fn populate_fsm_registry_pass(
 
     // -----------------------------------------------------------------
     // Phase 1: scan. Collect (fsm_name, FsmDefinition) tuples without
-    // mutating program declarations.
+    // mutating program declarations. Tick-guard expressions are
+    // captured here for lifting into stand-alone functions in
+    // phase 2.5 (so they survive `__fsm_meta__` stripping).
     // -----------------------------------------------------------------
     let mut found: Vec<(InternedString, FsmDefinition)> = Vec::new();
+    let mut guards_to_lift: Vec<(
+        InternedString,
+        zyntax_typed_ast::TypedNode<zyntax_typed_ast::TypedExpression>,
+    )> = Vec::new();
 
     for decl in &program.declarations {
         let TypedDeclaration::Impl(imp) = &decl.node else {
@@ -648,13 +670,32 @@ fn populate_fsm_registry_pass(
                     }
                 }
                 "__fsm_tick__" => {
-                    // arg 1 is the guard expression — preserved on
-                    // the AST for a future host-callable thunk
-                    // lowering. The runtime registry just records
-                    // (from, to); guard evaluation lands when tick
-                    // dispatch hits the engine.
+                    // arg 0 = from, arg 1 = guard expr, arg 2 = to.
+                    // We lift the guard into a stand-alone function
+                    // `__fsm_tick_guard_<FsmName>_<idx>__()` so it
+                    // survives the `__fsm_meta__` strip and is
+                    // callable as an ordinary Zyntax symbol at
+                    // dispatch time.
                     if let (Some(from), Some(to)) = (str_arg(0), str_arg(2)) {
-                        def.tick_guards.push(TickGuard { from, to });
+                        let idx = def.tick_guards.len();
+                        let fsm_name_str =
+                            fsm_name.resolve_global().unwrap_or_default();
+                        let guard_fn_name =
+                            format!("__fsm_tick_guard_{fsm_name_str}_{idx}__");
+                        let guard_fn = InternedString::new_global(&guard_fn_name);
+
+                        // Capture the guard expression (cloned to
+                        // escape the read borrow on `program`) for
+                        // lifting in the next phase.
+                        if let Some(expr_node) = call.positional_args.get(1) {
+                            guards_to_lift.push((guard_fn, expr_node.clone()));
+                        }
+
+                        def.tick_guards.push(TickGuard {
+                            from,
+                            to,
+                            guard_fn: Some(guard_fn),
+                        });
                     }
                 }
                 _ => {} // skip __fsm_begin__, __fsm_end__, anything else.
@@ -730,6 +771,46 @@ fn populate_fsm_registry_pass(
 
         let id = FsmId { module, type_id };
         with_fsm_registry_mut(|r| r.upsert(id, def.clone()));
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 2.5: lift each captured tick-guard expression into a
+    // stand-alone top-level function. The function returns `bool`
+    // and contains a single `Return(Some(<guard>))` statement. The
+    // generated symbol name (`__fsm_tick_guard_<Fsm>_<idx>__`) is
+    // already stored on each `TickGuard` from phase 1 — at dispatch
+    // time, evaluating the guard is a `runtime.call::<bool>(name,
+    // &[])` against this lifted function.
+    //
+    // The lifted functions are appended after phase 2 so they
+    // inherit the registered TypeIds in scope (in case a guard
+    // references a fsm-state variable; `count.get() > 100` style
+    // expressions only reference user-level signals which don't
+    // need our intervention).
+    // -----------------------------------------------------------------
+    use zyntax_typed_ast::typed_ast::TypedFunction;
+    for (fn_name, guard_expr) in guards_to_lift {
+        let return_node = zyntax_typed_ast::TypedNode::new(
+            TypedStatement::Return(Some(Box::new(guard_expr))),
+            Type::Primitive(PrimitiveType::Bool),
+            Span::default(),
+        );
+        let body = zyntax_typed_ast::typed_ast::TypedBlock {
+            statements: vec![return_node],
+            span: Span::default(),
+        };
+        let func = TypedFunction {
+            name: fn_name,
+            return_type: Type::Primitive(PrimitiveType::Bool),
+            body: Some(body),
+            ..Default::default()
+        };
+        let decl_node = zyntax_typed_ast::TypedNode::new(
+            TypedDeclaration::Function(func),
+            Type::Unknown,
+            Span::default(),
+        );
+        program.declarations.push(decl_node);
     }
 
     // -----------------------------------------------------------------
@@ -3365,6 +3446,7 @@ mod tests {
             tick_guards: vec![TickGuard {
                 from: intern("Loading"),
                 to: intern("TimedOut"),
+                guard_fn: Some(intern("__fsm_tick_guard_Loader_0__")),
             }],
             name: Some(intern("Loader")),
         };
@@ -3489,6 +3571,87 @@ mod tests {
                 .resolve_global()
                 .as_deref(),
             Some("Finish")
+        );
+    }
+
+    /// Each tick guard lifts into a stand-alone top-level
+    /// function. The function name lands on the TickGuard so
+    /// future dispatch can resolve it via `runtime.call::<bool>`.
+    /// Pinning the naming convention
+    /// (`__fsm_tick_guard_<Fsm>_<idx>__`) so a future refactor
+    /// that changes the format breaks loudly here.
+    #[test]
+    fn compile_source_lifts_tick_guards_to_functions() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        // Two tick guards on the same fsm so we exercise the
+        // index suffix — guard 0 and guard 1. Guards use bare
+        // integer comparisons so the lifted bodies don't need
+        // signal/symbol resolution we haven't wired up yet (the
+        // shape we care about here is the lifting + naming, not
+        // dispatch evaluation).
+        let function_names = dsl
+            .compile_source(
+                r#"
+                fsm GuardLiftProbe {
+                    state Loading
+                    state Done
+                    state Failed
+                    initial Loading
+                    tick Loading -> Done when 1 > 0
+                    tick Loading -> Failed when 1 < 0
+                }
+                "#,
+                "guard_lift.blinc",
+            )
+            .expect("compile");
+
+        // Both guard functions should appear in the compiled
+        // function-name list returned from compile_source.
+        assert!(
+            function_names
+                .iter()
+                .any(|n| n == "__fsm_tick_guard_GuardLiftProbe_0__"),
+            "expected guard 0 function in compiled symbols, got {:?}",
+            function_names
+        );
+        assert!(
+            function_names
+                .iter()
+                .any(|n| n == "__fsm_tick_guard_GuardLiftProbe_1__"),
+            "expected guard 1 function in compiled symbols, got {:?}",
+            function_names
+        );
+
+        // And the registry entry should reference both names on
+        // its TickGuard records.
+        let module = InternedString::new_global("main");
+        let def = with_fsm_registry(|r| {
+            r.iter()
+                .find(|(id, def)| {
+                    id.module == module
+                        && def.name.and_then(|n| n.resolve_global()).as_deref()
+                            == Some("GuardLiftProbe")
+                })
+                .map(|(_, def)| def.clone())
+        })
+        .expect("GuardLiftProbe should be registered");
+
+        assert_eq!(def.tick_guards.len(), 2);
+        assert_eq!(
+            def.tick_guards[0]
+                .guard_fn
+                .and_then(|n| n.resolve_global())
+                .as_deref(),
+            Some("__fsm_tick_guard_GuardLiftProbe_0__")
+        );
+        assert_eq!(
+            def.tick_guards[1]
+                .guard_fn
+                .and_then(|n| n.resolve_global())
+                .as_deref(),
+            Some("__fsm_tick_guard_GuardLiftProbe_1__")
         );
     }
 
