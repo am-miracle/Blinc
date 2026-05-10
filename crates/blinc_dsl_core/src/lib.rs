@@ -701,11 +701,19 @@ mod tests {
         let dsl = BlincDsl::new().expect("runtime init");
         let program = dsl
             .parse_to_typed_ast(
+                // `view { ... }` does the rendering. Handlers like
+                // `on_click` mutate state / call other functions /
+                // run general logic — they don't render. The body
+                // is empty here because state-mutation syntax
+                // (e.g. `count = count - 1`) isn't in the grammar
+                // yet (next phase-2 slice). The test still
+                // validates that the handler is recognised as a
+                // method on the component's Impl.
                 r#"
                 component Counter {
                     count: i32
                     view { text("count") }
-                    fn on_click() { text("clicked") }
+                    fn on_click() {}
                 }
                 "#,
                 "counter_folded.blinc",
