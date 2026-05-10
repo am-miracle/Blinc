@@ -4799,9 +4799,9 @@ mod tests {
                     TypedStatement::If(i) => {
                         walk_expr(&i.condition, callee)
                             || i.then_block.statements.iter().any(|s| walk_stmt(s, callee))
-                            || i.else_block.as_ref().is_some_and(|b| {
-                                b.statements.iter().any(|s| walk_stmt(s, callee))
-                            })
+                            || i.else_block
+                                .as_ref()
+                                .is_some_and(|b| b.statements.iter().any(|s| walk_stmt(s, callee)))
                     }
                     TypedStatement::Return(Some(e)) => walk_expr(e, callee),
                     _ => false,
