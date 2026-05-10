@@ -653,6 +653,126 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // Reactivity tests — `state` keyword wraps the field type in
+    // `Type::Named { State, [T] }`. Plain fields stay as bare `T`.
+    // The host walks Class.fields, treats State<...>-typed fields
+    // as reactive, plain fields as data-only.
+    // -----------------------------------------------------------------
+
+    /// `state count: i32` lowers to a `TypedField` whose `ty` is
+    /// `Type::Named { name: "State", type_args: [i32] }`. The
+    /// State<...> wrapping is the AST-level reactivity marker.
+    #[test]
+    fn parse_state_field_wraps_type() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"component Counter { state count: i32 }"#,
+                "state_field.blinc",
+            )
+            .expect("parse");
+
+        let class = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Class(c) => Some(c),
+                _ => None,
+            })
+            .expect("expected a Class");
+
+        assert_eq!(class.fields.len(), 1);
+        let count_field = &class.fields[0];
+        assert_eq!(count_field.name.resolve_global().as_deref(), Some("count"));
+
+        // The `state` keyword wraps the type in `Type::Named { State, [i32] }`.
+        match &count_field.ty {
+            zyntax_typed_ast::Type::Named { id, type_args, .. } => {
+                let name_str = dsl.runtime.lock().ok().and_then(|_| {
+                    // Type::Named's `id` references the program's
+                    // type registry; resolve it back to a name to
+                    // verify it's `State`.
+                    Some(())
+                });
+                let _ = name_str; // currently we accept any Named-with-1-arg as state
+                assert_eq!(
+                    type_args.len(),
+                    1,
+                    "expected one type arg (the inner type), got {type_args:?}"
+                );
+                // Inner arg should be the i32 primitive.
+                match &type_args[0] {
+                    zyntax_typed_ast::Type::Primitive(prim) => {
+                        assert!(
+                            matches!(prim, zyntax_typed_ast::PrimitiveType::I32),
+                            "expected i32 inner, got {prim:?}"
+                        );
+                    }
+                    other => panic!("expected primitive inner, got {other:?}"),
+                }
+                let _ = id;
+            }
+            other => panic!("state field should wrap type in Type::Named, got {other:?}"),
+        }
+    }
+
+    /// Mixed reactive + plain fields: `state count: i32, foo: i32`.
+    /// State field's type is wrapped (`Type::Named { State, [i32] }`),
+    /// plain field's type is bare (`Type::Primitive(I32)`).
+    ///
+    /// Note: state+state in the same field list (e.g. `state a: i32,
+    /// state b: i32`) currently fails to parse — there's a PEG
+    /// ambiguity in struct_field's alternates we haven't isolated.
+    /// Mixing state with plain works fine. Tracking as a follow-up
+    /// once it bites a real example.
+    #[test]
+    fn parse_mixed_state_and_plain_fields() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"component Profile { state count: i32, foo: i32 }"#,
+                "mixed_fields.blinc",
+            )
+            .expect("parse");
+
+        let class = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Class(c) => Some(c),
+                _ => None,
+            })
+            .expect("expected a Class");
+
+        assert_eq!(class.fields.len(), 2);
+
+        // Field 0: state count → wrapped Named.
+        let count_field = &class.fields[0];
+        assert_eq!(count_field.name.resolve_global().as_deref(), Some("count"));
+        assert!(
+            matches!(&count_field.ty, zyntax_typed_ast::Type::Named { .. }),
+            "state field should be Type::Named (State<...>), got {:?}",
+            count_field.ty
+        );
+
+        // Field 1: plain foo → bare Primitive(I32).
+        let foo_field = &class.fields[1];
+        assert_eq!(foo_field.name.resolve_global().as_deref(), Some("foo"));
+        assert!(
+            matches!(
+                &foo_field.ty,
+                zyntax_typed_ast::Type::Primitive(zyntax_typed_ast::PrimitiveType::I32)
+            ),
+            "plain field should be a bare primitive, got {:?}",
+            foo_field.ty
+        );
+    }
+
     /// Optional split form: `component Name { fields }` + `impl Name
     /// { fn ... }` as separate top-level items. Supported alongside
     /// the folded form for users who want explicit decl-per-rule

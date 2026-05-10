@@ -130,14 +130,43 @@ component_decl = { "component" ~ name:identifier ~ "{" ~ fields:struct_field_lis
       fields: fields,
   }
 
-// Comma-separated field list, mirroring ml.zyn:872-873.
+// Field list. Each field is either a reactive `state` field
+// (wrapped in `State<T>`) or a plain data field (bare type). PEG
+// ordered alternates inside `struct_field` try `state_field` first
+// because it matches the longer prefix (`state name: T`).
+//
+// Fields are comma-separated. ZynPEG WHITESPACE auto-skips
+// newlines so source can layout fields one-per-line as long as
+// commas appear between them. Optional trailing comma not
+// supported yet — that needs the field list to allow zero
+// trailing struct_fields after the last comma; small tweak when
+// needed.
 struct_field_list = { first:struct_field ~ rest:struct_field_comma* }
   -> prepend_list(first, rest)
 
 struct_field_comma = { "," ~ f:struct_field }
   -> f
 
-struct_field = { name:identifier ~ ":" ~ ty:state_type }
+struct_field = { state_field | plain_field }
+
+// `state <name>: <T>` — reactive field. Lowers to `TypedField` with
+// type wrapped in `Type::Named { name: "State", type_args: [T] }`
+// so the host can pattern-match on the wrapper to find reactive
+// fields without needing a TypedField annotation slot (which the
+// grammar interpreter doesn't support today).
+//
+// Reactivity is opt-in. Plain `name: T` fields are non-reactive
+// data — UI doesn't rebuild when they change. Most fields end up
+// being plain (config, derived data, refs); `state` is the
+// exception.
+state_field = { "state" ~ name:identifier ~ ":" ~ inner:state_type }
+  -> TypedField {
+      name: intern(name),
+      ty: Type::Named { name: intern("State"), type_args: [inner] },
+  }
+
+// Bare data field. No `state` keyword, no reactivity wrapper.
+plain_field = { name:identifier ~ ":" ~ ty:state_type }
   -> TypedField {
       name: intern(name),
       ty: ty,
