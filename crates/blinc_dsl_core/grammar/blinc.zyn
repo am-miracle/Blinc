@@ -70,13 +70,57 @@ bare_view_item = { "view" ~ "{" ~ stmts:statements ~ "}" }
       body: Some(TypedBlock { statements: stmts }),
   }
 
-component_item = { "component" ~ name:identifier ~ "{" ~ "view" ~ "{" ~ stmts:statements ~ "}" ~ "}" }
+// `component <Name> { state foo: T = ...; ... view { ... } }`.
+// State declarations are collected before the `view` block and
+// prepended to the function body as typed `Let` statements
+// (mirroring what ml.zyn does at lines 1944-2003 for plain `let`).
+// Persistence semantics — making state survive across renders rather
+// than resetting per call — is a runtime concern and lands when the
+// hot-reload + state-preservation glue is wired in. At the parser
+// stage we only need the AST shape.
+component_item = { "component" ~ name:identifier ~ "{" ~ states:state_decls ~ "view" ~ "{" ~ stmts:statements ~ "}" ~ "}" }
   -> TypedDeclaration::Function {
       name: intern(name),
       params: [],
       return_type: Type::Unit,
-      body: Some(TypedBlock { statements: stmts }),
+      body: Some(TypedBlock { statements: concat_list(states, stmts) }),
   }
+
+// Collect zero-or-more state declarations into a list. Optional
+// trailing semicolons are tolerated for ergonomics.
+state_decls = { d:state_decl* }
+  -> d
+
+// `state <name>: <type> = <literal>`. Lowers to a typed mutable
+// `Let` statement — the same shape ml.zyn's `mut_typed_let` produces
+// (ml.zyn:1998-2003), just spelled with `state` to signal the
+// persistence intent. The runtime side will treat these specially
+// later (per-component-instance lifetime); the AST is identical.
+state_decl = { "state" ~ name:identifier ~ ":" ~ ty:state_type ~ "=" ~ init:state_init }
+  -> TypedStatement::Let {
+      name: intern(name),
+      type_annotation: Some(ty),
+      initializer: Some(init),
+      is_mutable: true,
+  }
+
+// Minimum-viable type expressions — extend as state fields need
+// more. Following ml.zyn:1422-1452's `prim_*` shape: each primitive
+// is its own rule so the action can construct
+// `Type::Primitive { name: intern("...") }` with the right tag.
+state_type = { state_type_i32 | state_type_string }
+
+state_type_i32 = { "i32" }
+  -> Type::Primitive { name: intern("i32") }
+
+state_type_string = { "string" }
+  -> Type::Primitive { name: intern("string") }
+
+// Initializer expressions allowed in state declarations. Same pieces
+// the rest of the grammar already accepts as args. Adding more
+// (booleans, floats, function calls) is a follow-up — the current
+// surface gates only what state's typed annotation can describe.
+state_init = { integer | string_literal }
 
 // Collect all statements inside the view block.
 statements = { stmt:statement* }

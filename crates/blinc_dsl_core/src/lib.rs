@@ -729,6 +729,122 @@ mod tests {
         );
     }
 
+    /// `component Counter { state count: i32 = 0  view { text("hi") } }` —
+    /// state declarations parse as typed mutable `Let` statements
+    /// (the same shape ml.zyn's `mut_typed_let` produces) and get
+    /// prepended to the component function's body via `concat_list`.
+    /// The resulting body has the state Let first, then the view's
+    /// statements.
+    #[test]
+    fn parse_component_with_state() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"component Counter { state count: i32 = 0 view { text("hi") } }"#,
+                "state.blinc",
+            )
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        assert_eq!(
+            stmts.len(),
+            2,
+            "expected state Let + view stmt = 2, got {stmts:?}"
+        );
+
+        let TypedStatement::Let(let_stmt) = &stmts[0].node else {
+            panic!("expected Let as first statement, got {:?}", stmts[0].node);
+        };
+        assert_eq!(let_stmt.name.resolve_global().as_deref(), Some("count"));
+        assert!(
+            matches!(let_stmt.mutability, zyntax_typed_ast::Mutability::Mutable),
+            "state should lower to mutable Let, got {:?}",
+            let_stmt.mutability
+        );
+        assert!(
+            !matches!(let_stmt.ty, zyntax_typed_ast::Type::Unknown),
+            "state must carry a type annotation, got {:?}",
+            let_stmt.ty
+        );
+        assert!(
+            let_stmt.initializer.is_some(),
+            "state must carry an initializer"
+        );
+
+        // Second stmt is the view's text(...) call.
+        let TypedStatement::Expression(_) = &stmts[1].node else {
+            panic!(
+                "expected Expression as second statement (view text call), got {:?}",
+                stmts[1].node
+            );
+        };
+    }
+
+    /// Multiple state fields parse cleanly and all land before the
+    /// view body in the function. Validates the `state_decls`
+    /// repetition + `concat_list` merge.
+    #[test]
+    fn parse_component_with_multiple_states() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"component Form { state count: i32 = 0 state width: i32 = 100 view { text("ok") } }"#,
+                "states.blinc",
+            )
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        assert_eq!(
+            stmts.len(),
+            3,
+            "expected 2 state Lets + 1 view stmt, got {stmts:?}"
+        );
+
+        let names: Vec<Option<String>> = stmts
+            .iter()
+            .filter_map(|s| {
+                if let TypedStatement::Let(let_stmt) = &s.node {
+                    Some(let_stmt.name.resolve_global())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![Some("count".to_string()), Some("width".to_string())],
+            "state Lets should appear in source order, before view body"
+        );
+    }
+
+    /// Newline-separated state decls + view body. Probes that
+    /// WHITESPACE in the grammar correctly skips newlines between
+    /// `state` declarations and the `view` block — the natural
+    /// way users will write multi-line components.
+    #[test]
+    fn parse_component_with_multiline_layout() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                "component Counter {\n  state count: i32 = 0\n  view { text(\"hi\") }\n}",
+                "multiline.blinc",
+            )
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        assert_eq!(
+            stmts.len(),
+            2,
+            "expected state Let + view stmt, got {stmts:?}"
+        );
+    }
+
     /// `text(f"answer: {42}!")` — multi-part f-string. fold_concat
     /// builds `__fstring__(text_lit, fmt_call_stripped, text_lit)`
     /// (interpreter.rs:2372-2410). We assert the AST has that
