@@ -294,18 +294,36 @@ impl BlincDsl {
         self.compile_source(&source, &filename)
     }
 
-    /// Invoke the entry point and drain the scene buffer.
+    /// Invoke the bare-form `render_view` entry point and drain the
+    /// scene buffer.
     ///
-    /// The DSL's `view { ... }` block compiles to a `render_view()`
-    /// function that pushes ops onto the host's scene buffer; this
-    /// method calls it once and returns whatever the DSL emitted.
+    /// For programs of the shape `view { ... }` (no enclosing
+    /// `component` block). Component-form programs compile to
+    /// `<Name>$render_view` instead — use [`Self::render_component`]
+    /// for those.
     pub fn render_view(&self) -> BlincDslResult<Vec<DslOp>> {
+        self.render_named("render_view")
+    }
+
+    /// Invoke a named component's view and drain the scene buffer.
+    ///
+    /// For programs of the shape `component <Name> { view { ... } }`
+    /// — the grammar emits a function whose symbol IS the component
+    /// name (so `component Greeting { ... }` produces a function
+    /// named `Greeting`). This is symmetric: pass the component
+    /// name, get the ops it emitted. Multi-component files work
+    /// because each component gets its own distinct symbol.
+    pub fn render_component(&self, name: &str) -> BlincDslResult<Vec<DslOp>> {
+        self.render_named(name)
+    }
+
+    fn render_named(&self, fn_name: &str) -> BlincDslResult<Vec<DslOp>> {
         let runtime = self
             .runtime
             .lock()
             .expect("BlincDsl runtime mutex poisoned");
 
-        runtime.call::<()>("render_view", &[])?;
+        runtime.call::<()>(fn_name, &[])?;
         Ok(take_scene_ops())
     }
 }
@@ -568,26 +586,72 @@ mod tests {
     }
 
     /// Component-form round-trip: `component Name { view { … } }`.
-    /// Currently lowers to the same `render_view` symbol as the bare
-    /// form (see grammar comment), so the runtime side is unchanged
-    /// — this test pins the parser side: the new `component_program`
-    /// alternate matches and produces a typed AST the runtime can
-    /// compile + call.
+    /// The grammar emits a function whose symbol IS the component
+    /// name (`Greeting` for `component Greeting`), so the host
+    /// invokes via `render_component("Greeting")` and the runtime
+    /// finds it directly without a rename pass.
     #[test]
     fn round_trip_component_view() {
         let _ = tracing_subscriber::fmt::try_init();
 
         let dsl = BlincDsl::new().expect("runtime init");
-        dsl.compile_source(
-            r#"component Greeting { view { text("Hi from a component") } }"#,
-            "component_smoke.blinc",
-        )
-        .expect("compile");
-        let ops = dsl.render_view().expect("render_view");
+        let fns = dsl
+            .compile_source(
+                r#"component Greeting { view { text("Hi from a component") } }"#,
+                "component_smoke.blinc",
+            )
+            .expect("compile");
+        assert!(
+            fns.iter().any(|n| n == "Greeting"),
+            "expected Greeting in {fns:?}"
+        );
+
+        let ops = dsl.render_component("Greeting").expect("render_component");
 
         assert_eq!(ops.len(), 1, "expected 1 op, got {ops:?}");
         match &ops[0] {
             DslOp::Text(s) => assert_eq!(s, "Hi from a component"),
+        }
+    }
+
+    /// Two components in one file produce distinct symbols and each
+    /// renders only its own ops. Validates the third §3.9
+    /// risk-reduction probe (HIR module isolation) — when multiple
+    /// components share a file, their function symbols don't
+    /// collide and each compiles independently.
+    #[test]
+    fn multi_component_isolation() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let fns = dsl
+            .compile_source(
+                r#"
+                component Hello { view { text("hi from Hello") } }
+                component World { view { text("hi from World") } }
+                "#,
+                "multi.blinc",
+            )
+            .expect("compile");
+        assert!(
+            fns.iter().any(|n| n == "Hello"),
+            "expected Hello in {fns:?}"
+        );
+        assert!(
+            fns.iter().any(|n| n == "World"),
+            "expected World in {fns:?}"
+        );
+
+        let hello_ops = dsl.render_component("Hello").expect("render Hello");
+        assert_eq!(hello_ops.len(), 1);
+        match &hello_ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "hi from Hello"),
+        }
+
+        let world_ops = dsl.render_component("World").expect("render World");
+        assert_eq!(world_ops.len(), 1);
+        match &world_ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "hi from World"),
         }
     }
 

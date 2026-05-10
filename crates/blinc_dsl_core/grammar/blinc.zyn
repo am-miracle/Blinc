@@ -30,43 +30,49 @@
 // Program structure
 // =====================================================================
 //
-// Two forms accepted at the top level for the prototype:
+// Top-level items. Two shapes accepted:
 //
-//   1. Bare `view { ... }` — quick-test shape.
+//   1. Bare `view { ... }` — quick-test shape. Emits a function
+//      named `render_view`.
 //   2. `component <Name> { view { ... } }` — production shape.
+//      Emits a function whose symbol IS the component name. e.g.
+//      `component Greeting { ... }` -> `fn Greeting() -> ()`. This
+//      sidesteps ZynPEG's lack of grammar-action string concat
+//      (none of the helpers at `interpreter.rs:2034+` build dynamic
+//      names) by making the component name the symbol directly,
+//      rather than mangling it into `<Name>$render_view`. Multi-
+//      component files just produce multiple top-level functions
+//      with distinct names. The host calls a specific component's
+//      view via `BlincDsl::render_component(name)`.
 //
-// Both lower to a function named `render_view`. The component name is
-// captured but not yet used to scope the function symbol — ZynPEG's
-// semantic-action syntax doesn't support string concatenation (e.g.
-// `intern(name + "$render_view")` parses with "Expected ')', found '+'"),
-// so we'd need a host-side rename pass to namespace it. That's worth
-// doing once we actually have two components sharing a file. Until
-// then, multi-component support is a phase-2 grammar item.
+// `top_level_items` collects multiple items into the program's
+// declaration list, mirroring ml.zyn's `top_level_items` shape at
+// ml.zyn:324.
 
-program = { component_program | bare_program }
+program = { SOI ~ items:top_level_items ~ EOI }
+  -> items
 
-bare_program = { SOI ~ "view" ~ "{" ~ stmts:statements ~ "}" ~ EOI }
+top_level_items = { item:top_level_item* }
   -> TypedProgram {
-      declarations: [
-          TypedDeclaration::Function {
-              name: intern("render_view"),
-              params: [],
-              return_type: Type::Unit,
-              body: Some(TypedBlock { statements: stmts }),
-          },
-      ],
+      declarations: item,
   }
 
-component_program = { SOI ~ "component" ~ name:identifier ~ "{" ~ "view" ~ "{" ~ stmts:statements ~ "}" ~ "}" ~ EOI }
-  -> TypedProgram {
-      declarations: [
-          TypedDeclaration::Function {
-              name: intern("render_view"),
-              params: [],
-              return_type: Type::Unit,
-              body: Some(TypedBlock { statements: stmts }),
-          },
-      ],
+top_level_item = { component_item | bare_view_item }
+
+bare_view_item = { "view" ~ "{" ~ stmts:statements ~ "}" }
+  -> TypedDeclaration::Function {
+      name: intern("render_view"),
+      params: [],
+      return_type: Type::Unit,
+      body: Some(TypedBlock { statements: stmts }),
+  }
+
+component_item = { "component" ~ name:identifier ~ "{" ~ "view" ~ "{" ~ stmts:statements ~ "}" ~ "}" }
+  -> TypedDeclaration::Function {
+      name: intern(name),
+      params: [],
+      return_type: Type::Unit,
+      body: Some(TypedBlock { statements: stmts }),
   }
 
 // Collect all statements inside the view block.
