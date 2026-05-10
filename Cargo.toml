@@ -114,6 +114,21 @@ rust-version = "1.75"
 # prototyping but broke CI runners that don't clone the sibling repo.
 zyntax_embed = { git = "https://github.com/darmie/zyntax", rev = "a4dfa215d7664ce08b96052bf3de2f4c38a429f0" }
 
+# Krio (async runtime) — Zyntax's `krio_adapter` pins to rev `fe0177c`
+# (see zyntax/crates/passes/krio_adapter/Cargo.toml). We declare the
+# same rev here so any Blinc code that opts into the
+# `krio-async-backend` feature on `zyntax_embed` resolves to the
+# exact rev Zyntax was compiled against — preventing API mismatches
+# between Zyntax's compiled-against-X-rev krio types and any
+# transitively-resolved-Y-rev copy. Cargo's `[patch]` table rejects
+# same-URL+same-rev redirects as no-ops, so the workspace-deps
+# declaration is the operative pin: when the Zyntax rev is bumped
+# upstream and its `krio_adapter` moves to a newer krio rev, bump
+# these entries together.
+krio-async     = { git = "https://github.com/darmie/krio.git", rev = "fe0177c" }
+krio-stackless = { git = "https://github.com/darmie/krio.git", rev = "fe0177c" }
+krio-core      = { git = "https://github.com/darmie/krio.git", rev = "fe0177c" }
+
 # GPU rendering
 #
 # Pinned to wgpu 26.0.1 + wgpu-hal 26.0.6: wgpu 23 hits a "Parent device
