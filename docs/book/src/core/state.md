@@ -220,8 +220,8 @@ fn direction_toggle() -> impl ElementBuilder {
 You can access dependency values directly from the context using `ctx.dep()`:
 
 ```rust
-let count_signal: State<i32> = use_state(|| 0);
-let name_signal: State<String> = use_state(|| "".to_string());
+let count_signal: State<i32> = use_state_keyed("count", || 0);
+let name_signal: State<String> = use_state_keyed("name", || "".to_string());
 
 stateful::<ButtonState>()
     .deps([count_signal.signal_id(), name_signal.signal_id()])

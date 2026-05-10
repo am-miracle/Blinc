@@ -661,9 +661,9 @@ impl ElementBuilder for PaginationBuilder {
 ///
 /// ```ignore
 /// use blinc_cn::prelude::*;
-/// use blinc_core::use_state;
+/// use blinc_core::use_state_keyed;
 ///
-/// let page = use_state(|| 1usize);
+/// let page = use_state_keyed("pagination_page", || 1usize);
 ///
 /// cn::pagination(10, page.clone())
 ///     .visible_pages(7)

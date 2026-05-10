@@ -62,11 +62,14 @@ hover_card()
 Interactive content in a popup:
 
 ```rust
-let is_open = use_state(false);
+let is_open = use_state_keyed("popover_open", || false);
 
 popover()
-    .open(is_open)
-    .on_open_change(|open| set_is_open(open))
+    .open(is_open.clone())
+    .on_open_change({
+        let is_open = is_open.clone();
+        move |open| is_open.set(open)
+    })
     .child(popover_trigger()
         .child(button("Open Popover")))
     .child(popover_content()
@@ -213,12 +216,15 @@ tree()
 ### Selectable Tree
 
 ```rust
-let selected = use_state(HashSet::new());
+let selected = use_state_keyed("tree_selected", || HashSet::new());
 
 tree()
     .selectable(true)
     .selected(&selected)
-    .on_select(|ids| set_selected(ids))
+    .on_select({
+        let selected = selected.clone();
+        move |ids| selected.set(ids)
+    })
     .child(/* tree items */)
 ```
 

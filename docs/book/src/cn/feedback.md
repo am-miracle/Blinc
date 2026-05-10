@@ -228,9 +228,9 @@ toaster()
 ### Loading State
 
 ```rust
-let is_loading = use_state(true);
+let is_loading = use_state_keyed("feedback_loading", || true);
 
-if is_loading {
+if is_loading.get() {
     div()
         .flex_col()
         .items_center()
@@ -245,15 +245,15 @@ if is_loading {
 ### Form Submission Feedback
 
 ```rust
-let status = use_state(FormStatus::Idle);
+let status = use_state_keyed("form_status", || FormStatus::Idle);
 
 div()
     .flex_col()
     .gap(16.0)
     .child(/* form fields */)
     .child(
-        match status {
-            FormStatus::Idle => button("Submit").on_click(|| submit()),
+        match status.get() {
+            FormStatus::Idle => button("Submit").on_click(move |_| submit()),
             FormStatus::Submitting => button("").loading(true).disabled(true),
             FormStatus::Success => alert()
                 .child(alert_title("Success"))

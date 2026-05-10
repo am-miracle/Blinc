@@ -134,16 +134,19 @@ scroll_area()
 Expandable content:
 
 ```rust
-let is_open = use_state(false);
+let is_open = use_state_keyed("collapsible_open", || false);
 
 collapsible()
-    .open(is_open)
-    .on_open_change(|open| set_is_open(open))
+    .open(is_open.clone())
+    .on_open_change({
+        let is_open = is_open.clone();
+        move |open| is_open.set(open)
+    })
     .child(collapsible_trigger()
         .child(
             div().flex_row().items_center().gap(8.0)
                 .child(text("Show more"))
-                .child(icon(if is_open { icons::CHEVRON_UP } else { icons::CHEVRON_DOWN }))
+                .child(icon(if is_open.get() { icons::CHEVRON_UP } else { icons::CHEVRON_DOWN }))
         ))
     .child(collapsible_content()
         .child(text("Hidden content that expands...")))

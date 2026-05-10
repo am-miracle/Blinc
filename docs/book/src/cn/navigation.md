@@ -202,13 +202,16 @@ sidebar()
 ### Collapsible Sidebar
 
 ```rust
-let is_collapsed = use_state(false);
+let is_collapsed = use_state_keyed("sidebar_collapsed", || false);
 
 sidebar()
-    .collapsed(is_collapsed)
+    .collapsed(is_collapsed.clone())
     .child(sidebar_header()
         .child(sidebar_trigger()
-            .on_click(|| set_is_collapsed(!is_collapsed))))
+            .on_click({
+                let is_collapsed = is_collapsed.clone();
+                move |_| is_collapsed.set(!is_collapsed.get())
+            })))
     .child(/* rest of sidebar */)
 ```
 

@@ -6,12 +6,16 @@ Dialogs display content in a modal overlay that requires user interaction.
 
 ```rust
 use blinc_cn::prelude::*;
+use blinc_core::use_state_keyed;
 
-let is_open = use_state(false);
+let is_open = use_state_keyed("dialog_open", || false);
 
 dialog()
-    .open(is_open)
-    .on_open_change(|open| set_is_open(open))
+    .open(is_open.clone())
+    .on_open_change({
+        let is_open = is_open.clone();
+        move |open| is_open.set(open)
+    })
     .child(dialog_trigger()
         .child(button("Open Dialog")))
     .child(dialog_content()
@@ -20,7 +24,10 @@ dialog()
             .child(dialog_description("Dialog description")))
         .child(text("Dialog content goes here."))
         .child(dialog_footer()
-            .child(button("Close").on_click(|| set_is_open(false)))))
+            .child(button("Close").on_click({
+                let is_open = is_open.clone();
+                move |_| is_open.set(false)
+            }))))
 ```
 
 ## Dialog Parts
@@ -87,11 +94,14 @@ dialog_close()
 For destructive or important confirmations:
 
 ```rust
-let is_open = use_state(false);
+let is_open = use_state_keyed("alert_dialog_open", || false);
 
 alert_dialog()
-    .open(is_open)
-    .on_open_change(|open| set_is_open(open))
+    .open(is_open.clone())
+    .on_open_change({
+        let is_open = is_open.clone();
+        move |open| is_open.set(open)
+    })
     .child(alert_dialog_trigger()
         .child(button("Delete").variant(ButtonVariant::Destructive)))
     .child(alert_dialog_content()
@@ -111,12 +121,15 @@ alert_dialog()
 A panel that slides in from the edge:
 
 ```rust
-let is_open = use_state(false);
+let is_open = use_state_keyed("sheet_open", || false);
 
 sheet()
-    .open(is_open)
+    .open(is_open.clone())
     .side(SheetSide::Right)  // Left, Right, Top, Bottom
-    .on_open_change(|open| set_is_open(open))
+    .on_open_change({
+        let is_open = is_open.clone();
+        move |open| is_open.set(open)
+    })
     .child(sheet_trigger()
         .child(button("Open Sheet")))
     .child(sheet_content()
@@ -132,11 +145,14 @@ sheet()
 A mobile-friendly bottom sheet:
 
 ```rust
-let is_open = use_state(false);
+let is_open = use_state_keyed("drawer_open", || false);
 
 drawer()
-    .open(is_open)
-    .on_open_change(|open| set_is_open(open))
+    .open(is_open.clone())
+    .on_open_change({
+        let is_open = is_open.clone();
+        move |open| is_open.set(open)
+    })
     .child(drawer_trigger()
         .child(button("Open Drawer")))
     .child(drawer_content()
@@ -150,13 +166,16 @@ drawer()
 ### Form Dialog
 
 ```rust
-let is_open = use_state(false);
-let name = use_state(String::new());
-let email = use_state(String::new());
+let is_open = use_state_keyed("form_dialog_open", || false);
+let name = use_state_keyed("form_dialog_name", || String::new());
+let email = use_state_keyed("form_dialog_email", || String::new());
 
 dialog()
-    .open(is_open)
-    .on_open_change(|open| set_is_open(open))
+    .open(is_open.clone())
+    .on_open_change({
+        let is_open = is_open.clone();
+        move |open| is_open.set(open)
+    })
     .child(dialog_trigger()
         .child(button("Edit Profile")))
     .child(dialog_content()
@@ -172,34 +191,46 @@ dialog()
                         .child(label("Name"))
                         .child(input()
                             .value(&name)
-                            .on_change(|v| set_name(v)))
+                            .on_change({
+                                let name = name.clone();
+                                move |v| name.set(v)
+                            }))
                 )
                 .child(
                     div().flex_col().gap(4.0)
                         .child(label("Email"))
                         .child(input()
                             .value(&email)
-                            .on_change(|v| set_email(v)))
+                            .on_change({
+                                let email = email.clone();
+                                move |v| email.set(v)
+                            }))
                 )
         )
         .child(dialog_footer()
             .child(dialog_close().child(
                 button("Cancel").variant(ButtonVariant::Outline)
             ))
-            .child(button("Save").on_click(|| {
-                save_profile();
-                set_is_open(false);
+            .child(button("Save").on_click({
+                let is_open = is_open.clone();
+                move |_| {
+                    save_profile();
+                    is_open.set(false);
+                }
             }))))
 ```
 
 ### Confirmation Dialog
 
 ```rust
-let is_open = use_state(false);
+let is_open = use_state_keyed("confirm_dialog_open", || false);
 
 alert_dialog()
-    .open(is_open)
-    .on_open_change(|open| set_is_open(open))
+    .open(is_open.clone())
+    .on_open_change({
+        let is_open = is_open.clone();
+        move |open| is_open.set(open)
+    })
     .child(alert_dialog_trigger()
         .child(button("Delete Account").variant(ButtonVariant::Destructive)))
     .child(alert_dialog_content()
@@ -216,7 +247,7 @@ alert_dialog()
             .child(alert_dialog_action().child(
                 button("Delete")
                     .variant(ButtonVariant::Destructive)
-                    .on_click(|| delete_account())
+                    .on_click(move |_| delete_account())
             ))))
 ```
 

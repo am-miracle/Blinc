@@ -312,7 +312,7 @@ Two patterns for accessing dependency values:
 
 ```rust
 // Pattern 1: Capture in closure
-let my_signal = use_state(|| 42);
+let my_signal = use_state_keyed("my_signal", || 42);
 
 stateful::<ButtonState>()
     .deps([my_signal.signal_id()])

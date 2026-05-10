@@ -258,11 +258,12 @@ div()
 ## Validation
 
 ```rust
-let email = use_state(String::new());
+let email = use_state_keyed("form_email", || String::new());
 let email_error = use_derived(|| {
-    if email.is_empty() {
+    let value = email.get();
+    if value.is_empty() {
         None
-    } else if !email.contains('@') {
+    } else if !value.contains('@') {
         Some("Invalid email address")
     } else {
         None
@@ -274,7 +275,10 @@ div().flex_col().gap(4.0)
     .child(input()
         .value(&email)
         .error(email_error.is_some())
-        .on_change(|v| set_email(v)))
+        .on_change({
+            let email = email.clone();
+            move |v| email.set(v)
+        }))
     .child(
         email_error.map(|err|
             text(err).size(12.0).color(Color::RED)

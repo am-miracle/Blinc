@@ -1914,7 +1914,7 @@ impl<S: StateTransitions> StateContext<S> {
     /// # Example
     ///
     /// ```ignore
-    /// let direction_signal: State<String> = use_state(|| "down".to_string());
+    /// let direction_signal: State<String> = use_state_keyed("direction", || "down".to_string());
     ///
     /// stateful::<NoState>()
     ///     .deps([direction_signal.signal_id()])
@@ -1941,7 +1941,7 @@ impl<S: StateTransitions> StateContext<S> {
     /// # Example
     ///
     /// ```ignore
-    /// let counter: State<i32> = use_state(|| 0);
+    /// let counter: State<i32> = use_state_keyed("counter", || 0);
     ///
     /// stateful::<ButtonState>()
     ///     .deps([counter.signal_id()])

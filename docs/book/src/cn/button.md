@@ -137,14 +137,20 @@ button("")
 ### Loading Button
 
 ```rust
-let is_loading = use_state(false);
+let is_loading = use_state_keyed("button_loading", || false);
 
-button(if is_loading { "Saving..." } else { "Save" })
-    .loading(is_loading)
-    .disabled(is_loading)
-    .on_click(|| {
-        set_loading(true);
-        save_data().then(|| set_loading(false));
+button(if is_loading.get() { "Saving..." } else { "Save" })
+    .loading(is_loading.get())
+    .disabled(is_loading.get())
+    .on_click({
+        let is_loading = is_loading.clone();
+        move |_| {
+            is_loading.set(true);
+            save_data().then({
+                let is_loading = is_loading.clone();
+                move || is_loading.set(false)
+            });
+        }
     })
 ```
 

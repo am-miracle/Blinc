@@ -17,7 +17,7 @@
 //! use blinc_core::reactive::State;
 //!
 //! // State is typically obtained from a context
-//! let counter: State<i32> = ctx.use_state("counter", 0);
+//! let counter: State<i32> = ctx.use_state_keyed("counter", || 0);
 //!
 //! // Read the current value
 //! let value = counter.get();
@@ -607,7 +607,7 @@ pub type StatefulDepsCallback = Arc<dyn Fn(&[SignalId]) + Send + Sync>;
 ///
 /// ```ignore
 /// // State is typically obtained from a context
-/// let counter: State<i32> = ctx.use_state("counter", 0);
+/// let counter: State<i32> = ctx.use_state_keyed("counter", || 0);
 ///
 /// // Read the current value
 /// let value = counter.get();
