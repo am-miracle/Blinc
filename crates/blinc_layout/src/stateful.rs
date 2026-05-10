@@ -710,9 +710,21 @@ pub fn queue_prop_update(node_id: LayoutNodeId, props: RenderProps) {
 /// Trait for user-defined state types that can handle event transitions
 ///
 /// Implement this trait on your state enum to define how events cause
-/// state transitions.
+/// state transitions. Two transition paths are exposed:
 ///
-/// # Example
+/// * `on_event` — event-driven, fired by `Stateful::dispatch(event)` (or
+///   the auto-registered pointer / keyboard handlers). Use for state
+///   changes that follow from a discrete user input.
+///
+/// * `on_tick` — data-guarded, fired by the framework whenever the
+///   Stateful's registered deps change. Read signal values inside the
+///   impl and return a new state when a data condition is met. This is
+///   the Harel-statechart "guarded transition" path: the transition is
+///   not triggered by an event but by reaching a value condition. The
+///   default impl returns `None`, so existing event-only state types
+///   stay opt-out.
+///
+/// # Example — event-driven
 ///
 /// ```ignore
 /// #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -736,11 +748,44 @@ pub fn queue_prop_update(node_id: LayoutNodeId, props: RenderProps) {
 ///     }
 /// }
 /// ```
+///
+/// # Example — data-guarded (uses `on_tick`)
+///
+/// ```ignore
+/// // Imagine `progress: State<f32>` is a signal registered as a dep.
+/// #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// enum LoaderState {
+///     #[default]
+///     Loading,
+///     Done,
+/// }
+///
+/// impl StateTransitions for LoaderState {
+///     fn on_event(&self, _event: u32) -> Option<Self> { None }
+///
+///     fn on_tick(&self) -> Option<Self> {
+///         match self {
+///             LoaderState::Loading if PROGRESS.get() >= 1.0 => Some(LoaderState::Done),
+///             _ => None,
+///         }
+///     }
+/// }
+/// ```
 pub trait StateTransitions:
     Clone + Copy + PartialEq + Eq + Hash + Send + Sync + std::fmt::Debug + 'static
 {
     /// Handle an event and return the new state, or None if no transition
     fn on_event(&self, event: u32) -> Option<Self>;
+
+    /// Re-evaluate this state against current signal data without an
+    /// explicit event. Called by the framework before a deps-driven
+    /// rebuild — read globals or thread-local context inside and
+    /// return a new state when a data condition warrants transition.
+    /// Default impl returns `None` (no data-guarded transitions), so
+    /// existing event-only state types stay opt-out.
+    fn on_tick(&self) -> Option<Self> {
+        None
+    }
 }
 
 /// A no-op state type for dependency-based refreshing without state transitions
@@ -2395,6 +2440,19 @@ pub fn stateful_with_key<S: StateTransitions + Default>(
 /// This re-runs the `on_state` callback and queues a prop update.
 /// Called internally by the reactive system when dependencies change.
 pub(crate) fn refresh_stateful<S: StateTransitions>(shared: &SharedState<S>) {
+    // Data-guarded transition path. Before rebuilding the subtree,
+    // give the state machine a chance to transition based on the
+    // newly-arrived signal data — the dep change that brought us
+    // here may have crossed a guard condition that warrants a state
+    // change without a discrete event. Default `on_tick` returns
+    // `None`, so event-only state types stay no-op.
+    {
+        let mut inner = shared.lock().unwrap();
+        if let Some(new_state) = inner.state.on_tick() {
+            inner.state = new_state;
+            inner.needs_visual_update = true;
+        }
+    }
     Stateful::<S>::refresh_props_internal(shared);
 }
 
@@ -4393,6 +4451,92 @@ mod tests {
     use blinc_core::events::event_types;
     use blinc_core::{Brush, Color, CornerRadius};
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Minimal data-guarded state used to exercise `on_tick`.
+    /// Mirrors the documented Harel-style guard pattern: the
+    /// transition isn't triggered by an event, just by re-evaluating
+    /// the state's own data fields. In real use the impl reads
+    /// signal globals; here we use a plain bool field so the test
+    /// stays self-contained.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    struct GuardedState {
+        crossed: bool,
+    }
+
+    impl StateTransitions for GuardedState {
+        fn on_event(&self, _event: u32) -> Option<Self> {
+            None
+        }
+
+        fn on_tick(&self) -> Option<Self> {
+            // Transition once when the guard is "armed".
+            if !self.crossed {
+                Some(GuardedState { crossed: true })
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Default `on_tick` impl returns `None`. Pinning so existing
+    /// event-only state types (ButtonState, ToggleState, etc.) stay
+    /// no-op and don't accidentally start data-driven transitioning
+    /// after the trait grew this method.
+    #[test]
+    fn test_on_tick_default_is_no_op() {
+        assert_eq!(ButtonState::Idle.on_tick(), None);
+        assert_eq!(ButtonState::Hovered.on_tick(), None);
+        assert_eq!(ButtonState::Pressed.on_tick(), None);
+        assert_eq!(NoState.on_tick(), None);
+        // Unit type also implements StateTransitions.
+        assert_eq!(<()>::on_tick(&()), None);
+    }
+
+    /// Custom `on_tick` impl drives a transition when the guard
+    /// condition is met. After the transition, repeated ticks
+    /// return `None` — terminal-on-condition behaviour.
+    #[test]
+    fn test_on_tick_can_transition() {
+        let initial = GuardedState { crossed: false };
+        let next = initial.on_tick();
+        assert_eq!(next, Some(GuardedState { crossed: true }));
+
+        let after = next.unwrap().on_tick();
+        assert_eq!(after, None, "no further transition once crossed");
+    }
+
+    /// `refresh_stateful` calls `on_tick` before invoking the
+    /// rebuild. Using the GuardedState above, calling
+    /// `refresh_stateful` directly on a SharedState should mutate
+    /// `state` from `crossed: false` to `crossed: true`.
+    /// Verifies the wiring without needing the full event-loop /
+    /// signal-registry stack.
+    #[test]
+    fn test_refresh_stateful_invokes_on_tick() {
+        // Build the SharedState through `Stateful::new` so we don't
+        // duplicate the StatefulInner field list — this stays robust
+        // when fields get added in the future.
+        let stateful: Stateful<GuardedState> = Stateful::new(GuardedState { crossed: false });
+        let shared = Arc::clone(&stateful.shared_state);
+
+        assert_eq!(
+            shared.lock().unwrap().state,
+            GuardedState { crossed: false }
+        );
+
+        refresh_stateful(&shared);
+
+        // After refresh, on_tick has fired and the state moved.
+        assert_eq!(
+            shared.lock().unwrap().state,
+            GuardedState { crossed: true },
+            "refresh_stateful should call on_tick before rebuilding"
+        );
+        assert!(
+            shared.lock().unwrap().needs_visual_update,
+            "transitioned state should mark needs_visual_update"
+        );
+    }
 
     #[test]
 
