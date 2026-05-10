@@ -451,6 +451,268 @@ pub fn with_fsm_registry_mut<R>(f: impl FnOnce(&mut FsmRegistry) -> R) -> R {
 // FSM dispatch synthesis (post-parse)
 // =====================================================================
 
+/// Recognition heuristic for `signal <name>: <T>` decls. The
+/// grammar action's `Function` constructor in
+/// `zyn_peg/src/runtime2/interpreter.rs:898` hardcodes
+/// `link_name: None`, so we can't tag signal decls with a marker
+/// link_name from the action — instead we identify them by shape:
+/// extern function, no body, no parameters, primitive return,
+/// and `link_name: None`. The latter discriminates against host
+/// builtins auto-injected by `inject_builtin_externs`
+/// (zyntax_embed/src/grammar2.rs:280) which always set
+/// `link_name: Some(<target_symbol>)`.
+fn is_signal_decl(func: &zyntax_typed_ast::typed_ast::TypedFunction) -> bool {
+    func.is_external
+        && func.body.is_none()
+        && func.params.is_empty()
+        && func.link_name.is_none()
+        && matches!(func.return_type, Type::Primitive(_))
+}
+
+/// Resolve DSL signal references. Walks the program for
+/// `signal <name>: <T>` declarations (recognised by `is_signal_decl`
+/// above), records (name, type), then rewrites every
+/// `<name>.get()` method call into a host-extern call
+/// `__signal_get_<T>("<name>")`. The signal extern decls are
+/// stripped before the program reaches Zyntax's compile path so
+/// the bare-name extern doesn't collide with anything at link
+/// time.
+///
+/// Why this shape:
+///
+///   * One host extern per primitive type (`__signal_get_i32`,
+///     `__signal_get_string`, etc.) keeps the host registration
+///     cost O(types), not O(signals). Adding a new signal is
+///     pure DSL — no host code.
+///   * `<name>.get()` syntax matches how DSL authors think about
+///     signals (`State<T>::get()` is the standard accessor).
+///     Internally we route through name + type discrimination at
+///     the boundary; the DSL surface stays uniform.
+///   * Stripping the signal decls before compile avoids two
+///     problems: (a) the marker `link_name` would fail to link,
+///     and (b) the bare-named extern (e.g. `count`) might shadow
+///     other top-level callables.
+///
+/// Currently only primitive return types (`i32`, `string`) are
+/// handled — adding more is one match arm here plus a host extern.
+/// Struct returns route through Zyntax's Dyn Boxed machinery and
+/// don't need this pass at all (the DSL author writes
+/// `user.get().age` and Zyntax codegens the field load directly).
+fn resolve_signal_calls(program: &mut TypedProgram) {
+    use std::collections::HashMap;
+    use zyntax_typed_ast::typed_ast::{
+        TypedCall, TypedDeclaration, TypedExpression, TypedLiteral,
+    };
+    use zyntax_typed_ast::InternedString;
+
+    // -----------------------------------------------------------------
+    // Phase 1: collect signal name → return type. Walk extern fns
+    // tagged with the magic link_name marker. The pass doesn't
+    // require signals be declared before use (PEG already orders
+    // top_level_item alternates), but we collect them all up front
+    // anyway so the rewrite walker can see signals declared after
+    // their first usage too.
+    // -----------------------------------------------------------------
+    let mut signals: HashMap<InternedString, Type> = HashMap::new();
+    for decl in &program.declarations {
+        let TypedDeclaration::Function(func) = &decl.node else {
+            continue;
+        };
+        if !is_signal_decl(func) {
+            continue;
+        }
+        signals.insert(func.name, func.return_type.clone());
+    }
+
+    if signals.is_empty() {
+        return;
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 2: walk every expression in the program and rewrite
+    // `<sig_name>.get()` (a `TypedExpression::MethodCall` on a
+    // `Variable` receiver) into a `__signal_get_<T>("<name>")`
+    // host-extern call.
+    // -----------------------------------------------------------------
+    fn typed_signal_extern_name(ty: &Type) -> Option<&'static str> {
+        match ty {
+            Type::Primitive(PrimitiveType::I32) => Some("__signal_get_i32"),
+            Type::Primitive(PrimitiveType::String) => Some("__signal_get_string"),
+            // Add a match arm + a matching host builtin to extend.
+            _ => None,
+        }
+    }
+
+    fn rewrite_expr(
+        expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>,
+        signals: &HashMap<InternedString, Type>,
+    ) {
+        // Recursively rewrite children FIRST so nested signal calls
+        // (e.g. `text(count.get())`) get the rewrite applied to the
+        // inner expression before we look at the outer.
+        match &mut expr.node {
+            TypedExpression::Binary(b) => {
+                rewrite_expr(&mut b.left, signals);
+                rewrite_expr(&mut b.right, signals);
+            }
+            TypedExpression::Unary(u) => {
+                rewrite_expr(&mut u.operand, signals);
+            }
+            TypedExpression::Call(c) => {
+                rewrite_expr(&mut c.callee, signals);
+                for a in &mut c.positional_args {
+                    rewrite_expr(a, signals);
+                }
+            }
+            TypedExpression::Field(f) => {
+                rewrite_expr(&mut f.object, signals);
+            }
+            TypedExpression::Index(idx) => {
+                rewrite_expr(&mut idx.object, signals);
+                rewrite_expr(&mut idx.index, signals);
+            }
+            TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
+                for item in items {
+                    rewrite_expr(item, signals);
+                }
+            }
+            TypedExpression::MethodCall(mc) => {
+                rewrite_expr(&mut mc.receiver, signals);
+                for a in &mut mc.positional_args {
+                    rewrite_expr(a, signals);
+                }
+            }
+            TypedExpression::Block(block) => {
+                rewrite_block(block, signals);
+            }
+            TypedExpression::If(if_expr) => {
+                rewrite_expr(&mut if_expr.condition, signals);
+                rewrite_expr(&mut if_expr.then_branch, signals);
+                rewrite_expr(&mut if_expr.else_branch, signals);
+            }
+            // Other variants (Literal, Variable, etc.) have no
+            // rewritable children at this layer.
+            _ => {}
+        }
+
+        // Now check the current node: is it a method call of the
+        // shape `<sig_name>.get()` we should rewrite?
+        if let TypedExpression::MethodCall(mc) = &expr.node {
+            let TypedExpression::Variable(receiver_name) = &mc.receiver.node else {
+                return;
+            };
+            let Some(sig_ty) = signals.get(receiver_name) else {
+                return;
+            };
+            if mc.method.resolve_global().as_deref() != Some("get") {
+                return;
+            }
+            if !mc.positional_args.is_empty() {
+                return;
+            }
+
+            let Some(extern_name) = typed_signal_extern_name(sig_ty) else {
+                // Unsupported signal type — leave the method call
+                // alone. The compile path will surface the
+                // unresolved symbol if it's actually used.
+                return;
+            };
+
+            let call = TypedExpression::Call(TypedCall {
+                callee: Box::new(zyntax_typed_ast::TypedNode::new(
+                    TypedExpression::Variable(InternedString::new_global(extern_name)),
+                    Type::Unknown,
+                    expr.span,
+                )),
+                positional_args: vec![zyntax_typed_ast::TypedNode::new(
+                    TypedExpression::Literal(TypedLiteral::String(*receiver_name)),
+                    Type::Primitive(PrimitiveType::String),
+                    expr.span,
+                )],
+                named_args: vec![],
+                type_args: vec![],
+            });
+            expr.node = call;
+            expr.ty = sig_ty.clone();
+        }
+    }
+
+    fn rewrite_block(
+        block: &mut zyntax_typed_ast::typed_ast::TypedBlock,
+        signals: &HashMap<InternedString, Type>,
+    ) {
+        for stmt in &mut block.statements {
+            rewrite_stmt(stmt, signals);
+        }
+    }
+
+    fn rewrite_stmt(
+        stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>,
+        signals: &HashMap<InternedString, Type>,
+    ) {
+        match &mut stmt.node {
+            TypedStatement::Expression(e) => rewrite_expr(e, signals),
+            TypedStatement::Let(l) => {
+                if let Some(init) = &mut l.initializer {
+                    rewrite_expr(init, signals);
+                }
+            }
+            TypedStatement::Return(opt) => {
+                if let Some(e) = opt {
+                    rewrite_expr(e, signals);
+                }
+            }
+            TypedStatement::If(if_stmt) => {
+                rewrite_expr(&mut if_stmt.condition, signals);
+                rewrite_block(&mut if_stmt.then_block, signals);
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    rewrite_block(else_block, signals);
+                }
+            }
+            TypedStatement::While(w) => {
+                rewrite_expr(&mut w.condition, signals);
+                rewrite_block(&mut w.body, signals);
+            }
+            TypedStatement::Block(b) => rewrite_block(b, signals),
+            // Other variants don't carry expressions we'd rewrite
+            // for the prototype slice.
+            _ => {}
+        }
+    }
+
+    for decl in &mut program.declarations {
+        let TypedDeclaration::Function(func) = &mut decl.node else {
+            continue;
+        };
+        if let Some(body) = &mut func.body {
+            rewrite_block(body, &signals);
+        }
+    }
+    // Also walk impl-block methods.
+    for decl in &mut program.declarations {
+        let TypedDeclaration::Impl(imp) = &mut decl.node else {
+            continue;
+        };
+        for method in &mut imp.methods {
+            if let Some(body) = &mut method.body {
+                rewrite_block(body, &signals);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 3: strip the signal-marker decls. They were just
+    // metadata-carriers; the rewrite path replaces every usage
+    // with calls to host-registered builtins.
+    // -----------------------------------------------------------------
+    program.declarations.retain(|decl| {
+        let TypedDeclaration::Function(func) = &decl.node else {
+            return true;
+        };
+        !is_signal_decl(func)
+    });
+}
+
 /// Wrap every fsm's `__fsm_meta__` body with `__fsm_begin__("FsmName")`
 /// at the front and `__fsm_end__()` at the back. The host registers
 /// these markers as builtins that push/pop a "current FSM" name on
@@ -1110,6 +1372,7 @@ impl BlincDsl {
         // — keep these two paths in sync when adding new passes.
         inject_fsm_context_markers(&mut typed_program);
         synthesize_fsm_event_enums(&mut typed_program);
+        resolve_signal_calls(&mut typed_program);
 
         // Eager registry population: walk fsm impls, pin TypeIds,
         // record metadata into the global FsmRegistry, then strip
@@ -1173,6 +1436,10 @@ impl BlincDsl {
         //      manipulate a host-side context stack).
         //   2. Synthesise a `<FSM>Event` enum from the unique event
         //      names referenced by `__fsm_transition__` markers.
+        //   3. Resolve `signal <name>: <T>` decls into rewrites of
+        //      `<name>.get()` to `__signal_get_<T>("<name>")` host
+        //      extern calls. Strips the signal-marker decls so the
+        //      compile path doesn't see them.
         //
         // The marker calls inside `__fsm_meta__` are then ordinary
         // function calls; Zyntax compiles them like any other call,
@@ -1181,6 +1448,7 @@ impl BlincDsl {
         // codegen pass — Zyntax owns compilation.
         inject_fsm_context_markers(&mut program);
         synthesize_fsm_event_enums(&mut program);
+        resolve_signal_calls(&mut program);
 
         Ok(program)
     }
@@ -4062,6 +4330,315 @@ mod tests {
         // Phantom state name with no rules — should also miss.
         let from_phantom = dsl.step_tick(&id, "DoesNotExist").expect("step_tick");
         assert!(from_phantom.is_none(), "phantom from-state should miss");
+    }
+
+    // -----------------------------------------------------------------
+    // Signal-resolved guard tests. The `signal <name>: <T>` decl
+    // gets stripped before compile, and every `<name>.get()`
+    // method call becomes a `__signal_get_<T>("<name>")` extern
+    // call. Tests verify the rewrite shape on parsed AST — the
+    // host-builtin side (registering `__signal_get_i32` and a
+    // signal-value table) lands in a follow-up commit.
+    // -----------------------------------------------------------------
+
+    /// `count.get()` on an `i32` signal lowers to
+    /// `__signal_get_i32("count")`. Verifies (a) the rewrite
+    /// happened (the original MethodCall is gone), (b) the new
+    /// callee is `__signal_get_i32`, (c) the signal name is
+    /// preserved as a string literal arg.
+    #[test]
+    fn signal_get_rewrites_to_typed_extern_i32() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                signal count: i32
+                fsm SignalProbeI32 {
+                    state Idle
+                    state Hot
+                    initial Idle
+                    tick Idle -> Hot when count.get() > 100
+                }
+                "#,
+                "signal_i32.blinc",
+            )
+            .expect("parse");
+
+        // The signal_decl extern should be stripped — no more
+        // top-level Function named `count`.
+        let has_signal_decl = program.declarations.iter().any(|d| {
+            let zyntax_typed_ast::TypedDeclaration::Function(f) = &d.node else {
+                return false;
+            };
+            f.name.resolve_global().as_deref() == Some("count")
+        });
+        assert!(
+            !has_signal_decl,
+            "signal-marker decl should be stripped before compile"
+        );
+
+        // The rewrite happens inside `__fsm_meta__`'s body — the
+        // tick-guard expression is the second arg to a
+        // `__fsm_tick__("from", <guard>, "to")` marker call. After
+        // the rewrite, that <guard> is `Binary(Call(__signal_get_i32,
+        // "count"), Gt, IntLit(100))`. Lifting into a top-level
+        // function happens later, in compile_source's
+        // populate_fsm_registry_pass — at parse_to_typed_ast level
+        // the markers are still in place.
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i)
+                    if i.trait_name.resolve_global().as_deref() == Some("SignalProbeI32") =>
+                {
+                    Some(i)
+                }
+                _ => None,
+            })
+            .expect("SignalProbeI32 Impl");
+        let meta = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("__fsm_meta__"))
+            .expect("__fsm_meta__ method");
+        let body = meta.body.as_ref().expect("__fsm_meta__ body");
+
+        // Walk body for the __fsm_tick__ marker; arg[1] is the
+        // (now-rewritten) guard expression.
+        let tick_call = body
+            .statements
+            .iter()
+            .find_map(|s| {
+                let TypedStatement::Expression(e) = &s.node else {
+                    return None;
+                };
+                let TypedExpression::Call(c) = &e.node else {
+                    return None;
+                };
+                let TypedExpression::Variable(callee) = &c.callee.node else {
+                    return None;
+                };
+                if callee.resolve_global().as_deref() == Some("__fsm_tick__") {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .expect("__fsm_tick__ marker should exist");
+        let guard = &tick_call.positional_args[1];
+        let TypedExpression::Binary(cmp) = &guard.node else {
+            panic!("guard should be Binary, got {:?}", guard.node);
+        };
+        let TypedExpression::Call(call) = &cmp.left.node else {
+            panic!(
+                "guard LHS should be Call after rewrite, got {:?}",
+                cmp.left.node
+            );
+        };
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_eq!(
+            callee.resolve_global().as_deref(),
+            Some("__signal_get_i32"),
+            "signal call should rewrite to __signal_get_i32"
+        );
+        // Signal name preserved as the first string-literal arg.
+        assert_eq!(call.positional_args.len(), 1);
+        let TypedExpression::Literal(TypedLiteral::String(name)) = &call.positional_args[0].node
+        else {
+            panic!("expected string-literal name arg");
+        };
+        assert_eq!(name.resolve_global().as_deref(), Some("count"));
+    }
+
+    /// `name.get()` on a `string` signal lowers to
+    /// `__signal_get_string("name")`. Pinning the per-type extern
+    /// dispatch — same DSL surface, different host extern based
+    /// on the signal's declared return type. The signal usage
+    /// goes through a `let` initializer (which accepts any
+    /// expression) since `text(...)` doesn't yet accept method
+    /// calls — the rewrite walker handles let initializers.
+    #[test]
+    fn signal_get_rewrites_to_typed_extern_string() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                signal username: string
+                component C {
+                    state x: i32
+                    view {}
+                    fn step() { let s = username.get() }
+                }
+                "#,
+                "signal_string.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .expect("Impl block expected");
+        let step = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("step"))
+            .unwrap();
+        let body = step.body.as_ref().unwrap();
+        // body: let s = __signal_get_string("username")
+        let TypedStatement::Let(let_node) = &body.statements[0].node else {
+            panic!("expected Let stmt");
+        };
+        let init = let_node.initializer.as_ref().expect("let init");
+        let TypedExpression::Call(sig_call) = &init.node else {
+            panic!(
+                "let init should be Call after rewrite, got {:?}",
+                init.node
+            );
+        };
+        let TypedExpression::Variable(callee) = &sig_call.callee.node else {
+            panic!("signal callee should be Variable");
+        };
+        assert_eq!(
+            callee.resolve_global().as_deref(),
+            Some("__signal_get_string"),
+            "string-typed signal should rewrite to __signal_get_string"
+        );
+    }
+
+    /// Multiple signals in the same program — each gets its
+    /// rewrite based on its declared type. Verifies the pass
+    /// builds a signal table from ALL signal_decl markers, not
+    /// just the first one.
+    #[test]
+    fn multiple_signals_rewrite_independently() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                signal count: i32
+                signal label: string
+                fsm MultiSignalProbe {
+                    state Idle
+                    state Hot
+                    initial Idle
+                    tick Idle -> Hot when count.get() > 0
+                }
+                component C {
+                    state x: i32
+                    view {}
+                    fn step() { let s = label.get() }
+                }
+                "#,
+                "multi_signals.blinc",
+            )
+            .expect("parse");
+
+        // Both signal-marker decls stripped.
+        let strays: Vec<_> = program
+            .declarations
+            .iter()
+            .filter_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Function(f) => {
+                    let name = f.name.resolve_global();
+                    if matches!(name.as_deref(), Some("count") | Some("label")) {
+                        Some(name)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "signal markers should all be stripped, got strays: {strays:?}"
+        );
+
+        // Verify each signal has its expected extern in some call
+        // somewhere. We just look at the program-wide presence of
+        // both __signal_get_i32 and __signal_get_string callees.
+        fn callee_exists(program: &TypedProgram, callee: &str) -> bool {
+            fn walk_expr(
+                e: &zyntax_typed_ast::TypedNode<TypedExpression>,
+                callee: &str,
+            ) -> bool {
+                match &e.node {
+                    TypedExpression::Call(c) => {
+                        if let TypedExpression::Variable(name) = &c.callee.node {
+                            if name.resolve_global().as_deref() == Some(callee) {
+                                return true;
+                            }
+                        }
+                        c.positional_args.iter().any(|a| walk_expr(a, callee))
+                            || walk_expr(&c.callee, callee)
+                    }
+                    TypedExpression::Binary(b) => {
+                        walk_expr(&b.left, callee) || walk_expr(&b.right, callee)
+                    }
+                    _ => false,
+                }
+            }
+            fn walk_stmt(
+                s: &zyntax_typed_ast::TypedNode<TypedStatement>,
+                callee: &str,
+            ) -> bool {
+                match &s.node {
+                    TypedStatement::Expression(e) => walk_expr(e, callee),
+                    TypedStatement::Let(l) => l
+                        .initializer
+                        .as_ref()
+                        .map(|init| walk_expr(init, callee))
+                        .unwrap_or(false),
+                    TypedStatement::If(i) => {
+                        walk_expr(&i.condition, callee)
+                            || i.then_block.statements.iter().any(|s| walk_stmt(s, callee))
+                            || i.else_block.as_ref().map_or(false, |b| {
+                                b.statements.iter().any(|s| walk_stmt(s, callee))
+                            })
+                    }
+                    TypedStatement::Return(Some(e)) => walk_expr(e, callee),
+                    _ => false,
+                }
+            }
+            program.declarations.iter().any(|d| {
+                match &d.node {
+                    zyntax_typed_ast::TypedDeclaration::Function(f) => f
+                        .body
+                        .as_ref()
+                        .map(|b| b.statements.iter().any(|s| walk_stmt(s, callee)))
+                        .unwrap_or(false),
+                    zyntax_typed_ast::TypedDeclaration::Impl(i) => i.methods.iter().any(|m| {
+                        m.body
+                            .as_ref()
+                            .map(|b| b.statements.iter().any(|s| walk_stmt(s, callee)))
+                            .unwrap_or(false)
+                    }),
+                    _ => false,
+                }
+            })
+        }
+
+        assert!(
+            callee_exists(&program, "__signal_get_i32"),
+            "i32 signal should produce __signal_get_i32 call"
+        );
+        assert!(
+            callee_exists(&program, "__signal_get_string"),
+            "string signal should produce __signal_get_string call"
+        );
     }
 
     /// Direct `FsmDefinition::step_event` works without going

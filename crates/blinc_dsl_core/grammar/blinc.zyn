@@ -64,7 +64,41 @@ top_level_items = { item:top_level_item* }
 // `component_decl`. Falling through handles standalone struct-only
 // `component { fields }` decls, standalone `impl` blocks, and the
 // bare `view { ... }` quick-test shape.
-top_level_item = { component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
+top_level_item = { signal_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
+
+// `signal <name>: <type>` — declares a host-bound reactive signal
+// the DSL can read inside guards, view bodies, etc. Lowers to a
+// zero-arg extern `TypedDeclaration::Function` that the
+// `resolve_signal_calls` post-parse pass uses as a directory of
+// known signals when rewriting `<name>.get()` calls into the
+// host-registered `__signal_get_<T>("<name>")` extern.
+//
+// Recognition heuristic on the host side: `inject_builtin_externs`
+// (zyntax_embed/src/grammar2.rs:198-315) sets
+// `link_name: Some(<target_symbol>)` on every auto-injected
+// builtin extern. The grammar action's `Function` constructor
+// hardcodes `link_name: None` (interpreter.rs:898), so signal
+// decls authored via this rule arrive with `link_name = None`.
+// The post-parse pass uses `is_external: true && link_name == None
+// && params.is_empty() && body.is_none()` as the discriminator,
+// then strips these decls before compile so the bare-name
+// extern doesn't conflict with anything at link time.
+//
+// Why an extern decl as the carrier rather than e.g. a marker
+// statement: keeping signal metadata at the declaration level
+// (where types live) means the post-parse pass can read return
+// types directly via standard TypedAST traversal, no parallel
+// metadata structure. The is_external + body=None shape mirrors
+// what Zyntax's own extern injection produces, so downstream
+// passes that already handle externs handle ours uniformly.
+signal_decl = { "signal" ~ name:identifier ~ ":" ~ ty:state_type }
+  -> TypedDeclaration::Function {
+      name: intern(name),
+      params: [],
+      return_type: ty,
+      body: None,
+      is_external: true,
+  }
 
 bare_view_item = { "view" ~ "{" ~ stmts:statements ~ "}" }
   -> TypedDeclaration::Function {
