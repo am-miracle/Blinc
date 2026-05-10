@@ -653,11 +653,13 @@ mod tests {
         );
     }
 
-    /// Counter end-to-end shape — struct + impl in one file. Two
-    /// TypedDeclarations (Class then Impl). End-to-end parser
-    /// validation for the Zyntax struct + impl idiom.
+    /// Optional split form: `component Name { fields }` + `impl Name
+    /// { fn ... }` as separate top-level items. Supported alongside
+    /// the folded form for users who want explicit decl-per-rule
+    /// shape (or are programmatically generating `.blinc` source
+    /// where one decl at a time is easier to emit).
     #[test]
-    fn parse_component_with_struct_and_impl() {
+    fn parse_component_split_form() {
         let _ = tracing_subscriber::fmt::try_init();
 
         let dsl = BlincDsl::new().expect("runtime init");
@@ -669,7 +671,7 @@ mod tests {
                     fn view() { text("count") }
                 }
                 "#,
-                "counter.blinc",
+                "counter_split.blinc",
             )
             .expect("parse");
 
@@ -684,6 +686,80 @@ mod tests {
         }
         assert_eq!(class_count, 1, "expected 1 Class decl");
         assert_eq!(impl_count, 1, "expected 1 Impl decl");
+    }
+
+    /// Folded `component { fields, view { ... }, fn handler() { ... } }`
+    /// emits BOTH a Class and an Impl from one source-level block.
+    /// Validates the inlined `concat_list([Class], [Impl])` shape
+    /// in the grammar action — relies on the upstream
+    /// `get_field_as_decl_list` flatten patch (#7) so the parent
+    /// `top_level_items` collector unwraps the nested list.
+    #[test]
+    fn parse_component_folded() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component Counter {
+                    count: i32
+                    view { text("count") }
+                    fn on_click() { text("clicked") }
+                }
+                "#,
+                "counter_folded.blinc",
+            )
+            .expect("parse");
+
+        // One source `component { ... }` block -> two TypedDeclarations.
+        let class = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Class(c) => Some(c),
+                _ => None,
+            })
+            .expect("expected a Class decl from the folded component");
+        assert_eq!(class.name.resolve_global().as_deref(), Some("Counter"));
+        assert_eq!(
+            class.fields.len(),
+            1,
+            "expected one field (count) in folded component"
+        );
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .expect("expected an Impl decl from the folded component");
+        assert_eq!(
+            impl_block.trait_name.resolve_global().as_deref(),
+            Some("Counter")
+        );
+        assert_eq!(
+            impl_block.methods.len(),
+            2,
+            "expected view + on_click methods, got {:?}",
+            impl_block
+                .methods
+                .iter()
+                .map(|m| m.name.resolve_global())
+                .collect::<Vec<_>>()
+        );
+
+        // view is first (prepended), on_click is second.
+        assert_eq!(
+            impl_block.methods[0].name.resolve_global().as_deref(),
+            Some("view")
+        );
+        assert_eq!(
+            impl_block.methods[1].name.resolve_global().as_deref(),
+            Some("on_click")
+        );
     }
 
     /// `text(N)` round-trip — probes the i32 ABI through Cranelift.

@@ -59,7 +59,12 @@ top_level_items = { item:top_level_item* }
       declarations: item,
   }
 
-top_level_item = { component_decl | impl_block | bare_view_item }
+// PEG ordered alternates: try the folded `component { state, view }`
+// form first since it matches a longer prefix than the bare
+// `component_decl`. Falling through handles standalone struct-only
+// `component { fields }` decls, standalone `impl` blocks, and the
+// bare `view { ... }` quick-test shape.
+top_level_item = { component_folded | component_decl | impl_block | bare_view_item }
 
 bare_view_item = { "view" ~ "{" ~ stmts:statements ~ "}" }
   -> TypedDeclaration::Function {
@@ -69,17 +74,56 @@ bare_view_item = { "view" ~ "{" ~ stmts:statements ~ "}" }
       body: Some(TypedBlock { statements: stmts }),
   }
 
-// `component <Name> { count: i32, width: i32 }` — Zyntax struct
-// shape. The grammar interpreter's `Class` constructor
-// (interpreter.rs:989-1006) ignores any methods array on the action
-// (hardcodes `methods: vec![]`), so methods always go through a
-// separate `impl` block — matching Zyntax's mainline pattern.
+// `component <Name> { fields, view { stmts }, fn handler() { ... } }`
+// — folded source-level shape. Emits BOTH a Class (data) and an
+// Impl (methods) from one rule by inlining a list of two
+// declarations and letting the patched `get_field_as_decl_list`
+// flatten when `top_level_items` collects the result.
+//
+// `view { stmts }` becomes `fn view() { stmts }` inlined into the
+// Impl's items. Additional `fn`s (e.g. event handlers) sit
+// alongside it via `impl_fn*` and get prepended via the standard
+// list helper.
+//
+// This is the natural user-facing component shape — UI authors
+// think in terms of "a component IS a thing with state and a
+// view". Internally we lower to Zyntax's struct + impl idiom.
+component_folded = {
+    "component" ~ name:identifier ~ "{"
+    ~ fields:struct_field_list?
+    ~ "view" ~ "{" ~ stmts:statements ~ "}"
+    ~ extra:impl_fn*
+    ~ "}"
+}
+  -> concat_list(
+      [TypedDeclaration::Class {
+          name: intern(name),
+          fields: fields,
+      }],
+      [TypedDeclaration::Impl {
+          trait_name: intern(name),
+          for_type: intern(name),
+          items: prepend_list(
+              TypedDeclaration::Function {
+                  name: intern("view"),
+                  params: [],
+                  return_type: Type::Unit,
+                  body: Some(TypedBlock { statements: stmts }),
+              },
+              extra,
+          ),
+      }],
+  )
+
+// `component <Name> { fields }` — bare struct-only form, no
+// methods. Useful for data-only components that other components
+// reference. Lowers to `TypedDeclaration::Class`.
 //
 // Field initializers (`count: i32 = 0`) aren't representable yet:
 // `construct_field` (interpreter.rs:1418-1439) hardcodes
 // `initializer: None`. Until that's patched upstream, default
-// values come from explicit `fn init() { count = 0 }` methods on
-// the corresponding `impl` block.
+// values come from explicit `fn init() { count = 0 }` methods in
+// a separate `impl` block (or in the folded form above).
 component_decl = { "component" ~ name:identifier ~ "{" ~ fields:struct_field_list? ~ "}" }
   -> TypedDeclaration::Class {
       name: intern(name),
