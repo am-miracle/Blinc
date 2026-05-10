@@ -189,6 +189,134 @@ pub enum BlincDslError {
 pub type BlincDslResult<T> = std::result::Result<T, BlincDslError>;
 
 // =====================================================================
+// FSM dispatch synthesis (post-parse)
+// =====================================================================
+
+/// Walk a parsed `TypedProgram` and synthesize a sibling `<FSM>Event`
+/// enum for every fsm declaration that has at least one
+/// `__fsm_transition__` marker. The synthesized enum's variants are
+/// the unique event names referenced by the FSM's transitions, in
+/// declaration order.
+///
+/// # Why a post-parse pass and not grammar action
+///
+/// Two reasons: (a) the grammar action language doesn't support
+/// string concatenation, so we can't build the `<FSM>Event` name
+/// from the FSM's own name at parse time; (b) deduplication of
+/// event names across many transitions is naturally Rust code,
+/// not grammar action code.
+///
+/// # Runtime contract
+///
+/// The synthesized enum is the bridge between user-facing event
+/// names (`Start`, `Reset`) and `StateTransitions::on_event(event:
+/// u32)`. A downstream codegen pass turns the enum into a Rust
+/// `#[repr(u32)]` enum + `From<Event> for u32`, then user code
+/// dispatches via `loader.dispatch(LoaderEvent::Start.into())`.
+/// Tick transitions (`__fsm_tick__`) are guard-driven and don't
+/// have user-facing event names, so they never appear in the
+/// synthesized event enum.
+fn synthesize_fsm_event_enums(program: &mut TypedProgram) {
+    use std::collections::HashSet;
+    use zyntax_typed_ast::type_registry::Visibility;
+    use zyntax_typed_ast::typed_ast::{
+        TypedDeclaration, TypedEnum, TypedExpression, TypedLiteral, TypedVariant,
+        TypedVariantFields,
+    };
+    use zyntax_typed_ast::{InternedString, TypedNode};
+
+    let mut event_enums: Vec<TypedNode<TypedDeclaration>> = Vec::new();
+
+    for decl in &program.declarations {
+        let TypedDeclaration::Impl(imp) = &decl.node else {
+            continue;
+        };
+
+        // Find the synthesised `__fsm_meta__` method.
+        let Some(meta) = imp.methods.iter().find(|m| {
+            m.name.resolve_global().as_deref() == Some("__fsm_meta__")
+        }) else {
+            continue;
+        };
+        let Some(body) = meta.body.as_ref() else {
+            continue;
+        };
+
+        // Collect unique event names from `__fsm_transition__(_, event,
+        // _)` markers, preserving declaration order so the runtime
+        // discriminant assignment is stable.
+        let mut events: Vec<InternedString> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for stmt_node in &body.statements {
+            let TypedStatement::Expression(expr_node) = &stmt_node.node else {
+                continue;
+            };
+            let TypedExpression::Call(call) = &expr_node.node else {
+                continue;
+            };
+            let TypedExpression::Variable(callee) = &call.callee.node else {
+                continue;
+            };
+            if callee.resolve_global().as_deref() != Some("__fsm_transition__") {
+                continue;
+            }
+            let Some(event_arg) = call.positional_args.get(1) else {
+                continue;
+            };
+            let TypedExpression::Literal(TypedLiteral::String(name)) = &event_arg.node
+            else {
+                continue;
+            };
+            let key = name.resolve_global().unwrap_or_default();
+            if !key.is_empty() && seen.insert(key) {
+                events.push(*name);
+            }
+        }
+
+        if events.is_empty() {
+            // Tick-only fsm or no transitions at all — nothing to
+            // synthesise. The state enum + `__fsm_meta__` already
+            // carry everything the runtime needs.
+            continue;
+        }
+
+        // Build the variants and the `<FSM>Event` enum name. Use
+        // `trait_name` (an InternedString) rather than `for_type`
+        // (a Type) — the grammar sets both to the FSM identifier
+        // for inherent impls, but `trait_name` gives us the bare
+        // name without unwrapping a Type::Named.
+        let fsm_name = imp.trait_name.resolve_global().unwrap_or_default();
+        let event_enum_name = InternedString::new_global(&format!("{fsm_name}Event"));
+
+        let variants: Vec<TypedVariant> = events
+            .into_iter()
+            .map(|name| TypedVariant {
+                name,
+                fields: TypedVariantFields::Unit,
+                discriminant: None,
+                span: Span::default(),
+            })
+            .collect();
+
+        let event_enum = TypedDeclaration::Enum(TypedEnum {
+            name: event_enum_name,
+            type_params: vec![],
+            variants,
+            visibility: Visibility::Public,
+            span: Span::default(),
+        });
+
+        event_enums.push(TypedNode::new(event_enum, Type::Unknown, Span::default()));
+    }
+
+    // Append synthesised enums after all original declarations so
+    // existing `find_map` lookups (which return the first matching
+    // decl) keep returning the user-declared state enum / impl.
+    program.declarations.extend(event_enums);
+}
+
+// =====================================================================
 // Runtime engine
 // =====================================================================
 
@@ -331,9 +459,19 @@ impl BlincDsl {
             .lock()
             .expect("BlincDsl runtime mutex poisoned");
 
-        self.grammar
+        let mut program = self
+            .grammar
             .parse_with_signatures(source, filename, runtime.plugin_signatures())
-            .map_err(|e| BlincDslError::Compile(e.to_string()))
+            .map_err(|e| BlincDslError::Compile(e.to_string()))?;
+
+        // Post-parse synthesis: walk `__fsm_meta__` markers and emit
+        // a sibling `<FSM>Event` enum for every fsm with at least one
+        // event-driven transition. Keeps the grammar minimal (it
+        // can't string-concat at action time) and puts the runtime
+        // dispatch concern where it belongs — at the host boundary.
+        synthesize_fsm_event_enums(&mut program);
+
+        Ok(program)
     }
 
     /// Invoke the bare-form `render_view` entry point and drain the
@@ -2281,6 +2419,160 @@ mod tests {
         assert_eq!(callee_at(1), "__fsm_transition__");
         assert_eq!(callee_at(2), "__fsm_tick__");
         assert_eq!(callee_at(3), "__fsm_transition__");
+    }
+
+    /// Post-parse synthesis: an fsm with event-driven transitions
+    /// gets a sibling `<FSM>Event` enum appended to the program's
+    /// declarations. Variants are the unique event names from the
+    /// FSM's `__fsm_transition__` markers, in declaration order.
+    /// Pinning that the bridge between user-facing event names
+    /// (`Start`, `Reset`) and `StateTransitions::on_event(u32)` is
+    /// emitted at parse time, ready for codegen.
+    #[test]
+    fn synthesize_event_enum_basic() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                fsm Loader {
+                    state Idle
+                    state Loading
+                    state Done
+                    initial Idle
+                    on Idle.Start -> Loading
+                    on Loading.Finish -> Done
+                    on Done.Reset -> Idle
+                }
+                "#,
+                "fsm_event_enum.blinc",
+            )
+            .expect("parse");
+
+        // Two enums in the program: the state enum (Loader) and
+        // the synthesised event enum (LoaderEvent).
+        let enums: Vec<_> = program
+            .declarations
+            .iter()
+            .filter_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Enum(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            enums.len(),
+            2,
+            "expected state enum + event enum, got {}",
+            enums.len()
+        );
+
+        let state_enum = enums[0];
+        assert_eq!(state_enum.name.resolve_global().as_deref(), Some("Loader"));
+
+        let event_enum = enums[1];
+        assert_eq!(
+            event_enum.name.resolve_global().as_deref(),
+            Some("LoaderEvent"),
+            "synthesised enum should be named <FSM>Event"
+        );
+        assert_eq!(
+            event_enum.variants.len(),
+            3,
+            "expected 3 unique events (Start, Finish, Reset)"
+        );
+        for (i, expected) in ["Start", "Finish", "Reset"].iter().enumerate() {
+            assert_eq!(
+                event_enum.variants[i].name.resolve_global().as_deref(),
+                Some(*expected),
+                "variant {i} should be {expected} (declaration order preserved)"
+            );
+        }
+    }
+
+    /// Duplicate event names across transitions (e.g. `Click`
+    /// reused on multiple from-states) get deduped — the event
+    /// enum has at most one variant per unique name. Order is the
+    /// first-seen position.
+    #[test]
+    fn synthesize_event_enum_dedup() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                fsm Toggle {
+                    state On
+                    state Off
+                    initial Off
+                    on Off.Click -> On
+                    on On.Click -> Off
+                }
+                "#,
+                "fsm_event_dedup.blinc",
+            )
+            .expect("parse");
+
+        let event_enum = program
+            .declarations
+            .iter()
+            .filter_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Enum(e) => Some(e),
+                _ => None,
+            })
+            .find(|e| e.name.resolve_global().as_deref() == Some("ToggleEvent"))
+            .expect("expected ToggleEvent enum");
+
+        assert_eq!(
+            event_enum.variants.len(),
+            1,
+            "duplicate `Click` events should dedup to one variant"
+        );
+        assert_eq!(
+            event_enum.variants[0].name.resolve_global().as_deref(),
+            Some("Click")
+        );
+    }
+
+    /// Tick-only fsm has no `__fsm_transition__` markers and so
+    /// gets no event enum synthesised. The state enum + impl are
+    /// the only fsm-related decls. Confirms the pass doesn't emit
+    /// an empty stub when there are no events.
+    #[test]
+    fn synthesize_no_event_enum_for_tick_only_fsm() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                fsm Progress {
+                    state Loading
+                    state Done
+                    initial Loading
+                    tick Loading -> Done when count.get() > 100
+                }
+                "#,
+                "fsm_tick_only.blinc",
+            )
+            .expect("parse");
+
+        let enums: Vec<_> = program
+            .declarations
+            .iter()
+            .filter_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Enum(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            enums.len(),
+            1,
+            "tick-only fsm should have only the state enum, got {} enums",
+            enums.len()
+        );
+        assert_eq!(enums[0].name.resolve_global().as_deref(), Some("Progress"));
     }
 
     /// `fsm` with no transitions still parses — useful for the
