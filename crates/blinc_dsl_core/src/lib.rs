@@ -48,11 +48,7 @@ use zyntax_embed::{
 /// version bump on the embed crate.
 const ZRTL_MAX_PARAMS: usize = 16;
 use zyntax_typed_ast::type_registry::{PrimitiveType, Type};
-use zyntax_typed_ast::typed_ast::ParameterKind;
-use zyntax_typed_ast::{
-    typed_node, CallingConvention, InternedString, Mutability, Span, TypedDeclaration,
-    TypedFunction, TypedParameter, TypedProgram, TypedStatement, Visibility,
-};
+use zyntax_typed_ast::{typed_node, Span, TypedProgram, TypedStatement};
 
 /// The embedded Blinc DSL grammar source.
 ///
@@ -280,19 +276,24 @@ impl BlincDsl {
         // here come back with the span machinery Zyntax already
         // provides — we don't add a parallel check layer
         // (ROADMAP §3.6).
+        // `parse_with_signatures` runs Zyntax's
+        // `inject_builtin_externs` (grammar2.rs:198-315) using the
+        // runtime's registered plugin signatures. We populate those
+        // signatures in `register_builtins` via
+        // `register_function_typed`, so every `@builtin` entry in our
+        // grammar gets a properly-typed extern decl in the parsed
+        // program. This is the path that makes `concat` /
+        // `__fstring_format__` (used by f-string desugaring) plus
+        // our direct symbols (`$Blinc$text`, `$Blinc$text_int`,
+        // etc.) all type-check + JIT-link cleanly.
+        //
+        // We don't run our own `inject_builtin_externs` host pass
+        // anymore — Zyntax's covers everything in the @builtin
+        // table, and our table now lists every builtin we register.
         let mut typed_program = self
             .grammar
-            .parse_with_filename(source, filename)
+            .parse_with_signatures(source, filename, runtime.plugin_signatures())
             .map_err(|e| BlincDslError::Compile(e.to_string()))?;
-
-        // Splice extern decls so type inference resolves the
-        // `$Blinc$*` callees to their declared return / param types.
-        // Without this step the body classifier rewrites the
-        // synthesized `render_view` function's `Unit` return to a
-        // dynamic value, producing a misaligned-pointer panic at
-        // call time (see `BuiltinDescriptor`'s docs for the full
-        // chain).
-        inject_builtin_externs(&mut typed_program);
 
         // Belt-and-suspenders: terminate user functions with an
         // explicit `Return(None)` so the body classifier can't infer
@@ -312,6 +313,27 @@ impl BlincDsl {
         let source = std::fs::read_to_string(path)?;
         let filename = path.to_string_lossy();
         self.compile_source(&source, &filename)
+    }
+
+    /// Parse `.blinc` source to a TypedAST without compiling or
+    /// running. Exposed for tests + tooling that want to analyse
+    /// the parsed shape (e.g. an LSP, a CI lint, or — at this
+    /// prototype stage — assertion tests on grammar rules that
+    /// don't need full JIT round-trip).
+    ///
+    /// The grammar's job is to produce TypedAST; the compiler's
+    /// job is to compile it. This entry point exists so we can
+    /// test the former in isolation when the latter isn't the
+    /// concern.
+    pub fn parse_to_typed_ast(&self, source: &str, filename: &str) -> BlincDslResult<TypedProgram> {
+        let runtime = self
+            .runtime
+            .lock()
+            .expect("BlincDsl runtime mutex poisoned");
+
+        self.grammar
+            .parse_with_signatures(source, filename, runtime.plugin_signatures())
+            .map_err(|e| BlincDslError::Compile(e.to_string()))
     }
 
     /// Invoke the bare-form `render_view` entry point and drain the
@@ -477,73 +499,6 @@ fn register_builtins(runtime: &mut ZyntaxRuntime) {
     }
 }
 
-/// Splice extern function declarations for every builtin into the
-/// parsed `TypedProgram`.
-///
-/// The grammar's call sites lower to `TypedExpression::Variable`
-/// callees naming the builtin symbol. Without an extern declaration
-/// the type checker can't resolve the variable to a function and the
-/// body classifier defaults the return type to `Any`, which then
-/// overrides the function's declared `Type::Unit` return (see
-/// `zyntax/crates/compiler/src/lowering.rs:1610-1664`). The
-/// `inject_builtin_externs` path inside `Grammar2::parse_with_signatures`
-/// does this for `.zrtl` plugin symbols; we mirror it for our static
-/// builtins.
-fn inject_builtin_externs(program: &mut TypedProgram) {
-    let span = Span::default();
-
-    for b in builtins() {
-        let params: Vec<TypedParameter> = b
-            .param_types
-            .iter()
-            .enumerate()
-            .map(|(i, ty)| TypedParameter {
-                name: InternedString::new_global(&format!("p{i}")),
-                ty: ty.clone(),
-                mutability: Mutability::Immutable,
-                kind: ParameterKind::Regular,
-                default_value: None,
-                attributes: vec![],
-                span,
-            })
-            .collect();
-
-        // Build the extern decl directly rather than through
-        // `TypedASTBuilder::extern_function`. The builder hard-codes
-        // `CallingConvention::Cdecl` (typed_builder.rs:965) which the
-        // compiler lowers to `hir::CallingConvention::C ->
-        // CallConv::SystemV`. The call-site lowering at
-        // `cranelift_backend.rs:2716` uses `module.make_signature()`
-        // which yields the platform-default convention
-        // (`AppleAarch64` on aarch64-apple-darwin). The mismatch
-        // panics with `IncompatibleSignature` at codegen time.
-        // `CallingConvention::Default` lowers to
-        // `hir::CallingConvention::System`, which the backend then
-        // honours as the platform default — matching the call site.
-        let func = TypedFunction {
-            name: InternedString::new_global(b.name),
-            annotations: vec![],
-            effects: vec![],
-            type_params: vec![],
-            params,
-            return_type: b.return_type.clone(),
-            body: None,
-            visibility: Visibility::Public,
-            is_async: false,
-            is_pure: false,
-            is_external: true,
-            calling_convention: CallingConvention::Default,
-            link_name: None,
-        };
-
-        program.declarations.push(typed_node(
-            TypedDeclaration::Function(func),
-            b.return_type.clone(),
-            span,
-        ));
-    }
-}
-
 /// Append a `Return(None)` to the main function so the body
 /// classifier can't promote a single trailing Expression into a
 /// value-bearing return.
@@ -667,6 +622,154 @@ mod tests {
             DslOp::IntText(n) => assert_eq!(*n, 42),
             other => panic!("expected DslOp::IntText, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // F-string parsing tests — TypedAST shape only.
+    //
+    // At this prototype stage the grammar's job is to produce the
+    // right TypedAST and we verify that. JIT round-trip + runtime
+    // concat / format dispatch is the compiler's concern (Zyntax owns
+    // the SSA backend; what shape its f-string handling takes for a
+    // non-`println` caller is something we'll address when the
+    // compiler integration matures, not here).
+    // -----------------------------------------------------------------
+
+    use zyntax_typed_ast::typed_ast::{TypedExpression, TypedLiteral};
+    use zyntax_typed_ast::TypedDeclaration;
+
+    /// Pull the body statements out of the parsed program's first
+    /// non-extern function. Test-only helper.
+    fn first_user_function_body(
+        program: &TypedProgram,
+    ) -> &[zyntax_typed_ast::TypedNode<TypedStatement>] {
+        for decl in program.declarations.iter() {
+            if let TypedDeclaration::Function(func) = &decl.node {
+                if !func.is_external {
+                    return func
+                        .body
+                        .as_ref()
+                        .map(|b| b.statements.as_slice())
+                        .unwrap_or(&[]);
+                }
+            }
+        }
+        panic!("no user function found in program")
+    }
+
+    /// `text(f"hello")` — single-part f-string with no
+    /// interpolation. Zyntax's `fold_concat` short-circuits the
+    /// single-part case (interpreter.rs:2365-2370) and returns the
+    /// bare expression, so the parsed AST should look identical to
+    /// `text("hello")`.
+    #[test]
+    fn parse_text_fstring_single_part_text() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(r#"view { text(f"hello") }"#, "fstr_single.blinc")
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        assert_eq!(stmts.len(), 1, "expected 1 stmt in body, got {stmts:?}");
+        let TypedStatement::Expression(call_node) = &stmts[0].node else {
+            panic!("expected Expression statement");
+        };
+        let TypedExpression::Call(call) = &call_node.node else {
+            panic!("expected Call");
+        };
+        // text("hello") -> the only positional arg is a string literal.
+        assert_eq!(call.positional_args.len(), 1);
+        let TypedExpression::Literal(TypedLiteral::String(_)) = &call.positional_args[0].node
+        else {
+            panic!(
+                "expected single string-literal arg, got {:?}",
+                call.positional_args[0].node
+            );
+        };
+    }
+
+    /// `text(f"{42}")` — single interp part. fold_concat's
+    /// short-circuit returns the bare `__fstring_format__(42)` call
+    /// (interpreter.rs:2365-2370 + the wrapper from
+    /// `f_string_interp`). We assert the AST has that one call as
+    /// the arg of `text`.
+    #[test]
+    fn parse_text_fstring_single_part_interp() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(r#"view { text(f"{42}") }"#, "fstr_interp.blinc")
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        let TypedStatement::Expression(call_node) = &stmts[0].node else {
+            panic!("expected Expression statement");
+        };
+        let TypedExpression::Call(text_call) = &call_node.node else {
+            panic!("expected Call");
+        };
+        // text(__fstring_format__(42))
+        assert_eq!(text_call.positional_args.len(), 1);
+        let TypedExpression::Call(fmt_call) = &text_call.positional_args[0].node else {
+            panic!(
+                "expected nested __fstring_format__ call, got {:?}",
+                text_call.positional_args[0].node
+            );
+        };
+        let TypedExpression::Variable(name) = &fmt_call.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_eq!(
+            name.resolve_global().as_deref(),
+            Some("__fstring_format__"),
+            "expected __fstring_format__ wrapping the int arg"
+        );
+    }
+
+    /// `text(f"answer: {42}!")` — multi-part f-string. fold_concat
+    /// builds `__fstring__(text_lit, fmt_call_stripped, text_lit)`
+    /// (interpreter.rs:2372-2410). We assert the AST has that
+    /// shape: one `__fstring__` call with three positional args.
+    #[test]
+    fn parse_text_fstring_multi_part() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(r#"view { text(f"answer: {42}!") }"#, "fstr_multi.blinc")
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        let TypedStatement::Expression(call_node) = &stmts[0].node else {
+            panic!("expected Expression statement");
+        };
+        let TypedExpression::Call(text_call) = &call_node.node else {
+            panic!("expected Call");
+        };
+        assert_eq!(text_call.positional_args.len(), 1);
+        let TypedExpression::Call(fstring_call) = &text_call.positional_args[0].node else {
+            panic!(
+                "expected nested __fstring__ call, got {:?}",
+                text_call.positional_args[0].node
+            );
+        };
+        let TypedExpression::Variable(name) = &fstring_call.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_eq!(
+            name.resolve_global().as_deref(),
+            Some("__fstring__"),
+            "expected fold_concat-emitted __fstring__ marker"
+        );
+        assert_eq!(
+            fstring_call.positional_args.len(),
+            3,
+            "expected three parts (text, int, text), got {:?}",
+            fstring_call.positional_args
+        );
     }
 
     /// Mixed-statement view exercises both `text(...)` arg shapes

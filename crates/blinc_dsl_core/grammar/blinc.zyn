@@ -17,14 +17,17 @@
     entry_point: "render_view"
 }
 
-// No @builtin aliasing: the grammar lowers `text("...")` directly to
-// a call against the symbol `$Blinc$text`, and the host injects an
-// extern declaration with that exact name into every parsed program
-// (see `BlincDsl::compile_source` in `src/lib.rs`). This keeps the
-// extern surface to one decl per builtin instead of two (alias +
-// symbol) and matches the static-link distribution shape — the
-// alias-via-`@builtin` path exists for `.zrtl` plugins that need a
-// shorter DSL name than the mangled symbol.
+// `@builtin` map. Zyntax's `inject_builtin_externs`
+// (grammar2.rs:198-315) auto-injects properly-typed extern decls
+// for every entry, pulling signatures from the runtime's
+// registered builtins (we populate those via
+// `register_function_typed` in `src/lib.rs`). Each entry gives a
+// short DSL-visible alias and the mangled symbol the host
+// registered under.
+@builtin {
+    text: "$Blinc$text",
+    text_int: "$Blinc$text_int",
+}
 
 // =====================================================================
 // Program structure
@@ -101,18 +104,28 @@ statement = {
 }
 
 // =====================================================================
-// text("literal")
+// text(<string-typed expr>)
 // =====================================================================
 //
-// String form lowers to `$Blinc$text(s: string)` — the host pushes
-// `DslOp::Text(s)` onto the scene buffer.
-text_string_stmt = { "text" ~ "(" ~ s:string_literal ~ ")" }
+// String form. `text_arg` is either a plain string literal or an
+// f-string — both type-check as `string` so the host's
+// `$Blinc$text(s: string)` accepts either uniformly. F-strings
+// desugar to nested `concat(concat("hi ", __fstring_format__(N)), …)`
+// calls (see `f_string_*` rules below — same shape as
+// `ml.zyn:2885-2906`), and the `@builtin` map at the top of this
+// file routes `concat` / `__fstring_format__` to our inlined host
+// helpers (`$Blinc$concat`, `$Blinc$format_int`).
+text_string_stmt = { "text" ~ "(" ~ s:text_string_arg ~ ")" }
   -> TypedStatement::Expression {
       expr: TypedExpression::Call {
           callee: Box::new(TypedExpression::Variable { name: intern("$Blinc$text") }),
           args: [s],
       },
   }
+
+// Accept either a plain string literal or an f-string. Order: try
+// f-string first because it has the strong `f"` prefix.
+text_string_arg = { f_string_literal | string_literal }
 
 // =====================================================================
 // text(N)
@@ -153,6 +166,52 @@ string_inner = { !("\"" | "\\") ~ ANY | "\\" ~ ANY }
 // imagepipe.zyn's `signed_integer` rule.
 integer = @{ ("+" | "-")? ~ ASCII_DIGIT+ }
   -> TypedExpression::IntLiteral { value: parse_int(text()) }
+
+// =====================================================================
+// F-strings
+// =====================================================================
+//
+// `f"...{expr}..."` desugars to nested `concat(concat(text_part,
+// __fstring_format__(expr)), text_part)` calls via `fold_concat`
+// (the grammar-action helper at zyn_peg/src/runtime2/interpreter.rs:2323
+// that builds the call tree from a list of parts). Both `concat` and
+// `__fstring_format__` resolve through the `@builtin` map at the top
+// of this file — concat goes to `$Blinc$concat`, the format helper
+// goes to `$Blinc$format_int`.
+//
+// Mirrors ml.zyn:2885-2917 verbatim except for the format-spec
+// support and triple-quoted variant; we'll add those when needed.
+
+// Use Zyntax's standard `fold_concat` action — same shape as
+// ml.zyn:2895. The grammar's job is to parse and produce TypedAST;
+// the compiler handles SSA / codegen for `__fstring__` calls.
+f_string_literal = { "f\"" ~ parts:f_string_part* ~ "\"" }
+  -> fold_concat(parts)
+
+f_string_part = { f_string_interp | f_string_text }
+
+// `{expr}` interpolation. The expr is wrapped in a
+// `__fstring_format__` call so the runtime stringifies it. The
+// `@builtin` map at the top of this file routes
+// `__fstring_format__` to `$Blinc$format_int(i32) -> string`.
+// Expanding the format helper to dispatch on type (string, float,
+// bool, etc.) is a follow-up.
+f_string_interp = { "{" ~ e:f_string_expr ~ "}" }
+  -> TypedExpression::Call {
+      callee: Box::new(TypedExpression::Variable { name: intern("__fstring_format__") }),
+      args: [e],
+  }
+
+// Expressions allowed inside `{...}`. For the prototype slice this
+// is just integer literals — adding variable refs / call exprs
+// happens in the next phase-2 increment.
+f_string_expr = { integer }
+
+// Plain text run inside an f-string (between interpolations).
+// Atomic — `text()` returns the matched run as a
+// `TypedExpression::StringLiteral`.
+f_string_text = @{ (!("\"" | "{" | "}") ~ ANY)+ }
+  -> TypedExpression::StringLiteral { value: text() }
 
 // Identifiers (unused in the prototype slice but kept here so we don't
 // have to redo the grammar header when we expand).
