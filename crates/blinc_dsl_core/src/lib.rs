@@ -719,15 +719,23 @@ mod tests {
         }
     }
 
-    /// Mixed reactive + plain fields: `state count: i32, foo: i32`.
-    /// State field's type is wrapped (`Type::Named { State, [i32] }`),
-    /// plain field's type is bare (`Type::Primitive(I32)`).
+    /// Mixed reactive + plain fields with mixed types:
+    /// `state count: i32, name: string`. State field wrapped in
+    /// `Type::Named { State, [i32] }`; plain field stays as the
+    /// bare primitive.
     ///
-    /// Note: state+state in the same field list (e.g. `state a: i32,
-    /// state b: i32`) currently fails to parse — there's a PEG
-    /// ambiguity in struct_field's alternates we haven't isolated.
-    /// Mixing state with plain works fine. Tracking as a follow-up
-    /// once it bites a real example.
+    /// Earlier this test mis-attributed a parse failure to a PEG
+    /// ambiguity in `struct_field`'s alternates. The actual cause
+    /// was that the grammar was emitting `Type::Primitive { name:
+    /// intern("string") }` while Zyntax's
+    /// `primitive_type_from_name` (interpreter.rs:2017) recognises
+    /// only `str` / `String` for the string primitive (matching
+    /// ml.zyn's `prim_str` at ml.zyn:1444). Construct-type fell
+    /// through to "unknown primitive type" and the rule failed —
+    /// looked like an alternate-ordering issue from the outside,
+    /// but was a tag-name mismatch. Fixed by emitting
+    /// `intern("str")` internally while keeping `string` as the
+    /// user-facing DSL keyword.
     #[test]
     fn parse_mixed_state_and_plain_fields() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -735,7 +743,7 @@ mod tests {
         let dsl = BlincDsl::new().expect("runtime init");
         let program = dsl
             .parse_to_typed_ast(
-                r#"component Profile { state count: i32, foo: i32 }"#,
+                r#"component Profile { state count: i32, name: string }"#,
                 "mixed_fields.blinc",
             )
             .expect("parse");
@@ -751,7 +759,7 @@ mod tests {
 
         assert_eq!(class.fields.len(), 2);
 
-        // Field 0: state count → wrapped Named.
+        // Field 0: state count → wrapped Named (State<i32>).
         let count_field = &class.fields[0];
         assert_eq!(count_field.name.resolve_global().as_deref(), Some("count"));
         assert!(
@@ -760,17 +768,52 @@ mod tests {
             count_field.ty
         );
 
-        // Field 1: plain foo → bare Primitive(I32).
-        let foo_field = &class.fields[1];
-        assert_eq!(foo_field.name.resolve_global().as_deref(), Some("foo"));
+        // Field 1: plain name → bare Primitive(String).
+        let name_field = &class.fields[1];
+        assert_eq!(name_field.name.resolve_global().as_deref(), Some("name"));
         assert!(
             matches!(
-                &foo_field.ty,
-                zyntax_typed_ast::Type::Primitive(zyntax_typed_ast::PrimitiveType::I32)
+                &name_field.ty,
+                zyntax_typed_ast::Type::Primitive(zyntax_typed_ast::PrimitiveType::String)
             ),
-            "plain field should be a bare primitive, got {:?}",
-            foo_field.ty
+            "plain field should be Primitive(String), got {:?}",
+            name_field.ty
         );
+    }
+
+    /// state+state in the same field list also parses cleanly.
+    /// Pinning this so the false-positive "ambiguity" claim
+    /// doesn't get reintroduced by anyone reading the earlier
+    /// commit message.
+    #[test]
+    fn parse_two_state_fields_same_list() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"component Counter { state count: i32, state width: i32 }"#,
+                "two_states.blinc",
+            )
+            .expect("parse");
+
+        let class = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Class(c) => Some(c),
+                _ => None,
+            })
+            .expect("expected a Class");
+
+        assert_eq!(class.fields.len(), 2);
+        for f in &class.fields {
+            assert!(
+                matches!(&f.ty, zyntax_typed_ast::Type::Named { .. }),
+                "every field is `state`, so each ty should be Type::Named, got {:?}",
+                f.ty
+            );
+        }
     }
 
     /// Optional split form: `component Name { fields }` + `impl Name
