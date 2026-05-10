@@ -39,7 +39,8 @@ use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 use zyntax_embed::{
-    Grammar2, Grammar2Error, RuntimeError, TypeTag, ZrtlSigFlags, ZrtlSymbolSig, ZyntaxRuntime,
+    Grammar2, Grammar2Error, NativeSignature, NativeType, RuntimeError, TypeTag, ZrtlSigFlags,
+    ZrtlSymbolSig, ZyntaxRuntime, ZyntaxValue,
 };
 
 /// Mirror of `zyntax_compiler::zrtl::MAX_PARAMS` (16). Not re-exported
@@ -775,33 +776,77 @@ fn populate_fsm_registry_pass(
 
     // -----------------------------------------------------------------
     // Phase 2.5: lift each captured tick-guard expression into a
-    // stand-alone top-level function. The function returns `bool`
-    // and contains a single `Return(Some(<guard>))` statement. The
-    // generated symbol name (`__fsm_tick_guard_<Fsm>_<idx>__`) is
-    // already stored on each `TickGuard` from phase 1 — at dispatch
-    // time, evaluating the guard is a `runtime.call::<bool>(name,
-    // &[])` against this lifted function.
+    // stand-alone top-level function. The function returns `i32`
+    // (1 if the guard fires, 0 otherwise); the host's `step_tick`
+    // tests `!= 0` to decide whether to transition. Body shape:
+    //
+    //     fn __fsm_tick_guard_<Fsm>_<idx>__() -> i32 {
+    //         if <guard expr> { return 1 }
+    //         return 0
+    //     }
+    //
+    // Why i32 instead of bool: bool-return ABI marshaling through
+    // `runtime.call::<bool>` is untested upstream
+    // (`grep -rn 'call::<bool>'` hits zero across the Zyntax tree)
+    // and triggers a misaligned-pointer panic in
+    // `zyntax_compiler/zrtl.rs:416` during return-value
+    // type-meta lookup. Using i32 with a 1/0 convention is a
+    // tested ABI and keeps the lifting logic local to this pass.
     //
     // The lifted functions are appended after phase 2 so they
-    // inherit the registered TypeIds in scope (in case a guard
-    // references a fsm-state variable; `count.get() > 100` style
-    // expressions only reference user-level signals which don't
-    // need our intervention).
+    // inherit any registered TypeIds in scope.
     // -----------------------------------------------------------------
-    use zyntax_typed_ast::typed_ast::TypedFunction;
+    use zyntax_typed_ast::typed_ast::{TypedFunction, TypedIf};
     for (fn_name, guard_expr) in guards_to_lift {
-        let return_node = zyntax_typed_ast::TypedNode::new(
-            TypedStatement::Return(Some(Box::new(guard_expr))),
-            Type::Primitive(PrimitiveType::Bool),
+        let i32_ty = Type::Primitive(PrimitiveType::I32);
+
+        // `return 1` — the then-branch's only statement.
+        let return_one = zyntax_typed_ast::TypedNode::new(
+            TypedStatement::Return(Some(Box::new(zyntax_typed_ast::TypedNode::new(
+                TypedExpression::Literal(zyntax_typed_ast::typed_ast::TypedLiteral::Integer(1)),
+                i32_ty.clone(),
+                Span::default(),
+            )))),
+            i32_ty.clone(),
             Span::default(),
         );
-        let body = zyntax_typed_ast::typed_ast::TypedBlock {
-            statements: vec![return_node],
+
+        let then_block = zyntax_typed_ast::typed_ast::TypedBlock {
+            statements: vec![return_one],
             span: Span::default(),
         };
+
+        // `if <guard> { return 1 }` — no else branch.
+        let if_stmt = zyntax_typed_ast::TypedNode::new(
+            TypedStatement::If(TypedIf {
+                condition: Box::new(guard_expr),
+                then_block,
+                else_block: None,
+                span: Span::default(),
+            }),
+            Type::Primitive(PrimitiveType::Unit),
+            Span::default(),
+        );
+
+        // `return 0` — the body's trailing fallthrough.
+        let return_zero = zyntax_typed_ast::TypedNode::new(
+            TypedStatement::Return(Some(Box::new(zyntax_typed_ast::TypedNode::new(
+                TypedExpression::Literal(zyntax_typed_ast::typed_ast::TypedLiteral::Integer(0)),
+                i32_ty.clone(),
+                Span::default(),
+            )))),
+            i32_ty.clone(),
+            Span::default(),
+        );
+
+        let body = zyntax_typed_ast::typed_ast::TypedBlock {
+            statements: vec![if_stmt, return_zero],
+            span: Span::default(),
+        };
+
         let func = TypedFunction {
             name: fn_name,
-            return_type: Type::Primitive(PrimitiveType::Bool),
+            return_type: i32_ty.clone(),
             body: Some(body),
             ..Default::default()
         };
@@ -1171,6 +1216,81 @@ impl BlincDsl {
 
         runtime.call::<()>(fn_name, &[])?;
         Ok(take_scene_ops())
+    }
+
+    /// Resolve a tick-driven transition. Walks the registered fsm's
+    /// `tick_guards` in declaration order, evaluates each whose
+    /// `from` matches `current` by JIT-calling its lifted guard
+    /// function (`__fsm_tick_guard_<Fsm>_<idx>__`), and returns the
+    /// `to`-state of the first guard that fires (returns `true`).
+    /// Returns `None` if nothing fires — either no rules match the
+    /// current state, or every matching rule's guard returns `false`.
+    ///
+    /// Match-arm semantics: the first true guard wins. Authors get
+    /// priority by source order, the same way `step_event` resolves
+    /// event-driven transitions.
+    ///
+    /// Why this lives on `BlincDsl` and not the registry directly:
+    /// dispatch needs both the registry (to find the guard fn name)
+    /// and the runtime (to JIT-call it). `BlincDsl` is the natural
+    /// owner of both. Plumbing a `&ZyntaxRuntime` through the
+    /// registry's API would force every caller to thread it through
+    /// — pointless when the existing `BlincDsl` handle already has
+    /// what we need.
+    pub fn step_tick(
+        &self,
+        id: &FsmId,
+        current: &str,
+    ) -> BlincDslResult<Option<zyntax_typed_ast::InternedString>> {
+        // Phase 1: snapshot matching (guard_fn, to) pairs and drop
+        // the registry lock before reaching for the runtime, so
+        // there's no chance of holding both locks at once.
+        let candidates: Vec<(zyntax_typed_ast::InternedString, zyntax_typed_ast::InternedString)> =
+            with_fsm_registry(|r| {
+                r.get(id)
+                    .map(|def| {
+                        def.tick_guards
+                            .iter()
+                            .filter(|g| g.from.resolve_global().as_deref() == Some(current))
+                            .filter_map(|g| g.guard_fn.map(|fn_name| (fn_name, g.to)))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        // Phase 2: evaluate in declaration order against the JIT.
+        let runtime = self
+            .runtime
+            .lock()
+            .expect("BlincDsl runtime mutex poisoned");
+
+        // Explicit signature: zero args, i32 return. Bypasses the
+        // type-meta machinery in `runtime.call`, which doesn't have
+        // a registered TypeMeta for user-compiled functions and
+        // panics with a misaligned-pointer dereference at
+        // `zrtl.rs:416`. `call_function` takes the signature
+        // directly and uses Cranelift's known ABI for i32 returns.
+        let guard_sig = NativeSignature::new(&[], NativeType::I32);
+
+        for (guard_fn, to) in candidates {
+            let Some(name) = guard_fn.resolve_global() else {
+                continue;
+            };
+            let result = runtime
+                .call_function(&name, &[], &guard_sig)
+                .map_err(|e| BlincDslError::Compile(e.to_string()))?;
+            // Lifted guards return 1 if the guard fires, 0 otherwise.
+            let fired = matches!(result, ZyntaxValue::Int(v) if v != 0);
+            if fired {
+                return Ok(Some(to));
+            }
+        }
+
+        Ok(None)
     }
 }
 
@@ -3806,6 +3926,142 @@ mod tests {
         };
         let miss = with_fsm_registry(|r| r.step_event(&phantom, "Off", "Click"));
         assert!(miss.is_none(), "phantom fsm id should miss");
+    }
+
+    /// Tick dispatch fires when the lifted guard returns `true`.
+    /// `1 > 0` always evaluates to `true`, so step_tick should
+    /// return the to-state.
+    #[test]
+    fn step_tick_fires_when_guard_true() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            fsm StepTickTrue {
+                state Loading
+                state Done
+                initial Loading
+                tick Loading -> Done when 1 > 0
+            }
+            "#,
+            "step_tick_true.blinc",
+        )
+        .expect("compile");
+
+        let module = InternedString::new_global("main");
+        let id = with_fsm_registry(|r| r.find_by_name(module, "StepTickTrue"))
+            .expect("StepTickTrue should be registered");
+
+        let next = dsl.step_tick(&id, "Loading").expect("step_tick call");
+        assert_eq!(
+            next.and_then(|n| n.resolve_global()).as_deref(),
+            Some("Done"),
+            "guard `1 > 0` should fire and transition Loading → Done"
+        );
+    }
+
+    /// Tick dispatch returns `None` when the lifted guard returns
+    /// `false`. `1 < 0` is always false, so no transition.
+    #[test]
+    fn step_tick_no_transition_when_guard_false() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            fsm StepTickFalse {
+                state Loading
+                state Done
+                initial Loading
+                tick Loading -> Done when 1 < 0
+            }
+            "#,
+            "step_tick_false.blinc",
+        )
+        .expect("compile");
+
+        let module = InternedString::new_global("main");
+        let id = with_fsm_registry(|r| r.find_by_name(module, "StepTickFalse")).unwrap();
+
+        let next = dsl.step_tick(&id, "Loading").expect("step_tick call");
+        assert!(
+            next.is_none(),
+            "guard `1 < 0` should not fire — got {next:?}"
+        );
+    }
+
+    /// Multiple guards from the same from-state: declaration order
+    /// wins. The first guard whose expression returns true short-
+    /// circuits the rest. Pin this against future refactors that
+    /// might re-order guards or evaluate them in parallel.
+    #[test]
+    fn step_tick_first_true_guard_wins() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        // Two guards from Loading: the first is always true (so it
+        // fires), the second would also be true (but never gets a
+        // chance). Verifies "first" semantics — if step_tick eval'd
+        // in arbitrary order or all-at-once, this would flake.
+        dsl.compile_source(
+            r#"
+            fsm StepTickPriority {
+                state Loading
+                state Failed
+                state Done
+                initial Loading
+                tick Loading -> Failed when 1 > 0
+                tick Loading -> Done when 1 > 0
+            }
+            "#,
+            "step_tick_priority.blinc",
+        )
+        .expect("compile");
+
+        let module = InternedString::new_global("main");
+        let id = with_fsm_registry(|r| r.find_by_name(module, "StepTickPriority")).unwrap();
+
+        let next = dsl.step_tick(&id, "Loading").expect("step_tick call");
+        assert_eq!(
+            next.and_then(|n| n.resolve_global()).as_deref(),
+            Some("Failed"),
+            "first declared guard should fire (Loading → Failed), not Loading → Done"
+        );
+    }
+
+    /// No tick guard matches the current from-state → `None`.
+    /// Covers two related cases in one: the from-state has no
+    /// guards at all (Done has none), and a state that doesn't
+    /// exist as a from in any rule.
+    #[test]
+    fn step_tick_no_matching_from_state() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            fsm StepTickNoMatch {
+                state Loading
+                state Done
+                initial Loading
+                tick Loading -> Done when 1 > 0
+            }
+            "#,
+            "step_tick_no_match.blinc",
+        )
+        .expect("compile");
+
+        let module = InternedString::new_global("main");
+        let id = with_fsm_registry(|r| r.find_by_name(module, "StepTickNoMatch")).unwrap();
+
+        // Done has no tick rules — should miss.
+        let from_done = dsl.step_tick(&id, "Done").expect("step_tick");
+        assert!(from_done.is_none(), "Done has no tick rules");
+
+        // Phantom state name with no rules — should also miss.
+        let from_phantom = dsl.step_tick(&id, "DoesNotExist").expect("step_tick");
+        assert!(from_phantom.is_none(), "phantom from-state should miss");
     }
 
     /// Direct `FsmDefinition::step_event` works without going
