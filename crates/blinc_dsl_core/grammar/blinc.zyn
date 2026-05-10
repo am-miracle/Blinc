@@ -64,7 +64,7 @@ top_level_items = { item:top_level_item* }
 // `component_decl`. Falling through handles standalone struct-only
 // `component { fields }` decls, standalone `impl` blocks, and the
 // bare `view { ... }` quick-test shape.
-top_level_item = { component_folded | component_decl | impl_block | bare_view_item }
+top_level_item = { component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
 
 bare_view_item = { "view" ~ "{" ~ stmts:statements ~ "}" }
   -> TypedDeclaration::Function {
@@ -293,6 +293,123 @@ impl_fn = { "fn" ~ name:identifier ~ "(" ~ ")" ~ "{" ~ stmts:statements ~ "}" }
       params: [],
       return_type: Type::Unit,
       body: Some(TypedBlock { statements: stmts }),
+  }
+
+// =====================================================================
+// `fsm <Name> { ... }` — finite state machine declaration
+// =====================================================================
+//
+// Declares a state machine: an enum of named states + a metadata
+// payload (initial state, event-driven transitions). Lowers to TWO
+// `TypedDeclaration`s emitted from one rule via `concat_list`,
+// flattened by the patched `get_field_as_decl_list` helper:
+//
+//   1. `TypedDeclaration::Enum` — one variant per `state X` decl,
+//      same shape ml.zyn produces for `enum Foo { Red, Green }`
+//      (ml.zyn:991-1021). Existing `StateTransitions` plumbing in
+//      `blinc_layout::stateful` consumes types of this shape.
+//   2. `TypedDeclaration::Impl` — inherent impl carrying a single
+//      synthesised method `__fsm_meta__()` whose body is a flat
+//      list of marker calls:
+//         __fsm_initial__("InitialState")
+//         __fsm_transition__("From", "Event", "To")
+//         __fsm_transition__("From2", "Event2", "To2")
+//         ...
+//      The host runtime / a downstream pass intercepts these
+//      marker calls (same pattern Zyntax uses for `__fstring__`
+//      and we use for `__view_deps__`) to register the FSM with
+//      the framework and emit the matching `StateTransitions`
+//      `on_event` impl.
+//
+// Why marker calls and not, say, a richer enum-with-data shape:
+// the Zyntax `TypedAST` doesn't have a first-class FSM node, but
+// it does have `TypedDeclaration::Enum` and ordinary call
+// statements. We pour the FSM's metadata into structures the type
+// system already supports, and the runtime/host extracts it. No
+// upstream patches required.
+//
+// Tick-driven transitions (the data-guarded path that lowers to
+// `StateTransitions::on_tick`) aren't in this slice. When they
+// land, the same `__fsm_meta__` body grows additional
+// `__fsm_tick__("State", <guard expr>, "NextState")` markers; no
+// schema change for the existing event-driven shape.
+fsm_decl = {
+    "fsm" ~ name:identifier ~ "{"
+    ~ states:state_decl+
+    ~ "initial" ~ initial:identifier
+    ~ transitions:transition_decl*
+    ~ "}"
+}
+  -> concat_list(
+      [TypedDeclaration::Enum {
+          name: intern(name),
+          variants: states,
+      }],
+      [TypedDeclaration::Impl {
+          trait_name: intern(name),
+          for_type: intern(name),
+          items: [TypedDeclaration::Function {
+              name: intern("__fsm_meta__"),
+              params: [],
+              return_type: Type::Unit,
+              body: Some(TypedBlock {
+                  statements: prepend_list(
+                      TypedStatement::Expression {
+                          expr: TypedExpression::Call {
+                              callee: Box::new(TypedExpression::Variable {
+                                  name: intern("__fsm_initial__"),
+                              }),
+                              args: [TypedExpression::StringLiteral { value: initial }],
+                          },
+                      },
+                      transitions,
+                  ),
+              }),
+          }],
+      }],
+  )
+
+// `state Foo` — a single state variant. Lowers to a `TypedVariant`
+// with `Unit` fields (no associated data). Variants with attached
+// data (e.g. `state Loading(progress: f32)`) aren't in this slice
+// — keeping FSM states stateless mirrors how Blinc's existing
+// `StateTransitions` impls work (ButtonState, ScrollState, etc.).
+//
+// One state per `state` keyword. Multiple variants written as
+// `state Idle, state Loading` (commas optional via the
+// separator-flexibility rules) or one-per-line.
+state_decl = { "state" ~ name:identifier }
+  -> TypedVariant {
+      name: intern(name),
+      fields: TypedVariantFields::Unit,
+  }
+
+// `on <FromState>.<Event> -> <ToState>` — event-driven transition.
+// Lowers to a single `TypedStatement::Expression` wrapping a marker
+// call `__fsm_transition__("From", "Event", "To")`. State and event
+// names are emitted as `TypedExpression::StringLiteral` (the
+// interpreter's `StringLiteral` constructor, interpreter.rs:550-555,
+// trim-matches stripping is a no-op on bare identifiers and the
+// resulting interned string is the variant/event name).
+//
+// Why string-literal args instead of variant-path expressions
+// (e.g. `Foo::Idle`): at parse time we don't have access to the
+// type registry that would resolve identifier→variant, so the
+// marker carries the names as strings and the host resolves them
+// at FSM-registration time. Same approach used for
+// `__fsm_initial__`'s arg.
+transition_decl = { "on" ~ from:identifier ~ "." ~ event:identifier ~ "->" ~ to:identifier }
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Call {
+          callee: Box::new(TypedExpression::Variable {
+              name: intern("__fsm_transition__"),
+          }),
+          args: [
+              TypedExpression::StringLiteral { value: from },
+              TypedExpression::StringLiteral { value: event },
+              TypedExpression::StringLiteral { value: to },
+          ],
+      },
   }
 
 // Collect all statements inside the view block.

@@ -1897,6 +1897,279 @@ mod tests {
         assert!(if_stmt.else_block.is_none(), "no-else form should leave else_block None");
     }
 
+    // -----------------------------------------------------------------
+    // FSM declaration tests — `fsm Name { state X, initial Y, on
+    // X.Event -> Z }`. Verify the grammar emits the right two-decl
+    // shape (Enum + Impl) and the metadata marker calls inside
+    // `__fsm_meta__`.
+    // -----------------------------------------------------------------
+
+    /// `fsm Loader { ... }` emits BOTH a TypedDeclaration::Enum
+    /// (states as variants) and a TypedDeclaration::Impl (carrying
+    /// the metadata via `__fsm_meta__`). Pinning that the
+    /// `concat_list` lowering shape stays right — easy to break by
+    /// switching list helpers during a refactor.
+    #[test]
+    fn parse_fsm_emits_enum_and_impl() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                fsm Loader {
+                    state Idle
+                    state Loading
+                    state Done
+                    initial Idle
+                    on Idle.Load -> Loading
+                    on Loading.Finish -> Done
+                }
+                "#,
+                "fsm_loader.blinc",
+            )
+            .expect("parse");
+
+        let enum_decl = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Enum(e) => Some(e),
+                _ => None,
+            })
+            .expect("expected Enum decl from fsm");
+        assert_eq!(enum_decl.name.resolve_global().as_deref(), Some("Loader"));
+        assert_eq!(
+            enum_decl.variants.len(),
+            3,
+            "expected 3 variants (Idle, Loading, Done), got {:?}",
+            enum_decl
+                .variants
+                .iter()
+                .map(|v| v.name.resolve_global())
+                .collect::<Vec<_>>()
+        );
+        // Variant names match.
+        for (i, expected) in ["Idle", "Loading", "Done"].iter().enumerate() {
+            assert_eq!(
+                enum_decl.variants[i].name.resolve_global().as_deref(),
+                Some(*expected),
+                "variant {i}"
+            );
+        }
+
+        // Inherent Impl with a single `__fsm_meta__` method.
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .expect("expected Impl decl from fsm");
+        assert_eq!(
+            impl_block.trait_name.resolve_global().as_deref(),
+            Some("Loader")
+        );
+        assert_eq!(impl_block.methods.len(), 1, "expected one method");
+        assert_eq!(
+            impl_block.methods[0].name.resolve_global().as_deref(),
+            Some("__fsm_meta__")
+        );
+    }
+
+    /// First statement in `__fsm_meta__` is the `__fsm_initial__`
+    /// marker carrying the initial state name as a string literal.
+    /// Pinning this so a refactor that re-orders the prepend doesn't
+    /// silently move the initial declaration.
+    #[test]
+    fn parse_fsm_initial_marker() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                fsm Toggle {
+                    state On
+                    state Off
+                    initial Off
+                    on Off.Click -> On
+                    on On.Click -> Off
+                }
+                "#,
+                "fsm_toggle.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let meta = &impl_block.methods[0];
+        let body = meta.body.as_ref().expect("__fsm_meta__ body");
+
+        // Body[0] should be `__fsm_initial__("Off")`.
+        let TypedStatement::Expression(node) = &body.statements[0].node else {
+            panic!("expected Expression stmt at [0]");
+        };
+        let TypedExpression::Call(call) = &node.node else {
+            panic!("expected Call");
+        };
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_eq!(
+            callee.resolve_global().as_deref(),
+            Some("__fsm_initial__"),
+            "first marker should be __fsm_initial__"
+        );
+        assert_eq!(call.positional_args.len(), 1);
+        let TypedExpression::Literal(TypedLiteral::String(name)) = &call.positional_args[0].node
+        else {
+            panic!("expected String arg, got {:?}", call.positional_args[0].node);
+        };
+        assert_eq!(name.resolve_global().as_deref(), Some("Off"));
+    }
+
+    /// Each `on State.Event -> Next` lowers to one
+    /// `__fsm_transition__("State", "Event", "Next")` marker call.
+    /// Verifies all three string args carry the right names and the
+    /// markers appear after the initial-state marker (preserving
+    /// declaration order so the runtime can interpret them
+    /// sequentially).
+    #[test]
+    fn parse_fsm_transitions() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                fsm Loader {
+                    state Idle
+                    state Loading
+                    state Done
+                    initial Idle
+                    on Idle.Load -> Loading
+                    on Loading.Finish -> Done
+                    on Done.Reset -> Idle
+                }
+                "#,
+                "fsm_three_transitions.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let body = impl_block.methods[0].body.as_ref().unwrap();
+
+        // 1 initial marker + 3 transition markers = 4 stmts.
+        assert_eq!(
+            body.statements.len(),
+            4,
+            "expected 4 marker stmts, got {}",
+            body.statements.len()
+        );
+
+        let expected_transitions = [
+            ("Idle", "Load", "Loading"),
+            ("Loading", "Finish", "Done"),
+            ("Done", "Reset", "Idle"),
+        ];
+
+        for (i, (from, event, to)) in expected_transitions.iter().enumerate() {
+            // Skip the initial marker at body[0]; transitions start at
+            // body[1].
+            let stmt = &body.statements[i + 1].node;
+            let TypedStatement::Expression(node) = stmt else {
+                panic!("expected Expression stmt at index {}", i + 1);
+            };
+            let TypedExpression::Call(call) = &node.node else {
+                panic!("expected Call at index {}", i + 1);
+            };
+            let TypedExpression::Variable(callee) = &call.callee.node else {
+                panic!("expected Variable callee");
+            };
+            assert_eq!(
+                callee.resolve_global().as_deref(),
+                Some("__fsm_transition__"),
+                "marker at {} should be __fsm_transition__",
+                i + 1
+            );
+            assert_eq!(call.positional_args.len(), 3);
+            for (j, expected) in [from, event, to].iter().enumerate() {
+                let TypedExpression::Literal(TypedLiteral::String(s)) =
+                    &call.positional_args[j].node
+                else {
+                    panic!(
+                        "expected String arg at transition {} arg {}, got {:?}",
+                        i, j, call.positional_args[j].node
+                    );
+                };
+                assert_eq!(
+                    s.resolve_global().as_deref(),
+                    Some(**expected),
+                    "transition {} arg {}: expected {}, got differently",
+                    i,
+                    j,
+                    expected
+                );
+            }
+        }
+    }
+
+    /// `fsm` with no transitions still parses — useful for the
+    /// degenerate "states without yet-defined behaviour" stub. The
+    /// body should have exactly the initial marker, no transitions.
+    #[test]
+    fn parse_fsm_no_transitions() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                "fsm Status { state Open state Closed initial Open }",
+                "fsm_stub.blinc",
+            )
+            .expect("parse");
+
+        let enum_decl = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Enum(e) => Some(e),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(enum_decl.variants.len(), 2);
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let body = impl_block.methods[0].body.as_ref().unwrap();
+        assert_eq!(
+            body.statements.len(),
+            1,
+            "stub fsm should have only the initial marker"
+        );
+    }
+
     /// Mixed-statement view exercises both `text(...)` arg shapes
     /// (string + integer) coexisting in the same compiled function
     /// and routing to distinct host builtins via the grammar's PEG
