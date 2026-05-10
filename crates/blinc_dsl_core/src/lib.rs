@@ -1510,6 +1510,42 @@ mod tests {
         assert_eq!(else_block.statements.len(), 1);
     }
 
+    /// Field separators are optional. Authors should be able to
+    /// write fields one-per-line, comma-separated, or mixed —
+    /// without the parser caring. Pinning all three shapes
+    /// because the easiest way to regress this is to "tighten"
+    /// `struct_field_tail` back to a required comma during a
+    /// future refactor.
+    #[test]
+    fn parse_field_separators_optional() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        for (label, src) in [
+            ("newline", "component A { state count: i32 state width: i32 view {} }"),
+            ("comma",   "component A { state count: i32, state width: i32 view {} }"),
+            ("mixed",   "component A { state count: i32, state width: i32\nstate height: i32 view {} }"),
+        ] {
+            let program = dsl
+                .parse_to_typed_ast(src, &format!("sep_{label}.blinc"))
+                .unwrap_or_else(|e| panic!("parse failure for {label}: {e:?}"));
+            let class = program
+                .declarations
+                .iter()
+                .find_map(|d| match &d.node {
+                    zyntax_typed_ast::TypedDeclaration::Class(c) => Some(c),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no Class for {label}"));
+            let expected = if label == "mixed" { 3 } else { 2 };
+            assert_eq!(
+                class.fields.len(),
+                expected,
+                "{label}: expected {expected} fields"
+            );
+        }
+    }
+
     /// Method-call expressions parse via the postfix layer.
     /// `count.get()` lowers to TypedExpression::MethodCall with
     /// receiver=Variable("count"), method="get", no args. This is
@@ -1685,7 +1721,8 @@ mod tests {
             .parse_to_typed_ast(
                 r#"
                 component Counter {
-                    state count: i32, state width: i32
+                    state count: i32
+                    state width: i32
                     view([count, width]) {|ctx|
                         let c = ctx.get(0)
                         text("rendered")

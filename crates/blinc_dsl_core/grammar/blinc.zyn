@@ -167,15 +167,16 @@ view_with_deps = {
       }),
   }
 
-// Comma-separated identifier list, each lowered to a
-// TypedExpression::Variable so the synthesised
+// Identifier list, comma-or-newline separated. Each name is
+// lowered to a TypedExpression::Variable so the synthesised
 // `__view_deps__(dep1, dep2)` marker call carries the correct
 // expression shapes (the runtime treats them as state-field
-// references at lowering time).
-dep_id_list = { first:dep_id_expr ~ rest:dep_id_comma* }
+// references at lowering time). Commas optional, same rationale
+// as `struct_field_list`.
+dep_id_list = { first:dep_id_expr ~ rest:dep_id_tail* }
   -> prepend_list(first, rest)
 
-dep_id_comma = { "," ~ d:dep_id_expr }
+dep_id_tail = { ","? ~ d:dep_id_expr }
   -> d
 
 dep_id_expr = { name:identifier }
@@ -201,16 +202,23 @@ component_decl = { "component" ~ name:identifier ~ "{" ~ fields:struct_field_lis
 // ordered alternates inside `struct_field` try `state_field` first
 // because it matches the longer prefix (`state name: T`).
 //
-// Fields are comma-separated. ZynPEG WHITESPACE auto-skips
-// newlines so source can layout fields one-per-line as long as
-// commas appear between them. Optional trailing comma not
-// supported yet — that needs the field list to allow zero
-// trailing struct_fields after the last comma; small tweak when
-// needed.
-struct_field_list = { first:struct_field ~ rest:struct_field_comma* }
+// Separator is optional — `","?` lets fields be comma-separated,
+// newline-separated (WHITESPACE auto-skips `\n`), or mixed. UI
+// authors writing
+//
+//     component Counter {
+//         state count: i32
+//         state width: i32
+//     }
+//
+// is the natural shape; forcing trailing commas would be hostile.
+// The PEG `*` cleanly stops when the next token isn't a
+// struct_field (e.g. when it's `view` or `}`), so trailing-comma
+// behaviour falls out for free.
+struct_field_list = { first:struct_field ~ rest:struct_field_tail* }
   -> prepend_list(first, rest)
 
-struct_field_comma = { "," ~ f:struct_field }
+struct_field_tail = { ","? ~ f:struct_field }
   -> f
 
 struct_field = { state_field | plain_field }
@@ -618,14 +626,15 @@ suffix_field = { "." ~ field:identifier }
       field: intern(field),
   }
 
-// Comma-separated argument list. `prepend_list` is the standard
-// helper Zyntax exposes for stitching `first ~ rest*` into a flat
-// list. WHITESPACE auto-skips so authors can layout args one
-// per line.
-call_args_list = { first:expr ~ rest:call_args_comma* }
+// Argument list, comma-or-newline separated. `prepend_list` is
+// the standard helper Zyntax exposes for stitching `first ~
+// rest*` into a flat list. WHITESPACE auto-skips so authors can
+// layout args one per line; the optional `","?` lets them mix in
+// commas where they prefer.
+call_args_list = { first:expr ~ rest:call_args_tail* }
   -> prepend_list(first, rest)
 
-call_args_comma = { "," ~ e:expr }
+call_args_tail = { ","? ~ e:expr }
   -> e
 
 // Primary expressions. PEG ordered alternates — order matters:
