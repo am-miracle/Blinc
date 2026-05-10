@@ -74,16 +74,22 @@ bare_view_item = { "view" ~ "{" ~ stmts:statements ~ "}" }
       body: Some(TypedBlock { statements: stmts }),
   }
 
-// `component <Name> { fields, view { stmts }, fn handler() { ... } }`
+// `component <Name> { fields, <view-form>, fn handler() { ... } }`
 // — folded source-level shape. Emits BOTH a Class (data) and an
 // Impl (methods) from one rule by inlining a list of two
 // declarations and letting the patched `get_field_as_decl_list`
 // flatten when `top_level_items` collects the result.
 //
-// `view { stmts }` becomes `fn view() { stmts }` inlined into the
-// Impl's items. Additional `fn`s (e.g. event handlers) sit
-// alongside it via `impl_fn*` and get prepended via the standard
-// list helper.
+// The `<view-form>` slot accepts either the bare `view { stmts }`
+// shape (depends on every state field) or the dep-list closure
+// form `view([state1, state2]) {|ctx| stmts}` (explicit signal
+// dependencies). Both lower to a `TypedDeclaration::Function`
+// named `view`; see `view_member` below for the alternates and
+// their lowering shapes.
+//
+// Additional `fn`s (event handlers, helpers, methods) sit
+// alongside the view via `impl_fn*` and get prepended into the
+// Impl's items.
 //
 // This is the natural user-facing component shape — UI authors
 // think in terms of "a component IS a thing with state and a
@@ -91,7 +97,7 @@ bare_view_item = { "view" ~ "{" ~ stmts:statements ~ "}" }
 component_folded = {
     "component" ~ name:identifier ~ "{"
     ~ fields:struct_field_list?
-    ~ "view" ~ "{" ~ stmts:statements ~ "}"
+    ~ view:view_member
     ~ extra:impl_fn*
     ~ "}"
 }
@@ -103,17 +109,77 @@ component_folded = {
       [TypedDeclaration::Impl {
           trait_name: intern(name),
           for_type: intern(name),
-          items: prepend_list(
-              TypedDeclaration::Function {
-                  name: intern("view"),
-                  params: [],
-                  return_type: Type::Unit,
-                  body: Some(TypedBlock { statements: stmts }),
-              },
-              extra,
-          ),
+          items: prepend_list(view, extra),
       }],
   )
+
+// Two view forms — the grammar distinguishes them by what comes
+// after the `view` keyword. PEG ordered alternates: the deps form
+// is tried first because `view (` consumes a longer
+// disambiguating prefix than `view {`, so the tries don't waste
+// work on common cases.
+//
+//   * `view([dep1, dep2]) {|ctx| stmts}` — explicit dependencies.
+//     Mirrors Blinc's `Stateful::deps([...])` widget pattern: the
+//     view's render closure is invoked when any listed dep's
+//     signal fires, never on every frame. The deps list is
+//     captured as a leading `__view_deps__(dep1, dep2)` marker
+//     call inside the function body so the host's runtime can
+//     extract it (same intercept pattern Zyntax uses for
+//     `__fstring__`). Body parameter `ctx` is a TypedParameter
+//     with no explicit type — the host/compiler resolves what
+//     `ctx` is at lowering time (e.g. `ViewCtx` once that type
+//     gets registered as a runtime extern).
+//
+//   * `view { stmts }` — implicit "depends on all state". Same
+//     shape as a parameterless `fn view() { stmts }`. Useful for
+//     components where every field drives the UI.
+view_member = { view_with_deps | view_simple }
+
+view_simple = { "view" ~ "{" ~ stmts:statements ~ "}" }
+  -> TypedDeclaration::Function {
+      name: intern("view"),
+      params: [],
+      return_type: Type::Unit,
+      body: Some(TypedBlock { statements: stmts }),
+  }
+
+view_with_deps = {
+    "view" ~ "(" ~ "[" ~ deps:dep_id_list ~ "]" ~ ")"
+    ~ "{" ~ "|" ~ ctx:identifier ~ "|"
+    ~ stmts:statements
+    ~ "}"
+}
+  -> TypedDeclaration::Function {
+      name: intern("view"),
+      params: [TypedParameter { name: intern(ctx) }],
+      return_type: Type::Unit,
+      body: Some(TypedBlock {
+          statements: prepend_list(
+              TypedStatement::Expression {
+                  expr: TypedExpression::Call {
+                      callee: Box::new(TypedExpression::Variable { name: intern("__view_deps__") }),
+                      args: deps,
+                  },
+              },
+              stmts,
+          ),
+      }),
+  }
+
+// Comma-separated identifier list, each lowered to a
+// TypedExpression::Variable so the synthesised
+// `__view_deps__(dep1, dep2)` marker call carries the correct
+// expression shapes (the runtime treats them as state-field
+// references at lowering time).
+dep_id_list = { first:dep_id_expr ~ rest:dep_id_comma* }
+  -> prepend_list(first, rest)
+
+dep_id_comma = { "," ~ d:dep_id_expr }
+  -> d
+
+dep_id_expr = { name:identifier }
+  -> TypedExpression::Variable { name: intern(name) }
 
 // `component <Name> { fields }` — bare struct-only form, no
 // methods. Useful for data-only components that other components
@@ -516,13 +582,51 @@ additive_op = @{ "+" | "-" }
 // don't add value for the state-mutation slice and would only
 // invite questions about i32 wrap behaviour — punting until a real
 // use case shows up.
-multiplicative_expr = { first:primary_expr ~ rest:multiplicative_rest* }
+multiplicative_expr = { first:postfix_expr ~ rest:multiplicative_rest* }
   -> fold_left_ops(first, rest)
 
-multiplicative_rest = { op:multiplicative_op ~ operand:primary_expr }
+multiplicative_rest = { op:multiplicative_op ~ operand:postfix_expr }
   -> make_pair(op, operand)
 
 multiplicative_op = @{ "*" | "/" }
+
+// Postfix layer. Method calls (`obj.method(args)`) and bare field
+// access (`obj.field`) — both bind tighter than any binary
+// operator. Mirrors ml.zyn:2461-2479's postfix shape and uses
+// Zyntax's built-in `fold_postfix` helper
+// (runtime2/interpreter.rs:2286-2322) which dispatches each suffix
+// to TypedExpression::MethodCall / TypedExpression::Field.
+//
+// Index and slice suffixes are left out of the prototype slice —
+// they only matter once we add lists/maps. Adding them is
+// mechanical when needed (same Suffix-shape as below).
+postfix_expr = { base:primary_expr ~ suffixes:postfix_suffix* }
+  -> fold_postfix(base, suffixes)
+
+// Order matters: `suffix_method` first so `obj.foo(args)` doesn't
+// get split into `Field(obj.foo)` + an unconsumed `(args)` token.
+postfix_suffix = { suffix_method | suffix_field }
+
+suffix_method = { "." ~ method:identifier ~ "(" ~ args:call_args_list? ~ ")" }
+  -> SuffixMethod {
+      method: intern(method),
+      args: args,
+  }
+
+suffix_field = { "." ~ field:identifier }
+  -> SuffixField {
+      field: intern(field),
+  }
+
+// Comma-separated argument list. `prepend_list` is the standard
+// helper Zyntax exposes for stitching `first ~ rest*` into a flat
+// list. WHITESPACE auto-skips so authors can layout args one
+// per line.
+call_args_list = { first:expr ~ rest:call_args_comma* }
+  -> prepend_list(first, rest)
+
+call_args_comma = { "," ~ e:expr }
+  -> e
 
 // Primary expressions. PEG ordered alternates — order matters:
 //

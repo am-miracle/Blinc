@@ -1510,6 +1510,314 @@ mod tests {
         assert_eq!(else_block.statements.len(), 1);
     }
 
+    /// Method-call expressions parse via the postfix layer.
+    /// `count.get()` lowers to TypedExpression::MethodCall with
+    /// receiver=Variable("count"), method="get", no args. This is
+    /// the shape state-field reads will take once the deps-list
+    /// view + ViewCtx::get(N) → State<T> chain is wired.
+    #[test]
+    fn parse_method_call_no_args() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state count: i32
+                    view {}
+                    fn step() { let v = count.get() }
+                }
+                "#,
+                "method_call.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let body = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("step"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+        let TypedStatement::Let(let_node) = &body.statements[0].node else {
+            panic!("expected Let");
+        };
+        let init = let_node.initializer.as_ref().unwrap();
+        let TypedExpression::MethodCall(call) = &init.node else {
+            panic!("expected MethodCall, got {:?}", init.node);
+        };
+        assert_eq!(call.method.resolve_global().as_deref(), Some("get"));
+        assert_eq!(call.positional_args.len(), 0);
+        let TypedExpression::Variable(receiver) = &call.receiver.node else {
+            panic!("expected Variable receiver");
+        };
+        assert_eq!(receiver.resolve_global().as_deref(), Some("count"));
+    }
+
+    /// `ctx.get(0)` — method call with one positional arg.
+    /// Confirms `call_args_list` parses comma-separated args and
+    /// the integer literal flows through.
+    #[test]
+    fn parse_method_call_with_arg() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state count: i32
+                    view {}
+                    fn step() { let s = ctx.get(0) }
+                }
+                "#,
+                "method_call_arg.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let body = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("step"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+        let TypedStatement::Let(let_node) = &body.statements[0].node else {
+            panic!("expected Let");
+        };
+        let init = let_node.initializer.as_ref().unwrap();
+        let TypedExpression::MethodCall(call) = &init.node else {
+            panic!("expected MethodCall, got {:?}", init.node);
+        };
+        assert_eq!(call.method.resolve_global().as_deref(), Some("get"));
+        assert_eq!(call.positional_args.len(), 1);
+        let TypedExpression::Literal(TypedLiteral::Integer(n)) = &call.positional_args[0].node
+        else {
+            panic!("expected IntLiteral arg");
+        };
+        assert_eq!(*n, 0);
+    }
+
+    /// Method calls compose with comparisons: `count.get() > 0`
+    /// parses as Binary(MethodCall, Gt, IntLiteral). Pinning the
+    /// precedence — postfix should bind tighter than binary
+    /// operators, so the method-call subtree is on the LHS of the
+    /// comparison rather than the comparison being inside the
+    /// method's args.
+    #[test]
+    fn parse_method_call_in_condition() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state count: i32
+                    view { if count.get() > 0 { text("pos") } }
+                }
+                "#,
+                "mcall_in_cond.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let view = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("view"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+        let TypedStatement::If(if_stmt) = &view.statements[0].node else {
+            panic!("expected If");
+        };
+        let TypedExpression::Binary(cmp) = &if_stmt.condition.node else {
+            panic!("expected Binary condition");
+        };
+        assert!(matches!(cmp.op, zyntax_typed_ast::BinaryOp::Gt));
+        // LHS is the method call.
+        let TypedExpression::MethodCall(_) = &cmp.left.node else {
+            panic!("expected MethodCall on LHS, got {:?}", cmp.left.node);
+        };
+    }
+
+    /// `view([state1]) {|ctx| stmts}` — explicit-deps closure form.
+    /// Lowers to a function `view(ctx)` whose body starts with a
+    /// synthesised `__view_deps__(state1)` marker call, followed
+    /// by the user's stmts. Asserts (a) the function has one
+    /// parameter named "ctx", (b) the first statement is the
+    /// marker call carrying the right deps, (c) user stmts come
+    /// after the marker.
+    #[test]
+    fn parse_view_with_deps() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component Counter {
+                    state count: i32, state width: i32
+                    view([count, width]) {|ctx|
+                        let c = ctx.get(0)
+                        text("rendered")
+                    }
+                }
+                "#,
+                "view_deps.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .expect("expected Impl");
+        let view = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("view"))
+            .expect("expected view method");
+
+        // (a) one parameter named "ctx".
+        assert_eq!(view.params.len(), 1, "expected one param, got {:?}", view.params);
+        assert_eq!(
+            view.params[0].name.resolve_global().as_deref(),
+            Some("ctx")
+        );
+
+        // (b) first body stmt is `__view_deps__(count, width)`.
+        let body = view.body.as_ref().expect("view body");
+        assert!(
+            body.statements.len() >= 2,
+            "expected >=2 stmts (marker + user code), got {}",
+            body.statements.len()
+        );
+        let TypedStatement::Expression(marker_node) = &body.statements[0].node else {
+            panic!("expected marker stmt to be Expression");
+        };
+        let TypedExpression::Call(marker) = &marker_node.node else {
+            panic!("expected marker to be Call, got {:?}", marker_node.node);
+        };
+        let TypedExpression::Variable(callee_name) = &marker.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_eq!(
+            callee_name.resolve_global().as_deref(),
+            Some("__view_deps__"),
+            "marker callee should be __view_deps__"
+        );
+        assert_eq!(
+            marker.positional_args.len(),
+            2,
+            "expected two deps, got {:?}",
+            marker.positional_args
+        );
+
+        // (c) marker args are Variable refs with the right names.
+        for (i, expected) in ["count", "width"].iter().enumerate() {
+            let TypedExpression::Variable(name) = &marker.positional_args[i].node else {
+                panic!("expected Variable arg at {}", i);
+            };
+            assert_eq!(name.resolve_global().as_deref(), Some(*expected));
+        }
+
+        // (d) user statements follow the marker. body[1] should be
+        // the `let c = ctx.get(0)` stmt.
+        let TypedStatement::Let(_) = &body.statements[1].node else {
+            panic!(
+                "expected user `let` stmt after marker, got {:?}",
+                body.statements[1].node
+            );
+        };
+    }
+
+    /// Plain `view { stmts }` still works alongside the deps form
+    /// — `view_member` is `view_with_deps | view_simple`. The
+    /// simple form should produce a parameterless function with
+    /// no `__view_deps__` marker.
+    #[test]
+    fn parse_view_simple_still_works() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component Counter {
+                    state count: i32
+                    view { text("hi") }
+                }
+                "#,
+                "view_simple.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let view = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("view"))
+            .unwrap();
+        // No params on the simple form.
+        assert_eq!(view.params.len(), 0);
+        // No marker — first stmt is the user's text("hi"), not a
+        // __view_deps__ call.
+        let body = view.body.as_ref().unwrap();
+        let TypedStatement::Expression(first) = &body.statements[0].node else {
+            panic!("expected Expression stmt");
+        };
+        let TypedExpression::Call(call) = &first.node else {
+            panic!("expected Call");
+        };
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_ne!(
+            callee.resolve_global().as_deref(),
+            Some("__view_deps__"),
+            "simple view shouldn't carry the deps marker"
+        );
+    }
+
     /// `if count > 0 { ... }` with no else — `else_block` is None.
     /// Pinning the simple form so a future "always emit empty
     /// else" refactor doesn't sneak in.
