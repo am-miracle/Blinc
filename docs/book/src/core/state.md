@@ -395,13 +395,18 @@ stateful::<NoState>()
 
 ## Custom State Types
 
-Define your own state enum for complex interactions:
+Define your own state enum for complex interactions. The `StateTransitions` trait has two transition methods:
+
+- `on_event(&self, event: u32) -> Option<Self>` — fires on a discrete user input (pointer, keyboard, custom events). Required.
+- `on_tick(&self) -> Option<Self>` — fires when a registered signal dependency changes, giving the state machine a chance to transition based on data without an event. Default returns `None`; override only when you need a data-guarded transition.
+
+### Event-driven transitions (`on_event`)
 
 ```rust
 use blinc_layout::stateful::StateTransitions;
 use blinc_core::events::event_types::*;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
 enum DragState {
     #[default]
     Idle,
@@ -436,6 +441,65 @@ fn draggable_item() -> impl ElementBuilder {
         })
 }
 ```
+
+### Data-guarded transitions (`on_tick`)
+
+`on_tick` is the Harel-statechart-style guard path: the state machine re-evaluates itself when a registered signal dependency changes, and may transition without an explicit event. The framework calls it during the deps-driven rebuild path; you read the relevant signals inside the impl and return `Some(NextState)` when a value condition is met.
+
+Use it for state that should follow data automatically (loading completion, threshold crossings, timeouts driven by an external clock signal) rather than user input.
+
+```rust
+use blinc_layout::stateful::StateTransitions;
+use blinc_core::use_state_keyed;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
+enum LoaderState {
+    #[default]
+    Loading,
+    Done,
+    Failed,
+}
+
+// A signal the state machine reads inside on_tick. Anything that
+// can be read globally works — a keyed state, a singleton value,
+// or a thread-local context.
+use blinc_core::State;
+fn progress_signal() -> State<f32> {
+    use_state_keyed("loader_progress", || 0.0)
+}
+
+impl StateTransitions for LoaderState {
+    // No user-input transitions for this loader.
+    fn on_event(&self, _event: u32) -> Option<Self> { None }
+
+    fn on_tick(&self) -> Option<Self> {
+        let progress = progress_signal().get();
+        match self {
+            LoaderState::Loading if progress >= 1.0 => Some(LoaderState::Done),
+            LoaderState::Loading if progress < 0.0  => Some(LoaderState::Failed),
+            _ => None,
+        }
+    }
+}
+
+fn loader_view() -> impl ElementBuilder {
+    let progress = progress_signal();
+
+    stateful::<LoaderState>()
+        .deps([progress.signal_id()])  // tick fires when this signal changes
+        .on_state(|ctx| {
+            match ctx.state() {
+                LoaderState::Loading => div().child(text("Loading...")),
+                LoaderState::Done    => div().child(text("Done!")),
+                LoaderState::Failed  => div().child(text("Error")),
+            }
+        })
+}
+```
+
+The state machine's `on_tick` re-runs every time `progress` changes (because we registered it via `.deps([...])`), and the transition fires automatically when `progress` crosses one of the guard thresholds — no event handler needed.
+
+**`on_event` and `on_tick` compose:** an FSM can use both. Events drive user-input transitions, `on_tick` drives data-conditioned transitions. The framework calls them on the appropriate paths.
 
 ---
 
