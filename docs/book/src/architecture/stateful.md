@@ -62,13 +62,18 @@ Transitions can be conditional:
 
 ## StateTransitions Trait
 
-For type-safe state definitions, implement `StateTransitions`:
+For type-safe state definitions, implement `StateTransitions`. The trait has two transition methods, fired on different paths:
+
+- `on_event(&self, event: u32) -> Option<Self>` — discrete user inputs (pointer, keyboard, custom events). Required.
+- `on_tick(&self) -> Option<Self>` — data-guarded transitions, fired when the Stateful's signal dependencies change so the state machine can re-evaluate against the new data. Default returns `None`; override only when you have a guard condition to check.
+
+### Event-driven (`on_event`)
 
 ```rust
 use blinc_layout::stateful::StateTransitions;
 use blinc_core::events::event_types::*;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
 enum ButtonState {
     #[default]
     Idle,
@@ -89,6 +94,58 @@ impl StateTransitions for ButtonState {
     }
 }
 ```
+
+### Data-guarded (`on_tick`)
+
+`on_tick` is the Harel-statechart guard path: when a registered signal dependency changes, the framework re-evaluates the state machine before refreshing the Stateful. Inside the impl you read the relevant signals and return `Some(NextState)` when a condition is crossed.
+
+Use it for state that should follow data automatically — loading completion, threshold crossings, timeouts driven by an external clock signal — rather than user input.
+
+```rust
+use blinc_layout::stateful::StateTransitions;
+use blinc_core::{use_state_keyed, State};
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
+enum LoaderState {
+    #[default]
+    Loading,
+    Done,
+    Failed,
+}
+
+fn progress_signal() -> State<f32> {
+    use_state_keyed("loader_progress", || 0.0)
+}
+
+impl StateTransitions for LoaderState {
+    fn on_event(&self, _event: u32) -> Option<Self> { None }
+
+    fn on_tick(&self) -> Option<Self> {
+        let progress = progress_signal().get();
+        match self {
+            LoaderState::Loading if progress >= 1.0 => Some(LoaderState::Done),
+            LoaderState::Loading if progress <  0.0 => Some(LoaderState::Failed),
+            _ => None,
+        }
+    }
+}
+
+fn loader_view() -> impl ElementBuilder {
+    let progress = progress_signal();
+
+    stateful::<LoaderState>()
+        .deps([progress.signal_id()])  // tick fires when this signal changes
+        .on_state(|ctx| {
+            match ctx.state() {
+                LoaderState::Loading => div().child(text("Loading...")),
+                LoaderState::Done    => div().child(text("Done!")),
+                LoaderState::Failed  => div().child(text("Error")),
+            }
+        })
+}
+```
+
+`on_tick` runs as part of the Stateful's deps-driven refresh path: when any dependency in `.deps([...])` changes, the framework calls `on_tick` first; if it returns `Some(NextState)` the state advances, then `on_state` re-runs and the new visual props get queued. The two methods compose — an FSM can implement both, and event-driven and data-guarded transitions coexist on the same state type.
 
 ### Available Event Types
 
@@ -501,13 +558,21 @@ Handlers receive event details:
 
 ## Performance
 
-### Why FSM Over Signals?
+### Update paths and their cost
 
-| Signals for visual state | FSM for visual state |
-| ------------------------ | -------------------- |
-| Triggers full rebuild | Updates only affected element |
-| Creates new VDOM | Mutates existing element |
-| O(tree size) | O(1) |
+There isn't a single "FSM vs signals" tradeoff — Blinc has a few distinct update paths and they're chosen by the API you call, not by which type the state has. Cheapest first:
+
+| Trigger | What runs | When to use |
+|---------|-----------|-------------|
+| `state.set(v)` with no Stateful subscriber | The signal value updates. Nothing else runs this frame. | Values that exist for downstream computation but don't directly drive UI yet. |
+| `state.set(v)` watched by a `Stateful` via `.deps([signal_id])` | That Stateful's `on_state` callback re-runs; the returned `Div`'s changed `RenderProps` are queued via `queue_prop_update` and applied to the existing render-tree node. No tree diff, no layout recomputation when only props changed. | Visual state local to a container — colors, opacity, transforms, badge counts, hover/check tints. |
+| Stateful FSM transition (`on_event` / `on_tick` returns `Some(NextState)`) | Same prop-update path as the deps refresh above. | User-input or data-guarded state changes inside a `Stateful::<S>`. |
+| `state.set_rebuild(v)` (and `update_rebuild`) | The reactive dirty flag is set; the next frame re-runs `build_ui` from the top, builds a new `Div` tree, diffs it against the previous one, recomputes layout for affected subtrees. | Changes that affect tree structure: adding or removing children, branch-changing `if`s, list reorderings. |
+| Element-ref mutation (e.g. `ElementRef::set_text`, scroll-ref retargeting) | Same dirty-flag path as `set_rebuild`. | Mostly internal; widgets that mutate content go through this. |
+
+`set()` and `set_rebuild()` both set the signal value identically — the difference is whether Blinc is told to rebuild after. Calling `set()` when the consumer is a `Stateful` with `.deps()` gets you the cheap path; calling it on a signal nothing watches is a silent value update; calling it when the value drives layout but no Stateful subscribed it leaves the UI stale until something else triggers a rebuild. The runtime won't catch this — pick the right setter for what the value drives.
+
+Wrapping visual state in `stateful::<S>()` is how you keep the cost of an interaction (hover, press, check) local to one render-tree node. Without the wrapper you'd need `set_rebuild` to see the change, paying the full re-run + diff for a change that's just a color.
 
 ### Minimal Updates
 
