@@ -384,6 +384,15 @@ state_decl = { "state" ~ name:identifier }
       fields: TypedVariantFields::Unit,
   }
 
+// Two transition shapes — event-driven and tick-driven (data
+// guarded). PEG ordered alternates: `event_transition` first
+// because `on` is a strong discriminator; `tick_transition`
+// follows, recognised by the `tick` keyword. The two paths
+// mirror the `StateTransitions` trait's two methods in
+// blinc_layout/src/stateful.rs: `on_event` for event-driven and
+// `on_tick` for data-guarded transitions.
+transition_decl = { event_transition | tick_transition }
+
 // `on <FromState>.<Event> -> <ToState>` — event-driven transition.
 // Lowers to a single `TypedStatement::Expression` wrapping a marker
 // call `__fsm_transition__("From", "Event", "To")`. State and event
@@ -398,7 +407,7 @@ state_decl = { "state" ~ name:identifier }
 // marker carries the names as strings and the host resolves them
 // at FSM-registration time. Same approach used for
 // `__fsm_initial__`'s arg.
-transition_decl = { "on" ~ from:identifier ~ "." ~ event:identifier ~ "->" ~ to:identifier }
+event_transition = { "on" ~ from:identifier ~ "." ~ event:identifier ~ "->" ~ to:identifier }
   -> TypedStatement::Expression {
       expr: TypedExpression::Call {
           callee: Box::new(TypedExpression::Variable {
@@ -407,6 +416,43 @@ transition_decl = { "on" ~ from:identifier ~ "." ~ event:identifier ~ "->" ~ to:
           args: [
               TypedExpression::StringLiteral { value: from },
               TypedExpression::StringLiteral { value: event },
+              TypedExpression::StringLiteral { value: to },
+          ],
+      },
+  }
+
+// `tick <FromState> -> <ToState> when <guard expr>` — data-guarded
+// transition. Lowers to a marker call
+// `__fsm_tick__("From", <guard>, "To")` where `<guard>` is the raw
+// expression (NOT a string literal — the runtime/compiler reads
+// the expression to lower the guard into the body of the
+// `StateTransitions::on_tick` impl).
+//
+// At Stateful::refresh_stateful time, the framework calls
+// `state.on_tick()` on the current state; the lowering of
+// `<guard>` decides whether to return `Some(NextState)`. See
+// blinc_layout/src/stateful.rs:`StateTransitions::on_tick` for
+// the runtime contract.
+//
+// Multiple tick rules from the same FromState compose by ordered
+// pattern matching at lowering time — the first guard whose
+// expression evaluates truthy wins. The grammar emits them in
+// declaration order; the runtime/compiler preserves it.
+//
+// Why `when` rather than `if`: `if` is taken by `if_stmt` for
+// conditional rendering inside view bodies. `when` is unambiguous
+// here without overloading the conditional keyword.
+tick_transition = {
+    "tick" ~ from:identifier ~ "->" ~ to:identifier ~ "when" ~ guard:expr
+}
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Call {
+          callee: Box::new(TypedExpression::Variable {
+              name: intern("__fsm_tick__"),
+          }),
+          args: [
+              TypedExpression::StringLiteral { value: from },
+              guard,
               TypedExpression::StringLiteral { value: to },
           ],
       },

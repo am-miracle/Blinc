@@ -2129,6 +2129,160 @@ mod tests {
         }
     }
 
+    /// `tick From -> To when <expr>` — data-guarded transition.
+    /// Lowers to a `__fsm_tick__("From", <guard expr>, "To")`
+    /// marker call. The middle arg is the raw expression (NOT a
+    /// string literal) because the runtime/compiler reads it to
+    /// lower into the body of the `StateTransitions::on_tick`
+    /// impl. Pinning all three arg shapes: from is a string lit,
+    /// guard is a Binary (the expression survives parsing intact),
+    /// to is a string lit.
+    #[test]
+    fn parse_fsm_tick_transition() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                fsm Loader {
+                    state Loading
+                    state Done
+                    initial Loading
+                    tick Loading -> Done when progress.get() > 100
+                }
+                "#,
+                "fsm_tick.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let body = impl_block.methods[0].body.as_ref().unwrap();
+
+        // body[0] is the initial marker; body[1] is the tick marker.
+        assert_eq!(body.statements.len(), 2);
+        let TypedStatement::Expression(node) = &body.statements[1].node else {
+            panic!("expected Expression stmt at body[1]");
+        };
+        let TypedExpression::Call(call) = &node.node else {
+            panic!("expected Call");
+        };
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_eq!(
+            callee.resolve_global().as_deref(),
+            Some("__fsm_tick__"),
+            "tick marker callee"
+        );
+        assert_eq!(
+            call.positional_args.len(),
+            3,
+            "expected (from, guard, to)"
+        );
+
+        // arg 0: from = "Loading" string literal.
+        let TypedExpression::Literal(TypedLiteral::String(from)) = &call.positional_args[0].node
+        else {
+            panic!("expected string literal arg 0");
+        };
+        assert_eq!(from.resolve_global().as_deref(), Some("Loading"));
+
+        // arg 1: guard = Binary(MethodCall, Gt, IntLiteral(100)).
+        let TypedExpression::Binary(bin) = &call.positional_args[1].node else {
+            panic!(
+                "expected Binary guard expression, got {:?}",
+                call.positional_args[1].node
+            );
+        };
+        assert!(
+            matches!(bin.op, zyntax_typed_ast::BinaryOp::Gt),
+            "guard top op should be Gt"
+        );
+        let TypedExpression::MethodCall(mc) = &bin.left.node else {
+            panic!("guard LHS should be MethodCall");
+        };
+        assert_eq!(mc.method.resolve_global().as_deref(), Some("get"));
+        let TypedExpression::Literal(TypedLiteral::Integer(n)) = &bin.right.node else {
+            panic!("guard RHS should be IntLiteral");
+        };
+        assert_eq!(*n, 100);
+
+        // arg 2: to = "Done" string literal.
+        let TypedExpression::Literal(TypedLiteral::String(to)) = &call.positional_args[2].node
+        else {
+            panic!("expected string literal arg 2");
+        };
+        assert_eq!(to.resolve_global().as_deref(), Some("Done"));
+    }
+
+    /// Mixed event and tick transitions in the same fsm — both
+    /// shapes coexist inside `__fsm_meta__`. Pinning declaration
+    /// order survives so the runtime can interpret transitions
+    /// sequentially (event-driven and data-guarded share priority,
+    /// resolved by the order users wrote them).
+    #[test]
+    fn parse_fsm_mixed_event_and_tick() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                fsm Loader {
+                    state Idle
+                    state Loading
+                    state Done
+                    initial Idle
+                    on Idle.Start -> Loading
+                    tick Loading -> Done when progress.get() > 100
+                    on Done.Reset -> Idle
+                }
+                "#,
+                "fsm_mixed.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let body = impl_block.methods[0].body.as_ref().unwrap();
+
+        // 1 initial + 3 transitions = 4.
+        assert_eq!(body.statements.len(), 4);
+
+        // Helper to read a marker callee name from a stmt.
+        let callee_at = |idx: usize| -> String {
+            let TypedStatement::Expression(node) = &body.statements[idx].node else {
+                panic!("expected Expression at {idx}");
+            };
+            let TypedExpression::Call(call) = &node.node else {
+                panic!("expected Call at {idx}");
+            };
+            let TypedExpression::Variable(callee) = &call.callee.node else {
+                panic!("expected Variable callee at {idx}");
+            };
+            callee.resolve_global().unwrap_or_default()
+        };
+
+        assert_eq!(callee_at(0), "__fsm_initial__");
+        assert_eq!(callee_at(1), "__fsm_transition__");
+        assert_eq!(callee_at(2), "__fsm_tick__");
+        assert_eq!(callee_at(3), "__fsm_transition__");
+    }
+
     /// `fsm` with no transitions still parses — useful for the
     /// degenerate "states without yet-defined behaviour" stub. The
     /// body should have exactly the initial marker, no transitions.
