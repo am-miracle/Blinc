@@ -528,15 +528,14 @@ impl FsmInstance {
     /// initial state. Returns `None` if no fsm of the given name
     /// is registered for the module, or if the fsm was registered
     /// without an initial state.
-    pub fn new(
-        _dsl: &BlincDsl,
-        module: &str,
-        fsm_name: &str,
-    ) -> Option<Self> {
+    pub fn new(_dsl: &BlincDsl, module: &str, fsm_name: &str) -> Option<Self> {
         let module_i = zyntax_typed_ast::InternedString::new_global(module);
         let id = with_fsm_registry(|r| r.find_by_name(module_i, fsm_name))?;
         let initial = with_fsm_registry(|r| r.get(&id).and_then(|d| d.initial))?;
-        Some(Self { id, current: initial })
+        Some(Self {
+            id,
+            current: initial,
+        })
     }
 
     /// Current state name as a borrowed `&str`. Resolves from the
@@ -579,9 +578,7 @@ impl FsmInstance {
     /// Reset to the fsm's initial state. Useful when a higher-level
     /// flow restarts a sub-state-machine.
     pub fn reset(&mut self) {
-        if let Some(initial) =
-            with_fsm_registry(|r| r.get(&self.id).and_then(|d| d.initial))
-        {
+        if let Some(initial) = with_fsm_registry(|r| r.get(&self.id).and_then(|d| d.initial)) {
             self.current = initial;
         }
     }
@@ -671,9 +668,7 @@ fn is_signal_decl(func: &zyntax_typed_ast::typed_ast::TypedFunction) -> bool {
 /// `user.get().age` and Zyntax codegens the field load directly).
 fn resolve_signal_calls(program: &mut TypedProgram) {
     use std::collections::HashMap;
-    use zyntax_typed_ast::typed_ast::{
-        TypedCall, TypedDeclaration, TypedExpression, TypedLiteral,
-    };
+    use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
     use zyntax_typed_ast::InternedString;
 
     // -----------------------------------------------------------------
@@ -828,11 +823,7 @@ fn resolve_signal_calls(program: &mut TypedProgram) {
                     rewrite_expr(init, signals);
                 }
             }
-            TypedStatement::Return(opt) => {
-                if let Some(e) = opt {
-                    rewrite_expr(e, signals);
-                }
-            }
+            TypedStatement::Return(Some(e)) => rewrite_expr(e, signals),
             TypedStatement::If(if_stmt) => {
                 rewrite_expr(&mut if_stmt.condition, signals);
                 rewrite_block(&mut if_stmt.then_block, signals);
@@ -910,9 +901,7 @@ fn inject_fsm_context_markers(program: &mut TypedProgram) {
             .iter()
             .map(|s| {
                 TypedNode::new(
-                    TypedExpression::Literal(TypedLiteral::String(
-                        InternedString::new_global(s),
-                    )),
+                    TypedExpression::Literal(TypedLiteral::String(InternedString::new_global(s))),
                     Type::Primitive(PrimitiveType::String),
                     Span::default(),
                 )
@@ -1052,9 +1041,11 @@ fn populate_fsm_registry_pass(
         let TypedDeclaration::Impl(imp) = &decl.node else {
             continue;
         };
-        let Some(meta) = imp.methods.iter().find(|m| {
-            m.name.resolve_global().as_deref() == Some("__fsm_meta__")
-        }) else {
+        let Some(meta) = imp
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("__fsm_meta__"))
+        else {
             continue;
         };
         let Some(body) = meta.body.as_ref() else {
@@ -1112,10 +1103,8 @@ fn populate_fsm_registry_pass(
                     // dispatch time.
                     if let (Some(from), Some(to)) = (str_arg(0), str_arg(2)) {
                         let idx = def.tick_guards.len();
-                        let fsm_name_str =
-                            fsm_name.resolve_global().unwrap_or_default();
-                        let guard_fn_name =
-                            format!("__fsm_tick_guard_{fsm_name_str}_{idx}__");
+                        let fsm_name_str = fsm_name.resolve_global().unwrap_or_default();
+                        let guard_fn_name = format!("__fsm_tick_guard_{fsm_name_str}_{idx}__");
                         let guard_fn = InternedString::new_global(&guard_fn_name);
 
                         // Capture the guard expression (cloned to
@@ -1347,9 +1336,11 @@ fn synthesize_fsm_event_enums(program: &mut TypedProgram) {
         };
 
         // Find the synthesised `__fsm_meta__` method.
-        let Some(meta) = imp.methods.iter().find(|m| {
-            m.name.resolve_global().as_deref() == Some("__fsm_meta__")
-        }) else {
+        let Some(meta) = imp
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("__fsm_meta__"))
+        else {
             continue;
         };
         let Some(body) = meta.body.as_ref() else {
@@ -1378,8 +1369,7 @@ fn synthesize_fsm_event_enums(program: &mut TypedProgram) {
             let Some(event_arg) = call.positional_args.get(1) else {
                 continue;
             };
-            let TypedExpression::Literal(TypedLiteral::String(name)) = &event_arg.node
-            else {
+            let TypedExpression::Literal(TypedLiteral::String(name)) = &event_arg.node else {
                 continue;
             };
             let key = name.resolve_global().unwrap_or_default();
@@ -1684,18 +1674,20 @@ impl BlincDsl {
         // Phase 1: snapshot matching (guard_fn, to) pairs and drop
         // the registry lock before reaching for the runtime, so
         // there's no chance of holding both locks at once.
-        let candidates: Vec<(zyntax_typed_ast::InternedString, zyntax_typed_ast::InternedString)> =
-            with_fsm_registry(|r| {
-                r.get(id)
-                    .map(|def| {
-                        def.tick_guards
-                            .iter()
-                            .filter(|g| g.from.resolve_global().as_deref() == Some(current))
-                            .filter_map(|g| g.guard_fn.map(|fn_name| (fn_name, g.to)))
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            });
+        let candidates: Vec<(
+            zyntax_typed_ast::InternedString,
+            zyntax_typed_ast::InternedString,
+        )> = with_fsm_registry(|r| {
+            r.get(id)
+                .map(|def| {
+                    def.tick_guards
+                        .iter()
+                        .filter(|g| g.from.resolve_global().as_deref() == Some(current))
+                        .filter_map(|g| g.guard_fn.map(|fn_name| (fn_name, g.to)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
 
         if candidates.is_empty() {
             return Ok(None);
@@ -2097,13 +2089,12 @@ mod tests {
         // The `state` keyword wraps the type in `Type::Named { State, [i32] }`.
         match &count_field.ty {
             zyntax_typed_ast::Type::Named { id, type_args, .. } => {
-                let name_str = dsl.runtime.lock().ok().and_then(|_| {
-                    // Type::Named's `id` references the program's
-                    // type registry; resolve it back to a name to
-                    // verify it's `State`.
-                    Some(())
-                });
-                let _ = name_str; // currently we accept any Named-with-1-arg as state
+                let name_str = dsl.runtime.lock().ok().map(|_| ());
+                // Type::Named's `id` references the program's type
+                // registry; resolve it back to a name to verify
+                // it's `State`. For now we accept any
+                // Named-with-1-arg as state.
+                let _ = name_str;
                 assert_eq!(
                     type_args.len(),
                     1,
@@ -2530,10 +2521,7 @@ mod tests {
 
         let dsl = BlincDsl::new().expect("runtime init");
         let program = dsl
-            .parse_to_typed_ast(
-                r#"view { text(f"{count}") }"#,
-                "fstr_var.blinc",
-            )
+            .parse_to_typed_ast(r#"view { text(f"{count}") }"#, "fstr_var.blinc")
             .expect("parse");
 
         let stmts = first_user_function_body(&program);
@@ -2603,10 +2591,7 @@ mod tests {
             .find(|m| m.name.resolve_global().as_deref() == Some("on_click"))
             .expect("expected on_click method");
 
-        let body = on_click
-            .body
-            .as_ref()
-            .expect("on_click should have a body");
+        let body = on_click.body.as_ref().expect("on_click should have a body");
         assert_eq!(
             body.statements.len(),
             1,
@@ -2909,10 +2894,7 @@ mod tests {
         // then-branch has one text("positive") stmt.
         assert_eq!(if_stmt.then_block.statements.len(), 1);
         // else-branch present, also one stmt.
-        let else_block = if_stmt
-            .else_block
-            .as_ref()
-            .expect("expected else branch");
+        let else_block = if_stmt.else_block.as_ref().expect("expected else branch");
         assert_eq!(else_block.statements.len(), 1);
     }
 
@@ -2928,9 +2910,18 @@ mod tests {
 
         let dsl = BlincDsl::new().expect("runtime init");
         for (label, src) in [
-            ("newline", "component A { state count: i32 state width: i32 view {} }"),
-            ("comma",   "component A { state count: i32, state width: i32 view {} }"),
-            ("mixed",   "component A { state count: i32, state width: i32\nstate height: i32 view {} }"),
+            (
+                "newline",
+                "component A { state count: i32 state width: i32 view {} }",
+            ),
+            (
+                "comma",
+                "component A { state count: i32, state width: i32 view {} }",
+            ),
+            (
+                "mixed",
+                "component A { state count: i32, state width: i32\nstate height: i32 view {} }",
+            ),
         ] {
             let program = dsl
                 .parse_to_typed_ast(src, &format!("sep_{label}.blinc"))
@@ -3154,11 +3145,13 @@ mod tests {
             .expect("expected view method");
 
         // (a) one parameter named "ctx".
-        assert_eq!(view.params.len(), 1, "expected one param, got {:?}", view.params);
         assert_eq!(
-            view.params[0].name.resolve_global().as_deref(),
-            Some("ctx")
+            view.params.len(),
+            1,
+            "expected one param, got {:?}",
+            view.params
         );
+        assert_eq!(view.params[0].name.resolve_global().as_deref(), Some("ctx"));
 
         // (b) first body stmt is `__view_deps__(count, width)`.
         let body = view.body.as_ref().expect("view body");
@@ -3300,7 +3293,10 @@ mod tests {
         let TypedStatement::If(if_stmt) = &view.statements[0].node else {
             panic!("expected If");
         };
-        assert!(if_stmt.else_block.is_none(), "no-else form should leave else_block None");
+        assert!(
+            if_stmt.else_block.is_none(),
+            "no-else form should leave else_block None"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -3612,11 +3608,7 @@ mod tests {
             Some("__fsm_tick__"),
             "tick marker callee"
         );
-        assert_eq!(
-            call.positional_args.len(),
-            3,
-            "expected (from, guard, to)"
-        );
+        assert_eq!(call.positional_args.len(), 3, "expected (from, guard, to)");
 
         // arg 0: from = "Loading" string literal.
         let TypedExpression::Literal(TypedLiteral::String(from)) = &call.positional_args[0].node
@@ -3760,7 +3752,10 @@ mod tests {
         let TypedExpression::Variable(begin_callee) = &begin_call.callee.node else {
             panic!("expected Variable callee");
         };
-        assert_eq!(begin_callee.resolve_global().as_deref(), Some("__fsm_begin__"));
+        assert_eq!(
+            begin_callee.resolve_global().as_deref(),
+            Some("__fsm_begin__")
+        );
         let TypedExpression::Literal(TypedLiteral::String(name)) =
             &begin_call.positional_args[0].node
         else {
@@ -4161,17 +4156,11 @@ mod tests {
             "expected two event-driven transitions"
         );
         assert_eq!(
-            def.transitions[0]
-                .event
-                .resolve_global()
-                .as_deref(),
+            def.transitions[0].event.resolve_global().as_deref(),
             Some("Begin")
         );
         assert_eq!(
-            def.transitions[1]
-                .event
-                .resolve_global()
-                .as_deref(),
+            def.transitions[1].event.resolve_global().as_deref(),
             Some("Finish")
         );
     }
@@ -4715,10 +4704,7 @@ mod tests {
         };
         let init = let_node.initializer.as_ref().expect("let init");
         let TypedExpression::Call(sig_call) = &init.node else {
-            panic!(
-                "let init should be Call after rewrite, got {:?}",
-                init.node
-            );
+            panic!("let init should be Call after rewrite, got {:?}", init.node);
         };
         let TypedExpression::Variable(callee) = &sig_call.callee.node else {
             panic!("signal callee should be Variable");
@@ -4785,10 +4771,7 @@ mod tests {
         // somewhere. We just look at the program-wide presence of
         // both __signal_get_i32 and __signal_get_string callees.
         fn callee_exists(program: &TypedProgram, callee: &str) -> bool {
-            fn walk_expr(
-                e: &zyntax_typed_ast::TypedNode<TypedExpression>,
-                callee: &str,
-            ) -> bool {
+            fn walk_expr(e: &zyntax_typed_ast::TypedNode<TypedExpression>, callee: &str) -> bool {
                 match &e.node {
                     TypedExpression::Call(c) => {
                         if let TypedExpression::Variable(name) = &c.callee.node {
@@ -4805,10 +4788,7 @@ mod tests {
                     _ => false,
                 }
             }
-            fn walk_stmt(
-                s: &zyntax_typed_ast::TypedNode<TypedStatement>,
-                callee: &str,
-            ) -> bool {
+            fn walk_stmt(s: &zyntax_typed_ast::TypedNode<TypedStatement>, callee: &str) -> bool {
                 match &s.node {
                     TypedStatement::Expression(e) => walk_expr(e, callee),
                     TypedStatement::Let(l) => l
@@ -4819,7 +4799,7 @@ mod tests {
                     TypedStatement::If(i) => {
                         walk_expr(&i.condition, callee)
                             || i.then_block.statements.iter().any(|s| walk_stmt(s, callee))
-                            || i.else_block.as_ref().map_or(false, |b| {
+                            || i.else_block.as_ref().is_some_and(|b| {
                                 b.statements.iter().any(|s| walk_stmt(s, callee))
                             })
                     }
@@ -4827,21 +4807,19 @@ mod tests {
                     _ => false,
                 }
             }
-            program.declarations.iter().any(|d| {
-                match &d.node {
-                    zyntax_typed_ast::TypedDeclaration::Function(f) => f
-                        .body
+            program.declarations.iter().any(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Function(f) => f
+                    .body
+                    .as_ref()
+                    .map(|b| b.statements.iter().any(|s| walk_stmt(s, callee)))
+                    .unwrap_or(false),
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => i.methods.iter().any(|m| {
+                    m.body
                         .as_ref()
                         .map(|b| b.statements.iter().any(|s| walk_stmt(s, callee)))
-                        .unwrap_or(false),
-                    zyntax_typed_ast::TypedDeclaration::Impl(i) => i.methods.iter().any(|m| {
-                        m.body
-                            .as_ref()
-                            .map(|b| b.statements.iter().any(|s| walk_stmt(s, callee)))
-                            .unwrap_or(false)
-                    }),
-                    _ => false,
-                }
+                        .unwrap_or(false)
+                }),
+                _ => false,
             })
         }
 
@@ -5052,8 +5030,7 @@ mod tests {
         )
         .expect("compile");
 
-        let mut instance =
-            FsmInstance::new(&dsl, "main", "InstanceProbeMiss").unwrap();
+        let mut instance = FsmInstance::new(&dsl, "main", "InstanceProbeMiss").unwrap();
         assert_eq!(instance.current(), "Off");
 
         // Wrong event name from Off state → no transition.
@@ -5088,8 +5065,7 @@ mod tests {
         )
         .expect("compile");
 
-        let mut instance =
-            FsmInstance::new(&dsl, "main", "InstanceProbeTick").unwrap();
+        let mut instance = FsmInstance::new(&dsl, "main", "InstanceProbeTick").unwrap();
 
         // Signal below threshold → tick is a no-op.
         let fired = instance.tick(&dsl).expect("tick");
@@ -5126,8 +5102,7 @@ mod tests {
         )
         .expect("compile");
 
-        let mut instance =
-            FsmInstance::new(&dsl, "main", "InstanceProbeReset").unwrap();
+        let mut instance = FsmInstance::new(&dsl, "main", "InstanceProbeReset").unwrap();
 
         // Move off the initial state.
         instance.dispatch_event(&dsl, "Go");
