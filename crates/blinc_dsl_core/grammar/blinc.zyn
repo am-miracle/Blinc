@@ -225,26 +225,61 @@ impl_fn = { "fn" ~ name:identifier ~ "(" ~ ")" ~ "{" ~ stmts:statements ~ "}" }
 statements = { stmt:statement* }
   -> stmt
 
-// Statement choice. The two `text_*` alternates share the `text(`
-// prefix and disambiguate on the arg shape — PEG backtracking on
-// alternates is what makes this work (same pattern as imagepipe's
-// `rotate90_stmt` / `rotate180_stmt` at imagepipe.zyn:148-186).
+// Statement choice. PEG ordered alternates with backtracking — each
+// alternate's first token (or first few tokens) is enough to
+// distinguish.
 //
-// Keep the string variant first: `string_literal` starts with `"`
-// which is a strong discriminator, so the int alternate is only
-// tried when the user actually wrote a number.
+//   * `text_*_stmt` start with the keyword `"text" ~ "("` — they
+//     fail fast on anything else and we fall through.
+//   * `assign_stmt` starts with `identifier ~ "="`. Crucially it
+//     comes AFTER the text-stmt alternates: if a user happens to
+//     name a variable `text`, the literal-`"text"` match in
+//     text_*_stmt succeeds but the following `~ "("` fails, the
+//     alternate backtracks, and `assign_stmt` re-matches the
+//     identifier cleanly.
 //
-// **Future direction:** when variables + expressions land in the
-// next phase-2 slice, the int arm goes away. Users write
-// `text(f"{count}")` instead — Zyntax's f-string syntax (see
-// `ml.zyn:2885-2906`) desugars to nested `concat`/`__fstring_format__`
-// calls and the host only needs `$Blinc$text(s: string)` plus a few
-// runtime helpers (`$Blinc$concat`, `$Blinc$format_int`). This
-// per-arg-type dispatch is a stepping stone, not the production
-// shape.
+// The two `text_*` arms still split on arg shape (string-typed vs
+// integer literal) — Zyntax doesn't have arg-type fn overloading at
+// the type-checker level today, so we route through distinct host
+// callees. Same pattern as `imagepipe.zyn:148-186`'s
+// `rotate90`/`rotate180`/`rotate270` split.
+//
+// `text(<variable>)` for a bare identifier ref isn't supported yet
+// — interpolate via `text(f"{count}")` instead. f-string parts now
+// accept full expressions (see `f_string_expr` below).
 statement = {
-    text_string_stmt | text_int_stmt
+    text_string_stmt | text_int_stmt | assign_stmt
 }
+
+// `<target> = <expr>` — assignment statement, lowered as a
+// TypedExpression::Binary with BinaryOp::Assign wrapped in a
+// TypedStatement::Expression. This is how Zyntax represents
+// assignment: assignment is an expression operator, not a distinct
+// statement shape (see TypedAST `BinaryOp::Assign` at
+// typed_ast.rs:592).
+//
+// Target is restricted to a bare identifier for now — handles the
+// only state-mutation shape phase-2 needs (`count = count + 1`).
+// Field-access targets (`self.count = …`) and indexed targets
+// (`buf[0] = …`) get added when components grow methods that
+// reference `self`. The `target` arm uses the same
+// `variable_expr` shape as the right-hand side so the AST is
+// consistent on both sides of `=`.
+//
+// State semantics aren't enforced here. A `state count: i32` field
+// lowers to `Type::Named { State, [i32] }`; `count = count + 1`
+// just produces an Assign Binary. Whether the compiler turns that
+// into `count.set(count.get() + 1)` or a direct cell write is a
+// later (post-parse) lowering concern — keeping the parser dumb
+// matches the "let the compiler handle compiling" direction.
+assign_stmt = { target:variable_expr ~ "=" ~ value:expr }
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Binary {
+          op: "Assign",
+          left: Box::new(target),
+          right: Box::new(value),
+      },
+  }
 
 // =====================================================================
 // text(<string-typed expr>)
@@ -345,10 +380,12 @@ f_string_interp = { "{" ~ e:f_string_expr ~ "}" }
       args: [e],
   }
 
-// Expressions allowed inside `{...}`. For the prototype slice this
-// is just integer literals — adding variable refs / call exprs
-// happens in the next phase-2 increment.
-f_string_expr = { integer }
+// Expressions allowed inside `{...}`. Delegates to the full
+// expression grammar — variables, integer literals, and binary
+// arithmetic all flow through. Adding more expression shapes (call
+// exprs, field access) happens by extending `primary_expr` below.
+f_string_expr = { e:expr }
+  -> e
 
 // Plain text run inside an f-string (between interpolations).
 // Atomic — `text()` returns the matched run as a
@@ -356,8 +393,83 @@ f_string_expr = { integer }
 f_string_text = @{ (!("\"" | "{" | "}") ~ ANY)+ }
   -> TypedExpression::StringLiteral { value: text() }
 
-// Identifiers (unused in the prototype slice but kept here so we don't
-// have to redo the grammar header when we expand).
+// =====================================================================
+// Expressions
+// =====================================================================
+//
+// Standard precedence ladder, mirroring the shape ml.zyn uses
+// (`additive_expr` / `multiplicative_expr` / `primary_expr` —
+// ml.zyn:2417-2462). We keep it small for the phase-2 minimal slice:
+//
+//     expr → additive_expr → multiplicative_expr → primary_expr
+//
+// Comparisons, logical ops, ranges, and method calls aren't needed
+// yet for state mutation + interpolated rendering — we'll extend
+// outward as components grow conditionals and method dispatch.
+
+expr = { e:additive_expr } -> e
+
+// `a + b - c` → Binary(Binary(a, +, b), -, c). `fold_left_ops` is
+// the standard Zyntax helper at runtime2/interpreter.rs:2148 — it
+// takes a first operand and a list of [op, operand] pairs and
+// folds them left-associatively. The op string (`"+"` or `"-"`) is
+// converted to BinaryOp via `string_to_binary_op`
+// (interpreter.rs:4422-4448), which already accepts the ASCII forms
+// we emit here.
+additive_expr = { first:multiplicative_expr ~ rest:additive_rest* }
+  -> fold_left_ops(first, rest)
+
+additive_rest = { op:additive_op ~ operand:multiplicative_expr }
+  -> make_pair(op, operand)
+
+additive_op = @{ "+" | "-" }
+
+// Same pattern for `*` / `/`. Modulo (`%`) and matrix mul (`@`)
+// don't add value for the state-mutation slice and would only
+// invite questions about i32 wrap behaviour — punting until a real
+// use case shows up.
+multiplicative_expr = { first:primary_expr ~ rest:multiplicative_rest* }
+  -> fold_left_ops(first, rest)
+
+multiplicative_rest = { op:multiplicative_op ~ operand:primary_expr }
+  -> make_pair(op, operand)
+
+multiplicative_op = @{ "*" | "/" }
+
+// Primary expressions. PEG ordered alternates — order matters:
+//
+//   1. `paren_expr` first because `(` is unambiguous.
+//   2. `f_string_literal` before `string_literal` — `f"` is a
+//      stronger prefix than `"`.
+//   3. `string_literal` before `integer` — quotes vs digits.
+//   4. `integer` before `variable_expr` — digits start with a
+//      digit character which `identifier`'s `ASCII_ALPHA` head
+//      can't match, so the order here is mostly cosmetic, but
+//      keeping literals together feels right.
+//   5. `variable_expr` last as the catch-all bare-name shape.
+primary_expr = {
+    paren_expr |
+    f_string_literal |
+    string_literal |
+    integer |
+    variable_expr
+}
+
+// Parenthesised grouping. Doesn't synthesise a wrapper expression —
+// PEG's pass-through (`-> e`) just hands the inner expression back
+// up the precedence ladder. Avoids an unnecessary AST node.
+paren_expr = { "(" ~ e:expr ~ ")" } -> e
+
+// Bare identifier reference. Lowers to TypedExpression::Variable
+// with the interned name. The interpreter's `parsed_value_to_expr`
+// (interpreter.rs) accepts this shape for fold_left_ops operands,
+// so it composes cleanly with the additive/multiplicative chain.
+variable_expr = { name:identifier }
+  -> TypedExpression::Variable { name: intern(name) }
+
+// =====================================================================
+// Terminals: identifier
+// =====================================================================
 identifier = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
 
 // Whitespace + comments are skipped wherever they appear.

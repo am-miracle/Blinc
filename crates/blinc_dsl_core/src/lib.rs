@@ -1104,6 +1104,275 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // Expression-layer parsing tests — variable refs, binary
+    // arithmetic, assignment statements. Phase-2 minimal slice.
+    //
+    // Same TypedAST-only verification approach as the f-string tests
+    // — we assert the grammar produces the right shape and let the
+    // compiler handle codegen.
+    // -----------------------------------------------------------------
+
+    /// `text(f"{count}")` — interpolating a bare variable reference.
+    /// fold_concat short-circuits the single-part case and returns the
+    /// `__fstring_format__(count)` call directly. We assert the call
+    /// arg is a `TypedExpression::Variable`, proving variable refs
+    /// flow through `f_string_expr → expr → primary_expr`.
+    #[test]
+    fn parse_fstring_variable_ref() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"view { text(f"{count}") }"#,
+                "fstr_var.blinc",
+            )
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        let TypedStatement::Expression(call_node) = &stmts[0].node else {
+            panic!("expected Expression statement");
+        };
+        let TypedExpression::Call(text_call) = &call_node.node else {
+            panic!("expected Call");
+        };
+        let TypedExpression::Call(fmt_call) = &text_call.positional_args[0].node else {
+            panic!("expected nested __fstring_format__ call");
+        };
+        let TypedExpression::Variable(name) = &fmt_call.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_eq!(name.resolve_global().as_deref(), Some("__fstring_format__"));
+        // The arg of __fstring_format__ should now be a Variable("count")
+        // rather than an integer literal.
+        assert_eq!(fmt_call.positional_args.len(), 1);
+        let TypedExpression::Variable(arg_name) = &fmt_call.positional_args[0].node else {
+            panic!(
+                "expected Variable arg, got {:?}",
+                fmt_call.positional_args[0].node
+            );
+        };
+        assert_eq!(arg_name.resolve_global().as_deref(), Some("count"));
+    }
+
+    /// `count = count + 1` inside a method body. Lowers to a
+    /// `TypedStatement::Expression` wrapping `Binary(Variable, Assign,
+    /// Binary(Variable, Add, IntLiteral))`. The Class's reactivity
+    /// marker (`State<i32>`) is irrelevant here — at parse time
+    /// assignment is just an Assign Binary, regardless of whether the
+    /// target is reactive. The compiler / a later pass decides whether
+    /// to lower to `count.set(count.get() + 1)`.
+    #[test]
+    fn parse_assignment_state_mutation() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component Counter {
+                    state count: i32
+                    view { text(f"{count}") }
+                    fn on_click() { count = count + 1 }
+                }
+                "#,
+                "counter_assign.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .expect("expected an Impl decl");
+
+        // Find the on_click method.
+        let on_click = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("on_click"))
+            .expect("expected on_click method");
+
+        let body = on_click
+            .body
+            .as_ref()
+            .expect("on_click should have a body");
+        assert_eq!(
+            body.statements.len(),
+            1,
+            "expected one assignment stmt, got {:?}",
+            body.statements
+        );
+
+        // Statement: Expression(Binary(Variable("count"), Assign, ...)).
+        let TypedStatement::Expression(expr_node) = &body.statements[0].node else {
+            panic!("expected Expression stmt");
+        };
+        let TypedExpression::Binary(outer) = &expr_node.node else {
+            panic!("expected outer Binary, got {:?}", expr_node.node);
+        };
+        assert!(
+            matches!(outer.op, zyntax_typed_ast::BinaryOp::Assign),
+            "outer op should be Assign, got {:?}",
+            outer.op
+        );
+
+        // LHS: Variable("count").
+        let TypedExpression::Variable(target) = &outer.left.node else {
+            panic!("expected Variable target, got {:?}", outer.left.node);
+        };
+        assert_eq!(target.resolve_global().as_deref(), Some("count"));
+
+        // RHS: Binary(Variable("count"), Add, IntLiteral(1)).
+        let TypedExpression::Binary(rhs) = &outer.right.node else {
+            panic!("expected RHS Binary, got {:?}", outer.right.node);
+        };
+        assert!(
+            matches!(rhs.op, zyntax_typed_ast::BinaryOp::Add),
+            "RHS op should be Add, got {:?}",
+            rhs.op
+        );
+        let TypedExpression::Variable(lhs_var) = &rhs.left.node else {
+            panic!("expected Variable on RHS LHS");
+        };
+        assert_eq!(lhs_var.resolve_global().as_deref(), Some("count"));
+        let TypedExpression::Literal(TypedLiteral::Integer(n)) = &rhs.right.node else {
+            panic!("expected IntLiteral on RHS RHS, got {:?}", rhs.right.node);
+        };
+        assert_eq!(*n, 1);
+    }
+
+    /// Multiplicative binds tighter than additive: `1 + 2 * 3` should
+    /// parse as `Binary(1, Add, Binary(2, Mul, 3))`, not
+    /// `Binary(Binary(1, Add, 2), Mul, 3)`. Pinning this so a future
+    /// well-meaning grammar refactor doesn't accidentally flatten the
+    /// precedence ladder.
+    #[test]
+    fn parse_arithmetic_precedence() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state x: i32
+                    view {}
+                    fn step() { x = 1 + 2 * 3 }
+                }
+                "#,
+                "precedence.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .expect("expected Impl");
+
+        let step = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("step"))
+            .expect("expected step method");
+        let body = step.body.as_ref().expect("body");
+        let TypedStatement::Expression(node) = &body.statements[0].node else {
+            panic!("expected Expression stmt");
+        };
+        let TypedExpression::Binary(assign) = &node.node else {
+            panic!("expected Binary");
+        };
+        // RHS is Add at the top with Mul nested on the right.
+        let TypedExpression::Binary(add) = &assign.right.node else {
+            panic!("RHS should be Binary(Add)");
+        };
+        assert!(
+            matches!(add.op, zyntax_typed_ast::BinaryOp::Add),
+            "top RHS should be Add, got {:?}",
+            add.op
+        );
+        let TypedExpression::Literal(TypedLiteral::Integer(left_n)) = &add.left.node else {
+            panic!("Add LHS should be IntLiteral, got {:?}", add.left.node);
+        };
+        assert_eq!(*left_n, 1);
+        let TypedExpression::Binary(mul) = &add.right.node else {
+            panic!("Add RHS should be Binary(Mul), got {:?}", add.right.node);
+        };
+        assert!(
+            matches!(mul.op, zyntax_typed_ast::BinaryOp::Mul),
+            "nested op should be Mul, got {:?}",
+            mul.op
+        );
+    }
+
+    /// Parens override precedence: `(1 + 2) * 3` should parse as
+    /// `Binary(Binary(1, Add, 2), Mul, 3)`. Confirms `paren_expr`
+    /// passes its inner expression straight through (no wrapper node)
+    /// and feeds the multiplicative chain.
+    #[test]
+    fn parse_paren_grouping() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state x: i32
+                    view {}
+                    fn step() { x = (1 + 2) * 3 }
+                }
+                "#,
+                "parens.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let body = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("step"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+        let TypedStatement::Expression(node) = &body.statements[0].node else {
+            panic!("expected Expression stmt");
+        };
+        let TypedExpression::Binary(assign) = &node.node else {
+            panic!("expected assign");
+        };
+        // RHS top-level should be Mul; the LHS of Mul is the
+        // (1 + 2) Add subtree.
+        let TypedExpression::Binary(mul) = &assign.right.node else {
+            panic!("RHS should be Binary, got {:?}", assign.right.node);
+        };
+        assert!(
+            matches!(mul.op, zyntax_typed_ast::BinaryOp::Mul),
+            "top RHS should be Mul, got {:?}",
+            mul.op
+        );
+        let TypedExpression::Binary(add) = &mul.left.node else {
+            panic!("Mul LHS should be Add subtree, got {:?}", mul.left.node);
+        };
+        assert!(matches!(add.op, zyntax_typed_ast::BinaryOp::Add));
+    }
+
     /// Mixed-statement view exercises both `text(...)` arg shapes
     /// (string + integer) coexisting in the same compiled function
     /// and routing to distinct host builtins via the grammar's PEG
