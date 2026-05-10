@@ -475,6 +475,118 @@ impl FsmRegistry {
     }
 }
 
+/// A live instance of a DSL-defined fsm — pairs an `FsmId` with the
+/// current state name. Holds enough state for an embedder to drive
+/// transitions without committing to a particular widget integration:
+/// dispatch events / ticks, read the current state, reset to initial.
+///
+/// This is the dependency-free bridge to Blinc's Stateful pattern.
+/// Wrapping an `FsmInstance` inside a `Stateful<S>` impl is one
+/// integration shape, but it's not the only one — `FsmInstance`
+/// works equally well as a field in any reactive container or
+/// widget closure that needs string-keyed state.
+///
+/// # State representation
+///
+/// Current state is held as `InternedString` of the variant name
+/// (e.g. `"Idle"`, `"Loading"`). This keeps the bridge dynamic —
+/// no compile-time mapping between the DSL fsm's variants and a
+/// user-defined Rust enum is required. Embedders that want a
+/// strongly-typed enum on top can wrap with their own conversion
+/// shim; for prototype use cases, the string-keyed shape is the
+/// short path to "wire UI → DSL fsm".
+///
+/// # Example
+///
+/// ```ignore
+/// let dsl = BlincDsl::new()?;
+/// dsl.compile_source(/* fsm Loader { ... } */, "loader.blinc")?;
+///
+/// let mut loader = FsmInstance::new(&dsl, "main", "Loader")?;
+/// assert_eq!(loader.current(), "Idle");
+///
+/// // Wire to a button click:
+/// button("Start").on_click(move |_| {
+///     loader.dispatch_event(&dsl, "Start");
+///     // loader.current() → "Loading"
+/// });
+/// ```
+#[derive(Debug, Clone)]
+pub struct FsmInstance {
+    /// Identity of the fsm definition this instance follows.
+    /// Resolved via `FsmRegistry::find_by_name` at construction
+    /// time so subsequent dispatches don't pay the lookup cost.
+    pub id: FsmId,
+    /// Current state name. Mutated in place by `dispatch_event` /
+    /// `tick` when a transition fires.
+    pub current: zyntax_typed_ast::InternedString,
+}
+
+impl FsmInstance {
+    /// Create a new instance pinned to a fsm registered in the
+    /// global registry. The instance starts in the fsm's declared
+    /// initial state. Returns `None` if no fsm of the given name
+    /// is registered for the module, or if the fsm was registered
+    /// without an initial state.
+    pub fn new(
+        _dsl: &BlincDsl,
+        module: &str,
+        fsm_name: &str,
+    ) -> Option<Self> {
+        let module_i = zyntax_typed_ast::InternedString::new_global(module);
+        let id = with_fsm_registry(|r| r.find_by_name(module_i, fsm_name))?;
+        let initial = with_fsm_registry(|r| r.get(&id).and_then(|d| d.initial))?;
+        Some(Self { id, current: initial })
+    }
+
+    /// Current state name as a borrowed `&str`. Resolves from the
+    /// instance's stored `InternedString`.
+    pub fn current(&self) -> String {
+        self.current.resolve_global().unwrap_or_default()
+    }
+
+    /// Dispatch an event by name. Returns `true` if a transition
+    /// fired (and `current` has been updated to the new state),
+    /// `false` if no rule matched. Mirrors the
+    /// `StateTransitions::on_event` shape Blinc widgets expect:
+    /// "did anything change?" maps to "should the UI rebuild?".
+    pub fn dispatch_event(&mut self, _dsl: &BlincDsl, event: &str) -> bool {
+        let current_str = self.current();
+        let next = with_fsm_registry(|r| r.step_event(&self.id, &current_str, event));
+        if let Some(to) = next {
+            self.current = to;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Tick. Walks the registered tick-guards via `BlincDsl::step_tick`
+    /// (which JIT-evaluates each guard), updates `current` if any
+    /// fires, returns whether a transition happened. Errors from
+    /// the JIT call propagate.
+    pub fn tick(&mut self, dsl: &BlincDsl) -> BlincDslResult<bool> {
+        let current_str = self.current();
+        let next = dsl.step_tick(&self.id, &current_str)?;
+        if let Some(to) = next {
+            self.current = to;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Reset to the fsm's initial state. Useful when a higher-level
+    /// flow restarts a sub-state-machine.
+    pub fn reset(&mut self) {
+        if let Some(initial) =
+            with_fsm_registry(|r| r.get(&self.id).and_then(|d| d.initial))
+        {
+            self.current = initial;
+        }
+    }
+}
+
 /// Process-wide fsm registry. Host marker builtins (registered in a
 /// follow-up commit) read and mutate this through the `with_*`
 /// accessors below. Stored as `OnceLock<Mutex<FsmRegistry>>` so
@@ -4861,6 +4973,185 @@ mod tests {
             next.and_then(|n| n.resolve_global()).as_deref(),
             Some("Hot"),
             "after raising the signal, the guard should fire"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // FsmInstance bridge tests. Verifies the dependency-free
+    // bridge between the DSL fsm registry and host code:
+    // construct → current() / dispatch_event() / tick() / reset().
+    // No widget integration or Stateful coupling — just the live
+    // string-keyed state that embedders can wrap however they want.
+    // -----------------------------------------------------------------
+
+    /// Lifecycle: construct from a registered fsm, dispatch a
+    /// sequence of events, watch `current()` follow each
+    /// transition. End-to-end round-trip through the whole stack
+    /// (parse → registry → instance → dispatch).
+    #[test]
+    fn fsm_instance_event_round_trip() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            fsm InstanceProbeA {
+                state Idle
+                state Loading
+                state Done
+                initial Idle
+                on Idle.Start -> Loading
+                on Loading.Finish -> Done
+                on Done.Reset -> Idle
+            }
+            "#,
+            "instance_probe_a.blinc",
+        )
+        .expect("compile");
+
+        let mut instance = FsmInstance::new(&dsl, "main", "InstanceProbeA")
+            .expect("InstanceProbeA should construct");
+        assert_eq!(instance.current(), "Idle", "starts in declared initial");
+
+        // Idle --Start--> Loading
+        let fired = instance.dispatch_event(&dsl, "Start");
+        assert!(fired, "Idle.Start should transition");
+        assert_eq!(instance.current(), "Loading");
+
+        // Loading --Finish--> Done
+        let fired = instance.dispatch_event(&dsl, "Finish");
+        assert!(fired);
+        assert_eq!(instance.current(), "Done");
+
+        // Done --Reset--> Idle (full cycle)
+        let fired = instance.dispatch_event(&dsl, "Reset");
+        assert!(fired);
+        assert_eq!(instance.current(), "Idle");
+    }
+
+    /// Misses: dispatch on an event that doesn't match the
+    /// current from-state should leave `current()` unchanged
+    /// and return false. Pinning that the instance's state
+    /// can't drift on a no-op dispatch.
+    #[test]
+    fn fsm_instance_event_miss_keeps_current() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            fsm InstanceProbeMiss {
+                state Off
+                state On
+                initial Off
+                on Off.Click -> On
+                on On.Click -> Off
+            }
+            "#,
+            "instance_probe_miss.blinc",
+        )
+        .expect("compile");
+
+        let mut instance =
+            FsmInstance::new(&dsl, "main", "InstanceProbeMiss").unwrap();
+        assert_eq!(instance.current(), "Off");
+
+        // Wrong event name from Off state → no transition.
+        let fired = instance.dispatch_event(&dsl, "DoesNotExist");
+        assert!(!fired);
+        assert_eq!(instance.current(), "Off", "miss should leave state alone");
+    }
+
+    /// Tick + signal end-to-end through FsmInstance: live
+    /// signal value drives the guard, instance updates when
+    /// guard fires. Same plumbing as `signal_guard_*` tests but
+    /// going through `FsmInstance::tick` instead of
+    /// `BlincDsl::step_tick` directly — verifies the bridge
+    /// composes with the JIT-evaluated guard path.
+    #[test]
+    fn fsm_instance_tick_with_signal_guard() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.set_signal_i32("instance_tick_count", 5);
+        dsl.compile_source(
+            r#"
+            signal instance_tick_count: i32
+            fsm InstanceProbeTick {
+                state Cold
+                state Hot
+                initial Cold
+                tick Cold -> Hot when instance_tick_count.get() > 100
+            }
+            "#,
+            "instance_probe_tick.blinc",
+        )
+        .expect("compile");
+
+        let mut instance =
+            FsmInstance::new(&dsl, "main", "InstanceProbeTick").unwrap();
+
+        // Signal below threshold → tick is a no-op.
+        let fired = instance.tick(&dsl).expect("tick");
+        assert!(!fired);
+        assert_eq!(instance.current(), "Cold");
+
+        // Raise the signal above threshold.
+        dsl.set_signal_i32("instance_tick_count", 200);
+
+        // Now tick fires, instance moves to Hot.
+        let fired = instance.tick(&dsl).expect("tick");
+        assert!(fired);
+        assert_eq!(instance.current(), "Hot");
+    }
+
+    /// Reset returns the instance to its declared initial state.
+    /// Pinning that reset() works from any current state, not
+    /// only from the initial state.
+    #[test]
+    fn fsm_instance_reset() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            fsm InstanceProbeReset {
+                state Idle
+                state Working
+                initial Idle
+                on Idle.Go -> Working
+            }
+            "#,
+            "instance_probe_reset.blinc",
+        )
+        .expect("compile");
+
+        let mut instance =
+            FsmInstance::new(&dsl, "main", "InstanceProbeReset").unwrap();
+
+        // Move off the initial state.
+        instance.dispatch_event(&dsl, "Go");
+        assert_eq!(instance.current(), "Working");
+
+        // Reset.
+        instance.reset();
+        assert_eq!(
+            instance.current(),
+            "Idle",
+            "reset should return to declared initial state"
+        );
+    }
+
+    /// Construction fails cleanly when the fsm name doesn't
+    /// match any registered fsm in the module. Pinning the
+    /// "missing fsm → None" contract instead of e.g. panicking.
+    #[test]
+    fn fsm_instance_unknown_name_returns_none() {
+        let dsl = BlincDsl::new().expect("runtime init");
+        let attempt = FsmInstance::new(&dsl, "main", "DoesNotExistFsm");
+        assert!(
+            attempt.is_none(),
+            "missing fsm should return None, not panic"
         );
     }
 
