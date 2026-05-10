@@ -468,6 +468,215 @@ fn inject_fsm_context_markers(program: &mut TypedProgram) {
     }
 }
 
+/// Walk a parsed `TypedProgram`, populate the global `FsmRegistry`
+/// from each fsm's `__fsm_meta__` body, and strip the meta method so
+/// Zyntax doesn't have to compile the (now-redundant) marker calls.
+///
+/// Three phases:
+///
+///   1. **Scan**: walk `Impl` decls looking for `__fsm_meta__`,
+///      collect each fsm's name + parsed metadata (initial state,
+///      event transitions, tick guards) into a buffer.
+///
+///   2. **Pin TypeIds**: for each fsm we found, mint a `TypeId` via
+///      `TypeId::next()` and set the matching Enum decl's `ty` to
+///      `Type::Named { id, ... }`. Zyntax's compile path
+///      (`runtime.rs:1307-1368`) checks `decl_node.ty` first when
+///      registering enum types — if it's `Type::Named`, the embedded
+///      id wins; otherwise Zyntax mints its own. By pinning the id
+///      here we guarantee the registry's `(module, TypeId)` key
+///      matches whatever Zyntax sees later. Then we insert a
+///      placeholder `TypeDefinition` ourselves so the
+///      `get_type_by_name(...).is_none()` guard at runtime.rs:1308
+///      short-circuits — Zyntax skips re-registering and our id is
+///      authoritative.
+///
+///   3. **Strip**: remove `__fsm_meta__` from each fsm's Impl. The
+///      marker callees (`__fsm_begin__`, `__fsm_initial__`, etc.)
+///      have no extern decls in the program, so leaving the body in
+///      place would type-fail. We've already extracted everything
+///      the registry needs from those markers — the compiled
+///      program doesn't need to call them.
+///
+/// Why direct AST walking instead of host-builtin marker invocation:
+/// the chosen design (begin/end markers + eager population at
+/// compile time) maps naturally onto walking the AST in Rust. We
+/// already have the marker call shapes in `TypedExpression::Call`
+/// form; running them through the JIT just to mutate a host-side
+/// HashMap is a long detour for the same result.
+fn populate_fsm_registry_pass(
+    program: &mut TypedProgram,
+    module: zyntax_typed_ast::InternedString,
+) {
+    use zyntax_typed_ast::type_registry::{
+        TypeDefinition, TypeId, TypeKind, VariantDef, VariantFields, Visibility,
+    };
+    use zyntax_typed_ast::typed_ast::{
+        TypedDeclaration, TypedExpression, TypedLiteral, TypedVariantFields,
+    };
+    use zyntax_typed_ast::InternedString;
+
+    // -----------------------------------------------------------------
+    // Phase 1: scan. Collect (fsm_name, FsmDefinition) tuples without
+    // mutating program declarations.
+    // -----------------------------------------------------------------
+    let mut found: Vec<(InternedString, FsmDefinition)> = Vec::new();
+
+    for decl in &program.declarations {
+        let TypedDeclaration::Impl(imp) = &decl.node else {
+            continue;
+        };
+        let Some(meta) = imp.methods.iter().find(|m| {
+            m.name.resolve_global().as_deref() == Some("__fsm_meta__")
+        }) else {
+            continue;
+        };
+        let Some(body) = meta.body.as_ref() else {
+            continue;
+        };
+
+        let fsm_name = imp.trait_name;
+        let mut def = FsmDefinition {
+            name: Some(fsm_name),
+            ..Default::default()
+        };
+
+        for stmt_node in &body.statements {
+            let TypedStatement::Expression(expr_node) = &stmt_node.node else {
+                continue;
+            };
+            let TypedExpression::Call(call) = &expr_node.node else {
+                continue;
+            };
+            let TypedExpression::Variable(callee_id) = &call.callee.node else {
+                continue;
+            };
+            let callee = callee_id.resolve_global().unwrap_or_default();
+
+            // Helper: pull a string-literal arg at index `idx`.
+            let str_arg = |idx: usize| -> Option<InternedString> {
+                call.positional_args.get(idx).and_then(|a| {
+                    if let TypedExpression::Literal(TypedLiteral::String(s)) = &a.node {
+                        Some(*s)
+                    } else {
+                        None
+                    }
+                })
+            };
+
+            match callee.as_str() {
+                "__fsm_initial__" => {
+                    if let Some(state) = str_arg(0) {
+                        def.initial = Some(state);
+                    }
+                }
+                "__fsm_transition__" => {
+                    if let (Some(from), Some(event), Some(to)) =
+                        (str_arg(0), str_arg(1), str_arg(2))
+                    {
+                        def.transitions.push(EventTransition { from, event, to });
+                    }
+                }
+                "__fsm_tick__" => {
+                    // arg 1 is the guard expression — preserved on
+                    // the AST for a future host-callable thunk
+                    // lowering. The runtime registry just records
+                    // (from, to); guard evaluation lands when tick
+                    // dispatch hits the engine.
+                    if let (Some(from), Some(to)) = (str_arg(0), str_arg(2)) {
+                        def.tick_guards.push(TickGuard { from, to });
+                    }
+                }
+                _ => {} // skip __fsm_begin__, __fsm_end__, anything else.
+            }
+        }
+
+        found.push((fsm_name, def));
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 2: pin TypeIds + populate the registry. Pre-register the
+    // type so Zyntax's compile path takes the "name already known"
+    // short-circuit and respects our id.
+    // -----------------------------------------------------------------
+    for (fsm_name, def) in &found {
+        let type_id = TypeId::next();
+
+        // Pin `decl.ty` to Type::Named { id: our_id } on the matching
+        // enum decl. Zyntax's enum-registration check at
+        // runtime.rs:1313 reads exactly this field.
+        let named_ty = program.type_registry.make_type(type_id, Vec::new());
+        for decl in &mut program.declarations {
+            let TypedDeclaration::Enum(enum_decl) = &decl.node else {
+                continue;
+            };
+            if enum_decl.name == *fsm_name {
+                decl.ty = named_ty.clone();
+                break;
+            }
+        }
+
+        // Pre-register the type so the get_type_by_name(...).is_none()
+        // check at runtime.rs:1308 short-circuits and Zyntax doesn't
+        // double-register with a fresh TypeId. We synthesise a
+        // TypeDefinition mirroring what Zyntax would build for an
+        // Enum declaration; downstream uses of TypeRegistry consume
+        // this shape directly.
+        if let Some(enum_decl) = program.declarations.iter().find_map(|d| match &d.node {
+            TypedDeclaration::Enum(e) if e.name == *fsm_name => Some(e),
+            _ => None,
+        }) {
+            let variants: Vec<VariantDef> = enum_decl
+                .variants
+                .iter()
+                .enumerate()
+                .map(|(i, v)| VariantDef {
+                    name: v.name,
+                    fields: match &v.fields {
+                        TypedVariantFields::Unit => VariantFields::Unit,
+                        TypedVariantFields::Tuple(types) => VariantFields::Tuple(types.clone()),
+                        TypedVariantFields::Named(_) => VariantFields::Unit,
+                    },
+                    discriminant: Some(i as i64),
+                    span: v.span,
+                })
+                .collect();
+
+            let type_def = TypeDefinition {
+                id: type_id,
+                name: enum_decl.name,
+                kind: TypeKind::Enum { variants },
+                type_params: Vec::new(),
+                constraints: Vec::new(),
+                fields: Vec::new(),
+                methods: Vec::new(),
+                constructors: Vec::new(),
+                metadata: Default::default(),
+                span: enum_decl.span,
+            };
+            let _: TypeId = program.type_registry.register_type(type_def);
+            let _ = Visibility::Public; // silence unused-import in case the type_registry-vis path changes upstream
+        }
+
+        let id = FsmId { module, type_id };
+        with_fsm_registry_mut(|r| r.upsert(id, def.clone()));
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 3: strip `__fsm_meta__` so the compile path doesn't have
+    // to resolve the marker callees. The Impl may end up empty (the
+    // fsm grammar emits __fsm_meta__ as the impl's only method) —
+    // an empty inherent impl is benign.
+    // -----------------------------------------------------------------
+    for decl in &mut program.declarations {
+        let TypedDeclaration::Impl(imp) = &mut decl.node else {
+            continue;
+        };
+        imp.methods
+            .retain(|m| m.name.resolve_global().as_deref() != Some("__fsm_meta__"));
+    }
+}
+
 /// Walk a parsed `TypedProgram` and synthesize a sibling `<FSM>Event`
 /// enum for every fsm declaration that has at least one
 /// `__fsm_transition__` marker. The synthesized enum's variants are
@@ -698,6 +907,23 @@ impl BlincDsl {
             .grammar
             .parse_with_signatures(source, filename, runtime.plugin_signatures())
             .map_err(|e| BlincDslError::Compile(e.to_string()))?;
+
+        // Apply the same post-parse passes parse_to_typed_ast runs,
+        // so fsm-bearing programs get marker injection + event-enum
+        // synthesis before compilation. Mirrors parse_to_typed_ast
+        // — keep these two paths in sync when adding new passes.
+        inject_fsm_context_markers(&mut typed_program);
+        synthesize_fsm_event_enums(&mut typed_program);
+
+        // Eager registry population: walk fsm impls, pin TypeIds,
+        // record metadata into the global FsmRegistry, then strip
+        // `__fsm_meta__` so the compile path doesn't have to handle
+        // the marker callees. The module is hardcoded to "main"
+        // since Zyntax compiles every source into a single module
+        // today — when per-source modules surface upstream, this is
+        // the place to thread the real module name through.
+        let module = zyntax_typed_ast::InternedString::new_global("main");
+        populate_fsm_registry_pass(&mut typed_program, module);
 
         // Belt-and-suspenders: terminate user functions with an
         // explicit `Return(None)` so the body classifier can't infer
@@ -3127,6 +3353,123 @@ mod tests {
         let removed = registry.remove(&id).expect("entry should exist");
         assert_eq!(removed.initial, Some(intern("S")));
         assert!(registry.get(&id).is_none(), "remove should drop the entry");
+    }
+
+    /// End-to-end: compiling a fsm-bearing program populates the
+    /// global FsmRegistry. Pinning that the (module, TypeId) →
+    /// FsmDefinition wiring works through compile_source. Each test
+    /// scopes by a unique fsm name so the global registry doesn't
+    /// collide across tests in the same process.
+    #[test]
+    fn compile_source_populates_fsm_registry() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        // Distinct fsm name per test to avoid stepping on the global
+        // registry from concurrent test runs.
+        dsl.compile_source(
+            r#"
+            fsm RegistryProbeA {
+                state Idle
+                state Running
+                state Done
+                initial Idle
+                on Idle.Begin -> Running
+                on Running.Finish -> Done
+            }
+            "#,
+            "registry_probe_a.blinc",
+        )
+        .expect("compile");
+
+        // Find the registry entry by name (we don't know the
+        // assigned TypeId from outside).
+        let module = InternedString::new_global("main");
+        let probe = with_fsm_registry(|r| {
+            r.iter()
+                .find(|(id, def)| {
+                    id.module == module
+                        && def.name.and_then(|n| n.resolve_global()).as_deref()
+                            == Some("RegistryProbeA")
+                })
+                .map(|(id, def)| (*id, def.clone()))
+        });
+
+        let (_id, def) = probe.expect("RegistryProbeA should be in the registry after compile");
+        assert_eq!(
+            def.initial.and_then(|n| n.resolve_global()).as_deref(),
+            Some("Idle"),
+            "initial state survived registry round-trip"
+        );
+        assert_eq!(
+            def.transitions.len(),
+            2,
+            "expected two event-driven transitions"
+        );
+        assert_eq!(
+            def.transitions[0]
+                .event
+                .resolve_global()
+                .as_deref(),
+            Some("Begin")
+        );
+        assert_eq!(
+            def.transitions[1]
+                .event
+                .resolve_global()
+                .as_deref(),
+            Some("Finish")
+        );
+    }
+
+    /// Tick guards land in the registry alongside event transitions.
+    /// Pinning that the marker walker recognises `__fsm_tick__` and
+    /// extracts the (from, to) pair (the guard expression itself is
+    /// stripped for now — see `TickGuard` doc).
+    #[test]
+    fn compile_source_records_tick_guards_in_registry() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            fsm RegistryProbeB {
+                state Loading
+                state Done
+                initial Loading
+                tick Loading -> Done when count.get() > 100
+            }
+            "#,
+            "registry_probe_b.blinc",
+        )
+        .expect("compile");
+
+        let module = InternedString::new_global("main");
+        let probe = with_fsm_registry(|r| {
+            r.iter()
+                .find(|(id, def)| {
+                    id.module == module
+                        && def.name.and_then(|n| n.resolve_global()).as_deref()
+                            == Some("RegistryProbeB")
+                })
+                .map(|(_, def)| def.clone())
+        });
+
+        let def = probe.expect("RegistryProbeB should be in the registry");
+        assert_eq!(def.tick_guards.len(), 1);
+        assert_eq!(
+            def.tick_guards[0].from.resolve_global().as_deref(),
+            Some("Loading")
+        );
+        assert_eq!(
+            def.tick_guards[0].to.resolve_global().as_deref(),
+            Some("Done")
+        );
+        assert_eq!(
+            def.transitions.len(),
+            0,
+            "tick-only fsm has no event transitions"
+        );
     }
 
     /// `with_fsm_registry` / `with_fsm_registry_mut` round-trip.
