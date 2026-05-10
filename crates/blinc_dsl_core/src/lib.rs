@@ -189,6 +189,178 @@ pub enum BlincDslError {
 pub type BlincDslResult<T> = std::result::Result<T, BlincDslError>;
 
 // =====================================================================
+// FSM registry
+// =====================================================================
+//
+// Module-aware identity for fsms compiled by the DSL. Keys combine
+// the Zyntax module name (currently always `"main"` — Zyntax compiles
+// every source into a single module today, see
+// `zyntax_embed/src/runtime.rs:1373`) with the FSM's `TypeId` from
+// the program's `type_registry`. When Zyntax surfaces real per-source
+// modules later, the same key shape extends without breaking changes:
+// `("foo", TypeId)` and `("bar", TypeId)` for same-named fsms in
+// different modules can coexist.
+//
+// Why not bare-string keys: two fsms named `Loader` in different
+// modules would collide on a string key. `InternedString` doesn't help
+// either — `InternedString::new_global("Loader")` returns the same
+// handle process-wide regardless of source.
+//
+// Why not `HirId`: `HirId` is generated during HIR lowering after
+// compilation, isn't accessible at parse time, and is opaque
+// (`Uuid`-backed) — it works for runtime symbol lookup but not as a
+// stable identity exposed at the DSL surface.
+
+/// Identity of an fsm in the global registry: the Zyntax module the
+/// fsm is compiled in plus its `TypeId` within that module's type
+/// registry. Stable within a process run (TypeIds come from a
+/// process-global atomic counter).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FsmId {
+    /// The Zyntax module name the fsm lives in. Today this is always
+    /// `"main"` because Zyntax compiles each source into a single
+    /// module. Future per-source / per-package modules will surface
+    /// distinct values here without changing the rest of the registry
+    /// API.
+    pub module: zyntax_typed_ast::InternedString,
+    /// The fsm's enum `TypeId`, looked up from the program's
+    /// `type_registry` after `compile_source`. Used as the registry
+    /// key for fast lookup; user-facing `dispatch::<Loader>(event)`
+    /// resolves to this id via Zyntax's type machinery.
+    pub type_id: zyntax_typed_ast::type_registry::TypeId,
+}
+
+/// Tick-driven guard transition record. The `guard_expr` slot is
+/// populated with a host-callable thunk in a future commit (the
+/// pass that lowers the DSL `<expr>` to a Rust callable lives
+/// alongside the host-builtin work). For now the slot holds the
+/// `from`/`to` pair; the guard expression is skipped until tick
+/// dispatch lands.
+#[derive(Debug, Clone)]
+pub struct TickGuard {
+    pub from: zyntax_typed_ast::InternedString,
+    pub to: zyntax_typed_ast::InternedString,
+}
+
+/// One event-driven transition. Names match the DSL surface:
+/// `on <from>.<event> -> <to>`.
+#[derive(Debug, Clone)]
+pub struct EventTransition {
+    pub from: zyntax_typed_ast::InternedString,
+    pub event: zyntax_typed_ast::InternedString,
+    pub to: zyntax_typed_ast::InternedString,
+}
+
+/// The runtime definition of an fsm — populated by the host when
+/// the fsm's `__fsm_meta__` body executes (each marker call inside
+/// mutates the entry). Owned by the `FsmRegistry` keyed by `FsmId`.
+#[derive(Debug, Clone, Default)]
+pub struct FsmDefinition {
+    /// Initial state name (variant of the fsm's state enum).
+    pub initial: Option<zyntax_typed_ast::InternedString>,
+    /// Event-driven transitions in declaration order. Same order as
+    /// the source so dispatch can iterate match-arm-style.
+    pub transitions: Vec<EventTransition>,
+    /// Tick-driven guards in declaration order. Currently the guard
+    /// expression isn't carried — see `TickGuard` doc.
+    pub tick_guards: Vec<TickGuard>,
+    /// Bare fsm name (from the begin marker), useful for diagnostic
+    /// messages. The authoritative identity is `FsmId`.
+    pub name: Option<zyntax_typed_ast::InternedString>,
+}
+
+/// Process-wide registry of fsm definitions populated as the host
+/// runs each fsm's `__fsm_meta__` method. Lookup is by `FsmId`;
+/// dispatch sites resolve the id from the user-facing fsm enum
+/// type.
+#[derive(Debug, Default)]
+pub struct FsmRegistry {
+    fsms: std::collections::HashMap<FsmId, FsmDefinition>,
+}
+
+impl FsmRegistry {
+    /// Create an empty registry. Most callers should prefer the
+    /// process-wide `global_fsm_registry()` accessor — the registry
+    /// is host-managed singleton state, not something an embedder
+    /// typically wants to instantiate per-instance.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert / update an fsm definition. Replaces any existing
+    /// entry with the same `FsmId` — used when a hot-reload re-runs
+    /// `__fsm_meta__` for an already-known fsm.
+    pub fn upsert(&mut self, id: FsmId, def: FsmDefinition) {
+        self.fsms.insert(id, def);
+    }
+
+    /// Look up an fsm by id. Returns `None` if no `__fsm_meta__`
+    /// has been run for this `(module, type_id)` pair.
+    pub fn get(&self, id: &FsmId) -> Option<&FsmDefinition> {
+        self.fsms.get(id)
+    }
+
+    /// Mutable lookup. Used internally by the marker builtins to
+    /// append transitions to the top-of-stack fsm's definition.
+    pub fn get_mut(&mut self, id: &FsmId) -> Option<&mut FsmDefinition> {
+        self.fsms.get_mut(id)
+    }
+
+    /// Number of registered fsms. Useful for tests and diagnostics.
+    pub fn len(&self) -> usize {
+        self.fsms.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fsms.is_empty()
+    }
+
+    /// Iterate over all registered (id, definition) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&FsmId, &FsmDefinition)> {
+        self.fsms.iter()
+    }
+
+    /// Remove an fsm from the registry. Used during hot-reload when
+    /// a fsm decl gets removed from a source file — the host must
+    /// drop the stale entry so dispatch fails loudly rather than
+    /// silently using a definition for a type that no longer exists.
+    pub fn remove(&mut self, id: &FsmId) -> Option<FsmDefinition> {
+        self.fsms.remove(id)
+    }
+}
+
+/// Process-wide fsm registry. Host marker builtins (registered in a
+/// follow-up commit) read and mutate this through the `with_*`
+/// accessors below. Stored as `OnceLock<Mutex<FsmRegistry>>` so
+/// embedders that build multiple `BlincDsl` instances in the same
+/// process share one consistent view.
+static GLOBAL_FSM_REGISTRY: std::sync::OnceLock<std::sync::Mutex<FsmRegistry>> =
+    std::sync::OnceLock::new();
+
+fn fsm_registry_lock() -> std::sync::MutexGuard<'static, FsmRegistry> {
+    GLOBAL_FSM_REGISTRY
+        .get_or_init(|| std::sync::Mutex::new(FsmRegistry::new()))
+        .lock()
+        .expect("BlincDsl global FsmRegistry mutex poisoned")
+}
+
+/// Run a closure with shared access to the global fsm registry.
+/// Use this from dispatch sites that need to resolve a fsm
+/// definition by `FsmId`.
+pub fn with_fsm_registry<R>(f: impl FnOnce(&FsmRegistry) -> R) -> R {
+    let guard = fsm_registry_lock();
+    f(&guard)
+}
+
+/// Run a closure with mutable access. Used internally by the
+/// marker builtins; embedders shouldn't normally need this — the
+/// registry is populated automatically when source compiles.
+pub fn with_fsm_registry_mut<R>(f: impl FnOnce(&mut FsmRegistry) -> R) -> R {
+    let mut guard = fsm_registry_lock();
+    f(&mut guard)
+}
+
+// =====================================================================
 // FSM dispatch synthesis (post-parse)
 // =====================================================================
 
@@ -2833,6 +3005,160 @@ mod tests {
             3,
             "stub fsm body should be begin + initial + end"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // FsmRegistry data-structure tests. These verify the registry's
+    // public API in isolation. The end-to-end "compile a fsm
+    // source, see registry populate" path lands in the next commit
+    // when the host marker builtins are wired up — for now we
+    // exercise upsert/get/remove/iter directly so the API is pinned
+    // before integration arrives.
+    // -----------------------------------------------------------------
+
+    use zyntax_typed_ast::type_registry::TypeId;
+    use zyntax_typed_ast::InternedString;
+
+    fn fid(module: &str, raw_id: u32) -> FsmId {
+        FsmId {
+            module: InternedString::new_global(module),
+            type_id: TypeId::new(raw_id),
+        }
+    }
+
+    fn intern(s: &str) -> InternedString {
+        InternedString::new_global(s)
+    }
+
+    /// Distinct `FsmId`s (different modules, same TypeId) hash and
+    /// compare distinctly so two same-named fsms in different
+    /// modules don't collide. Same TypeId across modules can happen
+    /// because TypeIds come from a process-global counter — pinning
+    /// the (module, type_id) tuple semantics.
+    #[test]
+    fn fsm_id_disambiguates_by_module() {
+        let a = fid("foo", 7);
+        let b = fid("bar", 7);
+        let c = fid("foo", 7);
+        assert_ne!(a, b, "different modules → different ids");
+        assert_eq!(a, c, "same (module, type_id) → equal");
+    }
+
+    /// Upsert + get round-trip with the expected shape, including
+    /// the initial state, transitions, and tick guards. Exercises
+    /// the bulk of the data API.
+    #[test]
+    fn fsm_registry_upsert_get() {
+        let mut registry = FsmRegistry::new();
+        let id = fid("main", 42);
+
+        let def = FsmDefinition {
+            initial: Some(intern("Idle")),
+            transitions: vec![
+                EventTransition {
+                    from: intern("Idle"),
+                    event: intern("Start"),
+                    to: intern("Loading"),
+                },
+                EventTransition {
+                    from: intern("Loading"),
+                    event: intern("Done"),
+                    to: intern("Success"),
+                },
+            ],
+            tick_guards: vec![TickGuard {
+                from: intern("Loading"),
+                to: intern("TimedOut"),
+            }],
+            name: Some(intern("Loader")),
+        };
+
+        registry.upsert(id, def.clone());
+        let got = registry.get(&id).expect("inserted entry should exist");
+        assert_eq!(got.initial, Some(intern("Idle")));
+        assert_eq!(got.transitions.len(), 2);
+        assert_eq!(got.transitions[1].event, intern("Done"));
+        assert_eq!(got.tick_guards.len(), 1);
+        assert_eq!(got.name, Some(intern("Loader")));
+    }
+
+    /// Re-inserting the same id replaces the entry (used by
+    /// hot-reload paths). Pinning that the second upsert wins so
+    /// stale state from prior runs doesn't leak.
+    #[test]
+    fn fsm_registry_upsert_replaces() {
+        let mut registry = FsmRegistry::new();
+        let id = fid("main", 1);
+
+        registry.upsert(
+            id,
+            FsmDefinition {
+                initial: Some(intern("V1")),
+                ..FsmDefinition::default()
+            },
+        );
+        registry.upsert(
+            id,
+            FsmDefinition {
+                initial: Some(intern("V2")),
+                ..FsmDefinition::default()
+            },
+        );
+
+        let got = registry.get(&id).unwrap();
+        assert_eq!(got.initial, Some(intern("V2")), "second upsert should win");
+    }
+
+    /// `remove` drops the entry and returns the prior value;
+    /// subsequent `get` returns None. Mirrors the hot-reload-of-a-
+    /// removed-fsm scenario where dispatch should fail loudly.
+    #[test]
+    fn fsm_registry_remove() {
+        let mut registry = FsmRegistry::new();
+        let id = fid("main", 5);
+        registry.upsert(
+            id,
+            FsmDefinition {
+                initial: Some(intern("S")),
+                ..FsmDefinition::default()
+            },
+        );
+
+        let removed = registry.remove(&id).expect("entry should exist");
+        assert_eq!(removed.initial, Some(intern("S")));
+        assert!(registry.get(&id).is_none(), "remove should drop the entry");
+    }
+
+    /// `with_fsm_registry` / `with_fsm_registry_mut` round-trip.
+    /// Verifies the global accessors give shared access in both
+    /// directions; if a future refactor switches the lock to
+    /// something non-mutex-shaped these tests fail loudly.
+    #[test]
+    fn fsm_registry_global_accessors() {
+        // Use a high TypeId so this test is unlikely to collide with
+        // any other test that pokes the global registry.
+        let id = fid("global_test_module", 9_999);
+
+        with_fsm_registry_mut(|r| {
+            r.upsert(
+                id,
+                FsmDefinition {
+                    initial: Some(intern("Begin")),
+                    ..FsmDefinition::default()
+                },
+            );
+        });
+
+        let initial = with_fsm_registry(|r| {
+            r.get(&id)
+                .and_then(|d| d.initial.and_then(|n| n.resolve_global()))
+        });
+        assert_eq!(initial.as_deref(), Some("Begin"));
+
+        // Cleanup so other tests see a clean global state.
+        with_fsm_registry_mut(|r| {
+            r.remove(&id);
+        });
     }
 
     /// Mixed-statement view exercises both `text(...)` arg shapes
