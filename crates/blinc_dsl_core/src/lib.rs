@@ -74,8 +74,13 @@ pub const BLINC_GRAMMAR: &str = include_str!("../grammar/blinc.zyn");
 /// expansion in phase 2 of the prototype.
 #[derive(Debug, Clone)]
 pub enum DslOp {
-    /// `text("literal")` — a single text node.
+    /// `text("literal")` — a single text node carrying a string.
     Text(String),
+    /// `int_text(N)` — a single text node carrying an integer. The
+    /// host stringifies on render. Distinct variant from `Text` so
+    /// downstream consumers can format integers differently
+    /// (alignment, locale, etc.) if they want.
+    IntText(i32),
 }
 
 thread_local! {
@@ -136,6 +141,21 @@ extern "C" fn blinc_text(s_ptr: *const i32) {
         .unwrap_or(raw);
 
     SCENE_BUFFER.with(|b| b.borrow_mut().push(DslOp::Text(stripped.to_string())));
+}
+
+/// `$Blinc$text_int` — integer arm of `text(...)`. Pushes an integer
+/// onto the scene buffer.
+///
+/// Probes the i32 ABI through Cranelift's JIT: the host receives an
+/// actual `i32` register, not a length-prefixed pointer. Matches what
+/// the grammar's `integer` terminal lowers to via `parse_int(text())`.
+///
+/// # Safety
+///
+/// Same contract as [`blinc_text`]. The runtime guarantees the
+/// argument shape matches the registered `NativeType::I32`.
+extern "C" fn blinc_text_int(n: i32) {
+    SCENE_BUFFER.with(|b| b.borrow_mut().push(DslOp::IntText(n)));
 }
 
 // =====================================================================
@@ -374,12 +394,20 @@ unsafe impl Sync for BuiltinDescriptor {}
 /// The complete set of host builtins for the prototype slice. Ordering
 /// is irrelevant; the registration loop walks all of them.
 fn builtins() -> Vec<BuiltinDescriptor> {
-    vec![BuiltinDescriptor {
-        name: "$Blinc$text",
-        param_types: &[Type::Primitive(PrimitiveType::String)],
-        return_type: Type::Primitive(PrimitiveType::Unit),
-        ptr: blinc_text as *const u8,
-    }]
+    vec![
+        BuiltinDescriptor {
+            name: "$Blinc$text",
+            param_types: &[Type::Primitive(PrimitiveType::String)],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_text as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$text_int",
+            param_types: &[Type::Primitive(PrimitiveType::I32)],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_text_int as *const u8,
+        },
+    ]
 }
 
 /// Project a Blinc-side typed-AST `Type` onto the wire-format
@@ -394,6 +422,8 @@ fn type_to_tag(ty: &Type) -> TypeTag {
     match ty {
         Type::Primitive(PrimitiveType::Unit) => TypeTag::VOID,
         Type::Primitive(PrimitiveType::String) => TypeTag::STRING,
+        Type::Primitive(PrimitiveType::I32) => TypeTag::I32,
+        Type::Primitive(PrimitiveType::I64) => TypeTag::I64,
         // Add more as the builtin surface grows. Falling through to
         // VOID rather than guessing would silently break codegen, so
         // panic loudly to surface the gap during prototype iteration.
@@ -582,6 +612,7 @@ mod tests {
         assert_eq!(ops.len(), 1, "expected 1 op, got {ops:?}");
         match &ops[0] {
             DslOp::Text(s) => assert_eq!(s, "Hello, Blinc DSL!"),
+            other => panic!("expected DslOp::Text, got {other:?}"),
         }
     }
 
@@ -611,6 +642,54 @@ mod tests {
         assert_eq!(ops.len(), 1, "expected 1 op, got {ops:?}");
         match &ops[0] {
             DslOp::Text(s) => assert_eq!(s, "Hi from a component"),
+            other => panic!("expected DslOp::Text, got {other:?}"),
+        }
+    }
+
+    /// `text(N)` round-trip — probes the i32 ABI through Cranelift.
+    /// Confirms (a) the integer terminal in the grammar lowers to a
+    /// real `IntLiteral`, (b) PEG backtracks from the string variant
+    /// of `text(...)` and matches the int variant, (c) Zyntax
+    /// type-checks the call against `$Blinc$text_int`'s `(i32) ->
+    /// ()` signature, (d) Cranelift passes the value as an actual
+    /// i32 register, (e) the host receives it without ABI corruption.
+    #[test]
+    fn round_trip_text_int() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(r#"view { text(42) }"#, "int_smoke.blinc")
+            .expect("compile");
+        let ops = dsl.render_view().expect("render_view");
+
+        assert_eq!(ops.len(), 1, "expected 1 op, got {ops:?}");
+        match &ops[0] {
+            DslOp::IntText(n) => assert_eq!(*n, 42),
+            other => panic!("expected DslOp::IntText, got {other:?}"),
+        }
+    }
+
+    /// Mixed-statement view exercises both `text(...)` arg shapes
+    /// (string + integer) coexisting in the same compiled function
+    /// and routing to distinct host builtins via the grammar's PEG
+    /// alternate dispatch.
+    #[test]
+    fn round_trip_text_mixed_args() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(r#"view { text("answer:") text(42) }"#, "mixed_smoke.blinc")
+            .expect("compile");
+        let ops = dsl.render_view().expect("render_view");
+
+        assert_eq!(ops.len(), 2, "expected 2 ops, got {ops:?}");
+        match &ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "answer:"),
+            other => panic!("expected DslOp::Text, got {other:?}"),
+        }
+        match &ops[1] {
+            DslOp::IntText(n) => assert_eq!(*n, 42),
+            other => panic!("expected DslOp::IntText, got {other:?}"),
         }
     }
 
@@ -646,12 +725,18 @@ mod tests {
         assert_eq!(hello_ops.len(), 1);
         match &hello_ops[0] {
             DslOp::Text(s) => assert_eq!(s, "hi from Hello"),
+            _ => {
+                panic!("expected DslOp::Text, got {hello_ops:?}");
+            }
         }
 
         let world_ops = dsl.render_component("World").expect("render World");
         assert_eq!(world_ops.len(), 1);
         match &world_ops[0] {
             DslOp::Text(s) => assert_eq!(s, "hi from World"),
+            _ => {
+                panic!("expected DslOp::Text, got {world_ops:?}");
+            }
         }
     }
 

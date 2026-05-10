@@ -79,23 +79,60 @@ component_item = { "component" ~ name:identifier ~ "{" ~ "view" ~ "{" ~ stmts:st
 statements = { stmt:statement* }
   -> stmt
 
-// Statement choice — only `text` for the prototype.
+// Statement choice. The two `text_*` alternates share the `text(`
+// prefix and disambiguate on the arg shape — PEG backtracking on
+// alternates is what makes this work (same pattern as imagepipe's
+// `rotate90_stmt` / `rotate180_stmt` at imagepipe.zyn:148-186).
+//
+// Keep the string variant first: `string_literal` starts with `"`
+// which is a strong discriminator, so the int alternate is only
+// tried when the user actually wrote a number.
+//
+// **Future direction:** when variables + expressions land in the
+// next phase-2 slice, the int arm goes away. Users write
+// `text(f"{count}")` instead — Zyntax's f-string syntax (see
+// `ml.zyn:2885-2906`) desugars to nested `concat`/`__fstring_format__`
+// calls and the host only needs `$Blinc$text(s: string)` plus a few
+// runtime helpers (`$Blinc$concat`, `$Blinc$format_int`). This
+// per-arg-type dispatch is a stepping stone, not the production
+// shape.
 statement = {
-    text_stmt
+    text_string_stmt | text_int_stmt
 }
 
 // =====================================================================
 // text("literal")
 // =====================================================================
 //
-// Lowers to a `TypedStatement::Expression` calling `$Blinc$text`. The
-// `text` identifier on the callee is resolved through the `@builtin`
-// table at compile time.
-text_stmt = { "text" ~ "(" ~ s:string_literal ~ ")" }
+// String form lowers to `$Blinc$text(s: string)` — the host pushes
+// `DslOp::Text(s)` onto the scene buffer.
+text_string_stmt = { "text" ~ "(" ~ s:string_literal ~ ")" }
   -> TypedStatement::Expression {
       expr: TypedExpression::Call {
           callee: Box::new(TypedExpression::Variable { name: intern("$Blinc$text") }),
           args: [s],
+      },
+  }
+
+// =====================================================================
+// text(N)
+// =====================================================================
+//
+// Integer form. Same DSL surface (`text(...)`), different host
+// builtin (`$Blinc$text_int(n: i32)`), different scene op
+// (`DslOp::IntText(n)`). The dispatch is grammar-level via PEG
+// alternates — Zyntax doesn't have arg-type-based fn overloading at
+// the type-checker level today, so we route through distinct
+// callees instead. Same pattern as the `rotate90`/`rotate180`/
+// `rotate270` split in `imagepipe.zyn:148-186`.
+//
+// Probes the i32 ABI through Cranelift's JIT — the host's extern
+// receives an actual `i32` register, not a length-prefixed pointer.
+text_int_stmt = { "text" ~ "(" ~ n:integer ~ ")" }
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Call {
+          callee: Box::new(TypedExpression::Variable { name: intern("$Blinc$text_int") }),
+          args: [n],
       },
   }
 
@@ -110,6 +147,12 @@ string_literal = @{ "\"" ~ string_inner* ~ "\"" }
   -> TypedExpression::StringLiteral { value: text() }
 
 string_inner = { !("\"" | "\\") ~ ANY | "\\" ~ ANY }
+
+// Signed integer literal. Atomic rule — `text()` returns the matched
+// digits + optional sign which `parse_int()` interprets. Mirrors
+// imagepipe.zyn's `signed_integer` rule.
+integer = @{ ("+" | "-")? ~ ASCII_DIGIT+ }
+  -> TypedExpression::IntLiteral { value: parse_int(text()) }
 
 // Identifiers (unused in the prototype slice but kept here so we don't
 // have to redo the grammar header when we expand).
