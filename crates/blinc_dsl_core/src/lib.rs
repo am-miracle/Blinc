@@ -269,6 +269,37 @@ pub struct FsmDefinition {
     pub name: Option<zyntax_typed_ast::InternedString>,
 }
 
+impl FsmDefinition {
+    /// Resolve an event-driven transition. Returns the target
+    /// state's name (variant of the fsm's state enum) when there's
+    /// a transition matching `(from = current, event = event)`, or
+    /// `None` if no rule applies.
+    ///
+    /// Linear scan in declaration order — match-arm-style. The
+    /// first matching rule wins. Authors who want priority semantics
+    /// rely on declaration order in the source; the post-parse pass
+    /// preserves it (`populate_fsm_registry_pass` walks the AST in
+    /// statement order).
+    ///
+    /// `&str` arguments rather than `InternedString` because the
+    /// dispatch caller is typically holding either bare runtime
+    /// strings (from a host event channel) or compile-time literals
+    /// — converting at the boundary keeps the call site terse. The
+    /// implementation interns once for comparison.
+    pub fn step_event(
+        &self,
+        current: &str,
+        event: &str,
+    ) -> Option<zyntax_typed_ast::InternedString> {
+        let current_i = zyntax_typed_ast::InternedString::new_global(current);
+        let event_i = zyntax_typed_ast::InternedString::new_global(event);
+        self.transitions
+            .iter()
+            .find(|t| t.from == current_i && t.event == event_i)
+            .map(|t| t.to)
+    }
+}
+
 /// Process-wide registry of fsm definitions populated as the host
 /// runs each fsm's `__fsm_meta__` method. Lookup is by `FsmId`;
 /// dispatch sites resolve the id from the user-facing fsm enum
@@ -326,6 +357,45 @@ impl FsmRegistry {
     /// silently using a definition for a type that no longer exists.
     pub fn remove(&mut self, id: &FsmId) -> Option<FsmDefinition> {
         self.fsms.remove(id)
+    }
+
+    /// Find an fsm by its source-level name within a given module.
+    /// Returns `None` if no fsm of that name has been registered for
+    /// the module. Useful as the entry point for callers that don't
+    /// have an `FsmId` in hand — e.g. user code in Rust that holds
+    /// the fsm name as a string after parsing the DSL source.
+    ///
+    /// Linear scan; for typical app sizes (handful of fsms per
+    /// module) this is fine. If the registry grows past dozens of
+    /// fsms per module a name → FsmId secondary index is the
+    /// natural next step.
+    pub fn find_by_name(
+        &self,
+        module: zyntax_typed_ast::InternedString,
+        name: &str,
+    ) -> Option<FsmId> {
+        let needle = zyntax_typed_ast::InternedString::new_global(name);
+        self.fsms
+            .iter()
+            .find(|(id, def)| id.module == module && def.name == Some(needle))
+            .map(|(id, _)| *id)
+    }
+
+    /// Convenience: look up an fsm by id and resolve a transition
+    /// in one call. Returns the target state's name when
+    /// `(current, event)` matches a registered transition, `None`
+    /// otherwise (no fsm registered, or no matching rule).
+    ///
+    /// Equivalent to `self.get(id).and_then(|d| d.step_event(...))`
+    /// but lets callers avoid the explicit `get` lookup at the
+    /// dispatch site.
+    pub fn step_event(
+        &self,
+        id: &FsmId,
+        current: &str,
+        event: &str,
+    ) -> Option<zyntax_typed_ast::InternedString> {
+        self.get(id).and_then(|d| d.step_event(current, event))
     }
 }
 
@@ -3470,6 +3540,149 @@ mod tests {
             0,
             "tick-only fsm has no event transitions"
         );
+    }
+
+    /// Dispatch round-trip: compile a fsm, find it by name, walk a
+    /// full transition cycle, verify each step lands on the
+    /// expected state. End-to-end coverage of the dispatch API
+    /// against a registry populated by `compile_source`.
+    #[test]
+    fn dispatch_round_trip() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            fsm DispatchProbe {
+                state Idle
+                state Loading
+                state Done
+                initial Idle
+                on Idle.Start -> Loading
+                on Loading.Finish -> Done
+                on Done.Reset -> Idle
+            }
+            "#,
+            "dispatch_probe.blinc",
+        )
+        .expect("compile");
+
+        let module = InternedString::new_global("main");
+
+        // find_by_name resolves the (module, TypeId) from a bare
+        // string at the boundary.
+        let id = with_fsm_registry(|r| r.find_by_name(module, "DispatchProbe"))
+            .expect("DispatchProbe should be in the registry");
+
+        // Idle --Start--> Loading
+        let next = with_fsm_registry(|r| r.step_event(&id, "Idle", "Start"));
+        assert_eq!(
+            next.and_then(|n| n.resolve_global()).as_deref(),
+            Some("Loading")
+        );
+
+        // Loading --Finish--> Done
+        let next = with_fsm_registry(|r| r.step_event(&id, "Loading", "Finish"));
+        assert_eq!(
+            next.and_then(|n| n.resolve_global()).as_deref(),
+            Some("Done")
+        );
+
+        // Done --Reset--> Idle (full cycle)
+        let next = with_fsm_registry(|r| r.step_event(&id, "Done", "Reset"));
+        assert_eq!(
+            next.and_then(|n| n.resolve_global()).as_deref(),
+            Some("Idle")
+        );
+    }
+
+    /// Non-matching transitions return `None`. Three failure modes
+    /// covered: unknown event, wrong from-state, and unknown fsm
+    /// id. Pinning these together ensures callers can use
+    /// `Option::is_some` as a "transition is legal" predicate
+    /// without false positives.
+    #[test]
+    fn dispatch_misses_return_none() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            fsm DispatchMissProbe {
+                state On
+                state Off
+                initial Off
+                on Off.Click -> On
+                on On.Click -> Off
+            }
+            "#,
+            "dispatch_miss.blinc",
+        )
+        .expect("compile");
+
+        let module = InternedString::new_global("main");
+        let id = with_fsm_registry(|r| r.find_by_name(module, "DispatchMissProbe"))
+            .expect("DispatchMissProbe should be in the registry");
+
+        // (a) unknown event for the current state.
+        let miss = with_fsm_registry(|r| r.step_event(&id, "Off", "DoesNotExist"));
+        assert!(miss.is_none(), "unknown event should miss");
+
+        // (b) right event but wrong from-state.
+        //     Click is defined on Off and On but not on a state
+        //     that doesn't exist — verify the from-match isn't
+        //     loose.
+        let miss = with_fsm_registry(|r| r.step_event(&id, "Nowhere", "Click"));
+        assert!(miss.is_none(), "wrong from-state should miss");
+
+        // (c) unknown fsm id (TypeId that doesn't correspond to a
+        //     registered fsm).
+        let phantom = FsmId {
+            module,
+            type_id: TypeId::new(u32::MAX),
+        };
+        let miss = with_fsm_registry(|r| r.step_event(&phantom, "Off", "Click"));
+        assert!(miss.is_none(), "phantom fsm id should miss");
+    }
+
+    /// Direct `FsmDefinition::step_event` works without going
+    /// through the registry — useful for callers holding a
+    /// borrowed FsmDefinition (e.g. iterating registry contents
+    /// for diagnostics) and for unit-testing transition tables in
+    /// isolation.
+    #[test]
+    fn fsm_definition_step_event_direct() {
+        let def = FsmDefinition {
+            initial: Some(intern("Idle")),
+            transitions: vec![
+                EventTransition {
+                    from: intern("Idle"),
+                    event: intern("Go"),
+                    to: intern("Running"),
+                },
+                EventTransition {
+                    from: intern("Running"),
+                    event: intern("Stop"),
+                    to: intern("Idle"),
+                },
+            ],
+            ..FsmDefinition::default()
+        };
+
+        assert_eq!(
+            def.step_event("Idle", "Go")
+                .and_then(|n| n.resolve_global())
+                .as_deref(),
+            Some("Running")
+        );
+        assert_eq!(
+            def.step_event("Running", "Stop")
+                .and_then(|n| n.resolve_global())
+                .as_deref(),
+            Some("Idle")
+        );
+        assert!(def.step_event("Idle", "Stop").is_none());
+        assert!(def.step_event("Done", "Go").is_none());
     }
 
     /// `with_fsm_registry` / `with_fsm_registry_mut` round-trip.
