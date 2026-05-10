@@ -571,34 +571,119 @@ mod tests {
         }
     }
 
-    /// Component-form round-trip: `component Name { view { … } }`.
-    /// The grammar emits a function whose symbol IS the component
-    /// name (`Greeting` for `component Greeting`), so the host
-    /// invokes via `render_component("Greeting")` and the runtime
-    /// finds it directly without a rename pass.
+    // -----------------------------------------------------------------
+    // Component (Class + Impl) parsing tests.
+    //
+    // Components lower to two TypedDeclarations: a Class for the
+    // data shape, and an Impl for the methods. Same idiom as ml.zyn
+    // structs + inherent impls.
+    // -----------------------------------------------------------------
+
+    /// `component Counter { count: i32, width: i32 }` parses to a
+    /// `TypedDeclaration::Class` with two fields.
     #[test]
-    fn round_trip_component_view() {
+    fn parse_component_struct_only() {
         let _ = tracing_subscriber::fmt::try_init();
 
         let dsl = BlincDsl::new().expect("runtime init");
-        let fns = dsl
-            .compile_source(
-                r#"component Greeting { view { text("Hi from a component") } }"#,
-                "component_smoke.blinc",
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"component Counter { count: i32, width: i32 }"#,
+                "struct_only.blinc",
             )
-            .expect("compile");
-        assert!(
-            fns.iter().any(|n| n == "Greeting"),
-            "expected Greeting in {fns:?}"
+            .expect("parse");
+
+        let class = program
+            .declarations
+            .iter()
+            .find_map(|d| {
+                if let zyntax_typed_ast::TypedDeclaration::Class(c) = &d.node {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .expect("expected at least one Class decl");
+
+        assert_eq!(class.name.resolve_global().as_deref(), Some("Counter"));
+        assert_eq!(class.fields.len(), 2, "expected 2 fields");
+        assert_eq!(
+            class.fields[0].name.resolve_global().as_deref(),
+            Some("count")
         );
+        assert_eq!(
+            class.fields[1].name.resolve_global().as_deref(),
+            Some("width")
+        );
+    }
 
-        let ops = dsl.render_component("Greeting").expect("render_component");
+    /// `impl Counter { fn view() { text("hi") } }` parses to a
+    /// `TypedDeclaration::Impl`. The interpreter's Impl-walk
+    /// (interpreter.rs:1017-1080) unwraps each function into a
+    /// `TypedMethod` automatically.
+    #[test]
+    fn parse_impl_with_view() {
+        let _ = tracing_subscriber::fmt::try_init();
 
-        assert_eq!(ops.len(), 1, "expected 1 op, got {ops:?}");
-        match &ops[0] {
-            DslOp::Text(s) => assert_eq!(s, "Hi from a component"),
-            other => panic!("expected DslOp::Text, got {other:?}"),
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(r#"impl Counter { fn view() { text("hi") } }"#, "impl.blinc")
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| {
+                if let zyntax_typed_ast::TypedDeclaration::Impl(i) = &d.node {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .expect("expected an Impl decl");
+
+        assert_eq!(
+            impl_block.trait_name.resolve_global().as_deref(),
+            Some("Counter")
+        );
+        assert_eq!(impl_block.methods.len(), 1, "expected 1 method (view)");
+        assert_eq!(
+            impl_block.methods[0].name.resolve_global().as_deref(),
+            Some("view")
+        );
+    }
+
+    /// Counter end-to-end shape — struct + impl in one file. Two
+    /// TypedDeclarations (Class then Impl). End-to-end parser
+    /// validation for the Zyntax struct + impl idiom.
+    #[test]
+    fn parse_component_with_struct_and_impl() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component Counter { count: i32 }
+                impl Counter {
+                    fn view() { text("count") }
+                }
+                "#,
+                "counter.blinc",
+            )
+            .expect("parse");
+
+        let mut class_count = 0;
+        let mut impl_count = 0;
+        for decl in &program.declarations {
+            match &decl.node {
+                zyntax_typed_ast::TypedDeclaration::Class(_) => class_count += 1,
+                zyntax_typed_ast::TypedDeclaration::Impl(_) => impl_count += 1,
+                _ => {}
+            }
         }
+        assert_eq!(class_count, 1, "expected 1 Class decl");
+        assert_eq!(impl_count, 1, "expected 1 Impl decl");
     }
 
     /// `text(N)` round-trip — probes the i32 ABI through Cranelift.
@@ -729,122 +814,6 @@ mod tests {
         );
     }
 
-    /// `component Counter { state count: i32 = 0  view { text("hi") } }` —
-    /// state declarations parse as typed mutable `Let` statements
-    /// (the same shape ml.zyn's `mut_typed_let` produces) and get
-    /// prepended to the component function's body via `concat_list`.
-    /// The resulting body has the state Let first, then the view's
-    /// statements.
-    #[test]
-    fn parse_component_with_state() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let dsl = BlincDsl::new().expect("runtime init");
-        let program = dsl
-            .parse_to_typed_ast(
-                r#"component Counter { state count: i32 = 0 view { text("hi") } }"#,
-                "state.blinc",
-            )
-            .expect("parse");
-
-        let stmts = first_user_function_body(&program);
-        assert_eq!(
-            stmts.len(),
-            2,
-            "expected state Let + view stmt = 2, got {stmts:?}"
-        );
-
-        let TypedStatement::Let(let_stmt) = &stmts[0].node else {
-            panic!("expected Let as first statement, got {:?}", stmts[0].node);
-        };
-        assert_eq!(let_stmt.name.resolve_global().as_deref(), Some("count"));
-        assert!(
-            matches!(let_stmt.mutability, zyntax_typed_ast::Mutability::Mutable),
-            "state should lower to mutable Let, got {:?}",
-            let_stmt.mutability
-        );
-        assert!(
-            !matches!(let_stmt.ty, zyntax_typed_ast::Type::Unknown),
-            "state must carry a type annotation, got {:?}",
-            let_stmt.ty
-        );
-        assert!(
-            let_stmt.initializer.is_some(),
-            "state must carry an initializer"
-        );
-
-        // Second stmt is the view's text(...) call.
-        let TypedStatement::Expression(_) = &stmts[1].node else {
-            panic!(
-                "expected Expression as second statement (view text call), got {:?}",
-                stmts[1].node
-            );
-        };
-    }
-
-    /// Multiple state fields parse cleanly and all land before the
-    /// view body in the function. Validates the `state_decls`
-    /// repetition + `concat_list` merge.
-    #[test]
-    fn parse_component_with_multiple_states() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let dsl = BlincDsl::new().expect("runtime init");
-        let program = dsl
-            .parse_to_typed_ast(
-                r#"component Form { state count: i32 = 0 state width: i32 = 100 view { text("ok") } }"#,
-                "states.blinc",
-            )
-            .expect("parse");
-
-        let stmts = first_user_function_body(&program);
-        assert_eq!(
-            stmts.len(),
-            3,
-            "expected 2 state Lets + 1 view stmt, got {stmts:?}"
-        );
-
-        let names: Vec<Option<String>> = stmts
-            .iter()
-            .filter_map(|s| {
-                if let TypedStatement::Let(let_stmt) = &s.node {
-                    Some(let_stmt.name.resolve_global())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(
-            names,
-            vec![Some("count".to_string()), Some("width".to_string())],
-            "state Lets should appear in source order, before view body"
-        );
-    }
-
-    /// Newline-separated state decls + view body. Probes that
-    /// WHITESPACE in the grammar correctly skips newlines between
-    /// `state` declarations and the `view` block — the natural
-    /// way users will write multi-line components.
-    #[test]
-    fn parse_component_with_multiline_layout() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let dsl = BlincDsl::new().expect("runtime init");
-        let program = dsl
-            .parse_to_typed_ast(
-                "component Counter {\n  state count: i32 = 0\n  view { text(\"hi\") }\n}",
-                "multiline.blinc",
-            )
-            .expect("parse");
-
-        let stmts = first_user_function_body(&program);
-        assert_eq!(
-            stmts.len(),
-            2,
-            "expected state Let + view stmt, got {stmts:?}"
-        );
-    }
-
     /// `text(f"answer: {42}!")` — multi-part f-string. fold_concat
     /// builds `__fstring__(text_lit, fmt_call_stripped, text_lit)`
     /// (interpreter.rs:2372-2410). We assert the AST has that
@@ -909,53 +878,6 @@ mod tests {
         match &ops[1] {
             DslOp::IntText(n) => assert_eq!(*n, 42),
             other => panic!("expected DslOp::IntText, got {other:?}"),
-        }
-    }
-
-    /// Two components in one file produce distinct symbols and each
-    /// renders only its own ops. Validates the third §3.9
-    /// risk-reduction probe (HIR module isolation) — when multiple
-    /// components share a file, their function symbols don't
-    /// collide and each compiles independently.
-    #[test]
-    fn multi_component_isolation() {
-        let _ = tracing_subscriber::fmt::try_init();
-
-        let dsl = BlincDsl::new().expect("runtime init");
-        let fns = dsl
-            .compile_source(
-                r#"
-                component Hello { view { text("hi from Hello") } }
-                component World { view { text("hi from World") } }
-                "#,
-                "multi.blinc",
-            )
-            .expect("compile");
-        assert!(
-            fns.iter().any(|n| n == "Hello"),
-            "expected Hello in {fns:?}"
-        );
-        assert!(
-            fns.iter().any(|n| n == "World"),
-            "expected World in {fns:?}"
-        );
-
-        let hello_ops = dsl.render_component("Hello").expect("render Hello");
-        assert_eq!(hello_ops.len(), 1);
-        match &hello_ops[0] {
-            DslOp::Text(s) => assert_eq!(s, "hi from Hello"),
-            _ => {
-                panic!("expected DslOp::Text, got {hello_ops:?}");
-            }
-        }
-
-        let world_ops = dsl.render_component("World").expect("render World");
-        assert_eq!(world_ops.len(), 1);
-        match &world_ops[0] {
-            DslOp::Text(s) => assert_eq!(s, "hi from World"),
-            _ => {
-                panic!("expected DslOp::Text, got {world_ops:?}");
-            }
         }
     }
 
