@@ -27,6 +27,12 @@
 @builtin {
     text: "$Blinc$text",
     text_int: "$Blinc$text_int",
+    // Signal accessors. Synthesised by `resolve_signal_calls` —
+    // not addressable from user code directly. Listed here so
+    // `inject_builtin_externs` injects matching extern decls; the
+    // host registers the implementations via
+    // `register_function_typed` and the JIT calls into Rust.
+    __signal_get_i32: "__signal_get_i32",
 }
 
 // =====================================================================
