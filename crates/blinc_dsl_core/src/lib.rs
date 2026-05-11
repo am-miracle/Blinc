@@ -1076,6 +1076,230 @@ fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec<String>> {
     }
 }
 
+/// Rewrite `__component_call__` marker calls into regular function
+/// calls keyed on the component name, lifting `__named__` markers
+/// into Zyntax's native `TypedNamedArg` shape.
+///
+/// Before:
+///   Call(__component_call__, [
+///       StringLiteral("Counter"),    // component name (positional 0)
+///       IntLiteral(1),               // positional prop 1
+///       Call(__named__, [StringLiteral("step"), IntLiteral(2)]),
+///       Block { statements: [...] }, // optional trailing children body
+///   ])
+///
+/// After:
+///   Call(Variable("Counter"), positional_args=[IntLiteral(1),
+///        Block { ... }], named_args=[NamedArg { name: "step", value:
+///        IntLiteral(2) }])
+///
+/// The transformation makes the AST type-check and JIT-compile
+/// against an actual `Counter` function symbol (once component
+/// runtime lands), and surfaces named args in the form
+/// downstream codegen already knows how to consume. The trailing
+/// `Block` (if present) rides through as a regular positional arg
+/// — TypedCall has no first-class "children" slot, so the
+/// component-runtime side will recognise the Block-shape arg and
+/// route it as children.
+///
+/// Slot markers (`__slot_open__` / `__slot_close__`) are left in
+/// place inside the body Block — they're statement-level markers
+/// the component-runtime side unfolds when it walks the children
+/// block. Rewriting them here would lose the linear pair-up
+/// information the upstream stmt-list flatten produced.
+///
+/// Why this runs AFTER `validate_component_calls`: the validator
+/// reads the marker shape directly (StringLiteral as args[0]); if
+/// we rewrote first, the validator would have to also look at the
+/// rewritten Variable callee. Keeping passes independent keeps the
+/// pipeline easy to reason about.
+///
+/// The rewrite is recursive so nested component calls inside a
+/// body Block (e.g. `Counter() { Inner(1) }`) also get lowered.
+fn lower_component_calls(program: &mut TypedProgram) {
+    use zyntax_typed_ast::typed_ast::{
+        TypedCall, TypedDeclaration, TypedExpression, TypedLiteral, TypedNamedArg,
+    };
+
+    fn rewrite_expr(expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>) {
+        // Recurse first so nested marker calls (inside body blocks,
+        // inside other call args, etc.) get rewritten bottom-up.
+        match &mut expr.node {
+            TypedExpression::Binary(b) => {
+                rewrite_expr(&mut b.left);
+                rewrite_expr(&mut b.right);
+            }
+            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand),
+            TypedExpression::Call(c) => {
+                rewrite_expr(&mut c.callee);
+                for a in &mut c.positional_args {
+                    rewrite_expr(a);
+                }
+                for n in &mut c.named_args {
+                    rewrite_expr(&mut n.value);
+                }
+            }
+            TypedExpression::Field(f) => rewrite_expr(&mut f.object),
+            TypedExpression::Index(idx) => {
+                rewrite_expr(&mut idx.object);
+                rewrite_expr(&mut idx.index);
+            }
+            TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
+                for it in items {
+                    rewrite_expr(it);
+                }
+            }
+            TypedExpression::MethodCall(mc) => {
+                rewrite_expr(&mut mc.receiver);
+                for a in &mut mc.positional_args {
+                    rewrite_expr(a);
+                }
+            }
+            TypedExpression::Block(b) => rewrite_block(b),
+            TypedExpression::If(if_expr) => {
+                rewrite_expr(&mut if_expr.condition);
+                rewrite_expr(&mut if_expr.then_branch);
+                rewrite_expr(&mut if_expr.else_branch);
+            }
+            _ => {}
+        }
+
+        // Now check the current node — only act on calls whose
+        // callee is the `__component_call__` marker.
+        let TypedExpression::Call(call) = &expr.node else {
+            return;
+        };
+        let TypedExpression::Variable(callee_name) = &call.callee.node else {
+            return;
+        };
+        if callee_name.resolve_global().as_deref() != Some("__component_call__") {
+            return;
+        }
+
+        // args[0] is the component name as a StringLiteral. If
+        // it's missing or shaped wrong the parser would have caught
+        // it; this is a defensive bail.
+        let Some(name_arg) = call.positional_args.first() else {
+            return;
+        };
+        let TypedExpression::Literal(TypedLiteral::String(component_name)) = &name_arg.node else {
+            return;
+        };
+        let component_name = *component_name;
+        let span = expr.span;
+
+        // Split the remaining args into positional + named. A
+        // `__named__("name", value)` marker call lifts into a
+        // `TypedNamedArg`. Everything else stays positional.
+        let mut new_positional: Vec<zyntax_typed_ast::TypedNode<TypedExpression>> = Vec::new();
+        let mut new_named: Vec<TypedNamedArg> = Vec::new();
+
+        for arg in call.positional_args.iter().skip(1) {
+            // Is this arg a `__named__("name", value)` marker call?
+            if let TypedExpression::Call(inner) = &arg.node {
+                if let TypedExpression::Variable(inner_callee) = &inner.callee.node {
+                    if inner_callee.resolve_global().as_deref() == Some("__named__") {
+                        let name_node = &inner.positional_args[0];
+                        let value_node = &inner.positional_args[1];
+                        let TypedExpression::Literal(TypedLiteral::String(arg_name)) =
+                            &name_node.node
+                        else {
+                            // Marker shape is wrong — fall through
+                            // and treat as positional. The validator
+                            // doesn't currently check __named__ shape;
+                            // ill-formed markers will surface as
+                            // unresolved-symbol errors at compile.
+                            new_positional.push(arg.clone());
+                            continue;
+                        };
+                        new_named.push(TypedNamedArg {
+                            name: *arg_name,
+                            value: Box::new(value_node.clone()),
+                            span: arg.span,
+                        });
+                        continue;
+                    }
+                }
+            }
+            new_positional.push(arg.clone());
+        }
+
+        // Existing `named_args` on the marker call (if any —
+        // shouldn't happen from the grammar but defensive) carry
+        // through. Source order: positional args, then explicit
+        // named-marker args, then any pre-existing named_args.
+        new_named.extend(call.named_args.iter().cloned());
+
+        // Rebuild the call: callee becomes a plain Variable
+        // reference to the component, positional/named are
+        // populated, span carries through.
+        let new_callee = zyntax_typed_ast::TypedNode::new(
+            TypedExpression::Variable(component_name),
+            Type::Any,
+            span,
+        );
+
+        expr.node = TypedExpression::Call(TypedCall {
+            callee: Box::new(new_callee),
+            positional_args: new_positional,
+            named_args: new_named,
+            type_args: vec![],
+        });
+        // expr.ty stays whatever the original marker's type was
+        // (Type::Any in practice — the resolver will refine when
+        // the component symbol exists).
+    }
+
+    fn rewrite_block(block: &mut zyntax_typed_ast::typed_ast::TypedBlock) {
+        for stmt in &mut block.statements {
+            rewrite_stmt(stmt);
+        }
+    }
+
+    fn rewrite_stmt(stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>) {
+        match &mut stmt.node {
+            TypedStatement::Expression(e) => rewrite_expr(e),
+            TypedStatement::Let(l) => {
+                if let Some(init) = &mut l.initializer {
+                    rewrite_expr(init);
+                }
+            }
+            TypedStatement::Return(Some(e)) => rewrite_expr(e),
+            TypedStatement::If(if_stmt) => {
+                rewrite_expr(&mut if_stmt.condition);
+                rewrite_block(&mut if_stmt.then_block);
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    rewrite_block(else_block);
+                }
+            }
+            TypedStatement::While(w) => {
+                rewrite_expr(&mut w.condition);
+                rewrite_block(&mut w.body);
+            }
+            TypedStatement::Block(b) => rewrite_block(b),
+            _ => {}
+        }
+    }
+
+    for decl in &mut program.declarations {
+        match &mut decl.node {
+            TypedDeclaration::Function(func) => {
+                if let Some(body) = &mut func.body {
+                    rewrite_block(body);
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                for method in &mut imp.methods {
+                    if let Some(body) = &mut method.body {
+                        rewrite_block(body);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Wrap every fsm's `__fsm_meta__` body with `__fsm_begin__("FsmName")`
 /// at the front and `__fsm_end__()` at the back. The host registers
 /// these markers as builtins that push/pop a "current FSM" name on
@@ -1736,6 +1960,15 @@ impl BlincDsl {
         synthesize_fsm_event_enums(&mut typed_program);
         resolve_signal_calls(&mut typed_program);
 
+        // Validate component calls reference known components, then
+        // lower the markers. Validation runs first because it reads
+        // the marker shape (StringLiteral name as args[0]); lowering
+        // rewrites that shape away. Same ordering as
+        // `parse_to_typed_ast`.
+        validate_component_calls(&typed_program)
+            .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
+        lower_component_calls(&mut typed_program);
+
         // Eager registry population: walk fsm impls, pin TypeIds,
         // record metadata into the global FsmRegistry, then strip
         // `__fsm_meta__` so the compile path doesn't have to handle
@@ -1820,6 +2053,12 @@ impl BlincDsl {
         // in most type-checkers).
         validate_component_calls(&program)
             .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
+
+        // Lower `__component_call__` markers to regular Call
+        // expressions keyed on the component's Variable name.
+        // Runs after validation so the validator still sees the
+        // marker shape (StringLiteral name as args[0]).
+        lower_component_calls(&mut program);
 
         Ok(program)
     }
@@ -2698,13 +2937,11 @@ mod tests {
         assert_eq!(class.fields[0].name.resolve_global().as_deref(), Some("x"));
     }
 
-    /// `Counter(0)` inside a view body — statement-position
-    /// component call. Lowers to a `TypedStatement::Expression`
-    /// wrapping a `Call { callee: __component_call__, args: [
-    /// StringLiteral("Counter"), IntLiteral(0) ] }`. The leading
-    /// StringLiteral arg carries the component name (the
-    /// disambiguator the host's lowering pass reads to recognise
-    /// this as a component instantiation).
+    /// `Counter()` inside a view body — statement-position
+    /// component call. AFTER the `lower_component_calls` pass, the
+    /// callee is `Variable("Counter")` and there are no positional
+    /// args (the original `__component_call__` marker and its
+    /// leading StringLiteral name have been folded away).
     #[test]
     fn parse_component_call_no_args() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -2738,28 +2975,17 @@ mod tests {
         };
         assert_eq!(
             callee_name.resolve_global().as_deref(),
-            Some("__component_call__"),
-            "callee should be the __component_call__ marker"
+            Some("Counter"),
+            "callee should be the component name after lowering"
         );
 
-        assert_eq!(
-            call.positional_args.len(),
-            1,
-            "only the component-name string"
-        );
-        let TypedExpression::Literal(TypedLiteral::String(name)) = &call.positional_args[0].node
-        else {
-            panic!(
-                "expected StringLiteral name arg, got {:?}",
-                call.positional_args[0].node
-            );
-        };
-        assert_eq!(name.resolve_global().as_deref(), Some("Counter"));
+        assert_eq!(call.positional_args.len(), 0, "no args");
+        assert_eq!(call.named_args.len(), 0, "no named args");
     }
 
-    /// `Counter(1, 2)` — positional args lower into the marker
-    /// call's args list, in source order, after the component-name
-    /// string. Mirrors the args-flatten shape of `text(N)`.
+    /// `Counter(1, 2)` — after lowering, positional args appear
+    /// in source order as `positional_args`, no leading
+    /// StringLiteral name.
     #[test]
     fn parse_component_call_positional_args() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -2783,26 +3009,29 @@ mod tests {
             panic!("expected Call");
         };
 
-        // [StringLiteral("Counter"), IntLiteral(1), IntLiteral(2)]
-        assert_eq!(call.positional_args.len(), 3);
-
-        let TypedExpression::Literal(TypedLiteral::Integer(one)) = &call.positional_args[1].node
-        else {
-            panic!("arg 1 should be Integer(1)");
+        let TypedExpression::Variable(callee_name) = &call.callee.node else {
+            panic!("expected Variable callee");
         };
-        let TypedExpression::Literal(TypedLiteral::Integer(two)) = &call.positional_args[2].node
+        assert_eq!(callee_name.resolve_global().as_deref(), Some("Counter"));
+
+        // [IntLiteral(1), IntLiteral(2)] after lowering
+        assert_eq!(call.positional_args.len(), 2);
+
+        let TypedExpression::Literal(TypedLiteral::Integer(one)) = &call.positional_args[0].node
         else {
-            panic!("arg 2 should be Integer(2)");
+            panic!("arg 0 should be Integer(1)");
+        };
+        let TypedExpression::Literal(TypedLiteral::Integer(two)) = &call.positional_args[1].node
+        else {
+            panic!("arg 1 should be Integer(2)");
         };
         assert_eq!(*one, 1);
         assert_eq!(*two, 2);
     }
 
-    /// `Counter(1, step = 2)` — named args lower as a nested
-    /// `__named__("step", 2)` marker Call inside the positional args
-    /// list. The host's lowering pass detects the `__named__` callee
-    /// and reroutes the arg accordingly. Pin the shape so the host
-    /// has a stable thing to match against.
+    /// `Counter(1, step = 2)` — after lowering, the named arg
+    /// lifts into the Call's native `named_args` vec as a
+    /// `TypedNamedArg`. Positional args stay positional.
     #[test]
     fn parse_component_call_named_arg() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -2826,35 +3055,31 @@ mod tests {
             panic!("expected Call");
         };
 
-        // [StringLiteral("Counter"), IntLiteral(1), Call(__named__, ...)]
-        assert_eq!(call.positional_args.len(), 3);
-
-        let TypedExpression::Call(named) = &call.positional_args[2].node else {
-            panic!(
-                "expected nested __named__ Call, got {:?}",
-                call.positional_args[2].node
-            );
+        let TypedExpression::Variable(callee_name) = &call.callee.node else {
+            panic!("expected Variable callee");
         };
-        let TypedExpression::Variable(named_callee) = &named.callee.node else {
-            panic!("__named__ callee should be a Variable");
-        };
-        assert_eq!(named_callee.resolve_global().as_deref(), Some("__named__"));
+        assert_eq!(callee_name.resolve_global().as_deref(), Some("Counter"));
 
-        // Named-arg marker is [StringLiteral("step"), Integer(2)].
-        assert_eq!(named.positional_args.len(), 2);
-        let TypedExpression::Literal(TypedLiteral::String(arg_name)) =
-            &named.positional_args[0].node
+        // Positional: [IntLiteral(1)]
+        assert_eq!(call.positional_args.len(), 1);
+        let TypedExpression::Literal(TypedLiteral::Integer(one)) = &call.positional_args[0].node
         else {
-            panic!("named-arg name should be a StringLiteral");
+            panic!("positional arg 0 should be Integer(1)");
         };
-        assert_eq!(arg_name.resolve_global().as_deref(), Some("step"));
+        assert_eq!(*one, 1);
 
-        let TypedExpression::Literal(TypedLiteral::Integer(arg_value)) =
-            &named.positional_args[1].node
+        // Named: [step = 2]
+        assert_eq!(call.named_args.len(), 1);
+        assert_eq!(
+            call.named_args[0].name.resolve_global().as_deref(),
+            Some("step")
+        );
+        let TypedExpression::Literal(TypedLiteral::Integer(named_value)) =
+            &call.named_args[0].value.node
         else {
-            panic!("named-arg value should be an Integer literal");
+            panic!("named arg value should be Integer(2)");
         };
-        assert_eq!(*arg_value, 2);
+        assert_eq!(*named_value, 2);
     }
 
     /// `let widget = Counter(0)` — component call in expression
@@ -2895,7 +3120,8 @@ mod tests {
         };
         assert_eq!(
             callee_name.resolve_global().as_deref(),
-            Some("__component_call__")
+            Some("Counter"),
+            "after lowering, callee should be the component name (not the marker)"
         );
     }
 
@@ -2983,10 +3209,11 @@ mod tests {
     /// terminal is the explicit disambiguator. The PEG should
     /// backtrack and try `assign_stmt` (which fails because there's
     /// `Counter() { Inner(1) }` — body block on a component call.
-    /// Lowers to a `__component_call__("Counter", Block { ... })`
-    /// where the trailing arg is a `TypedExpression::Block` whose
-    /// statements are the children. Pin the AST shape so the host's
-    /// lowering pass has a stable contract to match against.
+    /// After lowering, a body-bearing `Counter() { ... }` becomes
+    /// `Counter(Block { ... })` — the component name is the
+    /// callee, and the body Block rides as the single positional
+    /// arg. Inner component calls inside the body are themselves
+    /// lowered (recursive walk).
     #[test]
     fn parse_component_call_with_body_children() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -3016,30 +3243,46 @@ mod tests {
             panic!("expected Call expression");
         };
 
-        // args: [StringLiteral("Counter"), Block { Inner(1); Inner(2) }]
+        let TypedExpression::Variable(callee_name) = &call.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_eq!(callee_name.resolve_global().as_deref(), Some("Counter"));
+
+        // args: [Block { Inner(1); Inner(2) }]
         assert_eq!(
             call.positional_args.len(),
-            2,
-            "expected [name, body_block], got {} args",
+            1,
+            "expected single body_block arg, got {} args",
             call.positional_args.len()
         );
 
-        let TypedExpression::Literal(TypedLiteral::String(name)) = &call.positional_args[0].node
-        else {
-            panic!("first arg should be the component-name string");
-        };
-        assert_eq!(name.resolve_global().as_deref(), Some("Counter"));
-
-        let TypedExpression::Block(block) = &call.positional_args[1].node else {
+        let TypedExpression::Block(block) = &call.positional_args[0].node else {
             panic!(
-                "second arg should be a Block, got {:?}",
-                call.positional_args[1].node
+                "arg should be a Block, got {:?}",
+                call.positional_args[0].node
             );
         };
         assert_eq!(
             block.statements.len(),
             2,
             "body block should hold 2 child statements"
+        );
+
+        // The nested Inner(1) call should also be lowered — callee
+        // is `Inner` (Variable), not `__component_call__`.
+        let TypedStatement::Expression(inner_expr) = &block.statements[0].node else {
+            panic!("first body stmt should be Expression");
+        };
+        let TypedExpression::Call(inner_call) = &inner_expr.node else {
+            panic!("first body stmt should be a Call");
+        };
+        let TypedExpression::Variable(inner_callee) = &inner_call.callee.node else {
+            panic!("inner callee should be a Variable");
+        };
+        assert_eq!(
+            inner_callee.resolve_global().as_deref(),
+            Some("Inner"),
+            "nested component call should be lowered recursively"
         );
     }
 
@@ -3075,7 +3318,8 @@ mod tests {
         let TypedExpression::Call(call) = &expr_node.node else {
             panic!("expected Call");
         };
-        let TypedExpression::Block(block) = &call.positional_args[1].node else {
+        // After lowering, the body Block is positional arg [0].
+        let TypedExpression::Block(block) = &call.positional_args[0].node else {
             panic!("body should be a Block");
         };
 
@@ -3124,11 +3368,16 @@ mod tests {
         let TypedExpression::Call(call) = &expr_node.node else {
             panic!("expected Call");
         };
-        let TypedExpression::Block(block) = &call.positional_args[1].node else {
+        // After lowering, the body Block is positional arg [0].
+        let TypedExpression::Block(block) = &call.positional_args[0].node else {
             panic!("body should be a Block");
         };
 
-        // [__slot_open__("Header"), Tab(1), __slot_close__, Tab(2)] = 4 stmts
+        // [__slot_open__("Header"), Tab(1), __slot_close__, Tab(2)] = 4 stmts.
+        // `__slot_open__` / `__slot_close__` are NOT rewritten by
+        // `lower_component_calls` — they're statement-level marker
+        // pairs the component runtime unfolds when walking the
+        // children block. Only `__component_call__` gets rewritten.
         assert_eq!(
             block.statements.len(),
             4,
@@ -3150,14 +3399,17 @@ mod tests {
             v.resolve_global().map(|s| s.to_string())
         }
 
+        // Slot markers untouched by the lowering pass.
         assert_eq!(
             callee_name(&block.statements[0]).as_deref(),
             Some("__slot_open__")
         );
-        // statements[1] is the inner Tab(1) — a __component_call__ marker
+        // Inner Tab(1) is a lowered component call — callee is the
+        // component name, not the marker.
         assert_eq!(
             callee_name(&block.statements[1]).as_deref(),
-            Some("__component_call__")
+            Some("Tab"),
+            "nested component call should be lowered to the component name"
         );
         assert_eq!(
             callee_name(&block.statements[2]).as_deref(),
@@ -3165,8 +3417,8 @@ mod tests {
         );
         assert_eq!(
             callee_name(&block.statements[3]).as_deref(),
-            Some("__component_call__"),
-            "trailing default child should remain at the parent level"
+            Some("Tab"),
+            "trailing default child should also be a lowered call"
         );
 
         // The __slot_open__ marker's first arg is the slot name.
@@ -3182,6 +3434,93 @@ mod tests {
             panic!("__slot_open__ first arg should be the slot-name StringLiteral");
         };
         assert_eq!(slot_name.resolve_global().as_deref(), Some("Header"));
+    }
+
+    /// `lower_component_calls` strips the unused defensive
+    /// `__component_call__` callee identifier from the AST. After
+    /// the pass, there should be no `__component_call__` variable
+    /// references anywhere in the program. Pin this so a future
+    /// regression where the rewrite forgets to swap the callee
+    /// shape is caught immediately.
+    #[test]
+    fn lower_component_calls_strips_marker_callee() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component Foo { }
+                view {
+                    Foo(1, name = 2)
+                    let x = Foo(3)
+                }
+                "#,
+                "strip_marker.blinc",
+            )
+            .expect("parse");
+
+        // Walk the program's expression tree and count any
+        // remaining `__component_call__` references.
+        fn count_marker_refs(expr: &TypedExpression) -> usize {
+            let mut n = 0;
+            match expr {
+                TypedExpression::Variable(name)
+                    if name.resolve_global().as_deref() == Some("__component_call__") =>
+                {
+                    n += 1;
+                }
+                TypedExpression::Call(c) => {
+                    n += count_marker_refs(&c.callee.node);
+                    for a in &c.positional_args {
+                        n += count_marker_refs(&a.node);
+                    }
+                    for na in &c.named_args {
+                        n += count_marker_refs(&na.value.node);
+                    }
+                }
+                TypedExpression::Block(b) => {
+                    for s in &b.statements {
+                        if let TypedStatement::Expression(e) = &s.node {
+                            n += count_marker_refs(&e.node);
+                        }
+                        if let TypedStatement::Let(l) = &s.node {
+                            if let Some(init) = &l.initializer {
+                                n += count_marker_refs(&init.node);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            n
+        }
+
+        let mut total = 0;
+        for decl in &program.declarations {
+            if let zyntax_typed_ast::TypedDeclaration::Function(func) = &decl.node {
+                if let Some(body) = &func.body {
+                    for stmt in &body.statements {
+                        match &stmt.node {
+                            TypedStatement::Expression(e) => {
+                                total += count_marker_refs(&e.node);
+                            }
+                            TypedStatement::Let(l) => {
+                                if let Some(init) = &l.initializer {
+                                    total += count_marker_refs(&init.node);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            total, 0,
+            "expected no __component_call__ refs after lowering, found {}",
+            total
+        );
     }
 
     /// no `=`) and then fail to parse the statement, returning a
