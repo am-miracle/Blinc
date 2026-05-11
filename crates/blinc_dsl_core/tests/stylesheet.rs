@@ -112,6 +112,35 @@ fn div_inline_class_attribute_applies_to_widget() {
     );
 }
 
+/// `stylesheet "..."` declared *inside* a `component { ... }`
+/// body co-locates styling with the component. Content still
+/// flows through `compiled_stylesheets()` — no auto-scoping
+/// today (authors scope via class names per the
+/// `class = "..."` flow).
+#[test]
+fn component_scoped_stylesheet_collects() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r##"
+        component Counter {
+            stylesheet ".counter { color: blue; }"
+            view { Text("hi") }
+        }
+        view { Counter() }
+        "##,
+        "component_scoped.blinc",
+    )
+    .expect("compile");
+
+    let sheets = dsl.compiled_stylesheets();
+    assert!(
+        sheets.iter().any(|s| s.contains(".counter")),
+        "in-component stylesheet should land in compiled_stylesheets, got: {sheets:?}"
+    );
+}
+
 /// Multiple stylesheet blocks in one source land in order.
 #[test]
 fn multiple_stylesheet_blocks_collect_in_order() {

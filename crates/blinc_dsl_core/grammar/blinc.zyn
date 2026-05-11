@@ -217,19 +217,23 @@ bare_view_item = { "view" ~ "{" ~ stmts:statements ~ "}" }
 component_folded = {
     "component" ~ name:identifier ~ props:component_props? ~ "{"
     ~ fields:struct_field_list?
+    ~ styles:stylesheet_decl*
     ~ view:view_member
     ~ extra:impl_fn*
     ~ "}"
 }
   -> concat_list(
-      [TypedDeclaration::Class {
-          name: intern(name),
-          // Props are NOT class fields — they're constructor
-          // bindings the `bind_component_props` post-parse pass
-          // injects as method params. Class.fields holds only the
-          // body's `state` / data declarations.
-          fields: fields.unwrap_or([]),
-      }],
+      concat_list(
+          [TypedDeclaration::Class {
+              name: intern(name),
+              // Props are NOT class fields — they're constructor
+              // bindings the `bind_component_props` post-parse pass
+              // injects as method params. Class.fields holds only the
+              // body's `state` / data declarations.
+              fields: fields.unwrap_or([]),
+          }],
+          styles.unwrap_or([]),
+      ),
       [TypedDeclaration::Impl {
           // Empty trait_name marks this as an INHERENT impl
           // (the Zyntax compiler's `is_inherent = trait_name_str.
