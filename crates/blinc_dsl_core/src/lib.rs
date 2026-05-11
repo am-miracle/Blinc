@@ -215,6 +215,45 @@ extern "C" fn blinc_signal_get_f64(name_ptr: *const i32) -> f64 {
     blinc_runtime::signal::get_f64_or_default(stripped)
 }
 
+/// `__signal_get_string` — host implementation of the string
+/// signal accessor.
+///
+/// Same shape as the i32 / f64 mirrors but returns a Zyntax
+/// length-prefixed string pointer (the same layout
+/// `blinc_string_alloc` produces — what `$Blinc$text` and the
+/// f-string concat chain consume). The value is cloned from the
+/// per-thread signal table and the resulting buffer leaks via
+/// the prototype's `blinc_string_alloc` (see the module comment
+/// on the f-string helpers for the per-render arena fix path).
+///
+/// # Safety
+///
+/// Same contract as [`blinc_signal_get_i32`]. The runtime
+/// guarantees `name_ptr` points at a Zyntax length-prefixed
+/// UTF-8 buffer.
+extern "C" fn blinc_signal_get_string(name_ptr: *const i32) -> *const i32 {
+    if name_ptr.is_null() {
+        tracing::warn!("__signal_get_string called with null name pointer");
+        return blinc_string_alloc("");
+    }
+
+    // SAFETY: Zyntax guarantees the length-prefixed string
+    // layout when the registered parameter type is String.
+    let name = unsafe {
+        let len = std::ptr::read_unaligned(name_ptr) as usize;
+        let body = (name_ptr as *const u8).add(std::mem::size_of::<i32>());
+        let bytes = std::slice::from_raw_parts(body, len);
+        std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
+    };
+    let stripped = name
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(name);
+
+    let value = blinc_runtime::signal::get_str_or_default(stripped);
+    blinc_string_alloc(&value)
+}
+
 /// `$Blinc$text_int` — integer arm of `text(...)`. Pushes an integer
 /// onto the scene buffer.
 ///
@@ -2909,6 +2948,18 @@ impl BlincDsl {
     pub fn get_signal_f64(&self, name: &str) -> Option<f64> {
         blinc_runtime::signal::get_f64(name)
     }
+
+    /// Set the current value of a string-typed signal. Same
+    /// shape as the i32 / f64 mirrors but for
+    /// `signal <name>: string` DSL declarations.
+    pub fn set_signal_string(&self, name: &str, value: impl Into<String>) {
+        blinc_runtime::signal::set_str(name, value);
+    }
+
+    /// Read the current value of a string-typed signal.
+    pub fn get_signal_string(&self, name: &str) -> Option<String> {
+        blinc_runtime::signal::get_str(name)
+    }
 }
 
 /// Builtin descriptor — pairs a DSL-visible symbol name with the
@@ -2988,6 +3039,22 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             param_types: &[Type::Primitive(PrimitiveType::String)],
             return_type: Type::Primitive(PrimitiveType::F64),
             ptr: blinc_signal_get_f64 as *const u8,
+        },
+        BuiltinDescriptor {
+            // String mirror of `__signal_get_i32`. The
+            // `resolve_signal_calls` pass already routes
+            // string-typed signals here (see the
+            // `typed_signal_extern_name` match), but the
+            // builtin wasn't registered until this commit —
+            // string-typed signals previously failed to JIT-
+            // link. Returns a Zyntax length-prefixed string,
+            // same layout `$Blinc$text` consumes (leaks the
+            // backing buffer for the prototype, see the
+            // f-string helpers' module comment).
+            name: "__signal_get_string",
+            param_types: &[Type::Primitive(PrimitiveType::String)],
+            return_type: Type::Primitive(PrimitiveType::String),
+            ptr: blinc_signal_get_string as *const u8,
         },
         BuiltinDescriptor {
             // `__fstring_format__` (i32 specialisation). The
@@ -3234,6 +3301,68 @@ mod tests {
         match &ops[0] {
             DslOp::Text(s) => assert_eq!(s, "hi 42"),
             other => panic!("expected DslOp::Text(\"hi 42\"), got {other:?}"),
+        }
+    }
+
+    /// End-to-end: `signal title: string` declared, host writes
+    /// via `set_signal_string`, DSL reads via `title.get()`
+    /// inside a view, the rendered text reflects the host
+    /// value. Proves the string-signal pipeline: extern
+    /// registered, ABI matches `$Blinc$text`, signal table
+    /// shared across the JIT boundary.
+    #[test]
+    fn render_view_reads_string_signal() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            signal title: string
+            view { text(f"hi {title.get()}") }
+            "#,
+            "string_signal.blinc",
+        )
+        .expect("compile");
+
+        dsl.set_signal_string("title", "Welcome");
+
+        let ops = dsl.render_view().expect("render_view");
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "hi Welcome"),
+            other => panic!("expected DslOp::Text(\"hi Welcome\"), got {other:?}"),
+        }
+
+        // Update from host, re-render — view picks up the new value.
+        dsl.set_signal_string("title", "Updated");
+        let ops = dsl.render_view().expect("render_view");
+        match &ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "hi Updated"),
+            other => panic!("expected DslOp::Text(\"hi Updated\"), got {other:?}"),
+        }
+    }
+
+    /// Unset string signal renders as empty string (matches the
+    /// `get_str_or_default` substrate behaviour).
+    #[test]
+    fn render_view_string_signal_unset_defaults_to_empty() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            signal greeting: string
+            view { text(f"prefix:{greeting.get()}") }
+            "#,
+            "string_signal_unset.blinc",
+        )
+        .expect("compile");
+
+        let ops = dsl.render_view().expect("render_view");
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "prefix:"),
+            other => panic!("expected `\"prefix:\"` DslOp::Text, got {other:?}"),
         }
     }
 

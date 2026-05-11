@@ -34,6 +34,7 @@
     // `register_function_typed` and the JIT calls into Rust.
     __signal_get_i32: "__signal_get_i32",
     __signal_get_f64: "__signal_get_f64",
+    __signal_get_string: "__signal_get_string",
     // F-string desugaring: the normalization pass
     // `fstring_to_concat` (zyntax passes/normalization) rewrites
     // multi-part f-strings into `string_concat` chains with
