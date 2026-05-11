@@ -1,65 +1,106 @@
 //! Hot-reload hooks.
 //!
-//! Resetting state when the DSL recompiles is necessarily a
-//! cross-cutting concern — every substrate module has its own
-//! persistent state (registries, dispatcher slot, scene
-//! buffer, signal tables) that needs to drop in lockstep so a
-//! re-published program doesn't see stale entries from the
-//! previous compile.
+//! **Hot-reload in Blinc is non-destructive.** The substrate
+//! does not wipe its state when DSL source recompiles; the
+//! JIT-side machinery handles in-place code replacement, and
+//! the substrate's registries / signal tables / in-flight
+//! widget trees survive across reloads.
 //!
-//! This module bundles the resets into one entry point so the
-//! reload flow on either backend (`blinc_dsl_core` JIT, future
-//! AOT crate) has a single thing to call. Embedders that want
-//! finer-grained control can still reach for the individual
-//! `clear` / `clear_all` functions on each substrate module.
+//! ## Why non-destructive
 //!
-//! ## What gets reset
+//! Zyntax's tiered runtime is backed by [`beadie`] (see
+//! `zyntax/crates/compiler/BEADIE_INTEGRATION.md`). When a
+//! function gets recompiled — whether because the source
+//! changed or because tier-up promoted it from baseline to
+//! optimised code — beadie performs an atomic function-pointer
+//! swap (`Bead::swap_compiled`) and, for long-running
+//! invocations, **on-stack replacement** (OSR) transfers live
+//! frames into the new code without unwinding.
 //!
-//! [`reset_all`] clears (in this order):
+//! Practical consequences for the substrate:
 //!
-//! 1. **`fsm` registry** — drops every published FSM
-//!    definition. State machines tied to a `Stateful<FsmStateId>`
-//!    widget will fail to resolve their current variant after
-//!    this; consumers should rebind their FsmStateId to a fresh
-//!    one (typically via `FsmStateId::from_fsm_name`) after
-//!    reload finishes re-publishing.
-//! 2. **`fsm` guard dispatcher** — releases the JIT runtime
-//!    handle the previous compile held. The next compile
-//!    installs a fresh one. Without this clear, the dispatcher
-//!    slot would briefly hold an `Arc` pointing at a now-
-//!    discarded runtime, surfacing as `FunctionNotFound` for
-//!    every guard call until reinstall.
-//! 3. **`component` registry** — drops every published
-//!    component definition. Same rebind-after-reload pattern as
-//!    the FSM registry.
-//! 4. **`signal` tables** — drops both i32 and f64 tables.
-//!    Embedders that want signals to persist across reloads
-//!    should snapshot before calling and re-seed after.
-//! 5. **`scene` buffer** — drops any partially-built op
-//!    stream. Reload should never happen mid-render, but the
-//!    clear is cheap and avoids tail-end glitches.
+//! - **FSM registry stays.** State machines tied to a
+//!   `Stateful<FsmStateId>` keep their current variant across
+//!   reload. If the new source moves a state's transitions
+//!   around, `FsmDefinition::register` (which replaces by
+//!   name) updates the rules but doesn't touch the in-flight
+//!   state. Widgets keep responding.
 //!
-//! View renderers held by embedders as `Arc<dyn ViewRenderer>`
-//! are NOT touched — they're owned outside the substrate.
-//! Embedders typically swap them as a separate step (drop the
-//! old, get a new one from the freshly-compiled backend).
+//! - **Component registry stays.** Same story — the publisher
+//!   re-registers with the new prop shape; the registry's
+//!   replace-by-name semantics swap the definition in place.
+//!   Any widget already holding a `ZyntaxValue` widget handle
+//!   keeps that handle valid because the underlying compiled
+//!   view function is updated via beadie, not deallocated.
+//!
+//! - **Signal tables stay.** User-facing state (scroll
+//!   positions, form values, etc.) MUST survive reload —
+//!   wiping them would be a UX regression every time the dev
+//!   saves a file. The DSL surface for signals is "named
+//!   storage cells"; reload doesn't change the names, just the
+//!   code that reads them.
+//!
+//! - **Guard dispatcher stays.** It points at the runtime,
+//!   not at any specific compiled function. Beadie's atomic
+//!   swap means the dispatcher's `call_guard(symbol)` call
+//!   picks up the new code automatically on the next
+//!   invocation.
+//!
+//! - **View renderer stays.** Same shape — embed-side
+//!   `Arc<dyn ViewRenderer>` holds a backend handle, not a
+//!   compiled-code reference. Next `render_named` call routes
+//!   through beadie to whatever code is currently installed.
+//!
+//! ## What reload actually does
+//!
+//! The runtime side: re-parse → re-compile → beadie swaps the
+//! new function pointers into the bead table. Embedders kick
+//! this off through whatever change-detection they wire up
+//! (file watcher, IPC signal, etc.).
+//!
+//! The substrate side: nothing routine. Registries get updated
+//! by the normal post-parse publishers (`publish_fsms_to_runtime_registry`,
+//! `publish_components_to_runtime_registry`) that run on the
+//! recompile path the same way they ran on the initial compile.
+//! Replace-by-name semantics make this idempotent.
+//!
+//! ## When you DO want a hard reset
+//!
+//! There's still a place for destructive clears:
+//!
+//! - **Tests** that want to start from a known-empty slate
+//!   between cases.
+//! - **Embedders shutting down a DSL** entirely (switching
+//!   to a different `.blinc` source, multi-tenant scenarios).
+//! - **Recovery** from a crash where the substrate state may
+//!   be corrupted.
+//!
+//! [`clear_all_destructive`] is the explicit-name function
+//! for that. Routine reload should NEVER call it.
+//!
+//! [`beadie`]: https://docs.rs/beadie
 
-use crate::{component, fsm, scene, signal};
+use crate::{component, fsm, signal};
 
-/// Reset every substrate's persistent state. Call at the
-/// start of a hot-reload cycle, before re-publishing.
+/// **Destructive** reset of every substrate's persistent state.
+/// Wipes FSM + component registries, clears the guard
+/// dispatcher slot, wipes signal tables.
 ///
-/// Each substrate's reset is idempotent — calling `reset_all`
-/// twice is the same as once. Safe to call from any thread,
-/// though embedders should serialise reload with any in-flight
-/// render so the resets don't race a concurrent push to the
-/// scene buffer.
-pub fn reset_all() {
+/// **This is not the reload path.** Hot-reload in Blinc is
+/// non-destructive — see the module-level docs for why.
+/// Call this only from tests that need a known-empty slate,
+/// or from embedders explicitly tearing down a DSL instance
+/// (switching to a different source, shutting down, etc.).
+///
+/// Idempotent — calling twice is the same as once. Safe to
+/// call from any thread, but embedders should serialise
+/// against any in-flight render so the resets don't race a
+/// concurrent registry read.
+pub fn clear_all_destructive() {
     fsm::with_fsm_registry_mut(|r| r.clear());
     fsm::clear_guard_dispatcher();
     component::with_component_registry_mut(|r| r.clear());
     signal::clear_all();
-    scene::clear();
 }
 
 #[cfg(test)]
@@ -71,10 +112,12 @@ mod tests {
         Arc::from(s)
     }
 
-    /// `reset_all` clears every substrate. Plant something in
-    /// each, call reset, observe everything is empty / absent.
+    /// `clear_all_destructive` wipes every substrate. Plant
+    /// something in each, call clear, observe everything is
+    /// empty / absent. This is the test-only / shutdown path,
+    /// NOT the reload path — see module docs.
     #[test]
-    fn reset_all_clears_every_substrate() {
+    fn clear_all_destructive_wipes_every_substrate() {
         // Plant: fsm registry
         fsm::with_fsm_registry_mut(|r| {
             r.register(fsm::FsmDefinition {
@@ -115,34 +158,64 @@ mod tests {
         assert_eq!(signal::get_i32("reload_test_count"), Some(7));
         assert_eq!(signal::get_f64("reload_test_progress"), Some(0.5));
 
-        // Plant: scene buffer
-        scene::push(scene::DslOp::Text("reload-leftover".into()));
+        clear_all_destructive();
 
-        // Reset.
-        reset_all();
-
-        // Observe.
         assert!(
             fsm::with_fsm_registry(|r| r.id_of("ReloadTestFsm").is_none()),
-            "fsm registry should be empty after reset"
+            "fsm registry should be empty after clear"
         );
         assert!(
             component::with_component_registry(|r| r.id_of("ReloadTestComponent").is_none()),
-            "component registry should be empty after reset"
+            "component registry should be empty after clear"
         );
         assert_eq!(signal::get_i32("reload_test_count"), None);
         assert_eq!(signal::get_f64("reload_test_progress"), None);
-        assert!(scene::take().is_empty());
     }
 
-    /// `reset_all` is idempotent — second call sees the
-    /// cleared state and does nothing harmful.
+    /// `clear_all_destructive` is idempotent — second call
+    /// sees the cleared state and does nothing harmful.
     #[test]
-    fn reset_all_is_idempotent() {
-        reset_all();
-        reset_all();
-        // Spot-check that nothing's left behind.
+    fn clear_all_destructive_is_idempotent() {
+        clear_all_destructive();
+        clear_all_destructive();
         assert!(fsm::with_fsm_registry(|r| r.is_empty()));
         assert!(component::with_component_registry(|r| r.is_empty()));
+    }
+
+    /// Re-publishing an FSM definition by the same name
+    /// replaces the rules in place — the FsmId stays stable,
+    /// in-flight `FsmStateId`s keep working with the new
+    /// transitions. This is the registry-side behaviour that
+    /// makes non-destructive reload work: the publisher just
+    /// calls `register` again with the new shape; widgets
+    /// holding a `FsmStateId(fsm_id, variant)` see updated
+    /// transitions on the next `on_event` / `on_tick` without
+    /// any handoff.
+    #[test]
+    fn fsm_register_replaces_by_name_without_rotating_id() {
+        clear_all_destructive();
+
+        let first = fsm::with_fsm_registry_mut(|r| {
+            r.register(fsm::FsmDefinition {
+                name: arc("ReloadStableId"),
+                state_names: vec![arc("Idle"), arc("Loading")],
+                initial_code: 0,
+                ..Default::default()
+            })
+        });
+
+        // Reload — re-register with a different state set.
+        let second = fsm::with_fsm_registry_mut(|r| {
+            r.register(fsm::FsmDefinition {
+                name: arc("ReloadStableId"),
+                state_names: vec![arc("Idle"), arc("Loading"), arc("Done")],
+                initial_code: 0,
+                ..Default::default()
+            })
+        });
+
+        assert_eq!(first, second, "FsmId stable across re-register by name");
+        let def = fsm::with_fsm_registry(|r| r.get(first).cloned()).unwrap();
+        assert_eq!(def.state_names.len(), 3, "definition reflects new shape");
     }
 }

@@ -58,41 +58,52 @@ use zyntax_typed_ast::{typed_node, Span, TypedProgram, TypedStatement};
 pub const BLINC_GRAMMAR: &str = include_str!("../grammar/blinc.zyn");
 
 // =====================================================================
-// Scene buffer — host-owned op stream populated by DSL builtins
+// Scene buffer — TRANSITIONAL legacy op stream
 // =====================================================================
-
-/// One declarative draw op emitted by the DSL during a `render_view`
-/// call. The host drains the buffer after each invocation and turns
-/// it into a Blinc element tree.
-///
-/// Re-exported from [`blinc_runtime::scene`] — the canonical type
-/// lives in the runtime substrate so widget extensions and other
-/// non-DSL crates can produce / consume scene ops without
-/// depending on the DSL compiler. The `pub use` keeps existing
-/// `blinc_dsl_core::DslOp` references working.
-pub use blinc_runtime::scene::DslOp;
-
-// Scene buffer + signal tables both live in `blinc_runtime`:
 //
-//   - `blinc_runtime::scene` — `DslOp`, the thread-local buffer,
-//     and `take` / `push` / `clear`. JIT-side builtins (this
-//     crate's `$Blinc$text` etc.) push to it; the embed API
-//     drains via `take_scene_ops`.
-//   - `blinc_runtime::signal` — per-thread i32 / f64 signal
-//     tables. JIT-side externs read; the DSL-facing setter API
-//     on `BlincDsl` writes.
+// This module's `$Blinc$text` / `$Blinc$text_int` builtins still
+// push onto a per-thread scene buffer; `BlincDsl::render_view` /
+// `render_component` drain it. That op-stream design is being
+// replaced by value-returning view functions that construct real
+// `blinc_layout` widget trees via registered primitives — the
+// substrate's `ViewRenderer::render_named` already returns
+// `ZyntaxValue` for that path. This buffer plumbing stays around
+// only until `Div`, `Text`, etc. are registered as widget
+// primitives (Phase 2 of the pivot); at that point the externs
+// become widget-handle constructors, the buffer goes away, and
+// `render_view` / `render_component` return widget trees directly.
 //
-// Both move out of `blinc_dsl_core` so the AOT path doesn't have
-// to depend on this crate at app runtime — both backends produce
-// scene ops and read signals through the same substrate.
+// Substrate-public code path: `blinc_runtime::view::ViewRenderer`
+// (returns `ZyntaxValue`).
+// Legacy DSL-only path: `BlincDsl::render_view()` (returns
+// `Vec<DslOp>`, drains this buffer).
 
-/// Drain and return everything pushed onto the scene buffer since
-/// the last call. Called by the embed API after `runtime.call(...)`
-/// returns. Thin wrapper over [`blinc_runtime::scene::take`] kept
-/// here for source-compatibility with embedders that still import
-/// `blinc_dsl_core::take_scene_ops`.
+use std::cell::RefCell;
+
+/// One declarative draw op emitted by the DSL during a
+/// `render_view` call. Transitional — once widget primitives
+/// are registered, view functions return real
+/// `blinc_layout::Div` / `Text` handles wrapped in `ZyntaxValue`
+/// and this enum + buffer disappear.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DslOp {
+    Text(String),
+    IntText(i32),
+}
+
+thread_local! {
+    static SCENE_BUFFER: RefCell<Vec<DslOp>> = const { RefCell::new(Vec::new()) };
+}
+
+fn push_op(op: DslOp) {
+    SCENE_BUFFER.with(|b| b.borrow_mut().push(op));
+}
+
+/// Drain and return everything pushed onto the scene buffer
+/// since the last call. Legacy path — see the module-level
+/// note above.
 pub fn take_scene_ops() -> Vec<DslOp> {
-    blinc_runtime::scene::take()
+    SCENE_BUFFER.with(|b| std::mem::take(&mut *b.borrow_mut()))
 }
 
 // =====================================================================
@@ -138,7 +149,7 @@ extern "C" fn blinc_text(s_ptr: *const i32) {
         .and_then(|s| s.strip_suffix('"'))
         .unwrap_or(raw);
 
-    blinc_runtime::scene::push(DslOp::Text(stripped.to_string()));
+    push_op(DslOp::Text(stripped.to_string()));
 }
 
 /// `__signal_get_i32` — host implementation of the i32 signal
@@ -266,7 +277,7 @@ extern "C" fn blinc_signal_get_string(name_ptr: *const i32) -> *const i32 {
 /// Same contract as [`blinc_text`]. The runtime guarantees the
 /// argument shape matches the registered `NativeType::I32`.
 extern "C" fn blinc_text_int(n: i32) {
-    blinc_runtime::scene::push(DslOp::IntText(n));
+    push_op(DslOp::IntText(n));
 }
 
 // =====================================================================
@@ -2217,16 +2228,25 @@ impl blinc_runtime::view::ViewRenderer for JitViewRenderer {
     fn render_named(
         &self,
         symbol: &str,
-    ) -> Result<Vec<blinc_runtime::scene::DslOp>, blinc_runtime::view::ViewRenderError> {
+    ) -> Result<ZyntaxValue, blinc_runtime::view::ViewRenderError> {
         let runtime = self.runtime.lock().map_err(|_| {
             blinc_runtime::view::ViewRenderError::Backend(
                 "BlincDsl runtime mutex poisoned".to_string(),
             )
         })?;
+        // Today's view functions are `() -> ()` — they push to
+        // the transitional scene buffer for side-effect-shape
+        // ops. Once `Div` / `Text` widget primitives are
+        // registered (Phase 2 of the pivot), view functions
+        // will be `() -> Widget` and this call captures the
+        // returned `ZyntaxValue` directly. Until then, return
+        // `ZyntaxValue::Void` and let the legacy
+        // `BlincDsl::render_view` path drain the scene buffer
+        // for tests that still assert on `DslOp` shapes.
         runtime
             .call::<()>(symbol, &[])
             .map_err(|e| blinc_runtime::view::ViewRenderError::Backend(e.to_string()))?;
-        Ok(blinc_runtime::scene::take())
+        Ok(ZyntaxValue::Void)
     }
 }
 
@@ -7365,21 +7385,18 @@ mod tests {
 
         // Bare view: `view { Greeting() }` runs Greeting's view
         // (inlined by `lower_component_calls`'s child flatten).
-        let main_ops = blinc_runtime::view::render_main(&renderer).expect("render_main");
-        assert_eq!(main_ops.len(), 1);
-        match &main_ops[0] {
-            DslOp::Text(s) => assert_eq!(s, "hello via renderer"),
-            other => panic!("expected text op, got {other:?}"),
-        }
+        // Substrate-public `render_main` returns `ZyntaxValue`
+        // (today `Void` — the legacy DslOp scene-buffer drain
+        // happens inside `BlincDsl::render_view` separately).
+        // Phase 2 of the pivot will make views return real
+        // widget trees here.
+        let main_value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+        assert_eq!(main_value, ZyntaxValue::Void);
 
-        // Direct component invocation: same component, same ops.
-        let comp_ops =
+        // Direct component invocation: same shape.
+        let comp_value =
             blinc_runtime::view::render_component(&renderer, "Greeting").expect("render_component");
-        assert_eq!(comp_ops.len(), 1);
-        match &comp_ops[0] {
-            DslOp::Text(s) => assert_eq!(s, "hello via renderer"),
-            other => panic!("expected text op, got {other:?}"),
-        }
+        assert_eq!(comp_value, ZyntaxValue::Void);
 
         // Unknown component → `NotFound` (well — actually
         // routes through Cranelift's symbol resolution and

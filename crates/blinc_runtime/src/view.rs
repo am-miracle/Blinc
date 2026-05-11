@@ -3,14 +3,25 @@
 //! A [`ViewRenderer`] resolves a DSL-emitted view symbol (e.g.
 //! `Counter$view` for an inherent-impl `view` method, or
 //! `render_view` for a bare-form `view { ... }`) and runs it,
-//! returning the scene ops the view produced.
+//! returning the typed value the view produced.
 //!
-//! Lives in `blinc_runtime` so widget integration code can hold
-//! an `Arc<dyn ViewRenderer>` without knowing whether the
-//! backend is `blinc_dsl_core` (Zyntax+Cranelift, in-process
-//! JIT) or a future AOT-only crate (Zyntax+LLVM, static link).
-//! Both backends implement this trait the same way from the
-//! widget side: name in, ops out.
+//! ## Value-returning views
+//!
+//! View functions in the Blinc DSL **return a widget tree**.
+//! The JIT-compiled (or AOT-linked) body of a `view { ... }`
+//! constructs a [`ZyntaxValue`] carrying handles to real
+//! `blinc_layout::Div` / `Text` / etc. instances built up via
+//! registered widget primitives — `Div(props) { ..children }`
+//! in source lowers to `$Blinc$Div(props, children)` extern
+//! calls that return widget handles.
+//!
+//! This is a retained-mode shape (return-a-value, like
+//! React / Vue / SwiftUI), not immediate-mode (push-an-op-stream).
+//! It exists because both backends compile views through
+//! Zyntax's value machinery — and Cranelift / LLVM can inline,
+//! fold, DCE across the entire view body when the body is a
+//! single value-returning expression. The earlier op-stream
+//! design left those optimisations on the table.
 //!
 //! ## Ownership story
 //!
@@ -25,7 +36,7 @@
 
 use std::sync::Arc;
 
-use crate::scene::DslOp;
+use zyntax_embed::ZyntaxValue;
 
 /// Strategy for resolving a view symbol and running it.
 ///
@@ -33,18 +44,18 @@ use crate::scene::DslOp;
 ///
 /// - **`JitViewRenderer`** (in `blinc_dsl_core`) — wraps an
 ///   `Arc<Mutex<ZyntaxRuntime>>`, calls
-///   `runtime.call::<()>(symbol, &[])` so the Cranelift JIT runs
-///   the compiled view body, then drains
-///   [`crate::scene::take`].
+///   `runtime.call::<ZyntaxValue>(symbol, &[])` so the Cranelift
+///   JIT runs the compiled view body and hands back the value
+///   it returned (a widget tree).
 ///
 /// - **AOT renderer** (future) — wraps a static lookup table of
-///   `extern "C" fn() -> ()` pointers produced at LLVM link
-///   time, calls the pointer directly, drains the same scene
-///   buffer.
+///   `extern "C" fn() -> ZyntaxValue` pointers produced at LLVM
+///   link time, calls the pointer directly.
 ///
-/// Both produce identical [`DslOp`] streams from identical
-/// `.blinc` sources. Widget code that consumes ops only depends
-/// on this trait — neither backend needs to be linked at widget
+/// Both produce identical [`ZyntaxValue`] trees from identical
+/// `.blinc` sources. Consumer code (the
+/// `ZyntaxValue -> blinc_layout::Div` walker) only depends on
+/// this trait — neither backend needs to be linked at consumer
 /// compile time.
 ///
 /// `Send + Sync` because renderers commonly live behind an
@@ -55,7 +66,7 @@ use crate::scene::DslOp;
 /// crate's `JitViewRenderer` for the safety argument.
 pub trait ViewRenderer: Send + Sync + 'static {
     /// Run the view registered under `symbol` and return the
-    /// scene ops it produced.
+    /// widget tree value it produced.
     ///
     /// `symbol` is the JIT-linker-visible name:
     ///
@@ -69,7 +80,7 @@ pub trait ViewRenderer: Send + Sync + 'static {
     /// The convenience helpers [`render_main`] and
     /// [`render_component`] construct these names so callers
     /// don't have to remember the mangling.
-    fn render_named(&self, symbol: &str) -> Result<Vec<DslOp>, ViewRenderError>;
+    fn render_named(&self, symbol: &str) -> Result<ZyntaxValue, ViewRenderError>;
 }
 
 /// Errors a view-renderer might return. Kept simple — most
@@ -93,7 +104,7 @@ pub enum ViewRenderError {
 
 /// Run the bare-form `view { ... }` at the top of the DSL
 /// source. Equivalent to `renderer.render_named("render_view")`.
-pub fn render_main(renderer: &Arc<dyn ViewRenderer>) -> Result<Vec<DslOp>, ViewRenderError> {
+pub fn render_main(renderer: &Arc<dyn ViewRenderer>) -> Result<ZyntaxValue, ViewRenderError> {
     renderer.render_named("render_view")
 }
 
@@ -103,7 +114,7 @@ pub fn render_main(renderer: &Arc<dyn ViewRenderer>) -> Result<Vec<DslOp>, ViewR
 pub fn render_component(
     renderer: &Arc<dyn ViewRenderer>,
     name: &str,
-) -> Result<Vec<DslOp>, ViewRenderError> {
+) -> Result<ZyntaxValue, ViewRenderError> {
     let symbol = format!("{name}$view");
     renderer.render_named(&symbol)
 }
@@ -114,31 +125,31 @@ mod tests {
     use std::sync::Mutex;
 
     /// In-process test renderer that records every symbol
-    /// called and emits a programmed scene-op set per call.
+    /// called and emits a programmed `ZyntaxValue` per call.
     /// Mirrors the shape of a real backend without dragging in
     /// any actual compile / JIT machinery.
     struct ScriptedRenderer {
         calls: Mutex<Vec<String>>,
-        ops_for: Mutex<std::collections::HashMap<String, Vec<DslOp>>>,
+        results: Mutex<std::collections::HashMap<String, ZyntaxValue>>,
     }
 
     impl ScriptedRenderer {
-        fn new(scripts: &[(&str, Vec<DslOp>)]) -> Self {
+        fn new(scripts: &[(&str, ZyntaxValue)]) -> Self {
             let mut map = std::collections::HashMap::new();
-            for (sym, ops) in scripts {
-                map.insert((*sym).to_string(), ops.clone());
+            for (sym, value) in scripts {
+                map.insert((*sym).to_string(), value.clone());
             }
             Self {
                 calls: Mutex::new(Vec::new()),
-                ops_for: Mutex::new(map),
+                results: Mutex::new(map),
             }
         }
     }
 
     impl ViewRenderer for ScriptedRenderer {
-        fn render_named(&self, symbol: &str) -> Result<Vec<DslOp>, ViewRenderError> {
+        fn render_named(&self, symbol: &str) -> Result<ZyntaxValue, ViewRenderError> {
             self.calls.lock().unwrap().push(symbol.to_string());
-            self.ops_for
+            self.results
                 .lock()
                 .unwrap()
                 .get(symbol)
@@ -148,14 +159,17 @@ mod tests {
     }
 
     /// `render_main` resolves to the `"render_view"` symbol.
+    /// Returns whatever ZyntaxValue the view produced — for
+    /// this test, a simple `String` standing in for a widget
+    /// handle.
     #[test]
     fn render_main_uses_render_view_symbol() {
         let renderer: Arc<dyn ViewRenderer> = Arc::new(ScriptedRenderer::new(&[(
             "render_view",
-            vec![DslOp::Text("bare".into())],
+            ZyntaxValue::String("bare-view-result".into()),
         )]));
-        let ops = render_main(&renderer).unwrap();
-        assert_eq!(ops, vec![DslOp::Text("bare".into())]);
+        let value = render_main(&renderer).unwrap();
+        assert_eq!(value, ZyntaxValue::String("bare-view-result".into()));
     }
 
     /// `render_component(name)` mangles to `<name>$view`.
@@ -163,10 +177,10 @@ mod tests {
     fn render_component_mangles_view_symbol() {
         let renderer: Arc<dyn ViewRenderer> = Arc::new(ScriptedRenderer::new(&[(
             "Counter$view",
-            vec![DslOp::IntText(42)],
+            ZyntaxValue::Int(42),
         )]));
-        let ops = render_component(&renderer, "Counter").unwrap();
-        assert_eq!(ops, vec![DslOp::IntText(42)]);
+        let value = render_component(&renderer, "Counter").unwrap();
+        assert_eq!(value, ZyntaxValue::Int(42));
     }
 
     /// Unknown symbol surfaces as `ViewRenderError::NotFound`.

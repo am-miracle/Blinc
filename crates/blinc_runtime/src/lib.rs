@@ -14,7 +14,6 @@
 pub mod component;
 pub mod fsm;
 pub mod reload;
-pub mod scene;
 pub mod signal;
 pub mod view;
 
