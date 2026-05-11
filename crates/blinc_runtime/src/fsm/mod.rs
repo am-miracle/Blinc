@@ -57,7 +57,7 @@ pub mod dispatch;
 pub mod instance;
 pub mod registry;
 
-pub use dispatch::{set_guard_dispatcher, GuardDispatcher};
+pub use dispatch::{clear_guard_dispatcher, set_guard_dispatcher, GuardDispatcher};
 pub use instance::FsmStateId;
 pub use registry::{
     with_fsm_registry, with_fsm_registry_mut, EventTransition, FsmDefinition, FsmId, FsmRegistry,
