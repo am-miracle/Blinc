@@ -22,19 +22,38 @@ full = ["blinc_core", "blinc_animation", "blinc_gpu", "blinc_paint"]
 # that want a leaner runtime surface (headless, server-side, etc.).
 blinc_layout = { path = "../blinc_layout", version = "0.5.1" }
 
-# Zyntax type-system primitives. `blinc_runtime` uses
-# `zyntax_typed_ast::type_registry::Type` as the canonical
-# representation for prop types, signal types, etc. — that's the
-# same shape the JIT publisher (`blinc_dsl_core`) and the future
-# AOT codegen produce, so the substrate can hold complex types
-# (structs, enums, tuples, arrays, optionals, generics) without
-# rolling its own type system in parallel.
-#
-# We depend on `zyntax_typed_ast` (the pure data crate), NOT
-# `zyntax_embed` (which pulls Cranelift and the JIT). Keeps the
-# substrate JIT-runtime-agnostic — an AOT-only app links
-# blinc_runtime + the AOT crate without Cranelift.
+# Zyntax type system — pure-data crate. Provides
+# `type_registry::Type` (and the rest of the typed-AST shape)
+# without dragging in any backend. The substrate uses `Type` as
+# the canonical representation for prop types, signal types,
+# event payloads, etc.
 zyntax_typed_ast = { git = "https://github.com/darmie/zyntax", rev = "5b0dfab7940dd01406f1982e02a2d2c7b5242604" }
+
+# Zyntax embedding SDK — used as a thin substrate dep for
+# `ZyntaxValue` (the runtime value enum). Both JIT and AOT-
+# compiled code from Zyntax produce/consume the same
+# `ZyntaxValue` shape, so `blinc_runtime` holds complex types
+# (structs, enums, arrays, optionals, generics) by storing
+# `ZyntaxValue` directly rather than rolling a parallel enum.
+#
+# `default-features = false` because the default `native` feature
+# enables Cranelift JIT and dynamic-plugin loading; the substrate
+# itself stays backend-free so JIT consumers (`blinc_dsl_core`,
+# which enables `native` itself) and AOT consumers (a future
+# Zyntax+LLVM-driven crate that enables `llvm-backend`) each pick
+# the backend they need without `blinc_runtime` forcing one.
+#
+# What `default-features = false` actually exposes:
+# - `ZyntaxValue` (the Rust-friendly runtime value enum)
+# - `ZyntaxString`
+# - `TypedProgram` (re-exported from zyntax_typed_ast)
+# - Pure-data type-registry items (`type_registry::Type`,
+#   `PrimitiveType`, etc.)
+# What it does NOT expose without an additional feature:
+# - `ZyntaxRuntime` / `TieredRuntime` (JIT runtime entry points)
+# - `.zrtl` dynamic plugin loading
+# - LLVM codegen
+zyntax_embed = { git = "https://github.com/darmie/zyntax", rev = "5b0dfab7940dd01406f1982e02a2d2c7b5242604", default-features = false }
 
 blinc_core = { path = "../blinc_core", version = "0.5.1", optional = true }
 blinc_animation = { path = "../blinc_animation", version = "0.5.1", optional = true }

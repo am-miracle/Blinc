@@ -16,8 +16,14 @@ pub mod fsm;
 pub mod reload;
 pub mod scene;
 pub mod signal;
-pub mod value;
 pub mod view;
+
+// `ZyntaxValue` is the canonical runtime value representation
+// — JIT and AOT compiled code from Zyntax both produce it.
+// Re-exported here so the substrate's surface includes the
+// value enum without callers needing to depend on
+// `zyntax_embed` themselves.
+pub use zyntax_embed::ZyntaxValue;
 
 pub use blinc_layout;
 

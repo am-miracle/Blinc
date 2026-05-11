@@ -7275,29 +7275,45 @@ mod tests {
     #[test]
     fn publish_components_to_runtime_registry_round_trip() {
         let _ = tracing_subscriber::fmt::try_init();
+        // Serialize against other tests that write to the
+        // global `blinc_runtime::component::ComponentRegistry`
+        // — many tests compile `component Counter { ... }` of
+        // various shapes, and the publisher replaces by name
+        // (hot-reload semantics), so parallel runs race over
+        // which `Counter` definition is current.
+        let _guard = BRIDGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let dsl = BlincDsl::new().expect("runtime init");
         dsl.compile_source(
             r#"
-            component Counter (initial: i32, step: i32) {
+            component RegistryRoundTripCounter (initial: i32, step: i32) {
                 view { text("counter") }
             }
-            component Greeting {
+            component RegistryRoundTripGreeting {
                 view { text("hi") }
             }
-            view { Counter(1, 2) }
+            view { RegistryRoundTripCounter(1, 2) }
             "#,
             "component_registry_round_trip.blinc",
         )
         .expect("compile");
 
         // Both components should be registered in the substrate
-        // under their DSL names. Greeting has no props.
+        // under their unique-to-this-test names. Using
+        // distinctive names avoids the global-registry race
+        // where other tests' `component Counter { ... }` /
+        // `component Greeting { ... }` compilations overwrite
+        // ours under parallel test execution.
         let counter = blinc_runtime::component::with_component_registry(|r| {
-            r.get_by_name("Counter").cloned()
+            r.get_by_name("RegistryRoundTripCounter").cloned()
         })
-        .expect("Counter should be published");
-        assert_eq!(counter.view_symbol.as_ref(), "Counter$view");
+        .expect("RegistryRoundTripCounter should be published");
+        assert_eq!(
+            counter.view_symbol.as_ref(),
+            "RegistryRoundTripCounter$view"
+        );
         assert_eq!(counter.prop_count(), 2);
         assert_eq!(counter.props[0].name.as_ref(), "initial");
         assert_eq!(
@@ -7311,10 +7327,13 @@ mod tests {
         );
 
         let greeting = blinc_runtime::component::with_component_registry(|r| {
-            r.get_by_name("Greeting").cloned()
+            r.get_by_name("RegistryRoundTripGreeting").cloned()
         })
-        .expect("Greeting should be published");
-        assert_eq!(greeting.view_symbol.as_ref(), "Greeting$view");
+        .expect("RegistryRoundTripGreeting should be published");
+        assert_eq!(
+            greeting.view_symbol.as_ref(),
+            "RegistryRoundTripGreeting$view"
+        );
         assert_eq!(greeting.prop_count(), 0);
     }
 

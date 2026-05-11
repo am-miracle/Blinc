@@ -10,30 +10,18 @@
 //! `__signal_get_string`) that the runtime resolves by name.
 //!
 //! Storage is a single thread-local `HashMap<String,
-//! crate::value::Value>` — values are stored in their full
-//! [`Value`] form so the table naturally handles complex types
-//! (structs, enums, arrays, optionals, ...) the moment the JIT
-//! / AOT pipeline grows externs that return them. Today the
-//! externs use i32 / f64 / string; the typed `set_*` / `get_*`
-//! accessors below are thin wrappers over the underlying
-//! `Value`-keyed store.
+//! ZyntaxValue>`. Both JIT and AOT-compiled DSL code produces
+//! `ZyntaxValue` natively (it's Zyntax's canonical runtime
+//! value representation), so the substrate stores it directly
+//! — no parallel value enum. Complex types (structs, enums,
+//! arrays, optionals, generics) flow through unchanged the
+//! moment the JIT / AOT externs grow to handle them.
 //!
 //! Lives in `blinc_runtime` rather than `blinc_dsl_core`
-//! because:
-//!
-//! - **Backend-agnostic.** Both the JIT path (Zyntax+Cranelift)
-//!   and the future AOT path (Zyntax+LLVM) compile the same DSL
-//!   surface into calls against the same `__signal_get_*`
-//!   externs. The storage shape doesn't change between
-//!   backends, so the table belongs in the substrate everyone
-//!   shares.
-//!
-//! - **Widget integration.** A widget that wants to feed a
-//!   value into a DSL tick guard (e.g. a `ScrollView` writing
-//!   its current position into a `progress` signal so a Loader
-//!   FSM can react) needs to call `set_*` from widget code. If
-//!   the table lived in `blinc_dsl_core`, the widget crate
-//!   would have to depend on the DSL compiler — a heavy cycle.
+//! because both backends share this storage; a widget that
+//! wants to feed a value into a DSL tick guard reaches for
+//! `blinc_runtime::signal::set_*` without depending on the
+//! DSL compiler.
 //!
 //! ## Threading
 //!
@@ -48,26 +36,26 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::value::Value;
+use zyntax_embed::ZyntaxValue;
 
 thread_local! {
-    /// The underlying `Value`-keyed table. All typed accessors
-    /// route through this single map so the substrate has one
-    /// place to clear / introspect / hot-reload from.
-    static TABLE: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
+    /// The underlying `ZyntaxValue`-keyed table. All typed
+    /// accessors route through this single map so the substrate
+    /// has one place to clear / introspect / hot-reload from.
+    static TABLE: RefCell<HashMap<String, ZyntaxValue>> = RefCell::new(HashMap::new());
 }
 
 // =====================================================================
-// Generic Value accessors
+// Generic ZyntaxValue accessors
 // =====================================================================
 //
-// These work in `Value` directly — for complex types (structs,
-// enums, arrays) callers use these and pattern-match on the
-// returned `Value`.
+// These work in `ZyntaxValue` directly — for complex types
+// (structs, enums, arrays) callers use these and pattern-match
+// on the returned `ZyntaxValue`.
 
-/// Set a signal to an arbitrary [`Value`]. Replaces any prior
-/// entry for `name`.
-pub fn set(name: &str, value: Value) {
+/// Set a signal to an arbitrary [`ZyntaxValue`]. Replaces any
+/// prior entry for `name`.
+pub fn set(name: &str, value: ZyntaxValue) {
     TABLE.with(|t| {
         t.borrow_mut().insert(name.to_string(), value);
     });
@@ -75,7 +63,7 @@ pub fn set(name: &str, value: Value) {
 
 /// Read the current value of a signal. Returns `None` when
 /// the signal hasn't been set on this thread.
-pub fn get(name: &str) -> Option<Value> {
+pub fn get(name: &str) -> Option<ZyntaxValue> {
     TABLE.with(|t| t.borrow().get(name).cloned())
 }
 
@@ -91,32 +79,34 @@ pub fn clear_all() {
 // i32 typed accessors
 // =====================================================================
 //
-// Wrap the `Value`-keyed table. JIT externs and most host
-// callers work in primitive types, so the typed accessors
-// stay the ergonomic surface.
+// Wrap the generic table. JIT externs and most host callers
+// work in primitive types, so the typed accessors stay the
+// ergonomic surface. Each accessor pattern-matches on the
+// matching `ZyntaxValue` variant — `Int(i64)` for the integer
+// signals, `Float(f64)` for floats, `String(String)` for
+// strings.
 
 /// Set the current value of an i32-typed signal. Stored
-/// internally as `Value::Int(i64)`; readers using `get_i32`
-/// truncate back.
+/// internally as `ZyntaxValue::Int(i64)`; readers using
+/// `get_i32` truncate back.
 pub fn set_i32(name: &str, value: i32) {
-    set(name, Value::from_i32(value));
+    set(name, ZyntaxValue::Int(value as i64));
 }
 
 /// Read the current value of an i32-typed signal. Returns
 /// `None` when the signal hasn't been set, or when the stored
 /// value isn't actually an int (e.g. the host put a struct in
-/// there — the JIT extern would have produced garbage if it
-/// reached this case).
+/// there).
 pub fn get_i32(name: &str) -> Option<i32> {
-    get(name).and_then(|v| v.as_i32())
+    match get(name) {
+        Some(ZyntaxValue::Int(n)) => i32::try_from(n).ok(),
+        _ => None,
+    }
 }
 
 /// Read with a default of `0` when the signal hasn't been
 /// set. Matches the surface the JIT extern presents to DSL
-/// code — guards never see an `Option`, just an `i32`, so the
-/// unset case has to resolve to *some* concrete value.
-/// Embedders that need a different default should seed the
-/// table via `set_i32` before the first JIT call.
+/// code.
 pub fn get_i32_or_default(name: &str) -> i32 {
     get_i32(name).unwrap_or(0)
 }
@@ -125,18 +115,20 @@ pub fn get_i32_or_default(name: &str) -> i32 {
 // f64 typed accessors
 // =====================================================================
 
-/// f64 mirror of [`set_i32`]. Stored as `Value::Float(f64)`.
+/// f64 mirror of [`set_i32`].
 pub fn set_f64(name: &str, value: f64) {
-    set(name, Value::from_f64(value));
+    set(name, ZyntaxValue::Float(value));
 }
 
 /// f64 mirror of [`get_i32`].
 pub fn get_f64(name: &str) -> Option<f64> {
-    get(name).and_then(|v| v.as_f64())
+    match get(name) {
+        Some(ZyntaxValue::Float(n)) => Some(n),
+        _ => None,
+    }
 }
 
-/// f64 mirror of [`get_i32_or_default`]. Returns `0.0` when
-/// the signal hasn't been set.
+/// f64 mirror of [`get_i32_or_default`].
 pub fn get_f64_or_default(name: &str) -> f64 {
     get_f64(name).unwrap_or(0.0)
 }
@@ -146,9 +138,9 @@ pub fn get_f64_or_default(name: &str) -> f64 {
 // =====================================================================
 
 /// Set the current value of a string-typed signal. Stored as
-/// `Value::String(owned)`.
+/// `ZyntaxValue::String(owned)`.
 pub fn set_str(name: &str, value: impl Into<String>) {
-    set(name, Value::from_string(value));
+    set(name, ZyntaxValue::String(value.into()));
 }
 
 /// Read the current value of a string-typed signal. Returns
@@ -156,14 +148,13 @@ pub fn set_str(name: &str, value: impl Into<String>) {
 /// string).
 pub fn get_str(name: &str) -> Option<String> {
     match get(name) {
-        Some(Value::String(s)) => Some(s),
+        Some(ZyntaxValue::String(s)) => Some(s),
         _ => None,
     }
 }
 
 /// Read with a default of `""` when the signal hasn't been
-/// set. Matches the surface the JIT extern presents to DSL
-/// code.
+/// set.
 pub fn get_str_or_default(name: &str) -> String {
     get_str(name).unwrap_or_default()
 }
@@ -172,7 +163,6 @@ pub fn get_str_or_default(name: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Round-trip a value through `set_i32` / `get_i32`.
     #[test]
     fn i32_round_trip() {
         clear_all();
@@ -183,8 +173,6 @@ mod tests {
         assert_eq!(get_i32("count"), Some(-7));
     }
 
-    /// `get_i32_or_default` falls back to `0` when unset and
-    /// returns the stored value otherwise.
     #[test]
     fn i32_default_when_unset() {
         clear_all();
@@ -193,10 +181,10 @@ mod tests {
         assert_eq!(get_i32_or_default("present"), 99);
     }
 
-    /// f64 mirror — round-trip + default. Single table now,
-    /// but the typed accessors keep i32 and f64 readers
-    /// independent: a name written as f64 reads back via
-    /// `get_f64`, not `get_i32`.
+    /// f64 round-trip — single table, but typed readers stay
+    /// type-strict: a name written as f64 reads back via
+    /// `get_f64`, not `get_i32`. Overwriting with i32 makes
+    /// `get_f64` return None (stored shape no longer matches).
     #[test]
     fn f64_round_trip_and_default() {
         clear_all();
@@ -207,15 +195,11 @@ mod tests {
         assert_eq!(get_f64("progress"), Some(0.75));
         assert_eq!(get_f64_or_default("progress"), 0.75);
 
-        // Writing i32 to the same name OVERWRITES the f64
-        // (single table). `get_f64` then returns None
-        // because the stored Value is now `Int`, not `Float`.
         set_i32("progress", 100);
         assert_eq!(get_i32("progress"), Some(100));
         assert_eq!(get_f64("progress"), None);
     }
 
-    /// String round-trip + default.
     #[test]
     fn str_round_trip_and_default() {
         clear_all();
@@ -227,36 +211,37 @@ mod tests {
         assert_eq!(get_str_or_default("title"), "hello");
     }
 
-    /// Complex types — set a struct, retrieve it via the
-    /// generic `get`. Proves the substrate's single-table
-    /// design supports complex types end-to-end.
+    /// Complex shape — Struct flows through the substrate
+    /// without normalising. Proves the single-table design
+    /// holds for arbitrary `ZyntaxValue` shapes.
     #[test]
     fn complex_value_round_trip() {
         clear_all();
-        let point = Value::Struct {
+        let point = ZyntaxValue::Struct {
             type_name: "Point".into(),
-            fields: std::collections::HashMap::from([
-                ("x".to_string(), Value::Int(3)),
-                ("y".to_string(), Value::Int(4)),
+            fields: HashMap::from([
+                ("x".to_string(), ZyntaxValue::Int(3)),
+                ("y".to_string(), ZyntaxValue::Int(4)),
             ]),
         };
         set("origin", point.clone());
         let read_back = get("origin").unwrap();
         assert_eq!(read_back, point);
 
-        // Typed accessors return `None` for a struct value —
-        // they only succeed when the stored shape matches.
+        // Typed accessors return None for a struct value.
         assert_eq!(get_i32("origin"), None);
         assert_eq!(get_str("origin"), None);
     }
 
-    /// `clear_all` wipes everything regardless of type.
     #[test]
-    fn clear_all_wipes_all_tables() {
+    fn clear_all_wipes_table() {
         set_i32("a", 1);
         set_f64("b", 2.0);
         set_str("c", "three");
-        set("d", Value::Array(vec![Value::Int(1), Value::Int(2)]));
+        set(
+            "d",
+            ZyntaxValue::Array(vec![ZyntaxValue::Int(1), ZyntaxValue::Int(2)]),
+        );
         clear_all();
         assert_eq!(get_i32("a"), None);
         assert_eq!(get_f64("b"), None);
