@@ -914,6 +914,168 @@ fn resolve_signal_calls(program: &mut TypedProgram) {
     });
 }
 
+/// Validate that every `__component_call__("Name", ...)` marker
+/// references a `Name` that's been declared as a `component` (a
+/// `TypedDeclaration::Class`) in the same program. The grammar
+/// emits the marker for any uppercase-leading `Foo(...)`
+/// invocation; this pass is what catches typos and undeclared
+/// component references at compile time, before Zyntax's
+/// type-checker has a chance to surface a less-helpful unresolved-
+/// symbol error.
+///
+/// Returns the list of `(component_name, span_hint)` pairs that
+/// failed validation — empty if everything resolves. Caller folds
+/// non-empty results into a `BlincDslError::Compile`.
+///
+/// Note: this pass intentionally does NOT rewrite the markers. The
+/// `__component_call__` shape is the stable contract the
+/// downstream codegen / host-runtime layer consumes — keeping the
+/// marker present after parse means later passes (and any
+/// debug-AST printers) can still see exactly what the user wrote.
+fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec<String>> {
+    use std::collections::HashSet;
+    use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedExpression, TypedLiteral};
+
+    let mut known: HashSet<String> = HashSet::new();
+    for decl in &program.declarations {
+        if let TypedDeclaration::Class(c) = &decl.node {
+            if let Some(name) = c.name.resolve_global() {
+                known.insert(name.to_string());
+            }
+        }
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+
+    fn check_expr(
+        expr: &zyntax_typed_ast::TypedNode<TypedExpression>,
+        known: &HashSet<String>,
+        errors: &mut Vec<String>,
+    ) {
+        match &expr.node {
+            TypedExpression::Binary(b) => {
+                check_expr(&b.left, known, errors);
+                check_expr(&b.right, known, errors);
+            }
+            TypedExpression::Unary(u) => check_expr(&u.operand, known, errors),
+            TypedExpression::Call(c) => {
+                check_expr(&c.callee, known, errors);
+                for a in &c.positional_args {
+                    check_expr(a, known, errors);
+                }
+
+                // Is this a __component_call__ marker? If so, check
+                // its first positional arg (the component name
+                // string literal) against the known-classes set.
+                if let TypedExpression::Variable(callee_name) = &c.callee.node {
+                    if callee_name.resolve_global().as_deref() == Some("__component_call__") {
+                        if let Some(name_node) = c.positional_args.first() {
+                            if let TypedExpression::Literal(TypedLiteral::String(name)) =
+                                &name_node.node
+                            {
+                                let name_str = name.resolve_global().unwrap_or_default();
+                                if !known.contains::<str>(name_str.as_ref()) {
+                                    errors.push(format!(
+                                        "unknown component `{}` — declare it with \
+                                         `component {} {{ ... }}` before use",
+                                        name_str, name_str
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            TypedExpression::Field(f) => check_expr(&f.object, known, errors),
+            TypedExpression::Index(idx) => {
+                check_expr(&idx.object, known, errors);
+                check_expr(&idx.index, known, errors);
+            }
+            TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
+                for it in items {
+                    check_expr(it, known, errors);
+                }
+            }
+            TypedExpression::MethodCall(mc) => {
+                check_expr(&mc.receiver, known, errors);
+                for a in &mc.positional_args {
+                    check_expr(a, known, errors);
+                }
+            }
+            TypedExpression::Block(b) => check_block(b, known, errors),
+            TypedExpression::If(if_expr) => {
+                check_expr(&if_expr.condition, known, errors);
+                check_expr(&if_expr.then_branch, known, errors);
+                check_expr(&if_expr.else_branch, known, errors);
+            }
+            _ => {}
+        }
+    }
+
+    fn check_block(
+        block: &zyntax_typed_ast::typed_ast::TypedBlock,
+        known: &HashSet<String>,
+        errors: &mut Vec<String>,
+    ) {
+        for stmt in &block.statements {
+            check_stmt(stmt, known, errors);
+        }
+    }
+
+    fn check_stmt(
+        stmt: &zyntax_typed_ast::TypedNode<TypedStatement>,
+        known: &HashSet<String>,
+        errors: &mut Vec<String>,
+    ) {
+        match &stmt.node {
+            TypedStatement::Expression(e) => check_expr(e, known, errors),
+            TypedStatement::Let(l) => {
+                if let Some(init) = &l.initializer {
+                    check_expr(init, known, errors);
+                }
+            }
+            TypedStatement::Return(Some(e)) => check_expr(e, known, errors),
+            TypedStatement::If(if_stmt) => {
+                check_expr(&if_stmt.condition, known, errors);
+                check_block(&if_stmt.then_block, known, errors);
+                if let Some(else_block) = &if_stmt.else_block {
+                    check_block(else_block, known, errors);
+                }
+            }
+            TypedStatement::While(w) => {
+                check_expr(&w.condition, known, errors);
+                check_block(&w.body, known, errors);
+            }
+            TypedStatement::Block(b) => check_block(b, known, errors),
+            _ => {}
+        }
+    }
+
+    for decl in &program.declarations {
+        match &decl.node {
+            TypedDeclaration::Function(func) => {
+                if let Some(body) = &func.body {
+                    check_block(body, &known, &mut errors);
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                for method in &imp.methods {
+                    if let Some(body) = &method.body {
+                        check_block(body, &known, &mut errors);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
 /// Wrap every fsm's `__fsm_meta__` body with `__fsm_begin__("FsmName")`
 /// at the front and `__fsm_end__()` at the back. The host registers
 /// these markers as builtins that push/pop a "current FSM" name on
@@ -1649,6 +1811,15 @@ impl BlincDsl {
         inject_fsm_context_markers(&mut program);
         synthesize_fsm_event_enums(&mut program);
         resolve_signal_calls(&mut program);
+
+        // Component-call validation runs after the FSM/signal
+        // rewrites because earlier passes never introduce or strip
+        // `__component_call__` markers — but ordering it here keeps
+        // diagnostics consistent ("unknown component" surfaces
+        // *after* "unknown signal", same as field-resolution order
+        // in most type-checkers).
+        validate_component_calls(&program)
+            .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
 
         Ok(program)
     }
@@ -2540,9 +2711,18 @@ mod tests {
 
         let dsl = BlincDsl::new().expect("runtime init");
         let program = dsl
-            .parse_to_typed_ast(r#"view { Counter() }"#, "call_no_args.blinc")
+            .parse_to_typed_ast(
+                r#"
+                component Counter { }
+                view { Counter() }
+                "#,
+                "call_no_args.blinc",
+            )
             .expect("parse");
 
+        // The bare `view` lowers to a free function — its body is
+        // the first user-function body that doesn't belong to the
+        // empty `Counter` Class.
         let stmts = first_user_function_body(&program);
         assert_eq!(stmts.len(), 1, "expected 1 stmt, got {stmts:?}");
 
@@ -2586,7 +2766,13 @@ mod tests {
 
         let dsl = BlincDsl::new().expect("runtime init");
         let program = dsl
-            .parse_to_typed_ast(r#"view { Counter(1, 2) }"#, "call_positional.blinc")
+            .parse_to_typed_ast(
+                r#"
+                component Counter { }
+                view { Counter(1, 2) }
+                "#,
+                "call_positional.blinc",
+            )
             .expect("parse");
 
         let stmts = first_user_function_body(&program);
@@ -2623,7 +2809,13 @@ mod tests {
 
         let dsl = BlincDsl::new().expect("runtime init");
         let program = dsl
-            .parse_to_typed_ast(r#"view { Counter(1, step = 2) }"#, "call_named.blinc")
+            .parse_to_typed_ast(
+                r#"
+                component Counter { }
+                view { Counter(1, step = 2) }
+                "#,
+                "call_named.blinc",
+            )
             .expect("parse");
 
         let stmts = first_user_function_body(&program);
@@ -2677,7 +2869,10 @@ mod tests {
         let dsl = BlincDsl::new().expect("runtime init");
         let program = dsl
             .parse_to_typed_ast(
-                r#"view { let widget = Counter(0) }"#,
+                r#"
+                component Counter { }
+                view { let widget = Counter(0) }
+                "#,
                 "call_expr_position.blinc",
             )
             .expect("parse");
@@ -2701,6 +2896,85 @@ mod tests {
         assert_eq!(
             callee_name.resolve_global().as_deref(),
             Some("__component_call__")
+        );
+    }
+
+    /// `validate_component_calls` errors when a `__component_call__`
+    /// marker references a component that wasn't declared. Catches
+    /// typos at parse time rather than letting them slip through to
+    /// the (less-helpful) symbol-resolution stage later. The error
+    /// message names the failing component and suggests the
+    /// declaration form.
+    #[test]
+    fn validate_rejects_unknown_component() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let result = dsl.parse_to_typed_ast(
+            // No `component Counter { ... }` decl anywhere — the
+            // call should fail validation.
+            r#"view { Counter(1) }"#,
+            "unknown_component.blinc",
+        );
+        let err = result.expect_err("unknown component should fail validation");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown component `Counter`"),
+            "diagnostic should name the failing component, got: {msg}"
+        );
+    }
+
+    /// Forward references — the component is declared AFTER its
+    /// first use. The validation pass collects all known classes
+    /// before checking calls, so source order doesn't matter. Pins
+    /// that we don't accidentally re-introduce an ordering
+    /// constraint via the validate pass.
+    #[test]
+    fn validate_accepts_forward_reference() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let result = dsl.parse_to_typed_ast(
+            r#"
+            view { Inner(0) }
+            component Inner (x: i32) { }
+            "#,
+            "forward_ref.blinc",
+        );
+        assert!(
+            result.is_ok(),
+            "forward reference should validate, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// Multiple unknown calls report multiple errors — the
+    /// validation pass collects ALL failures rather than bailing on
+    /// the first. Helps users fix every typo in a single
+    /// compile/test cycle instead of one at a time.
+    #[test]
+    fn validate_collects_multiple_unknown_calls() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let result = dsl.parse_to_typed_ast(
+            r#"
+            view {
+                FooBar(0)
+                BazQux(1)
+            }
+            "#,
+            "many_unknown.blinc",
+        );
+        let err = result.expect_err("two unknown components should fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("FooBar"),
+            "missing FooBar in diagnostic: {msg}"
+        );
+        assert!(
+            msg.contains("BazQux"),
+            "missing BazQux in diagnostic: {msg}"
         );
     }
 
