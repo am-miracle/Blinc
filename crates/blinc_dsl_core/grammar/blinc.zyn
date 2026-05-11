@@ -148,7 +148,23 @@ component_folded = {
           fields: concat_list(props.unwrap_or([]), fields.unwrap_or([])),
       }],
       [TypedDeclaration::Impl {
-          trait_name: intern(name),
+          // Empty trait_name marks this as an INHERENT impl
+          // (the Zyntax compiler's `is_inherent = trait_name_str.
+          // is_empty()` check at compiler/lowering.rs:3346). With a
+          // non-empty trait_name, lower_impl_block tries to
+          // `get_trait_by_name(trait_name)` and silently fails when
+          // no such trait exists — which is exactly what happens if
+          // we set `trait_name: intern(name)`: there's no
+          // `trait Counter { ... }` registered, so the methods get
+          // discarded and the view never lands as a callable symbol.
+          //
+          // The inherent path mangles methods as `TypeName$method`
+          // (so `component Counter { view { ... } }` produces a
+          // `Counter$view` symbol the host can call). The
+          // `lower_component_calls` post-parse pass uses this
+          // mangling when rewriting `__component_call__("Counter",
+          // ...)` callees.
+          trait_name: intern(""),
           for_type: intern(name),
           items: prepend_list(view, extra),
       }],
@@ -356,13 +372,15 @@ state_type_string = { "string" }
 // `impl <Name> { fn ... fn ... }` — methods attached to a
 // previously-declared component. The interpreter's `Impl` path
 // at interpreter.rs:1017+ unwraps each `TypedDeclaration::Function`
-// into a `TypedMethod`. We use `trait_name == for_type ==
-// component_name` (the inherent-impl convention) so the typed AST
-// carries the component as both the implemented trait stub and
-// the type — same shape ml.zyn uses for inherent impl blocks.
+// into a `TypedMethod`. We set `trait_name: intern("")` — the
+// empty-trait-name convention Zyntax's compiler reads as "inherent
+// impl, not a trait impl" (compiler/lowering.rs:3346). Without the
+// empty marker, `lower_impl_block` looks up a trait by `name` (which
+// doesn't exist), silently drops the methods, and the view never
+// surfaces as a callable symbol.
 impl_block = { "impl" ~ name:identifier ~ "{" ~ items:impl_items ~ "}" }
   -> TypedDeclaration::Impl {
-      trait_name: intern(name),
+      trait_name: intern(""),
       for_type: intern(name),
       items: items,
   }

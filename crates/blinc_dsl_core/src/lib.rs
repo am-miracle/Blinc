@@ -1230,11 +1230,16 @@ fn lower_component_calls(program: &mut TypedProgram) {
         // named-marker args, then any pre-existing named_args.
         new_named.extend(call.named_args.iter().cloned());
 
-        // Rebuild the call: callee becomes a plain Variable
-        // reference to the component, positional/named are
-        // populated, span carries through.
+        // Rebuild the call: callee becomes a Variable reference to
+        // the component's MANGLED view symbol `<Name>$view`. This
+        // matches Zyntax's inherent-impl method mangling (compiler/
+        // lowering.rs:3612). Calling the bare component name would
+        // surface as a link-time `FunctionNotFound("Counter")`
+        // because the only symbol Zyntax registers is `Counter$view`.
+        let component_name_str = component_name.resolve_global().unwrap_or_default();
+        let view_symbol = format!("{component_name_str}$view");
         let new_callee = zyntax_typed_ast::TypedNode::new(
-            TypedExpression::Variable(component_name),
+            TypedExpression::Variable(zyntax_typed_ast::InternedString::new_global(&view_symbol)),
             Type::Any,
             span,
         );
@@ -2077,13 +2082,16 @@ impl BlincDsl {
     /// Invoke a named component's view and drain the scene buffer.
     ///
     /// For programs of the shape `component <Name> { view { ... } }`
-    /// — the grammar emits a function whose symbol IS the component
-    /// name (so `component Greeting { ... }` produces a function
-    /// named `Greeting`). This is symmetric: pass the component
-    /// name, get the ops it emitted. Multi-component files work
-    /// because each component gets its own distinct symbol.
+    /// — the component lowers to a `TypedDeclaration::Class` plus an
+    /// inherent `TypedDeclaration::Impl` carrying a `view` method.
+    /// Zyntax's compiler mangles inherent-impl methods as
+    /// `<TypeName>$<method>`, so the view's actual symbol is
+    /// `<Name>$view`. This call constructs that symbol and dispatches
+    /// to it. Multi-component files work because each component gets
+    /// its own distinct mangled symbol.
     pub fn render_component(&self, name: &str) -> BlincDslResult<Vec<DslOp>> {
-        self.render_named(name)
+        let symbol = format!("{name}$view");
+        self.render_named(&symbol)
     }
 
     fn render_named(&self, fn_name: &str) -> BlincDslResult<Vec<DslOp>> {
@@ -2385,24 +2393,46 @@ fn register_builtins(runtime: &mut ZyntaxRuntime) {
 fn ensure_unit_return(program: &mut TypedProgram) {
     use zyntax_typed_ast::TypedDeclaration;
 
+    fn add_trailing_return_if_missing(body: &mut zyntax_typed_ast::typed_ast::TypedBlock) {
+        let trailing_is_return = matches!(
+            body.statements.last().map(|s| &s.node),
+            Some(TypedStatement::Return(_))
+        );
+        if !trailing_is_return {
+            body.statements.push(typed_node(
+                TypedStatement::Return(None),
+                Type::Primitive(PrimitiveType::Unit),
+                Span::default(),
+            ));
+        }
+    }
+
     for decl in program.declarations.iter_mut() {
-        if let TypedDeclaration::Function(func) = &mut decl.node {
-            if func.is_external {
-                continue;
-            }
-            if let Some(body) = func.body.as_mut() {
-                let trailing_is_return = matches!(
-                    body.statements.last().map(|s| &s.node),
-                    Some(TypedStatement::Return(_))
-                );
-                if !trailing_is_return {
-                    body.statements.push(typed_node(
-                        TypedStatement::Return(None),
-                        Type::Primitive(PrimitiveType::Unit),
-                        Span::default(),
-                    ));
+        match &mut decl.node {
+            TypedDeclaration::Function(func) => {
+                if func.is_external {
+                    continue;
+                }
+                if let Some(body) = func.body.as_mut() {
+                    add_trailing_return_if_missing(body);
                 }
             }
+            // Impl methods get compiled as free functions under the
+            // mangled `<TypeName>$<method>` symbol — they need the
+            // same trailing `Return(None)` treatment so the ABI
+            // matches what the runtime's `call::<()>` expects (the
+            // body classifier infers a value-bearing return from a
+            // single trailing `Expression` statement otherwise, and
+            // calling that as `::<()>` deref-faults on a null
+            // type-meta pointer).
+            TypedDeclaration::Impl(imp) => {
+                for method in &mut imp.methods {
+                    if let Some(body) = method.body.as_mut() {
+                        add_trailing_return_if_missing(body);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -2424,6 +2454,95 @@ mod tests {
     }
 
     /// Smoke test for the prototype slice — round-trips a tiny
+    /// `component Foo { view { text("...") } }` should compile to a
+    /// callable `Foo$view` symbol. Empty `trait_name` is the
+    /// inherent-impl marker — without it, Zyntax's
+    /// `lower_impl_block` looks for a `trait Foo` (which doesn't
+    /// exist), silently discards the methods, and we get zero
+    /// symbols back. Pin the regression.
+    #[test]
+    fn compile_component_registers_view_symbol() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let symbols = dsl
+            .compile_source(
+                r#"component Greeting { view { text("hi from Greeting") } }"#,
+                "compile_component.blinc",
+            )
+            .expect("compile");
+
+        assert!(
+            symbols.iter().any(|s| s == "Greeting$view"),
+            "expected `Greeting$view` in compiled symbols, got {:?}",
+            symbols
+        );
+    }
+
+    /// End-to-end: a bare `view { Counter() }` that calls a defined
+    /// component should compose — `lower_component_calls` rewrites
+    /// `Counter()` to `Call(Variable("Counter"), ...)`, which the
+    /// JIT links against the inherent-impl-mangled `Counter$view`
+    /// symbol... or does it? Pin the current behaviour either way.
+    #[test]
+    fn render_view_invoking_component() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            component Inner { view { text("from inner") } }
+            view { Inner() }
+            "#,
+            "view_invokes_component.blinc",
+        )
+        .expect("compile");
+
+        let ops = dsl.render_view().expect("render_view");
+        // If lowering rewrites `Inner()` to `Inner$view()`, the
+        // outer view's scene buffer would carry the inner's text.
+        // If not — `Inner` is unresolved at link time — compile
+        // would have failed above, so reaching here at all already
+        // proves that part.
+        assert_eq!(
+            ops.len(),
+            1,
+            "expected 1 op from the nested view, got {ops:?}"
+        );
+        match &ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "from inner"),
+            other => panic!("expected DslOp::Text, got {other:?}"),
+        }
+    }
+
+    /// End-to-end: compile a component, invoke its view via
+    /// `render_component`, verify the scene ops show the text. The
+    /// existing `render_component` API calls the bare component
+    /// name; after this commit it instead has to call the mangled
+    /// `<Name>$view` symbol — the prior implementation predates the
+    /// grammar shape and was untested.
+    #[test]
+    fn render_component_emits_view_ops() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"component Hello { view { text("hello world") } }"#,
+            "render_component.blinc",
+        )
+        .expect("compile");
+
+        let ops = dsl
+            .render_component("Hello")
+            .expect("render_component should invoke Hello$view");
+
+        assert_eq!(ops.len(), 1, "expected 1 op, got {ops:?}");
+        match &ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "hello world"),
+            other => panic!("expected DslOp::Text, got {other:?}"),
+        }
+    }
+
     /// `view { text("...") }` program through the full pipeline and
     /// checks the host saw the right scene op. If this fails, the
     /// integration is broken end-to-end and the rest of the plan is
@@ -2515,10 +2634,9 @@ mod tests {
             })
             .expect("expected an Impl decl");
 
-        assert_eq!(
-            impl_block.trait_name.resolve_global().as_deref(),
-            Some("Counter")
-        );
+        // Empty trait_name is the inherent-impl marker. for_type
+        // carries the component identity.
+        assert_eq!(impl_block.trait_name.resolve_global().as_deref(), Some(""));
         assert_eq!(impl_block.methods.len(), 1, "expected 1 method (view)");
         assert_eq!(
             impl_block.methods[0].name.resolve_global().as_deref(),
@@ -2779,10 +2897,8 @@ mod tests {
                 _ => None,
             })
             .expect("expected an Impl decl from the folded component");
-        assert_eq!(
-            impl_block.trait_name.resolve_global().as_deref(),
-            Some("Counter")
-        );
+        // Empty trait_name is the inherent-impl marker.
+        assert_eq!(impl_block.trait_name.resolve_global().as_deref(), Some(""));
         assert_eq!(
             impl_block.methods.len(),
             2,
@@ -2975,8 +3091,8 @@ mod tests {
         };
         assert_eq!(
             callee_name.resolve_global().as_deref(),
-            Some("Counter"),
-            "callee should be the component name after lowering"
+            Some("Counter$view"),
+            "callee should be the component's view symbol after lowering"
         );
 
         assert_eq!(call.positional_args.len(), 0, "no args");
@@ -3012,7 +3128,10 @@ mod tests {
         let TypedExpression::Variable(callee_name) = &call.callee.node else {
             panic!("expected Variable callee");
         };
-        assert_eq!(callee_name.resolve_global().as_deref(), Some("Counter"));
+        assert_eq!(
+            callee_name.resolve_global().as_deref(),
+            Some("Counter$view")
+        );
 
         // [IntLiteral(1), IntLiteral(2)] after lowering
         assert_eq!(call.positional_args.len(), 2);
@@ -3058,7 +3177,10 @@ mod tests {
         let TypedExpression::Variable(callee_name) = &call.callee.node else {
             panic!("expected Variable callee");
         };
-        assert_eq!(callee_name.resolve_global().as_deref(), Some("Counter"));
+        assert_eq!(
+            callee_name.resolve_global().as_deref(),
+            Some("Counter$view")
+        );
 
         // Positional: [IntLiteral(1)]
         assert_eq!(call.positional_args.len(), 1);
@@ -3120,8 +3242,9 @@ mod tests {
         };
         assert_eq!(
             callee_name.resolve_global().as_deref(),
-            Some("Counter"),
-            "after lowering, callee should be the component name (not the marker)"
+            Some("Counter$view"),
+            "after lowering, callee should be the mangled view symbol \
+             (not the bare marker)"
         );
     }
 
@@ -3246,7 +3369,10 @@ mod tests {
         let TypedExpression::Variable(callee_name) = &call.callee.node else {
             panic!("expected Variable callee");
         };
-        assert_eq!(callee_name.resolve_global().as_deref(), Some("Counter"));
+        assert_eq!(
+            callee_name.resolve_global().as_deref(),
+            Some("Counter$view")
+        );
 
         // args: [Block { Inner(1); Inner(2) }]
         assert_eq!(
@@ -3281,8 +3407,9 @@ mod tests {
         };
         assert_eq!(
             inner_callee.resolve_global().as_deref(),
-            Some("Inner"),
-            "nested component call should be lowered recursively"
+            Some("Inner$view"),
+            "nested component call should be lowered recursively \
+             to the mangled view symbol"
         );
     }
 
@@ -3405,11 +3532,11 @@ mod tests {
             Some("__slot_open__")
         );
         // Inner Tab(1) is a lowered component call — callee is the
-        // component name, not the marker.
+        // mangled view symbol, not the marker.
         assert_eq!(
             callee_name(&block.statements[1]).as_deref(),
-            Some("Tab"),
-            "nested component call should be lowered to the component name"
+            Some("Tab$view"),
+            "nested component call should be lowered to the mangled view symbol"
         );
         assert_eq!(
             callee_name(&block.statements[2]).as_deref(),
@@ -3417,7 +3544,7 @@ mod tests {
         );
         assert_eq!(
             callee_name(&block.statements[3]).as_deref(),
-            Some("Tab"),
+            Some("Tab$view"),
             "trailing default child should also be a lowered call"
         );
 
