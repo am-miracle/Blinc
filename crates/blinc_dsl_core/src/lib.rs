@@ -5080,10 +5080,7 @@ mod tests {
         let TypedExpression::Literal(TypedLiteral::Float(v)) = &init.node else {
             panic!("expected Float literal, got {:?}", init.node);
         };
-        assert!(
-            (*v - 1.5_f64).abs() < f64::EPSILON,
-            "expected 1.5, got {v}"
-        );
+        assert!((*v - 1.5_f64).abs() < f64::EPSILON, "expected 1.5, got {v}");
     }
 
     /// Negative float `-0.25` and scientific notation `1e3` both
@@ -5260,7 +5257,6 @@ mod tests {
             "1.0 >= 1.0, guard fires"
         );
     }
-
 
     /// Lifecycle: construct from a registered fsm, dispatch a
     /// sequence of events, watch `current()` follow each
