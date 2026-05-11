@@ -66,6 +66,45 @@ fn compile_directory_emits_per_file_function_names() {
     );
 }
 
+/// ES6 import: an entry file imports a component declared in
+/// a sibling file; `compile_project` resolves the dependency
+/// through the registered filesystem resolver, merges the
+/// imported decls into the entry program, and JIT-compiles the
+/// result.
+#[test]
+fn compile_project_resolves_es6_imports() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dir = TempDir::new("blinc_project_import").expect("tempdir");
+    dir.write(
+        "widgets.blinc",
+        r#"component Counter { view { Text("counted") } }"#,
+    )
+    .unwrap();
+    let entry = dir
+        .write(
+            "main.blinc",
+            r#"
+            import { Counter } from "widgets"
+            view { Counter() }
+            "#,
+        )
+        .unwrap();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    let names = dsl
+        .compile_project(&entry, dir.path())
+        .expect("compile_project");
+    assert!(
+        names.iter().any(|s| s == "Counter$view"),
+        "merged import should expose Counter$view, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|s| s == "render_view"),
+        "entry should expose render_view, got: {names:?}"
+    );
+}
+
 /// `recompile_file` re-runs compile for a single path and
 /// refreshes the per-file function-name map. Pins the hot-
 /// reload entry point.

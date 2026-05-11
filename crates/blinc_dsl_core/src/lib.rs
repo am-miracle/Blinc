@@ -1606,6 +1606,19 @@ fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec<String>> {
                 known.insert(name.to_string());
             }
         }
+        // Named imports — Zyntax resolves the actual module at
+        // compile time; we whitelist the imported names here so
+        // the validator (which runs before import resolution)
+        // doesn't flag them.
+        if let TypedDeclaration::Import(import) = &decl.node {
+            for item in &import.items {
+                if let zyntax_typed_ast::TypedImportItem::Named { name, .. } = item {
+                    if let Some(s) = name.resolve_global() {
+                        known.insert(s.to_string());
+                    }
+                }
+            }
+        }
     }
     // Substrate's `ComponentRegistry` carries pre-registered
     // primitives (`Div`, `Text`, etc. — see
@@ -3860,6 +3873,69 @@ impl BlincDsl {
     /// Returns the file's freshly-emitted function names.
     pub fn recompile_file(&self, path: &Path) -> BlincDslResult<Vec<String>> {
         self.compile_file(path)
+    }
+
+    /// Compile an entry `.blinc` file with cross-module
+    /// resolution rooted at `source_root`. ES6-style imports
+    /// (`import { X } from "./widgets"`) in the entry source
+    /// pull dependent files via a registered callback resolver;
+    /// Zyntax's import chain parses each, flat-merges its
+    /// declarations into the entry program, and JIT-compiles
+    /// the whole thing as one unit.
+    ///
+    /// Imports are de-duplicated per process (thread-local in
+    /// Zyntax's `process_imports_for_traits`), so the same
+    /// module pulled by multiple files only compiles once.
+    pub fn compile_project(&self, entry: &Path, source_root: &Path) -> BlincDslResult<Vec<String>> {
+        let mut aggregated: Vec<String> = Vec::new();
+        self.compile_project_inner(entry, source_root, &mut aggregated)?;
+        Ok(aggregated)
+    }
+
+    fn compile_project_inner(
+        &self,
+        entry: &Path,
+        source_root: &Path,
+        out: &mut Vec<String>,
+    ) -> BlincDslResult<()> {
+        let source = std::fs::read_to_string(entry)?;
+        let program = self.parse_to_typed_ast(&source, entry.to_string_lossy().as_ref())?;
+
+        for decl in &program.declarations {
+            let zyntax_typed_ast::TypedDeclaration::Import(import) = &decl.node else {
+                continue;
+            };
+            let segments: Vec<String> = import
+                .module_path
+                .iter()
+                .filter_map(|s| s.resolve_global().map(|s| s.to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+            if segments.is_empty() {
+                continue;
+            }
+            let mut rel = std::path::PathBuf::new();
+            for seg in &segments {
+                rel.push(seg);
+            }
+            let imported = source_root.join(rel).with_extension("blinc");
+            if !imported.exists() {
+                continue;
+            }
+            let already = self
+                .compiled_modules
+                .lock()
+                .map(|m| m.contains_key(&imported))
+                .unwrap_or(false);
+            if already {
+                continue;
+            }
+            self.compile_project_inner(&imported, source_root, out)?;
+        }
+
+        let names = self.compile_file(entry)?;
+        out.extend(names);
+        Ok(())
     }
 
     /// Snapshot of which JIT function names were last emitted

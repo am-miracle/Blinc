@@ -98,7 +98,34 @@ top_level_items = { item:top_level_item* }
 // `component_decl`. Falling through handles standalone struct-only
 // `component { fields }` decls, standalone `impl` blocks, and the
 // bare `view { ... }` quick-test shape.
-top_level_item = { signal_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
+top_level_item = { import_stmt | signal_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
+
+// `import { A, B } from "./path"` — ES6 named imports. The
+// quoted path is forwarded to Zyntax's import resolver chain
+// (`add_import_resolver` callbacks) to load the dependent
+// `.blinc` source; the resolver's return value is parsed with
+// the same grammar and merged into this program.
+//
+// Only NAMED imports for now; namespace + default imports land
+// later.
+import_stmt = { "import" ~ "{" ~ items:import_items_list ~ "}" ~ "from" ~ path:import_path }
+  -> TypedDeclaration::Import {
+      path: [intern(path)],
+      items: items,
+  }
+
+import_items_list = { item:identifier ~ ("," ~ item:identifier)* }
+  -> item
+
+// Quoted module path: matches `"./widgets"`, `"./ui/widgets"`,
+// `"widgets"`. Captures only the inner text (without quotes)
+// so Zyntax's interpreter — which splits the path on `.` — sees
+// the bare path. The resolver callback wired by
+// `BlincDsl::compile_project` interprets it.
+import_path = { "\"" ~ inner:import_path_chars ~ "\"" }
+  -> inner
+
+import_path_chars = @{ (!("\"" | "\\") ~ ANY)* }
 
 // `signal <name>: <type>` — declares a host-bound reactive signal
 // the DSL can read inside guards, view bodies, etc. Lowers to a
