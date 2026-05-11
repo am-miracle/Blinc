@@ -3008,6 +3008,68 @@ mod tests {
         }
     }
 
+    /// ES6-style namespacing: `LoaderState.Loading` parses via
+    /// the existing postfix field-access layer as
+    /// `Field { object: Variable("LoaderState"), field: "Loading" }`.
+    /// No path/`::` grammar is required — the compiler / type
+    /// resolver decides at lowering time whether `LoaderState` is
+    /// an enum type (variant access) or a regular value (field
+    /// access). Same AST shape either way; matches the
+    /// JS / TypeScript mental model the DSL targets.
+    #[test]
+    fn parse_dot_namespacing_via_field_access() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state x: i32
+                    view {}
+                    fn step() { let v = LoaderState.Loading }
+                }
+                "#,
+                "dot_namespacing.blinc",
+            )
+            .expect("parse");
+
+        let imp = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let body = imp
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("step"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+        let TypedStatement::Let(let_node) = &body.statements[0].node else {
+            panic!("expected Let");
+        };
+        let init = let_node.initializer.as_ref().unwrap();
+        let TypedExpression::Field(field_access) = &init.node else {
+            panic!(
+                "expected Field access for `LoaderState.Loading`, got {:?}",
+                init.node
+            );
+        };
+        assert_eq!(
+            field_access.field.resolve_global().as_deref(),
+            Some("Loading")
+        );
+        let TypedExpression::Variable(obj_name) = &field_access.object.node else {
+            panic!("expected Variable as object");
+        };
+        assert_eq!(obj_name.resolve_global().as_deref(), Some("LoaderState"));
+    }
+
     /// `a && b` lowers to `Binary(_, And, _)`. Single AND case;
     /// the next test covers precedence with OR.
     #[test]
