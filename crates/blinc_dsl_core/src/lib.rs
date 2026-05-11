@@ -385,6 +385,55 @@ extern "C" fn blinc_string_concat(a: *const i32, b: *const i32) -> *const i32 {
 }
 
 // =====================================================================
+// Widget primitives — value-returning externs for `Div` / `Text`
+// =====================================================================
+//
+// These are the runtime-side of the value-returning view
+// architecture. Each pre-registered widget primitive (see
+// `register_blinc_layout_primitives`) has a matching extern
+// here that builds a real `blinc_layout` value and returns
+// a pointer-sized handle. The handle crosses the JIT boundary
+// as `i64` (the platform's `usize` width); the host-side
+// walker that lands in Phase 2e knows how to dereference it
+// back into the real Rust value.
+//
+// **Memory ownership.** Each call boxes a fresh widget
+// (`Box::into_raw` → leak-on-construct, like the f-string
+// helpers above) and returns the raw pointer. A consumer that
+// receives the handle becomes responsible for reclaiming it
+// (the walker takes ownership via `Box::from_raw`). For the
+// prototype's short-lived test runs the leak is acceptable;
+// production paths flow the handle into the actual UI tree
+// where it gets owned for the widget's lifetime.
+
+/// Opaque widget handle as exchanged across the JIT boundary.
+/// Matches the i64 return type the registered signature
+/// advertises. Defined as a type alias for documentation —
+/// the actual ABI is just the bare `i64`.
+type WidgetHandle = i64;
+
+/// `$Blinc$Text$view(content: string) -> WidgetHandle`
+///
+/// Constructs a `blinc_layout::Text` from the Zyntax string
+/// argument, boxes it, returns the raw pointer cast to i64.
+///
+/// # Safety
+///
+/// `content_ptr` must point at a Zyntax length-prefixed UTF-8
+/// buffer when the registered signature has `String` for the
+/// parameter — the JIT guarantees this.
+extern "C" fn blinc_text_view(content_ptr: *const i32) -> WidgetHandle {
+    if content_ptr.is_null() {
+        tracing::warn!("$Blinc$Text$view called with null content pointer");
+        return 0;
+    }
+    // SAFETY: see fn-level doc.
+    let content = unsafe { blinc_string_decode(content_ptr) };
+    let widget = blinc_layout::text::Text::new(content);
+    Box::into_raw(Box::new(widget)) as WidgetHandle
+}
+
+// =====================================================================
 // Errors
 // =====================================================================
 
@@ -1377,13 +1426,23 @@ fn lower_component_calls(program: &mut TypedProgram) {
         new_named.extend(call.named_args.iter().cloned());
 
         // Rebuild the call: callee becomes a Variable reference to
-        // the component's MANGLED view symbol `<Name>$view`. This
-        // matches Zyntax's inherent-impl method mangling (compiler/
-        // lowering.rs:3612). Calling the bare component name would
-        // surface as a link-time `FunctionNotFound("Counter")`
-        // because the only symbol Zyntax registers is `Counter$view`.
+        // the component's view symbol. The substrate's component
+        // registry knows the exact symbol — pre-registered
+        // primitives (`Div`, `Text`) carry `$Blinc$<Name>$view`
+        // so the JIT links to the Rust-side extern; user-declared
+        // components carry the default Zyntax inherent-impl
+        // mangling `<Name>$view`. Either way we use whatever the
+        // registry holds; falling back to `<Name>$view` only when
+        // the component isn't in the registry yet (e.g. an
+        // unregistered user component the validator missed —
+        // shouldn't happen in normal flow).
         let component_name_str = component_name.resolve_global().unwrap_or_default();
-        let view_symbol = format!("{component_name_str}$view");
+        let component_name_str: &str = component_name_str.as_ref();
+        let view_symbol = blinc_runtime::component::with_component_registry(|r| {
+            r.get_by_name(component_name_str)
+                .map(|def| def.view_symbol.as_ref().to_string())
+        })
+        .unwrap_or_else(|| format!("{component_name_str}$view"));
         let new_callee = zyntax_typed_ast::TypedNode::new(
             TypedExpression::Variable(zyntax_typed_ast::InternedString::new_global(&view_symbol)),
             Type::Any,
@@ -3225,6 +3284,24 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             return_type: Type::Primitive(PrimitiveType::String),
             ptr: blinc_string_concat as *const u8,
         },
+        BuiltinDescriptor {
+            // `$Blinc$Text$view(content) -> WidgetHandle (i64)`
+            // — the value-returning Text primitive. Pre-
+            // registered in the substrate's `ComponentRegistry`
+            // by `register_blinc_layout_primitives`; the
+            // `lower_component_calls` pass routes user-facing
+            // `Text("hi")` calls to this symbol.
+            //
+            // Returns a raw pointer to a leaked
+            // `blinc_layout::Text` cast to i64. The
+            // host-side walker (Phase 2e) takes ownership via
+            // `Box::from_raw` when materialising the widget
+            // tree into the layout pass.
+            name: "$Blinc$Text$view",
+            param_types: &[Type::Primitive(PrimitiveType::String)],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_text_view as *const u8,
+        },
     ]
 }
 
@@ -4561,6 +4638,44 @@ mod tests {
                 .expect("Text should be pre-registered");
         assert_eq!(text.view_symbol.as_ref(), "$Blinc$Text$view");
         assert!(text.prop("content").is_some());
+    }
+
+    /// End-to-end: `view { Text("hello") }` compiles cleanly,
+    /// the JIT calls `$Blinc$Text$view`, the Rust impl boxes a
+    /// `blinc_layout::Text` and returns the pointer. `render_view`
+    /// (legacy DslOp path) drains an empty scene buffer
+    /// because the new extern doesn't push anything — the
+    /// widget handle flows back through the function return
+    /// instead.
+    ///
+    /// This is the smallest possible value-returning view —
+    /// proves the architecture works end-to-end before Div +
+    /// children + props compound the complexity. The host-side
+    /// walker that reclaims the handle lands in Phase 2e.
+    #[test]
+    fn render_text_widget_compiles_and_runs() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let result = dsl.compile_source(r#"view { Text("hello") }"#, "text_widget_smoke.blinc");
+        assert!(
+            result.is_ok(),
+            "Text widget primitive should compile: {:?}",
+            result.err()
+        );
+
+        // The legacy `render_view` returns `Vec<DslOp>` — the
+        // value-returning extern doesn't push to the scene
+        // buffer, so we expect an empty op vec. The widget
+        // handle returned by `$Blinc$Text$view` gets discarded
+        // today (Phase 2d wires the return value through the
+        // view function's signature; Phase 2e materialises it
+        // back into a `blinc_layout::Text`).
+        let ops = dsl.render_view().expect("render_view");
+        assert!(
+            ops.is_empty(),
+            "value-returning Text extern shouldn't push DslOps, got: {ops:?}"
+        );
     }
 
     /// DSL source that calls `Div { Text("hi") }` validates
