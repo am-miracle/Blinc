@@ -2191,6 +2191,130 @@ impl blinc_runtime::view::ViewRenderer for JitViewRenderer {
     }
 }
 
+/// Mirror DSL component declarations into the runtime-agnostic
+/// `blinc_runtime::component::ComponentRegistry`.
+///
+/// Walks each `TypedDeclaration::Impl` whose `for_type` matches
+/// a sibling `TypedDeclaration::Class`. For each such pair:
+///
+/// - The user-facing component name is the Class's name.
+/// - The view-symbol mangling is `<Name>$view` (matches Zyntax's
+///   inherent-impl method mangling; same name the call-site
+///   lowering uses).
+/// - The prop list comes from the `view` method's params,
+///   which were injected by `bind_component_props` from the
+///   synthesized `__component_props__` marker. Walking params
+///   here (vs. re-walking the Class fields or the marker)
+///   keeps the publisher robust against future changes to how
+///   props get attached to methods — whichever way they end up
+///   on the view's signature, this code reads them.
+///
+/// Prop types that don't map to one of the substrate's
+/// supported [`blinc_runtime::component::PropType`] variants
+/// are dropped silently (the substrate's surface is opinionated
+/// about which primitives apps can introspect). New supported
+/// types land in [`zyntax_prop_type`] in lockstep with the
+/// substrate enum.
+///
+/// Runs AFTER `bind_component_props` (which is what produces
+/// the param-bearing view method) and AFTER
+/// `populate_fsm_registry_pass` (so FSM impls — which have an
+/// empty trait_name but a matching Enum, not a Class — don't
+/// get accidentally registered as components).
+fn publish_components_to_runtime_registry(program: &TypedProgram) {
+    use zyntax_typed_ast::typed_ast::TypedDeclaration;
+
+    fn zyntax_prop_type(ty: &Type) -> Option<blinc_runtime::component::PropType> {
+        match ty {
+            Type::Primitive(PrimitiveType::I32) => Some(blinc_runtime::component::PropType::I32),
+            Type::Primitive(PrimitiveType::F64) => Some(blinc_runtime::component::PropType::F64),
+            Type::Primitive(PrimitiveType::String) => Some(blinc_runtime::component::PropType::Str),
+            _ => None,
+        }
+    }
+
+    for decl in &program.declarations {
+        let TypedDeclaration::Impl(imp) = &decl.node else {
+            continue;
+        };
+
+        // Extract the implementing type's name from
+        // `imp.for_type`. For our grammar's component impls
+        // this is `Type::Unresolved(name)` (the Impl-construct
+        // path in Zyntax's interpreter at
+        // runtime2/interpreter.rs:1044). For impls that have
+        // been resolved past that stage it may be
+        // `Type::Named { id, ... }` — look up the type's name
+        // through the program's registry then.
+        let component_name_intern = match &imp.for_type {
+            Type::Unresolved(name) => *name,
+            Type::Named { id, .. } => {
+                if let Some(type_def) = program.type_registry.get_type_by_id(*id) {
+                    type_def.name
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
+        let component_name_string = match component_name_intern.resolve_global() {
+            Some(s) => s,
+            None => continue,
+        };
+        let component_name: &str = component_name_string.as_ref();
+
+        // Only register impls that match a sibling Class —
+        // skips FSM impls (which match an Enum) and any stray
+        // `impl Foo { ... }` block for a type that doesn't
+        // exist as a component.
+        let class_match = program.declarations.iter().any(|d| match &d.node {
+            TypedDeclaration::Class(c) => c.name == component_name_intern,
+            _ => false,
+        });
+        if !class_match {
+            continue;
+        }
+
+        // Find the view method. Components without a view body
+        // (currently impossible to declare, but defensive) get
+        // skipped — there's nothing to introspect-and-render.
+        let Some(view_method) = imp
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("view"))
+        else {
+            continue;
+        };
+
+        // Each view param becomes a `PropDef`. The
+        // `self` param (if any — components don't have one
+        // today) gets skipped. Unsupported types get skipped.
+        let props: Vec<blinc_runtime::component::PropDef> = view_method
+            .params
+            .iter()
+            .filter(|p| !p.is_self)
+            .filter_map(|p| {
+                let name_str = p.name.resolve_global()?;
+                let ty = zyntax_prop_type(&p.ty)?;
+                Some(blinc_runtime::component::PropDef {
+                    name: std::sync::Arc::from(name_str.as_ref()),
+                    ty,
+                })
+            })
+            .collect();
+
+        let runtime_def = blinc_runtime::component::ComponentDefinition {
+            name: std::sync::Arc::from(component_name),
+            view_symbol: std::sync::Arc::from(format!("{component_name}$view").as_str()),
+            props,
+        };
+
+        blinc_runtime::component::with_component_registry_mut(|r| {
+            r.register(runtime_def);
+        });
+    }
+}
+
 /// Translate the local `blinc_dsl_core::FsmRegistry` (Zyntax-typed,
 /// uses `InternedString` everywhere) into the runtime-agnostic
 /// `blinc_runtime::fsm::FsmRegistry` shape (`Arc<str>`-typed,
@@ -2503,6 +2627,13 @@ impl BlincDsl {
         // generated init function will write to the same substrate
         // from its own translation; widget code stays unchanged.
         publish_fsms_to_runtime_registry(&typed_program);
+
+        // Mirror component declarations into the runtime-agnostic
+        // `blinc_runtime::component` substrate. Runs after
+        // `bind_component_props` so the view method's params
+        // reflect the prop list — that's where the publisher
+        // reads prop names + types from.
+        publish_components_to_runtime_registry(&typed_program);
 
         // Belt-and-suspenders: terminate user functions with an
         // explicit `Return(None)` so the body classifier can't infer
@@ -7009,6 +7140,51 @@ mod tests {
     /// mutex instead). Cleared automatically when the
     /// `MutexGuard` drops at test exit.
     static BRIDGE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// End-to-end: DSL component declarations publish into the
+    /// runtime-agnostic `blinc_runtime::component` substrate.
+    /// After `compile_source`, devtools / hot-reload / prop-
+    /// validator code can introspect components by name without
+    /// touching `BlincDsl` — same pattern as the FSM bridge.
+    #[test]
+    fn publish_components_to_runtime_registry_round_trip() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            component Counter (initial: i32, step: i32) {
+                view { text("counter") }
+            }
+            component Greeting {
+                view { text("hi") }
+            }
+            view { Counter(1, 2) }
+            "#,
+            "component_registry_round_trip.blinc",
+        )
+        .expect("compile");
+
+        // Both components should be registered in the substrate
+        // under their DSL names. Greeting has no props.
+        let counter = blinc_runtime::component::with_component_registry(|r| {
+            r.get_by_name("Counter").cloned()
+        })
+        .expect("Counter should be published");
+        assert_eq!(counter.view_symbol.as_ref(), "Counter$view");
+        assert_eq!(counter.prop_count(), 2);
+        assert_eq!(counter.props[0].name.as_ref(), "initial");
+        assert_eq!(counter.props[0].ty, blinc_runtime::component::PropType::I32);
+        assert_eq!(counter.props[1].name.as_ref(), "step");
+        assert_eq!(counter.props[1].ty, blinc_runtime::component::PropType::I32);
+
+        let greeting = blinc_runtime::component::with_component_registry(|r| {
+            r.get_by_name("Greeting").cloned()
+        })
+        .expect("Greeting should be published");
+        assert_eq!(greeting.view_symbol.as_ref(), "Greeting$view");
+        assert_eq!(greeting.prop_count(), 0);
+    }
 
     /// End-to-end: a widget-shaped consumer (held as
     /// `Arc<dyn ViewRenderer>` — no `BlincDsl` reference)

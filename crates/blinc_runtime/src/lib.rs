@@ -11,6 +11,7 @@
 //! The headline module is [`fsm`] — see its docs for the
 //! architecture diagram.
 
+pub mod component;
 pub mod fsm;
 pub mod scene;
 pub mod signal;
