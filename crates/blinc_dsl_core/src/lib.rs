@@ -2149,6 +2149,48 @@ impl blinc_runtime::fsm::GuardDispatcher for JitGuardDispatcher {
     }
 }
 
+/// `ViewRenderer` impl that resolves view symbols against a
+/// shared `ZyntaxRuntime` handle. Same wrapping pattern as
+/// `JitGuardDispatcher` — holds an
+/// `Arc<Mutex<ZyntaxRuntime>>`, calls
+/// `runtime.call::<()>(symbol, &[])` for the zero-arg unit-
+/// return view ABI, drains the scene buffer.
+///
+/// Cost-of-call is the JIT call plus one `Mutex` lock.
+/// Renderers are cheap to construct (just an `Arc::clone`) so
+/// callers can hold one or many without worry.
+struct JitViewRenderer {
+    runtime: Arc<Mutex<ZyntaxRuntime>>,
+}
+
+// SAFETY: same argument as `JitGuardDispatcher` — `ZyntaxRuntime`
+// is `!Send + !Sync` because Cranelift's `JITModule` carries
+// `Box<dyn Fn(LibCall) -> String>` + `NonNull` allocator pointers.
+// We serialise access via the surrounding `Mutex`, and production
+// Blinc apps run the UI thread single-threaded anyway. The
+// unsafe impl is what lets `Arc<dyn ViewRenderer>` (the
+// substrate's `Send + Sync`-bounded trait object slot) hold a
+// JIT renderer.
+unsafe impl Send for JitViewRenderer {}
+unsafe impl Sync for JitViewRenderer {}
+
+impl blinc_runtime::view::ViewRenderer for JitViewRenderer {
+    fn render_named(
+        &self,
+        symbol: &str,
+    ) -> Result<Vec<blinc_runtime::scene::DslOp>, blinc_runtime::view::ViewRenderError> {
+        let runtime = self.runtime.lock().map_err(|_| {
+            blinc_runtime::view::ViewRenderError::Backend(
+                "BlincDsl runtime mutex poisoned".to_string(),
+            )
+        })?;
+        runtime
+            .call::<()>(symbol, &[])
+            .map_err(|e| blinc_runtime::view::ViewRenderError::Backend(e.to_string()))?;
+        Ok(blinc_runtime::scene::take())
+    }
+}
+
 /// Translate the local `blinc_dsl_core::FsmRegistry` (Zyntax-typed,
 /// uses `InternedString` everywhere) into the runtime-agnostic
 /// `blinc_runtime::fsm::FsmRegistry` shape (`Arc<str>`-typed,
@@ -2589,6 +2631,26 @@ impl BlincDsl {
 
         runtime.call::<()>(fn_name, &[])?;
         Ok(take_scene_ops())
+    }
+
+    /// Return a backend-agnostic view renderer that resolves view
+    /// symbols against this `BlincDsl`'s Cranelift runtime.
+    ///
+    /// Widget code that wants to render DSL views without
+    /// depending on this crate holds an
+    /// `Arc<dyn blinc_runtime::view::ViewRenderer>`; this method
+    /// constructs the JIT-backed implementation. The future AOT
+    /// path's per-app crate will provide its own
+    /// `AotViewRenderer` from the same trait — widget code
+    /// switches between them by storing the right Arc.
+    ///
+    /// Multiple calls hand out fresh renderers, each pointing at
+    /// the same shared runtime. Cheap to call as often as
+    /// needed.
+    pub fn view_renderer(&self) -> std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> {
+        std::sync::Arc::new(JitViewRenderer {
+            runtime: self.runtime.clone(),
+        })
     }
 
     /// Resolve a tick-driven transition. Walks the registered fsm's
@@ -6947,6 +7009,63 @@ mod tests {
     /// mutex instead). Cleared automatically when the
     /// `MutexGuard` drops at test exit.
     static BRIDGE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// End-to-end: a widget-shaped consumer (held as
+    /// `Arc<dyn ViewRenderer>` — no `BlincDsl` reference)
+    /// renders a DSL view and gets back the scene ops.
+    /// Mirrors how an actual app would store the renderer:
+    /// construct from `BlincDsl::view_renderer()` once at
+    /// startup, hand the `Arc` to widget code, never touch the
+    /// DSL crate again.
+    #[test]
+    fn jit_view_renderer_round_trip() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            component Greeting { view { text("hello via renderer") } }
+            view { Greeting() }
+            "#,
+            "renderer_round_trip.blinc",
+        )
+        .expect("compile");
+
+        // Cast to the substrate trait — proves the rest of this
+        // test couldn't reach for any `BlincDsl`-specific method
+        // if it wanted to.
+        let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+
+        // Bare view: `view { Greeting() }` runs Greeting's view
+        // (inlined by `lower_component_calls`'s child flatten).
+        let main_ops = blinc_runtime::view::render_main(&renderer).expect("render_main");
+        assert_eq!(main_ops.len(), 1);
+        match &main_ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "hello via renderer"),
+            other => panic!("expected text op, got {other:?}"),
+        }
+
+        // Direct component invocation: same component, same ops.
+        let comp_ops =
+            blinc_runtime::view::render_component(&renderer, "Greeting").expect("render_component");
+        assert_eq!(comp_ops.len(), 1);
+        match &comp_ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "hello via renderer"),
+            other => panic!("expected text op, got {other:?}"),
+        }
+
+        // Unknown component → `NotFound` (well — actually
+        // routes through Cranelift's symbol resolution and
+        // surfaces as `Backend` because that's how the JIT
+        // returns "no such symbol"). Pin whichever shape is
+        // produced so the contract is clear.
+        let err = blinc_runtime::view::render_component(&renderer, "DoesNotExist")
+            .expect_err("unknown component should error");
+        assert!(
+            matches!(err, blinc_runtime::view::ViewRenderError::Backend(_)),
+            "JIT path surfaces missing symbols as Backend errors, got {err:?}"
+        );
+    }
 
     /// End-to-end: a DSL-defined FSM round-trips through the
     /// runtime-agnostic `blinc_runtime::fsm` substrate. After
