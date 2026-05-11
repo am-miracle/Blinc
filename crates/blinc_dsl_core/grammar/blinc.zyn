@@ -98,16 +98,45 @@ top_level_items = { item:top_level_item* }
 // `component_decl`. Falling through handles standalone struct-only
 // `component { fields }` decls, standalone `impl` blocks, and the
 // bare `view { ... }` quick-test shape.
-top_level_item = { import_stmt | signal_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
+top_level_item = { import_stmt | stylesheet_decl | signal_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
 
-// `import { A, B } from "./path"` — ES6 named imports. The
-// quoted path is forwarded to Zyntax's import resolver chain
-// (`add_import_resolver` callbacks) to load the dependent
-// `.blinc` source; the resolver's return value is parsed with
-// the same grammar and merged into this program.
+// `stylesheet "..."` — top-level CSS block. The contained text
+// is captured verbatim (multi-line OK) and exposed via
+// `BlincDsl::compiled_stylesheets()`. Hosts pass it to
+// `ctx.add_css(...)` at runtime. Supports the full CSS surface
+// `blinc_layout`'s parser understands — selectors, pseudo-
+// classes, combinators, `@flow` shader DAGs, animations, etc.
 //
-// Only NAMED imports for now; namespace + default imports land
-// later.
+// Lowers to a Blinc-private marker function `__blinc_stylesheet__`
+// whose body holds the CSS string as a single expression
+// statement. The pre-compile pass `extract_and_strip_stylesheets`
+// reads it out and removes the decl before JIT.
+stylesheet_decl = { "stylesheet" ~ css:stylesheet_body }
+  -> TypedDeclaration::Function {
+      name: intern("__blinc_stylesheet__"),
+      params: [],
+      return_type: Type::Unit,
+      body: Some(TypedBlock { statements: [
+          TypedStatement::Expression { expr:
+              TypedExpression::StringLiteral { value: css }
+          },
+      ] }),
+  }
+
+// Quoted CSS body — captures inner text verbatim including
+// newlines. Separate from `string_literal` so multi-line
+// content lands cleanly without escaping.
+stylesheet_body = { "\"" ~ inner:stylesheet_body_chars ~ "\"" }
+  -> inner
+
+stylesheet_body_chars = @{ (!"\"" ~ ANY)* }
+
+// `import { A, B } from "path"` — ES6 named imports. Lowers to
+// `TypedDeclaration::Import`. The path string is captured
+// verbatim; `BlincDsl::compile_project` walks the program's
+// Import decls, picks a resolver style via
+// `ModuleArchitecture` (NodeStyle for ES6 fidelity), and
+// recursively compiles dependencies.
 import_stmt = { "import" ~ "{" ~ items:import_items_list ~ "}" ~ "from" ~ path:import_path }
   -> TypedDeclaration::Import {
       path: [intern(path)],
@@ -117,11 +146,7 @@ import_stmt = { "import" ~ "{" ~ items:import_items_list ~ "}" ~ "from" ~ path:i
 import_items_list = { item:identifier ~ ("," ~ item:identifier)* }
   -> item
 
-// Quoted module path: matches `"./widgets"`, `"./ui/widgets"`,
-// `"widgets"`. Captures only the inner text (without quotes)
-// so Zyntax's interpreter — which splits the path on `.` — sees
-// the bare path. The resolver callback wired by
-// `BlincDsl::compile_project` interprets it.
+// Quoted module path; inner text captured without quotes.
 import_path = { "\"" ~ inner:import_path_chars ~ "\"" }
   -> inner
 

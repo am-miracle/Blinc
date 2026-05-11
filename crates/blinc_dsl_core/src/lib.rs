@@ -1365,6 +1365,39 @@ fn is_signal_decl(func: &zyntax_typed_ast::typed_ast::TypedFunction) -> bool {
 /// Struct returns route through Zyntax's Dyn Boxed machinery and
 /// don't need this pass at all (the DSL author writes
 /// `user.get().age` and Zyntax codegens the field load directly).
+/// Walk the program's top-level declarations, drain any
+/// `__blinc_stylesheet__` marker functions (emitted by the
+/// `stylesheet "..."` grammar rule), extract the CSS strings
+/// they hold in their bodies, and remove them so JIT-compile
+/// doesn't see the marker functions.
+fn extract_and_strip_stylesheets(program: &mut TypedProgram, out: &mut Vec<String>) {
+    use zyntax_typed_ast::typed_ast::{
+        TypedDeclaration, TypedExpression, TypedLiteral, TypedStatement,
+    };
+    program.declarations.retain(|decl| {
+        let TypedDeclaration::Function(func) = &decl.node else {
+            return true;
+        };
+        if func.name.resolve_global().as_deref() != Some("__blinc_stylesheet__") {
+            return true;
+        }
+        let Some(body) = &func.body else {
+            return false;
+        };
+        for stmt in &body.statements {
+            let TypedStatement::Expression(expr) = &stmt.node else {
+                continue;
+            };
+            if let TypedExpression::Literal(TypedLiteral::String(s)) = &expr.node {
+                if let Some(text) = s.resolve_global() {
+                    out.push(text.to_string());
+                }
+            }
+        }
+        false
+    });
+}
+
 fn resolve_signal_calls(program: &mut TypedProgram) {
     use std::collections::HashMap;
     use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
@@ -3353,6 +3386,10 @@ pub struct BlincDsl {
     /// / `compile_directory` so `recompile_file` knows which
     /// symbols belong to a given source.
     compiled_modules: Arc<Mutex<std::collections::HashMap<std::path::PathBuf, Vec<String>>>>,
+    /// CSS strings collected from `stylesheet "..."` blocks
+    /// across every compiled source. Hosts feed these to
+    /// `ctx.add_css(...)`. Order matches compile order.
+    compiled_stylesheets: Arc<Mutex<Vec<String>>>,
 }
 
 impl BlincDsl {
@@ -3410,12 +3447,14 @@ impl BlincDsl {
 
         let value_returning_views = Arc::new(Mutex::new(std::collections::HashSet::new()));
         let compiled_modules = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let compiled_stylesheets = Arc::new(Mutex::new(Vec::new()));
 
         Ok(Self {
             grammar,
             runtime,
             value_returning_views,
             compiled_modules,
+            compiled_stylesheets,
         })
     }
 
@@ -3729,6 +3768,17 @@ impl BlincDsl {
         synthesize_fsm_event_enums(&mut typed_program);
         resolve_signal_calls(&mut typed_program);
 
+        // Extract any `stylesheet "..."` blocks. Stored on
+        // BlincDsl for `compiled_stylesheets()` consumers; the
+        // marker decls get stripped so they don't reach JIT.
+        {
+            let mut sheets = self
+                .compiled_stylesheets
+                .lock()
+                .expect("compiled_stylesheets mutex poisoned");
+            extract_and_strip_stylesheets(&mut typed_program, &mut sheets);
+        }
+
         // Validate component calls reference known components, then
         // lower the markers. Validation runs first because it reads
         // the marker shape (StringLiteral name as args[0]); lowering
@@ -3956,6 +4006,18 @@ impl BlincDsl {
             .lock()
             .ok()
             .and_then(|m| m.get(path).cloned())
+    }
+
+    /// CSS strings collected from every `stylesheet "..."` block
+    /// across all compiled sources, in compile order. Hosts feed
+    /// these to `ctx.add_css(...)`. Supports the full CSS surface
+    /// (`#id`, `.class`, combinators, pseudo-classes, `@flow`
+    /// shader DAGs, animations).
+    pub fn compiled_stylesheets(&self) -> Vec<String> {
+        self.compiled_stylesheets
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 
     /// Parse `.blinc` source to a TypedAST without compiling or
