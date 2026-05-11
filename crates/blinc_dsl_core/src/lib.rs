@@ -3898,6 +3898,15 @@ impl BlincDsl {
         source_root: &Path,
         out: &mut Vec<String>,
     ) -> BlincDslResult<()> {
+        // ES6 / Node-style resolution: tries `<root>/<segs>.blinc`
+        // then `<root>/<segs>/index.blinc`. Drives the dotted
+        // `["", "/widgets"]` shape Zyntax's auto-split produces
+        // for `./widgets` AND plain `["widgets"]` for bare names.
+        let arch = zyntax_typed_ast::import_resolver::ModuleArchitecture::NodeStyle {
+            extensions: vec![".blinc".to_string()],
+            index_name: "index".to_string(),
+        };
+
         let source = std::fs::read_to_string(entry)?;
         let program = self.parse_to_typed_ast(&source, entry.to_string_lossy().as_ref())?;
 
@@ -3909,19 +3918,20 @@ impl BlincDsl {
                 .module_path
                 .iter()
                 .filter_map(|s| s.resolve_global().map(|s| s.to_string()))
+                // The action language's `.`-split turns `./widgets`
+                // into `["", "/widgets"]`; drop empty segments
+                // and strip a leading slash on the next so the
+                // path joins cleanly.
                 .filter(|s| !s.is_empty())
+                .map(|s| s.trim_start_matches('/').to_string())
                 .collect();
             if segments.is_empty() {
                 continue;
             }
-            let mut rel = std::path::PathBuf::new();
-            for seg in &segments {
-                rel.push(seg);
-            }
-            let imported = source_root.join(rel).with_extension("blinc");
-            if !imported.exists() {
+            let candidates = arch.module_to_paths(&segments, &source_root.to_path_buf());
+            let Some(imported) = candidates.into_iter().find(|p| p.exists()) else {
                 continue;
-            }
+            };
             let already = self
                 .compiled_modules
                 .lock()

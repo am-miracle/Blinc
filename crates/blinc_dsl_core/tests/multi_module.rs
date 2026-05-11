@@ -85,7 +85,7 @@ fn compile_project_resolves_es6_imports() {
         .write(
             "main.blinc",
             r#"
-            import { Counter } from "widgets"
+            import { Counter } from "./widgets"
             view { Counter() }
             "#,
         )
@@ -102,6 +102,41 @@ fn compile_project_resolves_es6_imports() {
     assert!(
         names.iter().any(|s| s == "render_view"),
         "entry should expose render_view, got: {names:?}"
+    );
+}
+
+/// Nested ES6 path: `import { X } from "./ui/widgets"`
+/// resolves to `<root>/ui/widgets.blinc` via the NodeStyle
+/// resolver. Confirms `ModuleArchitecture::NodeStyle` handles
+/// multi-segment paths.
+#[test]
+fn compile_project_resolves_nested_es6_path() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dir = TempDir::new("blinc_project_nested").expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("ui")).unwrap();
+    std::fs::write(
+        dir.path().join("ui/widgets.blinc"),
+        r#"component Counter { view { Text("c") } }"#,
+    )
+    .unwrap();
+    let entry = dir
+        .write(
+            "main.blinc",
+            r#"
+            import { Counter } from "./ui/widgets"
+            view { Counter() }
+            "#,
+        )
+        .unwrap();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    let names = dsl
+        .compile_project(&entry, dir.path())
+        .expect("compile_project");
+    assert!(
+        names.iter().any(|s| s == "Counter$view"),
+        "nested import should expose Counter$view, got: {names:?}"
     );
 }
 
