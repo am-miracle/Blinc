@@ -999,14 +999,92 @@ primary_expr = {
 // without needing to consult the type registry mid-parse. Mirrors
 // the `__fsm_*` and `__view_deps__` marker pattern already used
 // elsewhere in this grammar.
-component_call_expr = { name:component_name ~ "(" ~ args:component_args_list? ~ ")" }
+component_call_expr = { name:component_name ~ "(" ~ args:component_args_list? ~ ")" ~ body:component_body? }
   -> TypedExpression::Call {
       callee: Box::new(TypedExpression::Variable { name: intern("__component_call__") }),
       args: prepend_list(
           TypedExpression::StringLiteral { value: name },
-          args.unwrap_or([]),
+          concat_list(
+              args.unwrap_or([]),
+              body.unwrap_or([]),
+          ),
       ),
   }
+
+// Body block for `Name(args) { children-and-slots }`. Lowers to
+// a bare `TypedExpression::Block { statements: ... }` that
+// appears as the FINAL positional arg of the
+// `__component_call__` marker. The host's lowering pass
+// identifies it by being a Block (the only non-arg-shape
+// expression that lands in a component-call args list) and
+// unpacks the statements into the component's children tree.
+//
+// The action returns the bare Block expression (not wrapped in
+// `[...]`) because the action language parser rejects a list
+// literal at the action root — `parse_type_path` expects an
+// identifier first. The singleton-list composition still works
+// at the call site: `concat_list(args_list, body_or_empty)`
+// pushes a non-List second arg as a single element via the
+// `other => result.push(other)` arm. So:
+//
+//   body = Some(Block)  → `body.unwrap_or([])` → Block (expr)
+//   body = None         → `body.unwrap_or([])` → [] (empty list)
+//
+// Both compose correctly with `concat_list` — the first appends
+// the Block as one element, the second appends nothing.
+//
+// Why a Block expression and not e.g. a `__children__(...)`
+// marker call: the Block variant carries an arbitrary statement
+// list natively, so child rules like `let x = ...`, `if cond
+// { ... }`, and slot blocks compose without bespoke wrappers.
+// The upstream Zyntax stmt-list flatten (rev 7b78718) handles
+// the slot-emits-multiple-stmts case in one shot.
+component_body = { "{" ~ stmts:component_body_stmt* ~ "}" }
+  -> TypedExpression::Block { statements: stmts }
+
+// Body items mix regular statements (`text("hi")`,
+// `Counter(0)`, `let x = ...`, `if cond { ... }`) with `slot
+// Name { ... }` blocks. PEG ordered alternates — slot first
+// because `slot ` is the longer / more specific prefix.
+component_body_stmt = { slot_stmt | statement }
+
+// `slot Name { ... }` — emits an `__slot_open__("Name") ...
+// __slot_close__()` marker pair flanking the slot's body
+// statements. The host's lowering pass walks the parent block
+// linearly, treating anything between a matching open/close
+// pair as that slot's children. The rest of the body's
+// statements are default children.
+//
+// Why open/close markers instead of a nested `__slot__("Name",
+// Block { ... })`: keeping the slot body inline lets a single
+// `let` or `if` inside a slot compose without an extra
+// block-expr wrapper, and the upstream Zyntax stmt-list flatten
+// in `construct_block` / `parsed_value_to_block` handles the
+// `[open, body..., close]` list-of-statements in one shot.
+//
+// Slot bodies use `component_body_stmt*` (not `statement*`) so
+// slots can nest inside slots if the user wants — purely
+// mechanical via PEG's mutual recursion.
+slot_stmt = {
+    "slot" ~ name:identifier ~ "{" ~ stmts:component_body_stmt* ~ "}"
+}
+  -> concat_list(
+      prepend_list(
+          TypedStatement::Expression {
+              expr: TypedExpression::Call {
+                  callee: Box::new(TypedExpression::Variable { name: intern("__slot_open__") }),
+                  args: [TypedExpression::StringLiteral { value: name }],
+              },
+          },
+          stmts,
+      ),
+      [TypedStatement::Expression {
+          expr: TypedExpression::Call {
+              callee: Box::new(TypedExpression::Variable { name: intern("__slot_close__") }),
+              args: [],
+          },
+      }],
+  )
 
 // Capital-leading identifier. The `'A'..'Z'` head distinguishes
 // component invocations (`Counter(...)`) from regular function

@@ -2982,6 +2982,208 @@ mod tests {
     /// `component_call_expr` — the capital-first `component_name`
     /// terminal is the explicit disambiguator. The PEG should
     /// backtrack and try `assign_stmt` (which fails because there's
+    /// `Counter() { Inner(1) }` — body block on a component call.
+    /// Lowers to a `__component_call__("Counter", Block { ... })`
+    /// where the trailing arg is a `TypedExpression::Block` whose
+    /// statements are the children. Pin the AST shape so the host's
+    /// lowering pass has a stable contract to match against.
+    #[test]
+    fn parse_component_call_with_body_children() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component Counter { }
+                component Inner { }
+                view {
+                    Counter() {
+                        Inner(1)
+                        Inner(2)
+                    }
+                }
+                "#,
+                "body_children.blinc",
+            )
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        let TypedStatement::Expression(expr_node) = &stmts[0].node else {
+            panic!("expected Expression statement");
+        };
+        let TypedExpression::Call(call) = &expr_node.node else {
+            panic!("expected Call expression");
+        };
+
+        // args: [StringLiteral("Counter"), Block { Inner(1); Inner(2) }]
+        assert_eq!(
+            call.positional_args.len(),
+            2,
+            "expected [name, body_block], got {} args",
+            call.positional_args.len()
+        );
+
+        let TypedExpression::Literal(TypedLiteral::String(name)) = &call.positional_args[0].node
+        else {
+            panic!("first arg should be the component-name string");
+        };
+        assert_eq!(name.resolve_global().as_deref(), Some("Counter"));
+
+        let TypedExpression::Block(block) = &call.positional_args[1].node else {
+            panic!(
+                "second arg should be a Block, got {:?}",
+                call.positional_args[1].node
+            );
+        };
+        assert_eq!(
+            block.statements.len(),
+            2,
+            "body block should hold 2 child statements"
+        );
+    }
+
+    /// Body block with mixed `let` + component child — proves the
+    /// body is a real TypedBlock that accepts any statement, not
+    /// just component calls. Mirrors how a real component author
+    /// might bind a local before instantiating a child.
+    #[test]
+    fn parse_component_call_with_let_in_body() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component Wrapper { }
+                component Inner { }
+                view {
+                    Wrapper() {
+                        let count = 1
+                        Inner(count)
+                    }
+                }
+                "#,
+                "body_let.blinc",
+            )
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        let TypedStatement::Expression(expr_node) = &stmts[0].node else {
+            panic!("expected Expression");
+        };
+        let TypedExpression::Call(call) = &expr_node.node else {
+            panic!("expected Call");
+        };
+        let TypedExpression::Block(block) = &call.positional_args[1].node else {
+            panic!("body should be a Block");
+        };
+
+        assert_eq!(block.statements.len(), 2, "let + Inner = 2 stmts");
+        let TypedStatement::Let(_) = &block.statements[0].node else {
+            panic!("first body stmt should be Let");
+        };
+        let TypedStatement::Expression(_) = &block.statements[1].node else {
+            panic!("second body stmt should be the Inner call");
+        };
+    }
+
+    /// `slot Header { ... }` inside a component body emits a
+    /// `__slot_open__("Header") ... __slot_close__()` marker pair
+    /// flanking the slot's body statements. Pins the linear marker
+    /// representation the upstream stmt-list flatten produces — the
+    /// host's lowering pass folds open/close pairs back into a
+    /// named-slot tree at codegen time.
+    #[test]
+    fn parse_component_call_with_slot() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component Tabs { }
+                component Tab { }
+                view {
+                    Tabs() {
+                        slot Header {
+                            Tab(1)
+                        }
+                        Tab(2)
+                    }
+                }
+                "#,
+                "body_slot.blinc",
+            )
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        let TypedStatement::Expression(expr_node) = &stmts[0].node else {
+            panic!("expected Expression");
+        };
+        let TypedExpression::Call(call) = &expr_node.node else {
+            panic!("expected Call");
+        };
+        let TypedExpression::Block(block) = &call.positional_args[1].node else {
+            panic!("body should be a Block");
+        };
+
+        // [__slot_open__("Header"), Tab(1), __slot_close__, Tab(2)] = 4 stmts
+        assert_eq!(
+            block.statements.len(),
+            4,
+            "expected 4 statements (open, Tab(1), close, Tab(2)), got {} — flatten not working?",
+            block.statements.len()
+        );
+
+        // Helper to extract callee name from a stmt-position Call.
+        fn callee_name(stmt: &zyntax_typed_ast::TypedNode<TypedStatement>) -> Option<String> {
+            let TypedStatement::Expression(e) = &stmt.node else {
+                return None;
+            };
+            let TypedExpression::Call(c) = &e.node else {
+                return None;
+            };
+            let TypedExpression::Variable(v) = &c.callee.node else {
+                return None;
+            };
+            v.resolve_global().map(|s| s.to_string())
+        }
+
+        assert_eq!(
+            callee_name(&block.statements[0]).as_deref(),
+            Some("__slot_open__")
+        );
+        // statements[1] is the inner Tab(1) — a __component_call__ marker
+        assert_eq!(
+            callee_name(&block.statements[1]).as_deref(),
+            Some("__component_call__")
+        );
+        assert_eq!(
+            callee_name(&block.statements[2]).as_deref(),
+            Some("__slot_close__")
+        );
+        assert_eq!(
+            callee_name(&block.statements[3]).as_deref(),
+            Some("__component_call__"),
+            "trailing default child should remain at the parent level"
+        );
+
+        // The __slot_open__ marker's first arg is the slot name.
+        let TypedStatement::Expression(open_expr) = &block.statements[0].node else {
+            unreachable!();
+        };
+        let TypedExpression::Call(open_call) = &open_expr.node else {
+            unreachable!();
+        };
+        let TypedExpression::Literal(TypedLiteral::String(slot_name)) =
+            &open_call.positional_args[0].node
+        else {
+            panic!("__slot_open__ first arg should be the slot-name StringLiteral");
+        };
+        assert_eq!(slot_name.resolve_global().as_deref(), Some("Header"));
+    }
+
     /// no `=`) and then fail to parse the statement, returning a
     /// parse error. Pins that the disambiguation rule actually
     /// disambiguates.
