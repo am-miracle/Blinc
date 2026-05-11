@@ -253,6 +253,110 @@ extern "C" fn blinc_text_int(n: i32) {
 }
 
 // =====================================================================
+// F-string desugaring builtins
+// =====================================================================
+//
+// `f"hi {n}"` lowers (via the normalization-pass `fstring_to_concat`
+// rewrite at zyntax/crates/passes/normalization/src/lib.rs:137) into
+// `string_concat("hi ", __fstring_format__(n))`. Both names need to
+// resolve to host externs at JIT time — without them the SSA emits
+// undefined-variable reads that the runtime later derefs as a null
+// pointer, surfacing as a SIGSEGV instead of a compile error.
+//
+// Upstream ZynML registers these via the ZRTL `io` plugin
+// (`$IO$string_concat`, `$IO$format_dynamic`). Blinc doesn't load
+// ZRTL plugins — we use the static `register_function_typed` path
+// for everything — so we implement minimal Blinc-side versions
+// here.
+//
+// **Memory layout.** Zyntax-side strings are length-prefixed:
+//
+// ```text
+// +-----+----- ... -----+
+// | u32 |   UTF-8 bytes |
+// +-----+----- ... -----+
+//   len      content
+// ```
+//
+// The `*const i32` pointer the JIT passes around points at the
+// length word; the bytes follow immediately after. `blinc_text`
+// already reads from this layout — these formatters produce it.
+//
+// **Memory ownership.** Strings produced here LEAK — the host
+// doesn't free them. Acceptable for the prototype (test runs are
+// short-lived) but tracked as a known limitation: a single render
+// pass that materialises N f-strings keeps N buffers resident
+// until process exit. Fix path is to switch to a per-render
+// arena bump-allocator and reset between calls.
+
+/// Encode a Rust `&str` as a Zyntax length-prefixed string and
+/// leak it. Returns a pointer to the length word.
+///
+/// The buffer layout matches what `blinc_text` (and any
+/// future string-typed builtin) reads.
+fn blinc_string_alloc(s: &str) -> *const i32 {
+    let len = s.len() as u32;
+    let total = 4 + s.len();
+    let mut buf: Vec<u8> = Vec::with_capacity(total);
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(s.as_bytes());
+    let ptr = buf.as_ptr() as *const i32;
+    // Leak — see module comment above. The ZRTL plugin path uses
+    // a managed allocator with explicit free; the static-builtin
+    // path here doesn't have that machinery wired up yet.
+    std::mem::forget(buf);
+    ptr
+}
+
+/// Decode a Zyntax length-prefixed string back into a Rust
+/// `&str`. The returned reference is valid as long as the
+/// underlying buffer remains live — for our leak-on-allocate
+/// strategy that's "forever", so 'static.
+///
+/// # Safety
+///
+/// Caller must guarantee `ptr` came from `blinc_string_alloc`
+/// (or another producer that emits the same length-prefix +
+/// UTF-8 layout). The JIT guarantees this when the registered
+/// signature has `String` for the parameter.
+unsafe fn blinc_string_decode<'a>(ptr: *const i32) -> &'a str {
+    if ptr.is_null() {
+        return "";
+    }
+    let len = std::ptr::read_unaligned(ptr) as usize;
+    let body = (ptr as *const u8).add(4);
+    let bytes = std::slice::from_raw_parts(body, len);
+    std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
+}
+
+/// `__fstring_format__` for i32 — formats an integer as its
+/// decimal-string representation in a fresh Zyntax string.
+///
+/// The DSL's `@builtin` map routes `__fstring_format__` to
+/// `$Blinc$format_int`. Today this only handles i32 inputs —
+/// f64 props would need a separate format builtin (i.e. a
+/// generic dispatch path or a per-type DSL-visible alias).
+extern "C" fn blinc_format_int(n: i32) -> *const i32 {
+    let s = n.to_string();
+    blinc_string_alloc(&s)
+}
+
+/// `string_concat` — joins two Zyntax-formatted strings into a
+/// fresh one. Same memory-ownership caveat as the rest of this
+/// section.
+extern "C" fn blinc_string_concat(a: *const i32, b: *const i32) -> *const i32 {
+    // SAFETY: the runtime guarantees both args are well-formed
+    // length-prefixed string pointers when the registered
+    // signature has `String` for both params.
+    let a_str = unsafe { blinc_string_decode(a) };
+    let b_str = unsafe { blinc_string_decode(b) };
+    let mut out = String::with_capacity(a_str.len() + b_str.len());
+    out.push_str(a_str);
+    out.push_str(b_str);
+    blinc_string_alloc(&out)
+}
+
+// =====================================================================
 // Errors
 // =====================================================================
 
@@ -2406,6 +2510,36 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             return_type: Type::Primitive(PrimitiveType::F64),
             ptr: blinc_signal_get_f64 as *const u8,
         },
+        BuiltinDescriptor {
+            // `__fstring_format__` (i32 specialisation). The
+            // normalization pass `fstring_to_concat` wraps every
+            // non-string f-string part in a
+            // `__fstring_format__(part)` call; the @builtin alias
+            // routes that DSL-visible name to `$Blinc$format_int`.
+            //
+            // Today this handles i32 only. Mixing in f64 props
+            // would route the wrong-typed value through this i32
+            // formatter and produce garbage — a separate
+            // `__fstring_format_f64__` builtin (or upstream
+            // dispatch infra) is the fix path.
+            name: "$Blinc$format_int",
+            param_types: &[Type::Primitive(PrimitiveType::I32)],
+            return_type: Type::Primitive(PrimitiveType::String),
+            ptr: blinc_format_int as *const u8,
+        },
+        BuiltinDescriptor {
+            // `string_concat` — joins two strings. The
+            // normalization pass `fstring_to_concat` chains
+            // f-string parts via this. Maps to
+            // `$Blinc$string_concat` via the @builtin alias.
+            name: "$Blinc$string_concat",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::String),
+            ptr: blinc_string_concat as *const u8,
+        },
     ]
 }
 
@@ -2604,27 +2738,63 @@ mod tests {
         }
     }
 
-    /// USING a prop inside an impl-method view body — or any
-    /// f-string interpolation inside an impl-method body —
-    /// currently SIGSEGVs because Zyntax's SSA name resolution
-    /// doesn't surface program-level builtin externs
-    /// (`__fstring_format__`, etc.) when compiling impl methods.
-    /// Even a literal-only `text(f"hi {42}")` inside a `component
-    /// Foo { view { ... } }` block crashes for the same reason —
-    /// the issue is independent of prop-binding.
-    ///
-    /// The prop-binding pass itself works (see
-    /// `bind_component_props_writes_view_params` and
-    /// `render_component_with_unused_prop`). The wall is
-    /// downstream — likely Zyntax's `lower_impl_block` /
-    /// `retype_block_with_self` path missing a builtin-extern
-    /// lookup step that the free-function path has.
-    ///
-    /// Ignored until upstream impl-method-body name resolution
-    /// covers program-level externs the same way free-function
-    /// bodies do.
+    /// Baseline probe: literal-only f-string interpolation in a
+    /// bare view (free-function body). Validates the
+    /// `fstring_to_concat` normalization + SSA path works AT ALL
+    /// in our DSL setup before we dig into why impl methods fail.
     #[test]
-    #[ignore]
+    fn render_bare_view_with_fstring_literal() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(r#"view { text(f"hi {42}") }"#, "bare_fstring_literal.blinc")
+            .expect("compile");
+
+        let ops = dsl.render_view().expect("render_view");
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "hi 42"),
+            other => panic!("expected DslOp::Text(\"hi 42\"), got {other:?}"),
+        }
+    }
+
+    /// Literal-only f-string interpolation inside an impl-method
+    /// view body. Verifies the `__fstring_format__` /
+    /// `string_concat` Blinc builtins resolve cleanly when the
+    /// view runs as an inherent-impl method. The bare-view case
+    /// is `render_bare_view_with_fstring_literal`; this is the
+    /// same shape inside `component Foo { view { ... } }`.
+    #[test]
+    fn render_component_view_with_literal_fstring() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            component Greeting {
+                view { text(f"hi {42}") }
+            }
+            view { Greeting() }
+            "#,
+            "literal_fstring_in_impl.blinc",
+        )
+        .expect("compile");
+
+        let ops = dsl.render_view().expect("render_view");
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "hi 42"),
+            other => panic!("expected DslOp::Text(\"hi 42\"), got {other:?}"),
+        }
+    }
+
+    /// End-to-end: a prop value bound to a method param,
+    /// interpolated into an f-string inside the view body, then
+    /// rendered. Exercises the full parse → lower → bind →
+    /// compile → JIT loop with all of: component declaration,
+    /// component call site, prop binding, multi-part f-string,
+    /// and the `__fstring_format__` / `string_concat` builtins.
+    #[test]
     fn render_component_with_prop_in_fstring() {
         let _ = tracing_subscriber::fmt::try_init();
 

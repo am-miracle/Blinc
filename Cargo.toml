@@ -112,7 +112,7 @@ rust-version = "1.75"
 # track upstream commits when the Blinc DSL prototype lands. The
 # previous `path = "../zyntax/..."` worked locally during early
 # prototyping but broke CI runners that don't clone the sibling repo.
-zyntax_embed = { git = "https://github.com/darmie/zyntax", rev = "7b787188675825c70be03110bd76abcd02a66196" }
+zyntax_embed = { git = "https://github.com/darmie/zyntax", rev = "5b0dfab7940dd01406f1982e02a2d2c7b5242604" }
 
 # Krio (async runtime) — Zyntax's `krio_adapter` pins to rev `fe0177c`
 # (see zyntax/crates/passes/krio_adapter/Cargo.toml). We declare the

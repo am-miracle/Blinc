@@ -34,6 +34,18 @@
     // `register_function_typed` and the JIT calls into Rust.
     __signal_get_i32: "__signal_get_i32",
     __signal_get_f64: "__signal_get_f64",
+    // F-string desugaring: the normalization pass
+    // `fstring_to_concat` (zyntax passes/normalization) rewrites
+    // multi-part f-strings into `string_concat` chains with
+    // `__fstring_format__` formatting each non-string interp
+    // part. Both names must resolve to host externs at JIT time —
+    // without these entries the SSA emits undefined-variable
+    // reads and the runtime SIGSEGVs trying to call them. Upstream
+    // ZynML registers them via the ZRTL `io` plugin; Blinc has no
+    // plugin loader so we route to `$Blinc$*` symbols implemented
+    // statically.
+    __fstring_format__: "$Blinc$format_int",
+    string_concat: "$Blinc$string_concat",
 }
 
 // =====================================================================
