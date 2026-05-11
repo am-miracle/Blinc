@@ -2527,6 +2527,206 @@ mod tests {
         assert_eq!(class.fields[0].name.resolve_global().as_deref(), Some("x"));
     }
 
+    /// `Counter(0)` inside a view body — statement-position
+    /// component call. Lowers to a `TypedStatement::Expression`
+    /// wrapping a `Call { callee: __component_call__, args: [
+    /// StringLiteral("Counter"), IntLiteral(0) ] }`. The leading
+    /// StringLiteral arg carries the component name (the
+    /// disambiguator the host's lowering pass reads to recognise
+    /// this as a component instantiation).
+    #[test]
+    fn parse_component_call_no_args() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(r#"view { Counter() }"#, "call_no_args.blinc")
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        assert_eq!(stmts.len(), 1, "expected 1 stmt, got {stmts:?}");
+
+        let TypedStatement::Expression(expr_node) = &stmts[0].node else {
+            panic!("expected Expression statement");
+        };
+        let TypedExpression::Call(call) = &expr_node.node else {
+            panic!("expected Call expression");
+        };
+
+        let TypedExpression::Variable(callee_name) = &call.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_eq!(
+            callee_name.resolve_global().as_deref(),
+            Some("__component_call__"),
+            "callee should be the __component_call__ marker"
+        );
+
+        assert_eq!(
+            call.positional_args.len(),
+            1,
+            "only the component-name string"
+        );
+        let TypedExpression::Literal(TypedLiteral::String(name)) = &call.positional_args[0].node
+        else {
+            panic!(
+                "expected StringLiteral name arg, got {:?}",
+                call.positional_args[0].node
+            );
+        };
+        assert_eq!(name.resolve_global().as_deref(), Some("Counter"));
+    }
+
+    /// `Counter(1, 2)` — positional args lower into the marker
+    /// call's args list, in source order, after the component-name
+    /// string. Mirrors the args-flatten shape of `text(N)`.
+    #[test]
+    fn parse_component_call_positional_args() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(r#"view { Counter(1, 2) }"#, "call_positional.blinc")
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        let TypedStatement::Expression(expr_node) = &stmts[0].node else {
+            panic!("expected Expression");
+        };
+        let TypedExpression::Call(call) = &expr_node.node else {
+            panic!("expected Call");
+        };
+
+        // [StringLiteral("Counter"), IntLiteral(1), IntLiteral(2)]
+        assert_eq!(call.positional_args.len(), 3);
+
+        let TypedExpression::Literal(TypedLiteral::Integer(one)) = &call.positional_args[1].node
+        else {
+            panic!("arg 1 should be Integer(1)");
+        };
+        let TypedExpression::Literal(TypedLiteral::Integer(two)) = &call.positional_args[2].node
+        else {
+            panic!("arg 2 should be Integer(2)");
+        };
+        assert_eq!(*one, 1);
+        assert_eq!(*two, 2);
+    }
+
+    /// `Counter(1, step = 2)` — named args lower as a nested
+    /// `__named__("step", 2)` marker Call inside the positional args
+    /// list. The host's lowering pass detects the `__named__` callee
+    /// and reroutes the arg accordingly. Pin the shape so the host
+    /// has a stable thing to match against.
+    #[test]
+    fn parse_component_call_named_arg() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(r#"view { Counter(1, step = 2) }"#, "call_named.blinc")
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        let TypedStatement::Expression(expr_node) = &stmts[0].node else {
+            panic!("expected Expression");
+        };
+        let TypedExpression::Call(call) = &expr_node.node else {
+            panic!("expected Call");
+        };
+
+        // [StringLiteral("Counter"), IntLiteral(1), Call(__named__, ...)]
+        assert_eq!(call.positional_args.len(), 3);
+
+        let TypedExpression::Call(named) = &call.positional_args[2].node else {
+            panic!(
+                "expected nested __named__ Call, got {:?}",
+                call.positional_args[2].node
+            );
+        };
+        let TypedExpression::Variable(named_callee) = &named.callee.node else {
+            panic!("__named__ callee should be a Variable");
+        };
+        assert_eq!(named_callee.resolve_global().as_deref(), Some("__named__"));
+
+        // Named-arg marker is [StringLiteral("step"), Integer(2)].
+        assert_eq!(named.positional_args.len(), 2);
+        let TypedExpression::Literal(TypedLiteral::String(arg_name)) =
+            &named.positional_args[0].node
+        else {
+            panic!("named-arg name should be a StringLiteral");
+        };
+        assert_eq!(arg_name.resolve_global().as_deref(), Some("step"));
+
+        let TypedExpression::Literal(TypedLiteral::Integer(arg_value)) =
+            &named.positional_args[1].node
+        else {
+            panic!("named-arg value should be an Integer literal");
+        };
+        assert_eq!(*arg_value, 2);
+    }
+
+    /// `let widget = Counter(0)` — component call in expression
+    /// position (right-hand side of a `let`). Pins that
+    /// `component_call_expr` is reachable through the full
+    /// expression precedence chain (it sits in `primary_expr`
+    /// alongside the literal / variable / paren alternates).
+    #[test]
+    fn parse_component_call_in_expr_position() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"view { let widget = Counter(0) }"#,
+                "call_expr_position.blinc",
+            )
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        assert_eq!(stmts.len(), 1);
+
+        let TypedStatement::Let(let_stmt) = &stmts[0].node else {
+            panic!("expected Let statement");
+        };
+        let init = let_stmt
+            .initializer
+            .as_ref()
+            .expect("let must have initializer");
+        let TypedExpression::Call(call) = &init.node else {
+            panic!("expected Call initializer, got {:?}", init.node);
+        };
+        let TypedExpression::Variable(callee_name) = &call.callee.node else {
+            panic!("expected Variable callee");
+        };
+        assert_eq!(
+            callee_name.resolve_global().as_deref(),
+            Some("__component_call__")
+        );
+    }
+
+    /// Bare lowercase `counter(0)` must NOT match
+    /// `component_call_expr` — the capital-first `component_name`
+    /// terminal is the explicit disambiguator. The PEG should
+    /// backtrack and try `assign_stmt` (which fails because there's
+    /// no `=`) and then fail to parse the statement, returning a
+    /// parse error. Pins that the disambiguation rule actually
+    /// disambiguates.
+    #[test]
+    fn parse_lowercase_call_is_not_component_call() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        // `counter(0)` isn't a valid Blinc statement — lowercase
+        // function calls only land via the typed `text(...)` rules
+        // today. So parse should fail (not silently treat `counter`
+        // as a component).
+        let result = dsl.parse_to_typed_ast(r#"view { counter(0) }"#, "lowercase_call.blinc");
+        assert!(
+            result.is_err(),
+            "lowercase `counter(0)` should not parse as a component call"
+        );
+    }
+
     /// Single-prop component — exercises the `prop_decl_list` path
     /// where there's only the head `prop_decl` and no `prop_decl_tail`
     /// repetitions. Regression guard for prepend_list with empty

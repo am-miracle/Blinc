@@ -573,8 +573,18 @@ statements = { stmt:statement* }
 // — interpolate via `text(f"{count}")` instead. f-string parts now
 // accept full expressions (see `f_string_expr` below).
 statement = {
-    text_string_stmt | text_int_stmt | if_stmt | let_stmt | assign_stmt
+    text_string_stmt | text_int_stmt | if_stmt | let_stmt | component_call_stmt | assign_stmt
 }
+
+// Statement-position wrapper around `component_call_expr` — at
+// the top level of a `view { ... }` block, components are
+// instantiated as standalone statements (`Counter(1)`) rather
+// than expressions. PEG ordered alternates put this BEFORE
+// `assign_stmt` (also identifier-led) for cosmetic clarity —
+// either order parses correctly because `Counter(` and `name =`
+// disambiguate at the second token.
+component_call_stmt = { call:component_call_expr }
+  -> TypedStatement::Expression { expr: call }
 
 // `let <name> = <expr>` — immutable local binding. Lowers to
 // `TypedStatement::Let` with `is_mutable: false` and no
@@ -966,8 +976,75 @@ primary_expr = {
     string_literal |
     float |
     integer |
+    component_call_expr |
     variable_expr
 }
+
+// Component call: `Counter(arg)`, `Counter(1, step = 2)`. The
+// capital-first `component_name` terminal is what distinguishes
+// a component call from a bare variable reference (which is what
+// `variable_expr` would otherwise match). This mirrors the React /
+// Vue / Flutter convention — capital-leading names denote
+// components, lowercase denote primitives / builtins / locals —
+// which the DSL's target audience already carries as muscle
+// memory, so the disambiguation reads as "of course" rather than
+// "what's this convention".
+//
+// Valid in any expression position (so `let widget = if cond {
+// Counter(0) } else { Spinner() }` parses) and, via the wrapper
+// `component_call_stmt`, in statement position too.
+//
+// Lowers to a marker `__component_call__("Counter", args...)`
+// call so the host's lowering pass can detect component calls
+// without needing to consult the type registry mid-parse. Mirrors
+// the `__fsm_*` and `__view_deps__` marker pattern already used
+// elsewhere in this grammar.
+component_call_expr = { name:component_name ~ "(" ~ args:component_args_list? ~ ")" }
+  -> TypedExpression::Call {
+      callee: Box::new(TypedExpression::Variable { name: intern("__component_call__") }),
+      args: prepend_list(
+          TypedExpression::StringLiteral { value: name },
+          args.unwrap_or([]),
+      ),
+  }
+
+// Capital-leading identifier. The `'A'..'Z'` head distinguishes
+// component invocations (`Counter(...)`) from regular function
+// calls and variable references (`text(...)`, `count`). Atomic
+// rule so the matched text comes through as a String for use as
+// the marker's first arg.
+component_name = @{ 'A'..'Z' ~ (ASCII_ALPHANUMERIC | "_")* }
+
+// Comma-or-newline separated arg list. Each entry is either a
+// positional `expr` or a named `name = expr`. PEG ordered
+// alternates handle the dispatch — named comes first because
+// `identifier ~ "="` is the longer / more specific prefix.
+component_args_list = { first:component_arg ~ rest:component_args_tail* }
+  -> prepend_list(first, rest)
+
+component_args_tail = { ","? ~ a:component_arg }
+  -> a
+
+component_arg = { named_component_arg | expr }
+
+// `name = value` lowers to a `__named__("name", value)` marker
+// Call. Name is emitted as a `StringLiteral` (not a `Variable`)
+// so the SSA pass doesn't try to resolve it against the local
+// scope — it's purely a marker for the host's lowering. Same
+// pattern as `__fsm_transition__`'s string-typed state args.
+//
+// Why `=` and not `:` — keeps `name: Type` (the def-site prop /
+// field syntax) visually distinct from `name = value` (call-site
+// argument binding). Matches the JS/TS/Rust convention where `:`
+// is type annotation and `=` is value binding.
+named_component_arg = { name:identifier ~ "=" ~ value:expr }
+  -> TypedExpression::Call {
+      callee: Box::new(TypedExpression::Variable { name: intern("__named__") }),
+      args: [
+          TypedExpression::StringLiteral { value: name },
+          value,
+      ],
+  }
 
 // Parenthesised grouping. Doesn't synthesise a wrapper expression —
 // PEG's pass-through (`-> e`) just hands the inner expression back
