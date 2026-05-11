@@ -54,6 +54,13 @@
     // registered by `builtins()`.
     __new_child_list__: "__new_child_list__",
     __push_child__: "__push_child__",
+    // Style-overlay marshalling. Same pattern as the child list.
+    __new_style_overlay__: "__new_style_overlay__",
+    __set_overlay_bg__: "__set_overlay_bg__",
+    __set_overlay_opacity__: "__set_overlay_opacity__",
+    __set_overlay_corner_radius__: "__set_overlay_corner_radius__",
+    __set_overlay_border_width__: "__set_overlay_border_width__",
+    __set_overlay_border_color__: "__set_overlay_border_color__",
 }
 
 // =====================================================================

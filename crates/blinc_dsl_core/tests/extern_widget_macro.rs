@@ -107,6 +107,64 @@ impl ElementBuilder for MacroCard {
     }
 }
 
+// =====================================================================
+// `styled` flag — inline visual styling props through the macro
+// =====================================================================
+
+#[extern_widget(name = "StyledBox", styled)]
+pub struct StyledBox {
+    pub label: String,
+}
+
+impl ElementBuilder for StyledBox {
+    fn build(&self, tree: &mut blinc_layout::LayoutTree) -> blinc_layout::LayoutNodeId {
+        blinc_layout::text::Text::new(&self.label).build(tree)
+    }
+    fn render_props(&self) -> blinc_layout::RenderProps {
+        blinc_layout::text::Text::new(&self.label).render_props()
+    }
+    fn children_builders(&self) -> &[Box<dyn ElementBuilder>] {
+        &[]
+    }
+}
+
+#[test]
+fn extern_widget_styled_flag_applies_overlay() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.register_extern_widget::<StyledBox>()
+        .expect("register StyledBox");
+
+    dsl.compile_source(
+        r#"view { StyledBox("hello", opacity = 0.25, bg = 65280) }"#,
+        "styled_box.blinc",
+    )
+    .expect("compile");
+
+    let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+    let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+    let ZyntaxValue::Int(handle) = value else {
+        panic!("expected widget handle, got: {value:?}");
+    };
+    assert_ne!(handle, 0);
+
+    let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+    let WidgetBox::Custom(builder) = *widget else {
+        panic!("expected Custom(Styled<StyledBox>)");
+    };
+    let props = builder.render_props();
+    assert_eq!(props.opacity, 0.25);
+    // 65280 = 0x00FF00 → green.
+    if let Some(blinc_core::layer::Brush::Solid(c)) = props.background {
+        assert!(c.r.abs() < 0.01);
+        assert!((c.g - 1.0).abs() < 0.01);
+        assert!(c.b.abs() < 0.01);
+    } else {
+        panic!("background should be a solid brush");
+    }
+}
+
 /// End-to-end: `MacroCard(title = "hi") { Text("a") Text("b") }`
 /// compiles, calls the macro-generated thunk with the right
 /// args, and decodes back to a `Custom`-variant widget whose

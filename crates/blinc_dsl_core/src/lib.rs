@@ -551,10 +551,23 @@ pub use zyntax_embed::ZyntaxValue;
 #[doc(hidden)]
 pub mod __extern_widget_internals {
     pub use crate::{
-        BlincDsl, BlincDslError, BlincDslResult, ExternWidget, ExternWidgetSpec, WidgetBox,
+        BlincDsl, BlincDslError, BlincDslResult, ExternWidget, ExternWidgetSpec,
+        RenderPropsOverlay, Styled, WidgetBox,
     };
     pub use blinc_runtime::component::PropDef;
     pub use zyntax_typed_ast::type_registry::{PrimitiveType, Type};
+
+    /// Reclaim a `RenderPropsOverlay` from a `__new_style_overlay__`
+    /// pointer for use in macro-generated thunks. Wraps
+    /// `materialize_overlay` so the macro doesn't reach into a
+    /// public-but-unsafe surface name directly.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` MUST come from `__new_style_overlay__`.
+    pub unsafe fn decode_overlay(ptr: i64) -> crate::RenderPropsOverlay {
+        unsafe { crate::materialize_overlay(ptr) }
+    }
 
     /// Construct a `WidgetHandle` from any
     /// `Box<dyn ElementBuilder>`. Wraps it in
@@ -773,26 +786,27 @@ extern "C" fn blinc_text_view(content_ptr: *const i32) -> WidgetHandle {
 /// reclaimed `Box<WidgetBox>` flows into the Div as a
 /// `Box<dyn ElementBuilder>` child, owned for the Div's
 /// lifetime.
-extern "C" fn blinc_div_view(children: WidgetHandle) -> WidgetHandle {
+extern "C" fn blinc_div_view(children: WidgetHandle, style: i64) -> WidgetHandle {
     let mut widget = blinc_layout::div::Div::new();
     if children != 0 {
         // SAFETY: `children` is the raw-pointer payload of an
         // `i64` minted by `blinc_new_child_list`. The JIT
-        // guarantees the pointer's provenance by routing all
-        // child-list construction through that extern.
+        // guarantees provenance by routing all child-list
+        // construction through that extern.
         let list: Box<Vec<WidgetHandle>> =
             unsafe { Box::from_raw(children as *mut Vec<WidgetHandle>) };
         for handle in *list {
-            // SAFETY: each handle came from a widget-handle
-            // extern (`$Blinc$Text$view`, `$Blinc$Div$view`, a
-            // user-registered widget) that built the matching
-            // `WidgetBox` and into-raw'd it.
             if let Some(child_box) = unsafe { materialize_widget(handle) } {
                 widget = widget.child_box(child_box.into_element_builder());
             }
         }
     }
-    Box::into_raw(Box::new(WidgetBox::Div(Box::new(widget)))) as WidgetHandle
+    // SAFETY: `style` came from `__new_style_overlay__` (or is
+    // `0`).
+    let overlay = unsafe { materialize_overlay(style) };
+    Box::into_raw(Box::new(WidgetBox::Custom(Box::new(Styled::new(
+        widget, overlay,
+    ))))) as WidgetHandle
 }
 
 /// `__new_child_list__() -> i64`
@@ -830,6 +844,73 @@ extern "C" fn blinc_push_child(list: i64, child: WidgetHandle) {
     // what reclaims it.
     let vec: &mut Vec<WidgetHandle> = unsafe { &mut *(list as *mut Vec<WidgetHandle>) };
     vec.push(child);
+}
+
+// Overlay-builder externs. The lowering pass synthesises calls
+// to these for styled-primitive call sites that supply inline
+// visual props (`bg`, `opacity`, …). The overlay pointer is
+// consumed by the container/widget extern, which wraps the
+// constructed widget in `Styled<W>`.
+
+extern "C" fn blinc_new_style_overlay() -> i64 {
+    Box::into_raw(Box::new(RenderPropsOverlay::default())) as i64
+}
+
+extern "C" fn blinc_set_overlay_bg(ptr: i64, color: i64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.background = Some(blinc_core::layer::Brush::Solid(
+        blinc_core::layer::Color::from_hex(color as u32),
+    ));
+}
+
+extern "C" fn blinc_set_overlay_opacity(ptr: i64, val: f64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.opacity = Some(val as f32);
+}
+
+extern "C" fn blinc_set_overlay_corner_radius(ptr: i64, val: f64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.corner_radius = Some(val as f32);
+}
+
+extern "C" fn blinc_set_overlay_border_width(ptr: i64, val: f64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.border_width = Some(val as f32);
+}
+
+extern "C" fn blinc_set_overlay_border_color(ptr: i64, color: i64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.border_color = Some(blinc_core::layer::Color::from_hex(color as u32));
+}
+
+/// Reclaim a `Box<RenderPropsOverlay>` minted by
+/// `__new_style_overlay__`. Returns `Default::default()` for a
+/// null pointer (the no-styling-args call-site shape).
+///
+/// # Safety
+///
+/// `ptr` MUST come from `__new_style_overlay__`. The lowering
+/// pass is the only producer.
+pub unsafe fn materialize_overlay(ptr: i64) -> RenderPropsOverlay {
+    if ptr == 0 {
+        return RenderPropsOverlay::default();
+    }
+    *unsafe { Box::from_raw(ptr as *mut RenderPropsOverlay) }
 }
 
 // =====================================================================
@@ -2865,26 +2946,23 @@ fn register_blinc_layout_primitives() {
 
     let string_ty = Type::Primitive(PrimitiveType::String);
 
-    // `Div { ..children }` — the universal container. Its
-    // only DSL-visible prop today is `children`, which the
-    // lower pass materialises as the body block of the call
-    // site. Direction / bg / padding / etc. styling props
-    // will layer on via the `Styled<W>` overlay once that
-    // lands; storing them on Div directly would force every
-    // user-defined container to redeclare them.
-    //
-    // The `children` prop's runtime type is the heap-allocated
-    // `Vec<WidgetHandle>` minted by `__new_child_list__` —
-    // crossed as a raw pointer in `i64`. That matches the
-    // extern's actual signature so call-site lowering and
-    // type-checking agree.
+    // `Div { ..children }` — universal container, styled.
+    // `children` and `__style` both cross the JIT as `i64`
+    // pointer payloads; the lowering passes synthesise the
+    // matching call-site Blocks.
     let div = ComponentDefinition {
         name: std::sync::Arc::from("Div"),
         view_symbol: std::sync::Arc::from("$Blinc$Div$view"),
-        props: vec![PropDef {
-            name: std::sync::Arc::from("children"),
-            ty: Type::Primitive(PrimitiveType::I64),
-        }],
+        props: vec![
+            PropDef {
+                name: std::sync::Arc::from("children"),
+                ty: Type::Primitive(PrimitiveType::I64),
+            },
+            PropDef {
+                name: std::sync::Arc::from("__style"),
+                ty: Type::Primitive(PrimitiveType::I64),
+            },
+        ],
     };
 
     // `Text("hi")` — text leaf. Positional `content` is the
@@ -3620,6 +3698,13 @@ impl BlincDsl {
         // trailing shape).
         lower_children_arrays_to_blocks(&mut typed_program);
 
+        // Gather inline styling args (`bg`, `opacity`, …) into
+        // a `__new_style_overlay__` Block and attach the overlay
+        // pointer as `__style` named arg on styled primitives.
+        // Must run before `resolve_extern_widget_named_args` so
+        // the resolution pass sees a single uniform `__style` arg.
+        lower_styling_args_to_overlays(&mut typed_program);
+
         // Reorder remaining named args on extern primitive calls
         // into positional positions using the substrate
         // registry's prop order. Zyntax's auto-injected extern
@@ -3734,6 +3819,9 @@ impl BlincDsl {
         // Mirror the children-array → Block expansion so
         // AST tests see the lowered shape.
         lower_children_arrays_to_blocks(&mut program);
+
+        // Mirror the styling-args overlay lowering.
+        lower_styling_args_to_overlays(&mut program);
 
         // And mirror the named-arg → positional rewrite so AST
         // tests can assert the post-resolution shape.
@@ -4097,16 +4185,16 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_text_view as *const u8,
         },
         BuiltinDescriptor {
-            // `$Blinc$Div$view(children: i64) -> WidgetHandle (i64)`
-            // — the value-returning Div primitive. Takes a
-            // child-list pointer (built by `__new_child_list__`
-            // + populated via `__push_child__`); the extern
-            // reclaims the list, materialises each handle into
-            // a `Box<dyn ElementBuilder>`, and folds it into the
-            // Div's child list. A `0` pointer means "no body" —
-            // produces an empty Div.
+            // `$Blinc$Div$view(children, style) -> WidgetHandle (i64)`
+            // — value-returning Div primitive. Children consumed
+            // from a `__new_child_list__` pointer; visual props
+            // applied via a `__new_style_overlay__` overlay (both
+            // `0` for the bare-`Div()` case).
             name: "$Blinc$Div$view",
-            param_types: &[Type::Primitive(PrimitiveType::I64)],
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+            ],
             return_type: Type::Primitive(PrimitiveType::I64),
             ptr: blinc_div_view as *const u8,
         },
@@ -4135,6 +4223,60 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ],
             return_type: Type::Primitive(PrimitiveType::Unit),
             ptr: blinc_push_child as *const u8,
+        },
+        // Style-overlay builders. Mirror the child-list pattern:
+        // `__new_style_overlay__` mints the overlay, `__set_*`
+        // setters populate fields, the widget extern reclaims.
+        BuiltinDescriptor {
+            name: "__new_style_overlay__",
+            param_types: &[],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_new_style_overlay as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__set_overlay_bg__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_set_overlay_bg as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__set_overlay_opacity__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::F64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_set_overlay_opacity as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__set_overlay_corner_radius__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::F64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_set_overlay_corner_radius as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__set_overlay_border_width__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::F64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_set_overlay_border_width as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__set_overlay_border_color__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_set_overlay_border_color as *const u8,
         },
     ]
 }
@@ -4747,6 +4889,300 @@ fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
 /// statement-level trailing shape.
 ///
 /// [`ComponentRegistry`]: blinc_runtime::component::ComponentRegistry
+/// Names recognised as inline styling props in DSL call sites
+/// (e.g., `Div(bg = 0xFF0000, opacity = 0.5)`). Each maps to an
+/// overlay-setter extern with the matching FFI signature.
+const STYLING_PROP_NAMES: &[(&str, &str, StylingValueKind)] = &[
+    ("bg", "__set_overlay_bg__", StylingValueKind::IntColor),
+    (
+        "opacity",
+        "__set_overlay_opacity__",
+        StylingValueKind::Float,
+    ),
+    (
+        "corner_radius",
+        "__set_overlay_corner_radius__",
+        StylingValueKind::Float,
+    ),
+    (
+        "border_width",
+        "__set_overlay_border_width__",
+        StylingValueKind::Float,
+    ),
+    (
+        "border_color",
+        "__set_overlay_border_color__",
+        StylingValueKind::IntColor,
+    ),
+];
+
+#[derive(Clone, Copy)]
+enum StylingValueKind {
+    IntColor,
+    Float,
+}
+
+/// For styled primitives, gather inline styling named args
+/// (`bg`, `opacity`, …) into a `__new_style_overlay__` Block and
+/// attach the overlay pointer as `__style = <ident>` on the
+/// call. Styled primitives are detected by the presence of a
+/// `__style` prop in their registry definition.
+///
+/// Runs after `lower_children_arrays_to_blocks` and before
+/// `resolve_extern_widget_named_args`.
+fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
+    use zyntax_typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedNamedArg};
+
+    fn callee_is_styled_primitive(call: &TypedCall) -> bool {
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            return false;
+        };
+        let Some(sym) = callee.resolve_global() else {
+            return false;
+        };
+        let sym: &str = &sym;
+        let Some(name) = sym
+            .strip_prefix("$Blinc$")
+            .and_then(|s| s.strip_suffix("$view"))
+        else {
+            return false;
+        };
+        blinc_runtime::component::with_component_registry(|r| {
+            r.get_by_name(name)
+                .map(|def| def.props.iter().any(|p| p.name.as_ref() == "__style"))
+                .unwrap_or(false)
+        })
+    }
+
+    fn walk_stmt(stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>, counter: &mut u32) {
+        match &mut stmt.node {
+            TypedStatement::Expression(e) => rewrite_expr(e, counter),
+            TypedStatement::Return(Some(e)) => rewrite_expr(e, counter),
+            TypedStatement::Let(l) => {
+                if let Some(init) = &mut l.initializer {
+                    rewrite_expr(init, counter);
+                }
+            }
+            TypedStatement::If(if_stmt) => {
+                rewrite_expr(&mut if_stmt.condition, counter);
+                for s in &mut if_stmt.then_block.statements {
+                    walk_stmt(s, counter);
+                }
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    for s in &mut else_block.statements {
+                        walk_stmt(s, counter);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rewrite_expr(expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>, counter: &mut u32) {
+        match &mut expr.node {
+            TypedExpression::Call(call) => {
+                rewrite_expr(&mut call.callee, counter);
+                for arg in &mut call.positional_args {
+                    rewrite_expr(arg, counter);
+                }
+                for na in &mut call.named_args {
+                    rewrite_expr(&mut na.value, counter);
+                }
+            }
+            TypedExpression::Array(items) => {
+                for item in items {
+                    rewrite_expr(item, counter);
+                }
+            }
+            TypedExpression::Block(block) => {
+                for stmt in &mut block.statements {
+                    walk_stmt(stmt, counter);
+                }
+            }
+            TypedExpression::Binary(b) => {
+                rewrite_expr(&mut b.left, counter);
+                rewrite_expr(&mut b.right, counter);
+            }
+            _ => {}
+        }
+
+        let TypedExpression::Call(call) = &mut expr.node else {
+            return;
+        };
+        if !callee_is_styled_primitive(call) {
+            return;
+        }
+
+        // Partition named args into styling args (consumed by
+        // overlay setters) vs other args (left in place).
+        let mut styling_args: Vec<(&'static str, TypedNamedArg)> = Vec::new();
+        let mut remaining_named: Vec<TypedNamedArg> = Vec::new();
+        let existing_named = std::mem::take(&mut call.named_args);
+        for na in existing_named {
+            let resolved = na.name.resolve_global();
+            let name_str: Option<&str> = resolved.as_deref();
+            if let Some(name) = name_str {
+                if let Some(entry) = STYLING_PROP_NAMES.iter().find(|(n, _, _)| *n == name) {
+                    styling_args.push((entry.1, na));
+                    continue;
+                }
+            }
+            remaining_named.push(na);
+        }
+
+        let span = expr.span;
+        let i64_ty = Type::Primitive(PrimitiveType::I64);
+        let unit_ty = Type::Primitive(PrimitiveType::Unit);
+
+        if styling_args.is_empty() {
+            // Restore other named args and inject a null overlay
+            // pointer so the call's `__style` slot is filled.
+            call.named_args = remaining_named;
+            call.named_args.push(TypedNamedArg {
+                name: zyntax_typed_ast::InternedString::new_global("__style"),
+                value: Box::new(typed_node(
+                    TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(0)),
+                    i64_ty.clone(),
+                    span,
+                )),
+                span,
+            });
+            return;
+        }
+
+        // Allocate a unique ident for the overlay let-binding.
+        let id = {
+            let i = *counter;
+            *counter += 1;
+            i
+        };
+        let overlay_ident =
+            zyntax_typed_ast::InternedString::new_global(&format!("__blinc_style_{id}"));
+
+        let mut stmts: Vec<zyntax_typed_ast::TypedNode<TypedStatement>> = Vec::new();
+
+        // let __blinc_style_N = __new_style_overlay__()
+        stmts.push(typed_node(
+            TypedStatement::Let(zyntax_typed_ast::typed_ast::TypedLet {
+                name: overlay_ident,
+                ty: i64_ty.clone(),
+                mutability: zyntax_typed_ast::Mutability::Immutable,
+                initializer: Some(Box::new(typed_node(
+                    TypedExpression::Call(TypedCall {
+                        callee: Box::new(typed_node(
+                            TypedExpression::Variable(
+                                zyntax_typed_ast::InternedString::new_global(
+                                    "__new_style_overlay__",
+                                ),
+                            ),
+                            Type::Any,
+                            span,
+                        )),
+                        positional_args: vec![],
+                        named_args: vec![],
+                        type_args: vec![],
+                    }),
+                    i64_ty.clone(),
+                    span,
+                ))),
+                span,
+            }),
+            unit_ty.clone(),
+            span,
+        ));
+
+        // One setter call per styling arg.
+        for (setter_name, na) in styling_args {
+            let setter_call = TypedExpression::Call(TypedCall {
+                callee: Box::new(typed_node(
+                    TypedExpression::Variable(zyntax_typed_ast::InternedString::new_global(
+                        setter_name,
+                    )),
+                    Type::Any,
+                    span,
+                )),
+                positional_args: vec![
+                    typed_node(
+                        TypedExpression::Variable(overlay_ident),
+                        i64_ty.clone(),
+                        span,
+                    ),
+                    *na.value,
+                ],
+                named_args: vec![],
+                type_args: vec![],
+            });
+            stmts.push(typed_node(
+                TypedStatement::Expression(Box::new(typed_node(
+                    setter_call,
+                    unit_ty.clone(),
+                    span,
+                ))),
+                unit_ty.clone(),
+                span,
+            ));
+        }
+
+        // Trailing call: keep the original shape but attach
+        // `__style = Var(__blinc_style_N)` so the named-args
+        // resolution pass routes it to the right slot.
+        call.named_args = remaining_named;
+        call.named_args.push(TypedNamedArg {
+            name: zyntax_typed_ast::InternedString::new_global("__style"),
+            value: Box::new(typed_node(
+                TypedExpression::Variable(overlay_ident),
+                i64_ty.clone(),
+                span,
+            )),
+            span,
+        });
+
+        // The Call expression itself is what closes the Block;
+        // we extract a clone of the (now-modified) call to push
+        // as the trailing Expression statement, then replace
+        // `expr` with the Block.
+        let final_call = TypedExpression::Call(TypedCall {
+            callee: call.callee.clone(),
+            positional_args: std::mem::take(&mut call.positional_args),
+            named_args: std::mem::take(&mut call.named_args),
+            type_args: std::mem::take(&mut call.type_args),
+        });
+        stmts.push(typed_node(
+            TypedStatement::Expression(Box::new(typed_node(final_call, i64_ty.clone(), span))),
+            i64_ty.clone(),
+            span,
+        ));
+
+        expr.node = TypedExpression::Block(zyntax_typed_ast::typed_ast::TypedBlock {
+            statements: stmts,
+            span,
+        });
+    }
+
+    let mut counter: u32 = 0;
+    for decl in program.declarations.iter_mut() {
+        match &mut decl.node {
+            TypedDeclaration::Function(func) => {
+                if let Some(body) = func.body.as_mut() {
+                    for stmt in &mut body.statements {
+                        walk_stmt(stmt, &mut counter);
+                    }
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                for method in &mut imp.methods {
+                    if let Some(body) = method.body.as_mut() {
+                        for stmt in &mut body.statements {
+                            walk_stmt(stmt, &mut counter);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
     use zyntax_typed_ast::{TypedCall, TypedDeclaration, TypedExpression};
 
@@ -6719,13 +7155,27 @@ mod tests {
             div_callee.resolve_global().as_deref(),
             Some("$Blinc$Div$view")
         );
-        assert_eq!(div_call.positional_args.len(), 1, "Div takes (children)");
+        // Div takes (children, __style). The styling-args pass
+        // resolves `__style` to a positional `0` literal because
+        // this DSL source supplied no styling args.
+        assert_eq!(
+            div_call.positional_args.len(),
+            2,
+            "Div takes (children, __style)"
+        );
         let TypedExpression::Variable(div_list_arg) = &div_call.positional_args[0].node else {
             panic!("Div arg 0 should be the list ident Variable");
         };
         assert_eq!(
             div_list_arg.resolve_global().as_deref(),
             Some(list_ident.as_ref())
+        );
+        assert!(
+            matches!(
+                &div_call.positional_args[1].node,
+                TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(0))
+            ),
+            "Div arg 1 should be the null overlay literal"
         );
     }
 
@@ -9795,26 +10245,13 @@ mod tests {
         };
         assert_ne!(handle, 0, "Div view should return a real handle");
 
-        // SAFETY: handle came straight out of `$Blinc$Div$view`,
-        // which uses `Box::into_raw(Box::new(WidgetBox::Div(...)))`
-        // and hands the pointer back unchanged through `i64`.
+        // Div now lands in Custom(Styled<Div>). The Styled
+        // wrapper delegates `children_builders` to the inner.
         let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
-        let WidgetBox::Div(div) = *widget else {
-            panic!("expected WidgetBox::Div, got Text/Custom");
+        let WidgetBox::Custom(builder) = *widget else {
+            panic!("expected WidgetBox::Custom (Styled<Div>)");
         };
-
-        // The Div's children come straight from the
-        // `__push_child__` calls the lower pass emitted, in
-        // source order. Each one was originally a
-        // `WidgetBox::Text(...)` handle that the extern unwrapped
-        // via `into_element_builder`.
-        use blinc_layout::ElementBuilder;
-        let children = div.children_builders();
-        assert_eq!(
-            children.len(),
-            2,
-            "Div should hold the two Text children from the body block"
-        );
+        assert_eq!(builder.children_builders().len(), 2);
     }
 
     /// Nested container composition: `Div { Div { Text } }`
@@ -9849,31 +10286,63 @@ mod tests {
         };
         assert_ne!(handle, 0);
 
-        // SAFETY: handle came out of `$Blinc$Div$view`.
+        // Outer Div lands in Custom(Styled<Div>). The Styled
+        // wrapper delegates children to the inner Div.
         let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
-        let WidgetBox::Div(outer) = *widget else {
-            panic!("outer should be a Div");
+        let WidgetBox::Custom(outer) = *widget else {
+            panic!("outer should be a Custom(Styled<Div>)");
         };
-
-        use blinc_layout::ElementBuilder;
         let outer_children = outer.children_builders();
-        assert_eq!(outer_children.len(), 1, "outer Div should have 1 child Div");
+        assert_eq!(outer_children.len(), 1, "outer Div should have 1 child");
 
-        // The inner child is itself a `Div` with 1 Text child.
-        // We can't directly downcast through `dyn ElementBuilder`,
-        // but we can check the type-id and that it has its own
-        // single child.
+        // Inner Div is also a Styled<Div> with 1 Text child;
+        // `Styled<W>::build` delegates so the element_type_id
+        // reflects whatever the inner widget reports — for an
+        // inner Div from `blinc_layout::div::Div::new()` that's
+        // `ElementTypeId::Div`.
         let inner = &outer_children[0];
         assert_eq!(
             inner.element_type_id(),
             blinc_layout::div::ElementTypeId::Div,
             "inner child should report itself as a Div"
         );
-        assert_eq!(
-            inner.children_builders().len(),
-            1,
-            "inner Div should have 1 Text child"
-        );
+        assert_eq!(inner.children_builders().len(), 1);
+    }
+
+    #[test]
+    fn div_with_inline_styling_args_applies_overlay() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"view { Div(bg = 16711680, opacity = 0.5) }"#,
+            "div_styled.blinc",
+        )
+        .expect("compile");
+
+        let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+        let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+        let ZyntaxValue::Int(handle) = value else {
+            panic!("expected widget handle, got: {value:?}");
+        };
+        assert_ne!(handle, 0);
+
+        let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+        let WidgetBox::Custom(builder) = *widget else {
+            panic!("expected Custom(Styled<Div>)");
+        };
+        let props = builder.render_props();
+        assert_eq!(props.opacity, 0.5);
+        assert!(props.background.is_some(), "background should be set");
+        if let Some(blinc_core::layer::Brush::Solid(c)) = props.background {
+            // 16711680 = 0xFF0000 → red. Compare via channels
+            // since Color doesn't impl PartialEq.
+            assert!((c.r - 1.0).abs() < 0.01);
+            assert!(c.g.abs() < 0.01);
+            assert!(c.b.abs() < 0.01);
+        } else {
+            panic!("background should be a solid brush");
+        }
     }
 
     #[test]
@@ -9937,11 +10406,14 @@ mod tests {
         assert_ne!(handle, 0, "Div view should not return the null handle");
 
         // SAFETY: see `jit_view_renderer_round_trip_value_returning_text`.
+        // Div now wraps itself in `Styled<Div>` and lands in
+        // the Custom variant; the bare Div variant is reserved
+        // for unstyled raw construction.
         let widget =
             unsafe { materialize_widget(handle) }.expect("non-null handle should decode to Some");
         assert!(
-            matches!(*widget, WidgetBox::Div(_)),
-            "expected WidgetBox::Div"
+            matches!(*widget, WidgetBox::Custom(_)),
+            "expected WidgetBox::Custom (Styled<Div>)"
         );
     }
 

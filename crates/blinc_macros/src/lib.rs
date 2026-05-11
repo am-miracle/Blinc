@@ -136,11 +136,12 @@ fn classify_param_type(ty: &syn::Type) -> Option<ParamKind> {
 /// struct so adding future keys (e.g., `view_symbol = "..."`) is a
 /// matter of extending the `Parse` impl.
 struct ExternWidgetArgs {
-    /// DSL-facing identifier — what `.blinc` source types to call the
-    /// widget (e.g., `"FancyText"` matches `FancyText(...)` call
-    /// sites). Drives both the substrate `ComponentRegistry` entry
-    /// and the generated `register_<Name>` helper's name.
+    /// DSL-facing name.
     name: String,
+    /// `styled` flag — when true, the macro wraps the widget in
+    /// `Styled<W>` and the spec advertises a `__style` prop that
+    /// the lowering pass populates from inline DSL styling args.
+    styled: bool,
 }
 
 /// `#[children]` attribute on a struct field — marks the field as
@@ -158,6 +159,7 @@ fn field_has_children_attr(field: &syn::Field) -> bool {
 
 impl syn::parse::Parse for ExternWidgetArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        // Required: name = "<DslName>"
         let key: syn::Ident = input.parse()?;
         if key != "name" {
             return Err(syn::Error::new(
@@ -167,8 +169,29 @@ impl syn::parse::Parse for ExternWidgetArgs {
         }
         let _: syn::Token![=] = input.parse()?;
         let value: syn::LitStr = input.parse()?;
+
+        // Optional comma-separated trailing flags (currently
+        // just `styled`).
+        let mut styled = false;
+        while !input.is_empty() {
+            let _: syn::Token![,] = input.parse()?;
+            if input.is_empty() {
+                break;
+            }
+            let flag: syn::Ident = input.parse()?;
+            match flag.to_string().as_str() {
+                "styled" => styled = true,
+                other => {
+                    return Err(syn::Error::new(
+                        flag.span(),
+                        format!("unknown #[extern_widget] flag `{other}` — expected `styled`"),
+                    ));
+                }
+            }
+        }
         Ok(Self {
             name: value.value(),
+            styled,
         })
     }
 }
@@ -227,6 +250,7 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let struct_ident = item_struct.ident.clone();
     let dsl_name = args.name;
+    let styled = args.styled;
 
     if !item_struct.generics.params.is_empty() {
         return syn::Error::new_spanned(
@@ -398,10 +422,28 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
         param_types.push(type_expr.clone());
     }
 
+    // Styled flag: append `__style: i64` to the FFI signature
+    // and prop list; the thunk decodes the overlay and wraps the
+    // constructed widget in `Styled<W>`.
+    if styled {
+        thunk_params.push(quote! { __arg_style: i64 });
+        prop_defs.push(quote! {
+            ::blinc_dsl_core::__extern_widget_internals::PropDef {
+                name: ::std::sync::Arc::from("__style"),
+                ty: ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                    ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I64
+                ),
+            }
+        });
+        param_types.push(quote! {
+            ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I64
+            )
+        });
+    }
+
     // Strip macro-only field attributes before re-emitting the
-    // struct — Rust would reject `#[children]` / future
-    // `#[slot(...)]` as unknown helpers. We've already consumed
-    // them above; downstream code never sees them.
+    // struct.
     if let syn::Fields::Named(named) = &mut item_struct.fields {
         for field in &mut named.named {
             field
@@ -410,6 +452,28 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
+    let widget_construction = if styled {
+        quote! {
+            // SAFETY: `__arg_style` is `0` or a
+            // `__new_style_overlay__` pointer; either is safe to
+            // pass to `decode_overlay`.
+            let __overlay = unsafe {
+                ::blinc_dsl_core::__extern_widget_internals::decode_overlay(__arg_style)
+            };
+            let __widget: Box<dyn ::blinc_layout::div::ElementBuilder> = Box::new(
+                ::blinc_dsl_core::__extern_widget_internals::Styled::new(
+                    #struct_ident { #(#struct_inits),* },
+                    __overlay,
+                )
+            );
+        }
+    } else {
+        quote! {
+            let __widget: Box<dyn ::blinc_layout::div::ElementBuilder> =
+                Box::new(#struct_ident { #(#struct_inits),* });
+        }
+    };
+
     let expanded = quote! {
         #item_struct
 
@@ -417,14 +481,7 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(non_snake_case)]
         extern "C" fn #thunk_ident(#(#thunk_params),*) -> i64 {
             #(#thunk_decodes)*
-            // `Self { fields }` style construction means the
-            // user owns the widget's shape. The cast to
-            // `Box<dyn ElementBuilder>` requires the user to
-            // have provided `impl ElementBuilder for
-            // <StructName>` — failure to do so surfaces as a
-            // clear compile error pointing at this line.
-            let __widget: Box<dyn ::blinc_layout::div::ElementBuilder> =
-                Box::new(#struct_ident { #(#struct_inits),* });
+            #widget_construction
             ::blinc_dsl_core::__extern_widget_internals::into_handle(__widget)
         }
 
