@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use zyntax_embed::{
     Grammar2, Grammar2Error, NativeSignature, NativeType, RuntimeError, TypeTag, ZrtlSigFlags,
-    ZrtlSymbolSig, ZyntaxRuntime, ZyntaxValue,
+    ZrtlSymbolSig, ZyntaxRuntime,
 };
 
 /// Mirror of `zyntax_compiler::zrtl::MAX_PARAMS` (16). Not re-exported
@@ -406,16 +406,266 @@ extern "C" fn blinc_string_concat(a: *const i32, b: *const i32) -> *const i32 {
 // production paths flow the handle into the actual UI tree
 // where it gets owned for the widget's lifetime.
 
+/// Tagged box carrying a concrete `blinc_layout` widget across
+/// the JIT boundary. Each widget-primitive extern (`blinc_text_view`,
+/// `blinc_div_view`, …) builds the appropriate variant, wraps it in
+/// `Box<WidgetBox>`, and returns the raw pointer cast to `i64`.
+///
+/// The variant tag is what lets the host-side walker
+/// ([`materialize_widget`]) dispatch back to a concrete
+/// `blinc_layout` value — an untagged raw pointer would lose the
+/// type identity at the JIT boundary.
+///
+/// Each payload is boxed because `blinc_layout::div::Div` carries
+/// the full property suite (~1 KB) and Rust enums size to their
+/// largest variant; without the inner box every `Text` handle
+/// would balloon to the same width as a `Div`.
+///
+/// **`Custom` carries arbitrary `ElementBuilder` implementations**
+/// — the variant Rust-side widget extensions land in. It's the
+/// shared payload type for both interop directions:
+///
+///   - Rust → DSL: a Rust-side widget registered with
+///     [`BlincDsl::register_extern_widget`] wraps the user
+///     struct in `WidgetBox::Custom` so it round-trips back to
+///     Rust as a typed `Box<dyn ElementBuilder>`.
+///   - DSL → Rust: [`BlincDsl::query`] decodes a value-returning
+///     DSL component's handle through this variant when the
+///     component eventually produces user types.
+pub enum WidgetBox {
+    Text(Box<blinc_layout::text::Text>),
+    Div(Box<blinc_layout::div::Div>),
+    Custom(Box<dyn blinc_layout::div::ElementBuilder>),
+}
+
+impl WidgetBox {
+    /// Coerce into a `Box<dyn ElementBuilder>` so callers can
+    /// slot the widget into a Rust-side tree without caring which
+    /// variant it came in as. Used by the DSL→Rust query path
+    /// and any consumer that just wants "build me into a layout
+    /// tree" semantics.
+    pub fn into_element_builder(self) -> Box<dyn blinc_layout::div::ElementBuilder> {
+        match self {
+            WidgetBox::Text(t) => t,
+            WidgetBox::Div(d) => d,
+            WidgetBox::Custom(c) => c,
+        }
+    }
+}
+
+/// Re-exports the `#[extern_widget]` macro lives at the crate
+/// root so users only need one import to declare a DSL-exposed
+/// Rust widget. The expansion targets [`__extern_widget_internals`]
+/// — see that module for the surface the macro consumes.
+pub use blinc_macros::extern_widget;
+
+/// The canonical Zyntax runtime value enum, re-exported so
+/// consumers of `blinc_dsl_core` (notably [`BlincDsl::query`]
+/// callers and `ViewRenderer` consumers) can match on view
+/// return values without separately depending on
+/// `zyntax_embed`.
+pub use zyntax_embed::ZyntaxValue;
+
+/// Internals exposed for the [`extern_widget!`](crate::extern_widget)
+/// proc-macro's code generation. Not part of the stable public API
+/// surface — the items here exist so generated code can find them
+/// at fully-qualified paths. Manual callers should use the typed
+/// surfaces in the crate root ([`WidgetBox`],
+/// [`ExternWidgetSpec`], [`ExternWidget`],
+/// [`BlincDsl::register_extern_widget`]).
+///
+/// All re-exports here mirror existing public items; the module
+/// is `doc(hidden)` only because the *path* is an implementation
+/// detail of the macro, not the items themselves.
+#[doc(hidden)]
+pub mod __extern_widget_internals {
+    pub use crate::{
+        BlincDsl, BlincDslError, BlincDslResult, ExternWidget, ExternWidgetSpec, WidgetBox,
+    };
+    pub use blinc_runtime::component::PropDef;
+    pub use zyntax_typed_ast::type_registry::{PrimitiveType, Type};
+
+    /// Construct a `WidgetHandle` from any
+    /// `Box<dyn ElementBuilder>`. Wraps it in
+    /// [`WidgetBox::Custom`] and leaks the box; the host-side
+    /// walker reclaims via `materialize_widget` at view-render
+    /// time.
+    pub fn into_handle(widget: Box<dyn blinc_layout::div::ElementBuilder>) -> i64 {
+        Box::into_raw(Box::new(WidgetBox::Custom(widget))) as i64
+    }
+
+    /// Decode a Zyntax-FFI string argument (length-prefixed
+    /// UTF-8 buffer) to an owned `String`. Returns the empty
+    /// string for null pointers — same fast-fail the in-tree
+    /// `$Blinc$Text$view` extern uses.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` MUST come from the Zyntax JIT's String FFI lowering
+    /// — i.e., the registered signature has `String` for the
+    /// corresponding parameter. Any other source is undefined
+    /// behaviour.
+    pub unsafe fn decode_string(ptr: *const i32) -> String {
+        if ptr.is_null() {
+            return String::new();
+        }
+        // SAFETY: forwarded from caller per fn-level doc.
+        let s = unsafe { super::blinc_string_decode(ptr) };
+        s.to_string()
+    }
+
+    /// Decode a children-list pointer (minted by
+    /// `__new_child_list__` and populated via `__push_child__`)
+    /// into an owned `Vec<Box<dyn ElementBuilder>>` ready to
+    /// land in a `#[children]`-annotated struct field.
+    ///
+    /// A null/zero pointer means the DSL caller didn't provide a
+    /// body block — the widget gets an empty children list, same
+    /// shape as the in-tree `Div() { }` path.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` MUST be the `i64`-encoded payload of a
+    /// `Box<Vec<WidgetHandle>>` minted by
+    /// `__new_child_list__`. Every JIT call site that produces
+    /// children pointers routes through
+    /// `lower_children_arrays_to_blocks`, which constructs lists
+    /// exclusively via that extern — call sites can't forge a
+    /// pointer.
+    pub unsafe fn decode_children(ptr: i64) -> Vec<Box<dyn blinc_layout::div::ElementBuilder>> {
+        if ptr == 0 {
+            return Vec::new();
+        }
+        // SAFETY: see fn-level doc.
+        let handles: Vec<i64> = *unsafe { Box::from_raw(ptr as *mut Vec<i64>) };
+        handles
+            .into_iter()
+            .filter_map(|h| {
+                unsafe { super::materialize_widget(h) }.map(|w| w.into_element_builder())
+            })
+            .collect()
+    }
+}
+
+/// Trait implemented by Rust types that want to be callable from
+/// Blinc DSL source. The [`extern_widget!`](crate::extern_widget)
+/// proc-macro generates the impl on a user struct, pulling the
+/// DSL name out of the macro attribute and the prop list out of
+/// the struct's fields.
+///
+/// Users register a widget through the type:
+///
+/// ```ignore
+/// dsl.register_extern_widget::<FancyText>()?;
+/// ```
+///
+/// The generic dispatch reads `Self::DSL_NAME` and
+/// `Self::extern_widget_spec()` and forwards to the lower-level
+/// [`BlincDsl::register_extern_widget_spec`] — see that method
+/// for the underlying registration semantics.
+///
+/// **Hand-rolling without the macro:** implement this trait
+/// manually if you need a shape the proc-macro doesn't yet
+/// support (callbacks, custom marshalling, generic widgets).
+/// The trait surface is intentionally narrow so hand impls and
+/// macro impls stay symmetric.
+pub trait ExternWidget {
+    /// User-facing identifier — what `.blinc` source types to
+    /// call the widget. Matches the `name = "<DslName>"` value
+    /// the macro attribute carries.
+    const DSL_NAME: &'static str;
+
+    /// Build the full registration spec. The macro generates this
+    /// from the struct's fields; hand impls construct one directly.
+    fn extern_widget_spec() -> ExternWidgetSpec;
+}
+
+/// Description of a Rust-side widget being exposed to the DSL.
+///
+/// Hand-rolled today; the planned `#[extern_widget]` proc-macro
+/// generates one of these from a Rust struct + `ElementBuilder`
+/// impl. Passed to [`BlincDsl::register_extern_widget`] which:
+///
+///   1. Registers the JIT-side `extern "C"` thunk under
+///      `view_symbol` with the matching ZRTL signature.
+///   2. Records a `ComponentDefinition` in the substrate
+///      `ComponentRegistry` so `validate_component_calls` /
+///      `lower_component_calls` see the widget as a DSL-callable
+///      component.
+///   3. Marks `view_symbol` as value-returning so
+///      [`JitViewRenderer`] / [`BlincDsl::render_named`] pick
+///      the `i64`-return ABI when invoking it.
+///
+/// **Naming convention:** Pick a `$Blinc$<Name>$view`-shaped
+/// symbol to match the in-tree primitive externs (`$Blinc$Text$view`,
+/// `$Blinc$Div$view`). The DSL-facing name (`name` field) is what
+/// users type in `.blinc` source; the `view_symbol` is what the
+/// JIT links to.
+///
+/// **Extern function contract:** `extern_ptr` MUST point at a
+/// real `extern "C" fn(...)` whose argument types correspond
+/// to `param_types` (Zyntax FFI uses
+/// `*const i32` for `String`, `i32` / `i64` / `f64` directly for
+/// primitives) and which returns a `WidgetHandle`
+/// (`Box::into_raw(Box::new(WidgetBox::Custom(...)))` cast to `i64`).
+/// A return value of `0` signals null / build-failed.
+pub struct ExternWidgetSpec {
+    /// User-facing DSL name. Whatever a `.blinc` author types
+    /// (e.g., `"Button"` matches `Button(...)` call sites).
+    pub name: String,
+    /// JIT-linker-visible symbol the extern is registered under.
+    /// Convention: `$Blinc$<Name>$view`.
+    pub view_symbol: String,
+    /// Substrate metadata about the widget's props. Drives
+    /// validation diagnostics and (eventually) IDE / reflection
+    /// surfaces.
+    pub props: Vec<blinc_runtime::component::PropDef>,
+    /// FFI parameter types in declaration order. Must match the
+    /// extern fn's actual signature exactly — mismatches manifest
+    /// as register-level garbage reads at call time.
+    pub param_types: Vec<Type>,
+    /// FFI return type. Typically
+    /// `Type::Primitive(PrimitiveType::I64)` (widget handle).
+    pub return_type: Type,
+    /// `extern "C" fn(...)` cast to `*const u8`. The extern must
+    /// uphold the [`ExternWidgetSpec`] contract documented above.
+    pub extern_ptr: *const u8,
+}
+
 /// Opaque widget handle as exchanged across the JIT boundary.
-/// Matches the i64 return type the registered signature
-/// advertises. Defined as a type alias for documentation —
-/// the actual ABI is just the bare `i64`.
+/// Carries the address of a `Box<WidgetBox>` cast to the
+/// signature-advertised `i64`. Zero is the null-equivalent
+/// sentinel (extern fast-fail return).
 type WidgetHandle = i64;
+
+/// Take ownership of a `WidgetHandle` returned by a value-bearing
+/// view function. Reconstructs the `Box<WidgetBox>` whose pointer
+/// the extern stored in the handle, returning `None` for the
+/// null-sentinel (`0`) the externs use to flag early-out.
+///
+/// # Safety
+///
+/// `handle` MUST be a handle previously produced by one of this
+/// crate's `$Blinc$<X>$view` externs (which all use
+/// `Box::into_raw(Box::new(WidgetBox::...))` to mint the pointer)
+/// — or be zero. Calling with any other pointer is undefined
+/// behaviour. Calling twice with the same non-zero handle is a
+/// double-free; the JIT side hands out each handle exactly once
+/// per call.
+pub unsafe fn materialize_widget(handle: WidgetHandle) -> Option<Box<WidgetBox>> {
+    if handle == 0 {
+        return None;
+    }
+    // SAFETY: see fn-level doc.
+    Some(unsafe { Box::from_raw(handle as *mut WidgetBox) })
+}
 
 /// `$Blinc$Text$view(content: string) -> WidgetHandle`
 ///
 /// Constructs a `blinc_layout::Text` from the Zyntax string
-/// argument, boxes it, returns the raw pointer cast to i64.
+/// argument, wraps it in a [`WidgetBox::Text`], leaks the box,
+/// and returns the raw pointer cast to `i64`. The host-side
+/// walker reclaims the box via [`materialize_widget`].
 ///
 /// # Safety
 ///
@@ -430,7 +680,85 @@ extern "C" fn blinc_text_view(content_ptr: *const i32) -> WidgetHandle {
     // SAFETY: see fn-level doc.
     let content = unsafe { blinc_string_decode(content_ptr) };
     let widget = blinc_layout::text::Text::new(content);
-    Box::into_raw(Box::new(widget)) as WidgetHandle
+    Box::into_raw(Box::new(WidgetBox::Text(Box::new(widget)))) as WidgetHandle
+}
+
+/// `$Blinc$Div$view(children: i64) -> WidgetHandle`
+///
+/// Constructs a `blinc_layout::Div` populated with the children
+/// in the supplied child-list. `children` is an `i64`-encoded
+/// pointer to a `Vec<WidgetHandle>` minted by
+/// [`blinc_new_child_list`]; each handle in the vec was produced
+/// by some other widget extern and gets reclaimed here via
+/// [`materialize_widget`] + [`WidgetBox::into_element_builder`].
+///
+/// A null/zero list pointer produces an empty `Div` — the same
+/// thing `Div()` with no body would have produced under the
+/// previous zero-arg signature.
+///
+/// **Memory ownership.** The child-list `Vec` is consumed
+/// (`Box::from_raw`) — callers MUST NOT use the pointer after
+/// this call. Each child handle is also consumed once: the
+/// reclaimed `Box<WidgetBox>` flows into the Div as a
+/// `Box<dyn ElementBuilder>` child, owned for the Div's
+/// lifetime.
+extern "C" fn blinc_div_view(children: WidgetHandle) -> WidgetHandle {
+    let mut widget = blinc_layout::div::Div::new();
+    if children != 0 {
+        // SAFETY: `children` is the raw-pointer payload of an
+        // `i64` minted by `blinc_new_child_list`. The JIT
+        // guarantees the pointer's provenance by routing all
+        // child-list construction through that extern.
+        let list: Box<Vec<WidgetHandle>> =
+            unsafe { Box::from_raw(children as *mut Vec<WidgetHandle>) };
+        for handle in *list {
+            // SAFETY: each handle came from a widget-handle
+            // extern (`$Blinc$Text$view`, `$Blinc$Div$view`, a
+            // user-registered widget) that built the matching
+            // `WidgetBox` and into-raw'd it.
+            if let Some(child_box) = unsafe { materialize_widget(handle) } {
+                widget = widget.child_box(child_box.into_element_builder());
+            }
+        }
+    }
+    Box::into_raw(Box::new(WidgetBox::Div(Box::new(widget)))) as WidgetHandle
+}
+
+/// `__new_child_list__() -> i64`
+///
+/// Allocate a fresh empty `Vec<WidgetHandle>` on the heap and
+/// hand back its raw-pointer payload as `i64`. The lower pass
+/// `lower_children_arrays` calls this once per primitive
+/// container with a body block — `__push_child__` then appends
+/// each evaluated child handle, and the container's extern
+/// (`$Blinc$Div$view`, …) consumes the list.
+extern "C" fn blinc_new_child_list() -> i64 {
+    Box::into_raw(Box::new(Vec::<WidgetHandle>::new())) as i64
+}
+
+/// `__push_child__(list: i64, child: i64)`
+///
+/// Append a child handle to the `Vec<WidgetHandle>` referenced
+/// by `list`. The list pointer must still be live (no
+/// `Box::from_raw` since allocation); the container extern
+/// reclaims it later.
+///
+/// # Safety
+///
+/// Both args MUST come from `__new_child_list__` (for `list`)
+/// and a widget-handle extern (for `child`). The JIT-side
+/// rewrite emits these pairings explicitly so this is enforced
+/// at lowering time, not at the call site.
+extern "C" fn blinc_push_child(list: i64, child: WidgetHandle) {
+    if list == 0 {
+        return;
+    }
+    // SAFETY: see fn-level doc. We deliberately use
+    // `&mut *(raw as *mut Vec<...>)` instead of `Box::from_raw`
+    // so the allocation stays live — the container extern is
+    // what reclaims it.
+    let vec: &mut Vec<WidgetHandle> = unsafe { &mut *(list as *mut Vec<WidgetHandle>) };
+    vec.push(child);
 }
 
 // =====================================================================
@@ -1461,63 +1789,112 @@ fn lower_component_calls(program: &mut TypedProgram) {
     }
 
     fn rewrite_block(block: &mut zyntax_typed_ast::typed_ast::TypedBlock) {
-        // Walk + flatten. After per-stmt rewrite, the block's
-        // statement list may need to be expanded (a component call
-        // with a trailing body Block contributes the call PLUS the
-        // body's statements inline) or contracted (a slot
-        // open/close marker has no runtime meaning today and is
-        // dropped). Build a fresh statements vec and replace.
+        // Walk + transform. For each statement, rewrite-then-
+        // collect: rewrite recurses into expressions (turning
+        // marker calls into typed Calls); collect handles
+        // component-call-with-body shape (converts body block
+        // into a `children: [Widget]` named arg on the call).
         let old_stmts = std::mem::take(&mut block.statements);
         let mut new_stmts: Vec<zyntax_typed_ast::TypedNode<TypedStatement>> =
             Vec::with_capacity(old_stmts.len());
         for mut stmt in old_stmts {
             rewrite_stmt(&mut stmt);
-            inline_into(&mut new_stmts, stmt);
+            collect_children_into(&mut new_stmts, stmt);
         }
         block.statements = new_stmts;
     }
 
-    /// Append `stmt` to `out`, optionally flattening it:
+    /// Append `stmt` to `out`, handling body-bearing component
+    /// calls. The transformation forks on the callee:
     ///
-    /// - `__slot_open__("name")` / `__slot_close__()` markers
-    ///   contribute nothing — they're a definition-site
-    ///   "named-children" annotation the host-runtime side would
-    ///   consume if there were one. For the flat DslOp pipeline
-    ///   we just route every body child through as a default
-    ///   child. Future host code that needs named-slot routing
-    ///   should hook in before this pass.
-    /// - `Counter$view(args..., Block { children })` becomes the
-    ///   bare call `Counter$view(args...)` immediately followed by
-    ///   the children statements inlined at the parent level.
-    ///   Mirrors "children render after parent" — the simplest
-    ///   composition that fits a flat scene-op buffer.
-    /// - Everything else passes through unchanged.
+    /// - **Substrate primitives** (callees whose mangled symbol
+    ///   matches `$Blinc$<Name>$view`): the body Block becomes
+    ///   a `children: [Widget]` named arg on the call. The JIT
+    ///   evaluates each child expression eagerly to build the
+    ///   widget-handle array, then hands it to the primitive's
+    ///   extern (which knows how to build a real `blinc_layout`
+    ///   container around the children). Slot markers and non-
+    ///   expression statements drop on the floor — control-flow
+    ///   inside primitive bodies is a later slice.
     ///
-    /// Recursive on inlined children so nested component calls
-    /// (`A() { B() { C() } }`) flatten all the way down.
-    fn inline_into(
+    /// - **User-declared components** (everything else): the
+    ///   body Block flattens into the outer statement list — the
+    ///   call comes first, then each child statement is inlined
+    ///   right after. This is the transitional pre-Phase-2e
+    ///   shape; once user component view methods accept an
+    ///   implicit `children` param the flatten path goes away.
+    ///
+    /// - **Slot markers** (`__slot_open__("name")` /
+    ///   `__slot_close__()`) get dropped before any of this runs.
+    fn collect_children_into(
         out: &mut Vec<zyntax_typed_ast::TypedNode<TypedStatement>>,
         mut stmt: zyntax_typed_ast::TypedNode<TypedStatement>,
     ) {
-        // Slot markers contribute nothing at runtime.
         if is_slot_marker_stmt(&stmt) {
             return;
         }
 
-        // Component call with trailing body Block — extract.
         if let TypedStatement::Expression(expr_node) = &mut stmt.node {
             if let TypedExpression::Call(call) = &mut expr_node.node {
-                if matches!(
+                let has_body_block = matches!(
                     call.positional_args.last().map(|a| &a.node),
                     Some(TypedExpression::Block(_))
-                ) {
+                );
+                if has_body_block {
+                    if callee_is_substrate_primitive(call) {
+                        let block_arg = call.positional_args.pop().unwrap();
+                        let block_span = block_arg.span;
+                        let TypedExpression::Block(body_block) = block_arg.node else {
+                            unreachable!("just confirmed Block via the matches! above");
+                        };
+
+                        // Extract child widget expressions. Skip
+                        // slot markers entirely. Statements that
+                        // aren't expressions (let, if without
+                        // return, etc.) can't contribute a widget
+                        // value yet — control-flow as a widget
+                        // selector is a later grammar slice.
+                        let child_exprs: Vec<zyntax_typed_ast::TypedNode<TypedExpression>> =
+                            body_block
+                                .statements
+                                .into_iter()
+                                .filter(|s| !is_slot_marker_stmt(s))
+                                .filter_map(|s| {
+                                    if let TypedStatement::Expression(e) = s.node {
+                                        Some(*e)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+
+                        let children_array = zyntax_typed_ast::TypedNode::new(
+                            TypedExpression::Array(child_exprs),
+                            Type::Any,
+                            block_span,
+                        );
+
+                        call.named_args.push(zyntax_typed_ast::TypedNamedArg {
+                            name: zyntax_typed_ast::InternedString::new_global("children"),
+                            value: Box::new(children_array),
+                            span: block_span,
+                        });
+
+                        out.push(stmt);
+                        return;
+                    }
+
+                    // User-declared component with a body — fall
+                    // back to flatten: push the body-less call,
+                    // then inline each child statement at the
+                    // outer level.
                     let block_arg = call.positional_args.pop().unwrap();
                     let TypedExpression::Block(body_block) = block_arg.node else {
                         unreachable!("just confirmed Block via the matches! above");
                     };
                     out.push(stmt);
                     for inner in body_block.statements {
-                        inline_into(out, inner);
+                        collect_children_into(out, inner);
                     }
                     return;
                 }
@@ -1525,6 +1902,20 @@ fn lower_component_calls(program: &mut TypedProgram) {
         }
 
         out.push(stmt);
+    }
+
+    /// Is `call`'s callee a substrate-registered primitive — a
+    /// `Variable` whose interned name starts with `$Blinc$` (the
+    /// view-symbol prefix `register_blinc_layout_primitives`
+    /// uses for `Div`, `Text`, etc.)?
+    fn callee_is_substrate_primitive(call: &TypedCall) -> bool {
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            return false;
+        };
+        callee
+            .resolve_global()
+            .as_deref()
+            .is_some_and(|s| s.starts_with("$Blinc$"))
     }
 
     /// `Expression(Call(Variable("__slot_open__" | "__slot_close__"), _))`.
@@ -2273,17 +2664,27 @@ impl blinc_runtime::fsm::GuardDispatcher for JitGuardDispatcher {
 }
 
 /// `ViewRenderer` impl that resolves view symbols against a
-/// shared `ZyntaxRuntime` handle. Same wrapping pattern as
-/// `JitGuardDispatcher` — holds an
-/// `Arc<Mutex<ZyntaxRuntime>>`, calls
-/// `runtime.call::<()>(symbol, &[])` for the zero-arg unit-
-/// return view ABI, drains the scene buffer.
+/// shared `ZyntaxRuntime` handle. Holds an
+/// `Arc<Mutex<ZyntaxRuntime>>` plus the parent `BlincDsl`'s
+/// `value_returning_views` set, and picks one of two call ABIs:
+///
+///   - **Value-returning view** (symbol is in the set): call
+///     through `runtime.call_function` with a
+///     `() -> i64` native signature, capture the returned widget
+///     handle as `ZyntaxValue::Int(handle)`. The host-side
+///     walker decodes the handle via [`materialize_widget`].
+///
+///   - **Legacy Unit-returning view** (symbol not in the set):
+///     call as `runtime.call::<()>`, return `ZyntaxValue::Void`.
+///     The legacy DSL-side `BlincDsl::render_view` drains the
+///     scene-op buffer for tests still on the op-stream surface.
 ///
 /// Cost-of-call is the JIT call plus one `Mutex` lock.
-/// Renderers are cheap to construct (just an `Arc::clone`) so
+/// Renderers are cheap to construct (just two `Arc::clone`s) so
 /// callers can hold one or many without worry.
 struct JitViewRenderer {
     runtime: Arc<Mutex<ZyntaxRuntime>>,
+    value_returning_views: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 // SAFETY: same argument as `JitGuardDispatcher` — `ZyntaxRuntime`
@@ -2302,24 +2703,34 @@ impl blinc_runtime::view::ViewRenderer for JitViewRenderer {
         &self,
         symbol: &str,
     ) -> Result<ZyntaxValue, blinc_runtime::view::ViewRenderError> {
+        let is_value_returning = self
+            .value_returning_views
+            .lock()
+            .map(|set| set.contains(symbol))
+            .unwrap_or(false);
+
         let runtime = self.runtime.lock().map_err(|_| {
             blinc_runtime::view::ViewRenderError::Backend(
                 "BlincDsl runtime mutex poisoned".to_string(),
             )
         })?;
-        // Today's view functions are `() -> ()` — they push to
-        // the transitional scene buffer for side-effect-shape
-        // ops. Once `Div` / `Text` widget primitives are
-        // registered (Phase 2 of the pivot), view functions
-        // will be `() -> Widget` and this call captures the
-        // returned `ZyntaxValue` directly. Until then, return
-        // `ZyntaxValue::Void` and let the legacy
-        // `BlincDsl::render_view` path drain the scene buffer
-        // for tests that still assert on `DslOp` shapes.
-        runtime
-            .call::<()>(symbol, &[])
-            .map_err(|e| blinc_runtime::view::ViewRenderError::Backend(e.to_string()))?;
-        Ok(ZyntaxValue::Void)
+        if is_value_returning {
+            let sig = NativeSignature::new(&[], NativeType::I64);
+            let result = runtime
+                .call_function(symbol, &[], &sig)
+                .map_err(|e| blinc_runtime::view::ViewRenderError::Backend(e.to_string()))?;
+            // The widget-handle primitive externs return
+            // `i64`; `call_function` decodes that as
+            // `ZyntaxValue::Int(handle)`. Pass it through
+            // unchanged — `materialize_widget` on the caller
+            // side takes the `i64` and reclaims the box.
+            Ok(result)
+        } else {
+            runtime
+                .call::<()>(symbol, &[])
+                .map_err(|e| blinc_runtime::view::ViewRenderError::Backend(e.to_string()))?;
+            Ok(ZyntaxValue::Void)
+        }
     }
 }
 
@@ -2383,48 +2794,26 @@ fn register_blinc_layout_primitives() {
 
     let string_ty = Type::Primitive(PrimitiveType::String);
 
-    // `Div(direction, bg, padding) { ..children }` — the
-    // universal container. `direction` is an opaque integer
-    // (0 = row, 1 = column, 2 = stack) for the prototype
-    // surface; once the DSL grows an enum-prop ergonomic
-    // shape this becomes a typed enum prop. Same for `bg`
-    // (color as f32 RGBA pack today; richer Brush type
-    // later). Children come in via the `children` slot —
-    // populated by the body block, treated as an array of
-    // Widget handles after the upcoming
-    // lower_component_calls invert.
+    // `Div { ..children }` — the universal container. Its
+    // only DSL-visible prop today is `children`, which the
+    // lower pass materialises as the body block of the call
+    // site. Direction / bg / padding / etc. styling props
+    // will layer on via the `Styled<W>` overlay once that
+    // lands; storing them on Div directly would force every
+    // user-defined container to redeclare them.
+    //
+    // The `children` prop's runtime type is the heap-allocated
+    // `Vec<WidgetHandle>` minted by `__new_child_list__` —
+    // crossed as a raw pointer in `i64`. That matches the
+    // extern's actual signature so call-site lowering and
+    // type-checking agree.
     let div = ComponentDefinition {
         name: std::sync::Arc::from("Div"),
         view_symbol: std::sync::Arc::from("$Blinc$Div$view"),
-        props: vec![
-            PropDef {
-                name: std::sync::Arc::from("direction"),
-                ty: Type::Primitive(PrimitiveType::I32),
-            },
-            PropDef {
-                name: std::sync::Arc::from("bg"),
-                ty: Type::Primitive(PrimitiveType::I32),
-            },
-            PropDef {
-                name: std::sync::Arc::from("padding"),
-                ty: Type::Primitive(PrimitiveType::F64),
-            },
-            // `children` is the body-block sink. Once
-            // lower_component_calls inverts (children-as-arg
-            // rather than flatten-into-parent), the body block
-            // populates this prop. Until then it's a no-op
-            // placeholder that documents the eventual shape.
-            PropDef {
-                name: std::sync::Arc::from("children"),
-                ty: Type::Named {
-                    id: zyntax_typed_ast::type_registry::TypeId::next(),
-                    type_args: vec![],
-                    const_args: vec![],
-                    variance: vec![],
-                    nullability: zyntax_typed_ast::type_registry::NullabilityKind::NonNull,
-                },
-            },
-        ],
+        props: vec![PropDef {
+            name: std::sync::Arc::from("children"),
+            ty: Type::Primitive(PrimitiveType::I64),
+        }],
     };
 
     // `Text("hi")` — text leaf. Positional `content` is the
@@ -2706,6 +3095,22 @@ pub struct BlincDsl {
     // we silence it where the `Arc::new` call lives, with the
     // expectation that upstream will eventually add the impls.
     runtime: Arc<Mutex<ZyntaxRuntime>>,
+    /// JIT-linker-visible names of view symbols
+    /// [`lower_view_to_value_returning`] converted to the
+    /// `i64`-returning widget-handle ABI. Populated by
+    /// [`Self::compile_source`] / [`Self::parse_to_typed_ast`] (both
+    /// run the pass) and consulted by [`JitViewRenderer`] /
+    /// [`Self::render_named`] to decide whether to call as
+    /// `runtime.call::<()>` (legacy Unit-return) or as
+    /// `runtime.call_function(..., NativeType::I64)` (capture a
+    /// widget handle).
+    ///
+    /// `Arc<Mutex<...>>` mirrors the runtime field's shape — the
+    /// set accumulates across compiles (monotonically grows;
+    /// re-defining a symbol as Unit-returning would leave a stale
+    /// entry, but our existing flow only adds value-returning
+    /// symbols, never demotes).
+    value_returning_views: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl BlincDsl {
@@ -2761,7 +3166,13 @@ impl BlincDsl {
         // widget tree walker) lands in subsequent commits.
         register_blinc_layout_primitives();
 
-        Ok(Self { grammar, runtime })
+        let value_returning_views = Arc::new(Mutex::new(std::collections::HashSet::new()));
+
+        Ok(Self {
+            grammar,
+            runtime,
+            value_returning_views,
+        })
     }
 
     /// Install this `BlincDsl`'s JIT-flavoured guard dispatcher as
@@ -2788,6 +3199,244 @@ impl BlincDsl {
         blinc_runtime::fsm::set_guard_dispatcher(std::sync::Arc::new(JitGuardDispatcher {
             runtime: self.runtime.clone(),
         }));
+    }
+
+    /// Register a Rust widget that implements [`ExternWidget`].
+    ///
+    /// This is the primary Rust→DSL surface — almost all callers
+    /// (including the [`extern_widget!`](crate::extern_widget)
+    /// proc-macro's expansion) use this form:
+    ///
+    /// ```ignore
+    /// dsl.register_extern_widget::<FancyText>()?;
+    /// ```
+    ///
+    /// Pulls the spec from `W::extern_widget_spec()` and forwards
+    /// to [`Self::register_extern_widget_spec`]. See that method
+    /// for the registration semantics.
+    pub fn register_extern_widget<W: ExternWidget>(&self) -> BlincDslResult<()> {
+        self.register_extern_widget_spec(W::extern_widget_spec())
+    }
+
+    /// Register a Rust-side widget by passing an explicit
+    /// [`ExternWidgetSpec`]. Lower-level than
+    /// [`Self::register_extern_widget`] — most callers prefer the
+    /// trait-based form, which builds the spec from the
+    /// [`ExternWidget`] impl.
+    ///
+    /// Useful when you need to register a widget shape the
+    /// proc-macro doesn't yet support (callbacks, custom
+    /// marshalling, multi-instance specs from a single Rust type),
+    /// or when hand-rolling the integration without depending on
+    /// `blinc_macros`.
+    ///
+    /// Side effects:
+    ///
+    ///   - Registers `spec.extern_ptr` on the JIT runtime under
+    ///     `spec.view_symbol` with a matching ZRTL signature.
+    ///   - Re-finalises the runtime's symbol table so subsequent
+    ///     `compile_source` calls can JIT-link against the new
+    ///     symbol.
+    ///   - Adds a [`ComponentDefinition`] to the substrate
+    ///     [`ComponentRegistry`] so validation and call-site
+    ///     lowering recognise the widget as a callable
+    ///     component.
+    ///   - Records `spec.view_symbol` in the value-returning view
+    ///     set so the renderers pick the `i64`-return ABI.
+    ///
+    /// Must be called before [`Self::compile_source`] for any
+    /// source that uses the widget — otherwise the substrate
+    /// validator surfaces "unknown component" and the JIT linker
+    /// fails to resolve the symbol.
+    ///
+    /// [`ComponentRegistry`]: blinc_runtime::component::ComponentRegistry
+    /// [`ComponentDefinition`]: blinc_runtime::component::ComponentDefinition
+    pub fn register_extern_widget_spec(&self, spec: ExternWidgetSpec) -> BlincDslResult<()> {
+        // Build the ZRTL signature for the new symbol — same
+        // shape `register_builtins` constructs for the in-tree
+        // primitives, just sourced from the spec's owned fields
+        // instead of a `'static` descriptor.
+        if spec.param_types.len() > ZRTL_MAX_PARAMS {
+            return Err(BlincDslError::Compile(format!(
+                "register_extern_widget({}): parameter count {} exceeds ZRTL_MAX_PARAMS ({})",
+                spec.name,
+                spec.param_types.len(),
+                ZRTL_MAX_PARAMS
+            )));
+        }
+        let mut params = [TypeTag::VOID; ZRTL_MAX_PARAMS];
+        for (i, ty) in spec.param_types.iter().enumerate() {
+            params[i] = type_to_tag(ty);
+        }
+        let sig = ZrtlSymbolSig {
+            param_count: spec.param_types.len() as u8,
+            flags: ZrtlSigFlags::NONE,
+            return_type: type_to_tag(&spec.return_type),
+            params,
+        };
+
+        // `register_function_typed` requires a `&'static str`
+        // for the symbol name (it stores the name on the JIT
+        // module's symbol map). Leak the spec's `String` to
+        // promote it to `'static`. Widget registrations are a
+        // startup-time operation in normal flows — the leak is
+        // bounded by the number of widget types in the app, not
+        // the number of widget instances or render frames.
+        let view_symbol_static: &'static str = Box::leak(spec.view_symbol.into_boxed_str());
+
+        {
+            let mut runtime = self
+                .runtime
+                .lock()
+                .expect("BlincDsl runtime mutex poisoned");
+            // `register_function_typed` only updates the backend's
+            // accumulator; `finalize_runtime_symbols` is what
+            // pokes the Cranelift JIT module so the new symbol is
+            // resolvable at the next `compile_typed_program`.
+            // Same two-step `register_builtins` does at startup.
+            runtime.register_function_typed(view_symbol_static, spec.extern_ptr, sig);
+            runtime
+                .finalize_runtime_symbols()
+                .map_err(|e| BlincDslError::Compile(format!("finalize symbols: {e}")))?;
+        }
+
+        blinc_runtime::component::with_component_registry_mut(|r| {
+            r.register(blinc_runtime::component::ComponentDefinition {
+                name: std::sync::Arc::from(spec.name.as_str()),
+                view_symbol: std::sync::Arc::from(view_symbol_static),
+                props: spec.props,
+            });
+        });
+
+        // Widget-handle externs are value-returning by contract.
+        // Record the symbol so `JitViewRenderer::render_named`
+        // (and `BlincDsl::render_named`) pick the `i64`-return
+        // ABI when invoking it.
+        self.value_returning_views
+            .lock()
+            .expect("value_returning_views mutex poisoned")
+            .insert(view_symbol_static.to_string());
+
+        Ok(())
+    }
+
+    /// Build a DSL-defined component as a Rust
+    /// `Box<dyn ElementBuilder>`, ready to slot into a Rust
+    /// widget tree.
+    ///
+    /// This is the **DSL → Rust** half of the bidirectional
+    /// interop story. The companion direction (Rust widgets
+    /// callable from DSL) lives at [`Self::register_extern_widget`].
+    ///
+    /// Prop values pass through as positional Zyntax values in
+    /// the order the component's view method declares its
+    /// params. Today's surface is positional-only; named-arg
+    /// dispatch lands when the prop marshalling layer grows a
+    /// param-name index.
+    ///
+    /// Returns an error if:
+    ///
+    ///   - `name` isn't in the substrate
+    ///     [`ComponentRegistry`] (compile DSL source first, or
+    ///     register via [`Self::register_extern_widget`]).
+    ///   - The component's view function isn't value-returning
+    ///     (only widget-primitive-rooted views are; legacy
+    ///     `text(...)` views still produce Unit and can't be
+    ///     queried).
+    ///   - The JIT call fails (wrong arg count for the resolved
+    ///     view signature, etc.).
+    ///   - The returned handle is null.
+    ///
+    /// [`ComponentRegistry`]: blinc_runtime::component::ComponentRegistry
+    pub fn query(
+        &self,
+        name: &str,
+        props: &[ZyntaxValue],
+    ) -> BlincDslResult<Box<dyn blinc_layout::div::ElementBuilder>> {
+        let view_symbol = blinc_runtime::component::with_component_registry(|r| {
+            r.get_by_name(name).map(|def| def.view_symbol.clone())
+        })
+        .ok_or_else(|| {
+            BlincDslError::Compile(format!(
+                "query({name}): no component named `{name}` is registered — compile DSL source \
+                 that declares it, or call `register_extern_widget` first"
+            ))
+        })?;
+
+        let is_value_returning = self
+            .value_returning_views
+            .lock()
+            .map(|set| set.contains(view_symbol.as_ref()))
+            .unwrap_or(false);
+        if !is_value_returning {
+            return Err(BlincDslError::Compile(format!(
+                "query({name}): component's view symbol `{}` isn't value-returning — only \
+                 widget-primitive-rooted views can be queried (legacy `text(...)` bodies \
+                 produce Unit)",
+                view_symbol
+            )));
+        }
+
+        // Param-count check happens inside `call_function`. We
+        // build a signature whose return is I64 (widget handle)
+        // and whose params are derived from the component def's
+        // prop list, which (after `publish_components_to_runtime_registry`)
+        // mirrors the view method's actual ABI.
+        let param_types: Vec<Type> = blinc_runtime::component::with_component_registry(|r| {
+            r.get_by_name(name)
+                .map(|def| def.props.iter().map(|p| p.ty.clone()).collect())
+                .unwrap_or_default()
+        });
+
+        if param_types.len() > ZRTL_MAX_PARAMS {
+            return Err(BlincDslError::Compile(format!(
+                "query({name}): component declares {} props, exceeds ZRTL_MAX_PARAMS ({})",
+                param_types.len(),
+                ZRTL_MAX_PARAMS
+            )));
+        }
+
+        // Build a `NativeSignature` for `call_function`. The
+        // ZRTL `Type` → native conversion mirrors `type_to_tag`
+        // but lives in this caller because `call_function`
+        // takes the broader `NativeType` shape, not a `TypeTag`.
+        let native_params: Vec<NativeType> = param_types
+            .iter()
+            .map(|ty| type_to_native(ty))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|ty| {
+                BlincDslError::Compile(format!(
+                    "query({name}): no NativeType mapping for prop type {ty:?}"
+                ))
+            })?;
+        let sig = NativeSignature::new(&native_params, NativeType::I64);
+
+        let runtime = self
+            .runtime
+            .lock()
+            .expect("BlincDsl runtime mutex poisoned");
+        let result = runtime
+            .call_function(view_symbol.as_ref(), props, &sig)
+            .map_err(BlincDslError::from)?;
+        drop(runtime);
+
+        let ZyntaxValue::Int(handle) = result else {
+            return Err(BlincDslError::Compile(format!(
+                "query({name}): expected ZyntaxValue::Int(handle) from view call, got {result:?}"
+            )));
+        };
+
+        // SAFETY: the handle came straight out of a registered
+        // widget-handle extern, all of which use
+        // `Box::into_raw(Box::new(WidgetBox::...))` to mint the
+        // pointer. `materialize_widget`'s contract is satisfied
+        // by construction here.
+        let widget = unsafe { materialize_widget(handle) }.ok_or_else(|| {
+            BlincDslError::Compile(format!(
+                "query({name}): view returned the null handle (extern build failed)"
+            ))
+        })?;
+        Ok(widget.into_element_builder())
     }
 
     /// Compile a `.blinc` source file. Returns the names of compiled
@@ -2871,6 +3520,43 @@ impl BlincDsl {
         // reflect the prop list — that's where the publisher
         // reads prop names + types from.
         publish_components_to_runtime_registry(&typed_program);
+
+        // Wire view functions to value-returning shape: rewrite a
+        // trailing primitive-view call into `Return(Some(call))`
+        // and bump the function's return type to widget-handle
+        // (`I64`). The pass also records each converted symbol's
+        // JIT-linker name into `value_returning_views` so render
+        // paths can pick the right call ABI (`call_function`
+        // capturing `I64` vs legacy `call::<()>`).
+        //
+        // MUST run before `ensure_unit_return` so its defensive
+        // `Return(None)` doesn't override our value-bearing one.
+        {
+            let mut vrv = self
+                .value_returning_views
+                .lock()
+                .expect("value_returning_views mutex poisoned");
+            lower_view_to_value_returning(&mut typed_program, &mut vrv);
+        }
+
+        // Rewrite primitive `children = Array([...])` named args
+        // into explicit `__new_child_list__` / `__push_child__` /
+        // container-call Block expansions so the JIT can ferry
+        // children across the FFI boundary as a single pointer.
+        // Must run AFTER `lower_view_to_value_returning` (which
+        // expects to see the bare Call shape) and BEFORE
+        // `ensure_unit_return` (which only inspects statement-level
+        // trailing shape).
+        lower_children_arrays_to_blocks(&mut typed_program);
+
+        // Reorder remaining named args on extern primitive calls
+        // into positional positions using the substrate
+        // registry's prop order. Zyntax's auto-injected extern
+        // decls carry synthetic param names (`p0`, `p1`, …), so
+        // named-arg → param-name binding doesn't work at the type
+        // checker; this pass resolves names against our own
+        // registry instead.
+        resolve_extern_widget_named_args(&mut typed_program);
 
         // Belt-and-suspenders: terminate user functions with an
         // explicit `Return(None)` so the body classifier can't infer
@@ -2962,6 +3648,26 @@ impl BlincDsl {
         // the def-site changes contiguous in the diff.
         bind_component_props(&mut program);
 
+        // Mirror the value-returning view rewrite in
+        // `compile_source` so AST-inspection tests see the same
+        // shape the JIT will. Runs after `bind_component_props`
+        // for the same reason `compile_source` runs it late —
+        // we want it to operate on the fully-lowered view bodies.
+        // Uses a local set since `parse_to_typed_ast` doesn't
+        // touch the JIT-side renderer; the per-DSL set is only
+        // populated by the compile path that actually emits JIT
+        // symbols.
+        let mut local_vrv = std::collections::HashSet::new();
+        lower_view_to_value_returning(&mut program, &mut local_vrv);
+
+        // Mirror the children-array → Block expansion so
+        // AST tests see the lowered shape.
+        lower_children_arrays_to_blocks(&mut program);
+
+        // And mirror the named-arg → positional rewrite so AST
+        // tests can assert the post-resolution shape.
+        resolve_extern_widget_named_args(&mut program);
+
         Ok(program)
     }
 
@@ -2992,12 +3698,30 @@ impl BlincDsl {
     }
 
     fn render_named(&self, fn_name: &str) -> BlincDslResult<Vec<DslOp>> {
+        let is_value_returning = self
+            .value_returning_views
+            .lock()
+            .map(|set| set.contains(fn_name))
+            .unwrap_or(false);
+
         let runtime = self
             .runtime
             .lock()
             .expect("BlincDsl runtime mutex poisoned");
 
-        runtime.call::<()>(fn_name, &[])?;
+        if is_value_returning {
+            // Value-returning view: call through the i64-return
+            // ABI so the JIT side reads the widget handle out of
+            // the matching return register. The legacy `render_view`
+            // surface still returns `Vec<DslOp>` — the handle gets
+            // discarded for now (the substrate-side ViewRenderer is
+            // what flows the handle through to consumers). Test
+            // callers that want the handle use `view_renderer()`.
+            let sig = NativeSignature::new(&[], NativeType::I64);
+            runtime.call_function(fn_name, &[], &sig)?;
+        } else {
+            runtime.call::<()>(fn_name, &[])?;
+        }
         Ok(take_scene_ops())
     }
 
@@ -3018,6 +3742,7 @@ impl BlincDsl {
     pub fn view_renderer(&self) -> std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> {
         std::sync::Arc::new(JitViewRenderer {
             runtime: self.runtime.clone(),
+            value_returning_views: self.value_returning_views.clone(),
         })
     }
 
@@ -3293,14 +4018,52 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             // `Text("hi")` calls to this symbol.
             //
             // Returns a raw pointer to a leaked
-            // `blinc_layout::Text` cast to i64. The
-            // host-side walker (Phase 2e) takes ownership via
-            // `Box::from_raw` when materialising the widget
-            // tree into the layout pass.
+            // `WidgetBox::Text(...)` cast to i64. The host-side
+            // walker reclaims it via [`materialize_widget`].
             name: "$Blinc$Text$view",
             param_types: &[Type::Primitive(PrimitiveType::String)],
             return_type: Type::Primitive(PrimitiveType::I64),
             ptr: blinc_text_view as *const u8,
+        },
+        BuiltinDescriptor {
+            // `$Blinc$Div$view(children: i64) -> WidgetHandle (i64)`
+            // — the value-returning Div primitive. Takes a
+            // child-list pointer (built by `__new_child_list__`
+            // + populated via `__push_child__`); the extern
+            // reclaims the list, materialises each handle into
+            // a `Box<dyn ElementBuilder>`, and folds it into the
+            // Div's child list. A `0` pointer means "no body" —
+            // produces an empty Div.
+            name: "$Blinc$Div$view",
+            param_types: &[Type::Primitive(PrimitiveType::I64)],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_div_view as *const u8,
+        },
+        BuiltinDescriptor {
+            // `__new_child_list__() -> i64` — allocate a fresh
+            // `Vec<WidgetHandle>` and hand back its raw pointer
+            // as `i64`. Used by `lower_children_arrays` to
+            // synthesise a per-container children buffer that
+            // `__push_child__` then populates before the
+            // container's view extern consumes it.
+            name: "__new_child_list__",
+            param_types: &[],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_new_child_list as *const u8,
+        },
+        BuiltinDescriptor {
+            // `__push_child__(list: i64, child: i64)` — append a
+            // widget handle to the `Vec` minted by
+            // `__new_child_list__`. Returns nothing; the list
+            // pointer stays live so the container extern can
+            // reclaim it.
+            name: "__push_child__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_push_child as *const u8,
         },
     ]
 }
@@ -3328,6 +4091,33 @@ fn type_to_tag(ty: &Type) -> TypeTag {
              — extend `type_to_tag` in src/lib.rs when adding new \
              builtin parameter / return types"
         ),
+    }
+}
+
+/// Project a Blinc-side typed-AST `Type` onto the
+/// [`NativeType`] shape Zyntax's `runtime.call_function` expects.
+///
+/// Companion to [`type_to_tag`] — `type_to_tag` produces the
+/// `TypeTag` used in stored ZRTL signatures (consumed by
+/// call-site lowering at compile time); this produces the
+/// `NativeType` used by ad-hoc `call_function` invocations at
+/// runtime ([`BlincDsl::query`], guard dispatch, etc.).
+///
+/// Returns `Err(&Type)` when the mapping isn't known, so callers
+/// can surface a helpful diagnostic naming the offender. Adding
+/// new variants here lines up with [`type_to_tag`] — bump both
+/// together when the prop type surface grows.
+fn type_to_native(ty: &Type) -> Result<NativeType, &Type> {
+    match ty {
+        Type::Primitive(PrimitiveType::Unit) => Ok(NativeType::Void),
+        // Zyntax marshals strings across the FFI boundary as
+        // length-prefixed pointer buffers — `NativeType::Ptr` is
+        // what `call_function` expects for them.
+        Type::Primitive(PrimitiveType::String) => Ok(NativeType::Ptr),
+        Type::Primitive(PrimitiveType::I32) => Ok(NativeType::I32),
+        Type::Primitive(PrimitiveType::I64) => Ok(NativeType::I64),
+        Type::Primitive(PrimitiveType::F64) => Ok(NativeType::F64),
+        other => Err(other),
     }
 }
 
@@ -3370,6 +4160,687 @@ fn register_builtins(runtime: &mut ZyntaxRuntime) {
     for b in builtins() {
         let sig = descriptor_to_sig(&b);
         runtime.register_function_typed(b.name, b.ptr, sig);
+    }
+}
+
+/// Rewrite view functions to be value-returning when their body
+/// ends in a substrate widget-primitive call (`$Blinc$<X>$view`).
+///
+/// Blinc views are retained-mode: a `view { Div() { ... } }` body
+/// builds a widget tree and the function returns the root handle
+/// (an `i64` carrying a `Box::into_raw`-style pointer) so the
+/// JIT-side renderer can hand it back to the embed code.
+///
+/// This pass walks every function named `render_view` (the
+/// bare-form top-level view) and every impl method named `view`
+/// (component view) and looks at the last statement:
+///
+///   - **Last stmt is a primitive-view call**
+///     (`Expression(Call($Blinc$<X>$view, ...))`) → rewrite to
+///     `Return(Some(call))` and set the declaration's
+///     `return_type` to `Primitive(I64)` (the widget-handle ABI
+///     type). The JIT then compiles the function with a real i64
+///     return register, and [`JitViewRenderer::render_named`]
+///     picks it up via [`ZyntaxRuntime::call_function`] with the
+///     matching native signature.
+///
+///   - **Anything else** (`text(...)` op-stream call, a `let`, a
+///     conditional without a trailing widget, etc.) → leave alone.
+///     The function stays Unit-returning and the legacy
+///     scene-buffer drain path keeps working.
+///
+/// Why detect `$Blinc$<X>$view` specifically rather than `Type::Any`
+/// or a generic value-return: a Unit-vs-`Any` declared return forks
+/// Zyntax's body classifier into a type-meta path that null-derefs
+/// when invoked via the simpler `call::<()>` ABI the legacy paths
+/// use. Pinning the return to a concrete primitive (`I64`) keeps
+/// every code path on the well-trodden specialised-call road.
+///
+/// MUST run before [`ensure_unit_return`] so its defensive
+/// `Return(None)` doesn't preempt the value-bearing return we
+/// install here.
+fn lower_view_to_value_returning(
+    program: &mut TypedProgram,
+    value_returning_symbols: &mut std::collections::HashSet<String>,
+) {
+    use zyntax_typed_ast::{TypedDeclaration, TypedExpression};
+
+    fn is_view_name(name: zyntax_typed_ast::InternedString) -> bool {
+        matches!(
+            name.resolve_global().as_deref(),
+            Some("render_view") | Some("view")
+        )
+    }
+
+    /// `Expression(Call(Variable("$Blinc$<X>$view"), ...))` — the
+    /// shape `lower_component_calls` emits for substrate-registered
+    /// widget primitives whose registry entry uses the `$Blinc$`
+    /// prefix.
+    fn is_primitive_view_call_stmt(stmt: &TypedStatement) -> bool {
+        let TypedStatement::Expression(expr) = stmt else {
+            return false;
+        };
+        let TypedExpression::Call(call) = &expr.node else {
+            return false;
+        };
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            return false;
+        };
+        callee
+            .resolve_global()
+            .as_deref()
+            .is_some_and(|s| s.starts_with("$Blinc$") && s.ends_with("$view"))
+    }
+
+    /// If the body's last statement is a primitive view call,
+    /// rewrite it to `Return(Some(call))` in place and report
+    /// success so the caller can bump the function's declared
+    /// return type to `Primitive(I64)`.
+    fn try_convert_trailing(body: &mut zyntax_typed_ast::typed_ast::TypedBlock) -> bool {
+        let Some(last) = body.statements.last() else {
+            return false;
+        };
+        if !is_primitive_view_call_stmt(&last.node) {
+            return false;
+        }
+        let last = body
+            .statements
+            .last_mut()
+            .expect("just confirmed last exists above");
+        let placeholder = TypedStatement::Continue;
+        let original = std::mem::replace(&mut last.node, placeholder);
+        let TypedStatement::Expression(expr) = original else {
+            unreachable!("just confirmed Expression shape above");
+        };
+        last.node = TypedStatement::Return(Some(expr));
+        true
+    }
+
+    let widget_handle_type = Type::Primitive(PrimitiveType::I64);
+
+    for decl in program.declarations.iter_mut() {
+        match &mut decl.node {
+            TypedDeclaration::Function(func) => {
+                if func.is_external {
+                    continue;
+                }
+                if !is_view_name(func.name) {
+                    continue;
+                }
+                let Some(body) = func.body.as_mut() else {
+                    continue;
+                };
+                if try_convert_trailing(body) {
+                    func.return_type = widget_handle_type.clone();
+                    if let Some(name) = func.name.resolve_global() {
+                        value_returning_symbols.insert(name.to_string());
+                    }
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                // Inherent-impl methods get the `<TypeName>$<method>`
+                // mangling. Pull the type name once and reuse it for
+                // every converted method on this impl.
+                let type_name: Option<String> = match &imp.for_type {
+                    Type::Unresolved(name) => name.resolve_global().map(|s| s.to_string()),
+                    Type::Named { id, .. } => program
+                        .type_registry
+                        .get_type_by_id(*id)
+                        .and_then(|t| t.name.resolve_global())
+                        .map(|s| s.to_string()),
+                    _ => None,
+                };
+                for method in &mut imp.methods {
+                    if !is_view_name(method.name) {
+                        continue;
+                    }
+                    let Some(body) = method.body.as_mut() else {
+                        continue;
+                    };
+                    if try_convert_trailing(body) {
+                        method.return_type = widget_handle_type.clone();
+                        if let (Some(t), Some(m)) =
+                            (type_name.as_ref(), method.name.resolve_global())
+                        {
+                            value_returning_symbols.insert(format!("{t}${m}"));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Rewrite every substrate primitive call carrying a
+/// `children = Array([...])` named arg (the shape Phase 2c
+/// emits for body-block-bearing primitive widgets) into an
+/// explicit Block expansion that synthesises a per-container
+/// child-list via `__new_child_list__` / `__push_child__`.
+///
+/// Before (Phase 2c output):
+///
+/// ```text
+/// Call($Blinc$Div$view, [], named=[children = Array([
+///     Call($Blinc$Text$view, ["a"]),
+///     Call($Blinc$Text$view, ["b"]),
+/// ])])
+/// ```
+///
+/// After:
+///
+/// ```text
+/// Block {
+///     statements: [
+///         let __blinc_children_0 = __new_child_list__();
+///         __push_child__(__blinc_children_0, $Blinc$Text$view("a"));
+///         __push_child__(__blinc_children_0, $Blinc$Text$view("b"));
+///         $Blinc$Div$view(__blinc_children_0);  // trailing => block value
+///     ]
+/// }
+/// ```
+///
+/// The container extern (`$Blinc$Div$view`) takes the list
+/// pointer, walks each handle, materialises the boxed widgets,
+/// and folds them into the Div's child list. See
+/// [`blinc_div_view`] for the consumption side.
+///
+/// **Recursion:** runs post-order so nested primitive calls
+/// inside a parent's child array get rewritten to Blocks first
+/// — the parent's `__push_child__` then receives a Block
+/// expression that evaluates the inner container at the right
+/// point in source order.
+///
+/// **Where this runs:** after [`lower_view_to_value_returning`]
+/// (so trailing-Return wrapping is settled before the Block
+/// transformation alters expression shapes) and before
+/// [`ensure_unit_return`] (which only cares about the
+/// statement-level trailing shape, not the inner-expression
+/// rewrites we do here).
+///
+/// **What this doesn't yet handle:**
+///
+///   - User-component primitives (callees not starting with
+///     `$Blinc$`) — those still flatten via Phase 2c's fallback.
+///   - Children inside non-trivial expressions (`if cond {
+///     Div() { ... } else { Span() }`). Walked recursively so it
+///     handles direct nesting; if-as-expression and similar
+///     compound shapes inside children arrays land later.
+fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
+    use zyntax_typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedNamedArg};
+
+    /// Counter for unique `__blinc_children_<N>` idents within a
+    /// single compile. The N values don't carry semantics; they
+    /// just disambiguate so nested blocks don't shadow each
+    /// other's let bindings.
+    fn next_id(counter: &mut u32) -> u32 {
+        let id = *counter;
+        *counter += 1;
+        id
+    }
+
+    /// Walk a statement and rewrite any nested primitive calls.
+    fn walk_stmt(stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>, counter: &mut u32) {
+        match &mut stmt.node {
+            TypedStatement::Expression(e) => rewrite_expr(e, counter),
+            TypedStatement::Return(Some(e)) => rewrite_expr(e, counter),
+            TypedStatement::Let(l) => {
+                if let Some(init) = &mut l.initializer {
+                    rewrite_expr(init, counter);
+                }
+            }
+            TypedStatement::If(if_stmt) => {
+                rewrite_expr(&mut if_stmt.condition, counter);
+                for s in &mut if_stmt.then_block.statements {
+                    walk_stmt(s, counter);
+                }
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    for s in &mut else_block.statements {
+                        walk_stmt(s, counter);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Post-order rewrite: recurse first so nested primitive
+    /// calls in this expression get converted to Blocks before
+    /// we look at *this* expression's shape.
+    fn rewrite_expr(expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>, counter: &mut u32) {
+        match &mut expr.node {
+            TypedExpression::Call(call) => {
+                rewrite_expr(&mut call.callee, counter);
+                for arg in &mut call.positional_args {
+                    rewrite_expr(arg, counter);
+                }
+                for named in &mut call.named_args {
+                    rewrite_expr(&mut named.value, counter);
+                }
+            }
+            TypedExpression::Array(items) => {
+                for item in items {
+                    rewrite_expr(item, counter);
+                }
+            }
+            TypedExpression::Block(block) => {
+                for stmt in &mut block.statements {
+                    walk_stmt(stmt, counter);
+                }
+            }
+            TypedExpression::Binary(b) => {
+                rewrite_expr(&mut b.left, counter);
+                rewrite_expr(&mut b.right, counter);
+            }
+            _ => {}
+        }
+
+        // Now look at THIS expression. We only rewrite primitive
+        // calls whose substrate `ComponentDefinition` advertises
+        // a `children` prop — those are the container primitives
+        // (`Div`, future `Stack`/`Row`/`Column`, …). Leaf
+        // primitives like `Text` keep their existing positional-
+        // arg signatures intact.
+        //
+        // For container primitives, we either:
+        //
+        //   - Expand `children = Array([...])` into the
+        //     `__new_child_list__` / `__push_child__` Block
+        //     expansion (the body-block case).
+        //   - Or, if no `children` named arg is present (the
+        //     bare `Div()` case), splice a `0` literal as the
+        //     first positional arg so the call matches the
+        //     extern's `(children: i64, …) -> i64` signature.
+        let span = expr.span;
+        let i64_ty = Type::Primitive(PrimitiveType::I64);
+        let unit_ty = Type::Primitive(PrimitiveType::Unit);
+
+        let TypedExpression::Call(call) = &mut expr.node else {
+            return;
+        };
+        if !callee_takes_children(call) {
+            return;
+        }
+
+        let children_idx = call
+            .named_args
+            .iter()
+            .position(|na| na.name.resolve_global().as_deref() == Some("children"));
+
+        let Some(idx) = children_idx else {
+            // No body block in the source — splice a `0i64`
+            // pointer as the children arg so the call's
+            // positional list matches the extern's `(children:
+            // i64) -> i64` signature.
+            call.positional_args.insert(
+                0,
+                typed_node(
+                    TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(0)),
+                    i64_ty.clone(),
+                    span,
+                ),
+            );
+            return;
+        };
+
+        let children_named: TypedNamedArg = call.named_args.remove(idx);
+        let TypedExpression::Array(child_exprs) = children_named.value.node else {
+            // Not the Phase-2c shape — leave the call alone so
+            // we don't accidentally drop data on other named-arg
+            // values that happen to be called `children`.
+            call.named_args.push(children_named);
+            return;
+        };
+
+        let id = next_id(counter);
+        let list_ident =
+            zyntax_typed_ast::InternedString::new_global(&format!("__blinc_children_{id}"));
+
+        let mut stmts: Vec<zyntax_typed_ast::TypedNode<TypedStatement>> = Vec::new();
+
+        // let __blinc_children_<id> = __new_child_list__()
+        stmts.push(typed_node(
+            TypedStatement::Let(zyntax_typed_ast::typed_ast::TypedLet {
+                name: list_ident,
+                ty: i64_ty.clone(),
+                mutability: zyntax_typed_ast::Mutability::Immutable,
+                initializer: Some(Box::new(typed_node(
+                    TypedExpression::Call(TypedCall {
+                        callee: Box::new(typed_node(
+                            TypedExpression::Variable(
+                                zyntax_typed_ast::InternedString::new_global("__new_child_list__"),
+                            ),
+                            Type::Any,
+                            span,
+                        )),
+                        positional_args: vec![],
+                        named_args: vec![],
+                        type_args: vec![],
+                    }),
+                    i64_ty.clone(),
+                    span,
+                ))),
+                span,
+            }),
+            unit_ty.clone(),
+            span,
+        ));
+
+        // for each child: __push_child__(__blinc_children_<id>, child)
+        for child_expr in child_exprs {
+            let push_call = TypedExpression::Call(TypedCall {
+                callee: Box::new(typed_node(
+                    TypedExpression::Variable(zyntax_typed_ast::InternedString::new_global(
+                        "__push_child__",
+                    )),
+                    Type::Any,
+                    span,
+                )),
+                positional_args: vec![
+                    typed_node(TypedExpression::Variable(list_ident), i64_ty.clone(), span),
+                    child_expr,
+                ],
+                named_args: vec![],
+                type_args: vec![],
+            });
+            stmts.push(typed_node(
+                TypedStatement::Expression(Box::new(typed_node(push_call, unit_ty.clone(), span))),
+                unit_ty.clone(),
+                span,
+            ));
+        }
+
+        // Trailing call: <original callee>(__blinc_children_<id>)
+        // Block-as-expression value comes from this last
+        // statement. The original callee is reused verbatim; the
+        // original positional / remaining named args ride along
+        // in case future primitives grow extra props beyond
+        // `children`.
+        let mut final_positional = std::mem::take(&mut call.positional_args);
+        final_positional.insert(
+            0,
+            typed_node(TypedExpression::Variable(list_ident), i64_ty.clone(), span),
+        );
+        let final_call = TypedExpression::Call(TypedCall {
+            callee: call.callee.clone(),
+            positional_args: final_positional,
+            named_args: std::mem::take(&mut call.named_args),
+            type_args: std::mem::take(&mut call.type_args),
+        });
+        stmts.push(typed_node(
+            TypedStatement::Expression(Box::new(typed_node(final_call, i64_ty.clone(), span))),
+            i64_ty.clone(),
+            span,
+        ));
+
+        expr.node = TypedExpression::Block(zyntax_typed_ast::typed_ast::TypedBlock {
+            statements: stmts,
+            span,
+        });
+    }
+
+    /// Is the call's callee a substrate-registered component
+    /// whose prop list advertises a `children` prop? Reads the
+    /// process-wide [`ComponentRegistry`] so the same lookup the
+    /// validator / lowering layers use here too.
+    ///
+    /// The view-symbol → component-name mapping strips the
+    /// `$Blinc$<Name>$view` envelope — that's the convention
+    /// `register_blinc_layout_primitives` uses for in-tree
+    /// primitives and the `#[extern_widget]` macro uses for
+    /// user widgets.
+    ///
+    /// [`ComponentRegistry`]: blinc_runtime::component::ComponentRegistry
+    fn callee_takes_children(call: &TypedCall) -> bool {
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            return false;
+        };
+        let Some(sym) = callee.resolve_global() else {
+            return false;
+        };
+        let sym: &str = &sym;
+        // Strip the JIT-linker envelope to recover the user-
+        // visible DSL name. Anything that doesn't match the
+        // convention is not a substrate primitive.
+        let Some(name) = sym
+            .strip_prefix("$Blinc$")
+            .and_then(|s| s.strip_suffix("$view"))
+        else {
+            return false;
+        };
+        blinc_runtime::component::with_component_registry(|r| {
+            r.get_by_name(name)
+                .map(|def| def.props.iter().any(|p| p.name.as_ref() == "children"))
+                .unwrap_or(false)
+        })
+    }
+
+    let mut counter: u32 = 0;
+    for decl in program.declarations.iter_mut() {
+        match &mut decl.node {
+            TypedDeclaration::Function(func) => {
+                if let Some(body) = func.body.as_mut() {
+                    for stmt in &mut body.statements {
+                        walk_stmt(stmt, &mut counter);
+                    }
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                for method in &mut imp.methods {
+                    if let Some(body) = method.body.as_mut() {
+                        for stmt in &mut body.statements {
+                            walk_stmt(stmt, &mut counter);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Resolve named args on `$Blinc$<X>$view` extern calls into
+/// positional args using the substrate
+/// [`ComponentRegistry`]'s prop order as the source of truth.
+///
+/// Zyntax's `inject_builtin_externs` synthesises extern
+/// declarations with generic parameter names (`p0`, `p1`, …) —
+/// so a DSL call site like `MyWidget(label = "hi", count = 5)`
+/// can't bind by name through the type checker. This pass
+/// closes that gap purely in our lowering layer:
+///
+///   - Looks up the call's substrate definition (strips the
+///     `$Blinc$<Name>$view` envelope to recover the user-visible
+///     name).
+///   - Reads the props list (which the macro / hand-rolled
+///     `ExternWidgetSpec` populated in declaration order).
+///   - For each `TypedNamedArg` whose name matches a prop, slots
+///     its value into the corresponding positional position.
+///   - Positional args already on the call fill the *earliest*
+///     unclaimed positions; named args land at their named
+///     positions. Mixed positional+named call sites work as
+///     long as they don't collide on a slot.
+///   - Clears `named_args` once everything has landed.
+///
+/// **Skipped:** non-primitive callees (user-declared DSL
+/// components — Zyntax's normal name-based parameter binding
+/// handles those via `bind_component_props`); calls referencing
+/// a prop name that isn't in the registry (left as a named arg
+/// so Zyntax's own diagnostics flag it).
+///
+/// **Where this runs:** after [`lower_children_arrays_to_blocks`]
+/// — the `children = Array(...)` named arg is already gone by
+/// the time we look at remaining named args (the children pass
+/// extracts it into Block expansion + a positional list-pointer).
+/// Before [`ensure_unit_return`] which only cares about
+/// statement-level trailing shape.
+///
+/// [`ComponentRegistry`]: blinc_runtime::component::ComponentRegistry
+fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
+    use zyntax_typed_ast::{TypedCall, TypedDeclaration, TypedExpression};
+
+    fn walk_stmt(stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>) {
+        match &mut stmt.node {
+            TypedStatement::Expression(e) => rewrite_expr(e),
+            TypedStatement::Return(Some(e)) => rewrite_expr(e),
+            TypedStatement::Let(l) => {
+                if let Some(init) = &mut l.initializer {
+                    rewrite_expr(init);
+                }
+            }
+            TypedStatement::If(if_stmt) => {
+                rewrite_expr(&mut if_stmt.condition);
+                for s in &mut if_stmt.then_block.statements {
+                    walk_stmt(s);
+                }
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    for s in &mut else_block.statements {
+                        walk_stmt(s);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rewrite_expr(expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>) {
+        // Recurse first — nested calls inside args / blocks get
+        // their own named args resolved before we look at the
+        // outer call.
+        match &mut expr.node {
+            TypedExpression::Call(call) => {
+                rewrite_expr(&mut call.callee);
+                for arg in &mut call.positional_args {
+                    rewrite_expr(arg);
+                }
+                for na in &mut call.named_args {
+                    rewrite_expr(&mut na.value);
+                }
+            }
+            TypedExpression::Array(items) => {
+                for item in items {
+                    rewrite_expr(item);
+                }
+            }
+            TypedExpression::Block(block) => {
+                for stmt in &mut block.statements {
+                    walk_stmt(stmt);
+                }
+            }
+            TypedExpression::Binary(b) => {
+                rewrite_expr(&mut b.left);
+                rewrite_expr(&mut b.right);
+            }
+            _ => {}
+        }
+
+        // Now look at THIS expression.
+        let TypedExpression::Call(call) = &mut expr.node else {
+            return;
+        };
+        let Some(prop_names) = primitive_callee_prop_names(call) else {
+            return;
+        };
+        if call.named_args.is_empty() {
+            return;
+        }
+
+        // Slot vector sized to the prop count. Existing positional
+        // args fill the earliest slots; named args land at their
+        // resolved positions.
+        let mut slots: Vec<Option<zyntax_typed_ast::TypedNode<TypedExpression>>> =
+            (0..prop_names.len()).map(|_| None).collect();
+        let existing_positional = std::mem::take(&mut call.positional_args);
+        let mut overflow: Vec<zyntax_typed_ast::TypedNode<TypedExpression>> = Vec::new();
+        for (i, arg) in existing_positional.into_iter().enumerate() {
+            if i < slots.len() {
+                slots[i] = Some(arg);
+            } else {
+                overflow.push(arg);
+            }
+        }
+
+        // Place each named arg at its named position. Args
+        // whose name doesn't match any prop stay in named_args
+        // (Zyntax's type checker surfaces the diagnostic).
+        let existing_named = std::mem::take(&mut call.named_args);
+        let mut unresolved_named: Vec<zyntax_typed_ast::TypedNamedArg> = Vec::new();
+        for na in existing_named {
+            let Some(name) = na.name.resolve_global() else {
+                unresolved_named.push(na);
+                continue;
+            };
+            let name_str: &str = &name;
+            if let Some(pos) = prop_names.iter().position(|p| p == name_str) {
+                if slots[pos].is_some() {
+                    // Conflict: same slot supplied positionally
+                    // AND by name. Leave the named arg in place
+                    // so the diagnostic surface stays honest.
+                    unresolved_named.push(na);
+                } else {
+                    slots[pos] = Some(*na.value);
+                }
+            } else {
+                unresolved_named.push(na);
+            }
+        }
+
+        // Materialise the contiguous filled prefix. Unfilled
+        // trailing slots get dropped so call arity matches what
+        // the user supplied — missing required props surface as
+        // a downstream type/link diagnostic, not silent garbage.
+        let mut new_positional: Vec<zyntax_typed_ast::TypedNode<TypedExpression>> = Vec::new();
+        for slot in slots {
+            if let Some(arg) = slot {
+                new_positional.push(arg);
+            } else {
+                break;
+            }
+        }
+        new_positional.extend(overflow);
+
+        call.positional_args = new_positional;
+        call.named_args = unresolved_named;
+    }
+
+    /// If `call` resolves to a substrate-registered primitive
+    /// (`$Blinc$<Name>$view` callee), return its prop names in
+    /// declaration order. Otherwise `None`.
+    fn primitive_callee_prop_names(call: &TypedCall) -> Option<Vec<String>> {
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            return None;
+        };
+        let sym = callee.resolve_global()?;
+        let sym: &str = &sym;
+        let name = sym
+            .strip_prefix("$Blinc$")
+            .and_then(|s| s.strip_suffix("$view"))?;
+        blinc_runtime::component::with_component_registry(|r| {
+            r.get_by_name(name)
+                .map(|def| def.props.iter().map(|p| p.name.to_string()).collect())
+        })
+    }
+
+    for decl in program.declarations.iter_mut() {
+        match &mut decl.node {
+            TypedDeclaration::Function(func) => {
+                if let Some(body) = func.body.as_mut() {
+                    for stmt in &mut body.statements {
+                        walk_stmt(stmt);
+                    }
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                for method in &mut imp.methods {
+                    if let Some(body) = method.body.as_mut() {
+                        for stmt in &mut body.statements {
+                            walk_stmt(stmt);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -4625,13 +6096,18 @@ mod tests {
 
         // Substrate registry should know `Div` + `Text` regardless
         // of whether any DSL source has been compiled yet.
+        // Div's prop list is intentionally minimal — just
+        // `children`, since universal styling (bg, padding, …)
+        // is planned to come through the `Styled<W>` overlay
+        // rather than per-primitive props.
         let div =
             blinc_runtime::component::with_component_registry(|r| r.get_by_name("Div").cloned())
                 .expect("Div should be pre-registered");
         assert_eq!(div.view_symbol.as_ref(), "$Blinc$Div$view");
-        assert!(div.prop("direction").is_some());
-        assert!(div.prop("bg").is_some());
-        assert!(div.prop("children").is_some());
+        assert!(
+            div.prop("children").is_some(),
+            "Div should advertise its `children` slot"
+        );
 
         let text =
             blinc_runtime::component::with_component_registry(|r| r.get_by_name("Text").cloned())
@@ -4861,6 +6337,324 @@ mod tests {
             0,
             "Counter$view should have no args after body inlining, got: {:?}",
             c.positional_args
+        );
+    }
+
+    /// A bare-form `view { Text("hi") }` ending in a substrate
+    /// widget-primitive call gets rewritten to
+    /// `Return(Some(...))` and its declared return type is bumped
+    /// from `Unit` to widget-handle (`I64`). Pins Phase 2d's
+    /// value-returning view shape.
+    #[test]
+    fn lower_view_to_value_returning_wraps_primitive_call() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                view { Text("hi") }
+                "#,
+                "value_returning_view.blinc",
+            )
+            .expect("parse");
+
+        let render_view = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Function(f)
+                    if f.name.resolve_global().as_deref() == Some("render_view") =>
+                {
+                    Some(f)
+                }
+                _ => None,
+            })
+            .expect("expected a render_view function");
+
+        // Return type bumped to the widget-handle ABI type.
+        assert_eq!(
+            render_view.return_type,
+            Type::Primitive(PrimitiveType::I64),
+            "render_view should return I64 (widget handle) after value-returning rewrite"
+        );
+
+        // Body's last statement is now a Return(Some(call)) — not
+        // a bare Expression.
+        let body = render_view
+            .body
+            .as_ref()
+            .expect("render_view should have a body");
+        let last = body
+            .statements
+            .last()
+            .expect("body should have at least one stmt");
+        let TypedStatement::Return(Some(expr)) = &last.node else {
+            panic!("expected trailing `Return(Some(_))`, got: {:?}", last.node);
+        };
+        let TypedExpression::Call(call) = &expr.node else {
+            panic!("returned expr should be a Call");
+        };
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            panic!("callee should be a Variable");
+        };
+        assert_eq!(
+            callee.resolve_global().as_deref(),
+            Some("$Blinc$Text$view"),
+            "callee should be the primitive Text view symbol"
+        );
+    }
+
+    /// A view whose trailing statement is `text("...")` (the
+    /// legacy lowercase op-stream extern, not a substrate widget
+    /// primitive) must NOT get the value-returning rewrite — that
+    /// extern returns Unit and the legacy `render_view` -> scene
+    /// buffer path expects a Unit-returning function.
+    #[test]
+    fn lower_view_to_value_returning_skips_legacy_text_extern() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                view { text("hi") }
+                "#,
+                "legacy_text_view.blinc",
+            )
+            .expect("parse");
+
+        let render_view = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Function(f)
+                    if f.name.resolve_global().as_deref() == Some("render_view") =>
+                {
+                    Some(f)
+                }
+                _ => None,
+            })
+            .expect("expected a render_view function");
+
+        // Stays Unit-returning — the lowercase `text(...)` extern
+        // is op-stream / Unit.
+        assert_eq!(
+            render_view.return_type,
+            Type::Primitive(PrimitiveType::Unit),
+            "legacy text(...) view should stay Unit-returning"
+        );
+
+        let body = render_view
+            .body
+            .as_ref()
+            .expect("render_view should have a body");
+        let last = body
+            .statements
+            .last()
+            .expect("body should have at least one stmt");
+        assert!(
+            matches!(last.node, TypedStatement::Expression(_)),
+            "trailing stmt should stay as Expression(_), got: {:?}",
+            last.node
+        );
+    }
+
+    /// `Text(content = "hi")` — a leaf primitive with one prop
+    /// invoked by name — lowers to a positional call thanks to
+    /// `resolve_extern_widget_named_args`. Pins the named→
+    /// positional reorder explicitly so it can't regress
+    /// silently into an empty positional list (which would JIT
+    /// to garbage register reads).
+    #[test]
+    fn named_args_on_primitive_call_resolve_to_positional() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(r#"view { Text(content = "hi") }"#, "named_args.blinc")
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        assert_eq!(stmts.len(), 1);
+        let TypedStatement::Return(Some(e)) = &stmts[0].node else {
+            panic!("expected Return(Some(...)), got: {:?}", stmts[0].node);
+        };
+        let TypedExpression::Call(c) = &e.node else {
+            panic!("returned expr should be a Call, got: {:?}", e.node);
+        };
+        let TypedExpression::Variable(callee) = &c.callee.node else {
+            panic!("callee should be Variable");
+        };
+        assert_eq!(callee.resolve_global().as_deref(), Some("$Blinc$Text$view"));
+        assert!(
+            c.named_args.is_empty(),
+            "named args should have been resolved to positional, got: {:?}",
+            c.named_args
+        );
+        assert_eq!(c.positional_args.len(), 1, "Text takes one (content) prop");
+        let TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::String(s)) =
+            &c.positional_args[0].node
+        else {
+            panic!(
+                "positional[0] should be the string literal, got: {:?}",
+                c.positional_args[0].node
+            );
+        };
+        assert_eq!(
+            s.resolve_global().as_deref(),
+            Some("hi"),
+            "the named-arg value should land at position 0"
+        );
+    }
+
+    /// Substrate container primitives lower their body Block
+    /// into a `__new_child_list__` + `__push_child__` + final
+    /// container-call Block expansion (the
+    /// `lower_children_arrays_to_blocks` shape). Asserts the
+    /// post-lowering AST end-to-end: a trailing
+    /// `Return(Some(Block({ let, push, push, Div(__list) })))`
+    /// with each push consuming a primitive child call.
+    #[test]
+    fn parse_primitive_call_with_body_lowers_to_children_block_expansion() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                view {
+                    Div() {
+                        Text("a")
+                        Text("b")
+                    }
+                }
+                "#,
+                "primitive_body.blinc",
+            )
+            .expect("parse");
+
+        let stmts = first_user_function_body(&program);
+        assert_eq!(stmts.len(), 1, "body should stay as one stmt");
+
+        // Phase 2d wrapped the trailing expression in
+        // `Return(Some(...))`; the children-array pass then
+        // rewrote the inner Call into a Block expansion.
+        let TypedStatement::Return(Some(e)) = &stmts[0].node else {
+            panic!(
+                "stmts[0] should be Return(Some(Block)), got: {:?}",
+                stmts[0].node
+            );
+        };
+        let TypedExpression::Block(block) = &e.node else {
+            panic!(
+                "returned expr should be a Block expansion, got: {:?}",
+                e.node
+            );
+        };
+
+        // Expected statement sequence (4 entries):
+        //   0. let __blinc_children_N = __new_child_list__()
+        //   1. __push_child__(__blinc_children_N, Text$view("a"))
+        //   2. __push_child__(__blinc_children_N, Text$view("b"))
+        //   3. $Blinc$Div$view(__blinc_children_N)   <-- block value
+        assert_eq!(
+            block.statements.len(),
+            4,
+            "expected 4 stmts (let + 2 pushes + final call), got: {block:?}"
+        );
+
+        // Statement 0: the let.
+        let TypedStatement::Let(let_stmt) = &block.statements[0].node else {
+            panic!("stmt[0] should be Let, got: {:?}", block.statements[0].node);
+        };
+        let list_ident = let_stmt
+            .name
+            .resolve_global()
+            .expect("let name should resolve");
+        assert!(
+            list_ident.starts_with("__blinc_children_"),
+            "let name should follow the __blinc_children_<N> convention, got `{list_ident}`"
+        );
+        let init = let_stmt
+            .initializer
+            .as_ref()
+            .expect("let should carry an initializer");
+        let TypedExpression::Call(init_call) = &init.node else {
+            panic!("let initializer should be a Call");
+        };
+        let TypedExpression::Variable(init_callee) = &init_call.callee.node else {
+            panic!("init callee should be a Variable");
+        };
+        assert_eq!(
+            init_callee.resolve_global().as_deref(),
+            Some("__new_child_list__"),
+            "let initialiser should call __new_child_list__"
+        );
+
+        // Statements 1 + 2: __push_child__(list, Text$view("..."))
+        for (i, stmt) in block.statements.iter().enumerate().skip(1).take(2) {
+            let TypedStatement::Expression(expr) = &stmt.node else {
+                panic!("stmt[{i}] should be Expression(Call)");
+            };
+            let TypedExpression::Call(push_call) = &expr.node else {
+                panic!("stmt[{i}] should be Call");
+            };
+            let TypedExpression::Variable(push_callee) = &push_call.callee.node else {
+                panic!("stmt[{i}] callee should be Variable");
+            };
+            assert_eq!(
+                push_callee.resolve_global().as_deref(),
+                Some("__push_child__"),
+                "stmt[{i}] should call __push_child__"
+            );
+            assert_eq!(
+                push_call.positional_args.len(),
+                2,
+                "__push_child__ takes (list, child)"
+            );
+            // arg 0: Variable refers to the same list ident as the let.
+            let TypedExpression::Variable(list_ref) = &push_call.positional_args[0].node else {
+                panic!("__push_child__ arg 0 should be the list ident Variable");
+            };
+            assert_eq!(
+                list_ref.resolve_global().as_deref(),
+                Some(list_ident.as_ref())
+            );
+            // arg 1: Text$view call.
+            let TypedExpression::Call(child_call) = &push_call.positional_args[1].node else {
+                panic!("__push_child__ arg 1 should be a child Call");
+            };
+            let TypedExpression::Variable(child_callee) = &child_call.callee.node else {
+                panic!("child callee should be a Variable");
+            };
+            assert_eq!(
+                child_callee.resolve_global().as_deref(),
+                Some("$Blinc$Text$view")
+            );
+        }
+
+        // Statement 3: trailing Div call carrying the list ident.
+        let TypedStatement::Expression(final_expr) = &block.statements[3].node else {
+            panic!("stmt[3] should be Expression(Call)");
+        };
+        let TypedExpression::Call(div_call) = &final_expr.node else {
+            panic!("stmt[3] should be Call");
+        };
+        let TypedExpression::Variable(div_callee) = &div_call.callee.node else {
+            panic!("div callee should be a Variable");
+        };
+        assert_eq!(
+            div_callee.resolve_global().as_deref(),
+            Some("$Blinc$Div$view")
+        );
+        assert_eq!(div_call.positional_args.len(), 1, "Div takes (children)");
+        let TypedExpression::Variable(div_list_arg) = &div_call.positional_args[0].node else {
+            panic!("Div arg 0 should be the list ident Variable");
+        };
+        assert_eq!(
+            div_list_arg.resolve_global().as_deref(),
+            Some(list_ident.as_ref())
         );
     }
 
@@ -7709,6 +9503,335 @@ mod tests {
         assert!(
             matches!(err, blinc_runtime::view::ViewRenderError::Backend(_)),
             "JIT path surfaces missing symbols as Backend errors, got {err:?}"
+        );
+    }
+
+    /// `view { Text("hi") }` compiles to the value-returning
+    /// shape: the substrate ViewRenderer returns a non-zero
+    /// `ZyntaxValue::Int(handle)`, which decodes via
+    /// [`materialize_widget`] back to a `WidgetBox::Text` whose
+    /// `content` matches the source. Pins the full Phase 2
+    /// round-trip: AST rewrite → JIT-i64-return ABI → host-side
+    /// box reclamation.
+    #[test]
+    fn jit_view_renderer_round_trip_value_returning_text() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(r#"view { Text("hello") }"#, "value_returning_text.blinc")
+            .expect("compile");
+
+        let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+        let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+
+        let ZyntaxValue::Int(handle) = value else {
+            panic!("expected ZyntaxValue::Int(handle), got: {value:?}");
+        };
+        assert_ne!(handle, 0, "Text view should not return the null handle");
+
+        // SAFETY: handle came straight out of `$Blinc$Text$view`,
+        // which uses `Box::into_raw(Box::new(WidgetBox::Text(...)))`
+        // and hands the pointer back unchanged through `i64`.
+        let widget =
+            unsafe { materialize_widget(handle) }.expect("non-null handle should decode to Some");
+        let WidgetBox::Text(text) = *widget else {
+            panic!("expected WidgetBox::Text, got Div");
+        };
+        // `Text::new` stores the content via its public surface;
+        // pull it back out through the `content()` getter.
+        assert_eq!(
+            text.content(),
+            "hello",
+            "Text widget should carry the source string"
+        );
+    }
+
+    /// Rust → DSL interop: a user-defined widget registered via
+    /// `register_extern_widget` is callable from DSL source like
+    /// any built-in primitive. The extern wraps a real
+    /// `blinc_layout::Text` in `WidgetBox::Custom`; the round-trip
+    /// proves both the registration plumbing (JIT thunk + substrate
+    /// registry + value-returning-set entry) and the `Custom`
+    /// payload decode.
+    #[test]
+    fn register_extern_widget_rust_to_dsl_round_trip() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        // User-defined Rust extern. Convention: matches what the
+        // planned `#[extern_widget]` proc-macro would generate.
+        extern "C" fn fancy_text_view(content_ptr: *const i32) -> i64 {
+            if content_ptr.is_null() {
+                return 0;
+            }
+            // SAFETY: Zyntax's String FFI hands the matching
+            // length-prefixed buffer when the registered param
+            // type is `String`.
+            let content = unsafe { blinc_string_decode(content_ptr) };
+            let widget = blinc_layout::text::Text::new(content);
+            // Land in the `Custom` variant — that's the path any
+            // non-`Text`/`Div` user widget takes.
+            Box::into_raw(Box::new(WidgetBox::Custom(Box::new(widget)))) as i64
+        }
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.register_extern_widget_spec(ExternWidgetSpec {
+            name: "FancyText".into(),
+            view_symbol: "$Blinc$FancyText$view".into(),
+            props: vec![blinc_runtime::component::PropDef {
+                name: std::sync::Arc::from("content"),
+                ty: Type::Primitive(PrimitiveType::String),
+            }],
+            param_types: vec![Type::Primitive(PrimitiveType::String)],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            extern_ptr: fancy_text_view as *const u8,
+        })
+        .expect("register_extern_widget_spec");
+
+        // DSL source uses the user widget the same way it'd use a
+        // built-in primitive — no syntactic distinction.
+        dsl.compile_source(
+            r#"view { FancyText("registered widget") }"#,
+            "fancy_text.blinc",
+        )
+        .expect("compile");
+
+        let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+        let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+
+        let ZyntaxValue::Int(handle) = value else {
+            panic!("expected ZyntaxValue::Int(handle), got: {value:?}");
+        };
+        assert_ne!(handle, 0, "FancyText extern should return a real handle");
+
+        // SAFETY: handle came straight out of `fancy_text_view`
+        // above, which builds `WidgetBox::Custom(Box::new(Text))`.
+        let widget =
+            unsafe { materialize_widget(handle) }.expect("non-null handle should decode to Some");
+        assert!(
+            matches!(*widget, WidgetBox::Custom(_)),
+            "expected WidgetBox::Custom — the variant user widgets land in"
+        );
+    }
+
+    /// DSL → Rust interop: a DSL-declared component is buildable
+    /// from Rust code via `dsl.query(...)`. Compiles a
+    /// `component MyContainer { view { Div() } }`, then queries it
+    /// from Rust and asserts the returned
+    /// `Box<dyn ElementBuilder>` reports itself as a `Div`.
+    #[test]
+    fn query_dsl_component_returns_element_builder() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            component MyContainer {
+                view { Div() }
+            }
+            "#,
+            "query_container.blinc",
+        )
+        .expect("compile");
+
+        let widget = dsl.query("MyContainer", &[]).expect("query");
+        assert_eq!(
+            widget.element_type_id(),
+            blinc_layout::div::ElementTypeId::Div,
+            "queried widget should report as a Div"
+        );
+    }
+
+    /// Querying a component whose view ends in a non-primitive
+    /// call (so it doesn't get the value-returning rewrite) errors
+    /// rather than silently returning garbage. Pins the "only
+    /// value-returning views are queryable" contract.
+    #[test]
+    fn query_legacy_unit_returning_component_errors() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            component LegacyGreeting {
+                view { text("hi") }
+            }
+            "#,
+            "legacy_greeting.blinc",
+        )
+        .expect("compile");
+
+        // `Box<dyn ElementBuilder>` isn't `Debug`, so use the
+        // err() projection rather than `expect_err`.
+        let err = dsl
+            .query("LegacyGreeting", &[])
+            .err()
+            .expect("Unit-returning component should error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("isn't value-returning"),
+            "diagnostic should explain the contract, got: {msg}"
+        );
+    }
+
+    /// Querying a name that isn't registered surfaces a clear
+    /// diagnostic rather than crashing in the JIT linker.
+    #[test]
+    fn query_unknown_component_errors_with_helpful_message() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let err = dsl
+            .query("DoesNotExist", &[])
+            .err()
+            .expect("unknown component should error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no component named"),
+            "diagnostic should name the missing component, got: {msg}"
+        );
+    }
+
+    /// End-to-end children plumbing: `view { Div() { Text("a")
+    /// Text("b") } }` builds a real `blinc_layout::Div` whose
+    /// `children_builders()` returns the two `Text` widgets in
+    /// source order. Pins the
+    /// `lower_children_arrays_to_blocks` →
+    /// `__new_child_list__` / `__push_child__` →
+    /// `blinc_div_view` consume-and-fold path.
+    #[test]
+    fn jit_view_renderer_div_with_text_children_composes() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            view {
+                Div() {
+                    Text("first")
+                    Text("second")
+                }
+            }
+            "#,
+            "div_with_children.blinc",
+        )
+        .expect("compile");
+
+        let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+        let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+
+        let ZyntaxValue::Int(handle) = value else {
+            panic!("expected widget handle, got: {value:?}");
+        };
+        assert_ne!(handle, 0, "Div view should return a real handle");
+
+        // SAFETY: handle came straight out of `$Blinc$Div$view`,
+        // which uses `Box::into_raw(Box::new(WidgetBox::Div(...)))`
+        // and hands the pointer back unchanged through `i64`.
+        let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+        let WidgetBox::Div(div) = *widget else {
+            panic!("expected WidgetBox::Div, got Text/Custom");
+        };
+
+        // The Div's children come straight from the
+        // `__push_child__` calls the lower pass emitted, in
+        // source order. Each one was originally a
+        // `WidgetBox::Text(...)` handle that the extern unwrapped
+        // via `into_element_builder`.
+        use blinc_layout::ElementBuilder;
+        let children = div.children_builders();
+        assert_eq!(
+            children.len(),
+            2,
+            "Div should hold the two Text children from the body block"
+        );
+    }
+
+    /// Nested container composition: `Div { Div { Text } }`
+    /// round-trips correctly. The inner Div has 1 Text child,
+    /// the outer Div has 1 Div child. Pins recursive
+    /// `lower_children_arrays_to_blocks` behaviour — each
+    /// nesting level mints its own `__blinc_children_<N>` list
+    /// without leaking into siblings.
+    #[test]
+    fn jit_view_renderer_div_nested_div_composes() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            view {
+                Div() {
+                    Div() {
+                        Text("inner")
+                    }
+                }
+            }
+            "#,
+            "div_nested.blinc",
+        )
+        .expect("compile");
+
+        let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+        let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+        let ZyntaxValue::Int(handle) = value else {
+            panic!("expected widget handle, got: {value:?}");
+        };
+        assert_ne!(handle, 0);
+
+        // SAFETY: handle came out of `$Blinc$Div$view`.
+        let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+        let WidgetBox::Div(outer) = *widget else {
+            panic!("outer should be a Div");
+        };
+
+        use blinc_layout::ElementBuilder;
+        let outer_children = outer.children_builders();
+        assert_eq!(outer_children.len(), 1, "outer Div should have 1 child Div");
+
+        // The inner child is itself a `Div` with 1 Text child.
+        // We can't directly downcast through `dyn ElementBuilder`,
+        // but we can check the type-id and that it has its own
+        // single child.
+        let inner = &outer_children[0];
+        assert_eq!(
+            inner.element_type_id(),
+            blinc_layout::div::ElementTypeId::Div,
+            "inner child should report itself as a Div"
+        );
+        assert_eq!(
+            inner.children_builders().len(),
+            1,
+            "inner Div should have 1 Text child"
+        );
+    }
+
+    /// `view { Div() }` — the value-returning Div primitive
+    /// returns a non-zero handle that decodes back to a
+    /// `WidgetBox::Div`. The Div is empty (no children plumbed
+    /// through the JIT array-arg path yet, but the round-trip
+    /// works for the container shape).
+    #[test]
+    fn jit_view_renderer_round_trip_value_returning_div() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(r#"view { Div() }"#, "value_returning_div.blinc")
+            .expect("compile");
+
+        let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+        let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+
+        let ZyntaxValue::Int(handle) = value else {
+            panic!("expected ZyntaxValue::Int(handle), got: {value:?}");
+        };
+        assert_ne!(handle, 0, "Div view should not return the null handle");
+
+        // SAFETY: see `jit_view_renderer_round_trip_value_returning_text`.
+        let widget =
+            unsafe { materialize_widget(handle) }.expect("non-null handle should decode to Some");
+        assert!(
+            matches!(*widget, WidgetBox::Div(_)),
+            "expected WidgetBox::Div"
         );
     }
 

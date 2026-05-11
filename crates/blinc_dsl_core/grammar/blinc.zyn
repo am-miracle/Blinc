@@ -47,6 +47,13 @@
     // statically.
     __fstring_format__: "$Blinc$format_int",
     string_concat: "$Blinc$string_concat",
+    // Children-array marshalling. `lower_children_arrays_to_blocks`
+    // emits direct calls to these names; the @builtin entries make
+    // sure the typed AST carries matching extern declarations so
+    // type-checking + call-site lowering reach the host externs
+    // registered by `builtins()`.
+    __new_child_list__: "__new_child_list__",
+    __push_child__: "__push_child__",
 }
 
 // =====================================================================
