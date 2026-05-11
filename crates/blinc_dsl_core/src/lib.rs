@@ -1069,6 +1069,8 @@ fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec<String>> {
     use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedExpression, TypedLiteral};
 
     let mut known: HashSet<String> = HashSet::new();
+    // User-declared `component <Name> { ... }` decls in this
+    // program contribute their names directly.
     for decl in &program.declarations {
         if let TypedDeclaration::Class(c) = &decl.node {
             if let Some(name) = c.name.resolve_global() {
@@ -1076,6 +1078,18 @@ fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec<String>> {
             }
         }
     }
+    // Substrate's `ComponentRegistry` carries pre-registered
+    // primitives (`Div`, `Text`, etc. — see
+    // `register_blinc_layout_primitives`). They aren't declared
+    // in the user's source but are valid call targets, so the
+    // validator pulls them in alongside the user decls. This is
+    // also how user-defined components compiled in OTHER programs
+    // could be referenced once cross-source linking lands.
+    blinc_runtime::component::with_component_registry(|r| {
+        for (_, def) in r.iter() {
+            known.insert(def.name.as_ref().to_string());
+        }
+    });
 
     let mut errors: Vec<String> = Vec::new();
 
@@ -2280,6 +2294,103 @@ impl blinc_runtime::view::ViewRenderer for JitViewRenderer {
 /// `populate_fsm_registry_pass` (so FSM impls — which have an
 /// empty trait_name but a matching Enum, not a Class — don't
 /// get accidentally registered as components).
+/// Pre-register `blinc_layout` widget primitives in the
+/// substrate's `ComponentRegistry`. After this runs, DSL
+/// source can call `Div(...)`, `Text(...)`, etc. and the
+/// component-call validation + lowering passes treat them
+/// just like user-declared components.
+///
+/// Called once at `BlincDsl::new()`. Idempotent — re-running
+/// replaces by name (no FsmId / ComponentId churn).
+///
+/// **Today** the registration just establishes the names and
+/// prop shapes for validation. The view-symbol slot points at
+/// `$Blinc$<Name>$view` — those externs aren't wired yet;
+/// trying to compile a program that uses them will fail at
+/// JIT link time. Subsequent commits land the externs, the
+/// grammar pivot to value-returning view bodies, and the
+/// `ZyntaxValue` → `blinc_layout::Div` walker.
+///
+/// **Prop shapes** mirror what we want the DSL surface to
+/// look like — minimal subsets of the real `blinc_layout`
+/// builder methods, exposed as named args. Adding a prop is
+/// one line here + one parameter on the matching extern.
+/// Full coverage of `RenderProps` lands incrementally as
+/// each field gets a DSL-visible name.
+fn register_blinc_layout_primitives() {
+    use blinc_runtime::component::{ComponentDefinition, PropDef, Type};
+    use zyntax_typed_ast::type_registry::PrimitiveType;
+    use zyntax_typed_ast::InternedString;
+
+    let string_ty = Type::Primitive(PrimitiveType::String);
+
+    // `Div(direction, bg, padding) { ..children }` — the
+    // universal container. `direction` is an opaque integer
+    // (0 = row, 1 = column, 2 = stack) for the prototype
+    // surface; once the DSL grows an enum-prop ergonomic
+    // shape this becomes a typed enum prop. Same for `bg`
+    // (color as f32 RGBA pack today; richer Brush type
+    // later). Children come in via the `children` slot —
+    // populated by the body block, treated as an array of
+    // Widget handles after the upcoming
+    // lower_component_calls invert.
+    let div = ComponentDefinition {
+        name: std::sync::Arc::from("Div"),
+        view_symbol: std::sync::Arc::from("$Blinc$Div$view"),
+        props: vec![
+            PropDef {
+                name: std::sync::Arc::from("direction"),
+                ty: Type::Primitive(PrimitiveType::I32),
+            },
+            PropDef {
+                name: std::sync::Arc::from("bg"),
+                ty: Type::Primitive(PrimitiveType::I32),
+            },
+            PropDef {
+                name: std::sync::Arc::from("padding"),
+                ty: Type::Primitive(PrimitiveType::F64),
+            },
+            // `children` is the body-block sink. Once
+            // lower_component_calls inverts (children-as-arg
+            // rather than flatten-into-parent), the body block
+            // populates this prop. Until then it's a no-op
+            // placeholder that documents the eventual shape.
+            PropDef {
+                name: std::sync::Arc::from("children"),
+                ty: Type::Named {
+                    id: zyntax_typed_ast::type_registry::TypeId::next(),
+                    type_args: vec![],
+                    const_args: vec![],
+                    variance: vec![],
+                    nullability: zyntax_typed_ast::type_registry::NullabilityKind::NonNull,
+                },
+            },
+        ],
+    };
+
+    // `Text("hi")` — text leaf. Positional `content` is the
+    // only prop today; styling props (color, font_size, etc.)
+    // land as later prop entries.
+    let text_widget = ComponentDefinition {
+        name: std::sync::Arc::from("Text"),
+        view_symbol: std::sync::Arc::from("$Blinc$Text$view"),
+        props: vec![PropDef {
+            name: std::sync::Arc::from("content"),
+            ty: string_ty.clone(),
+        }],
+    };
+
+    blinc_runtime::component::with_component_registry_mut(|r| {
+        r.register(div);
+        r.register(text_widget);
+    });
+
+    // Suppress unused-imports when nothing further consumes
+    // these (e.g., if a future refactor stops needing the
+    // InternedString path here).
+    let _ = InternedString::new_global("__blinc_layout_primitives_marker__");
+}
+
 fn publish_components_to_runtime_registry(program: &TypedProgram) {
     use zyntax_typed_ast::typed_ast::TypedDeclaration;
 
@@ -2579,6 +2690,17 @@ impl BlincDsl {
         // is the production-shape handle we'll need once it is.
         #[allow(clippy::arc_with_non_send_sync)]
         let runtime = Arc::new(Mutex::new(runtime));
+
+        // Pre-register `blinc_layout` widget primitives as
+        // components in the substrate. After this, DSL source
+        // like `view { Div(bg: white) { Text("hi") } }` parses
+        // and validates cleanly — `Div` and `Text` look like
+        // any other component to `validate_component_calls` /
+        // `lower_component_calls`. The runtime-side
+        // (extern functions that build real `blinc_layout::Div`
+        // / `Text` values, view-body-as-expression grammar,
+        // widget tree walker) lands in subsequent commits.
+        register_blinc_layout_primitives();
 
         Ok(Self { grammar, runtime })
     }
@@ -4410,6 +4532,66 @@ mod tests {
         );
     }
 
+    /// `Div` and `Text` are pre-registered by
+    /// `register_blinc_layout_primitives()` at
+    /// `BlincDsl::new()` time, so DSL source can call them
+    /// without the author declaring them. The validation
+    /// pass accepts the references; the registry surfaces
+    /// the right `view_symbol` for the upcoming lowering /
+    /// extern-call wiring.
+    #[test]
+    fn blinc_layout_primitives_registered() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        // BlincDsl::new() runs `register_blinc_layout_primitives()`.
+        let _dsl = BlincDsl::new().expect("runtime init");
+
+        // Substrate registry should know `Div` + `Text` regardless
+        // of whether any DSL source has been compiled yet.
+        let div =
+            blinc_runtime::component::with_component_registry(|r| r.get_by_name("Div").cloned())
+                .expect("Div should be pre-registered");
+        assert_eq!(div.view_symbol.as_ref(), "$Blinc$Div$view");
+        assert!(div.prop("direction").is_some());
+        assert!(div.prop("bg").is_some());
+        assert!(div.prop("children").is_some());
+
+        let text =
+            blinc_runtime::component::with_component_registry(|r| r.get_by_name("Text").cloned())
+                .expect("Text should be pre-registered");
+        assert_eq!(text.view_symbol.as_ref(), "$Blinc$Text$view");
+        assert!(text.prop("content").is_some());
+    }
+
+    /// DSL source that calls `Div { Text("hi") }` validates
+    /// cleanly because both primitives are pre-registered.
+    /// Compile / render is NOT exercised here — the extern
+    /// bodies aren't wired yet, so a full compile would fail
+    /// at JIT link time. This pins the front-end half of the
+    /// pivot: the parser + validation pass already accept the
+    /// widget-tree DSL shape.
+    #[test]
+    fn validate_accepts_blinc_layout_primitives() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let result = dsl.parse_to_typed_ast(
+            r#"
+            view {
+                Div() {
+                    Text("hello")
+                }
+            }
+            "#,
+            "widget_primitives_parse.blinc",
+        );
+        assert!(
+            result.is_ok(),
+            "DSL using pre-registered Div/Text should validate, got: {:?}",
+            result.err()
+        );
+    }
+
     /// `validate_component_calls` errors when a `__component_call__`
     /// marker references a component that wasn't declared. Catches
     /// typos at parse time rather than letting them slip through to
@@ -4420,17 +4602,21 @@ mod tests {
     fn validate_rejects_unknown_component() {
         let _ = tracing_subscriber::fmt::try_init();
 
+        // Unique name so the global component registry (which
+        // other tests publish into in parallel) doesn't
+        // accidentally have an entry named `Counter` when the
+        // validator reads it. Using
+        // `UnknownComponentValidateTest` keeps this regression
+        // test isolated from cross-test interference.
         let dsl = BlincDsl::new().expect("runtime init");
         let result = dsl.parse_to_typed_ast(
-            // No `component Counter { ... }` decl anywhere — the
-            // call should fail validation.
-            r#"view { Counter(1) }"#,
+            r#"view { UnknownComponentValidateTest(1) }"#,
             "unknown_component.blinc",
         );
         let err = result.expect_err("unknown component should fail validation");
         let msg = format!("{err}");
         assert!(
-            msg.contains("unknown component `Counter`"),
+            msg.contains("unknown component `UnknownComponentValidateTest`"),
             "diagnostic should name the failing component, got: {msg}"
         );
     }
