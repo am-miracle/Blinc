@@ -453,6 +453,77 @@ impl WidgetBox {
     }
 }
 
+/// Per-call overlay of visual styling props. `Some` fields
+/// override the wrapped widget's `render_props()`; `None` fields
+/// leave it alone.
+#[derive(Debug, Default, Clone)]
+pub struct RenderPropsOverlay {
+    pub background: Option<blinc_core::layer::Brush>,
+    pub opacity: Option<f32>,
+    /// Uniform corner radius (px). Maps to a four-corner-equal `CornerRadius`.
+    pub corner_radius: Option<f32>,
+    pub border_width: Option<f32>,
+    pub border_color: Option<blinc_core::layer::Color>,
+}
+
+impl RenderPropsOverlay {
+    pub fn apply_to(&self, base: &mut blinc_layout::RenderProps) {
+        if let Some(bg) = self.background.clone() {
+            base.background = Some(bg);
+        }
+        if let Some(o) = self.opacity {
+            base.opacity = o;
+        }
+        if let Some(r) = self.corner_radius {
+            base.border_radius = blinc_core::layer::CornerRadius::new(r, r, r, r);
+            base.border_radius_explicit = true;
+        }
+        if let Some(w) = self.border_width {
+            base.border_width = w;
+        }
+        if let Some(c) = self.border_color {
+            base.border_color = Some(c);
+        }
+    }
+}
+
+/// Wraps a widget with a per-call styling overlay. Build /
+/// children delegate to the inner widget; `render_props()`
+/// merges the overlay.
+pub struct Styled<W: blinc_layout::div::ElementBuilder> {
+    inner: W,
+    overlay: RenderPropsOverlay,
+}
+
+impl<W: blinc_layout::div::ElementBuilder> Styled<W> {
+    pub fn new(widget: W, overlay: RenderPropsOverlay) -> Self {
+        Self {
+            inner: widget,
+            overlay,
+        }
+    }
+    pub fn inner(&self) -> &W {
+        &self.inner
+    }
+    pub fn overlay(&self) -> &RenderPropsOverlay {
+        &self.overlay
+    }
+}
+
+impl<W: blinc_layout::div::ElementBuilder> blinc_layout::div::ElementBuilder for Styled<W> {
+    fn build(&self, tree: &mut blinc_layout::LayoutTree) -> blinc_layout::LayoutNodeId {
+        self.inner.build(tree)
+    }
+    fn render_props(&self) -> blinc_layout::RenderProps {
+        let mut base = self.inner.render_props();
+        self.overlay.apply_to(&mut base);
+        base
+    }
+    fn children_builders(&self) -> &[Box<dyn blinc_layout::div::ElementBuilder>] {
+        self.inner.children_builders()
+    }
+}
+
 /// Re-exports the `#[extern_widget]` macro lives at the crate
 /// root so users only need one import to declare a DSL-exposed
 /// Rust widget. The expansion targets [`__extern_widget_internals`]
@@ -9803,6 +9874,45 @@ mod tests {
             1,
             "inner Div should have 1 Text child"
         );
+    }
+
+    #[test]
+    fn styled_wrapper_overlays_specified_fields_only() {
+        use blinc_layout::ElementBuilder;
+        let text = blinc_layout::text::Text::new("hi");
+        let base_props = text.render_props();
+
+        let overlay = RenderPropsOverlay {
+            opacity: Some(0.5),
+            corner_radius: Some(8.0),
+            ..Default::default()
+        };
+        let merged = Styled::new(text, overlay).render_props();
+
+        assert_eq!(merged.opacity, 0.5);
+        assert_eq!(
+            merged.border_radius,
+            blinc_core::layer::CornerRadius::new(8.0, 8.0, 8.0, 8.0)
+        );
+        assert!(merged.border_radius_explicit);
+        // Brush doesn't impl PartialEq — compare is_some() instead.
+        assert_eq!(merged.background.is_some(), base_props.background.is_some());
+        assert_eq!(merged.border_width, base_props.border_width);
+        assert_eq!(merged.border_color, base_props.border_color);
+    }
+
+    #[test]
+    fn styled_wrapper_default_overlay_is_noop() {
+        use blinc_layout::ElementBuilder;
+        let text = blinc_layout::text::Text::new("hi");
+        let base_props = text.render_props();
+        let merged = Styled::new(text, RenderPropsOverlay::default()).render_props();
+
+        assert_eq!(merged.opacity, base_props.opacity);
+        assert_eq!(merged.background.is_some(), base_props.background.is_some());
+        assert_eq!(merged.border_radius, base_props.border_radius);
+        assert_eq!(merged.border_width, base_props.border_width);
+        assert_eq!(merged.border_color, base_props.border_color);
     }
 
     /// `view { Div() }` — the value-returning Div primitive

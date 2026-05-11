@@ -38,6 +38,12 @@ blinc_runtime = { path = "../blinc_runtime", version = "0.5.1", default-features
 # widgets that flow back through the JIT as widget handles.
 blinc_layout = { path = "../blinc_layout", version = "0.5.1" }
 
+# `blinc_core` carries the canonical `Brush` / `Color` /
+# `CornerRadius` types `RenderPropsOverlay` overlays on top of a
+# widget's base `RenderProps`. `blinc_layout` doesn't re-export
+# them publicly, so we depend on `blinc_core` directly.
+blinc_core = { path = "../blinc_core", version = "0.5.1" }
+
 # `blinc_macros` carries the `#[extern_widget]` attribute macro
 # that desugars Rust widget definitions into the extern thunk +
 # `register_*` helper. Re-exported from the crate root so users
