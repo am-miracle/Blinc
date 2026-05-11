@@ -16,6 +16,7 @@ pub mod fsm;
 pub mod reload;
 pub mod scene;
 pub mod signal;
+pub mod value;
 pub mod view;
 
 pub use blinc_layout;

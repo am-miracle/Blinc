@@ -2263,15 +2263,6 @@ impl blinc_runtime::view::ViewRenderer for JitViewRenderer {
 fn publish_components_to_runtime_registry(program: &TypedProgram) {
     use zyntax_typed_ast::typed_ast::TypedDeclaration;
 
-    fn zyntax_prop_type(ty: &Type) -> Option<blinc_runtime::component::PropType> {
-        match ty {
-            Type::Primitive(PrimitiveType::I32) => Some(blinc_runtime::component::PropType::I32),
-            Type::Primitive(PrimitiveType::F64) => Some(blinc_runtime::component::PropType::F64),
-            Type::Primitive(PrimitiveType::String) => Some(blinc_runtime::component::PropType::Str),
-            _ => None,
-        }
-    }
-
     for decl in &program.declarations {
         let TypedDeclaration::Impl(imp) = &decl.node else {
             continue;
@@ -2325,19 +2316,25 @@ fn publish_components_to_runtime_registry(program: &TypedProgram) {
             continue;
         };
 
-        // Each view param becomes a `PropDef`. The
-        // `self` param (if any — components don't have one
-        // today) gets skipped. Unsupported types get skipped.
+        // Each view param becomes a `PropDef`. The substrate
+        // takes `zyntax_typed_ast::Type` directly, so we hand
+        // the param's `ty` through unchanged — no enum
+        // translation, no primitive-only filtering. Complex
+        // types (structs, arrays, optionals, ...) land in the
+        // substrate as-is; consumers that only understand
+        // primitives pattern-match on `Type::Primitive(...)`.
+        //
+        // The `self` param (currently impossible — components
+        // don't declare `self`) gets skipped defensively.
         let props: Vec<blinc_runtime::component::PropDef> = view_method
             .params
             .iter()
             .filter(|p| !p.is_self)
             .filter_map(|p| {
                 let name_str = p.name.resolve_global()?;
-                let ty = zyntax_prop_type(&p.ty)?;
                 Some(blinc_runtime::component::PropDef {
                     name: std::sync::Arc::from(name_str.as_ref()),
-                    ty,
+                    ty: p.ty.clone(),
                 })
             })
             .collect();
@@ -7303,9 +7300,15 @@ mod tests {
         assert_eq!(counter.view_symbol.as_ref(), "Counter$view");
         assert_eq!(counter.prop_count(), 2);
         assert_eq!(counter.props[0].name.as_ref(), "initial");
-        assert_eq!(counter.props[0].ty, blinc_runtime::component::PropType::I32);
+        assert_eq!(
+            counter.props[0].ty,
+            blinc_runtime::component::Type::Primitive(PrimitiveType::I32)
+        );
         assert_eq!(counter.props[1].name.as_ref(), "step");
-        assert_eq!(counter.props[1].ty, blinc_runtime::component::PropType::I32);
+        assert_eq!(
+            counter.props[1].ty,
+            blinc_runtime::component::Type::Primitive(PrimitiveType::I32)
+        );
 
         let greeting = blinc_runtime::component::with_component_registry(|r| {
             r.get_by_name("Greeting").cloned()

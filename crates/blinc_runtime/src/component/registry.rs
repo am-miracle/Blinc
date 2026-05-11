@@ -112,8 +112,9 @@ pub fn with_component_registry_mut<R>(f: impl FnOnce(&mut ComponentRegistry) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::super::definition::{PropDef, PropType};
+    use super::super::definition::{PropDef, Type};
     use super::*;
+    use zyntax_typed_ast::type_registry::PrimitiveType;
 
     fn arc(s: &str) -> Arc<str> {
         Arc::from(s)
@@ -125,7 +126,7 @@ mod tests {
             view_symbol: arc("Counter$view"),
             props: vec![PropDef {
                 name: arc("initial"),
-                ty: PropType::I32,
+                ty: Type::Primitive(PrimitiveType::I32),
             }],
         }
     }
@@ -150,11 +151,11 @@ mod tests {
             props: vec![
                 PropDef {
                     name: arc("initial"),
-                    ty: PropType::I32,
+                    ty: Type::Primitive(PrimitiveType::I32),
                 },
                 PropDef {
                     name: arc("step"),
-                    ty: PropType::I32,
+                    ty: Type::Primitive(PrimitiveType::I32),
                 },
             ],
         };

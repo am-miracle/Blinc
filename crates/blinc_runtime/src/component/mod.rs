@@ -50,7 +50,9 @@
 pub mod definition;
 pub mod registry;
 
-pub use definition::{ComponentDefinition, PropDef, PropType};
+#[allow(deprecated)]
+pub use definition::PropType;
+pub use definition::{ComponentDefinition, PropDef, Type};
 pub use registry::{
     with_component_registry, with_component_registry_mut, ComponentId, ComponentRegistry,
 };

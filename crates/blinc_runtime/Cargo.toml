@@ -22,6 +22,20 @@ full = ["blinc_core", "blinc_animation", "blinc_gpu", "blinc_paint"]
 # that want a leaner runtime surface (headless, server-side, etc.).
 blinc_layout = { path = "../blinc_layout", version = "0.5.1" }
 
+# Zyntax type-system primitives. `blinc_runtime` uses
+# `zyntax_typed_ast::type_registry::Type` as the canonical
+# representation for prop types, signal types, etc. — that's the
+# same shape the JIT publisher (`blinc_dsl_core`) and the future
+# AOT codegen produce, so the substrate can hold complex types
+# (structs, enums, tuples, arrays, optionals, generics) without
+# rolling its own type system in parallel.
+#
+# We depend on `zyntax_typed_ast` (the pure data crate), NOT
+# `zyntax_embed` (which pulls Cranelift and the JIT). Keeps the
+# substrate JIT-runtime-agnostic — an AOT-only app links
+# blinc_runtime + the AOT crate without Cranelift.
+zyntax_typed_ast = { git = "https://github.com/darmie/zyntax", rev = "5b0dfab7940dd01406f1982e02a2d2c7b5242604" }
+
 blinc_core = { path = "../blinc_core", version = "0.5.1", optional = true }
 blinc_animation = { path = "../blinc_animation", version = "0.5.1", optional = true }
 blinc_gpu = { path = "../blinc_gpu", version = "0.5.1", optional = true }

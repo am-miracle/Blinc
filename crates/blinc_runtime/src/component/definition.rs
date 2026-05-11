@@ -2,45 +2,45 @@
 
 use std::sync::Arc;
 
-/// One of the primitive types a component's prop can declare.
-///
-/// Matches what the DSL's `state_type` rule accepts today and
-/// what [`crate::signal`] supports for signal storage. New
-/// types land here, in `signal`, and as a `$Blinc$<name>`
-/// extern together.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PropType {
-    /// `i32` — the DSL's default integer.
-    I32,
-    /// `f64` — used in guard expressions and progress values.
-    F64,
-    /// `string` — DSL surface; routes through Zyntax's `str`
-    /// primitive at the typed-AST level. String-typed props
-    /// don't fully flow at runtime yet (see the broader Blinc
-    /// string-return ABI discussion); reserving the variant
-    /// so the registry doesn't need to break when they do.
-    Str,
-}
+pub use zyntax_typed_ast::type_registry::Type;
 
-impl PropType {
-    /// User-facing name of the primitive (matches the DSL
-    /// `state_type` keyword). Useful for diagnostic messages.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            PropType::I32 => "i32",
-            PropType::F64 => "f64",
-            PropType::Str => "string",
-        }
-    }
-}
+/// Re-exported convenience alias for `Type`. Keeps the old
+/// `PropType` name available as a deprecated path so existing
+/// embedders see a deprecation message rather than a hard
+/// compile error during the migration window.
+///
+/// New code should reach for `Type` directly — it's the full
+/// Zyntax type representation (primitives, named structs/enums,
+/// tuples, arrays, optionals, generics, ...). The substrate
+/// holds whatever shape the DSL declared without needing a
+/// parallel enum.
+#[deprecated(
+    since = "0.5.2",
+    note = "use `blinc_runtime::component::Type` (re-exported from \
+            `zyntax_typed_ast::type_registry::Type`) directly. Tracks the \
+            full Zyntax type system rather than the substrate-local \
+            primitive subset."
+)]
+pub type PropType = Type;
 
 /// One declared prop on a component.
+///
+/// `ty` carries the full Zyntax type representation —
+/// primitives, struct references, enums, tuples, arrays,
+/// optionals, etc. The substrate doesn't normalise or restrict
+/// what types it stores; consumers that only handle primitives
+/// pattern-match on `Type::Primitive(...)` and fall through
+/// for anything more complex.
 #[derive(Debug, Clone)]
 pub struct PropDef {
     /// The prop's identifier (the binding name visible inside
     /// the component's view body — `initial`, `step`, etc.).
     pub name: Arc<str>,
-    pub ty: PropType,
+    /// Full type representation. Same shape the JIT publisher
+    /// (`blinc_dsl_core`) reads off `TypedFunction::params[i].ty`
+    /// — keeping the substrate Type identical to Zyntax's
+    /// avoids a translation layer between the two.
+    pub ty: Type,
 }
 
 /// All registry-level information about a single component.
@@ -84,11 +84,22 @@ impl ComponentDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zyntax_typed_ast::type_registry::PrimitiveType;
 
     fn arc(s: &str) -> Arc<str> {
         Arc::from(s)
     }
 
+    fn i32_ty() -> Type {
+        Type::Primitive(PrimitiveType::I32)
+    }
+
+    fn f64_ty() -> Type {
+        Type::Primitive(PrimitiveType::F64)
+    }
+
+    /// Prop lookup by name returns the matching `PropDef`, or
+    /// `None` for unknown names. Pin the primitive-prop shape.
     #[test]
     fn prop_lookup_by_name() {
         let def = ComponentDefinition {
@@ -97,24 +108,46 @@ mod tests {
             props: vec![
                 PropDef {
                     name: arc("initial"),
-                    ty: PropType::I32,
+                    ty: i32_ty(),
                 },
                 PropDef {
                     name: arc("step"),
-                    ty: PropType::I32,
+                    ty: i32_ty(),
                 },
             ],
         };
         assert_eq!(def.prop_count(), 2);
-        assert_eq!(def.prop("initial").map(|p| p.ty), Some(PropType::I32));
-        assert_eq!(def.prop("step").map(|p| p.ty), Some(PropType::I32));
+        assert_eq!(def.prop("initial").map(|p| &p.ty), Some(&i32_ty()));
+        assert_eq!(def.prop("step").map(|p| &p.ty), Some(&i32_ty()));
         assert!(def.prop("missing").is_none());
     }
 
+    /// Complex prop type — substrate stores it as-is. The
+    /// consumer (widget code, devtools) can drill into
+    /// `Type::Array { element_type, .. }` to introspect.
     #[test]
-    fn prop_type_as_str_matches_dsl_surface() {
-        assert_eq!(PropType::I32.as_str(), "i32");
-        assert_eq!(PropType::F64.as_str(), "f64");
-        assert_eq!(PropType::Str.as_str(), "string");
+    fn prop_holds_complex_type() {
+        use zyntax_typed_ast::type_registry::NullabilityKind;
+        let array_of_f64 = Type::Array {
+            element_type: Box::new(f64_ty()),
+            size: None,
+            nullability: NullabilityKind::NonNull,
+        };
+
+        let def = ComponentDefinition {
+            name: arc("Histogram"),
+            view_symbol: arc("Histogram$view"),
+            props: vec![PropDef {
+                name: arc("buckets"),
+                ty: array_of_f64.clone(),
+            }],
+        };
+        let prop = def.prop("buckets").unwrap();
+        match &prop.ty {
+            Type::Array { element_type, .. } => {
+                assert_eq!(**element_type, f64_ty());
+            }
+            other => panic!("expected Type::Array, got {other:?}"),
+        }
     }
 }
