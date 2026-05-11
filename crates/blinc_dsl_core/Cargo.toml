@@ -20,7 +20,7 @@ zyntax_embed = { workspace = true }
 # through type inference has to add the extern decls programmatically.
 # Pinned to the same upstream rev as `zyntax_embed` in the workspace
 # Cargo.toml — bump both together when pulling in upstream changes.
-zyntax_typed_ast = { git = "https://github.com/darmie/zyntax", rev = "a4dfa215d7664ce08b96052bf3de2f4c38a429f0" }
+zyntax_typed_ast = { git = "https://github.com/darmie/zyntax", rev = "7b787188675825c70be03110bd76abcd02a66196" }
 
 # Logging
 tracing = { workspace = true }
