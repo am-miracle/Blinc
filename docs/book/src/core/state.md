@@ -89,7 +89,8 @@ stateful::<ButtonState>()
 |--------|-------------|
 | `ctx.state()` | Get the current state value |
 | `ctx.event()` | Get the event that triggered this callback (if any) |
-| `ctx.use_signal(name, init)` | Create/retrieve a scoped signal |
+| `ctx.use_signal(name, init)` | Create/retrieve a scoped signal (auto-subscribes) |
+| `ctx.subscribe(&signal)` | Subscribe this stateful to an externally-created signal's changes |
 | `ctx.use_spring(name, target, config)` | Declarative spring animation (recommended) |
 | `ctx.spring(name, target)` | Declarative spring with default stiff config |
 | `ctx.use_animated_value(name, initial)` | Low-level animated value handle |

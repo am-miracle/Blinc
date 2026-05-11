@@ -1070,28 +1070,6 @@ impl WindowedContext {
         self.reactive.lock().unwrap().get_derived(derived)
     }
 
-    /// Create an effect that runs when its dependencies change
-    ///
-    /// Effects are useful for side effects like logging, network requests,
-    /// or syncing state with external systems.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let count = ctx.use_signal(0);
-    ///
-    /// ctx.use_effect(move |cx| {
-    ///     let value = cx.get(count).unwrap_or(0);
-    ///     println!("Count changed to: {}", value);
-    /// });
-    /// ```
-    pub fn use_effect<F>(&self, run: F) -> blinc_core::reactive::Effect
-    where
-        F: FnMut(&ReactiveGraph) + Send + 'static,
-    {
-        self.reactive.lock().unwrap().create_effect(run)
-    }
-
     /// Batch multiple signal updates into a single reactive update
     ///
     /// This is useful when updating multiple signals at once to avoid
