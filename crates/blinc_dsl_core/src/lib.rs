@@ -3319,6 +3319,211 @@ mod tests {
         );
     }
 
+    /// `if a { ... } else if b { ... } else { ... }` lowers to a
+    /// recursive nested-If shape: the outer If's else_block holds a
+    /// single-statement block whose only statement is another If
+    /// (with its own else_block holding the final block). Pinning
+    /// the shape so a future grammar refactor doesn't break the
+    /// chain wrapping convention.
+    #[test]
+    fn parse_else_if_chain() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state count: i32
+                    view {
+                        if count > 100 { text("big") }
+                        else if count > 10 { text("medium") }
+                        else { text("small") }
+                    }
+                }
+                "#,
+                "else_if_chain.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let view = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("view"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            view.statements.len(),
+            1,
+            "view body holds the single outer If"
+        );
+
+        // Outer If: condition `count > 100`, then `text("big")`,
+        // else_block is a single-stmt block wrapping the next If.
+        let TypedStatement::If(outer) = &view.statements[0].node else {
+            panic!("expected outer If");
+        };
+        let outer_else = outer.else_block.as_ref().expect("outer else");
+        assert_eq!(
+            outer_else.statements.len(),
+            1,
+            "else block should hold one statement (the chained If)"
+        );
+
+        // Chained If: condition `count > 10`, then `text("medium")`,
+        // else_block is a one-stmt block with `text("small")`.
+        let TypedStatement::If(chained) = &outer_else.statements[0].node else {
+            panic!("expected chained If as the only stmt in outer else");
+        };
+        let TypedExpression::Binary(cmp) = &chained.condition.node else {
+            panic!("expected chained condition to be Binary");
+        };
+        assert!(matches!(cmp.op, zyntax_typed_ast::BinaryOp::Gt));
+        let TypedExpression::Literal(TypedLiteral::Integer(n)) = &cmp.right.node else {
+            panic!("expected IntLit on RHS of chained condition");
+        };
+        assert_eq!(*n, 10);
+
+        // Tail else.
+        let tail_else = chained.else_block.as_ref().expect("chained else (tail)");
+        assert_eq!(
+            tail_else.statements.len(),
+            1,
+            "tail else holds text(\"small\")"
+        );
+    }
+
+    /// 4-arm chain `if / else if / else if / else if / else` walks
+    /// to nested depth 4. Pinning that PEG recursion in `if_stmt`
+    /// doesn't bottom out at any chain length.
+    #[test]
+    fn parse_else_if_chain_deep() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state count: i32
+                    view {
+                        if count > 1000 { text("a") }
+                        else if count > 100 { text("b") }
+                        else if count > 10 { text("c") }
+                        else if count > 1 { text("d") }
+                        else { text("e") }
+                    }
+                }
+                "#,
+                "else_if_deep.blinc",
+            )
+            .expect("parse");
+
+        let imp = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let view_body = imp
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("view"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+
+        // Walk down the chain — each level should hold a single
+        // `If` in its else_block, with a final tail `else`.
+        let mut depth = 0;
+        let mut current = match &view_body.statements[0].node {
+            TypedStatement::If(i) => i,
+            _ => panic!("top of view body should be If"),
+        };
+        loop {
+            depth += 1;
+            let else_block = current
+                .else_block
+                .as_ref()
+                .unwrap_or_else(|| panic!("level {depth}: expected an else"));
+            // If the only stmt in else is another If, descend.
+            if else_block.statements.len() == 1 {
+                if let TypedStatement::If(next) = &else_block.statements[0].node {
+                    current = next;
+                    continue;
+                }
+            }
+            break;
+        }
+        assert_eq!(depth, 4, "expected 4 chained Ifs before the tail else");
+    }
+
+    /// `else if` without trailing else: `if A { } else if B { }`.
+    /// The chained inner If has `else_block: None`. Pinning the
+    /// no-tail-else case so the recursion handles it correctly.
+    #[test]
+    fn parse_else_if_no_trailing_else() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state count: i32
+                    view {
+                        if count > 100 { text("a") }
+                        else if count > 10 { text("b") }
+                    }
+                }
+                "#,
+                "else_if_no_tail.blinc",
+            )
+            .expect("parse");
+
+        let imp = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let body = imp
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("view"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+
+        let TypedStatement::If(outer) = &body.statements[0].node else {
+            panic!("expected outer If");
+        };
+        let outer_else = outer.else_block.as_ref().expect("outer else");
+        let TypedStatement::If(chained) = &outer_else.statements[0].node else {
+            panic!("expected chained If");
+        };
+        assert!(
+            chained.else_block.is_none(),
+            "chained If should have no else when source omits it"
+        );
+    }
+
     /// `if count > 0 { ... }` with no else — `else_block` is None.
     /// Pinning the simple form so a future "always emit empty
     /// else" refactor doesn't sneak in.
