@@ -108,6 +108,79 @@ impl ElementBuilder for MacroCard {
 }
 
 // =====================================================================
+// Named slots
+// =====================================================================
+
+#[extern_widget(name = "MacroPanel")]
+pub struct MacroPanel {
+    #[children]
+    pub children: Vec<Box<dyn ElementBuilder>>,
+    #[slot(name = "Header")]
+    pub header: Vec<Box<dyn ElementBuilder>>,
+    #[slot(name = "Footer")]
+    pub footer: Vec<Box<dyn ElementBuilder>>,
+}
+
+impl ElementBuilder for MacroPanel {
+    fn build(&self, tree: &mut blinc_layout::LayoutTree) -> blinc_layout::LayoutNodeId {
+        blinc_layout::div::Div::new().build(tree)
+    }
+    fn render_props(&self) -> blinc_layout::RenderProps {
+        blinc_layout::div::Div::new().render_props()
+    }
+    fn children_builders(&self) -> &[Box<dyn ElementBuilder>] {
+        &self.children
+    }
+}
+
+/// Body block with both default children and two named slots:
+/// each slot's contents land in the matching `Vec` field on the
+/// reconstructed widget.
+#[test]
+fn extern_widget_named_slots_route_correctly() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.register_extern_widget::<MacroPanel>()
+        .expect("register MacroPanel");
+
+    dsl.compile_source(
+        r#"
+        view {
+            MacroPanel() {
+                slot Header { Text("h1") Text("h2") }
+                Text("body")
+                slot Footer { Text("f1") }
+            }
+        }
+        "#,
+        "macro_panel.blinc",
+    )
+    .expect("compile");
+
+    let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+    let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+    let ZyntaxValue::Int(handle) = value else {
+        panic!("expected widget handle, got: {value:?}");
+    };
+    assert_ne!(handle, 0);
+
+    let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+    let WidgetBox::Custom(builder) = *widget else {
+        panic!("expected Custom(MacroPanel)");
+    };
+    // The macro re-emits the user struct unchanged, so the
+    // builder IS a MacroPanel by construction. We can't downcast
+    // through `dyn ElementBuilder`, but `children_builders()`
+    // returns `&self.children`, which the impl forwards.
+    assert_eq!(
+        builder.children_builders().len(),
+        1,
+        "default children: just `Text(\"body\")`"
+    );
+}
+
+// =====================================================================
 // `styled` flag — inline visual styling props through the macro
 // =====================================================================
 

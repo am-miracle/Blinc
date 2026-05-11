@@ -157,6 +157,23 @@ fn field_has_children_attr(field: &syn::Field) -> bool {
         .any(|attr| attr.path().is_ident("children"))
 }
 
+/// If the field carries `#[slot(name = "X")]`, return `"X"`.
+fn field_slot_name(field: &syn::Field) -> Option<String> {
+    let attr = field.attrs.iter().find(|a| a.path().is_ident("slot"))?;
+    let mut name: Option<String> = None;
+    let parse_result = attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("name") {
+            let lit: syn::LitStr = meta.value()?.parse()?;
+            name = Some(lit.value());
+            Ok(())
+        } else {
+            Err(meta.error("expected `name = \"...\"`"))
+        }
+    });
+    let _ = parse_result;
+    name
+}
+
 impl syn::parse::Parse for ExternWidgetArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         // Required: name = "<DslName>"
@@ -288,29 +305,26 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
     );
     let view_symbol = format!("$Blinc${dsl_name}$view");
 
-    // Two-pass field walk:
-    //   1. Find the (at-most-one) `#[children]`-annotated
-    //      field, if any. By convention this is the first
-    //      FFI arg position so the children-list pointer
-    //      matches what `lower_children_arrays_to_blocks`
-    //      splices into the call site.
-    //   2. Iterate the rest as scalar props in declaration
-    //      order.
+    // Partition fields: one optional #[children] field, any
+    // number of #[slot(name = "X")] fields, the rest are scalar
+    // props. FFI order: children → slots → scalars (matches the
+    // substrate registry's slot-then-scalar prop ordering).
     let mut children_field: Option<&syn::Field> = None;
+    let mut slot_fields: Vec<(&syn::Field, String)> = Vec::new();
     let mut scalar_fields: Vec<&syn::Field> = Vec::new();
     for field in &fields.named {
         if field_has_children_attr(field) {
             if children_field.is_some() {
                 return syn::Error::new_spanned(
                     field,
-                    "#[extern_widget] supports at most one `#[children]` field — additional \
-                     child slots will move to `#[slot(name = \"...\")]` once named-slot routing \
-                     lands",
+                    "#[extern_widget] supports at most one `#[children]` field",
                 )
                 .to_compile_error()
                 .into();
             }
             children_field = Some(field);
+        } else if let Some(slot_name) = field_slot_name(field) {
+            slot_fields.push((field, slot_name));
         } else {
             scalar_fields.push(field);
         }
@@ -360,6 +374,48 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
         prop_defs.push(quote! {
             ::blinc_dsl_core::__extern_widget_internals::PropDef {
                 name: ::std::sync::Arc::from("children"),
+                ty: ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                    ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I64
+                ),
+            }
+        });
+        param_types.push(quote! {
+            ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I64
+            )
+        });
+    }
+
+    // Slot fields, in declaration order. Each lands as a
+    // separate `slot_<Name>: i64` FFI arg + matching PropDef.
+    for (field, slot_name) in &slot_fields {
+        if !matches!(field.vis, syn::Visibility::Public(_)) {
+            return syn::Error::new_spanned(
+                &field.vis,
+                "#[extern_widget] `#[slot]` field must be `pub`",
+            )
+            .to_compile_error()
+            .into();
+        }
+        let field_ident = field
+            .ident
+            .as_ref()
+            .expect("named fields always have idents");
+        let ffi_arg_ident = syn::Ident::new(&format!("__arg_slot_{slot_name}"), field_ident.span());
+        let prop_name = format!("slot_{slot_name}");
+        thunk_params.push(quote! { #ffi_arg_ident: i64 });
+        thunk_decodes.push(quote! {
+            // SAFETY: same contract as the default children
+            // pointer — built by `__new_child_list__` /
+            // `__push_child__` per the slot lowering pass.
+            let #field_ident = unsafe {
+                ::blinc_dsl_core::__extern_widget_internals::decode_children(#ffi_arg_ident)
+            };
+        });
+        struct_inits.push(quote! { #field_ident });
+        prop_defs.push(quote! {
+            ::blinc_dsl_core::__extern_widget_internals::PropDef {
+                name: ::std::sync::Arc::from(#prop_name),
                 ty: ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
                     ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I64
                 ),

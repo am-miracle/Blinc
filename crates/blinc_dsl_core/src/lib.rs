@@ -1982,9 +1982,10 @@ fn lower_component_calls(program: &mut TypedProgram) {
         out: &mut Vec<zyntax_typed_ast::TypedNode<TypedStatement>>,
         mut stmt: zyntax_typed_ast::TypedNode<TypedStatement>,
     ) {
-        if is_slot_marker_stmt(&stmt) {
-            return;
-        }
+        // NOTE: do NOT drop slot markers here — the partition
+        // logic below relies on them to bucket primitive body
+        // blocks into `slot_<Name>` named args. The user-component
+        // flatten fallback below filters them out explicitly.
 
         if let TypedStatement::Expression(expr_node) = &mut stmt.node {
             if let TypedExpression::Call(call) = &mut expr_node.node {
@@ -2000,37 +2001,68 @@ fn lower_component_calls(program: &mut TypedProgram) {
                             unreachable!("just confirmed Block via the matches! above");
                         };
 
-                        // Extract child widget expressions. Skip
-                        // slot markers entirely. Statements that
-                        // aren't expressions (let, if without
-                        // return, etc.) can't contribute a widget
-                        // value yet — control-flow as a widget
-                        // selector is a later grammar slice.
-                        let child_exprs: Vec<zyntax_typed_ast::TypedNode<TypedExpression>> =
-                            body_block
-                                .statements
-                                .into_iter()
-                                .filter(|s| !is_slot_marker_stmt(s))
-                                .filter_map(|s| {
-                                    if let TypedStatement::Expression(e) = s.node {
-                                        Some(*e)
+                        // Partition body statements: unnamed body
+                        // entries → default `children`; entries
+                        // inside `__slot_open__("X") … __slot_close__`
+                        // marker pairs → `slot_X` named arg.
+                        let mut default_children: Vec<
+                            zyntax_typed_ast::TypedNode<TypedExpression>,
+                        > = Vec::new();
+                        let mut slot_buckets: Vec<(
+                            String,
+                            Vec<zyntax_typed_ast::TypedNode<TypedExpression>>,
+                        )> = Vec::new();
+                        let mut current_slot: Option<String> = None;
+
+                        for s in body_block.statements {
+                            if let Some(name) = slot_open_name(&s) {
+                                current_slot = Some(name);
+                                continue;
+                            }
+                            if is_slot_close_stmt(&s) {
+                                current_slot = None;
+                                continue;
+                            }
+                            let TypedStatement::Expression(e) = s.node else {
+                                continue;
+                            };
+                            match &current_slot {
+                                None => default_children.push(*e),
+                                Some(name) => {
+                                    if let Some(bucket) =
+                                        slot_buckets.iter_mut().find(|(n, _)| n == name)
+                                    {
+                                        bucket.1.push(*e);
                                     } else {
-                                        None
+                                        slot_buckets.push((name.clone(), vec![*e]));
                                     }
-                                })
-                                .collect();
+                                }
+                            }
+                        }
 
-                        let children_array = zyntax_typed_ast::TypedNode::new(
-                            TypedExpression::Array(child_exprs),
-                            Type::Any,
-                            block_span,
-                        );
-
-                        call.named_args.push(zyntax_typed_ast::TypedNamedArg {
-                            name: zyntax_typed_ast::InternedString::new_global("children"),
-                            value: Box::new(children_array),
-                            span: block_span,
-                        });
+                        if !default_children.is_empty() {
+                            call.named_args.push(zyntax_typed_ast::TypedNamedArg {
+                                name: zyntax_typed_ast::InternedString::new_global("children"),
+                                value: Box::new(zyntax_typed_ast::TypedNode::new(
+                                    TypedExpression::Array(default_children),
+                                    Type::Any,
+                                    block_span,
+                                )),
+                                span: block_span,
+                            });
+                        }
+                        for (name, exprs) in slot_buckets {
+                            let arg_name = format!("slot_{name}");
+                            call.named_args.push(zyntax_typed_ast::TypedNamedArg {
+                                name: zyntax_typed_ast::InternedString::new_global(&arg_name),
+                                value: Box::new(zyntax_typed_ast::TypedNode::new(
+                                    TypedExpression::Array(exprs),
+                                    Type::Any,
+                                    block_span,
+                                )),
+                                span: block_span,
+                            });
+                        }
 
                         out.push(stmt);
                         return;
@@ -2039,13 +2071,18 @@ fn lower_component_calls(program: &mut TypedProgram) {
                     // User-declared component with a body — fall
                     // back to flatten: push the body-less call,
                     // then inline each child statement at the
-                    // outer level.
+                    // outer level. Slot markers are dropped here
+                    // (user-component view methods don't accept
+                    // named slots yet).
                     let block_arg = call.positional_args.pop().unwrap();
                     let TypedExpression::Block(body_block) = block_arg.node else {
                         unreachable!("just confirmed Block via the matches! above");
                     };
                     out.push(stmt);
                     for inner in body_block.statements {
+                        if is_slot_marker_stmt(&inner) {
+                            continue;
+                        }
                         collect_children_into(out, inner);
                     }
                     return;
@@ -2054,6 +2091,44 @@ fn lower_component_calls(program: &mut TypedProgram) {
         }
 
         out.push(stmt);
+    }
+
+    /// If `stmt` is `Expression(Call(Variable("__slot_open__"),
+    /// [StringLiteral(name)]))`, return `name`. Otherwise `None`.
+    fn slot_open_name(stmt: &zyntax_typed_ast::TypedNode<TypedStatement>) -> Option<String> {
+        let TypedStatement::Expression(e) = &stmt.node else {
+            return None;
+        };
+        let TypedExpression::Call(c) = &e.node else {
+            return None;
+        };
+        let TypedExpression::Variable(callee) = &c.callee.node else {
+            return None;
+        };
+        if callee.resolve_global().as_deref() != Some("__slot_open__") {
+            return None;
+        }
+        let arg = c.positional_args.first()?;
+        let TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::String(name)) = &arg.node
+        else {
+            return None;
+        };
+        name.resolve_global().map(|s| s.to_string())
+    }
+
+    /// `Expression(Call(Variable("__slot_close__"), []))` — the
+    /// counterpart marker that ends the active slot bucket.
+    fn is_slot_close_stmt(stmt: &zyntax_typed_ast::TypedNode<TypedStatement>) -> bool {
+        let TypedStatement::Expression(e) = &stmt.node else {
+            return false;
+        };
+        let TypedExpression::Call(c) = &e.node else {
+            return false;
+        };
+        let TypedExpression::Variable(callee) = &c.callee.node else {
+            return false;
+        };
+        callee.resolve_global().as_deref() == Some("__slot_close__")
     }
 
     /// Is `call`'s callee a substrate-registered primitive — a
@@ -4648,22 +4723,14 @@ fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
             _ => {}
         }
 
-        // Now look at THIS expression. We only rewrite primitive
-        // calls whose substrate `ComponentDefinition` advertises
-        // a `children` prop — those are the container primitives
-        // (`Div`, future `Stack`/`Row`/`Column`, …). Leaf
-        // primitives like `Text` keep their existing positional-
-        // arg signatures intact.
-        //
-        // For container primitives, we either:
-        //
-        //   - Expand `children = Array([...])` into the
-        //     `__new_child_list__` / `__push_child__` Block
-        //     expansion (the body-block case).
-        //   - Or, if no `children` named arg is present (the
-        //     bare `Div()` case), splice a `0` literal as the
-        //     first positional arg so the call matches the
-        //     extern's `(children: i64, …) -> i64` signature.
+        // For primitives whose registry advertises child slots
+        // (`children` and/or `slot_<Name>` props), gather each
+        // slot's Array value into a `__new_child_list__` Block.
+        // Missing slots get `__style`-style `0` literal fills.
+        // The final call carries each list as a NAMED arg
+        // (`children = Var(__list_N)`, `slot_Header = Var(__list_M)`);
+        // `resolve_extern_widget_named_args` later resolves
+        // those names into positional slots per the registry.
         let span = expr.span;
         let i64_ty = Type::Primitive(PrimitiveType::I64);
         let unit_ty = Type::Primitive(PrimitiveType::Unit);
@@ -4671,139 +4738,185 @@ fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
         let TypedExpression::Call(call) = &mut expr.node else {
             return;
         };
-        if !callee_takes_children(call) {
-            return;
-        }
-
-        let children_idx = call
-            .named_args
-            .iter()
-            .position(|na| na.name.resolve_global().as_deref() == Some("children"));
-
-        let Some(idx) = children_idx else {
-            // No body block in the source — splice a `0i64`
-            // pointer as the children arg so the call's
-            // positional list matches the extern's `(children:
-            // i64) -> i64` signature.
-            call.positional_args.insert(
-                0,
-                typed_node(
-                    TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(0)),
-                    i64_ty.clone(),
-                    span,
-                ),
-            );
+        let Some(slot_prop_names) = callee_slot_prop_names(call) else {
             return;
         };
 
-        let children_named: TypedNamedArg = call.named_args.remove(idx);
-        let TypedExpression::Array(child_exprs) = children_named.value.node else {
-            // Not the Phase-2c shape — leave the call alone so
-            // we don't accidentally drop data on other named-arg
-            // values that happen to be called `children`.
-            call.named_args.push(children_named);
-            return;
-        };
+        let mut prelude: Vec<zyntax_typed_ast::TypedNode<TypedStatement>> = Vec::new();
+        let mut had_real_slot = false;
 
-        let id = next_id(counter);
-        let list_ident =
-            zyntax_typed_ast::InternedString::new_global(&format!("__blinc_children_{id}"));
-
-        let mut stmts: Vec<zyntax_typed_ast::TypedNode<TypedStatement>> = Vec::new();
-
-        // let __blinc_children_<id> = __new_child_list__()
-        stmts.push(typed_node(
-            TypedStatement::Let(zyntax_typed_ast::typed_ast::TypedLet {
-                name: list_ident,
-                ty: i64_ty.clone(),
-                mutability: zyntax_typed_ast::Mutability::Immutable,
-                initializer: Some(Box::new(typed_node(
-                    TypedExpression::Call(TypedCall {
-                        callee: Box::new(typed_node(
-                            TypedExpression::Variable(
-                                zyntax_typed_ast::InternedString::new_global("__new_child_list__"),
-                            ),
-                            Type::Any,
-                            span,
-                        )),
-                        positional_args: vec![],
-                        named_args: vec![],
-                        type_args: vec![],
-                    }),
-                    i64_ty.clone(),
-                    span,
-                ))),
-                span,
-            }),
-            unit_ty.clone(),
-            span,
-        ));
-
-        // for each child: __push_child__(__blinc_children_<id>, child)
-        for child_expr in child_exprs {
-            let push_call = TypedExpression::Call(TypedCall {
-                callee: Box::new(typed_node(
-                    TypedExpression::Variable(zyntax_typed_ast::InternedString::new_global(
-                        "__push_child__",
+        for slot_name in &slot_prop_names {
+            let na_idx = call
+                .named_args
+                .iter()
+                .position(|na| na.name.resolve_global().as_deref() == Some(slot_name.as_str()));
+            let Some(idx) = na_idx else {
+                // Slot not supplied — inject a `0` literal so
+                // the registry-driven resolution finds something
+                // at this slot's named position.
+                call.named_args.push(TypedNamedArg {
+                    name: zyntax_typed_ast::InternedString::new_global(slot_name),
+                    value: Box::new(typed_node(
+                        TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(0)),
+                        i64_ty.clone(),
+                        span,
                     )),
-                    Type::Any,
                     span,
-                )),
-                positional_args: vec![
-                    typed_node(TypedExpression::Variable(list_ident), i64_ty.clone(), span),
-                    child_expr,
-                ],
-                named_args: vec![],
-                type_args: vec![],
-            });
-            stmts.push(typed_node(
-                TypedStatement::Expression(Box::new(typed_node(push_call, unit_ty.clone(), span))),
+                });
+                continue;
+            };
+            let mut na = call.named_args.remove(idx);
+            let TypedExpression::Array(child_exprs) = std::mem::replace(
+                &mut na.value.node,
+                TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(0)),
+            ) else {
+                // Already a non-Array value (e.g., user passed
+                // a raw i64 list pointer). Leave it alone.
+                call.named_args.push(na);
+                continue;
+            };
+            had_real_slot = true;
+
+            let id = next_id(counter);
+            let list_ident =
+                zyntax_typed_ast::InternedString::new_global(&format!("__blinc_children_{id}"));
+
+            // let __blinc_children_<id> = __new_child_list__()
+            prelude.push(typed_node(
+                TypedStatement::Let(zyntax_typed_ast::typed_ast::TypedLet {
+                    name: list_ident,
+                    ty: i64_ty.clone(),
+                    mutability: zyntax_typed_ast::Mutability::Immutable,
+                    initializer: Some(Box::new(typed_node(
+                        TypedExpression::Call(TypedCall {
+                            callee: Box::new(typed_node(
+                                TypedExpression::Variable(
+                                    zyntax_typed_ast::InternedString::new_global(
+                                        "__new_child_list__",
+                                    ),
+                                ),
+                                Type::Any,
+                                span,
+                            )),
+                            positional_args: vec![],
+                            named_args: vec![],
+                            type_args: vec![],
+                        }),
+                        i64_ty.clone(),
+                        span,
+                    ))),
+                    span,
+                }),
                 unit_ty.clone(),
                 span,
             ));
+
+            // for each child: __push_child__(__list, child)
+            for child_expr in child_exprs {
+                let push_call = TypedExpression::Call(TypedCall {
+                    callee: Box::new(typed_node(
+                        TypedExpression::Variable(zyntax_typed_ast::InternedString::new_global(
+                            "__push_child__",
+                        )),
+                        Type::Any,
+                        span,
+                    )),
+                    positional_args: vec![
+                        typed_node(TypedExpression::Variable(list_ident), i64_ty.clone(), span),
+                        child_expr,
+                    ],
+                    named_args: vec![],
+                    type_args: vec![],
+                });
+                prelude.push(typed_node(
+                    TypedStatement::Expression(Box::new(typed_node(
+                        push_call,
+                        unit_ty.clone(),
+                        span,
+                    ))),
+                    unit_ty.clone(),
+                    span,
+                ));
+            }
+
+            // Re-attach the slot as a named arg pointing at the ident.
+            call.named_args.push(TypedNamedArg {
+                name: zyntax_typed_ast::InternedString::new_global(slot_name),
+                value: Box::new(typed_node(
+                    TypedExpression::Variable(list_ident),
+                    i64_ty.clone(),
+                    span,
+                )),
+                span,
+            });
         }
 
-        // Trailing call: <original callee>(__blinc_children_<id>)
-        // Block-as-expression value comes from this last
-        // statement. The original callee is reused verbatim; the
-        // original positional / remaining named args ride along
-        // in case future primitives grow extra props beyond
-        // `children`.
-        let mut final_positional = std::mem::take(&mut call.positional_args);
-        final_positional.insert(
-            0,
-            typed_node(TypedExpression::Variable(list_ident), i64_ty.clone(), span),
-        );
+        if !had_real_slot {
+            // No body-supplied slots — the `0`-literal fills are
+            // already on the call; no Block expansion needed.
+            return;
+        }
+
+        // Wrap the original call (now with slot named args
+        // pointing at the locally-allocated lists) in a Block
+        // whose trailing expression is the call.
         let final_call = TypedExpression::Call(TypedCall {
             callee: call.callee.clone(),
-            positional_args: final_positional,
+            positional_args: std::mem::take(&mut call.positional_args),
             named_args: std::mem::take(&mut call.named_args),
             type_args: std::mem::take(&mut call.type_args),
         });
-        stmts.push(typed_node(
+        prelude.push(typed_node(
             TypedStatement::Expression(Box::new(typed_node(final_call, i64_ty.clone(), span))),
             i64_ty.clone(),
             span,
         ));
 
         expr.node = TypedExpression::Block(zyntax_typed_ast::typed_ast::TypedBlock {
-            statements: stmts,
+            statements: prelude,
             span,
         });
     }
 
-    /// Is the call's callee a substrate-registered component
-    /// whose prop list advertises a `children` prop? Reads the
-    /// process-wide [`ComponentRegistry`] so the same lookup the
-    /// validator / lowering layers use here too.
-    ///
-    /// The view-symbol → component-name mapping strips the
-    /// `$Blinc$<Name>$view` envelope — that's the convention
-    /// `register_blinc_layout_primitives` uses for in-tree
-    /// primitives and the `#[extern_widget]` macro uses for
-    /// user widgets.
-    ///
-    /// [`ComponentRegistry`]: blinc_runtime::component::ComponentRegistry
+    /// If the call's callee is a substrate-registered primitive
+    /// with at least one child-slot prop (named `children` or
+    /// `slot_<Name>`), return the slot names in registry order.
+    /// Otherwise `None` — leaf primitives (`Text`) and
+    /// non-primitives never lower through this pass.
+    fn callee_slot_prop_names(call: &TypedCall) -> Option<Vec<String>> {
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            return None;
+        };
+        let sym = callee.resolve_global()?;
+        let sym: &str = &sym;
+        let name = sym
+            .strip_prefix("$Blinc$")
+            .and_then(|s| s.strip_suffix("$view"))?;
+        let slots: Vec<String> = blinc_runtime::component::with_component_registry(|r| {
+            r.get_by_name(name)
+                .map(|def| {
+                    def.props
+                        .iter()
+                        .filter_map(|p| {
+                            let n = p.name.as_ref();
+                            (n == "children" || n.starts_with("slot_")).then(|| n.to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        if slots.is_empty() {
+            None
+        } else {
+            Some(slots)
+        }
+    }
+
+    /// Legacy single-child gate, kept for the old call sites
+    /// (none remain after this refactor, but the function name
+    /// is referenced in earlier docs; remove once those are
+    /// retired).
+    #[allow(dead_code)]
     fn callee_takes_children(call: &TypedCall) -> bool {
         let TypedExpression::Variable(callee) = &call.callee.node else {
             return false;
@@ -6964,6 +7077,91 @@ mod tests {
             matches!(last.node, TypedStatement::Expression(_)),
             "trailing stmt should stay as Expression(_), got: {:?}",
             last.node
+        );
+    }
+
+    /// Pin: slot bodies on a substrate-primitive call partition
+    /// into `slot_<Name>` named args + a default `children` named
+    /// arg. Inspects the AST after parse_to_typed_ast — by then
+    /// children-array lowering has minted a child-list per slot.
+    #[test]
+    fn slot_bodies_partition_into_named_args() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        // Pre-register a synthetic widget with children + slot
+        // props so the partition has somewhere to route the slot
+        // bodies. Real users go through `register_extern_widget`,
+        // but for an AST-shape test we just plant the
+        // `ComponentDefinition` directly.
+        blinc_runtime::component::with_component_registry_mut(|r| {
+            r.register(blinc_runtime::component::ComponentDefinition {
+                name: std::sync::Arc::from("SlotProbe"),
+                view_symbol: std::sync::Arc::from("$Blinc$SlotProbe$view"),
+                props: vec![
+                    blinc_runtime::component::PropDef {
+                        name: std::sync::Arc::from("children"),
+                        ty: Type::Primitive(PrimitiveType::I64),
+                    },
+                    blinc_runtime::component::PropDef {
+                        name: std::sync::Arc::from("slot_Header"),
+                        ty: Type::Primitive(PrimitiveType::I64),
+                    },
+                ],
+            });
+        });
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                view {
+                    SlotProbe() {
+                        slot Header { Text("h") }
+                        Text("body")
+                    }
+                }
+                "#,
+                "slot_probe.blinc",
+            )
+            .expect("parse");
+
+        // The body should have lowered through children-arrays
+        // → Block expansion. Walk into the Block and look for
+        // the trailing call's named-arg shape *before* the
+        // resolve_extern_widget_named_args pass — wait, that
+        // pass already ran in parse_to_typed_ast. So we'll just
+        // assert there's a final call carrying `__blinc_children_*`
+        // variables, AND that the prelude has TWO __new_child_list__
+        // let bindings (one for default children, one for Header).
+        let stmts = first_user_function_body(&program);
+        let TypedStatement::Return(Some(e)) = &stmts[0].node else {
+            panic!("expected Return(Some(...))");
+        };
+        let TypedExpression::Block(block) = &e.node else {
+            panic!("expected Block expansion, got: {:?}", e.node);
+        };
+        let new_list_count = block
+            .statements
+            .iter()
+            .filter(|s| {
+                let TypedStatement::Let(l) = &s.node else {
+                    return false;
+                };
+                let Some(init) = &l.initializer else {
+                    return false;
+                };
+                let TypedExpression::Call(c) = &init.node else {
+                    return false;
+                };
+                let TypedExpression::Variable(v) = &c.callee.node else {
+                    return false;
+                };
+                v.resolve_global().as_deref() == Some("__new_child_list__")
+            })
+            .count();
+        assert_eq!(
+            new_list_count, 2,
+            "should mint one child-list per slot (default + Header)"
         );
     }
 
