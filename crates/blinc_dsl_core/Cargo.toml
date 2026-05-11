@@ -22,6 +22,16 @@ zyntax_embed = { workspace = true }
 # Cargo.toml — bump both together when pulling in upstream changes.
 zyntax_typed_ast = { git = "https://github.com/darmie/zyntax", rev = "5b0dfab7940dd01406f1982e02a2d2c7b5242604" }
 
+# Runtime-agnostic FSM substrate. blinc_dsl_core publishes its
+# parsed FSM defs into `blinc_runtime::fsm::FsmRegistry` and
+# installs a JIT-flavoured `GuardDispatcher` so widget-side
+# `Stateful<FsmStateId>` consumers can reach DSL-defined FSMs
+# without depending on Zyntax themselves. The AOT path
+# (Zyntax+LLVM, future) writes the same registry types from its
+# own generated init function — so this dep stays runtime-only,
+# not a path back into Zyntax.
+blinc_runtime = { path = "../blinc_runtime", version = "0.5.1", default-features = false }
+
 # Logging
 tracing = { workspace = true }
 

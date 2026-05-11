@@ -2120,6 +2120,201 @@ fn synthesize_fsm_event_enums(program: &mut TypedProgram) {
 }
 
 // =====================================================================
+// Runtime-substrate bridge (blinc_runtime::fsm)
+// =====================================================================
+//
+// `blinc_runtime::fsm` is the pure-Rust substrate that lets DSL-
+// defined FSMs plug into widget-side `Stateful<FsmStateId>` without
+// the widget side knowing whether the DSL was compiled by Zyntax+
+// Cranelift (this crate's JIT path) or by Zyntax+LLVM (a future AOT
+// codegen crate). Both publishers write to the same
+// `FsmRegistry` singleton and install their own `GuardDispatcher`.
+// This section is the JIT half of that contract.
+
+/// `GuardDispatcher` impl that routes tick-guard calls through a
+/// shared `ZyntaxRuntime` handle. Wraps the same
+/// `Arc<Mutex<ZyntaxRuntime>>` `BlincDsl` already owns, so
+/// installing one as the process-wide dispatcher costs only the
+/// `Arc::clone` it takes to keep the runtime alive while the
+/// dispatcher is reachable.
+///
+/// The call shape (zero args, `i32` return — `1` = guard fires,
+/// `0` = doesn't) mirrors what `populate_fsm_registry_pass` emits
+/// when lifting guard expressions; see `BlincDsl::step_tick`
+/// (~line 2440) for the matching call-site.
+struct JitGuardDispatcher {
+    runtime: Arc<Mutex<ZyntaxRuntime>>,
+}
+
+// SAFETY: `ZyntaxRuntime` is `!Send + !Sync` because Cranelift's
+// `JITModule` is — it carries `Box<dyn Fn(LibCall) -> String>` +
+// `NonNull` allocator-table pointers that the compiler can't prove
+// are race-safe. We pin a `Mutex` around it (BlincDsl::runtime),
+// which serialises all access. `JitGuardDispatcher` only ever
+// reaches the inner runtime through that Mutex, so concurrent
+// callers from different threads queue cleanly rather than racing.
+// Production Blinc apps run the UI thread single-threaded anyway,
+// so the cross-thread case is hypothetical — the unsafe impl is
+// what lets `Arc<dyn GuardDispatcher>` (the substrate's
+// `Send + Sync`-bounded trait object slot) hold a JIT dispatcher.
+unsafe impl Send for JitGuardDispatcher {}
+unsafe impl Sync for JitGuardDispatcher {}
+
+impl blinc_runtime::fsm::GuardDispatcher for JitGuardDispatcher {
+    fn call_guard(&self, symbol: &str) -> Option<bool> {
+        let runtime = self.runtime.lock().ok()?;
+        let guard_sig = NativeSignature::new(&[], NativeType::I32);
+        let result = runtime.call_function(symbol, &[], &guard_sig).ok()?;
+        // Lifted guards return `1` to fire, `0` not. Match the
+        // exact decode `BlincDsl::step_tick` uses.
+        Some(matches!(result, ZyntaxValue::Int(v) if v != 0))
+    }
+}
+
+/// Translate the local `blinc_dsl_core::FsmRegistry` (Zyntax-typed,
+/// uses `InternedString` everywhere) into the runtime-agnostic
+/// `blinc_runtime::fsm::FsmRegistry` shape (`Arc<str>`-typed,
+/// `u32`-coded state variants) and publish each entry.
+///
+/// Code-assignment policy:
+/// - **State variant codes** come from the FSM's state enum
+///   declaration order. Walking `program.declarations` for
+///   `TypedDeclaration::Enum` whose name matches the FSM's
+///   `trait_name` yields the variants in source order; index = code.
+/// - **Event codes** are assigned in first-appearance order across
+///   the FSM's transitions. Identical events get one code; new
+///   events get the next free index.
+///
+/// Both policies are deterministic — re-running the publisher on
+/// the same source produces identical codes — which is the
+/// invariant the `FsmStateId::on_event` path relies on so the
+/// widget side and the registry agree on which `u32` means which
+/// state.
+///
+/// Why a separate post-parse pass instead of folding into
+/// `populate_fsm_registry_pass`: the existing pass already does
+/// quite a bit (FSM scan → TypeId minting → guard lifting →
+/// `__fsm_meta__` strip), and the publish step needs the
+/// post-lift state of the program (specifically the lifted-guard
+/// symbol names) which only become stable after that pass runs.
+/// Keeping them separated also makes the JIT-only nature of
+/// this publish step obvious — the AOT path will reach the
+/// substrate from a codegen-emitted equivalent of this function,
+/// not from inside `populate_fsm_registry_pass`.
+fn publish_fsms_to_runtime_registry(program: &TypedProgram) {
+    use zyntax_typed_ast::typed_ast::TypedDeclaration;
+
+    for decl in &program.declarations {
+        let TypedDeclaration::Impl(imp) = &decl.node else {
+            continue;
+        };
+        let fsm_name_intern = imp.trait_name;
+        let Some(fsm_name) = fsm_name_intern.resolve_global() else {
+            continue;
+        };
+
+        // Find the matching state-enum declaration. Mid-pipeline
+        // FSMs always have one (the grammar emits Class+Impl
+        // pairs); skip anything else (non-FSM impls).
+        let state_enum = program.declarations.iter().find_map(|d| match &d.node {
+            TypedDeclaration::Enum(e) if e.name == fsm_name_intern => Some(e),
+            _ => None,
+        });
+        let Some(state_enum) = state_enum else {
+            continue;
+        };
+
+        // Read the local registry for this FSM's transitions +
+        // initial + tick_guards. If the local entry is missing
+        // (FSM wasn't fully processed), bail — same idempotent
+        // semantics as the rest of the pipeline.
+        let local_def = with_fsm_registry(|r| {
+            r.iter()
+                .map(|(_, d)| d)
+                .find(|d| d.name.map(|n| n == fsm_name_intern).unwrap_or(false))
+                .cloned()
+        });
+        let Some(local_def) = local_def else {
+            continue;
+        };
+
+        // State names in declaration order. Codes = indices.
+        let state_names: Vec<std::sync::Arc<str>> = state_enum
+            .variants
+            .iter()
+            .map(|v| std::sync::Arc::from(v.name.resolve_global().unwrap_or_default().as_ref()))
+            .collect();
+        let state_code = |name: zyntax_typed_ast::InternedString| -> Option<u32> {
+            let s = name.resolve_global()?;
+            let needle: &str = s.as_ref();
+            state_names
+                .iter()
+                .position(|n| {
+                    let n_ref: &str = n.as_ref();
+                    n_ref == needle
+                })
+                .map(|i| i as u32)
+        };
+
+        // Event codes — first-appearance order in transitions.
+        let mut event_names: Vec<std::sync::Arc<str>> = Vec::new();
+        let mut event_code_of = |name: zyntax_typed_ast::InternedString| -> u32 {
+            let resolved = name.resolve_global().unwrap_or_default();
+            let needle: &str = resolved.as_ref();
+            if let Some(i) = event_names.iter().position(|n| {
+                let n_ref: &str = n.as_ref();
+                n_ref == needle
+            }) {
+                return i as u32;
+            }
+            event_names.push(std::sync::Arc::from(needle));
+            (event_names.len() - 1) as u32
+        };
+
+        let transitions: Vec<blinc_runtime::fsm::EventTransition> = local_def
+            .transitions
+            .iter()
+            .filter_map(|t| {
+                Some(blinc_runtime::fsm::EventTransition {
+                    from_code: state_code(t.from)?,
+                    event_code: event_code_of(t.event),
+                    to_code: state_code(t.to)?,
+                })
+            })
+            .collect();
+
+        let tick_guards: Vec<blinc_runtime::fsm::TickGuard> = local_def
+            .tick_guards
+            .iter()
+            .filter_map(|g| {
+                let symbol_intern = g.guard_fn?;
+                let symbol = symbol_intern.resolve_global()?;
+                Some(blinc_runtime::fsm::TickGuard {
+                    from_code: state_code(g.from)?,
+                    to_code: state_code(g.to)?,
+                    guard_symbol: std::sync::Arc::from(symbol.as_ref()),
+                })
+            })
+            .collect();
+
+        let initial_code = local_def.initial.and_then(state_code).unwrap_or(0);
+
+        let runtime_def = blinc_runtime::fsm::FsmDefinition {
+            name: std::sync::Arc::from(fsm_name.as_ref()),
+            initial_code,
+            state_names,
+            event_names,
+            transitions,
+            tick_guards,
+        };
+
+        blinc_runtime::fsm::with_fsm_registry_mut(|r| {
+            r.register(runtime_def);
+        });
+    }
+}
+
+// =====================================================================
 // Runtime engine
 // =====================================================================
 
@@ -2188,6 +2383,32 @@ impl BlincDsl {
         Ok(Self { grammar, runtime })
     }
 
+    /// Install this `BlincDsl`'s JIT-flavoured guard dispatcher as
+    /// the process-wide `blinc_runtime::fsm::GuardDispatcher`. After
+    /// this call, any widget that constructs a
+    /// `Stateful<FsmStateId>` can dispatch tick guards through the
+    /// substrate without depending on Zyntax types — the dispatcher
+    /// routes back into this `BlincDsl`'s Cranelift runtime to call
+    /// the lifted guard functions.
+    ///
+    /// Why opt-in: the dispatcher slot is process-wide. Auto-
+    /// installing in [`BlincDsl::new`] would race when multiple
+    /// `BlincDsl` instances coexist in the same process (tests do
+    /// this routinely; hot-reload pipelines might in production).
+    /// Production apps own a single long-lived `BlincDsl` singleton
+    /// and call `install_runtime_bridge()` once at startup — no
+    /// race, no cost. Tests that need bridge dispatch take a
+    /// serialization lock and call this explicitly.
+    ///
+    /// Replaces any previously-installed dispatcher (last-write-
+    /// wins), so hot-reload flows that re-bootstrap the DSL stay
+    /// straightforward.
+    pub fn install_runtime_bridge(&self) {
+        blinc_runtime::fsm::set_guard_dispatcher(std::sync::Arc::new(JitGuardDispatcher {
+            runtime: self.runtime.clone(),
+        }));
+    }
+
     /// Compile a `.blinc` source file. Returns the names of compiled
     /// functions, mirroring the zynml `load_module_file` shape so we
     /// can rely on the same hot-reload pivot later (`runtime.hot_reload`
@@ -2253,6 +2474,15 @@ impl BlincDsl {
         // the place to thread the real module name through.
         let module = zyntax_typed_ast::InternedString::new_global("main");
         populate_fsm_registry_pass(&mut typed_program, module);
+
+        // Mirror the (Zyntax-typed) local FSM registry into the
+        // runtime-agnostic `blinc_runtime::fsm` substrate so
+        // widget-side `Stateful<FsmStateId>` consumers can dispatch
+        // transitions through `blinc_runtime::fsm::with_fsm_registry`
+        // without depending on Zyntax types. The AOT path's
+        // generated init function will write to the same substrate
+        // from its own translation; widget code stays unchanged.
+        publish_fsms_to_runtime_registry(&typed_program);
 
         // Belt-and-suspenders: terminate user functions with an
         // explicit `Return(None)` so the body classifier can't infer
@@ -6725,6 +6955,103 @@ mod tests {
         };
         let miss = with_fsm_registry(|r| r.step_event(&phantom, "Off", "Click"));
         assert!(miss.is_none(), "phantom fsm id should miss");
+    }
+
+    /// Serializer for tests that depend on the process-wide
+    /// `blinc_runtime::fsm::GuardDispatcher` slot. `BlincDsl::new()`
+    /// installs a JIT dispatcher pointing at its own runtime; if
+    /// two tests construct `BlincDsl` in parallel, the slot races
+    /// and a later `FsmStateId::on_tick` may dispatch into a
+    /// runtime that doesn't have the expected guard symbol. Tests
+    /// that route tick dispatch through the substrate take this
+    /// lock at entry; tests that drive `dsl.step_tick(...)`
+    /// directly don't need it (they hold the per-dsl runtime
+    /// mutex instead). Cleared automatically when the
+    /// `MutexGuard` drops at test exit.
+    static BRIDGE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// End-to-end: a DSL-defined FSM round-trips through the
+    /// runtime-agnostic `blinc_runtime::fsm` substrate. After
+    /// `compile_source` runs, the FSM should be registered in
+    /// the global runtime registry, callable from widget code
+    /// (or any other consumer) via `FsmStateId` without that
+    /// consumer depending on Zyntax types.
+    ///
+    /// This pins the JIT half of the JIT/AOT contract: both
+    /// publishers (this one, and a future `blinc_dsl_aot`-style
+    /// build-time codegen) must produce identical substrate
+    /// state for the same source — same state codes in the same
+    /// declaration order, same event codes in first-appearance
+    /// order, same guard symbol names.
+    #[test]
+    fn publish_to_runtime_registry_round_trip() {
+        let _ = tracing_subscriber::fmt::try_init();
+        // Serialize with any other test that takes the bridge
+        // lock and dispatches through the global slot. Other
+        // tests that don't touch the bridge run in parallel
+        // because `BlincDsl::new()` no longer auto-installs the
+        // dispatcher — that's now an explicit
+        // `install_runtime_bridge()` call.
+        let _guard = BRIDGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            fsm Loader {
+                state Idle
+                state Loading
+                state Done
+                initial Idle
+                on Idle.Start -> Loading
+                on Loading.Finish -> Done
+                tick Loading -> Done when 1 > 0
+            }
+            "#,
+            "loader_runtime_bridge.blinc",
+        )
+        .expect("compile");
+
+        // Install the JIT dispatcher AFTER compile so the guard
+        // symbol is registered in this dsl's runtime before any
+        // bridge dispatch hits it. Under the BRIDGE_TEST_LOCK,
+        // no other bridge test can overwrite the slot while we
+        // dispatch.
+        dsl.install_runtime_bridge();
+
+        // The FSM should be registered in the runtime substrate
+        // under its DSL name.
+        let state = blinc_runtime::fsm::FsmStateId::from_fsm_name("Loader")
+            .expect("Loader should be published to blinc_runtime substrate");
+
+        // Codes should reflect declaration order: Idle = 0,
+        // Loading = 1, Done = 2.
+        assert_eq!(state.variant, 0, "initial state should be Idle (code 0)");
+        assert_eq!(
+            state.state_name().as_deref(),
+            Some("Idle")
+        );
+
+        // Event dispatch: Idle + Start → Loading. Event codes
+        // are first-appearance order: Start = 0, Finish = 1.
+        use blinc_runtime::blinc_layout::stateful::StateTransitions;
+        let loading = state.on_event(0).expect("Idle + Start should transition");
+        assert_eq!(loading.variant, 1);
+        assert_eq!(
+            loading.state_name().as_deref(),
+            Some("Loading")
+        );
+
+        // Tick dispatch: Loading + (1 > 0 always fires) → Done.
+        // Routes through the JitGuardDispatcher installed by
+        // BlincDsl::new(), which JIT-calls the lifted guard fn.
+        let done = loading.on_tick().expect("guard `1 > 0` should fire");
+        assert_eq!(done.variant, 2);
+        assert_eq!(
+            done.state_name().as_deref(),
+            Some("Done")
+        );
     }
 
     /// Tick dispatch fires when the lifted guard returns `true`.

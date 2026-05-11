@@ -11,12 +11,19 @@ publish = false
 
 [features]
 default = ["full"]
-full = ["blinc_core", "blinc_animation", "blinc_layout", "blinc_gpu", "blinc_paint"]
+full = ["blinc_core", "blinc_animation", "blinc_gpu", "blinc_paint"]
 
 [dependencies]
+# `blinc_layout` is non-optional because `blinc_runtime::fsm` depends
+# on its `StateTransitions` trait — the substrate that lets DSL-side
+# FSMs plug into widget-side `Stateful<S>` machinery regardless of
+# whether the DSL was JIT-compiled at app runtime or AOT-compiled
+# into the binary. The remaining sub-crates stay optional for callers
+# that want a leaner runtime surface (headless, server-side, etc.).
+blinc_layout = { path = "../blinc_layout", version = "0.5.1" }
+
 blinc_core = { path = "../blinc_core", version = "0.5.1", optional = true }
 blinc_animation = { path = "../blinc_animation", version = "0.5.1", optional = true }
-blinc_layout = { path = "../blinc_layout", version = "0.5.1", optional = true }
 blinc_gpu = { path = "../blinc_gpu", version = "0.5.1", optional = true }
 blinc_paint = { path = "../blinc_paint", version = "0.5.1", optional = true }
 # blinc_cn = { path = "../blinc_cn", version = "0.5.1", optional = true }
