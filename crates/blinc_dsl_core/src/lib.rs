@@ -33,7 +33,6 @@
 //! fixed at link time, which matches the zynml "patterns to NOT copy"
 //! recommendation in our research notes.
 
-use std::cell::RefCell;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -66,55 +65,34 @@ pub const BLINC_GRAMMAR: &str = include_str!("../grammar/blinc.zyn");
 /// call. The host drains the buffer after each invocation and turns
 /// it into a Blinc element tree.
 ///
-/// Kept intentionally narrow for the prototype. Real ops (containers,
-/// layout modifiers, event handlers, etc.) land alongside the grammar
-/// expansion in phase 2 of the prototype.
-#[derive(Debug, Clone)]
-pub enum DslOp {
-    /// `text("literal")` — a single text node carrying a string.
-    Text(String),
-    /// `int_text(N)` — a single text node carrying an integer. The
-    /// host stringifies on render. Distinct variant from `Text` so
-    /// downstream consumers can format integers differently
-    /// (alignment, locale, etc.) if they want.
-    IntText(i32),
-}
+/// Re-exported from [`blinc_runtime::scene`] — the canonical type
+/// lives in the runtime substrate so widget extensions and other
+/// non-DSL crates can produce / consume scene ops without
+/// depending on the DSL compiler. The `pub use` keeps existing
+/// `blinc_dsl_core::DslOp` references working.
+pub use blinc_runtime::scene::DslOp;
 
-thread_local! {
-    /// Per-thread scene buffer. Builtins push, the embed API drains.
-    /// Thread-local because Zyntax invocations are synchronous on the
-    /// caller thread; multi-threaded callers would each see their own
-    /// buffer, which is the right semantics for "render this view".
-    static SCENE_BUFFER: RefCell<Vec<DslOp>> = const { RefCell::new(Vec::new()) };
+// Scene buffer + signal tables both live in `blinc_runtime`:
+//
+//   - `blinc_runtime::scene` — `DslOp`, the thread-local buffer,
+//     and `take` / `push` / `clear`. JIT-side builtins (this
+//     crate's `$Blinc$text` etc.) push to it; the embed API
+//     drains via `take_scene_ops`.
+//   - `blinc_runtime::signal` — per-thread i32 / f64 signal
+//     tables. JIT-side externs read; the DSL-facing setter API
+//     on `BlincDsl` writes.
+//
+// Both move out of `blinc_dsl_core` so the AOT path doesn't have
+// to depend on this crate at app runtime — both backends produce
+// scene ops and read signals through the same substrate.
 
-    /// Per-thread i32-signal table. Populated by `BlincDsl::set_signal_i32`,
-    /// read by the `blinc_signal_get_i32` extern when DSL code calls
-    /// `<name>.get()` on an i32 signal (after `resolve_signal_calls`
-    /// has rewritten it to `__signal_get_i32("<name>")`).
-    ///
-    /// Thread-local for the same reason as `SCENE_BUFFER` — Zyntax
-    /// JIT calls run synchronously on the caller's thread, so
-    /// host-side state populated before a call is visible inside
-    /// the call. Cross-thread signal sharing is not supported by
-    /// this layer; embedders that need it should layer their own
-    /// `Mutex<HashMap>` on top and update via `set_signal_i32`
-    /// from the worker thread that's about to issue a call.
-    static SIGNAL_TABLE_I32: RefCell<std::collections::HashMap<String, i32>> =
-        RefCell::new(std::collections::HashMap::new());
-
-    /// Per-thread f64-signal table. Same shape as `SIGNAL_TABLE_I32`
-    /// but for `signal <name>: f64` declarations. Read by
-    /// `blinc_signal_get_f64`, populated by `set_signal_f64`.
-    /// Useful for guards like `progress.get() >= 1.0` where the
-    /// signal value drives a Harel-style data transition.
-    static SIGNAL_TABLE_F64: RefCell<std::collections::HashMap<String, f64>> =
-        RefCell::new(std::collections::HashMap::new());
-}
-
-/// Drain and return everything pushed onto the scene buffer since the
-/// last call. Called by the embed API after `runtime.call(...)` returns.
+/// Drain and return everything pushed onto the scene buffer since
+/// the last call. Called by the embed API after `runtime.call(...)`
+/// returns. Thin wrapper over [`blinc_runtime::scene::take`] kept
+/// here for source-compatibility with embedders that still import
+/// `blinc_dsl_core::take_scene_ops`.
 pub fn take_scene_ops() -> Vec<DslOp> {
-    SCENE_BUFFER.with(|b| std::mem::take(&mut *b.borrow_mut()))
+    blinc_runtime::scene::take()
 }
 
 // =====================================================================
@@ -160,7 +138,7 @@ extern "C" fn blinc_text(s_ptr: *const i32) {
         .and_then(|s| s.strip_suffix('"'))
         .unwrap_or(raw);
 
-    SCENE_BUFFER.with(|b| b.borrow_mut().push(DslOp::Text(stripped.to_string())));
+    blinc_runtime::scene::push(DslOp::Text(stripped.to_string()));
 }
 
 /// `__signal_get_i32` — host implementation of the i32 signal
@@ -204,7 +182,7 @@ extern "C" fn blinc_signal_get_i32(name_ptr: *const i32) -> i32 {
         .and_then(|s| s.strip_suffix('"'))
         .unwrap_or(name);
 
-    SIGNAL_TABLE_I32.with(|t| t.borrow().get(stripped).copied().unwrap_or(0))
+    blinc_runtime::signal::get_i32_or_default(stripped)
 }
 
 /// `__signal_get_f64` — host implementation of the f64 signal
@@ -234,7 +212,7 @@ extern "C" fn blinc_signal_get_f64(name_ptr: *const i32) -> f64 {
         .and_then(|s| s.strip_suffix('"'))
         .unwrap_or(name);
 
-    SIGNAL_TABLE_F64.with(|t| t.borrow().get(stripped).copied().unwrap_or(0.0))
+    blinc_runtime::signal::get_f64_or_default(stripped)
 }
 
 /// `$Blinc$text_int` — integer arm of `text(...)`. Pushes an integer
@@ -249,7 +227,7 @@ extern "C" fn blinc_signal_get_f64(name_ptr: *const i32) -> f64 {
 /// Same contract as [`blinc_text`]. The runtime guarantees the
 /// argument shape matches the registered `NativeType::I32`.
 extern "C" fn blinc_text_int(n: i32) {
-    SCENE_BUFFER.with(|b| b.borrow_mut().push(DslOp::IntText(n)));
+    blinc_runtime::scene::push(DslOp::IntText(n));
 }
 
 // =====================================================================
@@ -2708,9 +2686,7 @@ impl BlincDsl {
     /// the contract. Embedders can verify shape via
     /// `parse_to_typed_ast` if they want to surface typos earlier.
     pub fn set_signal_i32(&self, name: &str, value: i32) {
-        SIGNAL_TABLE_I32.with(|t| {
-            t.borrow_mut().insert(name.to_string(), value);
-        });
+        blinc_runtime::signal::set_i32(name, value);
     }
 
     /// Read the current value of an i32-typed signal. Returns
@@ -2719,8 +2695,12 @@ impl BlincDsl {
     /// for diagnostics; production dispatch goes through
     /// `step_tick` / `step_event` which read the table at JIT
     /// time.
+    ///
+    /// Delegates to `blinc_runtime::signal::get_i32` — widget
+    /// crates that want signal access without depending on the
+    /// DSL compiler can call the runtime module directly.
     pub fn get_signal_i32(&self, name: &str) -> Option<i32> {
-        SIGNAL_TABLE_I32.with(|t| t.borrow().get(name).copied())
+        blinc_runtime::signal::get_i32(name)
     }
 
     /// Set the current value of an f64-typed signal. Same shape
@@ -2728,15 +2708,13 @@ impl BlincDsl {
     /// declarations. Useful for floating-point guards — progress
     /// fractions, timing values, normalised positions.
     pub fn set_signal_f64(&self, name: &str, value: f64) {
-        SIGNAL_TABLE_F64.with(|t| {
-            t.borrow_mut().insert(name.to_string(), value);
-        });
+        blinc_runtime::signal::set_f64(name, value);
     }
 
     /// Read the current value of an f64-typed signal. `None`
     /// when unset; `Some(0.0)` when explicitly seeded to zero.
     pub fn get_signal_f64(&self, name: &str) -> Option<f64> {
-        SIGNAL_TABLE_F64.with(|t| t.borrow().get(name).copied())
+        blinc_runtime::signal::get_f64(name)
     }
 }
 
@@ -7028,30 +7006,21 @@ mod tests {
         // Codes should reflect declaration order: Idle = 0,
         // Loading = 1, Done = 2.
         assert_eq!(state.variant, 0, "initial state should be Idle (code 0)");
-        assert_eq!(
-            state.state_name().as_deref(),
-            Some("Idle")
-        );
+        assert_eq!(state.state_name().as_deref(), Some("Idle"));
 
         // Event dispatch: Idle + Start → Loading. Event codes
         // are first-appearance order: Start = 0, Finish = 1.
         use blinc_runtime::blinc_layout::stateful::StateTransitions;
         let loading = state.on_event(0).expect("Idle + Start should transition");
         assert_eq!(loading.variant, 1);
-        assert_eq!(
-            loading.state_name().as_deref(),
-            Some("Loading")
-        );
+        assert_eq!(loading.state_name().as_deref(), Some("Loading"));
 
         // Tick dispatch: Loading + (1 > 0 always fires) → Done.
         // Routes through the JitGuardDispatcher installed by
         // BlincDsl::new(), which JIT-calls the lifted guard fn.
         let done = loading.on_tick().expect("guard `1 > 0` should fire");
         assert_eq!(done.variant, 2);
-        assert_eq!(
-            done.state_name().as_deref(),
-            Some("Done")
-        );
+        assert_eq!(done.state_name().as_deref(), Some("Done"));
     }
 
     /// Tick dispatch fires when the lifted guard returns `true`.

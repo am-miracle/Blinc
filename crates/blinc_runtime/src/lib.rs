@@ -12,6 +12,8 @@
 //! architecture diagram.
 
 pub mod fsm;
+pub mod scene;
+pub mod signal;
 
 pub use blinc_layout;
 
