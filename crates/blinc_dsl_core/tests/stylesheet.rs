@@ -67,6 +67,51 @@ fn stylesheet_block_preserves_multiline_and_flow() {
     );
 }
 
+/// Inline `class = "..."` on Div lands on the constructed
+/// widget's class list. Pairs with a stylesheet that targets
+/// `.btn` — together they form the standard CSS+class flow
+/// that mirrors the Rust-side `.class("btn")` + `ctx.add_css`
+/// pattern in `styling_demo.rs`.
+#[test]
+fn div_inline_class_attribute_applies_to_widget() {
+    use blinc_dsl_core::{materialize_widget, WidgetBox, ZyntaxValue};
+
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = blinc_dsl_core::BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r##"
+        stylesheet ".btn { background: red; }"
+        view { Div(class = "btn primary") }
+        "##,
+        "class_attr.blinc",
+    )
+    .expect("compile");
+
+    let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+    let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+    let ZyntaxValue::Int(handle) = value else {
+        panic!("expected widget handle");
+    };
+    assert_ne!(handle, 0);
+
+    let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+    let WidgetBox::Custom(builder) = *widget else {
+        panic!("expected Custom(Styled<Div>)");
+    };
+    // The Styled wrapper delegates element_classes() to the
+    // inner Div, which stores the class list.
+    let classes = builder.element_classes();
+    assert!(
+        classes.iter().any(|c| c.as_ref() == "btn"),
+        "missing 'btn' class, got: {classes:?}"
+    );
+    assert!(
+        classes.iter().any(|c| c.as_ref() == "primary"),
+        "missing 'primary' class, got: {classes:?}"
+    );
+}
+
 /// Multiple stylesheet blocks in one source land in order.
 #[test]
 fn multiple_stylesheet_blocks_collect_in_order() {

@@ -522,6 +522,17 @@ impl<W: blinc_layout::div::ElementBuilder> blinc_layout::div::ElementBuilder for
     fn children_builders(&self) -> &[Box<dyn blinc_layout::div::ElementBuilder>] {
         self.inner.children_builders()
     }
+    // Forward element identity to the inner so CSS class /
+    // id / type-name selectors keep matching through the wrapper.
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
+        self.inner.element_classes()
+    }
+    fn element_id(&self) -> Option<&str> {
+        self.inner.element_id()
+    }
+    fn element_type_id(&self) -> blinc_layout::div::ElementTypeId {
+        self.inner.element_type_id()
+    }
 }
 
 /// Re-exports the `#[extern_widget]` macro lives at the crate
@@ -786,13 +797,13 @@ extern "C" fn blinc_text_view(content_ptr: *const i32) -> WidgetHandle {
 /// reclaimed `Box<WidgetBox>` flows into the Div as a
 /// `Box<dyn ElementBuilder>` child, owned for the Div's
 /// lifetime.
-extern "C" fn blinc_div_view(children: WidgetHandle, style: i64) -> WidgetHandle {
+extern "C" fn blinc_div_view(
+    children: WidgetHandle,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
     let mut widget = blinc_layout::div::Div::new();
     if children != 0 {
-        // SAFETY: `children` is the raw-pointer payload of an
-        // `i64` minted by `blinc_new_child_list`. The JIT
-        // guarantees provenance by routing all child-list
-        // construction through that extern.
         let list: Box<Vec<WidgetHandle>> =
             unsafe { Box::from_raw(children as *mut Vec<WidgetHandle>) };
         for handle in *list {
@@ -801,8 +812,13 @@ extern "C" fn blinc_div_view(children: WidgetHandle, style: i64) -> WidgetHandle
             }
         }
     }
-    // SAFETY: `style` came from `__new_style_overlay__` (or is
-    // `0`).
+    // SAFETY: `class_str` is `*const i32` per registered sig.
+    if !class_str.is_null() {
+        let raw = unsafe { blinc_string_decode(class_str) };
+        for name in raw.split_whitespace() {
+            widget = widget.class(name);
+        }
+    }
     let overlay = unsafe { materialize_overlay(style) };
     Box::into_raw(Box::new(WidgetBox::Custom(Box::new(Styled::new(
         widget, overlay,
@@ -3083,6 +3099,10 @@ fn register_blinc_layout_primitives() {
                 name: std::sync::Arc::from("__style"),
                 ty: Type::Primitive(PrimitiveType::I64),
             },
+            PropDef {
+                name: std::sync::Arc::from("class"),
+                ty: Type::Primitive(PrimitiveType::String),
+            },
         ],
     };
 
@@ -4471,15 +4491,15 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_text_view as *const u8,
         },
         BuiltinDescriptor {
-            // `$Blinc$Div$view(children, style) -> WidgetHandle (i64)`
-            // — value-returning Div primitive. Children consumed
-            // from a `__new_child_list__` pointer; visual props
-            // applied via a `__new_style_overlay__` overlay (both
-            // `0` for the bare-`Div()` case).
+            // `$Blinc$Div$view(children, style, class) -> WidgetHandle`
+            // — children from `__new_child_list__`, visual style
+            // from `__new_style_overlay__`, class as a
+            // whitespace-separated name list (or null for none).
             name: "$Blinc$Div$view",
             param_types: &[
                 Type::Primitive(PrimitiveType::I64),
                 Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
             ],
             return_type: Type::Primitive(PrimitiveType::I64),
             ptr: blinc_div_view as *const u8,
@@ -5566,21 +5586,21 @@ fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
         }
 
         // Now look at THIS expression.
+        let span = expr.span;
         let TypedExpression::Call(call) = &mut expr.node else {
             return;
         };
-        let Some(prop_names) = primitive_callee_prop_names(call) else {
+        let Some(props) = primitive_callee_props(call) else {
             return;
         };
-        if call.named_args.is_empty() {
-            return;
-        }
+        // Note: don't early-out on empty named_args — we may
+        // still need to type-default missing trailing slots
+        // (e.g., `Div()` with no class supplied — the class
+        // slot needs a null-pointer default so call arity
+        // matches the extern signature).
 
-        // Slot vector sized to the prop count. Existing positional
-        // args fill the earliest slots; named args land at their
-        // resolved positions.
         let mut slots: Vec<Option<zyntax_typed_ast::TypedNode<TypedExpression>>> =
-            (0..prop_names.len()).map(|_| None).collect();
+            (0..props.len()).map(|_| None).collect();
         let existing_positional = std::mem::take(&mut call.positional_args);
         let mut overflow: Vec<zyntax_typed_ast::TypedNode<TypedExpression>> = Vec::new();
         for (i, arg) in existing_positional.into_iter().enumerate() {
@@ -5591,9 +5611,6 @@ fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
             }
         }
 
-        // Place each named arg at its named position. Args
-        // whose name doesn't match any prop stay in named_args
-        // (Zyntax's type checker surfaces the diagnostic).
         let existing_named = std::mem::take(&mut call.named_args);
         let mut unresolved_named: Vec<zyntax_typed_ast::TypedNamedArg> = Vec::new();
         for na in existing_named {
@@ -5602,11 +5619,8 @@ fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
                 continue;
             };
             let name_str: &str = &name;
-            if let Some(pos) = prop_names.iter().position(|p| p == name_str) {
+            if let Some(pos) = props.iter().position(|(n, _)| n == name_str) {
                 if slots[pos].is_some() {
-                    // Conflict: same slot supplied positionally
-                    // AND by name. Leave the named arg in place
-                    // so the diagnostic surface stays honest.
                     unresolved_named.push(na);
                 } else {
                     slots[pos] = Some(*na.value);
@@ -5616,16 +5630,18 @@ fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
             }
         }
 
-        // Materialise the contiguous filled prefix. Unfilled
-        // trailing slots get dropped so call arity matches what
-        // the user supplied — missing required props surface as
-        // a downstream type/link diagnostic, not silent garbage.
-        let mut new_positional: Vec<zyntax_typed_ast::TypedNode<TypedExpression>> = Vec::new();
-        for slot in slots {
+        // Materialise the contiguous filled prefix. Trailing
+        // unfilled slots get a type-appropriate default so the
+        // call's arity matches the extern's registered
+        // signature — `Div()` lands as `Div(0, 0, "")`, not
+        // `Div()` with garbage register reads.
+        let mut new_positional: Vec<zyntax_typed_ast::TypedNode<TypedExpression>> =
+            Vec::with_capacity(slots.len());
+        for (slot, (_, ty)) in slots.into_iter().zip(props.iter()) {
             if let Some(arg) = slot {
                 new_positional.push(arg);
             } else {
-                break;
+                new_positional.push(default_literal_for(ty, span));
             }
         }
         new_positional.extend(overflow);
@@ -5634,10 +5650,9 @@ fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
         call.named_args = unresolved_named;
     }
 
-    /// If `call` resolves to a substrate-registered primitive
-    /// (`$Blinc$<Name>$view` callee), return its prop names in
-    /// declaration order. Otherwise `None`.
-    fn primitive_callee_prop_names(call: &TypedCall) -> Option<Vec<String>> {
+    /// If `call` resolves to a substrate-registered primitive,
+    /// return its prop (name, type) pairs in declaration order.
+    fn primitive_callee_props(call: &TypedCall) -> Option<Vec<(String, Type)>> {
         let TypedExpression::Variable(callee) = &call.callee.node else {
             return None;
         };
@@ -5647,9 +5662,42 @@ fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
             .strip_prefix("$Blinc$")
             .and_then(|s| s.strip_suffix("$view"))?;
         blinc_runtime::component::with_component_registry(|r| {
-            r.get_by_name(name)
-                .map(|def| def.props.iter().map(|p| p.name.to_string()).collect())
+            r.get_by_name(name).map(|def| {
+                def.props
+                    .iter()
+                    .map(|p| (p.name.to_string(), p.ty.clone()))
+                    .collect()
+            })
         })
+    }
+
+    /// Type-appropriate literal for an unsupplied prop slot.
+    /// I64 / I32 → `0`, F64 → `0.0`, String → `""`. Anything
+    /// else falls back to `0` (matches the extern's null /
+    /// sentinel convention).
+    fn default_literal_for(
+        ty: &Type,
+        span: zyntax_typed_ast::Span,
+    ) -> zyntax_typed_ast::TypedNode<TypedExpression> {
+        match ty {
+            Type::Primitive(PrimitiveType::F64) => typed_node(
+                TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Float(0.0)),
+                ty.clone(),
+                span,
+            ),
+            Type::Primitive(PrimitiveType::String) => typed_node(
+                TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::String(
+                    zyntax_typed_ast::InternedString::new_global(""),
+                )),
+                ty.clone(),
+                span,
+            ),
+            _ => typed_node(
+                TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(0)),
+                ty.clone(),
+                span,
+            ),
+        }
     }
 
     for decl in program.declarations.iter_mut() {
@@ -7564,13 +7612,11 @@ mod tests {
             div_callee.resolve_global().as_deref(),
             Some("$Blinc$Div$view")
         );
-        // Div takes (children, __style). The styling-args pass
-        // resolves `__style` to a positional `0` literal because
-        // this DSL source supplied no styling args.
+        // Div takes (children, __style, class).
         assert_eq!(
             div_call.positional_args.len(),
-            2,
-            "Div takes (children, __style)"
+            3,
+            "Div takes (children, __style, class)"
         );
         let TypedExpression::Variable(div_list_arg) = &div_call.positional_args[0].node else {
             panic!("Div arg 0 should be the list ident Variable");
