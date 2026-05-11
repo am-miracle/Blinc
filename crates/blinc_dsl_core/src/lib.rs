@@ -2395,6 +2395,167 @@ mod tests {
         );
     }
 
+    /// `component Counter (initial: i32, step: i32) { ... }` parses the
+    /// props parenthetical and folds the prop fields into the lowered
+    /// Class.fields, ahead of any body fields. The order matters:
+    /// props come first because at the call site they're bound
+    /// positionally before any body-declared state initialises.
+    #[test]
+    fn parse_component_with_props_folded() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component Counter (initial: i32, step: i32) {
+                    state count: i32
+                    view { text("count") }
+                }
+                "#,
+                "counter_with_props.blinc",
+            )
+            .expect("parse");
+
+        let class = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Class(c) => Some(c),
+                _ => None,
+            })
+            .expect("expected a Class decl from the folded component");
+
+        // 2 props (initial, step) + 1 state field (count) = 3 fields.
+        let names: Vec<_> = class
+            .fields
+            .iter()
+            .map(|f| f.name.resolve_global())
+            .collect();
+        assert_eq!(
+            class.fields.len(),
+            3,
+            "expected 3 fields (initial, step, count), got: {:?}",
+            names
+        );
+        assert_eq!(
+            class.fields[0].name.resolve_global().as_deref(),
+            Some("initial"),
+            "props should be first"
+        );
+        assert_eq!(
+            class.fields[1].name.resolve_global().as_deref(),
+            Some("step")
+        );
+        assert_eq!(
+            class.fields[2].name.resolve_global().as_deref(),
+            Some("count"),
+            "body fields should follow props"
+        );
+    }
+
+    /// Bare struct-only form with props: `component Foo (a: i32) { b: i32 }`.
+    /// The split form must accept the same `(props)` parenthetical so
+    /// the two definition shapes stay symmetrical.
+    #[test]
+    fn parse_component_with_props_struct_only() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"component Pair (left: i32, right: i32) { sum: i32 }"#,
+                "pair_with_props.blinc",
+            )
+            .expect("parse");
+
+        let class = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Class(c) => Some(c),
+                _ => None,
+            })
+            .expect("expected a Class decl");
+
+        assert_eq!(class.fields.len(), 3);
+        assert_eq!(
+            class.fields[0].name.resolve_global().as_deref(),
+            Some("left")
+        );
+        assert_eq!(
+            class.fields[1].name.resolve_global().as_deref(),
+            Some("right")
+        );
+        assert_eq!(
+            class.fields[2].name.resolve_global().as_deref(),
+            Some("sum")
+        );
+    }
+
+    /// Empty props parens — `component Foo () { ... }` — is legal and
+    /// equivalent to no parens. Keeps the call-site / def-site
+    /// grammar regular (parser doesn't need a special "must have at
+    /// least one prop" rule). This pins that behaviour.
+    #[test]
+    fn parse_component_with_empty_props() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component Empty () {
+                    state x: i32
+                    view { text("x") }
+                }
+                "#,
+                "empty_props.blinc",
+            )
+            .expect("parse");
+
+        let class = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Class(c) => Some(c),
+                _ => None,
+            })
+            .expect("expected a Class");
+
+        assert_eq!(class.fields.len(), 1, "only the state field is present");
+        assert_eq!(class.fields[0].name.resolve_global().as_deref(), Some("x"));
+    }
+
+    /// Single-prop component — exercises the `prop_decl_list` path
+    /// where there's only the head `prop_decl` and no `prop_decl_tail`
+    /// repetitions. Regression guard for prepend_list with empty
+    /// tail.
+    #[test]
+    fn parse_component_with_single_prop() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(r#"component Only (just_one: i32) { }"#, "single_prop.blinc")
+            .expect("parse");
+
+        let class = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Class(c) => Some(c),
+                _ => None,
+            })
+            .expect("expected a Class");
+
+        assert_eq!(class.fields.len(), 1);
+        assert_eq!(
+            class.fields[0].name.resolve_global().as_deref(),
+            Some("just_one")
+        );
+    }
+
     /// `text(N)` round-trip — probes the i32 ABI through Cranelift.
     /// Confirms (a) the integer terminal in the grammar lowers to a
     /// real `IntLiteral`, (b) PEG backtracks from the string variant

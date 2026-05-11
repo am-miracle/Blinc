@@ -136,7 +136,7 @@ bare_view_item = { "view" ~ "{" ~ stmts:statements ~ "}" }
 // think in terms of "a component IS a thing with state and a
 // view". Internally we lower to Zyntax's struct + impl idiom.
 component_folded = {
-    "component" ~ name:identifier ~ "{"
+    "component" ~ name:identifier ~ props:component_props? ~ "{"
     ~ fields:struct_field_list?
     ~ view:view_member
     ~ extra:impl_fn*
@@ -145,7 +145,7 @@ component_folded = {
   -> concat_list(
       [TypedDeclaration::Class {
           name: intern(name),
-          fields: fields,
+          fields: concat_list(props.unwrap_or([]), fields.unwrap_or([])),
       }],
       [TypedDeclaration::Impl {
           trait_name: intern(name),
@@ -153,6 +153,37 @@ component_folded = {
           items: prepend_list(view, extra),
       }],
   )
+
+// Optional `(prop_a: T, prop_b: U)` after the component name —
+// declares props the component accepts at instantiation. Both
+// positional and named call-site forms are supported (the call-
+// site grammar is in a sibling commit). Props lower to
+// `TypedField`s on the Class alongside any `state` /
+// bare-name fields declared in the body — Zyntax treats them
+// uniformly. Default values aren't supported yet pending the
+// upstream `TypedField` initializer patch (#6).
+//
+// Why parens and not e.g. a `props { ... }` block: matches the
+// JS / TypeScript / Swift function-signature mental model the
+// DSL targets, and keeps the props/state distinction visible at
+// a glance (props live "outside" the body, state lives inside).
+component_props = { "(" ~ list:prop_decl_list? ~ ")" }
+  -> list
+
+prop_decl_list = { first:prop_decl ~ rest:prop_decl_tail* }
+  -> prepend_list(first, rest)
+
+prop_decl_tail = { ","? ~ p:prop_decl }
+  -> p
+
+// `name: type` — same shape as a plain struct field, no
+// `state` keyword (props aren't reactive container fields, they
+// stay constant for the lifetime of a component instance).
+prop_decl = { name:identifier ~ ":" ~ ty:state_type }
+  -> TypedField {
+      name: intern(name),
+      ty: ty,
+  }
 
 // Two view forms — the grammar distinguishes them by what comes
 // after the `view` keyword. PEG ordered alternates: the deps form
@@ -232,10 +263,14 @@ dep_id_expr = { name:identifier }
 // `initializer: None`. Until that's patched upstream, default
 // values come from explicit `fn init() { count = 0 }` methods in
 // a separate `impl` block (or in the folded form above).
-component_decl = { "component" ~ name:identifier ~ "{" ~ fields:struct_field_list? ~ "}" }
+component_decl = {
+    "component" ~ name:identifier ~ props:component_props? ~ "{"
+    ~ fields:struct_field_list?
+    ~ "}"
+}
   -> TypedDeclaration::Class {
       name: intern(name),
-      fields: fields,
+      fields: concat_list(props.unwrap_or([]), fields.unwrap_or([])),
   }
 
 // Field list. Each field is either a reactive `state` field
