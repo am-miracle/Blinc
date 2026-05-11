@@ -1360,9 +1360,87 @@ fn lower_component_calls(program: &mut TypedProgram) {
     }
 
     fn rewrite_block(block: &mut zyntax_typed_ast::typed_ast::TypedBlock) {
-        for stmt in &mut block.statements {
-            rewrite_stmt(stmt);
+        // Walk + flatten. After per-stmt rewrite, the block's
+        // statement list may need to be expanded (a component call
+        // with a trailing body Block contributes the call PLUS the
+        // body's statements inline) or contracted (a slot
+        // open/close marker has no runtime meaning today and is
+        // dropped). Build a fresh statements vec and replace.
+        let old_stmts = std::mem::take(&mut block.statements);
+        let mut new_stmts: Vec<zyntax_typed_ast::TypedNode<TypedStatement>> =
+            Vec::with_capacity(old_stmts.len());
+        for mut stmt in old_stmts {
+            rewrite_stmt(&mut stmt);
+            inline_into(&mut new_stmts, stmt);
         }
+        block.statements = new_stmts;
+    }
+
+    /// Append `stmt` to `out`, optionally flattening it:
+    ///
+    /// - `__slot_open__("name")` / `__slot_close__()` markers
+    ///   contribute nothing — they're a definition-site
+    ///   "named-children" annotation the host-runtime side would
+    ///   consume if there were one. For the flat DslOp pipeline
+    ///   we just route every body child through as a default
+    ///   child. Future host code that needs named-slot routing
+    ///   should hook in before this pass.
+    /// - `Counter$view(args..., Block { children })` becomes the
+    ///   bare call `Counter$view(args...)` immediately followed by
+    ///   the children statements inlined at the parent level.
+    ///   Mirrors "children render after parent" — the simplest
+    ///   composition that fits a flat scene-op buffer.
+    /// - Everything else passes through unchanged.
+    ///
+    /// Recursive on inlined children so nested component calls
+    /// (`A() { B() { C() } }`) flatten all the way down.
+    fn inline_into(
+        out: &mut Vec<zyntax_typed_ast::TypedNode<TypedStatement>>,
+        mut stmt: zyntax_typed_ast::TypedNode<TypedStatement>,
+    ) {
+        // Slot markers contribute nothing at runtime.
+        if is_slot_marker_stmt(&stmt) {
+            return;
+        }
+
+        // Component call with trailing body Block — extract.
+        if let TypedStatement::Expression(expr_node) = &mut stmt.node {
+            if let TypedExpression::Call(call) = &mut expr_node.node {
+                if matches!(
+                    call.positional_args.last().map(|a| &a.node),
+                    Some(TypedExpression::Block(_))
+                ) {
+                    let block_arg = call.positional_args.pop().unwrap();
+                    let TypedExpression::Block(body_block) = block_arg.node else {
+                        unreachable!("just confirmed Block via the matches! above");
+                    };
+                    out.push(stmt);
+                    for inner in body_block.statements {
+                        inline_into(out, inner);
+                    }
+                    return;
+                }
+            }
+        }
+
+        out.push(stmt);
+    }
+
+    /// `Expression(Call(Variable("__slot_open__" | "__slot_close__"), _))`.
+    fn is_slot_marker_stmt(stmt: &zyntax_typed_ast::TypedNode<TypedStatement>) -> bool {
+        let TypedStatement::Expression(expr_node) = &stmt.node else {
+            return false;
+        };
+        let TypedExpression::Call(call) = &expr_node.node else {
+            return false;
+        };
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            return false;
+        };
+        matches!(
+            callee.resolve_global().as_deref(),
+            Some("__slot_open__") | Some("__slot_close__")
+        )
     }
 
     fn rewrite_stmt(stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>) {
@@ -2788,6 +2866,110 @@ mod tests {
         }
     }
 
+    /// End-to-end: `view { Outer() { Inner() } }` actually
+    /// renders both components' scene ops in source order. The
+    /// flatten pass extracts the body Block from the parent
+    /// call's args and inlines the children right after the
+    /// parent. The flat DslOp buffer ends up with the parent's
+    /// ops followed by each child's ops.
+    #[test]
+    fn render_view_with_component_children() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            component Outer { view { text("outer") } }
+            component Inner { view { text("inner") } }
+            view {
+                Outer() {
+                    Inner()
+                    Inner()
+                }
+            }
+            "#,
+            "children_e2e.blinc",
+        )
+        .expect("compile");
+
+        let ops = dsl.render_view().expect("render_view");
+        assert_eq!(ops.len(), 3, "expected outer + 2 inners, got {ops:?}");
+        match (&ops[0], &ops[1], &ops[2]) {
+            (DslOp::Text(a), DslOp::Text(b), DslOp::Text(c)) => {
+                assert_eq!(a, "outer");
+                assert_eq!(b, "inner");
+                assert_eq!(c, "inner");
+            }
+            other => panic!("expected 3 text ops in order, got {other:?}"),
+        }
+    }
+
+    /// End-to-end: `slot Name { ... }` body items flatten into
+    /// the parent's render alongside default children. The slot
+    /// markers themselves are dropped at runtime (no host-side
+    /// named-slot routing yet for the flat DslOp buffer).
+    #[test]
+    fn render_view_with_slots_flattens() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            component Tabs { view { text("tabs") } }
+            component Tab { view { text("tab") } }
+            view {
+                Tabs() {
+                    slot Header { Tab() }
+                    Tab()
+                }
+            }
+            "#,
+            "slots_e2e.blinc",
+        )
+        .expect("compile");
+
+        let ops = dsl.render_view().expect("render_view");
+        // Tabs + Header's Tab + default-children Tab = 3 ops.
+        assert_eq!(ops.len(), 3, "expected tabs + 2 tabs, got {ops:?}");
+    }
+
+    /// Nested composition: `Outer() { Mid() { Inner() } }` — the
+    /// flatten is recursive, so all three components' ops appear
+    /// in order in the flat DslOp buffer.
+    #[test]
+    fn render_view_with_nested_component_children() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            component Outer { view { text("outer") } }
+            component Mid { view { text("mid") } }
+            component Inner { view { text("inner") } }
+            view {
+                Outer() {
+                    Mid() {
+                        Inner()
+                    }
+                }
+            }
+            "#,
+            "nested_children.blinc",
+        )
+        .expect("compile");
+
+        let ops = dsl.render_view().expect("render_view");
+        assert_eq!(ops.len(), 3, "expected outer + mid + inner, got {ops:?}");
+        match (&ops[0], &ops[1], &ops[2]) {
+            (DslOp::Text(a), DslOp::Text(b), DslOp::Text(c)) => {
+                assert_eq!(a, "outer");
+                assert_eq!(b, "mid");
+                assert_eq!(c, "inner");
+            }
+            other => panic!("expected outer/mid/inner in order, got {other:?}"),
+        }
+    }
+
     /// End-to-end: a prop value bound to a method param,
     /// interpolated into an f-string inside the view body, then
     /// rendered. Exercises the full parse → lower → bind →
@@ -3765,11 +3947,12 @@ mod tests {
     /// terminal is the explicit disambiguator. The PEG should
     /// backtrack and try `assign_stmt` (which fails because there's
     /// `Counter() { Inner(1) }` — body block on a component call.
-    /// After lowering, a body-bearing `Counter() { ... }` becomes
-    /// `Counter(Block { ... })` — the component name is the
-    /// callee, and the body Block rides as the single positional
-    /// arg. Inner component calls inside the body are themselves
-    /// lowered (recursive walk).
+    /// After lowering, a body-bearing `Counter() { Inner(1);
+    /// Inner(2) }` becomes a flat statement sequence: the parent's
+    /// `Counter$view()` call followed by each child statement
+    /// inlined at the parent level. The body Block is consumed —
+    /// no trailing arg, no nesting. Models "children render after
+    /// parent" semantics for the flat DslOp scene buffer.
     #[test]
     fn parse_component_call_with_body_children() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -3792,64 +3975,54 @@ mod tests {
             .expect("parse");
 
         let stmts = first_user_function_body(&program);
-        let TypedStatement::Expression(expr_node) = &stmts[0].node else {
-            panic!("expected Expression statement");
-        };
-        let TypedExpression::Call(call) = &expr_node.node else {
-            panic!("expected Call expression");
-        };
-
-        let TypedExpression::Variable(callee_name) = &call.callee.node else {
-            panic!("expected Variable callee");
-        };
+        // 3 stmts: Counter$view(); Inner$view(1); Inner$view(2)
         assert_eq!(
-            callee_name.resolve_global().as_deref(),
-            Some("Counter$view")
+            stmts.len(),
+            3,
+            "expected flat [Counter$view, Inner$view, Inner$view], got {} stmts",
+            stmts.len()
         );
 
-        // args: [Block { Inner(1); Inner(2) }]
-        assert_eq!(
-            call.positional_args.len(),
-            1,
-            "expected single body_block arg, got {} args",
-            call.positional_args.len()
-        );
+        fn callee_name(stmt: &zyntax_typed_ast::TypedNode<TypedStatement>) -> Option<String> {
+            let TypedStatement::Expression(e) = &stmt.node else {
+                return None;
+            };
+            let TypedExpression::Call(c) = &e.node else {
+                return None;
+            };
+            let TypedExpression::Variable(v) = &c.callee.node else {
+                return None;
+            };
+            v.resolve_global().map(|s| s.to_string())
+        }
+        assert_eq!(callee_name(&stmts[0]).as_deref(), Some("Counter$view"));
+        assert_eq!(callee_name(&stmts[1]).as_deref(), Some("Inner$view"));
+        assert_eq!(callee_name(&stmts[2]).as_deref(), Some("Inner$view"));
 
-        let TypedExpression::Block(block) = &call.positional_args[0].node else {
-            panic!(
-                "arg should be a Block, got {:?}",
-                call.positional_args[0].node
-            );
+        // The parent call has NO body-Block arg anymore (children
+        // were extracted and inlined). Counter takes no props, so
+        // positional_args should be empty.
+        let TypedStatement::Expression(e) = &stmts[0].node else {
+            unreachable!()
+        };
+        let TypedExpression::Call(c) = &e.node else {
+            unreachable!()
         };
         assert_eq!(
-            block.statements.len(),
-            2,
-            "body block should hold 2 child statements"
-        );
-
-        // The nested Inner(1) call should also be lowered — callee
-        // is `Inner` (Variable), not `__component_call__`.
-        let TypedStatement::Expression(inner_expr) = &block.statements[0].node else {
-            panic!("first body stmt should be Expression");
-        };
-        let TypedExpression::Call(inner_call) = &inner_expr.node else {
-            panic!("first body stmt should be a Call");
-        };
-        let TypedExpression::Variable(inner_callee) = &inner_call.callee.node else {
-            panic!("inner callee should be a Variable");
-        };
-        assert_eq!(
-            inner_callee.resolve_global().as_deref(),
-            Some("Inner$view"),
-            "nested component call should be lowered recursively \
-             to the mangled view symbol"
+            c.positional_args.len(),
+            0,
+            "Counter$view should have no args after body inlining, got: {:?}",
+            c.positional_args
         );
     }
 
-    /// Body block with mixed `let` + component child — proves the
-    /// body is a real TypedBlock that accepts any statement, not
-    /// just component calls. Mirrors how a real component author
-    /// might bind a local before instantiating a child.
+    /// Body with a `let` binding + component child. The body
+    /// Block flattens into the parent statement list — the `let`
+    /// rides between the parent call and the child call. Note:
+    /// this is just the AST-shape assertion; whether the `let`
+    /// binding's value flows into the child call at runtime is a
+    /// scope question (a flat statement sequence puts the let in
+    /// the OUTER scope, not the inner component's scope).
     #[test]
     fn parse_component_call_with_let_in_body() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -3872,32 +4045,32 @@ mod tests {
             .expect("parse");
 
         let stmts = first_user_function_body(&program);
-        let TypedStatement::Expression(expr_node) = &stmts[0].node else {
-            panic!("expected Expression");
-        };
-        let TypedExpression::Call(call) = &expr_node.node else {
-            panic!("expected Call");
-        };
-        // After lowering, the body Block is positional arg [0].
-        let TypedExpression::Block(block) = &call.positional_args[0].node else {
-            panic!("body should be a Block");
-        };
-
-        assert_eq!(block.statements.len(), 2, "let + Inner = 2 stmts");
-        let TypedStatement::Let(_) = &block.statements[0].node else {
-            panic!("first body stmt should be Let");
-        };
-        let TypedStatement::Expression(_) = &block.statements[1].node else {
-            panic!("second body stmt should be the Inner call");
-        };
+        // 3 stmts: Wrapper$view(); let count = 1; Inner$view(count)
+        assert_eq!(
+            stmts.len(),
+            3,
+            "expected [Wrapper$view, let, Inner$view] after flatten"
+        );
+        assert!(
+            matches!(stmts[0].node, TypedStatement::Expression(_)),
+            "stmts[0] should be the Wrapper call"
+        );
+        assert!(
+            matches!(stmts[1].node, TypedStatement::Let(_)),
+            "stmts[1] should be the let binding"
+        );
+        assert!(
+            matches!(stmts[2].node, TypedStatement::Expression(_)),
+            "stmts[2] should be the Inner call"
+        );
     }
 
-    /// `slot Header { ... }` inside a component body emits a
-    /// `__slot_open__("Header") ... __slot_close__()` marker pair
-    /// flanking the slot's body statements. Pins the linear marker
-    /// representation the upstream stmt-list flatten produces — the
-    /// host's lowering pass folds open/close pairs back into a
-    /// named-slot tree at codegen time.
+    /// `slot Header { ... }` inside a component body — the
+    /// `__slot_open__` / `__slot_close__` markers are stripped at
+    /// flatten time (host-side runtime would route named slots,
+    /// but the prototype's flat DslOp scene buffer has no slot
+    /// concept). Slot bodies fold into the parent as if they were
+    /// plain children.
     #[test]
     fn parse_component_call_with_slot() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -3922,30 +4095,22 @@ mod tests {
             .expect("parse");
 
         let stmts = first_user_function_body(&program);
-        let TypedStatement::Expression(expr_node) = &stmts[0].node else {
-            panic!("expected Expression");
-        };
-        let TypedExpression::Call(call) = &expr_node.node else {
-            panic!("expected Call");
-        };
-        // After lowering, the body Block is positional arg [0].
-        let TypedExpression::Block(block) = &call.positional_args[0].node else {
-            panic!("body should be a Block");
-        };
 
-        // [__slot_open__("Header"), Tab(1), __slot_close__, Tab(2)] = 4 stmts.
-        // `__slot_open__` / `__slot_close__` are NOT rewritten by
-        // `lower_component_calls` — they're statement-level marker
-        // pairs the component runtime unfolds when walking the
-        // children block. Only `__component_call__` gets rewritten.
+        // Flatten output:
+        //   Tabs$view(); Tab$view(1); Tab$view(2)
+        //
+        // The `slot Header { Tab(1) }` lowered to
+        //   `__slot_open__("Header"), Tab$view(1), __slot_close__()`
+        // (linear marker pair from the slot rule's
+        // `concat_list(...)`). flatten then DROPS both markers and
+        // inlines `Tab$view(1)` at the parent level. `Tab(2)` was
+        // already a default child; it appears next.
         assert_eq!(
-            block.statements.len(),
-            4,
-            "expected 4 statements (open, Tab(1), close, Tab(2)), got {} — flatten not working?",
-            block.statements.len()
+            stmts.len(),
+            3,
+            "expected flat [Tabs$view, Tab$view, Tab$view] after stripping slot markers"
         );
 
-        // Helper to extract callee name from a stmt-position Call.
         fn callee_name(stmt: &zyntax_typed_ast::TypedNode<TypedStatement>) -> Option<String> {
             let TypedStatement::Expression(e) = &stmt.node else {
                 return None;
@@ -3958,42 +4123,18 @@ mod tests {
             };
             v.resolve_global().map(|s| s.to_string())
         }
+        assert_eq!(callee_name(&stmts[0]).as_deref(), Some("Tabs$view"));
+        assert_eq!(callee_name(&stmts[1]).as_deref(), Some("Tab$view"));
+        assert_eq!(callee_name(&stmts[2]).as_deref(), Some("Tab$view"));
 
-        // Slot markers untouched by the lowering pass.
-        assert_eq!(
-            callee_name(&block.statements[0]).as_deref(),
-            Some("__slot_open__")
-        );
-        // Inner Tab(1) is a lowered component call — callee is the
-        // mangled view symbol, not the marker.
-        assert_eq!(
-            callee_name(&block.statements[1]).as_deref(),
-            Some("Tab$view"),
-            "nested component call should be lowered to the mangled view symbol"
-        );
-        assert_eq!(
-            callee_name(&block.statements[2]).as_deref(),
-            Some("__slot_close__")
-        );
-        assert_eq!(
-            callee_name(&block.statements[3]).as_deref(),
-            Some("Tab$view"),
-            "trailing default child should also be a lowered call"
-        );
-
-        // The __slot_open__ marker's first arg is the slot name.
-        let TypedStatement::Expression(open_expr) = &block.statements[0].node else {
-            unreachable!();
-        };
-        let TypedExpression::Call(open_call) = &open_expr.node else {
-            unreachable!();
-        };
-        let TypedExpression::Literal(TypedLiteral::String(slot_name)) =
-            &open_call.positional_args[0].node
-        else {
-            panic!("__slot_open__ first arg should be the slot-name StringLiteral");
-        };
-        assert_eq!(slot_name.resolve_global().as_deref(), Some("Header"));
+        // No slot markers anywhere — strip is complete.
+        for s in stmts {
+            let name = callee_name(s).unwrap_or_default();
+            assert!(
+                !name.starts_with("__slot_"),
+                "found leftover slot marker `{name}` in flattened output"
+            );
+        }
     }
 
     /// `lower_component_calls` strips the unused defensive
