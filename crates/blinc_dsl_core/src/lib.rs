@@ -3335,6 +3335,11 @@ pub struct BlincDsl {
     /// entry, but our existing flow only adds value-returning
     /// symbols, never demotes).
     value_returning_views: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Per-file map of JIT function names emitted by the most
+    /// recent compile of each path. Populated by `compile_file`
+    /// / `compile_directory` so `recompile_file` knows which
+    /// symbols belong to a given source.
+    compiled_modules: Arc<Mutex<std::collections::HashMap<std::path::PathBuf, Vec<String>>>>,
 }
 
 impl BlincDsl {
@@ -3391,11 +3396,13 @@ impl BlincDsl {
         register_blinc_layout_primitives();
 
         let value_returning_views = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let compiled_modules = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
         Ok(Self {
             grammar,
             runtime,
             value_returning_views,
+            compiled_modules,
         })
     }
 
@@ -3802,11 +3809,67 @@ impl BlincDsl {
         Ok(function_names)
     }
 
-    /// Compile a `.blinc` file off disk.
+    /// Compile a `.blinc` file off disk. Records the resulting
+    /// JIT function names against the path so [`Self::recompile_file`]
+    /// can re-emit them on hot reload.
     pub fn compile_file(&self, path: &Path) -> BlincDslResult<Vec<String>> {
         let source = std::fs::read_to_string(path)?;
         let filename = path.to_string_lossy();
-        self.compile_source(&source, &filename)
+        let names = self.compile_source(&source, &filename)?;
+        self.compiled_modules
+            .lock()
+            .expect("compiled_modules mutex poisoned")
+            .insert(path.to_path_buf(), names.clone());
+        Ok(names)
+    }
+
+    /// Compile every `*.blinc` file directly inside `path`
+    /// (non-recursive). Returns a per-file map of the JIT
+    /// function names emitted.
+    ///
+    /// All files share the process-global substrate registry —
+    /// component / FSM / signal names must be unique across the
+    /// directory or the second compile errors on duplicate
+    /// symbols. Imports + module-prefixed mangling land in a
+    /// later slice.
+    pub fn compile_directory(
+        &self,
+        path: &Path,
+    ) -> BlincDslResult<std::collections::HashMap<std::path::PathBuf, Vec<String>>> {
+        let mut out = std::collections::HashMap::new();
+        let entries = std::fs::read_dir(path)?;
+        // Sort by file name for deterministic compile order.
+        let mut files: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("blinc"))
+            .collect();
+        files.sort();
+        for file in files {
+            let names = self.compile_file(&file)?;
+            out.insert(file, names);
+        }
+        Ok(out)
+    }
+
+    /// Re-run compilation for a single file. Replaces the per-
+    /// path entry in the compiled-modules map; the JIT-side
+    /// symbol table picks up the new function pointers via
+    /// beadie's atomic `swap_compiled` (FSM / signal / component
+    /// registry state survives — see `blinc_runtime::reload`).
+    ///
+    /// Returns the file's freshly-emitted function names.
+    pub fn recompile_file(&self, path: &Path) -> BlincDslResult<Vec<String>> {
+        self.compile_file(path)
+    }
+
+    /// Snapshot of which JIT function names were last emitted
+    /// for `path`. `None` if the file hasn't been compiled
+    /// through this `BlincDsl` instance.
+    pub fn compiled_function_names(&self, path: &Path) -> Option<Vec<String>> {
+        self.compiled_modules
+            .lock()
+            .ok()
+            .and_then(|m| m.get(path).cloned())
     }
 
     /// Parse `.blinc` source to a TypedAST without compiling or
