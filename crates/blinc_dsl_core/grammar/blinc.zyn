@@ -145,7 +145,11 @@ component_folded = {
   -> concat_list(
       [TypedDeclaration::Class {
           name: intern(name),
-          fields: concat_list(props.unwrap_or([]), fields.unwrap_or([])),
+          // Props are NOT class fields — they're constructor
+          // bindings the `bind_component_props` post-parse pass
+          // injects as method params. Class.fields holds only the
+          // body's `state` / data declarations.
+          fields: fields.unwrap_or([]),
       }],
       [TypedDeclaration::Impl {
           // Empty trait_name marks this as an INHERENT impl
@@ -166,23 +170,55 @@ component_folded = {
           // ...)` callees.
           trait_name: intern(""),
           for_type: intern(name),
-          items: prepend_list(view, extra),
+          // `__component_props__` is a synthesized marker method
+          // that carries the prop param list. The
+          // `bind_component_props` post-parse pass:
+          //
+          //   1. walks each impl, finds the `__component_props__`
+          //      method
+          //   2. reads its params (the prop list)
+          //   3. prepends those params onto every other method in
+          //      the same impl (so `view` becomes `view(initial:
+          //      i32, step: i32)`)
+          //   4. strips the marker so the compile path doesn't try
+          //      to call it
+          //
+          // Why a marker method and not e.g. storing props on the
+          // impl directly: TypedTraitImpl has no "params" field of
+          // its own, and the action language can't synthesize a
+          // side-table. A marker method is the cheapest path that
+          // round-trips through the existing AST shapes.
+          items: concat_list(
+              [TypedDeclaration::Function {
+                  name: intern("__component_props__"),
+                  params: props.unwrap_or([]),
+                  return_type: Type::Unit,
+                  body: Some(TypedBlock { statements: [] }),
+              }],
+              prepend_list(view, extra),
+          ),
       }],
   )
 
 // Optional `(prop_a: T, prop_b: U)` after the component name —
 // declares props the component accepts at instantiation. Both
-// positional and named call-site forms are supported (the call-
-// site grammar is in a sibling commit). Props lower to
-// `TypedField`s on the Class alongside any `state` /
-// bare-name fields declared in the body — Zyntax treats them
-// uniformly. Default values aren't supported yet pending the
-// upstream `TypedField` initializer patch (#6).
+// positional and named call-site forms are supported. Props
+// lower to `TypedParameter`s — they ride on a synthesized
+// `__component_props__` marker method that the post-parse pass
+// `bind_component_props` consumes to prepend the prop list onto
+// every other method in the impl (including the view). They are
+// NOT stored as Class fields: a prop is a constructor-time
+// binding, not part of the component's persistent shape — same
+// distinction React/Vue draw between props and state.
 //
 // Why parens and not e.g. a `props { ... }` block: matches the
 // JS / TypeScript / Swift function-signature mental model the
 // DSL targets, and keeps the props/state distinction visible at
 // a glance (props live "outside" the body, state lives inside).
+//
+// Default values aren't supported yet pending the upstream
+// `TypedParameter::default_value` plumbing through the action
+// language.
 component_props = { "(" ~ list:prop_decl_list? ~ ")" }
   -> list
 
@@ -192,11 +228,11 @@ prop_decl_list = { first:prop_decl ~ rest:prop_decl_tail* }
 prop_decl_tail = { ","? ~ p:prop_decl }
   -> p
 
-// `name: type` — same shape as a plain struct field, no
-// `state` keyword (props aren't reactive container fields, they
-// stay constant for the lifetime of a component instance).
+// `name: type` — directly a `TypedParameter` so it slots into
+// the synthesized `__component_props__` method's param list and
+// (via post-parse plumbing) every user method's params.
 prop_decl = { name:identifier ~ ":" ~ ty:state_type }
-  -> TypedField {
+  -> TypedParameter {
       name: intern(name),
       ty: ty,
   }
@@ -279,6 +315,13 @@ dep_id_expr = { name:identifier }
 // `initializer: None`. Until that's patched upstream, default
 // values come from explicit `fn init() { count = 0 }` methods in
 // a separate `impl` block (or in the folded form above).
+//
+// The `props:component_props?` parenthetical is accepted for
+// surface-syntax symmetry with the folded form, but on the bare
+// shape it has nowhere to bind — there's no view or method to
+// receive the params. The action drops them silently. Users who
+// want props need the folded form so the post-parse pass has a
+// method body to inject the params into.
 component_decl = {
     "component" ~ name:identifier ~ props:component_props? ~ "{"
     ~ fields:struct_field_list?
@@ -286,7 +329,7 @@ component_decl = {
 }
   -> TypedDeclaration::Class {
       name: intern(name),
-      fields: concat_list(props.unwrap_or([]), fields.unwrap_or([])),
+      fields: fields.unwrap_or([]),
   }
 
 // Field list. Each field is either a reactive `state` field

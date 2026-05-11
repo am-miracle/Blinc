@@ -1305,6 +1305,93 @@ fn lower_component_calls(program: &mut TypedProgram) {
     }
 }
 
+/// Pull props off the synthesized `__component_props__` marker
+/// method and bind them as leading parameters on every other
+/// method in the same impl. Strip the marker after.
+///
+/// The grammar emits a component `Counter (initial: i32) { view {
+/// ... }; fn on_click() { ... } }` as:
+///
+/// ```text
+/// impl Counter {
+///     fn __component_props__(initial: i32) { }   // marker
+///     fn view() { ... }
+///     fn on_click() { ... }
+/// }
+/// ```
+///
+/// After this pass:
+///
+/// ```text
+/// impl Counter {
+///     fn view(initial: i32) { ... }
+///     fn on_click(initial: i32) { ... }
+/// }
+/// ```
+///
+/// (The marker is gone.) The call site `Counter(1)` is already
+/// lowered by `lower_component_calls` to `Counter$view(1)`, so
+/// the prop binds positionally — `initial` becomes `1` inside the
+/// view body. The Zyntax JIT sees a normal function with a
+/// typed parameter and codegens the load/store as it would for
+/// any local.
+///
+/// Why a marker method instead of e.g. storing props on
+/// `TypedTraitImpl` directly: that struct has no "params" slot,
+/// and the grammar action language can't synthesize a side-table.
+/// A marker method is the cheapest path through the existing AST
+/// shapes — the same pattern used for `__fsm_meta__`.
+///
+/// The pass is idempotent: programs without a
+/// `__component_props__` method pass through untouched.
+fn bind_component_props(program: &mut TypedProgram) {
+    use zyntax_typed_ast::typed_ast::TypedDeclaration;
+
+    for decl in program.declarations.iter_mut() {
+        let TypedDeclaration::Impl(imp) = &mut decl.node else {
+            continue;
+        };
+
+        // Find the `__component_props__` marker and snapshot its
+        // params. Take(params) leaves an empty Vec behind so the
+        // strip step's drain-by-name is straightforward.
+        let prop_params = imp
+            .methods
+            .iter_mut()
+            .find(|m| m.name.resolve_global().as_deref() == Some("__component_props__"))
+            .map(|m| std::mem::take(&mut m.params));
+
+        let Some(prop_params) = prop_params else {
+            // No marker on this impl — nothing to do. Either the
+            // component has no props, or this impl came from a
+            // stand-alone `impl Foo { ... }` block.
+            continue;
+        };
+
+        // Prepend the prop params onto every OTHER method's
+        // params list. Order matters: props must come first
+        // because the call-site lowers `Counter(1, 2)` to
+        // `Counter$view(1, 2)` with the user's positional args
+        // matching the prop order.
+        for method in imp.methods.iter_mut() {
+            if method.name.resolve_global().as_deref() == Some("__component_props__") {
+                continue;
+            }
+            // Convert TypedMethodParam → TypedMethodParam (props
+            // come in as TypedMethodParam already because the
+            // marker is a TypedMethod, not a TypedFunction).
+            let mut new_params = prop_params.clone();
+            new_params.extend(std::mem::take(&mut method.params));
+            method.params = new_params;
+        }
+
+        // Strip the marker so the compile path doesn't try to
+        // surface it as a callable `Counter$__component_props__`.
+        imp.methods
+            .retain(|m| m.name.resolve_global().as_deref() != Some("__component_props__"));
+    }
+}
+
 /// Wrap every fsm's `__fsm_meta__` body with `__fsm_begin__("FsmName")`
 /// at the front and `__fsm_end__()` at the back. The host registers
 /// these markers as builtins that push/pop a "current FSM" name on
@@ -1973,6 +2060,7 @@ impl BlincDsl {
         validate_component_calls(&typed_program)
             .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
         lower_component_calls(&mut typed_program);
+        bind_component_props(&mut typed_program);
 
         // Eager registry population: walk fsm impls, pin TypeIds,
         // record metadata into the global FsmRegistry, then strip
@@ -2064,6 +2152,15 @@ impl BlincDsl {
         // Runs after validation so the validator still sees the
         // marker shape (StringLiteral name as args[0]).
         lower_component_calls(&mut program);
+
+        // Bind component props as leading params on each impl
+        // method. Independent of `lower_component_calls` — props
+        // are a definition-site concern (which impl method gets
+        // the params), call-site lowering is a use-site concern
+        // (which symbol to call). Order between the two doesn't
+        // matter functionally; running prop-binding after keeps
+        // the def-site changes contiguous in the diff.
+        bind_component_props(&mut program);
 
         Ok(program)
     }
@@ -2476,6 +2573,146 @@ mod tests {
             symbols.iter().any(|s| s == "Greeting$view"),
             "expected `Greeting$view` in compiled symbols, got {:?}",
             symbols
+        );
+    }
+
+    /// Prop declared but not referenced in body — the prop arg
+    /// flows through silently and the unused param doesn't disturb
+    /// the compile. Pins the half of `bind_component_props` that
+    /// doesn't need name-resolution of the prop inside the body.
+    #[test]
+    fn render_component_with_unused_prop() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            component Counter (initial: i32) {
+                view { text("static") }
+            }
+            view { Counter(42) }
+            "#,
+            "unused_prop.blinc",
+        )
+        .expect("compile");
+
+        let ops = dsl.render_view().expect("render_view");
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "static"),
+            other => panic!("expected DslOp::Text(\"static\"), got {other:?}"),
+        }
+    }
+
+    /// USING a prop inside an impl-method view body — or any
+    /// f-string interpolation inside an impl-method body —
+    /// currently SIGSEGVs because Zyntax's SSA name resolution
+    /// doesn't surface program-level builtin externs
+    /// (`__fstring_format__`, etc.) when compiling impl methods.
+    /// Even a literal-only `text(f"hi {42}")` inside a `component
+    /// Foo { view { ... } }` block crashes for the same reason —
+    /// the issue is independent of prop-binding.
+    ///
+    /// The prop-binding pass itself works (see
+    /// `bind_component_props_writes_view_params` and
+    /// `render_component_with_unused_prop`). The wall is
+    /// downstream — likely Zyntax's `lower_impl_block` /
+    /// `retype_block_with_self` path missing a builtin-extern
+    /// lookup step that the free-function path has.
+    ///
+    /// Ignored until upstream impl-method-body name resolution
+    /// covers program-level externs the same way free-function
+    /// bodies do.
+    #[test]
+    #[ignore]
+    fn render_component_with_prop_in_fstring() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(
+            r#"
+            component Counter (initial: i32) {
+                view { text(f"value: {initial}") }
+            }
+            view { Counter(42) }
+            "#,
+            "render_prop.blinc",
+        )
+        .expect("compile");
+
+        let ops = dsl.render_view().expect("render_view");
+        match &ops[0] {
+            DslOp::Text(s) => assert_eq!(s, "value: 42"),
+            other => panic!("expected DslOp::Text(\"value: 42\"), got {other:?}"),
+        }
+    }
+
+    /// AST-level: after `bind_component_props`, the view method's
+    /// params hold the prop list in source order. Doesn't depend
+    /// on the f-string runtime wall — purely checks that the pass
+    /// itself wires the params on. Pin so future grammar changes
+    /// don't accidentally regress the prop → method-param flow.
+    #[test]
+    fn bind_component_props_writes_view_params() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component Counter (initial: i32, step: i32) {
+                    view { text("static") }
+                    fn on_click() { }
+                }
+                "#,
+                "bind_props.blinc",
+            )
+            .expect("parse");
+
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .expect("expected an Impl decl");
+
+        // Both `view` and `on_click` should have the props bound,
+        // in source order. The marker `__component_props__` should
+        // be stripped.
+        for method_name in ["view", "on_click"] {
+            let method = impl_block
+                .methods
+                .iter()
+                .find(|m| m.name.resolve_global().as_deref() == Some(method_name))
+                .unwrap_or_else(|| panic!("expected method `{method_name}`"));
+            assert_eq!(
+                method.params.len(),
+                2,
+                "{method_name} should receive 2 prop params, got {:?}",
+                method
+                    .params
+                    .iter()
+                    .map(|p| p.name.resolve_global())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                method.params[0].name.resolve_global().as_deref(),
+                Some("initial")
+            );
+            assert_eq!(
+                method.params[1].name.resolve_global().as_deref(),
+                Some("step")
+            );
+        }
+
+        assert!(
+            !impl_block
+                .methods
+                .iter()
+                .any(|m| { m.name.resolve_global().as_deref() == Some("__component_props__") }),
+            "marker should be stripped after binding"
         );
     }
 
@@ -2922,10 +3159,13 @@ mod tests {
     }
 
     /// `component Counter (initial: i32, step: i32) { ... }` parses the
-    /// props parenthetical and folds the prop fields into the lowered
-    /// Class.fields, ahead of any body fields. The order matters:
-    /// props come first because at the call site they're bound
-    /// positionally before any body-declared state initialises.
+    /// props parenthetical and — after `bind_component_props` runs —
+    /// binds the props as leading params on the view method (and any
+    /// other impl methods). Class.fields holds only the body's
+    /// declarations (state/data fields), not the props. Order
+    /// matters: props come first in the view's param list because
+    /// the call site lowers `Counter(1, 2)` to `Counter$view(1, 2)`
+    /// with positional args matching the prop order.
     #[test]
     fn parse_component_with_props_folded() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -2943,6 +3183,8 @@ mod tests {
             )
             .expect("parse");
 
+        // Class.fields holds only the body's `state count` field —
+        // props are bound to methods, not stored as class fields.
         let class = program
             .declarations
             .iter()
@@ -2951,38 +3193,64 @@ mod tests {
                 _ => None,
             })
             .expect("expected a Class decl from the folded component");
-
-        // 2 props (initial, step) + 1 state field (count) = 3 fields.
-        let names: Vec<_> = class
-            .fields
-            .iter()
-            .map(|f| f.name.resolve_global())
-            .collect();
-        assert_eq!(
-            class.fields.len(),
-            3,
-            "expected 3 fields (initial, step, count), got: {:?}",
-            names
-        );
+        assert_eq!(class.fields.len(), 1, "only the body's state field");
         assert_eq!(
             class.fields[0].name.resolve_global().as_deref(),
-            Some("initial"),
-            "props should be first"
+            Some("count")
+        );
+
+        // After bind_component_props: the view method has the
+        // props as its leading params, in source order.
+        let impl_block = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .expect("expected an Impl decl");
+
+        // No __component_props__ method left (stripped by the pass).
+        assert!(
+            !impl_block
+                .methods
+                .iter()
+                .any(|m| { m.name.resolve_global().as_deref() == Some("__component_props__") }),
+            "__component_props__ marker should be stripped after binding"
+        );
+
+        let view = impl_block
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("view"))
+            .expect("expected a view method");
+
+        let param_names: Vec<_> = view
+            .params
+            .iter()
+            .map(|p| p.name.resolve_global())
+            .collect();
+        assert_eq!(
+            view.params.len(),
+            2,
+            "view should receive 2 props, got params: {:?}",
+            param_names
         );
         assert_eq!(
-            class.fields[1].name.resolve_global().as_deref(),
+            view.params[0].name.resolve_global().as_deref(),
+            Some("initial")
+        );
+        assert_eq!(
+            view.params[1].name.resolve_global().as_deref(),
             Some("step")
-        );
-        assert_eq!(
-            class.fields[2].name.resolve_global().as_deref(),
-            Some("count"),
-            "body fields should follow props"
         );
     }
 
-    /// Bare struct-only form with props: `component Foo (a: i32) { b: i32 }`.
-    /// The split form must accept the same `(props)` parenthetical so
-    /// the two definition shapes stay symmetrical.
+    /// Bare struct-only form: `component Pair { sum: i32 }`. The
+    /// bare shape has no methods to bind props to, so the
+    /// `(props)` parenthetical is accepted syntactically but the
+    /// props get silently dropped — see the grammar comment on
+    /// `component_decl`. Class.fields holds only body fields.
     #[test]
     fn parse_component_with_props_struct_only() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -3004,17 +3272,12 @@ mod tests {
             })
             .expect("expected a Class decl");
 
-        assert_eq!(class.fields.len(), 3);
+        // Only the body's `sum` field — `left` / `right` props are
+        // dropped because the bare form has no method to bind them
+        // onto.
+        assert_eq!(class.fields.len(), 1);
         assert_eq!(
             class.fields[0].name.resolve_global().as_deref(),
-            Some("left")
-        );
-        assert_eq!(
-            class.fields[1].name.resolve_global().as_deref(),
-            Some("right")
-        );
-        assert_eq!(
-            class.fields[2].name.resolve_global().as_deref(),
             Some("sum")
         );
     }
@@ -3669,10 +3932,13 @@ mod tests {
         );
     }
 
-    /// Single-prop component — exercises the `prop_decl_list` path
-    /// where there's only the head `prop_decl` and no `prop_decl_tail`
-    /// repetitions. Regression guard for prepend_list with empty
-    /// tail.
+    /// Single-prop component on the bare form — `component Only
+    /// (just_one: i32) { }` parses cleanly. With no view/method to
+    /// bind the prop to, the bare form silently drops it (see the
+    /// `component_decl` grammar comment). Class.fields ends up
+    /// empty. This pins the regression where the
+    /// `prop_decl_list` rule miscounts when there's only the head
+    /// `prop_decl` and no `prop_decl_tail` repetitions.
     #[test]
     fn parse_component_with_single_prop() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -3691,11 +3957,8 @@ mod tests {
             })
             .expect("expected a Class");
 
-        assert_eq!(class.fields.len(), 1);
-        assert_eq!(
-            class.fields[0].name.resolve_global().as_deref(),
-            Some("just_one")
-        );
+        // Bare form drops props — no method to bind them onto.
+        assert_eq!(class.fields.len(), 0);
     }
 
     /// `text(N)` round-trip — probes the i32 ABI through Cranelift.
