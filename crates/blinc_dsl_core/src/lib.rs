@@ -3008,6 +3008,125 @@ mod tests {
         }
     }
 
+    /// `a && b` lowers to `Binary(_, And, _)`. Single AND case;
+    /// the next test covers precedence with OR.
+    #[test]
+    fn parse_logical_and() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state x: i32
+                    view {
+                        if x > 0 && x < 100 { text("in range") }
+                    }
+                }
+                "#,
+                "logical_and.blinc",
+            )
+            .expect("parse");
+
+        let imp = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let body = imp
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("view"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+        let TypedStatement::If(if_stmt) = &body.statements[0].node else {
+            panic!("expected If");
+        };
+        let TypedExpression::Binary(top) = &if_stmt.condition.node else {
+            panic!("expected Binary top condition");
+        };
+        assert!(
+            matches!(top.op, zyntax_typed_ast::BinaryOp::And),
+            "top op should be And, got {:?}",
+            top.op
+        );
+        let TypedExpression::Binary(lhs) = &top.left.node else {
+            panic!("LHS of And should be a comparison");
+        };
+        assert!(matches!(lhs.op, zyntax_typed_ast::BinaryOp::Gt));
+        let TypedExpression::Binary(rhs) = &top.right.node else {
+            panic!("RHS of And should be a comparison");
+        };
+        assert!(matches!(rhs.op, zyntax_typed_ast::BinaryOp::Lt));
+    }
+
+    /// `a || b && c` parses with AND binding tighter than OR:
+    /// top op is Or, RHS is `Binary(b, And, c)`. Pinning the
+    /// precedence ladder so a future grammar refactor can't flip
+    /// `||` and `&&`.
+    #[test]
+    fn parse_logical_or_and_precedence() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let dsl = BlincDsl::new().expect("runtime init");
+        let program = dsl
+            .parse_to_typed_ast(
+                r#"
+                component C {
+                    state x: i32
+                    view {
+                        if x < 0 || x > 100 && x < 200 { text("either") }
+                    }
+                }
+                "#,
+                "logical_precedence.blinc",
+            )
+            .expect("parse");
+
+        let imp = program
+            .declarations
+            .iter()
+            .find_map(|d| match &d.node {
+                zyntax_typed_ast::TypedDeclaration::Impl(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let body = imp
+            .methods
+            .iter()
+            .find(|m| m.name.resolve_global().as_deref() == Some("view"))
+            .unwrap()
+            .body
+            .as_ref()
+            .unwrap();
+        let TypedStatement::If(if_stmt) = &body.statements[0].node else {
+            panic!("expected If");
+        };
+
+        let TypedExpression::Binary(top) = &if_stmt.condition.node else {
+            panic!("expected Binary at top");
+        };
+        assert!(
+            matches!(top.op, zyntax_typed_ast::BinaryOp::Or),
+            "top op should be Or, got {:?}",
+            top.op
+        );
+        let TypedExpression::Binary(rhs_and) = &top.right.node else {
+            panic!("RHS of Or should be Binary(And), got {:?}", top.right.node);
+        };
+        assert!(
+            matches!(rhs_and.op, zyntax_typed_ast::BinaryOp::And),
+            "RHS top op should be And, got {:?}",
+            rhs_and.op
+        );
+    }
+
     /// Method-call expressions parse via the postfix layer.
     /// `count.get()` lowers to TypedExpression::MethodCall with
     /// receiver=Variable("count"), method="get", no args. This is

@@ -790,7 +790,31 @@ f_string_text = @{ (!("\"" | "{" | "}") ~ ANY)+ }
 // yet for state mutation + interpolated rendering — we'll extend
 // outward as components grow conditionals and method dispatch.
 
-expr = { e:comparison_expr } -> e
+expr = { e:or_expr } -> e
+
+// Logical OR layer (lowest precedence among binary operators).
+// `a || b || c` folds left as `Binary(Binary(a, Or, b), Or, c)`,
+// short-circuiting handled at the runtime/codegen level (we just
+// build the typed-AST shape). Mirrors ml.zyn:2364-2370.
+or_expr = { first:and_expr ~ rest:or_rest* }
+  -> fold_left_ops(first, rest)
+
+or_rest = { op:or_op ~ operand:and_expr }
+  -> make_pair(op, operand)
+
+or_op = @{ "||" }
+
+// Logical AND layer. Binds tighter than `||`, looser than
+// comparisons (`a == b && c == d` → `Binary(a == b, And, c == d)`,
+// matching every C-family precedence table). Mirrors
+// ml.zyn:2373-2379.
+and_expr = { first:comparison_expr ~ rest:and_rest* }
+  -> fold_left_ops(first, rest)
+
+and_rest = { op:and_op ~ operand:comparison_expr }
+  -> make_pair(op, operand)
+
+and_op = @{ "&&" }
 
 // Comparison layer. Single-shot, non-chainable — `a < b < c` is
 // a parse error, not `(a < b) < c`. Mirrors ml.zyn:2384-2396 with
