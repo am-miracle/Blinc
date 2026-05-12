@@ -50,6 +50,7 @@ fn main() -> Result<()> {
                     div()
                         .overflow_scroll()
                         .w(ctx.width / 2.0)
+                        .h(ctx.height)
                         .child(source_pane),
                 )
                 .child(

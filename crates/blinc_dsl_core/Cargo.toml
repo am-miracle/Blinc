@@ -20,14 +20,14 @@ zyntax_embed = { workspace = true }
 # through type inference has to add the extern decls programmatically.
 # Pinned to the same upstream rev as `zyntax_embed` in the workspace
 # Cargo.toml — bump both together when pulling in upstream changes.
-zyntax_typed_ast = { git = "https://github.com/darmie/zyntax", rev = "5b0dfab7940dd01406f1982e02a2d2c7b5242604" }
+zyntax_typed_ast = { git = "https://github.com/darmie/zyntax", rev = "212dba388946d1561dd36c8e7393841159914294" }
 
 # Zyntax runtime support library (`sdk/zrtl/`). The JIT compiles
 # DSL closures (`|| { … }`) into `ZrtlClosure*` values; the Div
 # on_click extern receives that pointer as an `i64` and invokes
 # it via `zrtl_closure_call`. Pinned to the same upstream rev as
 # the other Zyntax crates.
-zrtl = { git = "https://github.com/darmie/zyntax", rev = "5b0dfab7940dd01406f1982e02a2d2c7b5242604" }
+zrtl = { git = "https://github.com/darmie/zyntax", rev = "212dba388946d1561dd36c8e7393841159914294" }
 
 # Runtime-agnostic FSM substrate. blinc_dsl_core publishes its
 # parsed FSM defs into `blinc_runtime::fsm::FsmRegistry` and

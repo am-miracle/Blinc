@@ -112,7 +112,7 @@ rust-version = "1.75"
 # track upstream commits when the Blinc DSL prototype lands. The
 # previous `path = "../zyntax/..."` worked locally during early
 # prototyping but broke CI runners that don't clone the sibling repo.
-zyntax_embed = { git = "https://github.com/darmie/zyntax", rev = "5b0dfab7940dd01406f1982e02a2d2c7b5242604" }
+zyntax_embed = { git = "https://github.com/darmie/zyntax", rev = "212dba388946d1561dd36c8e7393841159914294" }
 
 # Krio (async runtime) — Zyntax's `krio_adapter` pins to rev `fe0177c`
 # (see zyntax/crates/passes/krio_adapter/Cargo.toml). We declare the
@@ -242,18 +242,5 @@ strip = "symbols"
 blinc_core = { path = "crates/blinc_core" }
 blinc_layout = { path = "crates/blinc_layout" }
 blinc_platform = { path = "crates/blinc_platform" }
-
-# Local-dev override for Zyntax. The workspace pins each Zyntax
-# crate at a specific git rev (so downstream consumers get a
-# reproducible build); this patch block redirects every git-pinned
-# crate back to the sibling repo at `/Users/amaterasu/Vibranium/zyntax`
-# so we can iterate on upstream Zyntax patches (see
-# `ZYNTAX_LAMBDA_BODY_BUG.md`) without push-bump-pull cycles.
-# Drop this block before publishing or when the local checkout
-# isn't present.
-[patch."https://github.com/darmie/zyntax"]
-zyntax_embed = { path = "/Users/amaterasu/Vibranium/zyntax/crates/zyntax_embed" }
-zyntax_typed_ast = { path = "/Users/amaterasu/Vibranium/zyntax/crates/typed_ast" }
-zrtl = { path = "/Users/amaterasu/Vibranium/zyntax/sdk/zrtl" }
 
 
