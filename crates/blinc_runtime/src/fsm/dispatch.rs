@@ -97,6 +97,15 @@ pub(crate) fn call_guard(symbol: &str) -> Option<bool> {
     dispatcher.call_guard(symbol)
 }
 
+/// Test-only mutex that serializes every test toggling
+/// `GUARD_DISPATCHER`. The dispatcher slot is process-wide, so
+/// parallel tests in this crate (`dispatch::tests::*` and
+/// `instance::tests::on_tick_*`) clobber each other without
+/// serialization. Acquire at the top of any test that calls
+/// `set_guard_dispatcher` / `clear_guard_dispatcher`.
+#[cfg(test)]
+pub(crate) static DISPATCHER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +142,7 @@ mod tests {
     /// This is the "FSM not compiled in" fallback.
     #[test]
     fn no_dispatcher_returns_none() {
+        let _guard = DISPATCHER_TEST_LOCK.lock().unwrap();
         clear_guard_dispatcher();
         assert_eq!(call_guard("__fsm_tick_guard_Loader_0__"), None);
     }
@@ -142,6 +152,7 @@ mod tests {
     /// accidental Box-vs-Arc confusion or wrong-arg-type churn.
     #[test]
     fn installed_dispatcher_is_invoked() {
+        let _guard = DISPATCHER_TEST_LOCK.lock().unwrap();
         let scripted = Arc::new(ScriptedDispatcher::new(&[
             ("__fsm_tick_guard_Loader_0__", true),
             ("__fsm_tick_guard_Loader_1__", false),

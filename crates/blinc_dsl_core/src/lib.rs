@@ -2884,8 +2884,8 @@ fn lower_match_blocks(program: &mut TypedProgram) {
 
             // Each arm at i+1..end_idx is a Block whose first stmt is `__match_arm__(pat)`.
             let mut arms: Vec<(Option<String>, TypedBlock)> = Vec::new();
-            for arm_idx in (i + 1)..end_idx {
-                let TypedStatement::Block(arm_block) = &stmts[arm_idx].node else {
+            for arm in stmts[(i + 1)..end_idx].iter() {
+                let TypedStatement::Block(arm_block) = &arm.node else {
                     continue;
                 };
                 if arm_block.statements.is_empty() {
@@ -2913,11 +2913,10 @@ fn lower_match_blocks(program: &mut TypedProgram) {
             let mut chain_arms: Vec<(String, TypedBlock)> = Vec::new();
             for (pat, body) in arms {
                 match pat.as_deref() {
-                    Some("__wildcard__") => {
-                        if else_block.is_none() {
-                            else_block = Some(body);
-                        }
+                    Some("__wildcard__") if else_block.is_none() => {
+                        else_block = Some(body);
                     }
+                    Some("__wildcard__") => {}
                     Some(p) => {
                         chain_arms.push((p.to_string(), body));
                     }
@@ -2948,7 +2947,7 @@ fn lower_match_blocks(program: &mut TypedProgram) {
                 let if_stmt = TypedStatement::If(TypedIf {
                     condition: Box::new(condition),
                     then_block: body,
-                    else_block: tail_else.take().map(|b| b),
+                    else_block: tail_else.take(),
                     span,
                 });
                 tail_else = Some(TypedBlock {
@@ -3669,6 +3668,13 @@ impl BlincDsl {
             .parse_with_signatures(source, filename, runtime.plugin_signatures())
             .map_err(|e| BlincDslError::Compile(e.to_string()))?;
 
+        // Pre-Zyntax-212dba3 a call to an imported `<Comp>$view` lowered
+        // to `Indirect(Undef)` and slid through; post-bump it surfaces a
+        // clean `Lowering("Call to undefined function ...")`. Inject
+        // extern decls for already-compiled imports so the entry's
+        // lowering sees them as known symbols.
+        self.inject_imported_view_externs(&mut typed_program, filename);
+
         // Snapshot signal/fsm decls BEFORE rewrite/strip passes destroy them.
         {
             let (signals, fsms) = collect_declared(&typed_program);
@@ -3782,6 +3788,15 @@ impl BlincDsl {
             .compile_typed_program(typed_program)
             .map_err(|e| BlincDslError::Compile(e.to_string()))?;
 
+        // Export `<Component>$view` symbols so the next `compile_source`
+        // (e.g. the entry in `compile_project`) can link against imports
+        // that resolve to them.
+        for name in &function_names {
+            if name.ends_with("$view") {
+                let _ = runtime.export_function(name);
+            }
+        }
+
         // Eagerly run each component's `<Component>$__init__` exactly once at compile.
         // Running at compile (not on_mount) avoids accumulating subscribers across rebuilds.
         for name in &function_names {
@@ -3793,6 +3808,106 @@ impl BlincDsl {
         }
 
         Ok(function_names)
+    }
+
+    /// For each `import { X } from "./path"` in `program`, resolve the
+    /// imported file relative to `entry_filename`'s parent, look it up
+    /// in `compiled_modules`, and synthesize `extern fn <X>$view(): i64`
+    /// decls so the entry program's lowering recognises imported view
+    /// calls as known symbols.
+    ///
+    /// Today assumes zero-prop view signatures — prop-bearing imports
+    /// need their param list mirrored too. Sufficient for the
+    /// `compile_project` test surface.
+    fn inject_imported_view_externs(&self, program: &mut TypedProgram, entry_filename: &str) {
+        use zyntax_typed_ast::type_registry::{CallingConvention, Visibility};
+        use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedFunction};
+        use zyntax_typed_ast::{typed_node, InternedString};
+
+        let entry_path = Path::new(entry_filename);
+        let parent = entry_path.parent().unwrap_or_else(|| Path::new("."));
+        let arch = zyntax_typed_ast::import_resolver::ModuleArchitecture::NodeStyle {
+            extensions: vec![".blinc".to_string()],
+            index_name: "index".to_string(),
+        };
+
+        let modules = match self.compiled_modules.lock() {
+            Ok(m) => m.clone(),
+            Err(_) => return,
+        };
+
+        let mut wanted: Vec<String> = Vec::new();
+        for decl in &program.declarations {
+            let TypedDeclaration::Import(import) = &decl.node else {
+                continue;
+            };
+            let segments: Vec<String> = import
+                .module_path
+                .iter()
+                .filter_map(|s| s.resolve_global().map(|s| s.to_string()))
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim_start_matches('/').to_string())
+                .collect();
+            if segments.is_empty() {
+                continue;
+            }
+            let candidates = arch.module_to_paths(&segments, &parent.to_path_buf());
+            let Some(imported_path) = candidates.into_iter().find(|p| p.exists()) else {
+                continue;
+            };
+            let Some(compiled) = modules.get(&imported_path) else {
+                continue;
+            };
+            for item in &import.items {
+                let zyntax_typed_ast::TypedImportItem::Named { name, .. } = item else {
+                    continue;
+                };
+                let Some(import_name) = name.resolve_global() else {
+                    continue;
+                };
+                let view_sym = format!("{import_name}$view");
+                if compiled.iter().any(|s| s == &view_sym) && !wanted.contains(&view_sym) {
+                    wanted.push(view_sym);
+                }
+            }
+        }
+
+        for sym in wanted {
+            // Sanity guard against double-injection if the entry
+            // source already declared `<X>$view` for some reason.
+            let already_declared = program.declarations.iter().any(|d| {
+                if let TypedDeclaration::Function(f) = &d.node {
+                    f.name.resolve_global().as_deref() == Some(sym.as_str())
+                } else {
+                    false
+                }
+            });
+            if already_declared {
+                continue;
+            }
+            let interned = InternedString::new_global(&sym);
+            let func = TypedFunction {
+                name: interned,
+                annotations: vec![],
+                effects: vec![],
+                with_handlers: vec![],
+                type_params: vec![],
+                params: vec![],
+                return_type: Type::Primitive(PrimitiveType::I64),
+                body: None,
+                visibility: Visibility::Public,
+                is_async: false,
+                is_pure: false,
+                is_external: true,
+                calling_convention: CallingConvention::Default,
+                link_name: Some(interned),
+            };
+            program.declarations.push(typed_node(
+                TypedDeclaration::Function(func),
+                Type::Primitive(PrimitiveType::Unit),
+                Span::default(),
+            ));
+        }
     }
 
     /// Compile a `.blinc` file off disk. Records JIT names per-path for hot reload.

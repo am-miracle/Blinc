@@ -116,7 +116,9 @@ impl StateTransitions for FsmStateId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fsm::dispatch::{clear_guard_dispatcher, set_guard_dispatcher, GuardDispatcher};
+    use crate::fsm::dispatch::{
+        clear_guard_dispatcher, set_guard_dispatcher, GuardDispatcher, DISPATCHER_TEST_LOCK,
+    };
     use crate::fsm::registry::{with_fsm_registry_mut, EventTransition, FsmDefinition, TickGuard};
     use std::sync::{Arc, Mutex};
 
@@ -180,6 +182,7 @@ mod tests {
     /// guard fires, the state transitions; otherwise stays put.
     #[test]
     fn on_tick_routes_through_dispatcher() {
+        let _guard = DISPATCHER_TEST_LOCK.lock().unwrap();
         struct FixedDispatcher(bool);
         impl GuardDispatcher for FixedDispatcher {
             fn call_guard(&self, _symbol: &str) -> Option<bool> {
@@ -211,6 +214,7 @@ mod tests {
     /// variant doesn't accidentally trigger.
     #[test]
     fn on_tick_only_matches_current_variant() {
+        let _guard = DISPATCHER_TEST_LOCK.lock().unwrap();
         struct AlwaysFire;
         impl GuardDispatcher for AlwaysFire {
             fn call_guard(&self, _symbol: &str) -> Option<bool> {
@@ -232,6 +236,7 @@ mod tests {
     /// match-arm-style first-match semantics.
     #[test]
     fn on_tick_first_fire_wins() {
+        let _guard = DISPATCHER_TEST_LOCK.lock().unwrap();
         let id = with_fsm_registry_mut(|r| {
             r.register(FsmDefinition {
                 name: arc("Priority_test"),
