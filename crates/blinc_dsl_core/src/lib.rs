@@ -1,37 +1,10 @@
-//! Blinc DSL core — Zyntax-embedded grammar, runtime engine, and host
-//! glue.
+//! Blinc DSL core — Zyntax-embedded grammar, runtime engine, and host glue.
 //!
-//! # Status
+//! Pipeline: source → `Grammar2::from_source` → `TypedProgram` →
+//! `ZyntaxRuntime::compile_typed_program` → JIT call → scene buffer drained
+//! via `take_scene_ops()` → `ElementBuilder` tree for the renderer.
 //!
-//! Risk-reduction prototype. Covers the `view { text("...") }` slice
-//! end-to-end so we can validate Zyntax integration before scaling up
-//! to the full grammar. See ROADMAP §3.9 for the phasing.
-//!
-//! # Pipeline
-//!
-//! ```text
-//! .blinc source
-//!     |
-//!     v
-//! [Grammar2::from_source(BLINC_GRAMMAR)] -> TypedProgram
-//!     |
-//!     v
-//! [ZyntaxRuntime::compile_typed_program]  -> HirModule (cached)
-//!     |
-//!     v
-//! [runtime.call::<()>("render_view", &[])]
-//!     |
-//!     v
-//! [host scene buffer drained via take_scene_ops()]
-//!     |
-//!     v
-//! [ElementBuilder tree handed to Blinc renderer]
-//! ```
-//!
-//! Builtins are registered statically (`runtime.register_function`) —
-//! no `.zrtl` plugin discovery from disk. Blinc's set of builtins is
-//! fixed at link time, which matches the zynml "patterns to NOT copy"
-//! recommendation in our research notes.
+//! Builtins are registered statically — no `.zrtl` plugin discovery.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -42,49 +15,21 @@ use zyntax_embed::{
     ZrtlSymbolSig, ZyntaxRuntime,
 };
 
-/// Mirror of `zyntax_compiler::zrtl::MAX_PARAMS` (16). Not re-exported
-/// from `zyntax_embed`, so we redeclare locally; the value is part of
-/// the wire ABI for `ZrtlSymbolSig` and won't change without a major
-/// version bump on the embed crate.
+/// Mirror of `zyntax_compiler::zrtl::MAX_PARAMS` (16). Part of `ZrtlSymbolSig`'s wire ABI.
 const ZRTL_MAX_PARAMS: usize = 16;
 use zyntax_typed_ast::type_registry::{PrimitiveType, Type};
 use zyntax_typed_ast::{typed_node, Span, TypedProgram, TypedStatement};
 
-/// The embedded Blinc DSL grammar source.
-///
-/// Baked at compile time so apps don't ship a `.zyn` file separately.
-/// Mirrors the zynml `ZYNML_GRAMMAR` pattern (zynml/src/lib.rs:77 in
-/// the Zyntax sibling repo).
+/// Embedded Blinc DSL grammar source.
 pub const BLINC_GRAMMAR: &str = include_str!("../grammar/blinc.zyn");
 
-// =====================================================================
-// Scene buffer — TRANSITIONAL legacy op stream
-// =====================================================================
-//
-// This module's `$Blinc$text` / `$Blinc$text_int` builtins still
-// push onto a per-thread scene buffer; `BlincDsl::render_view` /
-// `render_component` drain it. That op-stream design is being
-// replaced by value-returning view functions that construct real
-// `blinc_layout` widget trees via registered primitives — the
-// substrate's `ViewRenderer::render_named` already returns
-// `ZyntaxValue` for that path. This buffer plumbing stays around
-// only until `Div`, `Text`, etc. are registered as widget
-// primitives (Phase 2 of the pivot); at that point the externs
-// become widget-handle constructors, the buffer goes away, and
-// `render_view` / `render_component` return widget trees directly.
-//
-// Substrate-public code path: `blinc_runtime::view::ViewRenderer`
-// (returns `ZyntaxValue`).
-// Legacy DSL-only path: `BlincDsl::render_view()` (returns
-// `Vec<DslOp>`, drains this buffer).
+// Transitional legacy op stream. `$Blinc$text` / `$Blinc$text_int` push to a
+// per-thread scene buffer drained by `render_view` / `render_component`. Goes
+// away once all primitives are value-returning widget constructors.
 
 use std::cell::RefCell;
 
-/// One declarative draw op emitted by the DSL during a
-/// `render_view` call. Transitional — once widget primitives
-/// are registered, view functions return real
-/// `blinc_layout::Div` / `Text` handles wrapped in `ZyntaxValue`
-/// and this enum + buffer disappear.
+/// One declarative draw op emitted by the DSL during `render_view`. Legacy path.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DslOp {
     Text(String),
@@ -99,9 +44,7 @@ fn push_op(op: DslOp) {
     SCENE_BUFFER.with(|b| b.borrow_mut().push(op));
 }
 
-/// Drain and return everything pushed onto the scene buffer
-/// since the last call. Legacy path — see the module-level
-/// note above.
+/// Drain and return everything pushed onto the scene buffer since the last call.
 pub fn take_scene_ops() -> Vec<DslOp> {
     SCENE_BUFFER.with(|b| std::mem::take(&mut *b.borrow_mut()))
 }
@@ -110,30 +53,19 @@ pub fn take_scene_ops() -> Vec<DslOp> {
 // Builtins
 // =====================================================================
 
-/// `$Blinc$text` — the only builtin in the prototype slice.
-///
-/// Cranelift passes Zyntax `string` arguments as a pointer into the
-/// length-prefixed `ZyntaxString` layout: `[i32 length][utf8 bytes...]`
-/// (see `zyntax_embed::string` and the `ZyntaxString::HEADER_SIZE`
-/// constant — 4 bytes). We pull the length, read the bytes, and strip
-/// the surrounding quotes the grammar preserved (`string_literal`'s
-/// `text()` capture returns `"hello"` whole, not `hello`).
+/// `$Blinc$text` — pushes a string literal onto the scene buffer.
 ///
 /// # Safety
 ///
-/// Called by Zyntax's JIT through a function pointer registered via
-/// [`ZyntaxRuntime::register_function`]. The runtime guarantees the
-/// argument shape matches the registered signature (one
-/// `NativeType::Ptr`); any deviation is a Zyntax bug, not ours.
+/// Called by Zyntax's JIT via [`ZyntaxRuntime::register_function`]; `s_ptr`
+/// points at a `ZyntaxString` (`[i32 len][utf8 bytes…]`).
 extern "C" fn blinc_text(s_ptr: *const i32) {
     if s_ptr.is_null() {
         tracing::warn!("$Blinc$text called with null pointer");
         return;
     }
 
-    // SAFETY: the runtime guarantees `s_ptr` points at a Zyntax
-    // length-prefixed UTF-8 buffer when the signature is `Ptr` for a
-    // string parameter.
+    // SAFETY: runtime guarantees length-prefixed UTF-8 layout for `Ptr` string args.
     let raw = unsafe {
         let len = std::ptr::read_unaligned(s_ptr) as usize;
         let body = (s_ptr as *const u8).add(std::mem::size_of::<i32>());
@@ -141,9 +73,7 @@ extern "C" fn blinc_text(s_ptr: *const i32) {
         std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
     };
 
-    // The grammar's `string_literal` capture preserves the surrounding
-    // quotes (`text()` returns `"hello"` not `hello`). Strip them
-    // before the host sees the value.
+    // Grammar's `string_literal` preserves surrounding quotes; strip them.
     let stripped = raw
         .strip_prefix('"')
         .and_then(|s| s.strip_suffix('"'))
@@ -152,31 +82,19 @@ extern "C" fn blinc_text(s_ptr: *const i32) {
     push_op(DslOp::Text(stripped.to_string()));
 }
 
-/// `__signal_get_i32` — host implementation of the i32 signal
-/// accessor synthesised by the `resolve_signal_calls` pass.
-///
-/// The pass rewrites every `<name>.get()` (where `<name>` is an
-/// i32 signal declared via `signal <name>: i32`) into
-/// `__signal_get_i32("<name>")`. At JIT time this Rust function
-/// runs, looks the name up in the per-thread `SIGNAL_TABLE_I32`,
-/// and returns the current value (or `0` when the signal hasn't
-/// been set, which mirrors Default::default for i32 — embedders
-/// that want a different fallback can call `set_signal_i32`
-/// during `BlincDsl::new` to seed defaults).
+/// `__signal_get_i32` — i32 signal accessor synthesised by `resolve_signal_calls`.
+/// Returns `0` for unset signals.
 ///
 /// # Safety
 ///
-/// Same contract as [`blinc_text`]. The runtime guarantees
-/// `name_ptr` points at a Zyntax length-prefixed UTF-8 buffer
-/// when the registered signature has `String` for the parameter.
+/// Same contract as [`blinc_text`]: `name_ptr` points at a length-prefixed UTF-8 buffer.
 extern "C" fn blinc_signal_get_i32(name_ptr: *const i32) -> i32 {
     if name_ptr.is_null() {
         tracing::warn!("__signal_get_i32 called with null name pointer");
         return 0;
     }
 
-    // SAFETY: Zyntax guarantees the length-prefixed Zyntax-string
-    // layout when the registered parameter type is String.
+    // SAFETY: length-prefixed string layout for String params.
     let name = unsafe {
         let len = std::ptr::read_unaligned(name_ptr) as usize;
         let body = (name_ptr as *const u8).add(std::mem::size_of::<i32>());
@@ -184,10 +102,7 @@ extern "C" fn blinc_signal_get_i32(name_ptr: *const i32) -> i32 {
         std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
     };
 
-    // The signal-name string literal generated by the rewrite is
-    // already unquoted (StringLiteral construction strips the
-    // quotes — interpreter.rs:553). Defensive trim for parity with
-    // blinc_text in case the synthesis changes upstream.
+    // Defensive quote-strip — the rewrite normally hands us unquoted names.
     let stripped = name
         .strip_prefix('"')
         .and_then(|s| s.strip_suffix('"'))
@@ -196,16 +111,11 @@ extern "C" fn blinc_signal_get_i32(name_ptr: *const i32) -> i32 {
     blinc_runtime::signal::get_i32_or_default(stripped)
 }
 
-/// `__signal_get_f64` — host implementation of the f64 signal
-/// accessor. Mirrors `blinc_signal_get_i32` in shape; the only
-/// differences are the lookup table and the return type.
-/// Default fallback is `0.0` for unset signals.
+/// `__signal_get_f64` — f64 signal accessor. Returns `0.0` for unset signals.
 ///
 /// # Safety
 ///
-/// Same contract as [`blinc_signal_get_i32`]. The runtime
-/// guarantees `name_ptr` points at a Zyntax length-prefixed
-/// UTF-8 buffer.
+/// Same contract as [`blinc_signal_get_i32`].
 extern "C" fn blinc_signal_get_f64(name_ptr: *const i32) -> f64 {
     if name_ptr.is_null() {
         tracing::warn!("__signal_get_f64 called with null name pointer");
@@ -226,30 +136,19 @@ extern "C" fn blinc_signal_get_f64(name_ptr: *const i32) -> f64 {
     blinc_runtime::signal::get_f64_or_default(stripped)
 }
 
-/// `__signal_get_string` — host implementation of the string
-/// signal accessor.
-///
-/// Same shape as the i32 / f64 mirrors but returns a Zyntax
-/// length-prefixed string pointer (the same layout
-/// `blinc_string_alloc` produces — what `$Blinc$text` and the
-/// f-string concat chain consume). The value is cloned from the
-/// per-thread signal table and the resulting buffer leaks via
-/// the prototype's `blinc_string_alloc` (see the module comment
-/// on the f-string helpers for the per-render arena fix path).
+/// `__signal_get_string` — string signal accessor. Returns a Zyntax length-prefixed
+/// pointer; the buffer leaks via `blinc_string_alloc`.
 ///
 /// # Safety
 ///
-/// Same contract as [`blinc_signal_get_i32`]. The runtime
-/// guarantees `name_ptr` points at a Zyntax length-prefixed
-/// UTF-8 buffer.
+/// Same contract as [`blinc_signal_get_i32`].
 extern "C" fn blinc_signal_get_string(name_ptr: *const i32) -> *const i32 {
     if name_ptr.is_null() {
         tracing::warn!("__signal_get_string called with null name pointer");
         return blinc_string_alloc("");
     }
 
-    // SAFETY: Zyntax guarantees the length-prefixed string
-    // layout when the registered parameter type is String.
+    // SAFETY: length-prefixed string layout for String params.
     let name = unsafe {
         let len = std::ptr::read_unaligned(name_ptr) as usize;
         let body = (name_ptr as *const u8).add(std::mem::size_of::<i32>());
@@ -265,14 +164,12 @@ extern "C" fn blinc_signal_get_string(name_ptr: *const i32) -> *const i32 {
     blinc_string_alloc(&value)
 }
 
-/// Helper used by every `__signal_set_<T>` extern to decode the
-/// length-prefixed string pointer Zyntax hands us for the
-/// signal name.
+/// Decode a length-prefixed Zyntax string pointer to a `&str`.
 fn decode_signal_name<'a>(name_ptr: *const i32) -> Option<&'a str> {
     if name_ptr.is_null() {
         return None;
     }
-    // SAFETY: Zyntax guarantees length-prefixed UTF-8 layout.
+    // SAFETY: length-prefixed UTF-8 layout per Zyntax String param ABI.
     let raw = unsafe {
         let len = std::ptr::read_unaligned(name_ptr) as usize;
         let body = (name_ptr as *const u8).add(std::mem::size_of::<i32>());
@@ -286,10 +183,7 @@ fn decode_signal_name<'a>(name_ptr: *const i32) -> Option<&'a str> {
     )
 }
 
-/// `__signal_set_i32("<name>", value)` — the host write side of
-/// the `signal <name>: i32` cell. Emitted by the
-/// `resolve_signal_calls` pass for any bare assignment
-/// `<signal> = <expr>` inside DSL function / closure bodies.
+/// `__signal_set_i32("<name>", value)` — i32 signal write side.
 extern "C" fn blinc_signal_set_i32(name_ptr: *const i32, value: i32) {
     let Some(name) = decode_signal_name(name_ptr) else {
         tracing::warn!("__signal_set_i32 called with null name pointer");
@@ -298,8 +192,7 @@ extern "C" fn blinc_signal_set_i32(name_ptr: *const i32, value: i32) {
     blinc_runtime::signal::set_i32(name, value);
 }
 
-/// `__signal_set_f64("<name>", value)` — f64 mirror of
-/// [`blinc_signal_set_i32`].
+/// `__signal_set_f64("<name>", value)` — f64 signal write side.
 extern "C" fn blinc_signal_set_f64(name_ptr: *const i32, value: f64) {
     let Some(name) = decode_signal_name(name_ptr) else {
         tracing::warn!("__signal_set_f64 called with null name pointer");
@@ -308,8 +201,7 @@ extern "C" fn blinc_signal_set_f64(name_ptr: *const i32, value: f64) {
     blinc_runtime::signal::set_f64(name, value);
 }
 
-/// `__signal_set_string("<name>", value)` — string mirror of
-/// [`blinc_signal_set_i32`].
+/// `__signal_set_string("<name>", value)` — string signal write side.
 extern "C" fn blinc_signal_set_string(name_ptr: *const i32, value_ptr: *const i32) {
     let Some(name) = decode_signal_name(name_ptr) else {
         tracing::warn!("__signal_set_string called with null name pointer");
@@ -319,14 +211,8 @@ extern "C" fn blinc_signal_set_string(name_ptr: *const i32, value_ptr: *const i3
     blinc_runtime::signal::set_str(name, value);
 }
 
-/// `__fsm_runtime_trigger__("<FsmName>", "<state.event>")` —
-/// emitted by `resolve_fsm_trigger_calls` for every
-/// `<FsmName>.trigger(<expr>)` method call site. Parses the
-/// path arg as `"<state>.<event>"`, verifies the current
-/// default-instance state matches `<state>` (no-op if it
-/// doesn't — that's the precondition the user requested), and
-/// dispatches the event through
-/// [`blinc_runtime::fsm::dispatch_default`].
+/// `__fsm_runtime_trigger__("<FsmName>", "<state.event>")` — dispatches `event`
+/// on the default instance iff its current state matches `state`.
 extern "C" fn blinc_fsm_runtime_trigger(fsm_ptr: *const i32, path_ptr: *const i32) {
     let Some(fsm) = decode_signal_name(fsm_ptr) else {
         tracing::warn!("__fsm_runtime_trigger__ called with null fsm pointer");
@@ -355,25 +241,12 @@ extern "C" fn blinc_fsm_runtime_trigger(fsm_ptr: *const i32, path_ptr: *const i3
     blinc_runtime::fsm::dispatch_default(fsm, event);
 }
 
-/// `__fsm_subscribe__("<FsmName>", "<From.Event>", closure_ptr)` —
-/// registers a DSL closure as a path-filtered subscriber to the
-/// FSM's default-instance transitions. Emitted by
-/// `resolve_fsm_subscribe_calls` from
-/// `<FsmName>.subscribe("<From.Event>", || { … })` inside a
-/// component's `init { … }` block.
-///
-/// The closure is a JIT'd Zyntax lambda taking no parameters and
-/// returning Unit — `register_subscriber` filters on the path, so
-/// the closure only runs when its registered filter matches the
-/// just-triggered path. We hold the raw function pointer and call
-/// it via `transmute → extern "C" fn()`.
+/// `__fsm_subscribe__("<FsmName>", "<From.Event>", closure_ptr)` — registers a
+/// path-filtered subscriber closure for the FSM's default-instance transitions.
 ///
 /// # Safety
 ///
-/// The closure pointer must remain valid for the lifetime of the
-/// process — JIT memory is leak-on-init for the prototype, so
-/// this holds as long as `BlincDsl` (which owns the
-/// `ZyntaxRuntime`) isn't dropped.
+/// `closure_ptr` must remain valid for the lifetime of the `ZyntaxRuntime`.
 extern "C" fn blinc_fsm_subscribe(fsm_ptr: *const i32, path_ptr: *const i32, closure_ptr: i64) {
     let Some(fsm) = decode_signal_name(fsm_ptr) else {
         tracing::warn!("__fsm_subscribe__ called with null fsm pointer");
@@ -388,26 +261,14 @@ extern "C" fn blinc_fsm_subscribe(fsm_ptr: *const i32, path_ptr: *const i32, clo
         return;
     }
     blinc_runtime::fsm::register_subscriber(fsm, path, move || {
-        // SAFETY: the SSA lowering produces an `extern "C"` lambda body
-        // taking zero args and returning Unit. The raw `i64` we received
-        // from CreateClosure points at exactly that ABI.
+        // SAFETY: SSA lowering produces an `extern "C" fn()` lambda body.
         type SubscriberFn = extern "C" fn();
         let func: SubscriberFn = unsafe { std::mem::transmute(closure_ptr) };
         func();
     });
 }
 
-/// `$Blinc$text_int` — integer arm of `text(...)`. Pushes an integer
-/// onto the scene buffer.
-///
-/// Probes the i32 ABI through Cranelift's JIT: the host receives an
-/// actual `i32` register, not a length-prefixed pointer. Matches what
-/// the grammar's `integer` terminal lowers to via `parse_int(text())`.
-///
-/// # Safety
-///
-/// Same contract as [`blinc_text`]. The runtime guarantees the
-/// argument shape matches the registered `NativeType::I32`.
+/// `$Blinc$text_int` — integer arm of `text(...)`. Pushes an int onto the scene buffer.
 extern "C" fn blinc_text_int(n: i32) {
     push_op(DslOp::IntText(n));
 }
@@ -416,44 +277,12 @@ extern "C" fn blinc_text_int(n: i32) {
 // F-string desugaring builtins
 // =====================================================================
 //
-// `f"hi {n}"` lowers (via the normalization-pass `fstring_to_concat`
-// rewrite at zyntax/crates/passes/normalization/src/lib.rs:137) into
-// `string_concat("hi ", __fstring_format__(n))`. Both names need to
-// resolve to host externs at JIT time — without them the SSA emits
-// undefined-variable reads that the runtime later derefs as a null
-// pointer, surfacing as a SIGSEGV instead of a compile error.
-//
-// Upstream ZynML registers these via the ZRTL `io` plugin
-// (`$IO$string_concat`, `$IO$format_dynamic`). Blinc doesn't load
-// ZRTL plugins — we use the static `register_function_typed` path
-// for everything — so we implement minimal Blinc-side versions
-// here.
-//
-// **Memory layout.** Zyntax-side strings are length-prefixed:
-//
-// ```text
-// +-----+----- ... -----+
-// | u32 |   UTF-8 bytes |
-// +-----+----- ... -----+
-//   len      content
-// ```
-//
-// The `*const i32` pointer the JIT passes around points at the
-// length word; the bytes follow immediately after. `blinc_text`
-// already reads from this layout — these formatters produce it.
-//
-// **Memory ownership.** Strings produced here LEAK — the host
-// doesn't free them. Acceptable for the prototype (test runs are
-// short-lived) but tracked as a known limitation: a single render
-// pass that materialises N f-strings keeps N buffers resident
-// until process exit. Fix path is to switch to a per-render
-// arena bump-allocator and reset between calls.
+// `f"hi {n}"` lowers to `string_concat("hi ", __fstring_format__(n))` via the
+// normalization pass. Both names must resolve to host externs at JIT time.
+// Strings produced here LEAK — acceptable for the prototype; fix path is a
+// per-render arena bump allocator.
 
-/// Encode a Rust `&str` as a Zyntax length-prefixed string and
-/// leak it. Returns a pointer to the length word.
-///
-/// The buffer layout matches what `blinc_text` (and any
-/// future string-typed builtin) reads.
+/// Encode a Rust `&str` as a Zyntax length-prefixed string (leaked).
 fn blinc_string_alloc(s: &str) -> *const i32 {
     let len = s.len() as u32;
     let total = 4 + s.len();
@@ -461,24 +290,16 @@ fn blinc_string_alloc(s: &str) -> *const i32 {
     buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(s.as_bytes());
     let ptr = buf.as_ptr() as *const i32;
-    // Leak — see module comment above. The ZRTL plugin path uses
-    // a managed allocator with explicit free; the static-builtin
-    // path here doesn't have that machinery wired up yet.
+    // Leak — see module comment above.
     std::mem::forget(buf);
     ptr
 }
 
-/// Decode a Zyntax length-prefixed string back into a Rust
-/// `&str`. The returned reference is valid as long as the
-/// underlying buffer remains live — for our leak-on-allocate
-/// strategy that's "forever", so 'static.
+/// Decode a Zyntax length-prefixed string back to a `&str`.
 ///
 /// # Safety
 ///
-/// Caller must guarantee `ptr` came from `blinc_string_alloc`
-/// (or another producer that emits the same length-prefix +
-/// UTF-8 layout). The JIT guarantees this when the registered
-/// signature has `String` for the parameter.
+/// `ptr` must come from `blinc_string_alloc` (or any producer of the same layout).
 unsafe fn blinc_string_decode<'a>(ptr: *const i32) -> &'a str {
     if ptr.is_null() {
         return "";
@@ -489,25 +310,15 @@ unsafe fn blinc_string_decode<'a>(ptr: *const i32) -> &'a str {
     std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
 }
 
-/// `__fstring_format__` for i32 — formats an integer as its
-/// decimal-string representation in a fresh Zyntax string.
-///
-/// The DSL's `@builtin` map routes `__fstring_format__` to
-/// `$Blinc$format_int`. Today this only handles i32 inputs —
-/// f64 props would need a separate format builtin (i.e. a
-/// generic dispatch path or a per-type DSL-visible alias).
+/// `__fstring_format__` for i32 — decimal string of an integer.
 extern "C" fn blinc_format_int(n: i32) -> *const i32 {
     let s = n.to_string();
     blinc_string_alloc(&s)
 }
 
-/// `string_concat` — joins two Zyntax-formatted strings into a
-/// fresh one. Same memory-ownership caveat as the rest of this
-/// section.
+/// `string_concat` — joins two Zyntax-formatted strings into a fresh leaked one.
 extern "C" fn blinc_string_concat(a: *const i32, b: *const i32) -> *const i32 {
-    // SAFETY: the runtime guarantees both args are well-formed
-    // length-prefixed string pointers when the registered
-    // signature has `String` for both params.
+    // SAFETY: length-prefixed string layout for String params.
     let a_str = unsafe { blinc_string_decode(a) };
     let b_str = unsafe { blinc_string_decode(b) };
     let mut out = String::with_capacity(a_str.len() + b_str.len());
@@ -520,50 +331,13 @@ extern "C" fn blinc_string_concat(a: *const i32, b: *const i32) -> *const i32 {
 // Widget primitives — value-returning externs for `Div` / `Text`
 // =====================================================================
 //
-// These are the runtime-side of the value-returning view
-// architecture. Each pre-registered widget primitive (see
-// `register_blinc_layout_primitives`) has a matching extern
-// here that builds a real `blinc_layout` value and returns
-// a pointer-sized handle. The handle crosses the JIT boundary
-// as `i64` (the platform's `usize` width); the host-side
-// walker that lands in Phase 2e knows how to dereference it
-// back into the real Rust value.
-//
-// **Memory ownership.** Each call boxes a fresh widget
-// (`Box::into_raw` → leak-on-construct, like the f-string
-// helpers above) and returns the raw pointer. A consumer that
-// receives the handle becomes responsible for reclaiming it
-// (the walker takes ownership via `Box::from_raw`). For the
-// prototype's short-lived test runs the leak is acceptable;
-// production paths flow the handle into the actual UI tree
-// where it gets owned for the widget's lifetime.
+// Each registered widget primitive has a matching extern here that boxes a
+// `blinc_layout` value and returns the raw pointer as `i64`. Consumers
+// reclaim via `Box::from_raw`. Handles are leak-on-construct until owned.
 
-/// Tagged box carrying a concrete `blinc_layout` widget across
-/// the JIT boundary. Each widget-primitive extern (`blinc_text_view`,
-/// `blinc_div_view`, …) builds the appropriate variant, wraps it in
-/// `Box<WidgetBox>`, and returns the raw pointer cast to `i64`.
-///
-/// The variant tag is what lets the host-side walker
-/// ([`materialize_widget`]) dispatch back to a concrete
-/// `blinc_layout` value — an untagged raw pointer would lose the
-/// type identity at the JIT boundary.
-///
-/// Each payload is boxed because `blinc_layout::div::Div` carries
-/// the full property suite (~1 KB) and Rust enums size to their
-/// largest variant; without the inner box every `Text` handle
-/// would balloon to the same width as a `Div`.
-///
-/// **`Custom` carries arbitrary `ElementBuilder` implementations**
-/// — the variant Rust-side widget extensions land in. It's the
-/// shared payload type for both interop directions:
-///
-///   - Rust → DSL: a Rust-side widget registered with
-///     [`BlincDsl::register_extern_widget`] wraps the user
-///     struct in `WidgetBox::Custom` so it round-trips back to
-///     Rust as a typed `Box<dyn ElementBuilder>`.
-///   - DSL → Rust: [`BlincDsl::query`] decodes a value-returning
-///     DSL component's handle through this variant when the
-///     component eventually produces user types.
+/// Tagged box carrying a concrete `blinc_layout` widget across the JIT boundary.
+/// `Custom` carries arbitrary `ElementBuilder` implementations registered via
+/// [`BlincDsl::register_extern_widget`].
 pub enum WidgetBox {
     Text(Box<blinc_layout::text::Text>),
     Div(Box<blinc_layout::div::Div>),
@@ -571,11 +345,7 @@ pub enum WidgetBox {
 }
 
 impl WidgetBox {
-    /// Coerce into a `Box<dyn ElementBuilder>` so callers can
-    /// slot the widget into a Rust-side tree without caring which
-    /// variant it came in as. Used by the DSL→Rust query path
-    /// and any consumer that just wants "build me into a layout
-    /// tree" semantics.
+    /// Coerce into a `Box<dyn ElementBuilder>` regardless of variant.
     pub fn into_element_builder(self) -> Box<dyn blinc_layout::div::ElementBuilder> {
         match self {
             WidgetBox::Text(t) => t,
@@ -654,8 +424,7 @@ impl<W: blinc_layout::div::ElementBuilder> blinc_layout::div::ElementBuilder for
     fn children_builders(&self) -> &[Box<dyn blinc_layout::div::ElementBuilder>] {
         self.inner.children_builders()
     }
-    // Forward element identity to the inner so CSS class /
-    // id / type-name selectors keep matching through the wrapper.
+    // Forward identity so CSS class/id/type-name selectors match through the wrapper.
     fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
@@ -665,10 +434,7 @@ impl<W: blinc_layout::div::ElementBuilder> blinc_layout::div::ElementBuilder for
     fn element_type_id(&self) -> blinc_layout::div::ElementTypeId {
         self.inner.element_type_id()
     }
-    // The event router calls `event_handlers()` on the registered
-    // builder when hit-testing. Without this forward, on_click /
-    // on_hover / etc. attached to the inner Div are invisible
-    // through the Styled wrapper — clicks register but never fire.
+    // MUST forward — without this, on_click/on_hover on the inner Div never fire.
     fn event_handlers(&self) -> Option<&blinc_layout::event_handler::EventHandlers> {
         self.inner.event_handlers()
     }
@@ -682,30 +448,13 @@ impl<W: blinc_layout::div::ElementBuilder> blinc_layout::div::ElementBuilder for
     }
 }
 
-/// Re-exports the `#[extern_widget]` macro lives at the crate
-/// root so users only need one import to declare a DSL-exposed
-/// Rust widget. The expansion targets [`__extern_widget_internals`]
-/// — see that module for the surface the macro consumes.
+/// `#[extern_widget]` proc-macro for declaring DSL-exposed Rust widgets.
 pub use blinc_macros::extern_widget;
 
-/// The canonical Zyntax runtime value enum, re-exported so
-/// consumers of `blinc_dsl_core` (notably [`BlincDsl::query`]
-/// callers and `ViewRenderer` consumers) can match on view
-/// return values without separately depending on
-/// `zyntax_embed`.
+/// Canonical Zyntax runtime value enum, re-exported for `query` / `ViewRenderer` consumers.
 pub use zyntax_embed::ZyntaxValue;
 
-/// Internals exposed for the [`extern_widget!`](crate::extern_widget)
-/// proc-macro's code generation. Not part of the stable public API
-/// surface — the items here exist so generated code can find them
-/// at fully-qualified paths. Manual callers should use the typed
-/// surfaces in the crate root ([`WidgetBox`],
-/// [`ExternWidgetSpec`], [`ExternWidget`],
-/// [`BlincDsl::register_extern_widget`]).
-///
-/// All re-exports here mirror existing public items; the module
-/// is `doc(hidden)` only because the *path* is an implementation
-/// detail of the macro, not the items themselves.
+/// Internals for the [`extern_widget!`] macro's code generation. Not stable API.
 #[doc(hidden)]
 pub mod __extern_widget_internals {
     pub use crate::{
@@ -715,38 +464,26 @@ pub mod __extern_widget_internals {
     pub use blinc_runtime::component::PropDef;
     pub use zyntax_typed_ast::type_registry::{PrimitiveType, Type};
 
-    /// Reclaim a `RenderPropsOverlay` from a `__new_style_overlay__`
-    /// pointer for use in macro-generated thunks. Wraps
-    /// `materialize_overlay` so the macro doesn't reach into a
-    /// public-but-unsafe surface name directly.
+    /// Reclaim a `RenderPropsOverlay` from `__new_style_overlay__` for macro thunks.
     ///
     /// # Safety
     ///
-    /// `ptr` MUST come from `__new_style_overlay__`.
+    /// `ptr` must come from `__new_style_overlay__`.
     pub unsafe fn decode_overlay(ptr: i64) -> crate::RenderPropsOverlay {
         unsafe { crate::materialize_overlay(ptr) }
     }
 
-    /// Construct a `WidgetHandle` from any
-    /// `Box<dyn ElementBuilder>`. Wraps it in
-    /// [`WidgetBox::Custom`] and leaks the box; the host-side
-    /// walker reclaims via `materialize_widget` at view-render
-    /// time.
+    /// Wrap an `ElementBuilder` in `WidgetBox::Custom` and leak as a `WidgetHandle`.
     pub fn into_handle(widget: Box<dyn blinc_layout::div::ElementBuilder>) -> i64 {
         Box::into_raw(Box::new(WidgetBox::Custom(widget))) as i64
     }
 
     /// Decode a Zyntax-FFI string argument (length-prefixed
-    /// UTF-8 buffer) to an owned `String`. Returns the empty
-    /// string for null pointers — same fast-fail the in-tree
-    /// `$Blinc$Text$view` extern uses.
+    /// UTF-8 buffer) to an owned `String`. Empty for null.
     ///
     /// # Safety
     ///
-    /// `ptr` MUST come from the Zyntax JIT's String FFI lowering
-    /// — i.e., the registered signature has `String` for the
-    /// corresponding parameter. Any other source is undefined
-    /// behaviour.
+    /// `ptr` must come from Zyntax JIT's String FFI lowering.
     pub unsafe fn decode_string(ptr: *const i32) -> String {
         if ptr.is_null() {
             return String::new();
@@ -756,24 +493,12 @@ pub mod __extern_widget_internals {
         s.to_string()
     }
 
-    /// Decode a children-list pointer (minted by
-    /// `__new_child_list__` and populated via `__push_child__`)
-    /// into an owned `Vec<Box<dyn ElementBuilder>>` ready to
-    /// land in a `#[children]`-annotated struct field.
-    ///
-    /// A null/zero pointer means the DSL caller didn't provide a
-    /// body block — the widget gets an empty children list, same
-    /// shape as the in-tree `Div() { }` path.
+    /// Decode a `__new_child_list__` pointer into a `Vec<Box<dyn ElementBuilder>>`.
+    /// Null/zero pointer means no children.
     ///
     /// # Safety
     ///
-    /// `ptr` MUST be the `i64`-encoded payload of a
-    /// `Box<Vec<WidgetHandle>>` minted by
-    /// `__new_child_list__`. Every JIT call site that produces
-    /// children pointers routes through
-    /// `lower_children_arrays_to_blocks`, which constructs lists
-    /// exclusively via that extern — call sites can't forge a
-    /// pointer.
+    /// `ptr` must be the `i64`-encoded payload of a list minted by `__new_child_list__`.
     pub unsafe fn decode_children(ptr: i64) -> Vec<Box<dyn blinc_layout::div::ElementBuilder>> {
         if ptr == 0 {
             return Vec::new();
@@ -789,111 +514,45 @@ pub mod __extern_widget_internals {
     }
 }
 
-/// Trait implemented by Rust types that want to be callable from
-/// Blinc DSL source. The [`extern_widget!`](crate::extern_widget)
-/// proc-macro generates the impl on a user struct, pulling the
-/// DSL name out of the macro attribute and the prop list out of
-/// the struct's fields.
-///
-/// Users register a widget through the type:
-///
-/// ```ignore
-/// dsl.register_extern_widget::<FancyText>()?;
-/// ```
-///
-/// The generic dispatch reads `Self::DSL_NAME` and
-/// `Self::extern_widget_spec()` and forwards to the lower-level
-/// [`BlincDsl::register_extern_widget_spec`] — see that method
-/// for the underlying registration semantics.
-///
-/// **Hand-rolling without the macro:** implement this trait
-/// manually if you need a shape the proc-macro doesn't yet
-/// support (callbacks, custom marshalling, generic widgets).
-/// The trait surface is intentionally narrow so hand impls and
-/// macro impls stay symmetric.
+/// Rust types callable from Blinc DSL source. Generated by `#[extern_widget]`,
+/// or implemented manually. Register via `dsl.register_extern_widget::<T>()`.
 pub trait ExternWidget {
-    /// User-facing identifier — what `.blinc` source types to
-    /// call the widget. Matches the `name = "<DslName>"` value
-    /// the macro attribute carries.
+    /// User-facing identifier — what `.blinc` source types to call the widget.
     const DSL_NAME: &'static str;
 
-    /// Build the full registration spec. The macro generates this
-    /// from the struct's fields; hand impls construct one directly.
+    /// Build the full registration spec.
     fn extern_widget_spec() -> ExternWidgetSpec;
 }
 
-/// Description of a Rust-side widget being exposed to the DSL.
-///
-/// Hand-rolled today; the planned `#[extern_widget]` proc-macro
-/// generates one of these from a Rust struct + `ElementBuilder`
-/// impl. Passed to [`BlincDsl::register_extern_widget`] which:
-///
-///   1. Registers the JIT-side `extern "C"` thunk under
-///      `view_symbol` with the matching ZRTL signature.
-///   2. Records a `ComponentDefinition` in the substrate
-///      `ComponentRegistry` so `validate_component_calls` /
-///      `lower_component_calls` see the widget as a DSL-callable
-///      component.
-///   3. Marks `view_symbol` as value-returning so
-///      [`JitViewRenderer`] / [`BlincDsl::render_named`] pick
-///      the `i64`-return ABI when invoking it.
-///
-/// **Naming convention:** Pick a `$Blinc$<Name>$view`-shaped
-/// symbol to match the in-tree primitive externs (`$Blinc$Text$view`,
-/// `$Blinc$Div$view`). The DSL-facing name (`name` field) is what
-/// users type in `.blinc` source; the `view_symbol` is what the
-/// JIT links to.
-///
-/// **Extern function contract:** `extern_ptr` MUST point at a
-/// real `extern "C" fn(...)` whose argument types correspond
-/// to `param_types` (Zyntax FFI uses
-/// `*const i32` for `String`, `i32` / `i64` / `f64` directly for
-/// primitives) and which returns a `WidgetHandle`
-/// (`Box::into_raw(Box::new(WidgetBox::Custom(...)))` cast to `i64`).
-/// A return value of `0` signals null / build-failed.
+/// Description of a Rust-side widget exposed to the DSL. Passed to
+/// [`BlincDsl::register_extern_widget`]. `view_symbol` convention is
+/// `$Blinc$<Name>$view`. `extern_ptr` must be `extern "C" fn(...)` matching
+/// `param_types`, returning a `WidgetHandle` (`0` = null/build-failed).
 pub struct ExternWidgetSpec {
-    /// User-facing DSL name. Whatever a `.blinc` author types
-    /// (e.g., `"Button"` matches `Button(...)` call sites).
+    /// User-facing DSL name (e.g. `"Button"`).
     pub name: String,
-    /// JIT-linker-visible symbol the extern is registered under.
-    /// Convention: `$Blinc$<Name>$view`.
+    /// JIT-linker-visible symbol. Convention: `$Blinc$<Name>$view`.
     pub view_symbol: String,
-    /// Substrate metadata about the widget's props. Drives
-    /// validation diagnostics and (eventually) IDE / reflection
-    /// surfaces.
+    /// Substrate metadata about the widget's props.
     pub props: Vec<blinc_runtime::component::PropDef>,
-    /// FFI parameter types in declaration order. Must match the
-    /// extern fn's actual signature exactly — mismatches manifest
-    /// as register-level garbage reads at call time.
+    /// FFI parameter types in declaration order; must match `extern_ptr` exactly.
     pub param_types: Vec<Type>,
-    /// FFI return type. Typically
-    /// `Type::Primitive(PrimitiveType::I64)` (widget handle).
+    /// FFI return type (typically `i64` for widget handle).
     pub return_type: Type,
-    /// `extern "C" fn(...)` cast to `*const u8`. The extern must
-    /// uphold the [`ExternWidgetSpec`] contract documented above.
+    /// `extern "C" fn(...)` cast to `*const u8`.
     pub extern_ptr: *const u8,
 }
 
-/// Opaque widget handle as exchanged across the JIT boundary.
-/// Carries the address of a `Box<WidgetBox>` cast to the
-/// signature-advertised `i64`. Zero is the null-equivalent
-/// sentinel (extern fast-fail return).
+/// Opaque widget handle across the JIT boundary. `Box<WidgetBox>` raw as `i64`,
+/// with `0` as the null sentinel.
 type WidgetHandle = i64;
 
-/// Take ownership of a `WidgetHandle` returned by a value-bearing
-/// view function. Reconstructs the `Box<WidgetBox>` whose pointer
-/// the extern stored in the handle, returning `None` for the
-/// null-sentinel (`0`) the externs use to flag early-out.
+/// Take ownership of a `WidgetHandle` returned by a view fn. `None` for `0`.
 ///
 /// # Safety
 ///
-/// `handle` MUST be a handle previously produced by one of this
-/// crate's `$Blinc$<X>$view` externs (which all use
-/// `Box::into_raw(Box::new(WidgetBox::...))` to mint the pointer)
-/// — or be zero. Calling with any other pointer is undefined
-/// behaviour. Calling twice with the same non-zero handle is a
-/// double-free; the JIT side hands out each handle exactly once
-/// per call.
+/// `handle` must be from one of this crate's `$Blinc$<X>$view` externs (or `0`).
+/// Each non-zero handle may be materialised exactly once.
 pub unsafe fn materialize_widget(handle: WidgetHandle) -> Option<Box<WidgetBox>> {
     if handle == 0 {
         return None;
@@ -904,16 +563,9 @@ pub unsafe fn materialize_widget(handle: WidgetHandle) -> Option<Box<WidgetBox>>
 
 /// `$Blinc$Text$view(content: string) -> WidgetHandle`
 ///
-/// Constructs a `blinc_layout::Text` from the Zyntax string
-/// argument, wraps it in a [`WidgetBox::Text`], leaks the box,
-/// and returns the raw pointer cast to `i64`. The host-side
-/// walker reclaims the box via [`materialize_widget`].
-///
 /// # Safety
 ///
-/// `content_ptr` must point at a Zyntax length-prefixed UTF-8
-/// buffer when the registered signature has `String` for the
-/// parameter — the JIT guarantees this.
+/// `content_ptr` must point at a Zyntax length-prefixed UTF-8 buffer.
 extern "C" fn blinc_text_view(content_ptr: *const i32) -> WidgetHandle {
     if content_ptr.is_null() {
         tracing::warn!("$Blinc$Text$view called with null content pointer");
@@ -925,25 +577,8 @@ extern "C" fn blinc_text_view(content_ptr: *const i32) -> WidgetHandle {
     Box::into_raw(Box::new(WidgetBox::Text(Box::new(widget)))) as WidgetHandle
 }
 
-/// `$Blinc$Div$view(children: i64) -> WidgetHandle`
-///
-/// Constructs a `blinc_layout::Div` populated with the children
-/// in the supplied child-list. `children` is an `i64`-encoded
-/// pointer to a `Vec<WidgetHandle>` minted by
-/// [`blinc_new_child_list`]; each handle in the vec was produced
-/// by some other widget extern and gets reclaimed here via
-/// [`materialize_widget`] + [`WidgetBox::into_element_builder`].
-///
-/// A null/zero list pointer produces an empty `Div` — the same
-/// thing `Div()` with no body would have produced under the
-/// previous zero-arg signature.
-///
-/// **Memory ownership.** The child-list `Vec` is consumed
-/// (`Box::from_raw`) — callers MUST NOT use the pointer after
-/// this call. Each child handle is also consumed once: the
-/// reclaimed `Box<WidgetBox>` flows into the Div as a
-/// `Box<dyn ElementBuilder>` child, owned for the Div's
-/// lifetime.
+/// `$Blinc$Div$view(children, style, class_str, on_click) -> WidgetHandle`.
+/// Consumes the child-list and each child handle exactly once.
 extern "C" fn blinc_div_view(
     children: WidgetHandle,
     style: i64,
@@ -967,22 +602,9 @@ extern "C" fn blinc_div_view(
             widget = widget.class(name);
         }
     }
-    // `on_click = || { … }` lowers to a Zyntax closure value.
-    // Zyntax's `CreateClosure` SSA → Cranelift `func_addr` emits
-    // the body's compiled entry point as a RAW function
-    // pointer (no captures, no `ZrtlClosure*` wrapper — see
-    // `compiler/src/cranelift_backend.rs:3407`). The JIT hands
-    // that pointer up as the `i64` we receive here; we
-    // transmute back to `extern "C" fn()` (the body's ABI:
-    // zero args, returns Unit) and call directly.
-    //
-    // The closure body holds all behaviour the DSL author
-    // declared (signal writes, FSM triggers, etc.) so this
-    // handler does no interpretation. Signal writes inside the
-    // closure route through `__signal_set_i32` → reactive
-    // `State::set`, which fires the stateful-deps callback
-    // wired by `BlincContextState::init_with_callback` — that's
-    // what drives `view_widget`'s wrapping stateful to refresh.
+    // `on_click` closure is a raw `extern "C" fn()` pointer minted by Zyntax's
+    // `CreateClosure` → `func_addr`. Signal writes inside route through
+    // `__signal_set_i32` → reactive `State::set` → stateful refresh.
     if on_click_closure != 0 {
         type ClosureFn = extern "C" fn();
         let func: ClosureFn = unsafe { std::mem::transmute(on_click_closure) };
@@ -996,48 +618,27 @@ extern "C" fn blinc_div_view(
     ))))) as WidgetHandle
 }
 
-/// `__new_child_list__() -> i64`
-///
-/// Allocate a fresh empty `Vec<WidgetHandle>` on the heap and
-/// hand back its raw-pointer payload as `i64`. The lower pass
-/// `lower_children_arrays` calls this once per primitive
-/// container with a body block — `__push_child__` then appends
-/// each evaluated child handle, and the container's extern
-/// (`$Blinc$Div$view`, …) consumes the list.
+/// `__new_child_list__() -> i64` — mints a fresh `Vec<WidgetHandle>` for a container.
 extern "C" fn blinc_new_child_list() -> i64 {
     Box::into_raw(Box::new(Vec::<WidgetHandle>::new())) as i64
 }
 
-/// `__push_child__(list: i64, child: i64)`
-///
-/// Append a child handle to the `Vec<WidgetHandle>` referenced
-/// by `list`. The list pointer must still be live (no
-/// `Box::from_raw` since allocation); the container extern
-/// reclaims it later.
+/// `__push_child__(list, child)` — appends to a list minted by `__new_child_list__`.
 ///
 /// # Safety
 ///
-/// Both args MUST come from `__new_child_list__` (for `list`)
-/// and a widget-handle extern (for `child`). The JIT-side
-/// rewrite emits these pairings explicitly so this is enforced
-/// at lowering time, not at the call site.
+/// `list` must come from `__new_child_list__` and remain live (reclaimed by the container).
 extern "C" fn blinc_push_child(list: i64, child: WidgetHandle) {
     if list == 0 {
         return;
     }
-    // SAFETY: see fn-level doc. We deliberately use
-    // `&mut *(raw as *mut Vec<...>)` instead of `Box::from_raw`
-    // so the allocation stays live — the container extern is
-    // what reclaims it.
+    // SAFETY: keep alloc live for the container extern to reclaim.
     let vec: &mut Vec<WidgetHandle> = unsafe { &mut *(list as *mut Vec<WidgetHandle>) };
     vec.push(child);
 }
 
-// Overlay-builder externs. The lowering pass synthesises calls
-// to these for styled-primitive call sites that supply inline
-// visual props (`bg`, `opacity`, …). The overlay pointer is
-// consumed by the container/widget extern, which wraps the
-// constructed widget in `Styled<W>`.
+// Overlay-builder externs for inline visual props (bg, opacity, …). Consumed by
+// the container/widget extern, which wraps the widget in `Styled<W>`.
 
 extern "C" fn blinc_new_style_overlay() -> i64 {
     Box::into_raw(Box::new(RenderPropsOverlay::default())) as i64
@@ -1085,14 +686,11 @@ extern "C" fn blinc_set_overlay_border_color(ptr: i64, color: i64) {
     overlay.border_color = Some(blinc_core::layer::Color::from_hex(color as u32));
 }
 
-/// Reclaim a `Box<RenderPropsOverlay>` minted by
-/// `__new_style_overlay__`. Returns `Default::default()` for a
-/// null pointer (the no-styling-args call-site shape).
+/// Reclaim a `Box<RenderPropsOverlay>` from `__new_style_overlay__`. Default for null.
 ///
 /// # Safety
 ///
-/// `ptr` MUST come from `__new_style_overlay__`. The lowering
-/// pass is the only producer.
+/// `ptr` must come from `__new_style_overlay__`.
 pub unsafe fn materialize_overlay(ptr: i64) -> RenderPropsOverlay {
     if ptr == 0 {
         return RenderPropsOverlay::default();
@@ -1104,22 +702,14 @@ pub unsafe fn materialize_overlay(ptr: i64) -> RenderPropsOverlay {
 // Errors
 // =====================================================================
 
-/// Top-level error type for the embed API. Wraps Zyntax's own error
-/// types so callers see one taxonomy. Each variant carries the
-/// underlying Zyntax error so `Display` / `source()` still surfaces
-/// the original diagnostic with file:line:col spans where Zyntax
-/// produced them.
+/// Top-level error type for the embed API.
 #[derive(Debug, Error)]
 pub enum BlincDslError {
-    /// `Grammar2::from_source(BLINC_GRAMMAR)` failed. This is a Blinc
-    /// bug — the grammar is baked at compile time, so any compile-
-    /// failure is on us, not the user.
+    /// `Grammar2::from_source(BLINC_GRAMMAR)` failed (Blinc-internal bug).
     #[error("blinc grammar compile failed: {0}")]
     Grammar(#[from] Grammar2Error),
 
-    /// `runtime.compile_typed_program(...)` failed — the user's
-    /// `.blinc` source has a parse / type / lowering error. The
-    /// inner string carries the diagnostic with a file:line span.
+    /// User's `.blinc` source has a parse / type / lowering error.
     #[error("blinc compile error: {0}")]
     Compile(String),
 
@@ -1138,120 +728,52 @@ pub type BlincDslResult<T> = std::result::Result<T, BlincDslError>;
 // FSM registry
 // =====================================================================
 //
-// Module-aware identity for fsms compiled by the DSL. Keys combine
-// the Zyntax module name (currently always `"main"` — Zyntax compiles
-// every source into a single module today, see
-// `zyntax_embed/src/runtime.rs:1373`) with the FSM's `TypeId` from
-// the program's `type_registry`. When Zyntax surfaces real per-source
-// modules later, the same key shape extends without breaking changes:
-// `("foo", TypeId)` and `("bar", TypeId)` for same-named fsms in
-// different modules can coexist.
-//
-// Why not bare-string keys: two fsms named `Loader` in different
-// modules would collide on a string key. `InternedString` doesn't help
-// either — `InternedString::new_global("Loader")` returns the same
-// handle process-wide regardless of source.
-//
-// Why not `HirId`: `HirId` is generated during HIR lowering after
-// compilation, isn't accessible at parse time, and is opaque
-// (`Uuid`-backed) — it works for runtime symbol lookup but not as a
-// stable identity exposed at the DSL surface.
+// `(module, TypeId)` keys so same-named fsms in different modules don't collide.
 
-/// Identity of an fsm in the global registry: the Zyntax module the
-/// fsm is compiled in plus its `TypeId` within that module's type
-/// registry. Stable within a process run (TypeIds come from a
-/// process-global atomic counter).
+/// Identity of an fsm in the global registry: Zyntax module + type-registry `TypeId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FsmId {
-    /// The Zyntax module name the fsm lives in. Today this is always
-    /// `"main"` because Zyntax compiles each source into a single
-    /// module. Future per-source / per-package modules will surface
-    /// distinct values here without changing the rest of the registry
-    /// API.
+    /// Zyntax module name. Currently always `"main"`.
     pub module: zyntax_typed_ast::InternedString,
-    /// The fsm's enum `TypeId`, looked up from the program's
-    /// `type_registry` after `compile_source`. Used as the registry
-    /// key for fast lookup; user-facing `dispatch::<Loader>(event)`
-    /// resolves to this id via Zyntax's type machinery.
+    /// The fsm's enum `TypeId` from the program's `type_registry`.
     pub type_id: zyntax_typed_ast::type_registry::TypeId,
 }
 
-/// Tick-driven guard transition record. The original DSL guard
-/// expression (the `<expr>` after `when`) is lifted into a
-/// stand-alone top-level function during the post-parse pass so
-/// it survives compile and is callable at dispatch time as an
-/// ordinary Zyntax-compiled symbol. `guard_fn` carries the
-/// generated function's symbol name; resolving it through
-/// `runtime.call::<bool>(name, &[])` evaluates the guard with
-/// current signal values.
-///
-/// Why a generated function rather than carrying the AST node
-/// directly: Zyntax's runtime exposes `call(symbol, args)` for
-/// invocation, but no general-purpose "evaluate this AST" entry
-/// point. Wrapping the expression in a function gives us a
-/// callable symbol with no extra runtime infrastructure. The
-/// generated name is `__fsm_tick_guard_<FsmName>_<idx>__`, where
-/// `<idx>` is the guard's position in the fsm's declaration order
-/// (deterministic, stable across runs of the same source).
+/// Tick-driven guard. The guard expression is lifted into a top-level function
+/// `__fsm_tick_guard_<FsmName>_<idx>__` so dispatch can call it as a normal symbol.
 #[derive(Debug, Clone)]
 pub struct TickGuard {
     pub from: zyntax_typed_ast::InternedString,
     pub to: zyntax_typed_ast::InternedString,
-    /// Synthesised guard-function symbol name. `None` only when
-    /// the parse-time pass couldn't extract an expression (a
-    /// malformed `__fsm_tick__` marker). In normal flow this is
-    /// always `Some`.
+    /// Synthesised guard-function symbol name.
     pub guard_fn: Option<zyntax_typed_ast::InternedString>,
 }
 
-/// One event-driven transition. Names match the DSL surface:
-/// `on <from>.<event> -> <to> { <action>... }`.
+/// One event-driven transition: `on <from>.<event> -> <to> { <action>... }`.
 #[derive(Debug, Clone)]
 pub struct EventTransition {
     pub from: zyntax_typed_ast::InternedString,
     pub event: zyntax_typed_ast::InternedString,
     pub to: zyntax_typed_ast::InternedString,
-    /// Actions to execute when this transition fires, in
-    /// source order. Maps to the substrate's
-    /// [`blinc_runtime::fsm::TransitionAction`] variants.
+    /// Actions in source order.
     pub actions: Vec<blinc_runtime::fsm::TransitionAction>,
 }
 
-/// The runtime definition of an fsm — populated by the host when
-/// the fsm's `__fsm_meta__` body executes (each marker call inside
-/// mutates the entry). Owned by the `FsmRegistry` keyed by `FsmId`.
+/// Runtime definition of an fsm — populated by the `__fsm_meta__` body.
 #[derive(Debug, Clone, Default)]
 pub struct FsmDefinition {
-    /// Initial state name (variant of the fsm's state enum).
+    /// Initial state name.
     pub initial: Option<zyntax_typed_ast::InternedString>,
-    /// Event-driven transitions in declaration order. Same order as
-    /// the source so dispatch can iterate match-arm-style.
+    /// Event-driven transitions in declaration order.
     pub transitions: Vec<EventTransition>,
-    /// Tick-driven guards in declaration order. Currently the guard
-    /// expression isn't carried — see `TickGuard` doc.
+    /// Tick-driven guards in declaration order.
     pub tick_guards: Vec<TickGuard>,
-    /// Bare fsm name (from the begin marker), useful for diagnostic
-    /// messages. The authoritative identity is `FsmId`.
+    /// Bare fsm name (for diagnostics; authoritative identity is `FsmId`).
     pub name: Option<zyntax_typed_ast::InternedString>,
 }
 
 impl FsmDefinition {
-    /// Resolve an event-driven transition. Returns the target
-    /// state's name (variant of the fsm's state enum) when there's
-    /// a transition matching `(from = current, event = event)`, or
-    /// `None` if no rule applies.
-    ///
-    /// Linear scan in declaration order — match-arm-style. The
-    /// first matching rule wins. Authors who want priority semantics
-    /// rely on declaration order in the source; the post-parse pass
-    /// preserves it (`populate_fsm_registry_pass` walks the AST in
-    /// statement order).
-    ///
-    /// `&str` arguments rather than `InternedString` because the
-    /// dispatch caller is typically holding either bare runtime
-    /// strings (from a host event channel) or compile-time literals
-    /// — converting at the boundary keeps the call site terse. The
-    /// implementation interns once for comparison.
+    /// Resolve an event-driven transition. First matching rule wins (declaration order).
     pub fn step_event(
         &self,
         current: &str,
@@ -1266,44 +788,30 @@ impl FsmDefinition {
     }
 }
 
-/// Process-wide registry of fsm definitions populated as the host
-/// runs each fsm's `__fsm_meta__` method. Lookup is by `FsmId`;
-/// dispatch sites resolve the id from the user-facing fsm enum
-/// type.
+/// Process-wide registry of fsm definitions keyed by `FsmId`.
 #[derive(Debug, Default)]
 pub struct FsmRegistry {
     fsms: std::collections::HashMap<FsmId, FsmDefinition>,
 }
 
 impl FsmRegistry {
-    /// Create an empty registry. Most callers should prefer the
-    /// process-wide `global_fsm_registry()` accessor — the registry
-    /// is host-managed singleton state, not something an embedder
-    /// typically wants to instantiate per-instance.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Insert / update an fsm definition. Replaces any existing
-    /// entry with the same `FsmId` — used when a hot-reload re-runs
-    /// `__fsm_meta__` for an already-known fsm.
+    /// Insert/update an fsm definition.
     pub fn upsert(&mut self, id: FsmId, def: FsmDefinition) {
         self.fsms.insert(id, def);
     }
 
-    /// Look up an fsm by id. Returns `None` if no `__fsm_meta__`
-    /// has been run for this `(module, type_id)` pair.
     pub fn get(&self, id: &FsmId) -> Option<&FsmDefinition> {
         self.fsms.get(id)
     }
 
-    /// Mutable lookup. Used internally by the marker builtins to
-    /// append transitions to the top-of-stack fsm's definition.
     pub fn get_mut(&mut self, id: &FsmId) -> Option<&mut FsmDefinition> {
         self.fsms.get_mut(id)
     }
 
-    /// Number of registered fsms. Useful for tests and diagnostics.
     pub fn len(&self) -> usize {
         self.fsms.len()
     }
@@ -1312,29 +820,16 @@ impl FsmRegistry {
         self.fsms.is_empty()
     }
 
-    /// Iterate over all registered (id, definition) pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&FsmId, &FsmDefinition)> {
         self.fsms.iter()
     }
 
-    /// Remove an fsm from the registry. Used during hot-reload when
-    /// a fsm decl gets removed from a source file — the host must
-    /// drop the stale entry so dispatch fails loudly rather than
-    /// silently using a definition for a type that no longer exists.
+    /// Remove an fsm — used during hot-reload to drop stale entries.
     pub fn remove(&mut self, id: &FsmId) -> Option<FsmDefinition> {
         self.fsms.remove(id)
     }
 
-    /// Find an fsm by its source-level name within a given module.
-    /// Returns `None` if no fsm of that name has been registered for
-    /// the module. Useful as the entry point for callers that don't
-    /// have an `FsmId` in hand — e.g. user code in Rust that holds
-    /// the fsm name as a string after parsing the DSL source.
-    ///
-    /// Linear scan; for typical app sizes (handful of fsms per
-    /// module) this is fine. If the registry grows past dozens of
-    /// fsms per module a name → FsmId secondary index is the
-    /// natural next step.
+    /// Find an fsm by source-level name within a module (linear scan).
     pub fn find_by_name(
         &self,
         module: zyntax_typed_ast::InternedString,
@@ -1347,14 +842,7 @@ impl FsmRegistry {
             .map(|(id, _)| *id)
     }
 
-    /// Convenience: look up an fsm by id and resolve a transition
-    /// in one call. Returns the target state's name when
-    /// `(current, event)` matches a registered transition, `None`
-    /// otherwise (no fsm registered, or no matching rule).
-    ///
-    /// Equivalent to `self.get(id).and_then(|d| d.step_event(...))`
-    /// but lets callers avoid the explicit `get` lookup at the
-    /// dispatch site.
+    /// Lookup + transition in one call. `None` if no fsm registered or no rule matches.
     pub fn step_event(
         &self,
         id: &FsmId,
@@ -1365,59 +853,26 @@ impl FsmRegistry {
     }
 }
 
-/// A live instance of a DSL-defined fsm — pairs an `FsmId` with the
-/// current state name. Holds enough state for an embedder to drive
-/// transitions without committing to a particular widget integration:
-/// dispatch events / ticks, read the current state, reset to initial.
-///
-/// This is the dependency-free bridge to Blinc's Stateful pattern.
-/// Wrapping an `FsmInstance` inside a `Stateful<S>` impl is one
-/// integration shape, but it's not the only one — `FsmInstance`
-/// works equally well as a field in any reactive container or
-/// widget closure that needs string-keyed state.
-///
-/// # State representation
-///
-/// Current state is held as `InternedString` of the variant name
-/// (e.g. `"Idle"`, `"Loading"`). This keeps the bridge dynamic —
-/// no compile-time mapping between the DSL fsm's variants and a
-/// user-defined Rust enum is required. Embedders that want a
-/// strongly-typed enum on top can wrap with their own conversion
-/// shim; for prototype use cases, the string-keyed shape is the
-/// short path to "wire UI → DSL fsm".
+/// Live instance of a DSL-defined fsm — pairs an `FsmId` with current state name.
+/// State is `InternedString` of the variant (dynamic, no compile-time enum mapping).
 ///
 /// # Example
 ///
 /// ```ignore
-/// let dsl = BlincDsl::new()?;
-/// dsl.compile_source(/* fsm Loader { ... } */, "loader.blinc")?;
-///
 /// let mut loader = FsmInstance::new(&dsl, "main", "Loader")?;
-/// assert_eq!(loader.current(), "Idle");
-///
-/// // Wire to a button click:
-/// button("Start").on_click(move |_| {
-///     loader.dispatch_event(&dsl, "Start");
-///     // loader.current() → "Loading"
-/// });
+/// loader.dispatch_event(&dsl, "Start");
 /// ```
 #[derive(Debug, Clone)]
 pub struct FsmInstance {
     /// Identity of the fsm definition this instance follows.
-    /// Resolved via `FsmRegistry::find_by_name` at construction
-    /// time so subsequent dispatches don't pay the lookup cost.
     pub id: FsmId,
-    /// Current state name. Mutated in place by `dispatch_event` /
-    /// `tick` when a transition fires.
+    /// Current state name (mutated by `dispatch_event` / `tick`).
     pub current: zyntax_typed_ast::InternedString,
 }
 
 impl FsmInstance {
-    /// Create a new instance pinned to a fsm registered in the
-    /// global registry. The instance starts in the fsm's declared
-    /// initial state. Returns `None` if no fsm of the given name
-    /// is registered for the module, or if the fsm was registered
-    /// without an initial state.
+    /// Create an instance starting in the fsm's declared initial state. `None` if
+    /// the fsm isn't registered or has no initial state.
     pub fn new(_dsl: &BlincDsl, module: &str, fsm_name: &str) -> Option<Self> {
         let module_i = zyntax_typed_ast::InternedString::new_global(module);
         let id = with_fsm_registry(|r| r.find_by_name(module_i, fsm_name))?;
@@ -1428,17 +883,12 @@ impl FsmInstance {
         })
     }
 
-    /// Current state name as a borrowed `&str`. Resolves from the
-    /// instance's stored `InternedString`.
+    /// Current state name as `String`.
     pub fn current(&self) -> String {
         self.current.resolve_global().unwrap_or_default()
     }
 
-    /// Dispatch an event by name. Returns `true` if a transition
-    /// fired (and `current` has been updated to the new state),
-    /// `false` if no rule matched. Mirrors the
-    /// `StateTransitions::on_event` shape Blinc widgets expect:
-    /// "did anything change?" maps to "should the UI rebuild?".
+    /// Dispatch an event by name. Returns `true` if a transition fired.
     pub fn dispatch_event(&mut self, _dsl: &BlincDsl, event: &str) -> bool {
         let current_str = self.current();
         let next = with_fsm_registry(|r| r.step_event(&self.id, &current_str, event));
@@ -1450,10 +900,7 @@ impl FsmInstance {
         }
     }
 
-    /// Tick. Walks the registered tick-guards via `BlincDsl::step_tick`
-    /// (which JIT-evaluates each guard), updates `current` if any
-    /// fires, returns whether a transition happened. Errors from
-    /// the JIT call propagate.
+    /// Tick. JIT-evaluates registered tick-guards; returns `true` if a transition fired.
     pub fn tick(&mut self, dsl: &BlincDsl) -> BlincDslResult<bool> {
         let current_str = self.current();
         let next = dsl.step_tick(&self.id, &current_str)?;
@@ -1465,8 +912,7 @@ impl FsmInstance {
         }
     }
 
-    /// Reset to the fsm's initial state. Useful when a higher-level
-    /// flow restarts a sub-state-machine.
+    /// Reset to the fsm's initial state.
     pub fn reset(&mut self) {
         if let Some(initial) = with_fsm_registry(|r| r.get(&self.id).and_then(|d| d.initial)) {
             self.current = initial;
@@ -1474,11 +920,7 @@ impl FsmInstance {
     }
 }
 
-/// Process-wide fsm registry. Host marker builtins (registered in a
-/// follow-up commit) read and mutate this through the `with_*`
-/// accessors below. Stored as `OnceLock<Mutex<FsmRegistry>>` so
-/// embedders that build multiple `BlincDsl` instances in the same
-/// process share one consistent view.
+/// Process-wide fsm registry. Multiple `BlincDsl` instances share one view.
 static GLOBAL_FSM_REGISTRY: std::sync::OnceLock<std::sync::Mutex<FsmRegistry>> =
     std::sync::OnceLock::new();
 
@@ -1490,16 +932,12 @@ fn fsm_registry_lock() -> std::sync::MutexGuard<'static, FsmRegistry> {
 }
 
 /// Run a closure with shared access to the global fsm registry.
-/// Use this from dispatch sites that need to resolve a fsm
-/// definition by `FsmId`.
 pub fn with_fsm_registry<R>(f: impl FnOnce(&FsmRegistry) -> R) -> R {
     let guard = fsm_registry_lock();
     f(&guard)
 }
 
-/// Run a closure with mutable access. Used internally by the
-/// marker builtins; embedders shouldn't normally need this — the
-/// registry is populated automatically when source compiles.
+/// Run a closure with mutable registry access. Used internally by marker builtins.
 pub fn with_fsm_registry_mut<R>(f: impl FnOnce(&mut FsmRegistry) -> R) -> R {
     let mut guard = fsm_registry_lock();
     f(&mut guard)
@@ -1509,16 +947,8 @@ pub fn with_fsm_registry_mut<R>(f: impl FnOnce(&mut FsmRegistry) -> R) -> R {
 // FSM dispatch synthesis (post-parse)
 // =====================================================================
 
-/// Recognition heuristic for `signal <name>: <T>` decls. The
-/// grammar action's `Function` constructor in
-/// `zyn_peg/src/runtime2/interpreter.rs:898` hardcodes
-/// `link_name: None`, so we can't tag signal decls with a marker
-/// link_name from the action — instead we identify them by shape:
-/// extern function, no body, no parameters, primitive return,
-/// and `link_name: None`. The latter discriminates against host
-/// builtins auto-injected by `inject_builtin_externs`
-/// (zyntax_embed/src/grammar2.rs:280) which always set
-/// `link_name: Some(<target_symbol>)`.
+/// Shape-based recognition for `signal <name>: <T>` decls: extern fn, no body,
+/// no params, primitive return, `link_name: None` (so we don't catch host builtins).
 fn is_signal_decl(func: &zyntax_typed_ast::typed_ast::TypedFunction) -> bool {
     func.is_external
         && func.body.is_none()
@@ -1527,10 +957,7 @@ fn is_signal_decl(func: &zyntax_typed_ast::typed_ast::TypedFunction) -> bool {
         && matches!(func.return_type, Type::Primitive(_))
 }
 
-/// Run the JIT'd view once and box the resulting widget
-/// builder. Returned by `view_widget` when the program has no
-/// declared signals / FSMs — there's nothing to subscribe to,
-/// so a single materialise + done.
+/// Run the JIT'd view once and box the resulting widget builder (no reactive wrapper).
 fn materialize_view(
     renderer: &std::sync::Arc<dyn blinc_runtime::view::ViewRenderer>,
 ) -> Box<dyn blinc_layout::div::ElementBuilder> {
@@ -1544,28 +971,13 @@ fn materialize_view(
         .unwrap_or_else(|| Box::new(blinc_layout::div::Div::new()))
 }
 
-/// Detect view decorators and strip the synthetic marker calls
-/// the grammar prepended. Returns
-/// `(saw_stateful, explicit_signal_deps, explicit_fsms)`:
-///
-///  * `saw_stateful` — `true` when any view was decorated with
-///    `@stateful`. Pinned on `BlincDsl` so `view_widget`
-///    wraps the materialised tree in a reactive container.
-///  * `explicit_signal_deps` — every signal name listed
-///    inside `@stateful([…])` across the program, merged and
-///    deduplicated. Empty when authors used the bare
-///    `@stateful` form — `view_widget` reads that as
-///    "subscribe to every declared signal".
-///  * `explicit_fsms` — every FSM name listed inside
-///    `@fsm([…])` across the program. Empty when no `@fsm`
-///    was used; `view_widget` falls back to the first
-///    declared FSM in that case.
+/// Detect view decorators and strip the synthetic marker calls.
+/// Returns `(saw_stateful, explicit_signal_deps, explicit_fsms)`.
+/// Empty `signal_deps` with `saw_stateful=true` means subscribe to all declared signals.
 fn detect_and_strip_stateful_views(program: &mut TypedProgram) -> (bool, Vec<String>, Vec<String>) {
     use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedExpression, TypedLiteral};
 
-    // Pull string-literal args off a leading marker call whose
-    // callee matches `expected_callee`. Returns Some(args) and
-    // pops the marker; None leaves the body alone.
+    // Strip a leading marker call matching `expected_callee` and return its string args.
     fn strip_leading_marker(
         body: &mut zyntax_typed_ast::typed_ast::TypedBlock,
         expected_callee: &str,
@@ -1606,10 +1018,7 @@ fn detect_and_strip_stateful_views(program: &mut TypedProgram) -> (bool, Vec<Str
         let Some(body) = body else {
             return;
         };
-        // Decorator order at the grammar level is
-        // `(stateful | fsm)*`, but the author can stack them
-        // either way; loop until no more markers strip so we
-        // recognise both orderings.
+        // Decorators can stack either way; strip until no more match.
         loop {
             if let Some(names) = strip_leading_marker(body, "__stateful_view__") {
                 saw_stateful = true;
@@ -1648,11 +1057,8 @@ fn detect_and_strip_stateful_views(program: &mut TypedProgram) -> (bool, Vec<Str
     (saw_stateful, signal_deps, fsms)
 }
 
-/// Snapshot a program's `signal <name>: <T>` and
-/// `fsm <Name> { … }` declarations. Run BEFORE the
-/// signal-rewrite / fsm-meta-strip passes — afterwards the
-/// originating decls are gone and recovery would require
-/// re-parsing.
+/// Snapshot `signal <name>: <T>` and `fsm <Name> { … }` decls. MUST run BEFORE
+/// the signal-rewrite / fsm-meta-strip passes — they erase the originating decls.
 fn collect_declared(program: &TypedProgram) -> (Vec<(String, Type)>, Vec<String>) {
     use zyntax_typed_ast::typed_ast::TypedDeclaration;
     let mut signals = Vec::new();
@@ -1681,42 +1087,9 @@ fn collect_declared(program: &TypedProgram) -> (Vec<(String, Type)>, Vec<String>
     (signals, fsms)
 }
 
-/// Resolve DSL signal references. Walks the program for
-/// `signal <name>: <T>` declarations (recognised by `is_signal_decl`
-/// above), records (name, type), then rewrites every
-/// `<name>.get()` method call into a host-extern call
-/// `__signal_get_<T>("<name>")`. The signal extern decls are
-/// stripped before the program reaches Zyntax's compile path so
-/// the bare-name extern doesn't collide with anything at link
-/// time.
-///
-/// Why this shape:
-///
-///   * One host extern per primitive type (`__signal_get_i32`,
-///     `__signal_get_string`, etc.) keeps the host registration
-///     cost O(types), not O(signals). Adding a new signal is
-///     pure DSL — no host code.
-///   * `<name>.get()` syntax matches how DSL authors think about
-///     signals (`State<T>::get()` is the standard accessor).
-///     Internally we route through name + type discrimination at
-///     the boundary; the DSL surface stays uniform.
-///   * Stripping the signal decls before compile avoids two
-///     problems: (a) the marker `link_name` would fail to link,
-///     and (b) the bare-named extern (e.g. `count`) might shadow
-///     other top-level callables.
-///
-/// Currently only primitive return types (`i32`, `string`) are
-/// handled — adding more is one match arm here plus a host extern.
-/// Struct returns route through Zyntax's Dyn Boxed machinery and
-/// don't need this pass at all (the DSL author writes
-/// `user.get().age` and Zyntax codegens the field load directly).
-/// Walk the program's top-level declarations, drain any
-/// `__blinc_stylesheet__` marker functions (emitted by the
-/// `style { ... }` grammar rule), extract the CSS strings
-/// they hold in their bodies, and remove them so JIT-compile
-/// doesn't see the marker functions. The extracted text gets
-/// piped through [`auto_inject_semicolons`] so authors can
-/// write `;`-free CSS in `style` blocks.
+/// Extract CSS from `__blinc_stylesheet__` marker fns and remove them from the
+/// program. The CSS text is run through [`auto_inject_semicolons`] so `;`-free
+/// declarations work.
 fn extract_and_strip_stylesheets(program: &mut TypedProgram, out: &mut Vec<String>) {
     use zyntax_typed_ast::typed_ast::{
         TypedDeclaration, TypedExpression, TypedLiteral, TypedStatement,
@@ -1745,23 +1118,13 @@ fn extract_and_strip_stylesheets(program: &mut TypedProgram, out: &mut Vec<Strin
     });
 }
 
-/// Append a `;` to every line inside a `{ ... }` block whose
-/// trailing significant char doesn't already terminate the
-/// declaration. Lets DSL authors omit `;` in `style { ... }`
-/// blocks; the host-side CSS parser (which still uses `;` /
-/// `}` as the value-terminator) sees a well-formed sheet.
-///
-/// Brace-depth tracking is naïve — string-literal / comment
-/// braces will throw off the count. CSS in real `style {}`
-/// blocks rarely contains either at top level, so the
-/// heuristic holds; pathological cases can supply explicit
-/// `;` if needed.
+/// Append `;` inside `{ ... }` blocks where the line's last char doesn't already
+/// terminate. Brace depth tracking is naïve — string/comment braces will skew it.
 fn auto_inject_semicolons(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len() + raw.len() / 8);
     let mut depth: i32 = 0;
     for line in raw.split_inclusive('\n') {
-        // Separate the content from the line-ending whitespace
-        // so we can inject `;` *before* the newline.
+        // Separate body from trailing whitespace so we inject `;` before the newline.
         let line_end_idx = line
             .rfind(|c: char| !c.is_whitespace())
             .map(|i| i + line[i..].chars().next().map(char::len_utf8).unwrap_or(0))
@@ -1794,19 +1157,13 @@ fn auto_inject_semicolons(raw: &str) -> String {
     out
 }
 
+/// Rewrite `<sig>.get()` / `<sig>.set(v)` / `<sig> = v` into `__signal_<get|set>_<T>` calls.
 fn resolve_signal_calls(program: &mut TypedProgram) {
     use std::collections::HashMap;
     use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
     use zyntax_typed_ast::InternedString;
 
-    // -----------------------------------------------------------------
-    // Phase 1: collect signal name → return type. Walk extern fns
-    // tagged with the magic link_name marker. The pass doesn't
-    // require signals be declared before use (PEG already orders
-    // top_level_item alternates), but we collect them all up front
-    // anyway so the rewrite walker can see signals declared after
-    // their first usage too.
-    // -----------------------------------------------------------------
+    // Phase 1: collect signal name → return type.
     let mut signals: HashMap<InternedString, Type> = HashMap::new();
     for decl in &program.declarations {
         let TypedDeclaration::Function(func) = &decl.node else {
@@ -1822,18 +1179,12 @@ fn resolve_signal_calls(program: &mut TypedProgram) {
         return;
     }
 
-    // -----------------------------------------------------------------
-    // Phase 2: walk every expression in the program and rewrite
-    // `<sig_name>.get()` (a `TypedExpression::MethodCall` on a
-    // `Variable` receiver) into a `__signal_get_<T>("<name>")`
-    // host-extern call.
-    // -----------------------------------------------------------------
+    // Phase 2: rewrite `<sig>.get()` → `__signal_get_<T>("<name>")`.
     fn typed_signal_extern_name(ty: &Type) -> Option<&'static str> {
         match ty {
             Type::Primitive(PrimitiveType::I32) => Some("__signal_get_i32"),
             Type::Primitive(PrimitiveType::F64) => Some("__signal_get_f64"),
             Type::Primitive(PrimitiveType::String) => Some("__signal_get_string"),
-            // Add a match arm + a matching host builtin to extend.
             _ => None,
         }
     }
@@ -1851,23 +1202,14 @@ fn resolve_signal_calls(program: &mut TypedProgram) {
         expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>,
         signals: &HashMap<InternedString, Type>,
     ) {
-        // Special-case: `<signal> = <expr>` parses as
-        // `Binary(Variable(name), Assign, expr)`. We must intercept
-        // BEFORE the recursive children walk below — otherwise the
-        // LHS `Variable(name)` would be left alone (no rewrite
-        // triggers on bare variables) but we'd never see the
-        // assignment shape again to rewrite the whole Binary into
-        // a `__signal_set_<T>("name", rhs)` call.
+        // MUST intercept `<signal> = <expr>` BEFORE the recursive walk — the
+        // LHS `Variable` doesn't otherwise trigger a rewrite.
         if let TypedExpression::Binary(b) = &expr.node {
             if b.op == zyntax_typed_ast::typed_ast::BinaryOp::Assign {
                 if let TypedExpression::Variable(name) = &b.left.node {
                     if let Some(sig_ty) = signals.get(name).cloned() {
                         if let Some(setter) = typed_signal_setter_extern_name(&sig_ty) {
-                            // Rewrite the RHS first so nested
-                            // signal reads (`count + 1`) become
-                            // `__signal_get_i32("count") + 1`
-                            // before we attach it as the setter's
-                            // second arg.
+                            // Rewrite RHS first so nested signal reads route through getters.
                             let mut rhs = (*b.right).clone();
                             rewrite_expr(&mut rhs, signals);
 
@@ -1895,9 +1237,7 @@ fn resolve_signal_calls(program: &mut TypedProgram) {
             }
         }
 
-        // Recursively rewrite children FIRST so nested signal calls
-        // (e.g. `text(count.get())`) get the rewrite applied to the
-        // inner expression before we look at the outer.
+        // Children first so nested signal calls (e.g. `text(count.get())`) are rewritten.
         match &mut expr.node {
             TypedExpression::Binary(b) => {
                 rewrite_expr(&mut b.left, signals);
@@ -1946,30 +1286,13 @@ fn resolve_signal_calls(program: &mut TypedProgram) {
                     rewrite_block(block, signals);
                 }
             },
-            // Other variants (Literal, Variable, etc.) have no
-            // rewritable children at this layer.
             _ => {}
         }
 
-        // Now check the current node: is it a method call of the
-        // shape `<sig_name>.get()` / `<sig_name>.set(value)`?
-        //
-        // Two AST shapes both round-trip to the same logical
-        // method call:
-        //
-        //   1. `MethodCall { receiver, method, args }` — what the
-        //      postfix-expr `suffix_method` chain produces inside
-        //      an expression position.
-        //   2. `Call { callee: Field { object, field }, args }` —
-        //      what `method_call_stmt` emits at statement
-        //      position, because Zyntax's action-language
-        //      interpreter doesn't expose a direct
-        //      `TypedExpression::MethodCall` constructor.
-        //
-        // Recognise both so signals work end-to-end whether
-        // `.get()` / `.set(x)` appears as an expression operand
-        // (`text(f"{count.get()}")`) or a bare statement
-        // (`count.set(n)` inside a closure body).
+        // `.get()` / `.set(x)` lands in two AST shapes:
+        //   1. `MethodCall` — expression position (postfix-expr).
+        //   2. `Call { callee: Field { ... }, ... }` — statement position.
+        // Recognise both.
         let method_call = match &expr.node {
             TypedExpression::MethodCall(mc) => {
                 if let TypedExpression::Variable(receiver_name) = &mc.receiver.node {
@@ -2032,11 +1355,7 @@ fn resolve_signal_calls(program: &mut TypedProgram) {
                 });
                 expr.ty = sig_ty;
             }
-            // `count.set(value)` — write. Single arg of the
-            // signal's value type, returns Unit. The arg
-            // expression is already child-rewritten by the
-            // recursion above, so nested signal reads in
-            // `count.set(count.get() + 1)` resolve cleanly.
+            // `count.set(value)` — write. Arg already child-rewritten.
             Some("set") if args.len() == 1 => {
                 let Some(setter) = typed_signal_setter_extern_name(&sig_ty) else {
                     return;
@@ -2098,8 +1417,6 @@ fn resolve_signal_calls(program: &mut TypedProgram) {
                 rewrite_block(&mut w.body, signals);
             }
             TypedStatement::Block(b) => rewrite_block(b, signals),
-            // Other variants don't carry expressions we'd rewrite
-            // for the prototype slice.
             _ => {}
         }
     }
@@ -2112,7 +1429,6 @@ fn resolve_signal_calls(program: &mut TypedProgram) {
             rewrite_block(body, &signals);
         }
     }
-    // Also walk impl-block methods.
     for decl in &mut program.declarations {
         let TypedDeclaration::Impl(imp) = &mut decl.node else {
             continue;
@@ -2124,11 +1440,7 @@ fn resolve_signal_calls(program: &mut TypedProgram) {
         }
     }
 
-    // -----------------------------------------------------------------
-    // Phase 3: strip the signal-marker decls. They were just
-    // metadata-carriers; the rewrite path replaces every usage
-    // with calls to host-registered builtins.
-    // -----------------------------------------------------------------
+    // Phase 3: strip signal-marker decls (metadata only; usage was rewritten above).
     program.declarations.retain(|decl| {
         let TypedDeclaration::Function(func) = &decl.node else {
             return true;
@@ -2137,38 +1449,16 @@ fn resolve_signal_calls(program: &mut TypedProgram) {
     });
 }
 
-/// Rewrite `<FsmName>.trigger(<path_expr>)` method-call sites
-/// into `__fsm_runtime_trigger__("<FsmName>", <path_expr>)`
-/// extern calls, so a DSL closure / function body can drive a
-/// declared FSM without touching the host.
-///
-/// `<FsmName>` must match an `fsm <Name> { ... }` declared in
-/// the same program. The path argument is passed through as-is
-/// (typically a `"State.Event"` string literal, but any
-/// string-typed expression works); the host-side extern parses
-/// `"State.Event"`, checks the precondition, and dispatches via
-/// `blinc_runtime::fsm::dispatch_default`.
-///
-/// Mirrors the `resolve_signal_calls` pattern — a post-parse
-/// rewrite catching DSL-surface method calls and lowering them
-/// to extern symbols the host registers.
+/// Rewrite `<FsmName>.trigger(<path>)` → `__fsm_runtime_trigger__("<FsmName>", <path>)`.
 fn resolve_fsm_trigger_calls(program: &mut TypedProgram) {
     use std::collections::HashSet;
     use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
     use zyntax_typed_ast::InternedString;
 
-    // Phase 1: collect declared FSM names. The fsm grammar emits
-    // both `Enum { name: "FsmName", ... }` AND `Impl { trait_name:
-    // "FsmName", ... }` — either is enough to recognise the name
-    // is an FSM. Using the Impl side because `Enum.name` is the
-    // bare ident which matches the `Variable` we'll see on the
-    // receiver side of `<FsmName>.trigger(...)`.
+    // Phase 1: collect declared FSM names from `__fsm_meta__`-bearing impls.
     let mut fsm_names: HashSet<InternedString> = HashSet::new();
     for decl in &program.declarations {
         if let TypedDeclaration::Impl(imp) = &decl.node {
-            // Inherent impls (for_type == trait_name == FsmName) and
-            // the FSM-grammar shape (also for_type == trait_name)
-            // both qualify. Either way, capture the name.
             if imp.trait_name.resolve_global().is_some()
                 && imp
                     .methods
@@ -2233,16 +1523,7 @@ fn resolve_fsm_trigger_calls(program: &mut TypedProgram) {
             _ => {}
         }
 
-        // Current node: is it `<FsmName>.trigger(<arg>)`?
-        //
-        // Recognise both representations the grammar can emit:
-        //
-        //   1. `MethodCall { receiver, method, args }` — inside
-        //      an expression position via the postfix chain.
-        //   2. `Call { callee: Field { object, field }, args }` —
-        //      from the `method_call_stmt` statement rule (see
-        //      its grammar comment for why action-lang can't
-        //      build `MethodCall` directly).
+        // Match `<FsmName>.trigger(<arg>)` in both AST shapes (MethodCall / Call+Field).
         let trigger_call = match &expr.node {
             TypedExpression::MethodCall(mc) if mc.positional_args.len() == 1 => {
                 if let TypedExpression::Variable(receiver_name) = &mc.receiver.node {
@@ -2360,18 +1641,9 @@ fn resolve_fsm_trigger_calls(program: &mut TypedProgram) {
     }
 }
 
-/// Rewrite `<FsmName>.subscribe(<path_str>, <closure>)` method
-/// calls into `__fsm_subscribe__("<FsmName>", <path_str>,
-/// <closure>)` extern calls. Mirrors [`resolve_fsm_trigger_calls`]
-/// — collects FSM names from impl blocks that carry a synthesised
-/// `__fsm_meta__` method, then walks every function / impl-method
-/// body and rewrites matching call shapes.
-///
-/// The intended call site is inside a component's `init { … }`
-/// block. The closure is a no-arg lambda whose body runs after
-/// every transition whose `"From.Event"` path equals the path
-/// string. Path-filtering happens host-side inside
-/// `blinc_runtime::fsm::register_subscriber`.
+/// Rewrite `<FsmName>.subscribe(<path>, <closure>)` →
+/// `__fsm_subscribe__("<FsmName>", <path>, <closure>)`. Path filtering happens
+/// host-side in `blinc_runtime::fsm::register_subscriber`.
 fn resolve_fsm_subscribe_calls(program: &mut TypedProgram) {
     use std::collections::HashSet;
     use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
@@ -2443,9 +1715,7 @@ fn resolve_fsm_subscribe_calls(program: &mut TypedProgram) {
             _ => {}
         }
 
-        // Recognise both `MethodCall` (expression position) and
-        // `Call { callee: Field { object, field }, args }`
-        // (statement position via `method_call_stmt`).
+        // Match in both AST shapes (MethodCall / Call+Field).
         let subscribe_call = match &expr.node {
             TypedExpression::MethodCall(mc) if mc.positional_args.len() == 2 => {
                 if let TypedExpression::Variable(receiver_name) = &mc.receiver.node {
@@ -2565,41 +1835,21 @@ fn resolve_fsm_subscribe_calls(program: &mut TypedProgram) {
     }
 }
 
-/// Validate that every `__component_call__("Name", ...)` marker
-/// references a `Name` that's been declared as a `component` (a
-/// `TypedDeclaration::Class`) in the same program. The grammar
-/// emits the marker for any uppercase-leading `Foo(...)`
-/// invocation; this pass is what catches typos and undeclared
-/// component references at compile time, before Zyntax's
-/// type-checker has a chance to surface a less-helpful unresolved-
-/// symbol error.
-///
-/// Returns the list of `(component_name, span_hint)` pairs that
-/// failed validation — empty if everything resolves. Caller folds
-/// non-empty results into a `BlincDslError::Compile`.
-///
-/// Note: this pass intentionally does NOT rewrite the markers. The
-/// `__component_call__` shape is the stable contract the
-/// downstream codegen / host-runtime layer consumes — keeping the
-/// marker present after parse means later passes (and any
-/// debug-AST printers) can still see exactly what the user wrote.
+/// Validate every `__component_call__("Name", ...)` marker references a known
+/// component. Catches typos before Zyntax's less-helpful unresolved-symbol error.
+/// Does NOT rewrite markers — that contract is consumed by `lower_component_calls`.
 fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec<String>> {
     use std::collections::HashSet;
     use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedExpression, TypedLiteral};
 
     let mut known: HashSet<String> = HashSet::new();
-    // User-declared `component <Name> { ... }` decls in this
-    // program contribute their names directly.
     for decl in &program.declarations {
         if let TypedDeclaration::Class(c) = &decl.node {
             if let Some(name) = c.name.resolve_global() {
                 known.insert(name.to_string());
             }
         }
-        // Named imports — Zyntax resolves the actual module at
-        // compile time; we whitelist the imported names here so
-        // the validator (which runs before import resolution)
-        // doesn't flag them.
+        // Named imports — whitelist so the validator (pre import-resolution) doesn't flag them.
         if let TypedDeclaration::Import(import) = &decl.node {
             for item in &import.items {
                 if let zyntax_typed_ast::TypedImportItem::Named { name, .. } = item {
@@ -2610,13 +1860,7 @@ fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec<String>> {
             }
         }
     }
-    // Substrate's `ComponentRegistry` carries pre-registered
-    // primitives (`Div`, `Text`, etc. — see
-    // `register_blinc_layout_primitives`). They aren't declared
-    // in the user's source but are valid call targets, so the
-    // validator pulls them in alongside the user decls. This is
-    // also how user-defined components compiled in OTHER programs
-    // could be referenced once cross-source linking lands.
+    // Pull pre-registered primitives (`Div`, `Text`, …) from the substrate registry.
     blinc_runtime::component::with_component_registry(|r| {
         for (_, def) in r.iter() {
             known.insert(def.name.as_ref().to_string());
@@ -2642,9 +1886,7 @@ fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec<String>> {
                     check_expr(a, known, errors);
                 }
 
-                // Is this a __component_call__ marker? If so, check
-                // its first positional arg (the component name
-                // string literal) against the known-classes set.
+                // Check `__component_call__("Name", ...)` against known set.
                 if let TypedExpression::Variable(callee_name) = &c.callee.node {
                     if callee_name.resolve_global().as_deref() == Some("__component_call__") {
                         if let Some(name_node) = c.positional_args.first() {
@@ -2754,54 +1996,16 @@ fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec<String>> {
     }
 }
 
-/// Rewrite `__component_call__` marker calls into regular function
-/// calls keyed on the component name, lifting `__named__` markers
-/// into Zyntax's native `TypedNamedArg` shape.
-///
-/// Before:
-///   Call(__component_call__, [
-///       StringLiteral("Counter"),    // component name (positional 0)
-///       IntLiteral(1),               // positional prop 1
-///       Call(__named__, [StringLiteral("step"), IntLiteral(2)]),
-///       Block { statements: [...] }, // optional trailing children body
-///   ])
-///
-/// After:
-///   Call(Variable("Counter"), positional_args=[IntLiteral(1),
-///        Block { ... }], named_args=[NamedArg { name: "step", value:
-///        IntLiteral(2) }])
-///
-/// The transformation makes the AST type-check and JIT-compile
-/// against an actual `Counter` function symbol (once component
-/// runtime lands), and surfaces named args in the form
-/// downstream codegen already knows how to consume. The trailing
-/// `Block` (if present) rides through as a regular positional arg
-/// — TypedCall has no first-class "children" slot, so the
-/// component-runtime side will recognise the Block-shape arg and
-/// route it as children.
-///
-/// Slot markers (`__slot_open__` / `__slot_close__`) are left in
-/// place inside the body Block — they're statement-level markers
-/// the component-runtime side unfolds when it walks the children
-/// block. Rewriting them here would lose the linear pair-up
-/// information the upstream stmt-list flatten produced.
-///
-/// Why this runs AFTER `validate_component_calls`: the validator
-/// reads the marker shape directly (StringLiteral as args[0]); if
-/// we rewrote first, the validator would have to also look at the
-/// rewritten Variable callee. Keeping passes independent keeps the
-/// pipeline easy to reason about.
-///
-/// The rewrite is recursive so nested component calls inside a
-/// body Block (e.g. `Counter() { Inner(1) }`) also get lowered.
+/// Rewrite `__component_call__("Name", positionals, __named__(...), body)` markers
+/// into `Call(Variable("Name"), positionals, named_args, body)`. MUST run after
+/// `validate_component_calls`. Slot markers inside body Blocks are left alone.
 fn lower_component_calls(program: &mut TypedProgram) {
     use zyntax_typed_ast::typed_ast::{
         TypedCall, TypedDeclaration, TypedExpression, TypedLiteral, TypedNamedArg,
     };
 
     fn rewrite_expr(expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>) {
-        // Recurse first so nested marker calls (inside body blocks,
-        // inside other call args, etc.) get rewritten bottom-up.
+        // Recurse bottom-up so nested marker calls also lower.
         match &mut expr.node {
             TypedExpression::Binary(b) => {
                 rewrite_expr(&mut b.left);
@@ -2842,8 +2046,7 @@ fn lower_component_calls(program: &mut TypedProgram) {
             _ => {}
         }
 
-        // Now check the current node — only act on calls whose
-        // callee is the `__component_call__` marker.
+        // Only act on `__component_call__` markers.
         let TypedExpression::Call(call) = &expr.node else {
             return;
         };
@@ -2882,11 +2085,7 @@ fn lower_component_calls(program: &mut TypedProgram) {
                         let TypedExpression::Literal(TypedLiteral::String(arg_name)) =
                             &name_node.node
                         else {
-                            // Marker shape is wrong — fall through
-                            // and treat as positional. The validator
-                            // doesn't currently check __named__ shape;
-                            // ill-formed markers will surface as
-                            // unresolved-symbol errors at compile.
+                            // Ill-formed marker — fall through as positional.
                             new_positional.push(arg.clone());
                             continue;
                         };
@@ -2902,23 +2101,11 @@ fn lower_component_calls(program: &mut TypedProgram) {
             new_positional.push(arg.clone());
         }
 
-        // Existing `named_args` on the marker call (if any —
-        // shouldn't happen from the grammar but defensive) carry
-        // through. Source order: positional args, then explicit
-        // named-marker args, then any pre-existing named_args.
+        // Carry pre-existing named_args through (defensive — grammar doesn't emit them).
         new_named.extend(call.named_args.iter().cloned());
 
-        // Rebuild the call: callee becomes a Variable reference to
-        // the component's view symbol. The substrate's component
-        // registry knows the exact symbol — pre-registered
-        // primitives (`Div`, `Text`) carry `$Blinc$<Name>$view`
-        // so the JIT links to the Rust-side extern; user-declared
-        // components carry the default Zyntax inherent-impl
-        // mangling `<Name>$view`. Either way we use whatever the
-        // registry holds; falling back to `<Name>$view` only when
-        // the component isn't in the registry yet (e.g. an
-        // unregistered user component the validator missed —
-        // shouldn't happen in normal flow).
+        // Resolve callee to the registry's `view_symbol` (substrate primitives use
+        // `$Blinc$<Name>$view`; user components use `<Name>$view`).
         let component_name_str = component_name.resolve_global().unwrap_or_default();
         let component_name_str: &str = component_name_str.as_ref();
         let view_symbol = blinc_runtime::component::with_component_registry(|r| {
@@ -2938,17 +2125,9 @@ fn lower_component_calls(program: &mut TypedProgram) {
             named_args: new_named,
             type_args: vec![],
         });
-        // expr.ty stays whatever the original marker's type was
-        // (Type::Any in practice — the resolver will refine when
-        // the component symbol exists).
     }
 
     fn rewrite_block(block: &mut zyntax_typed_ast::typed_ast::TypedBlock) {
-        // Walk + transform. For each statement, rewrite-then-
-        // collect: rewrite recurses into expressions (turning
-        // marker calls into typed Calls); collect handles
-        // component-call-with-body shape (converts body block
-        // into a `children: [Widget]` named arg on the call).
         let old_stmts = std::mem::take(&mut block.statements);
         let mut new_stmts: Vec<zyntax_typed_ast::TypedNode<TypedStatement>> =
             Vec::with_capacity(old_stmts.len());
@@ -2959,37 +2138,14 @@ fn lower_component_calls(program: &mut TypedProgram) {
         block.statements = new_stmts;
     }
 
-    /// Append `stmt` to `out`, handling body-bearing component
-    /// calls. The transformation forks on the callee:
-    ///
-    /// - **Substrate primitives** (callees whose mangled symbol
-    ///   matches `$Blinc$<Name>$view`): the body Block becomes
-    ///   a `children: [Widget]` named arg on the call. The JIT
-    ///   evaluates each child expression eagerly to build the
-    ///   widget-handle array, then hands it to the primitive's
-    ///   extern (which knows how to build a real `blinc_layout`
-    ///   container around the children). Slot markers and non-
-    ///   expression statements drop on the floor — control-flow
-    ///   inside primitive bodies is a later slice.
-    ///
-    /// - **User-declared components** (everything else): the
-    ///   body Block flattens into the outer statement list — the
-    ///   call comes first, then each child statement is inlined
-    ///   right after. This is the transitional pre-Phase-2e
-    ///   shape; once user component view methods accept an
-    ///   implicit `children` param the flatten path goes away.
-    ///
-    /// - **Slot markers** (`__slot_open__("name")` /
-    ///   `__slot_close__()`) get dropped before any of this runs.
+    /// Handle body-bearing component calls. Substrate primitives: body block
+    /// becomes `children: [Widget]` (plus `slot_<Name>` per slot pair).
+    /// User components: flatten body statements after the call. MUST keep slot
+    /// markers in place for the primitive-partition path.
     fn collect_children_into(
         out: &mut Vec<zyntax_typed_ast::TypedNode<TypedStatement>>,
         mut stmt: zyntax_typed_ast::TypedNode<TypedStatement>,
     ) {
-        // NOTE: do NOT drop slot markers here — the partition
-        // logic below relies on them to bucket primitive body
-        // blocks into `slot_<Name>` named args. The user-component
-        // flatten fallback below filters them out explicitly.
-
         if let TypedStatement::Expression(expr_node) = &mut stmt.node {
             if let TypedExpression::Call(call) = &mut expr_node.node {
                 let has_body_block = matches!(
@@ -3096,8 +2252,7 @@ fn lower_component_calls(program: &mut TypedProgram) {
         out.push(stmt);
     }
 
-    /// If `stmt` is `Expression(Call(Variable("__slot_open__"),
-    /// [StringLiteral(name)]))`, return `name`. Otherwise `None`.
+    /// Match `__slot_open__("name")` and return `"name"`.
     fn slot_open_name(stmt: &zyntax_typed_ast::TypedNode<TypedStatement>) -> Option<String> {
         let TypedStatement::Expression(e) = &stmt.node else {
             return None;
@@ -3119,8 +2274,7 @@ fn lower_component_calls(program: &mut TypedProgram) {
         name.resolve_global().map(|s| s.to_string())
     }
 
-    /// `Expression(Call(Variable("__slot_close__"), []))` — the
-    /// counterpart marker that ends the active slot bucket.
+    /// Match `__slot_close__()` — ends the active slot bucket.
     fn is_slot_close_stmt(stmt: &zyntax_typed_ast::TypedNode<TypedStatement>) -> bool {
         let TypedStatement::Expression(e) = &stmt.node else {
             return false;
@@ -3134,10 +2288,7 @@ fn lower_component_calls(program: &mut TypedProgram) {
         callee.resolve_global().as_deref() == Some("__slot_close__")
     }
 
-    /// Is `call`'s callee a substrate-registered primitive — a
-    /// `Variable` whose interned name starts with `$Blinc$` (the
-    /// view-symbol prefix `register_blinc_layout_primitives`
-    /// uses for `Div`, `Text`, etc.)?
+    /// Callee is a substrate primitive (mangled name begins with `$Blinc$`).
     fn callee_is_substrate_primitive(call: &TypedCall) -> bool {
         let TypedExpression::Variable(callee) = &call.callee.node else {
             return false;
@@ -3209,45 +2360,8 @@ fn lower_component_calls(program: &mut TypedProgram) {
     }
 }
 
-/// Pull props off the synthesized `__component_props__` marker
-/// method and bind them as leading parameters on every other
-/// method in the same impl. Strip the marker after.
-///
-/// The grammar emits a component `Counter (initial: i32) { view {
-/// ... }; fn on_click() { ... } }` as:
-///
-/// ```text
-/// impl Counter {
-///     fn __component_props__(initial: i32) { }   // marker
-///     fn view() { ... }
-///     fn on_click() { ... }
-/// }
-/// ```
-///
-/// After this pass:
-///
-/// ```text
-/// impl Counter {
-///     fn view(initial: i32) { ... }
-///     fn on_click(initial: i32) { ... }
-/// }
-/// ```
-///
-/// (The marker is gone.) The call site `Counter(1)` is already
-/// lowered by `lower_component_calls` to `Counter$view(1)`, so
-/// the prop binds positionally — `initial` becomes `1` inside the
-/// view body. The Zyntax JIT sees a normal function with a
-/// typed parameter and codegens the load/store as it would for
-/// any local.
-///
-/// Why a marker method instead of e.g. storing props on
-/// `TypedTraitImpl` directly: that struct has no "params" slot,
-/// and the grammar action language can't synthesize a side-table.
-/// A marker method is the cheapest path through the existing AST
-/// shapes — the same pattern used for `__fsm_meta__`.
-///
-/// The pass is idempotent: programs without a
-/// `__component_props__` method pass through untouched.
+/// Lift `__component_props__` marker params onto every other method in the impl,
+/// then strip the marker. Idempotent.
 fn bind_component_props(program: &mut TypedProgram) {
     use zyntax_typed_ast::typed_ast::TypedDeclaration;
 
@@ -3256,9 +2370,6 @@ fn bind_component_props(program: &mut TypedProgram) {
             continue;
         };
 
-        // Find the `__component_props__` marker and snapshot its
-        // params. Take(params) leaves an empty Vec behind so the
-        // strip step's drain-by-name is straightforward.
         let prop_params = imp
             .methods
             .iter_mut()
@@ -3266,51 +2377,27 @@ fn bind_component_props(program: &mut TypedProgram) {
             .map(|m| std::mem::take(&mut m.params));
 
         let Some(prop_params) = prop_params else {
-            // No marker on this impl — nothing to do. Either the
-            // component has no props, or this impl came from a
-            // stand-alone `impl Foo { ... }` block.
             continue;
         };
 
-        // Prepend the prop params onto every OTHER method's
-        // params list. Order matters: props must come first
-        // because the call-site lowers `Counter(1, 2)` to
-        // `Counter$view(1, 2)` with the user's positional args
-        // matching the prop order.
+        // Props MUST come first — call site lowers `Counter(1, 2)` to `Counter$view(1, 2)`.
         for method in imp.methods.iter_mut() {
             if method.name.resolve_global().as_deref() == Some("__component_props__") {
                 continue;
             }
-            // Convert TypedMethodParam → TypedMethodParam (props
-            // come in as TypedMethodParam already because the
-            // marker is a TypedMethod, not a TypedFunction).
             let mut new_params = prop_params.clone();
             new_params.extend(std::mem::take(&mut method.params));
             method.params = new_params;
         }
 
-        // Strip the marker so the compile path doesn't try to
-        // surface it as a callable `Counter$__component_props__`.
+        // Strip the marker so compile doesn't expose a `Counter$__component_props__`.
         imp.methods
             .retain(|m| m.name.resolve_global().as_deref() != Some("__component_props__"));
     }
 }
 
-/// Wrap every fsm's `__fsm_meta__` body with `__fsm_begin__("FsmName")`
-/// at the front and `__fsm_end__()` at the back. The host registers
-/// these markers as builtins that push/pop a "current FSM" name on
-/// a stack, so the `__fsm_initial__` / `__fsm_transition__` calls
-/// inside the body know which fsm they're configuring.
-///
-/// Why a post-parse pass and not grammar action: same reason the
-/// `<FSM>Event` synthesis is post-parse — the action language can't
-/// string-concat or reach into the surrounding rule's bindings to
-/// pull the FSM name into a child rule's emit. Building the wrapper
-/// stmts in Rust is simpler.
-///
-/// The pass is idempotent in the sense that it only fires on
-/// `__fsm_meta__` methods (synthesised by the `fsm` grammar rule);
-/// programs without an fsm decl pass through untouched.
+/// Wrap each `__fsm_meta__` body with `__fsm_begin__("Name")` / `__fsm_end__()`
+/// so inner marker calls know which fsm they're configuring. Idempotent.
 fn inject_fsm_context_markers(program: &mut TypedProgram) {
     use zyntax_typed_ast::typed_ast::{
         TypedCall, TypedDeclaration, TypedExpression, TypedLiteral, TypedStatement,
@@ -3367,9 +2454,7 @@ fn inject_fsm_context_markers(program: &mut TypedProgram) {
                 continue;
             };
 
-            // Skip if begin marker already present — defensive
-            // against double-application if this pass is ever run
-            // twice on the same program.
+            // Skip if already wrapped (defensive against double-application).
             let already_wrapped = body
                 .statements
                 .first()
@@ -3398,42 +2483,8 @@ fn inject_fsm_context_markers(program: &mut TypedProgram) {
     }
 }
 
-/// Walk a parsed `TypedProgram`, populate the global `FsmRegistry`
-/// from each fsm's `__fsm_meta__` body, and strip the meta method so
-/// Zyntax doesn't have to compile the (now-redundant) marker calls.
-///
-/// Three phases:
-///
-///   1. **Scan**: walk `Impl` decls looking for `__fsm_meta__`,
-///      collect each fsm's name + parsed metadata (initial state,
-///      event transitions, tick guards) into a buffer.
-///
-///   2. **Pin TypeIds**: for each fsm we found, mint a `TypeId` via
-///      `TypeId::next()` and set the matching Enum decl's `ty` to
-///      `Type::Named { id, ... }`. Zyntax's compile path
-///      (`runtime.rs:1307-1368`) checks `decl_node.ty` first when
-///      registering enum types — if it's `Type::Named`, the embedded
-///      id wins; otherwise Zyntax mints its own. By pinning the id
-///      here we guarantee the registry's `(module, TypeId)` key
-///      matches whatever Zyntax sees later. Then we insert a
-///      placeholder `TypeDefinition` ourselves so the
-///      `get_type_by_name(...).is_none()` guard at runtime.rs:1308
-///      short-circuits — Zyntax skips re-registering and our id is
-///      authoritative.
-///
-///   3. **Strip**: remove `__fsm_meta__` from each fsm's Impl. The
-///      marker callees (`__fsm_begin__`, `__fsm_initial__`, etc.)
-///      have no extern decls in the program, so leaving the body in
-///      place would type-fail. We've already extracted everything
-///      the registry needs from those markers — the compiled
-///      program doesn't need to call them.
-///
-/// Why direct AST walking instead of host-builtin marker invocation:
-/// the chosen design (begin/end markers + eager population at
-/// compile time) maps naturally onto walking the AST in Rust. We
-/// already have the marker call shapes in `TypedExpression::Call`
-/// form; running them through the JIT just to mutate a host-side
-/// HashMap is a long detour for the same result.
+/// Populate the global `FsmRegistry` from each fsm's `__fsm_meta__` body and
+/// strip the meta method. Three phases: scan, pin TypeIds, strip markers.
 fn populate_fsm_registry_pass(
     program: &mut TypedProgram,
     module: zyntax_typed_ast::InternedString,
@@ -3446,12 +2497,7 @@ fn populate_fsm_registry_pass(
     };
     use zyntax_typed_ast::InternedString;
 
-    // -----------------------------------------------------------------
-    // Phase 1: scan. Collect (fsm_name, FsmDefinition) tuples without
-    // mutating program declarations. Tick-guard expressions are
-    // captured here for lifting into stand-alone functions in
-    // phase 2.5 (so they survive `__fsm_meta__` stripping).
-    // -----------------------------------------------------------------
+    // Phase 1: scan. Collect (fsm_name, FsmDefinition) tuples.
     let mut found: Vec<(InternedString, FsmDefinition)> = Vec::new();
     let mut guards_to_lift: Vec<(
         InternedString,
@@ -3521,21 +2567,15 @@ fn populate_fsm_registry_pass(
                     }
                 }
                 "__fsm_tick__" => {
-                    // arg 0 = from, arg 1 = guard expr, arg 2 = to.
-                    // We lift the guard into a stand-alone function
-                    // `__fsm_tick_guard_<FsmName>_<idx>__()` so it
-                    // survives the `__fsm_meta__` strip and is
-                    // callable as an ordinary Zyntax symbol at
-                    // dispatch time.
+                    // args: 0=from, 1=guard expr, 2=to. Lift guard into a top-level fn
+                    // so it survives `__fsm_meta__` stripping.
                     if let (Some(from), Some(to)) = (str_arg(0), str_arg(2)) {
                         let idx = def.tick_guards.len();
                         let fsm_name_str = fsm_name.resolve_global().unwrap_or_default();
                         let guard_fn_name = format!("__fsm_tick_guard_{fsm_name_str}_{idx}__");
                         let guard_fn = InternedString::new_global(&guard_fn_name);
 
-                        // Capture the guard expression (cloned to
-                        // escape the read borrow on `program`) for
-                        // lifting in the next phase.
+                        // Clone the guard expression to escape the read borrow on `program`.
                         if let Some(expr_node) = call.positional_args.get(1) {
                             guards_to_lift.push((guard_fn, expr_node.clone()));
                         }
@@ -3547,24 +2587,19 @@ fn populate_fsm_registry_pass(
                         });
                     }
                 }
-                _ => {} // skip __fsm_begin__, __fsm_end__, anything else.
+                _ => {}
             }
         }
 
         found.push((fsm_name, def));
     }
 
-    // -----------------------------------------------------------------
-    // Phase 2: pin TypeIds + populate the registry. Pre-register the
-    // type so Zyntax's compile path takes the "name already known"
-    // short-circuit and respects our id.
-    // -----------------------------------------------------------------
+    // Phase 2: pin TypeIds + populate the registry. Pre-register so Zyntax's
+    // compile path short-circuits and respects our id.
     for (fsm_name, def) in &found {
         let type_id = TypeId::next();
 
-        // Pin `decl.ty` to Type::Named { id: our_id } on the matching
-        // enum decl. Zyntax's enum-registration check at
-        // runtime.rs:1313 reads exactly this field.
+        // Pin `decl.ty` so Zyntax's enum-registration check respects our id.
         let named_ty = program.type_registry.make_type(type_id, Vec::new());
         for decl in &mut program.declarations {
             let TypedDeclaration::Enum(enum_decl) = &decl.node else {
@@ -3576,12 +2611,7 @@ fn populate_fsm_registry_pass(
             }
         }
 
-        // Pre-register the type so the get_type_by_name(...).is_none()
-        // check at runtime.rs:1308 short-circuits and Zyntax doesn't
-        // double-register with a fresh TypeId. We synthesise a
-        // TypeDefinition mirroring what Zyntax would build for an
-        // Enum declaration; downstream uses of TypeRegistry consume
-        // this shape directly.
+        // Pre-register so Zyntax skips double-registration with a fresh TypeId.
         if let Some(enum_decl) = program.declarations.iter().find_map(|d| match &d.node {
             TypedDeclaration::Enum(e) if e.name == *fsm_name => Some(e),
             _ => None,
@@ -3615,40 +2645,21 @@ fn populate_fsm_registry_pass(
                 span: enum_decl.span,
             };
             let _: TypeId = program.type_registry.register_type(type_def);
-            let _ = Visibility::Public; // silence unused-import in case the type_registry-vis path changes upstream
+            let _ = Visibility::Public; // silence unused-import in case the path changes upstream
         }
 
         let id = FsmId { module, type_id };
         with_fsm_registry_mut(|r| r.upsert(id, def.clone()));
     }
 
-    // -----------------------------------------------------------------
-    // Phase 2.5: lift each captured tick-guard expression into a
-    // stand-alone top-level function. The function returns `i32`
-    // (1 if the guard fires, 0 otherwise); the host's `step_tick`
-    // tests `!= 0` to decide whether to transition. Body shape:
-    //
-    //     fn __fsm_tick_guard_<Fsm>_<idx>__() -> i32 {
-    //         if <guard expr> { return 1 }
-    //         return 0
-    //     }
-    //
-    // Why i32 instead of bool: bool-return ABI marshaling through
-    // `runtime.call::<bool>` is untested upstream
-    // (`grep -rn 'call::<bool>'` hits zero across the Zyntax tree)
-    // and triggers a misaligned-pointer panic in
-    // `zyntax_compiler/zrtl.rs:416` during return-value
-    // type-meta lookup. Using i32 with a 1/0 convention is a
-    // tested ABI and keeps the lifting logic local to this pass.
-    //
-    // The lifted functions are appended after phase 2 so they
-    // inherit any registered TypeIds in scope.
-    // -----------------------------------------------------------------
+    // Phase 2.5: lift each captured tick-guard expression into a top-level fn
+    // returning i32 (1 if guard fires, 0 otherwise). i32 chosen because bool-return
+    // ABI marshaling through `runtime.call::<bool>` is untested upstream.
     use zyntax_typed_ast::typed_ast::{TypedFunction, TypedIf};
     for (fn_name, guard_expr) in guards_to_lift {
         let i32_ty = Type::Primitive(PrimitiveType::I32);
 
-        // `return 1` — the then-branch's only statement.
+        // `return 1`
         let return_one = zyntax_typed_ast::TypedNode::new(
             TypedStatement::Return(Some(Box::new(zyntax_typed_ast::TypedNode::new(
                 TypedExpression::Literal(zyntax_typed_ast::typed_ast::TypedLiteral::Integer(1)),
@@ -3664,7 +2675,7 @@ fn populate_fsm_registry_pass(
             span: Span::default(),
         };
 
-        // `if <guard> { return 1 }` — no else branch.
+        // `if <guard> { return 1 }`
         let if_stmt = zyntax_typed_ast::TypedNode::new(
             TypedStatement::If(TypedIf {
                 condition: Box::new(guard_expr),
@@ -3676,7 +2687,7 @@ fn populate_fsm_registry_pass(
             Span::default(),
         );
 
-        // `return 0` — the body's trailing fallthrough.
+        // `return 0`
         let return_zero = zyntax_typed_ast::TypedNode::new(
             TypedStatement::Return(Some(Box::new(zyntax_typed_ast::TypedNode::new(
                 TypedExpression::Literal(zyntax_typed_ast::typed_ast::TypedLiteral::Integer(0)),
@@ -3706,12 +2717,7 @@ fn populate_fsm_registry_pass(
         program.declarations.push(decl_node);
     }
 
-    // -----------------------------------------------------------------
-    // Phase 3: strip `__fsm_meta__` so the compile path doesn't have
-    // to resolve the marker callees. The Impl may end up empty (the
-    // fsm grammar emits __fsm_meta__ as the impl's only method) —
-    // an empty inherent impl is benign.
-    // -----------------------------------------------------------------
+    // Phase 3: strip `__fsm_meta__` so compile doesn't try to resolve markers.
     for decl in &mut program.declarations {
         let TypedDeclaration::Impl(imp) = &mut decl.node else {
             continue;
@@ -3721,30 +2727,9 @@ fn populate_fsm_registry_pass(
     }
 }
 
-/// Walk a parsed `TypedProgram` and synthesize a sibling `<FSM>Event`
-/// enum for every fsm declaration that has at least one
-/// `__fsm_transition__` marker. The synthesized enum's variants are
-/// the unique event names referenced by the FSM's transitions, in
-/// declaration order.
-///
-/// # Why a post-parse pass and not grammar action
-///
-/// Two reasons: (a) the grammar action language doesn't support
-/// string concatenation, so we can't build the `<FSM>Event` name
-/// from the FSM's own name at parse time; (b) deduplication of
-/// event names across many transitions is naturally Rust code,
-/// not grammar action code.
-///
-/// # Runtime contract
-///
-/// The synthesized enum is the bridge between user-facing event
-/// names (`Start`, `Reset`) and `StateTransitions::on_event(event:
-/// u32)`. A downstream codegen pass turns the enum into a Rust
-/// `#[repr(u32)]` enum + `From<Event> for u32`, then user code
-/// dispatches via `loader.dispatch(LoaderEvent::Start.into())`.
-/// Tick transitions (`__fsm_tick__`) are guard-driven and don't
-/// have user-facing event names, so they never appear in the
-/// synthesized event enum.
+/// Synthesise a sibling `<FSM>Event` enum for every fsm with transitions.
+/// Variants are the unique event names in declaration order. Tick transitions
+/// don't have user-facing event names and never appear here.
 fn synthesize_fsm_event_enums(program: &mut TypedProgram) {
     use std::collections::HashSet;
     use zyntax_typed_ast::type_registry::Visibility;
@@ -3805,17 +2790,11 @@ fn synthesize_fsm_event_enums(program: &mut TypedProgram) {
         }
 
         if events.is_empty() {
-            // Tick-only fsm or no transitions at all — nothing to
-            // synthesise. The state enum + `__fsm_meta__` already
-            // carry everything the runtime needs.
+            // Tick-only fsm — nothing to synthesise.
             continue;
         }
 
-        // Build the variants and the `<FSM>Event` enum name. Use
-        // `trait_name` (an InternedString) rather than `for_type`
-        // (a Type) — the grammar sets both to the FSM identifier
-        // for inherent impls, but `trait_name` gives us the bare
-        // name without unwrapping a Type::Named.
+        // Use `trait_name` (bare ident) rather than `for_type` (Type::Named).
         let fsm_name = imp.trait_name.resolve_global().unwrap_or_default();
         let event_enum_name = InternedString::new_global(&format!("{fsm_name}Event"));
 
@@ -3840,37 +2819,236 @@ fn synthesize_fsm_event_enums(program: &mut TypedProgram) {
         event_enums.push(TypedNode::new(event_enum, Type::Unknown, Span::default()));
     }
 
-    // Append synthesised enums after all original declarations so
-    // existing `find_map` lookups (which return the first matching
-    // decl) keep returning the user-declared state enum / impl.
+    // Append at the end so `find_map` lookups still return user-declared decls first.
     program.declarations.extend(event_enums);
 }
 
-/// Mint a `TypedDeclaration::Interface { name: <FsmName> }` for every
-/// `fsm <FsmName> { ... }` block.
-///
-/// The FSM grammar emits the FSM as an `Impl` block with `trait_name`
-/// set to the FSM name (so existing FSM-aware passes find it by
-/// scanning impl trait names). Zyntax's compiler first-pass registers
-/// every `TypedDeclaration::Interface` it sees in the trait registry,
-/// then second-pass resolves `Impl` blocks against that registry. With
-/// no matching Interface decl, the second pass logs
-/// `Trait '<FsmName>' not found in registry, skipping impl block` and
-/// discards the impl's methods.
-///
-/// For Blinc, that discard is benign at runtime (our
-/// `resolve_fsm_trigger_calls` pass has already rewritten every
-/// `<FsmName>.trigger(...)` call site into a direct extern call to
-/// `__fsm_runtime_trigger__("<FsmName>", "<event>")` before the impl
-/// block reaches Zyntax's compiler — so nothing actually needs to
-/// resolve through trait dispatch). But the warning is noise on every
-/// compile, and silently-skipped impl methods would bite any future
-/// pass that does rely on them.
-///
-/// This pass closes the gap by synthesising a minimal Interface decl
-/// per FSM (name only — no methods, no super-traits). Zyntax's first
-/// pass registers it; the second pass's lookup succeeds; the impl
-/// keeps its methods; no warning.
+/// Desugar `match` marker-statement quads into `if/else if/.../else` chains
+/// over string equality. Wildcard arm becomes the trailing `else`.
+fn lower_match_blocks(program: &mut TypedProgram) {
+    use zyntax_typed_ast::typed_ast::{
+        BinaryOp, TypedBinary, TypedBlock, TypedDeclaration, TypedExpression, TypedIf, TypedLiteral,
+    };
+    use zyntax_typed_ast::TypedNode;
+
+    fn is_call_to(stmt: &TypedNode<TypedStatement>, name: &str) -> bool {
+        let TypedStatement::Expression(expr) = &stmt.node else {
+            return false;
+        };
+        let TypedExpression::Call(call) = &expr.node else {
+            return false;
+        };
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            return false;
+        };
+        callee.resolve_global().as_deref() == Some(name)
+    }
+
+    fn call_first_arg(stmt: &TypedNode<TypedStatement>) -> Option<&TypedNode<TypedExpression>> {
+        let TypedStatement::Expression(expr) = &stmt.node else {
+            return None;
+        };
+        let TypedExpression::Call(call) = &expr.node else {
+            return None;
+        };
+        call.positional_args.first()
+    }
+
+    /// Lower every `__match_begin__ … __match_end__` span in `stmts`.
+    /// MUST recurse into nested blocks first so inner matches lower before outers see them.
+    fn rewrite_stmts(stmts: &mut Vec<TypedNode<TypedStatement>>) {
+        for stmt in stmts.iter_mut() {
+            recurse_into_stmt(stmt);
+        }
+
+        let mut i = 0;
+        while i < stmts.len() {
+            if !is_call_to(&stmts[i], "__match_begin__") {
+                i += 1;
+                continue;
+            }
+            let Some(scrutinee_expr) = call_first_arg(&stmts[i]).cloned() else {
+                i += 1;
+                continue;
+            };
+
+            let mut end_idx = i + 1;
+            while end_idx < stmts.len() && !is_call_to(&stmts[end_idx], "__match_end__") {
+                end_idx += 1;
+            }
+            if end_idx >= stmts.len() {
+                // Malformed — no end marker.
+                i += 1;
+                continue;
+            }
+
+            // Each arm at i+1..end_idx is a Block whose first stmt is `__match_arm__(pat)`.
+            let mut arms: Vec<(Option<String>, TypedBlock)> = Vec::new();
+            for arm_idx in (i + 1)..end_idx {
+                let TypedStatement::Block(arm_block) = &stmts[arm_idx].node else {
+                    continue;
+                };
+                if arm_block.statements.is_empty() {
+                    continue;
+                }
+                if !is_call_to(&arm_block.statements[0], "__match_arm__") {
+                    continue;
+                }
+                let pat_str = call_first_arg(&arm_block.statements[0]).and_then(|expr| {
+                    if let TypedExpression::Literal(TypedLiteral::String(s)) = &expr.node {
+                        s.resolve_global().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                });
+                let body = TypedBlock {
+                    statements: arm_block.statements[1..].to_vec(),
+                    span: arm_block.span,
+                };
+                arms.push((pat_str, body));
+            }
+
+            // Build the if/else-if/else chain. First `_` arm becomes trailing `else`.
+            let mut else_block: Option<TypedBlock> = None;
+            let mut chain_arms: Vec<(String, TypedBlock)> = Vec::new();
+            for (pat, body) in arms {
+                match pat.as_deref() {
+                    Some("__wildcard__") => {
+                        if else_block.is_none() {
+                            else_block = Some(body);
+                        }
+                    }
+                    Some(p) => {
+                        chain_arms.push((p.to_string(), body));
+                    }
+                    None => {}
+                }
+            }
+
+            // Fold from last to first so the FIRST arm wraps everything else.
+            let mut tail_else = else_block;
+            for (pat, body) in chain_arms.into_iter().rev() {
+                let span = body.span;
+                let pat_literal = TypedNode::new(
+                    TypedExpression::Literal(TypedLiteral::String(
+                        zyntax_typed_ast::InternedString::new_global(&pat),
+                    )),
+                    Type::Primitive(PrimitiveType::String),
+                    span,
+                );
+                let condition = TypedNode::new(
+                    TypedExpression::Binary(TypedBinary {
+                        op: BinaryOp::Eq,
+                        left: Box::new(scrutinee_expr.clone()),
+                        right: Box::new(pat_literal),
+                    }),
+                    Type::Primitive(PrimitiveType::Bool),
+                    span,
+                );
+                let if_stmt = TypedStatement::If(TypedIf {
+                    condition: Box::new(condition),
+                    then_block: body,
+                    else_block: tail_else.take().map(|b| b),
+                    span,
+                });
+                tail_else = Some(TypedBlock {
+                    statements: vec![TypedNode::new(
+                        if_stmt,
+                        Type::Primitive(PrimitiveType::Unit),
+                        span,
+                    )],
+                    span,
+                });
+            }
+
+            // Splice the chain in place of the marker span.
+            let chain_stmts = tail_else.map(|b| b.statements).unwrap_or_default();
+            stmts.splice(i..=end_idx, chain_stmts);
+            i += 1;
+        }
+    }
+
+    fn recurse_into_stmt(stmt: &mut TypedNode<TypedStatement>) {
+        match &mut stmt.node {
+            TypedStatement::Block(b) => {
+                rewrite_stmts(&mut b.statements);
+            }
+            TypedStatement::If(if_stmt) => {
+                rewrite_stmts(&mut if_stmt.then_block.statements);
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    rewrite_stmts(&mut else_block.statements);
+                }
+            }
+            TypedStatement::While(w) => {
+                rewrite_stmts(&mut w.body.statements);
+            }
+            TypedStatement::Expression(expr) => {
+                recurse_into_expr(expr);
+            }
+            TypedStatement::Let(l) => {
+                if let Some(init) = &mut l.initializer {
+                    recurse_into_expr(init);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn recurse_into_expr(expr: &mut TypedNode<TypedExpression>) {
+        // Lambda bodies need this: `<Fsm>.subscribe(..., || { match … })` must
+        // lower before any downstream pass walks the lambda HIR.
+        match &mut expr.node {
+            TypedExpression::Lambda(lam) => match &mut lam.body {
+                zyntax_typed_ast::typed_ast::TypedLambdaBody::Expression(e) => {
+                    recurse_into_expr(e);
+                }
+                zyntax_typed_ast::typed_ast::TypedLambdaBody::Block(block) => {
+                    rewrite_stmts(&mut block.statements);
+                }
+            },
+            TypedExpression::Block(block) => {
+                rewrite_stmts(&mut block.statements);
+            }
+            TypedExpression::Call(call) => {
+                recurse_into_expr(&mut call.callee);
+                for arg in &mut call.positional_args {
+                    recurse_into_expr(arg);
+                }
+            }
+            TypedExpression::Binary(b) => {
+                recurse_into_expr(&mut b.left);
+                recurse_into_expr(&mut b.right);
+            }
+            TypedExpression::If(if_expr) => {
+                recurse_into_expr(&mut if_expr.condition);
+                recurse_into_expr(&mut if_expr.then_branch);
+                recurse_into_expr(&mut if_expr.else_branch);
+            }
+            _ => {}
+        }
+    }
+
+    for decl in &mut program.declarations {
+        match &mut decl.node {
+            TypedDeclaration::Function(func) => {
+                if let Some(body) = &mut func.body {
+                    rewrite_stmts(&mut body.statements);
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                for method in &mut imp.methods {
+                    if let Some(body) = &mut method.body {
+                        rewrite_stmts(&mut body.statements);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Mint a placeholder `Interface { name: <FsmName> }` for each FSM impl so
+/// Zyntax's compiler doesn't log "Trait not found" and drop the impl's methods.
 fn synthesize_fsm_trait_interfaces(program: &mut TypedProgram) {
     use std::collections::HashSet;
     use zyntax_typed_ast::type_registry::Visibility;
@@ -3918,40 +3096,18 @@ fn synthesize_fsm_trait_interfaces(program: &mut TypedProgram) {
 // Runtime-substrate bridge (blinc_runtime::fsm)
 // =====================================================================
 //
-// `blinc_runtime::fsm` is the pure-Rust substrate that lets DSL-
-// defined FSMs plug into widget-side `Stateful<FsmStateId>` without
-// the widget side knowing whether the DSL was compiled by Zyntax+
-// Cranelift (this crate's JIT path) or by Zyntax+LLVM (a future AOT
-// codegen crate). Both publishers write to the same
-// `FsmRegistry` singleton and install their own `GuardDispatcher`.
-// This section is the JIT half of that contract.
+// JIT-side impls of the substrate traits. Both publishers (JIT here, future
+// LLVM AOT) write to the same `FsmRegistry` and install their own dispatcher.
 
-/// `GuardDispatcher` impl that routes tick-guard calls through a
-/// shared `ZyntaxRuntime` handle. Wraps the same
-/// `Arc<Mutex<ZyntaxRuntime>>` `BlincDsl` already owns, so
-/// installing one as the process-wide dispatcher costs only the
-/// `Arc::clone` it takes to keep the runtime alive while the
-/// dispatcher is reachable.
-///
-/// The call shape (zero args, `i32` return — `1` = guard fires,
-/// `0` = doesn't) mirrors what `populate_fsm_registry_pass` emits
-/// when lifting guard expressions; see `BlincDsl::step_tick`
-/// (~line 2440) for the matching call-site.
+/// JIT `GuardDispatcher` — routes tick-guard calls through `ZyntaxRuntime`.
+/// Lifted guards return `i32` (1 = fires, 0 = doesn't).
 struct JitGuardDispatcher {
     runtime: Arc<Mutex<ZyntaxRuntime>>,
 }
 
-// SAFETY: `ZyntaxRuntime` is `!Send + !Sync` because Cranelift's
-// `JITModule` is — it carries `Box<dyn Fn(LibCall) -> String>` +
-// `NonNull` allocator-table pointers that the compiler can't prove
-// are race-safe. We pin a `Mutex` around it (BlincDsl::runtime),
-// which serialises all access. `JitGuardDispatcher` only ever
-// reaches the inner runtime through that Mutex, so concurrent
-// callers from different threads queue cleanly rather than racing.
-// Production Blinc apps run the UI thread single-threaded anyway,
-// so the cross-thread case is hypothetical — the unsafe impl is
-// what lets `Arc<dyn GuardDispatcher>` (the substrate's
-// `Send + Sync`-bounded trait object slot) hold a JIT dispatcher.
+// SAFETY: `ZyntaxRuntime` is `!Send + !Sync` (Cranelift `JITModule`). The
+// surrounding `Mutex` serialises access; UI threads run single-threaded anyway.
+// The unsafe impl is what lets `Arc<dyn GuardDispatcher>` hold a JIT dispatcher.
 unsafe impl Send for JitGuardDispatcher {}
 unsafe impl Sync for JitGuardDispatcher {}
 
@@ -3960,44 +3116,18 @@ impl blinc_runtime::fsm::GuardDispatcher for JitGuardDispatcher {
         let runtime = self.runtime.lock().ok()?;
         let guard_sig = NativeSignature::new(&[], NativeType::I32);
         let result = runtime.call_function(symbol, &[], &guard_sig).ok()?;
-        // Lifted guards return `1` to fire, `0` not. Match the
-        // exact decode `BlincDsl::step_tick` uses.
         Some(matches!(result, ZyntaxValue::Int(v) if v != 0))
     }
 }
 
-/// `ViewRenderer` impl that resolves view symbols against a
-/// shared `ZyntaxRuntime` handle. Holds an
-/// `Arc<Mutex<ZyntaxRuntime>>` plus the parent `BlincDsl`'s
-/// `value_returning_views` set, and picks one of two call ABIs:
-///
-///   - **Value-returning view** (symbol is in the set): call
-///     through `runtime.call_function` with a
-///     `() -> i64` native signature, capture the returned widget
-///     handle as `ZyntaxValue::Int(handle)`. The host-side
-///     walker decodes the handle via [`materialize_widget`].
-///
-///   - **Legacy Unit-returning view** (symbol not in the set):
-///     call as `runtime.call::<()>`, return `ZyntaxValue::Void`.
-///     The legacy DSL-side `BlincDsl::render_view` drains the
-///     scene-op buffer for tests still on the op-stream surface.
-///
-/// Cost-of-call is the JIT call plus one `Mutex` lock.
-/// Renderers are cheap to construct (just two `Arc::clone`s) so
-/// callers can hold one or many without worry.
+/// JIT `ViewRenderer` — value-returning views call as `() -> i64` (handle);
+/// legacy Unit-returning views call as `() -> ()` and drain the scene-op buffer.
 struct JitViewRenderer {
     runtime: Arc<Mutex<ZyntaxRuntime>>,
     value_returning_views: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
-// SAFETY: same argument as `JitGuardDispatcher` — `ZyntaxRuntime`
-// is `!Send + !Sync` because Cranelift's `JITModule` carries
-// `Box<dyn Fn(LibCall) -> String>` + `NonNull` allocator pointers.
-// We serialise access via the surrounding `Mutex`, and production
-// Blinc apps run the UI thread single-threaded anyway. The
-// unsafe impl is what lets `Arc<dyn ViewRenderer>` (the
-// substrate's `Send + Sync`-bounded trait object slot) hold a
-// JIT renderer.
+// SAFETY: same as `JitGuardDispatcher` — Mutex serialises access to `!Send` runtime.
 unsafe impl Send for JitViewRenderer {}
 unsafe impl Sync for JitViewRenderer {}
 
@@ -4022,11 +3152,7 @@ impl blinc_runtime::view::ViewRenderer for JitViewRenderer {
             let result = runtime
                 .call_function(symbol, &[], &sig)
                 .map_err(|e| blinc_runtime::view::ViewRenderError::Backend(e.to_string()))?;
-            // The widget-handle primitive externs return
-            // `i64`; `call_function` decodes that as
-            // `ZyntaxValue::Int(handle)`. Pass it through
-            // unchanged — `materialize_widget` on the caller
-            // side takes the `i64` and reclaims the box.
+            // Pass `ZyntaxValue::Int(handle)` through; caller decodes via `materialize_widget`.
             Ok(result)
         } else {
             runtime
@@ -4037,59 +3163,8 @@ impl blinc_runtime::view::ViewRenderer for JitViewRenderer {
     }
 }
 
-/// Mirror DSL component declarations into the runtime-agnostic
-/// `blinc_runtime::component::ComponentRegistry`.
-///
-/// Walks each `TypedDeclaration::Impl` whose `for_type` matches
-/// a sibling `TypedDeclaration::Class`. For each such pair:
-///
-/// - The user-facing component name is the Class's name.
-/// - The view-symbol mangling is `<Name>$view` (matches Zyntax's
-///   inherent-impl method mangling; same name the call-site
-///   lowering uses).
-/// - The prop list comes from the `view` method's params,
-///   which were injected by `bind_component_props` from the
-///   synthesized `__component_props__` marker. Walking params
-///   here (vs. re-walking the Class fields or the marker)
-///   keeps the publisher robust against future changes to how
-///   props get attached to methods — whichever way they end up
-///   on the view's signature, this code reads them.
-///
-/// Prop types that don't map to one of the substrate's
-/// supported [`blinc_runtime::component::PropType`] variants
-/// are dropped silently (the substrate's surface is opinionated
-/// about which primitives apps can introspect). New supported
-/// types land in [`zyntax_prop_type`] in lockstep with the
-/// substrate enum.
-///
-/// Runs AFTER `bind_component_props` (which is what produces
-/// the param-bearing view method) and AFTER
-/// `populate_fsm_registry_pass` (so FSM impls — which have an
-/// empty trait_name but a matching Enum, not a Class — don't
-/// get accidentally registered as components).
-/// Pre-register `blinc_layout` widget primitives in the
-/// substrate's `ComponentRegistry`. After this runs, DSL
-/// source can call `Div(...)`, `Text(...)`, etc. and the
-/// component-call validation + lowering passes treat them
-/// just like user-declared components.
-///
-/// Called once at `BlincDsl::new()`. Idempotent — re-running
-/// replaces by name (no FsmId / ComponentId churn).
-///
-/// **Today** the registration just establishes the names and
-/// prop shapes for validation. The view-symbol slot points at
-/// `$Blinc$<Name>$view` — those externs aren't wired yet;
-/// trying to compile a program that uses them will fail at
-/// JIT link time. Subsequent commits land the externs, the
-/// grammar pivot to value-returning view bodies, and the
-/// `ZyntaxValue` → `blinc_layout::Div` walker.
-///
-/// **Prop shapes** mirror what we want the DSL surface to
-/// look like — minimal subsets of the real `blinc_layout`
-/// builder methods, exposed as named args. Adding a prop is
-/// one line here + one parameter on the matching extern.
-/// Full coverage of `RenderProps` lands incrementally as
-/// each field gets a DSL-visible name.
+/// Pre-register `blinc_layout` widget primitives (`Div`, `Text`, …) in the
+/// substrate's `ComponentRegistry`. Idempotent; called once at `BlincDsl::new()`.
 fn register_blinc_layout_primitives() {
     use blinc_runtime::component::{ComponentDefinition, PropDef, Type};
     use zyntax_typed_ast::type_registry::PrimitiveType;
@@ -4097,10 +3172,7 @@ fn register_blinc_layout_primitives() {
 
     let string_ty = Type::Primitive(PrimitiveType::String);
 
-    // `Div { ..children }` — universal container, styled.
-    // `children` and `__style` both cross the JIT as `i64`
-    // pointer payloads; the lowering passes synthesise the
-    // matching call-site Blocks.
+    // `Div { ..children }` — container. `children` and `__style` cross as `i64` payloads.
     let div = ComponentDefinition {
         name: std::sync::Arc::from("Div"),
         view_symbol: std::sync::Arc::from("$Blinc$Div$view"),
@@ -4118,22 +3190,14 @@ fn register_blinc_layout_primitives() {
                 ty: Type::Primitive(PrimitiveType::String),
             },
             PropDef {
-                // `on_click = || { … }` — a Zyntax closure value
-                // (`ZrtlClosure*` carried as an i64 through the
-                // JIT ABI). Invoked by the Div's Rust click
-                // handler each time the user clicks. Closure
-                // body holds the side effects the DSL author
-                // declared (signal writes, FSM `.trigger(…)`,
-                // etc.) — no host glue required.
+                // `on_click = || { … }` — Zyntax closure value as `i64`.
                 name: std::sync::Arc::from("on_click"),
                 ty: Type::Primitive(PrimitiveType::I64),
             },
         ],
     };
 
-    // `Text("hi")` — text leaf. Positional `content` is the
-    // only prop today; styling props (color, font_size, etc.)
-    // land as later prop entries.
+    // `Text("hi")` — text leaf. Styling props land later.
     let text_widget = ComponentDefinition {
         name: std::sync::Arc::from("Text"),
         view_symbol: std::sync::Arc::from("$Blinc$Text$view"),
@@ -4148,12 +3212,11 @@ fn register_blinc_layout_primitives() {
         r.register(text_widget);
     });
 
-    // Suppress unused-imports when nothing further consumes
-    // these (e.g., if a future refactor stops needing the
-    // InternedString path here).
     let _ = InternedString::new_global("__blinc_layout_primitives_marker__");
 }
 
+/// Mirror DSL component decls (impl + matching Class) into the runtime's
+/// `ComponentRegistry`. View symbol is `<Name>$view`.
 fn publish_components_to_runtime_registry(program: &TypedProgram) {
     use zyntax_typed_ast::typed_ast::TypedDeclaration;
 
@@ -4162,14 +3225,8 @@ fn publish_components_to_runtime_registry(program: &TypedProgram) {
             continue;
         };
 
-        // Extract the implementing type's name from
-        // `imp.for_type`. For our grammar's component impls
-        // this is `Type::Unresolved(name)` (the Impl-construct
-        // path in Zyntax's interpreter at
-        // runtime2/interpreter.rs:1044). For impls that have
-        // been resolved past that stage it may be
-        // `Type::Named { id, ... }` — look up the type's name
-        // through the program's registry then.
+        // `for_type` is usually `Type::Unresolved(name)` mid-pipeline;
+        // post-resolution it can be `Type::Named { id, ... }`.
         let component_name_intern = match &imp.for_type {
             Type::Unresolved(name) => *name,
             Type::Named { id, .. } => {
@@ -4187,10 +3244,7 @@ fn publish_components_to_runtime_registry(program: &TypedProgram) {
         };
         let component_name: &str = component_name_string.as_ref();
 
-        // Only register impls that match a sibling Class —
-        // skips FSM impls (which match an Enum) and any stray
-        // `impl Foo { ... }` block for a type that doesn't
-        // exist as a component.
+        // Only register impls with a sibling Class — skips FSM impls and orphan impls.
         let class_match = program.declarations.iter().any(|d| match &d.node {
             TypedDeclaration::Class(c) => c.name == component_name_intern,
             _ => false,
@@ -4199,9 +3253,7 @@ fn publish_components_to_runtime_registry(program: &TypedProgram) {
             continue;
         }
 
-        // Find the view method. Components without a view body
-        // (currently impossible to declare, but defensive) get
-        // skipped — there's nothing to introspect-and-render.
+        // Find the view method. Bodyless components are skipped defensively.
         let Some(view_method) = imp
             .methods
             .iter()
@@ -4210,16 +3262,7 @@ fn publish_components_to_runtime_registry(program: &TypedProgram) {
             continue;
         };
 
-        // Each view param becomes a `PropDef`. The substrate
-        // takes `zyntax_typed_ast::Type` directly, so we hand
-        // the param's `ty` through unchanged — no enum
-        // translation, no primitive-only filtering. Complex
-        // types (structs, arrays, optionals, ...) land in the
-        // substrate as-is; consumers that only understand
-        // primitives pattern-match on `Type::Primitive(...)`.
-        //
-        // The `self` param (currently impossible — components
-        // don't declare `self`) gets skipped defensively.
+        // Each view param becomes a `PropDef`; `ty` passes through unchanged.
         let props: Vec<blinc_runtime::component::PropDef> = view_method
             .params
             .iter()
@@ -4245,36 +3288,9 @@ fn publish_components_to_runtime_registry(program: &TypedProgram) {
     }
 }
 
-/// Translate the local `blinc_dsl_core::FsmRegistry` (Zyntax-typed,
-/// uses `InternedString` everywhere) into the runtime-agnostic
-/// `blinc_runtime::fsm::FsmRegistry` shape (`Arc<str>`-typed,
-/// `u32`-coded state variants) and publish each entry.
-///
-/// Code-assignment policy:
-/// - **State variant codes** come from the FSM's state enum
-///   declaration order. Walking `program.declarations` for
-///   `TypedDeclaration::Enum` whose name matches the FSM's
-///   `trait_name` yields the variants in source order; index = code.
-/// - **Event codes** are assigned in first-appearance order across
-///   the FSM's transitions. Identical events get one code; new
-///   events get the next free index.
-///
-/// Both policies are deterministic — re-running the publisher on
-/// the same source produces identical codes — which is the
-/// invariant the `FsmStateId::on_event` path relies on so the
-/// widget side and the registry agree on which `u32` means which
-/// state.
-///
-/// Why a separate post-parse pass instead of folding into
-/// `populate_fsm_registry_pass`: the existing pass already does
-/// quite a bit (FSM scan → TypeId minting → guard lifting →
-/// `__fsm_meta__` strip), and the publish step needs the
-/// post-lift state of the program (specifically the lifted-guard
-/// symbol names) which only become stable after that pass runs.
-/// Keeping them separated also makes the JIT-only nature of
-/// this publish step obvious — the AOT path will reach the
-/// substrate from a codegen-emitted equivalent of this function,
-/// not from inside `populate_fsm_registry_pass`.
+/// Publish the local FSM registry into `blinc_runtime::fsm::FsmRegistry`.
+/// State codes = enum decl order. Event codes = first-appearance order,
+/// offset by `FSM_EVENT_CODE_OFFSET` to avoid colliding with pointer event codes.
 fn publish_fsms_to_runtime_registry(program: &TypedProgram) {
     use zyntax_typed_ast::typed_ast::TypedDeclaration;
 
@@ -4287,9 +3303,7 @@ fn publish_fsms_to_runtime_registry(program: &TypedProgram) {
             continue;
         };
 
-        // Find the matching state-enum declaration. Mid-pipeline
-        // FSMs always have one (the grammar emits Class+Impl
-        // pairs); skip anything else (non-FSM impls).
+        // Find the matching state-enum. Mid-pipeline FSMs always have one.
         let state_enum = program.declarations.iter().find_map(|d| match &d.node {
             TypedDeclaration::Enum(e) if e.name == fsm_name_intern => Some(e),
             _ => None,
@@ -4298,10 +3312,7 @@ fn publish_fsms_to_runtime_registry(program: &TypedProgram) {
             continue;
         };
 
-        // Read the local registry for this FSM's transitions +
-        // initial + tick_guards. If the local entry is missing
-        // (FSM wasn't fully processed), bail — same idempotent
-        // semantics as the rest of the pipeline.
+        // Read local registry. Missing entry → bail (idempotent).
         let local_def = with_fsm_registry(|r| {
             r.iter()
                 .map(|(_, d)| d)
@@ -4312,7 +3323,7 @@ fn publish_fsms_to_runtime_registry(program: &TypedProgram) {
             continue;
         };
 
-        // State names in declaration order. Codes = indices.
+        // State codes = indices into declaration order.
         let state_names: Vec<std::sync::Arc<str>> = state_enum
             .variants
             .iter()
@@ -4330,13 +3341,7 @@ fn publish_fsms_to_runtime_registry(program: &TypedProgram) {
                 .map(|i| i as u32)
         };
 
-        // Event codes — first-appearance order in transitions,
-        // offset into the high range via
-        // [`FSM_EVENT_CODE_OFFSET`](blinc_runtime::fsm::FSM_EVENT_CODE_OFFSET)
-        // so they can't collide with widget pointer event codes (
-        // `POINTER_DOWN = 1` etc. — the widget Stateful auto-feeds
-        // those into `state.on_event`, which would otherwise match
-        // an FSM event sharing the same low code).
+        // Event codes — first-appearance order, offset to avoid POINTER_* collisions.
         let mut event_names: Vec<std::sync::Arc<str>> = Vec::new();
         let mut event_code_of = |name: zyntax_typed_ast::InternedString| -> u32 {
             let resolved = name.resolve_global().unwrap_or_default();
@@ -4399,84 +3404,33 @@ fn publish_fsms_to_runtime_registry(program: &TypedProgram) {
 // Runtime engine
 // =====================================================================
 
-/// The Blinc DSL runtime. Owns the compiled grammar + the Zyntax
-/// runtime engine + the loaded module table.
-///
-/// Construction is `O(grammar parse)` — measured during the
-/// risk-reduction prototype. If it climbs past 50 ms, the plan
-/// (ROADMAP §3.9) is to switch to a pre-compiled `.zpeg` baked in via
-/// `include_bytes!`.
+/// The Blinc DSL runtime. Owns the compiled grammar, the Zyntax runtime,
+/// and the loaded module table.
 pub struct BlincDsl {
     grammar: Grammar2,
-    // We wrap `ZyntaxRuntime` in `Arc<Mutex<_>>` because the
-    // production API (Phase 2 of ROADMAP §3.9) hands the same handle
-    // to the hot-reload watcher thread for `runtime.hot_reload(...)`
-    // calls. The runtime doesn't currently impl `Send + Sync`
-    // upstream (its Cranelift `JITModule` is the blocker), which
-    // makes clippy's `arc_with_non_send_sync` fire on construction —
-    // we silence it where the `Arc::new` call lives, with the
-    // expectation that upstream will eventually add the impls.
     runtime: Arc<Mutex<ZyntaxRuntime>>,
-    /// JIT-linker-visible names of view symbols
-    /// [`lower_view_to_value_returning`] converted to the
-    /// `i64`-returning widget-handle ABI. Populated by
-    /// [`Self::compile_source`] / [`Self::parse_to_typed_ast`] (both
-    /// run the pass) and consulted by [`JitViewRenderer`] /
-    /// [`Self::render_named`] to decide whether to call as
-    /// `runtime.call::<()>` (legacy Unit-return) or as
-    /// `runtime.call_function(..., NativeType::I64)` (capture a
-    /// widget handle).
-    ///
-    /// `Arc<Mutex<...>>` mirrors the runtime field's shape — the
-    /// set accumulates across compiles (monotonically grows;
-    /// re-defining a symbol as Unit-returning would leave a stale
-    /// entry, but our existing flow only adds value-returning
-    /// symbols, never demotes).
+    /// JIT symbols `lower_view_to_value_returning` rewrote to the
+    /// `i64` widget-handle ABI; consulted to choose `call_function`
+    /// vs `call::<()>` at render time.
     value_returning_views: Arc<Mutex<std::collections::HashSet<String>>>,
-    /// Per-file map of JIT function names emitted by the most
-    /// recent compile of each path. Populated by `compile_file`
-    /// / `compile_directory` so `recompile_file` knows which
-    /// symbols belong to a given source.
+    /// JIT function names per source path; used by `recompile_file`.
     compiled_modules: Arc<Mutex<std::collections::HashMap<std::path::PathBuf, Vec<String>>>>,
-    /// CSS strings collected from `stylesheet "..."` blocks
-    /// across every compiled source. Hosts feed these to
-    /// `ctx.add_css(...)`. Order matches compile order.
+    /// CSS from `style { … }` blocks, compile-order.
     compiled_stylesheets: Arc<Mutex<Vec<String>>>,
-    /// Number of entries from `compiled_stylesheets` already
-    /// pushed onto `BlincContextState`'s stylesheet queue.
-    /// Bumped on each successful queue flush — keeps
-    /// [`Self::view_widget`] idempotent across frames.
+    /// Cursor into `compiled_stylesheets` of how far the
+    /// `BlincContextState` queue flush has reached.
     stylesheets_queued_up_to: Arc<Mutex<usize>>,
-    /// Names of every `signal <name>: <T>` declared in any
-    /// source this DSL instance has compiled, paired with the
-    /// primitive type the declaration used. Lets
-    /// [`Self::view_widget`] subscribe a single wrapping
-    /// stateful to every reactive cell the view reads without
-    /// the host having to enumerate them.
+    /// Every declared `signal <name>: <T>`, accumulated across compiles.
     declared_signals: Arc<Mutex<Vec<(String, Type)>>>,
-    /// Names of every `fsm <Name> { ... }` declared in any
-    /// compiled source. Used by [`Self::view_widget`] to bind
-    /// the wrapping stateful to the FSM's `SharedState` so
-    /// `.trigger(...)` calls in the DSL flow through the
-    /// standard widget-refresh path.
+    /// Every declared `fsm <Name>`, accumulated across compiles.
     declared_fsms: Arc<Mutex<Vec<String>>>,
-    /// `true` once any source compiled into this DSL declared
-    /// a view with the `@stateful` decorator. Blinc deliberately
-    /// avoids re-running views unless asked, so
-    /// [`Self::view_widget`] wraps the materialised tree in a
-    /// reactive `Stateful` only when this flag is set —
-    /// authors opt in explicitly per view.
+    /// Set when any view carries `@stateful`. `view_widget` then
+    /// wraps the tree in a reactive `Stateful`.
     has_stateful_view: Arc<Mutex<bool>>,
-    /// Signal names listed inside `@stateful([sig1, sig2])`
-    /// decorators across the program, merged and deduplicated.
-    /// Empty when authors used the bare `@stateful` form (no
-    /// parens) — [`Self::view_widget`] reads that as "subscribe
-    /// to every declared signal".
+    /// Signal names listed in `@stateful([…])`. Empty = subscribe
+    /// to every declared signal.
     stateful_view_deps: Arc<Mutex<Vec<String>>>,
-    /// FSM names listed inside `@fsm([FsmName1, …])` decorators
-    /// across the program, merged and deduplicated. Empty when
-    /// no `@fsm` was used; [`Self::view_widget`] falls back to
-    /// the first declared FSM in that case.
+    /// FSM names listed in `@fsm([…])`. Empty = first declared FSM.
     stateful_view_fsms: Arc<Mutex<Vec<String>>>,
 }
 
@@ -4484,53 +3438,24 @@ impl BlincDsl {
     /// Build a fresh runtime with the embedded Blinc grammar and all
     /// host builtins pre-registered.
     pub fn new() -> BlincDslResult<Self> {
-        // Parse the grammar first so any embedded-grammar bug fails
-        // fast before we touch the runtime.
+        // Parse grammar first so embedded-grammar bugs fail fast.
         let grammar = Grammar2::from_source(BLINC_GRAMMAR)?;
 
-        // Single-tier classic runtime for the prototype. The full
-        // plan (§3.5) wraps this in a `RuntimeEngine` enum that picks
-        // between `ZyntaxRuntime` and `TieredRuntime` based on
-        // dev/release profile, mirroring the zynml shape.
         let mut runtime = ZyntaxRuntime::new()
             .map_err(|e| BlincDslError::Compile(format!("runtime init: {e}")))?;
 
-        // Order matters: builtins must be registered before any
-        // module load so the JIT linker can resolve `$Blinc$*`
-        // symbols when `compile_typed_program` runs. Same rule zynml
-        // calls out at zynml/src/lib.rs:199-200, except we do it via
-        // `register_function` (statically linked symbols) rather than
-        // `load_plugin` (.zrtl from disk). With Grammar2 there's no
-        // separate `register_grammar` step — `compile_typed_program`
-        // takes the typed AST directly.
+        // MUST register builtins BEFORE any module load so the JIT linker can resolve them.
         register_builtins(&mut runtime);
 
-        // `register_function` only updates the backend's accumulator.
-        // The Cranelift JIT module was constructed at `ZyntaxRuntime::new`
-        // time and doesn't see new symbols until rebuild. Plugin loaders
-        // do this implicitly; for static `register_function` callers we
-        // poke the same hook explicitly. Without this, the first
-        // `compile_typed_program` for any module that calls a builtin
-        // panics inside Cranelift with "can't resolve symbol".
+        // MUST finalize after register_function — Cranelift JIT only sees symbols after rebuild.
         runtime
             .finalize_runtime_symbols()
             .map_err(|e| BlincDslError::Compile(format!("finalize symbols: {e}")))?;
 
-        // ZyntaxRuntime isn't Send+Sync today (see field-level
-        // comment on `BlincDsl::runtime`). The Arc<Mutex<_>> wrapper
-        // is the production-shape handle we'll need once it is.
+        // `ZyntaxRuntime` isn't Send+Sync; the Arc<Mutex<_>> wrapper is the production shape.
         #[allow(clippy::arc_with_non_send_sync)]
         let runtime = Arc::new(Mutex::new(runtime));
 
-        // Pre-register `blinc_layout` widget primitives as
-        // components in the substrate. After this, DSL source
-        // like `view { Div(bg: white) { Text("hi") } }` parses
-        // and validates cleanly — `Div` and `Text` look like
-        // any other component to `validate_component_calls` /
-        // `lower_component_calls`. The runtime-side
-        // (extern functions that build real `blinc_layout::Div`
-        // / `Text` values, view-body-as-expression grammar,
-        // widget tree walker) lands in subsequent commits.
         register_blinc_layout_primitives();
 
         let value_returning_views = Arc::new(Mutex::new(std::collections::HashSet::new()));
@@ -4558,87 +3483,24 @@ impl BlincDsl {
         })
     }
 
-    /// Install this `BlincDsl`'s JIT-flavoured guard dispatcher as
-    /// the process-wide `blinc_runtime::fsm::GuardDispatcher`. After
-    /// this call, any widget that constructs a
-    /// `Stateful<FsmStateId>` can dispatch tick guards through the
-    /// substrate without depending on Zyntax types — the dispatcher
-    /// routes back into this `BlincDsl`'s Cranelift runtime to call
-    /// the lifted guard functions.
-    ///
-    /// Why opt-in: the dispatcher slot is process-wide. Auto-
-    /// installing in [`BlincDsl::new`] would race when multiple
-    /// `BlincDsl` instances coexist in the same process (tests do
-    /// this routinely; hot-reload pipelines might in production).
-    /// Production apps own a single long-lived `BlincDsl` singleton
-    /// and call `install_runtime_bridge()` once at startup — no
-    /// race, no cost. Tests that need bridge dispatch take a
-    /// serialization lock and call this explicitly.
-    ///
-    /// Replaces any previously-installed dispatcher (last-write-
-    /// wins), so hot-reload flows that re-bootstrap the DSL stay
-    /// straightforward.
+    /// Install this `BlincDsl`'s JIT guard dispatcher as the process-wide
+    /// `blinc_runtime::fsm::GuardDispatcher`. Opt-in to avoid races between
+    /// multiple `BlincDsl` instances in the same process. Last-write-wins.
     pub fn install_runtime_bridge(&self) {
         blinc_runtime::fsm::set_guard_dispatcher(std::sync::Arc::new(JitGuardDispatcher {
             runtime: self.runtime.clone(),
         }));
     }
 
-    /// Register a Rust widget that implements [`ExternWidget`].
-    ///
-    /// This is the primary Rust→DSL surface — almost all callers
-    /// (including the [`extern_widget!`](crate::extern_widget)
-    /// proc-macro's expansion) use this form:
-    ///
-    /// ```ignore
-    /// dsl.register_extern_widget::<FancyText>()?;
-    /// ```
-    ///
-    /// Pulls the spec from `W::extern_widget_spec()` and forwards
-    /// to [`Self::register_extern_widget_spec`]. See that method
-    /// for the registration semantics.
+    /// Register a Rust widget that implements [`ExternWidget`]. Primary Rust→DSL surface.
     pub fn register_extern_widget<W: ExternWidget>(&self) -> BlincDslResult<()> {
         self.register_extern_widget_spec(W::extern_widget_spec())
     }
 
-    /// Register a Rust-side widget by passing an explicit
-    /// [`ExternWidgetSpec`]. Lower-level than
-    /// [`Self::register_extern_widget`] — most callers prefer the
-    /// trait-based form, which builds the spec from the
-    /// [`ExternWidget`] impl.
-    ///
-    /// Useful when you need to register a widget shape the
-    /// proc-macro doesn't yet support (callbacks, custom
-    /// marshalling, multi-instance specs from a single Rust type),
-    /// or when hand-rolling the integration without depending on
-    /// `blinc_macros`.
-    ///
-    /// Side effects:
-    ///
-    ///   - Registers `spec.extern_ptr` on the JIT runtime under
-    ///     `spec.view_symbol` with a matching ZRTL signature.
-    ///   - Re-finalises the runtime's symbol table so subsequent
-    ///     `compile_source` calls can JIT-link against the new
-    ///     symbol.
-    ///   - Adds a [`ComponentDefinition`] to the substrate
-    ///     [`ComponentRegistry`] so validation and call-site
-    ///     lowering recognise the widget as a callable
-    ///     component.
-    ///   - Records `spec.view_symbol` in the value-returning view
-    ///     set so the renderers pick the `i64`-return ABI.
-    ///
-    /// Must be called before [`Self::compile_source`] for any
-    /// source that uses the widget — otherwise the substrate
-    /// validator surfaces "unknown component" and the JIT linker
-    /// fails to resolve the symbol.
-    ///
-    /// [`ComponentRegistry`]: blinc_runtime::component::ComponentRegistry
-    /// [`ComponentDefinition`]: blinc_runtime::component::ComponentDefinition
+    /// Lower-level than [`Self::register_extern_widget`] — register an explicit
+    /// [`ExternWidgetSpec`]. MUST be called before `compile_source` for any
+    /// source that uses the widget.
     pub fn register_extern_widget_spec(&self, spec: ExternWidgetSpec) -> BlincDslResult<()> {
-        // Build the ZRTL signature for the new symbol — same
-        // shape `register_builtins` constructs for the in-tree
-        // primitives, just sourced from the spec's owned fields
-        // instead of a `'static` descriptor.
         if spec.param_types.len() > ZRTL_MAX_PARAMS {
             return Err(BlincDslError::Compile(format!(
                 "register_extern_widget({}): parameter count {} exceeds ZRTL_MAX_PARAMS ({})",
@@ -4658,13 +3520,8 @@ impl BlincDsl {
             params,
         };
 
-        // `register_function_typed` requires a `&'static str`
-        // for the symbol name (it stores the name on the JIT
-        // module's symbol map). Leak the spec's `String` to
-        // promote it to `'static`. Widget registrations are a
-        // startup-time operation in normal flows — the leak is
-        // bounded by the number of widget types in the app, not
-        // the number of widget instances or render frames.
+        // Leak the symbol — `register_function_typed` requires `&'static str`.
+        // Bounded by widget-type count, not instance count.
         let view_symbol_static: &'static str = Box::leak(spec.view_symbol.into_boxed_str());
 
         {
@@ -4672,11 +3529,7 @@ impl BlincDsl {
                 .runtime
                 .lock()
                 .expect("BlincDsl runtime mutex poisoned");
-            // `register_function_typed` only updates the backend's
-            // accumulator; `finalize_runtime_symbols` is what
-            // pokes the Cranelift JIT module so the new symbol is
-            // resolvable at the next `compile_typed_program`.
-            // Same two-step `register_builtins` does at startup.
+            // MUST finalize after register — Cranelift only sees new symbols after rebuild.
             runtime.register_function_typed(view_symbol_static, spec.extern_ptr, sig);
             runtime
                 .finalize_runtime_symbols()
@@ -4691,10 +3544,7 @@ impl BlincDsl {
             });
         });
 
-        // Widget-handle externs are value-returning by contract.
-        // Record the symbol so `JitViewRenderer::render_named`
-        // (and `BlincDsl::render_named`) pick the `i64`-return
-        // ABI when invoking it.
+        // Widget-handle externs are value-returning — pick the `i64`-return ABI at render time.
         self.value_returning_views
             .lock()
             .expect("value_returning_views mutex poisoned")
@@ -4703,34 +3553,8 @@ impl BlincDsl {
         Ok(())
     }
 
-    /// Build a DSL-defined component as a Rust
-    /// `Box<dyn ElementBuilder>`, ready to slot into a Rust
-    /// widget tree.
-    ///
-    /// This is the **DSL → Rust** half of the bidirectional
-    /// interop story. The companion direction (Rust widgets
-    /// callable from DSL) lives at [`Self::register_extern_widget`].
-    ///
-    /// Prop values pass through as positional Zyntax values in
-    /// the order the component's view method declares its
-    /// params. Today's surface is positional-only; named-arg
-    /// dispatch lands when the prop marshalling layer grows a
-    /// param-name index.
-    ///
-    /// Returns an error if:
-    ///
-    ///   - `name` isn't in the substrate
-    ///     [`ComponentRegistry`] (compile DSL source first, or
-    ///     register via [`Self::register_extern_widget`]).
-    ///   - The component's view function isn't value-returning
-    ///     (only widget-primitive-rooted views are; legacy
-    ///     `text(...)` views still produce Unit and can't be
-    ///     queried).
-    ///   - The JIT call fails (wrong arg count for the resolved
-    ///     view signature, etc.).
-    ///   - The returned handle is null.
-    ///
-    /// [`ComponentRegistry`]: blinc_runtime::component::ComponentRegistry
+    /// Build a DSL-defined component as a `Box<dyn ElementBuilder>`. DSL→Rust
+    /// half of the interop. Props pass through as positional Zyntax values.
     pub fn query(
         &self,
         name: &str,
@@ -4809,11 +3633,7 @@ impl BlincDsl {
             )));
         };
 
-        // SAFETY: the handle came straight out of a registered
-        // widget-handle extern, all of which use
-        // `Box::into_raw(Box::new(WidgetBox::...))` to mint the
-        // pointer. `materialize_widget`'s contract is satisfied
-        // by construction here.
+        // SAFETY: handle came from a registered widget-handle extern.
         let widget = unsafe { materialize_widget(handle) }.ok_or_else(|| {
             BlincDslError::Compile(format!(
                 "query({name}): view returned the null handle (extern build failed)"
@@ -4822,53 +3642,24 @@ impl BlincDsl {
         Ok(widget.into_element_builder())
     }
 
-    /// Compile a `.blinc` source file. Returns the names of compiled
-    /// functions, mirroring the zynml `load_module_file` shape so we
-    /// can rely on the same hot-reload pivot later (`runtime.hot_reload`
-    /// keyed by function name).
+    /// Compile a `.blinc` source. Returns JIT function names (keyed by name
+    /// for hot-reload). Runs the full post-parse pipeline: marker injection,
+    /// signal/fsm resolution, component lowering, value-returning view rewrite,
+    /// styling overlay collection, extern named-arg resolution, init dispatch.
     pub fn compile_source(&self, source: &str, filename: &str) -> BlincDslResult<Vec<String>> {
         let mut runtime = self
             .runtime
             .lock()
             .expect("BlincDsl runtime mutex poisoned");
 
-        // Parse to typed AST. We don't pass plugin signatures
-        // because we don't load `.zrtl` plugins; instead we splice
-        // extern declarations for our static builtins directly into
-        // the parsed program below, mirroring what
-        // `Grammar2::inject_builtin_externs` does for plugin
-        // symbols. Any parse-time / type / call-site / arity errors
-        // here come back with the span machinery Zyntax already
-        // provides — we don't add a parallel check layer
-        // (ROADMAP §3.6).
-        // `parse_with_signatures` runs Zyntax's
-        // `inject_builtin_externs` (grammar2.rs:198-315) using the
-        // runtime's registered plugin signatures. We populate those
-        // signatures in `register_builtins` via
-        // `register_function_typed`, so every `@builtin` entry in our
-        // grammar gets a properly-typed extern decl in the parsed
-        // program. This is the path that makes `concat` /
-        // `__fstring_format__` (used by f-string desugaring) plus
-        // our direct symbols (`$Blinc$text`, `$Blinc$text_int`,
-        // etc.) all type-check + JIT-link cleanly.
-        //
-        // We don't run our own `inject_builtin_externs` host pass
-        // anymore — Zyntax's covers everything in the @builtin
-        // table, and our table now lists every builtin we register.
+        // `parse_with_signatures` runs Zyntax's `inject_builtin_externs`. We
+        // populate signatures via `register_function_typed` in `register_builtins`.
         let mut typed_program = self
             .grammar
             .parse_with_signatures(source, filename, runtime.plugin_signatures())
             .map_err(|e| BlincDslError::Compile(e.to_string()))?;
 
-        // Apply the same post-parse passes parse_to_typed_ast runs,
-        // so fsm-bearing programs get marker injection + event-enum
-        // synthesis before compilation. Mirrors parse_to_typed_ast
-        // — keep these two paths in sync when adding new passes.
-        // Snapshot `signal <name>: <T>` and `fsm <Name> { ... }`
-        // declarations BEFORE the rewrite/strip passes destroy
-        // them. `view_widget` reads from these to subscribe a
-        // wrapping stateful to every reactive cell the program
-        // owns, so hosts don't have to enumerate them.
+        // Snapshot signal/fsm decls BEFORE rewrite/strip passes destroy them.
         {
             let (signals, fsms) = collect_declared(&typed_program);
             self.declared_signals
@@ -4881,12 +3672,7 @@ impl BlincDsl {
                 .extend(fsms);
         }
 
-        // Detect `@stateful` / `@fsm` view decorators and
-        // strip the markers. Runs before the JIT sees the
-        // body — the marker calls have no implementations.
-        // Explicit signal deps from `@stateful([…])` and FSM
-        // names from `@fsm([…])` accumulate into per-DSL lists
-        // `view_widget` consults at wrap time.
+        // Detect and strip `@stateful` / `@fsm` markers. Accumulate explicit deps.
         {
             let (saw_stateful, explicit_deps, explicit_fsms) =
                 detect_and_strip_stateful_views(&mut typed_program);
@@ -4923,16 +3709,12 @@ impl BlincDsl {
         inject_fsm_context_markers(&mut typed_program);
         synthesize_fsm_event_enums(&mut typed_program);
         synthesize_fsm_trait_interfaces(&mut typed_program);
+        lower_match_blocks(&mut typed_program);
         resolve_signal_calls(&mut typed_program);
         resolve_fsm_trigger_calls(&mut typed_program);
         resolve_fsm_subscribe_calls(&mut typed_program);
 
-        // Extract any `style { … }` blocks. The strings live
-        // on the DSL for `compiled_stylesheets()` callers AND
-        // queue through `BlincContextState::queue_stylesheet`
-        // so the windowed runner picks them up on the next
-        // frame — no host-side `ctx.add_css(...)` boilerplate
-        // required.
+        // Extract `style { … }` blocks and queue through `BlincContextState` for next frame.
         {
             let mut sheets = self
                 .compiled_stylesheets
@@ -4948,52 +3730,23 @@ impl BlincDsl {
             }
         }
 
-        // Validate component calls reference known components, then
-        // lower the markers. Validation runs first because it reads
-        // the marker shape (StringLiteral name as args[0]); lowering
-        // rewrites that shape away. Same ordering as
-        // `parse_to_typed_ast`.
+        // MUST validate BEFORE lower_component_calls — validator reads the marker shape.
         validate_component_calls(&typed_program)
             .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
         lower_component_calls(&mut typed_program);
         bind_component_props(&mut typed_program);
 
-        // Eager registry population: walk fsm impls, pin TypeIds,
-        // record metadata into the global FsmRegistry, then strip
-        // `__fsm_meta__` so the compile path doesn't have to handle
-        // the marker callees. The module is hardcoded to "main"
-        // since Zyntax compiles every source into a single module
-        // today — when per-source modules surface upstream, this is
-        // the place to thread the real module name through.
+        // Module hardcoded to "main" — Zyntax compiles each source into one module.
         let module = zyntax_typed_ast::InternedString::new_global("main");
         populate_fsm_registry_pass(&mut typed_program, module);
 
-        // Mirror the (Zyntax-typed) local FSM registry into the
-        // runtime-agnostic `blinc_runtime::fsm` substrate so
-        // widget-side `Stateful<FsmStateId>` consumers can dispatch
-        // transitions through `blinc_runtime::fsm::with_fsm_registry`
-        // without depending on Zyntax types. The AOT path's
-        // generated init function will write to the same substrate
-        // from its own translation; widget code stays unchanged.
         publish_fsms_to_runtime_registry(&typed_program);
 
-        // Mirror component declarations into the runtime-agnostic
-        // `blinc_runtime::component` substrate. Runs after
-        // `bind_component_props` so the view method's params
-        // reflect the prop list — that's where the publisher
-        // reads prop names + types from.
+        // MUST run after `bind_component_props` so view params reflect the prop list.
         publish_components_to_runtime_registry(&typed_program);
 
-        // Wire view functions to value-returning shape: rewrite a
-        // trailing primitive-view call into `Return(Some(call))`
-        // and bump the function's return type to widget-handle
-        // (`I64`). The pass also records each converted symbol's
-        // JIT-linker name into `value_returning_views` so render
-        // paths can pick the right call ABI (`call_function`
-        // capturing `I64` vs legacy `call::<()>`).
-        //
-        // MUST run before `ensure_unit_return` so its defensive
-        // `Return(None)` doesn't override our value-bearing one.
+        // MUST run BEFORE `ensure_unit_return` so its defensive `Return(None)`
+        // doesn't override the value-bearing one.
         {
             let mut vrv = self
                 .value_returning_views
@@ -5002,73 +3755,37 @@ impl BlincDsl {
             lower_view_to_value_returning(&mut typed_program, &mut vrv);
         }
 
-        // Rewrite primitive `children = Array([...])` named args
-        // into explicit `__new_child_list__` / `__push_child__` /
-        // container-call Block expansions so the JIT can ferry
-        // children across the FFI boundary as a single pointer.
-        // Must run AFTER `lower_view_to_value_returning` (which
-        // expects to see the bare Call shape) and BEFORE
-        // `ensure_unit_return` (which only inspects statement-level
-        // trailing shape).
+        // MUST run AFTER `lower_view_to_value_returning` and BEFORE `ensure_unit_return`.
         lower_children_arrays_to_blocks(&mut typed_program);
 
-        // Gather inline styling args (`bg`, `opacity`, …) into
-        // a `__new_style_overlay__` Block and attach the overlay
-        // pointer as `__style` named arg on styled primitives.
-        // Must run before `resolve_extern_widget_named_args` so
-        // the resolution pass sees a single uniform `__style` arg.
+        // MUST run BEFORE `resolve_extern_widget_named_args` so it sees uniform `__style`.
         lower_styling_args_to_overlays(&mut typed_program);
 
-        // Reorder remaining named args on extern primitive calls
-        // into positional positions using the substrate
-        // registry's prop order. Zyntax's auto-injected extern
-        // decls carry synthetic param names (`p0`, `p1`, …), so
-        // named-arg → param-name binding doesn't work at the type
-        // checker; this pass resolves names against our own
-        // registry instead.
+        // Resolve named args against our component registry — Zyntax's auto-injected
+        // extern decls carry synthetic `p0`, `p1`, … param names that can't bind by name.
         resolve_extern_widget_named_args(&mut typed_program);
 
-        // Belt-and-suspenders: terminate user functions with an
-        // explicit `Return(None)` so the body classifier can't infer
-        // a value-bearing return from a single trailing `Expression`
-        // statement.
+        // Defensive `Return(None)` so the body classifier can't infer a value-bearing return.
         ensure_unit_return(&mut typed_program);
 
         let function_names = runtime
             .compile_typed_program(typed_program)
             .map_err(|e| BlincDslError::Compile(e.to_string()))?;
 
-        // Eagerly run every component's `init { … }` block exactly
-        // once per compile. The grammar lowers `init { stmts }` into
-        // an `__init__` method on the component's impl, which Zyntax
-        // mangles into a `<Component>$__init__` JIT symbol. Calling
-        // each one here — after `compile_typed_program` returns and
-        // before any view ever mounts — gives the subscribe / setup
-        // statements inside `init` a chance to register before a
-        // first transition can fire.
-        //
-        // Running at compile time (rather than via `on_mount` on the
-        // view's outer container) keeps subscriber registrations from
-        // accumulating across view rebuilds: `view_widget()` can be
-        // called many times per app launch (resize, stateful refresh,
-        // …), but `compile_source` runs exactly once.
+        // Eagerly run each component's `<Component>$__init__` exactly once at compile.
+        // Running at compile (not on_mount) avoids accumulating subscribers across rebuilds.
         for name in &function_names {
             if !name.ends_with("$__init__") {
                 continue;
             }
-            // Ignore call failures — init is best-effort: a typo'd
-            // signal name or FSM in `init { … }` shouldn't sink the
-            // whole compile. The user-visible failure surfaces at
-            // the first transition that doesn't take.
+            // Best-effort: a typo'd signal/FSM in `init { … }` shouldn't sink the whole compile.
             let _ = runtime.call::<()>(name, &[]);
         }
 
         Ok(function_names)
     }
 
-    /// Compile a `.blinc` file off disk. Records the resulting
-    /// JIT function names against the path so [`Self::recompile_file`]
-    /// can re-emit them on hot reload.
+    /// Compile a `.blinc` file off disk. Records JIT names per-path for hot reload.
     pub fn compile_file(&self, path: &Path) -> BlincDslResult<Vec<String>> {
         let source = std::fs::read_to_string(path)?;
         let filename = path.to_string_lossy();
@@ -5080,15 +3797,8 @@ impl BlincDsl {
         Ok(names)
     }
 
-    /// Compile every `*.blinc` file directly inside `path`
-    /// (non-recursive). Returns a per-file map of the JIT
-    /// function names emitted.
-    ///
-    /// All files share the process-global substrate registry —
-    /// component / FSM / signal names must be unique across the
-    /// directory or the second compile errors on duplicate
-    /// symbols. Imports + module-prefixed mangling land in a
-    /// later slice.
+    /// Compile every `*.blinc` file directly inside `path` (non-recursive).
+    /// Names must be unique across the directory (shared global substrate registry).
     pub fn compile_directory(
         &self,
         path: &Path,
@@ -5162,10 +3872,7 @@ impl BlincDsl {
                 .module_path
                 .iter()
                 .filter_map(|s| s.resolve_global().map(|s| s.to_string()))
-                // The action language's `.`-split turns `./widgets`
-                // into `["", "/widgets"]`; drop empty segments
-                // and strip a leading slash on the next so the
-                // path joins cleanly.
+                // Action language's `.`-split on `./widgets` → `["", "/widgets"]`.
                 .filter(|s| !s.is_empty())
                 .map(|s| s.trim_start_matches('/').to_string())
                 .collect();
@@ -5192,9 +3899,7 @@ impl BlincDsl {
         Ok(())
     }
 
-    /// Snapshot of which JIT function names were last emitted
-    /// for `path`. `None` if the file hasn't been compiled
-    /// through this `BlincDsl` instance.
+    /// JIT function names last emitted for `path`, or `None` if never compiled.
     pub fn compiled_function_names(&self, path: &Path) -> Option<Vec<String>> {
         self.compiled_modules
             .lock()
@@ -5202,11 +3907,7 @@ impl BlincDsl {
             .and_then(|m| m.get(path).cloned())
     }
 
-    /// CSS strings collected from every `stylesheet "..."` block
-    /// across all compiled sources, in compile order. Hosts feed
-    /// these to `ctx.add_css(...)`. Supports the full CSS surface
-    /// (`#id`, `.class`, combinators, pseudo-classes, `@flow`
-    /// shader DAGs, animations).
+    /// CSS strings from every `style { ... }` block, in compile order.
     pub fn compiled_stylesheets(&self) -> Vec<String> {
         self.compiled_stylesheets
             .lock()
@@ -5214,16 +3915,8 @@ impl BlincDsl {
             .unwrap_or_default()
     }
 
-    /// Parse `.blinc` source to a TypedAST without compiling or
-    /// running. Exposed for tests + tooling that want to analyse
-    /// the parsed shape (e.g. an LSP, a CI lint, or — at this
-    /// prototype stage — assertion tests on grammar rules that
-    /// don't need full JIT round-trip).
-    ///
-    /// The grammar's job is to produce TypedAST; the compiler's
-    /// job is to compile it. This entry point exists so we can
-    /// test the former in isolation when the latter isn't the
-    /// concern.
+    /// Parse `.blinc` source to TypedAST without compiling. Runs the same
+    /// post-parse pipeline as `compile_source` so AST tests see the lowered shape.
     pub fn parse_to_typed_ast(&self, source: &str, filename: &str) -> BlincDslResult<TypedProgram> {
         let runtime = self
             .runtime
@@ -5235,109 +3928,42 @@ impl BlincDsl {
             .parse_with_signatures(source, filename, runtime.plugin_signatures())
             .map_err(|e| BlincDslError::Compile(e.to_string()))?;
 
-        // Post-parse FSM passes — both run regardless of whether
-        // the source contains an fsm; they no-op on programs that
-        // don't have `__fsm_meta__` impls.
-        //
-        //   1. Inject `__fsm_begin__("FsmName")` / `__fsm_end__()`
-        //      around each `__fsm_meta__` body so the host knows
-        //      which FSM owns each marker call when the body is
-        //      executed by Zyntax (the markers are stateful — they
-        //      manipulate a host-side context stack).
-        //   2. Synthesise a `<FSM>Event` enum from the unique event
-        //      names referenced by `__fsm_transition__` markers.
-        //   3. Resolve `signal <name>: <T>` decls into rewrites of
-        //      `<name>.get()` to `__signal_get_<T>("<name>")` host
-        //      extern calls. Strips the signal-marker decls so the
-        //      compile path doesn't see them.
-        //
-        // The marker calls inside `__fsm_meta__` are then ordinary
-        // function calls; Zyntax compiles them like any other call,
-        // and the host registers `__fsm_begin__` / `__fsm_end__` /
-        // `__fsm_initial__` / `__fsm_transition__` as builtins. No
-        // codegen pass — Zyntax owns compilation.
+        // Post-parse passes — no-op on programs without the matching shapes.
         inject_fsm_context_markers(&mut program);
         synthesize_fsm_event_enums(&mut program);
         synthesize_fsm_trait_interfaces(&mut program);
+        lower_match_blocks(&mut program);
         resolve_signal_calls(&mut program);
         resolve_fsm_trigger_calls(&mut program);
         resolve_fsm_subscribe_calls(&mut program);
-        // Strip `@stateful` markers so AST-inspection tests
-        // see the same body shape `compile_source` will hand
-        // to the JIT.
         let _ = detect_and_strip_stateful_views(&mut program);
 
-        // Component-call validation runs after the FSM/signal
-        // rewrites because earlier passes never introduce or strip
-        // `__component_call__` markers — but ordering it here keeps
-        // diagnostics consistent ("unknown component" surfaces
-        // *after* "unknown signal", same as field-resolution order
-        // in most type-checkers).
         validate_component_calls(&program)
             .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
 
-        // Lower `__component_call__` markers to regular Call
-        // expressions keyed on the component's Variable name.
-        // Runs after validation so the validator still sees the
-        // marker shape (StringLiteral name as args[0]).
+        // MUST run after validation — validator reads the marker shape.
         lower_component_calls(&mut program);
 
-        // Bind component props as leading params on each impl
-        // method. Independent of `lower_component_calls` — props
-        // are a definition-site concern (which impl method gets
-        // the params), call-site lowering is a use-site concern
-        // (which symbol to call). Order between the two doesn't
-        // matter functionally; running prop-binding after keeps
-        // the def-site changes contiguous in the diff.
         bind_component_props(&mut program);
 
-        // Mirror the value-returning view rewrite in
-        // `compile_source` so AST-inspection tests see the same
-        // shape the JIT will. Runs after `bind_component_props`
-        // for the same reason `compile_source` runs it late —
-        // we want it to operate on the fully-lowered view bodies.
-        // Uses a local set since `parse_to_typed_ast` doesn't
-        // touch the JIT-side renderer; the per-DSL set is only
-        // populated by the compile path that actually emits JIT
-        // symbols.
+        // Local set; `parse_to_typed_ast` doesn't touch the JIT renderer.
         let mut local_vrv = std::collections::HashSet::new();
         lower_view_to_value_returning(&mut program, &mut local_vrv);
 
-        // Mirror the children-array → Block expansion so
-        // AST tests see the lowered shape.
         lower_children_arrays_to_blocks(&mut program);
-
-        // Mirror the styling-args overlay lowering.
         lower_styling_args_to_overlays(&mut program);
-
-        // And mirror the named-arg → positional rewrite so AST
-        // tests can assert the post-resolution shape.
         resolve_extern_widget_named_args(&mut program);
 
         Ok(program)
     }
 
-    /// Invoke the bare-form `render_view` entry point and drain the
-    /// scene buffer.
-    ///
-    /// For programs of the shape `view { ... }` (no enclosing
-    /// `component` block). Component-form programs compile to
-    /// `<Name>$render_view` instead — use [`Self::render_component`]
-    /// for those.
+    /// Invoke bare-form `render_view` and drain the scene buffer.
+    /// For `view { ... }` programs (no enclosing `component`).
     pub fn render_view(&self) -> BlincDslResult<Vec<DslOp>> {
         self.render_named("render_view")
     }
 
-    /// Invoke a named component's view and drain the scene buffer.
-    ///
-    /// For programs of the shape `component <Name> { view { ... } }`
-    /// — the component lowers to a `TypedDeclaration::Class` plus an
-    /// inherent `TypedDeclaration::Impl` carrying a `view` method.
-    /// Zyntax's compiler mangles inherent-impl methods as
-    /// `<TypeName>$<method>`, so the view's actual symbol is
-    /// `<Name>$view`. This call constructs that symbol and dispatches
-    /// to it. Multi-component files work because each component gets
-    /// its own distinct mangled symbol.
+    /// Invoke `<Name>$view` (inherent-impl mangling) and drain the scene buffer.
     pub fn render_component(&self, name: &str) -> BlincDslResult<Vec<DslOp>> {
         let symbol = format!("{name}$view");
         self.render_named(&symbol)
@@ -5356,13 +3982,7 @@ impl BlincDsl {
             .expect("BlincDsl runtime mutex poisoned");
 
         if is_value_returning {
-            // Value-returning view: call through the i64-return
-            // ABI so the JIT side reads the widget handle out of
-            // the matching return register. The legacy `render_view`
-            // surface still returns `Vec<DslOp>` — the handle gets
-            // discarded for now (the substrate-side ViewRenderer is
-            // what flows the handle through to consumers). Test
-            // callers that want the handle use `view_renderer()`.
+            // Handle discarded — substrate `ViewRenderer` flows it through to consumers.
             let sig = NativeSignature::new(&[], NativeType::I64);
             runtime.call_function(fn_name, &[], &sig)?;
         } else {
@@ -5371,20 +3991,7 @@ impl BlincDsl {
         Ok(take_scene_ops())
     }
 
-    /// Return a backend-agnostic view renderer that resolves view
-    /// symbols against this `BlincDsl`'s Cranelift runtime.
-    ///
-    /// Widget code that wants to render DSL views without
-    /// depending on this crate holds an
-    /// `Arc<dyn blinc_runtime::view::ViewRenderer>`; this method
-    /// constructs the JIT-backed implementation. The future AOT
-    /// path's per-app crate will provide its own
-    /// `AotViewRenderer` from the same trait — widget code
-    /// switches between them by storing the right Arc.
-    ///
-    /// Multiple calls hand out fresh renderers, each pointing at
-    /// the same shared runtime. Cheap to call as often as
-    /// needed.
+    /// Backend-agnostic view renderer backed by this `BlincDsl`'s Cranelift runtime.
     pub fn view_renderer(&self) -> std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> {
         std::sync::Arc::new(JitViewRenderer {
             runtime: self.runtime.clone(),
@@ -5392,9 +3999,7 @@ impl BlincDsl {
         })
     }
 
-    /// Names of every `signal <name>: <T>` declared across all
-    /// sources compiled into this DSL instance, paired with the
-    /// primitive type from the declaration.
+    /// Every declared `signal <name>: <T>` across all compiled sources.
     pub fn declared_signals(&self) -> Vec<(String, Type)> {
         self.declared_signals
             .lock()
@@ -5402,8 +4007,7 @@ impl BlincDsl {
             .clone()
     }
 
-    /// Names of every `fsm <Name> { ... }` declared across all
-    /// sources compiled into this DSL instance.
+    /// Every declared `fsm <Name> { ... }` across all compiled sources.
     pub fn declared_fsms(&self) -> Vec<String> {
         self.declared_fsms
             .lock()
@@ -5411,52 +4015,24 @@ impl BlincDsl {
             .clone()
     }
 
-    /// Materialise the compiled `view { ... }` as a top-level
-    /// `ElementBuilder`.
+    /// Materialise the compiled `view { ... }` as a top-level `ElementBuilder`.
     ///
-    /// **Opt-in reactivity.** Blinc never re-renders unless
-    /// something asks it to, so this method returns a bare
-    /// (materialise-once) widget by default. To make the view
-    /// re-render when its declared `signal` / `fsm` cells
-    /// change, mark it in the `.blinc` with the `@stateful`
-    /// decorator:
+    /// Opt-in reactivity: returns a bare widget by default. If any view carries
+    /// `@stateful`, the result is wrapped in a `Stateful<FsmStateId>` that
+    /// re-renders on signal/FSM changes.
     ///
     /// ```text
     /// @stateful view {
     ///     Div { Text(f"Count: {count.get()}") }
     /// }
     /// ```
-    ///
-    /// When any view in the program is `@stateful`, the
-    /// returned widget is wrapped in a `Stateful<FsmStateId>`
-    /// whose `shared_state` is the first declared FSM's
-    /// `default_state` and whose `deps` cover every declared
-    /// signal — re-rendering happens automatically with no
-    /// host-side `subscribe(...)` boilerplate.
-    ///
-    /// Host integration shrinks to:
-    /// ```ignore
-    /// WindowedApp::run(cfg, move |ctx| {
-    ///     if ctx.rebuild_count == 0 {
-    ///         for s in &dsl.compiled_stylesheets() { ctx.add_css(s); }
-    ///     }
-    ///     dsl.view_widget()
-    /// })
-    /// ```
     pub fn view_widget(&self) -> Box<dyn blinc_layout::div::ElementBuilder> {
         use blinc_core::reactive::SignalId;
         use blinc_runtime::fsm::FsmStateId;
         use zyntax_embed::ZyntaxValue;
 
-        // Push any compiled `style { … }` blocks that haven't
-        // been seen by `BlincContextState`'s stylesheet queue
-        // yet. `compile_source` can't always queue them itself
-        // because the host typically compiles BEFORE
-        // `WindowedApp::run` initialises `BlincContextState` —
-        // by the time `view_widget` runs (inside `build_ui`)
-        // the context is live, so this is the natural flush
-        // point. The `stylesheets_queued_up_to` cursor keeps
-        // this idempotent across frames.
+        // Flush pending stylesheets into `BlincContextState` — `compile_source`
+        // typically runs before the context is live. Cursor keeps it idempotent.
         if blinc_core::context_state::BlincContextState::is_initialized() {
             let sheets = self
                 .compiled_stylesheets
@@ -5481,10 +4057,7 @@ impl BlincDsl {
             .lock()
             .expect("has_stateful_view mutex poisoned");
 
-        // Author didn't ask for reactivity → render once and
-        // hand back the bare tree. Blinc's deliberate
-        // "don't redraw unless something asks" stance — see
-        // the `@stateful` doc comment above for opting in.
+        // No `@stateful` → render once, return bare tree.
         if !stateful {
             return materialize_view(&renderer);
         }
@@ -5492,13 +4065,7 @@ impl BlincDsl {
         let signals = self.declared_signals();
         let fsms = self.declared_fsms();
 
-        // Author may have narrowed the dep set via
-        // `@stateful([sig1, sig2])`. Empty vec means the bare
-        // `@stateful` form was used — subscribe to every
-        // declared signal. Same shape for `@fsm([Foo, Bar])`:
-        // empty → first declared FSM is used as the binding
-        // `SharedState`; non-empty → the first listed FSM
-        // wins.
+        // Empty explicit lists → bare `@stateful` / `@fsm`: use all declared / first.
         let explicit_deps = self
             .stateful_view_deps
             .lock()
@@ -5510,14 +4077,7 @@ impl BlincDsl {
             .expect("stateful_view_fsms mutex poisoned")
             .clone();
 
-        // Pick which signals contribute as deps:
-        //  * `@stateful([…])` listed names → only those (look
-        //    each up in the declared-signal table to recover
-        //    its type, then resolve to a `SignalId`).
-        //  * bare `@stateful` → every declared signal.
-        // Skip signals whose type we don't yet bridge
-        // (substrate only exposes `State<T>` for i32/f64/string
-        // today).
+        // Skip signals whose type isn't bridged (only i32/f64/string today).
         let dep_pool: Vec<(String, Type)> = if explicit_deps.is_empty() {
             signals.clone()
         } else {
@@ -5556,10 +4116,7 @@ impl BlincDsl {
 
         let mut builder = blinc_layout::stateful::stateful::<FsmStateId>();
         let fsm_for_binding = if let Some(name) = explicit_fsms.first() {
-            // `@fsm([Foo, Bar])` — the first listed FSM wins.
-            // (Multi-FSM binding stacks would need nested
-            // statefuls; the substrate today exposes a single
-            // `SharedState` per stateful.)
+            // First-listed FSM wins; substrate exposes a single `SharedState` per stateful.
             Some(name.as_str())
         } else {
             fsms.first().map(|s| s.as_str())
@@ -5585,33 +4142,14 @@ impl BlincDsl {
         }))
     }
 
-    /// Resolve a tick-driven transition. Walks the registered fsm's
-    /// `tick_guards` in declaration order, evaluates each whose
-    /// `from` matches `current` by JIT-calling its lifted guard
-    /// function (`__fsm_tick_guard_<Fsm>_<idx>__`), and returns the
-    /// `to`-state of the first guard that fires (returns `true`).
-    /// Returns `None` if nothing fires — either no rules match the
-    /// current state, or every matching rule's guard returns `false`.
-    ///
-    /// Match-arm semantics: the first true guard wins. Authors get
-    /// priority by source order, the same way `step_event` resolves
-    /// event-driven transitions.
-    ///
-    /// Why this lives on `BlincDsl` and not the registry directly:
-    /// dispatch needs both the registry (to find the guard fn name)
-    /// and the runtime (to JIT-call it). `BlincDsl` is the natural
-    /// owner of both. Plumbing a `&ZyntaxRuntime` through the
-    /// registry's API would force every caller to thread it through
-    /// — pointless when the existing `BlincDsl` handle already has
-    /// what we need.
+    /// Resolve a tick-driven transition. First-matching guard wins. Returns
+    /// `None` when no guard fires.
     pub fn step_tick(
         &self,
         id: &FsmId,
         current: &str,
     ) -> BlincDslResult<Option<zyntax_typed_ast::InternedString>> {
-        // Phase 1: snapshot matching (guard_fn, to) pairs and drop
-        // the registry lock before reaching for the runtime, so
-        // there's no chance of holding both locks at once.
+        // Snapshot candidates and drop the registry lock before taking the runtime lock.
         let candidates: Vec<(
             zyntax_typed_ast::InternedString,
             zyntax_typed_ast::InternedString,
@@ -5631,18 +4169,13 @@ impl BlincDsl {
             return Ok(None);
         }
 
-        // Phase 2: evaluate in declaration order against the JIT.
         let runtime = self
             .runtime
             .lock()
             .expect("BlincDsl runtime mutex poisoned");
 
-        // Explicit signature: zero args, i32 return. Bypasses the
-        // type-meta machinery in `runtime.call`, which doesn't have
-        // a registered TypeMeta for user-compiled functions and
-        // panics with a misaligned-pointer dereference at
-        // `zrtl.rs:416`. `call_function` takes the signature
-        // directly and uses Cranelift's known ABI for i32 returns.
+        // Use `call_function` (not `call`) — user-compiled fns lack a registered
+        // TypeMeta, which panics in `zrtl.rs` type-meta lookup.
         let guard_sig = NativeSignature::new(&[], NativeType::I32);
 
         for (guard_fn, to) in candidates {
@@ -5662,113 +4195,53 @@ impl BlincDsl {
         Ok(None)
     }
 
-    /// Set the current value of an i32-typed signal in the
-    /// per-thread signal table. Subsequent JIT calls into the
-    /// program — including tick-guard evaluations via `step_tick`
-    /// and view-body reads — will see the new value.
-    ///
-    /// Embedders typically wire this to a Blinc `State<i32>` change
-    /// callback so DSL guards stay in sync with the host's reactive
-    /// state without needing to flow through Zyntax: when the host
-    /// signal fires, push the new value into the DSL table here,
-    /// then invalidate / re-tick whatever subscribed to it.
-    ///
-    /// The signal name must match the DSL `signal <name>: i32`
-    /// declaration. There's no validation against the FsmRegistry
-    /// — unknown names just sit in the table doing nothing, the
-    /// JIT lookup at `<name>.get()` time finds them, and that's
-    /// the contract. Embedders can verify shape via
-    /// `parse_to_typed_ast` if they want to surface typos earlier.
+    /// Set an i32-typed signal in the per-thread signal table.
     pub fn set_signal_i32(&self, name: &str, value: i32) {
         blinc_runtime::signal::set_i32(name, value);
     }
 
-    /// Read the current value of an i32-typed signal. Returns
-    /// `None` when the signal hasn't been set in this thread —
-    /// distinct from "set to 0", which returns `Some(0)`. Useful
-    /// for diagnostics; production dispatch goes through
-    /// `step_tick` / `step_event` which read the table at JIT
-    /// time.
-    ///
-    /// Delegates to `blinc_runtime::signal::get_i32` — widget
-    /// crates that want signal access without depending on the
-    /// DSL compiler can call the runtime module directly.
+    /// Read an i32-typed signal. `None` if unset (distinct from `Some(0)`).
     pub fn get_signal_i32(&self, name: &str) -> Option<i32> {
         blinc_runtime::signal::get_i32(name)
     }
 
-    /// Set the current value of an f64-typed signal. Same shape
-    /// as `set_signal_i32` but for `signal <name>: f64`
-    /// declarations. Useful for floating-point guards — progress
-    /// fractions, timing values, normalised positions.
+    /// Set an f64-typed signal.
     pub fn set_signal_f64(&self, name: &str, value: f64) {
         blinc_runtime::signal::set_f64(name, value);
     }
 
-    /// Read the current value of an f64-typed signal. `None`
-    /// when unset; `Some(0.0)` when explicitly seeded to zero.
+    /// Read an f64-typed signal. `None` if unset.
     pub fn get_signal_f64(&self, name: &str) -> Option<f64> {
         blinc_runtime::signal::get_f64(name)
     }
 
-    /// Set the current value of a string-typed signal. Same
-    /// shape as the i32 / f64 mirrors but for
-    /// `signal <name>: string` DSL declarations.
+    /// Set a string-typed signal.
     pub fn set_signal_string(&self, name: &str, value: impl Into<String>) {
         blinc_runtime::signal::set_str(name, value);
     }
 
-    /// Read the current value of a string-typed signal.
+    /// Read a string-typed signal.
     pub fn get_signal_string(&self, name: &str) -> Option<String> {
         blinc_runtime::signal::get_str(name)
     }
 }
 
-/// Builtin descriptor — pairs a DSL-visible symbol name with the
-/// `extern "C"` function pointer Cranelift will dispatch to and a
-/// signature for the type checker.
-///
-/// Two roles in one struct:
-///
-/// - **Runtime registration**: `name` + `ptr` + `arg_count` are the
-///   inputs to [`ZyntaxRuntime::register_function`], which makes the
-///   symbol resolvable at JIT link time.
-/// - **Type-system injection**: `param_types` + `return_type` are
-///   used to mint a [`TypedDeclaration::Function`] with `is_external:
-///   true` (via [`TypedASTBuilder::extern_function`]) that we splice
-///   into every parsed `.blinc` `TypedProgram` before
-///   `compile_typed_program`. Without that splice the type inferencer
-///   sees `text(...)` as `Type::Any`, the body classifier rewrites
-///   `render_view`'s declared `Unit` return to `I64`, and the call
-///   site reads register-junk as a boxed value (misaligned-pointer
-///   panic). The path `inject_builtin_externs` takes for `.zrtl`
-///   plugins is the model — see
-///   `zyntax/crates/zyntax_embed/src/grammar2.rs:198-315`.
+/// Pairs a DSL-visible symbol name with an `extern "C"` fn pointer and signature.
+/// Used for runtime registration AND type-system injection (spliced as an extern
+/// fn decl into each parsed `TypedProgram` before `compile_typed_program`).
 struct BuiltinDescriptor {
-    /// The mangled symbol the DSL emits as the call target. Grammar
-    /// rules lower directly to this — no `@builtin` alias indirection
-    /// (we drop the alias because we only have one consumer per
-    /// symbol in the static-link world).
+    /// Mangled symbol the grammar lowers to (no `@builtin` alias indirection).
     name: &'static str,
-    /// Argument types, in order. Drives the extern decl's parameter
-    /// list and the type checker's call-site validation.
     param_types: &'static [Type],
-    /// Return type. `Type::Primitive(PrimitiveType::Unit)` for
-    /// builtins that perform a side-effect on the host scene buffer.
     return_type: Type,
-    /// `extern "C"` function pointer — the Rust impl that gets
-    /// invoked at runtime. Cast to `*const u8` for `register_function`.
+    /// `extern "C"` fn cast to `*const u8` for `register_function`.
     ptr: *const u8,
 }
 
-// SAFETY: `BuiltinDescriptor` only stores function pointers and
-// `'static` references. Function pointers in Rust are `Send + Sync`;
-// we mark this explicitly so the `[BuiltinDescriptor]` table can be
-// iterated from any thread without complaints.
+// SAFETY: Only fn pointers and `'static` references inside.
 unsafe impl Sync for BuiltinDescriptor {}
 
-/// The complete set of host builtins for the prototype slice. Ordering
-/// is irrelevant; the registration loop walks all of them.
+/// All host builtins. Ordering irrelevant — registration walks the full table.
 fn builtins() -> Vec<BuiltinDescriptor> {
     vec![
         BuiltinDescriptor {
@@ -5784,35 +4257,19 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_text_int as *const u8,
         },
         BuiltinDescriptor {
-            // Bridges DSL `<name>.get()` (rewritten by
-            // `resolve_signal_calls` to `__signal_get_i32("<name>")`)
-            // to the per-thread `SIGNAL_TABLE_I32`. The DSL surface
-            // for setting values lives on `BlincDsl::set_signal_i32`.
+            // `<name>.get()` lowered by `resolve_signal_calls`.
             name: "__signal_get_i32",
             param_types: &[Type::Primitive(PrimitiveType::String)],
             return_type: Type::Primitive(PrimitiveType::I32),
             ptr: blinc_signal_get_i32 as *const u8,
         },
         BuiltinDescriptor {
-            // f64 mirror of `__signal_get_i32`. Same DSL surface
-            // (`<name>.get()`) routed by `resolve_signal_calls` to
-            // this extern when the signal's declared type is `f64`.
             name: "__signal_get_f64",
             param_types: &[Type::Primitive(PrimitiveType::String)],
             return_type: Type::Primitive(PrimitiveType::F64),
             ptr: blinc_signal_get_f64 as *const u8,
         },
         BuiltinDescriptor {
-            // String mirror of `__signal_get_i32`. The
-            // `resolve_signal_calls` pass already routes
-            // string-typed signals here (see the
-            // `typed_signal_extern_name` match), but the
-            // builtin wasn't registered until this commit —
-            // string-typed signals previously failed to JIT-
-            // link. Returns a Zyntax length-prefixed string,
-            // same layout `$Blinc$text` consumes (leaks the
-            // backing buffer for the prototype, see the
-            // f-string helpers' module comment).
             name: "__signal_get_string",
             param_types: &[Type::Primitive(PrimitiveType::String)],
             return_type: Type::Primitive(PrimitiveType::String),
@@ -5850,9 +4307,7 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_signal_set_string as *const u8,
         },
         BuiltinDescriptor {
-            // `<FsmName>.trigger("<State>.<Event>")` inside a DSL
-            // function / closure body lowers via
-            // `resolve_fsm_trigger_calls` to a call here.
+            // `<FsmName>.trigger("State.Event")` lowered by `resolve_fsm_trigger_calls`.
             name: "__fsm_runtime_trigger__",
             param_types: &[
                 Type::Primitive(PrimitiveType::String),
@@ -5862,47 +4317,26 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_fsm_runtime_trigger as *const u8,
         },
         BuiltinDescriptor {
-            // `<FsmName>.subscribe("<From.Event>", || { ... })`
-            // inside a component's `init { … }` block lowers via
-            // `resolve_fsm_subscribe_calls` to a call here. The
-            // third arg is a `ClosurePtr`-carrying i64 minted by
-            // Zyntax's `CreateClosure` for the lambda value; the
-            // host extern transmutes it back to `extern "C" fn()`
-            // and stashes it in the per-thread subscribers table
-            // inside `blinc_runtime::fsm`, keyed by the path so
-            // the dispatcher only fires matching ones.
+            // `<FsmName>.subscribe("From.Event", closure)` — third arg is the
+            // closure's raw fn ptr smuggled as i64.
             name: "__fsm_subscribe__",
             param_types: &[
                 Type::Primitive(PrimitiveType::String),
                 Type::Primitive(PrimitiveType::String),
-                // i64 carries the closure handle (raw fn ptr).
                 Type::Primitive(PrimitiveType::I64),
             ],
             return_type: Type::Primitive(PrimitiveType::Unit),
             ptr: blinc_fsm_subscribe as *const u8,
         },
         BuiltinDescriptor {
-            // `__fstring_format__` (i32 specialisation). The
-            // normalization pass `fstring_to_concat` wraps every
-            // non-string f-string part in a
-            // `__fstring_format__(part)` call; the @builtin alias
-            // routes that DSL-visible name to `$Blinc$format_int`.
-            //
-            // Today this handles i32 only. Mixing in f64 props
-            // would route the wrong-typed value through this i32
-            // formatter and produce garbage — a separate
-            // `__fstring_format_f64__` builtin (or upstream
-            // dispatch infra) is the fix path.
+            // `__fstring_format__` (i32 only — f64 needs a separate `__fstring_format_f64__`).
             name: "$Blinc$format_int",
             param_types: &[Type::Primitive(PrimitiveType::I32)],
             return_type: Type::Primitive(PrimitiveType::String),
             ptr: blinc_format_int as *const u8,
         },
         BuiltinDescriptor {
-            // `string_concat` — joins two strings. The
-            // normalization pass `fstring_to_concat` chains
-            // f-string parts via this. Maps to
-            // `$Blinc$string_concat` via the @builtin alias.
+            // `string_concat` — chains f-string parts.
             name: "$Blinc$string_concat",
             param_types: &[
                 Type::Primitive(PrimitiveType::String),
@@ -5912,31 +4346,15 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_string_concat as *const u8,
         },
         BuiltinDescriptor {
-            // `$Blinc$Text$view(content) -> WidgetHandle (i64)`
-            // — the value-returning Text primitive. Pre-
-            // registered in the substrate's `ComponentRegistry`
-            // by `register_blinc_layout_primitives`; the
-            // `lower_component_calls` pass routes user-facing
-            // `Text("hi")` calls to this symbol.
-            //
-            // Returns a raw pointer to a leaked
-            // `WidgetBox::Text(...)` cast to i64. The host-side
-            // walker reclaims it via [`materialize_widget`].
+            // `Text("hi")` → leaked `WidgetBox::Text(...)` as i64.
             name: "$Blinc$Text$view",
             param_types: &[Type::Primitive(PrimitiveType::String)],
             return_type: Type::Primitive(PrimitiveType::I64),
             ptr: blinc_text_view as *const u8,
         },
         BuiltinDescriptor {
-            // `$Blinc$Div$view(children, style, class, on_click)
-            // -> WidgetHandle` — children from
-            // `__new_child_list__`, visual style from
-            // `__new_style_overlay__`, class as a
-            // whitespace-separated name list (or empty),
-            // on_click as a `ZrtlClosure*` smuggled through i64
-            // (or 0 for "no handler"). The Rust click handler
-            // invokes the closure on each click via
-            // `zrtl_closure_call`.
+            // `Div(children, style, class, on_click)`. `class` = whitespace-sep names,
+            // `on_click` = raw fn ptr as i64 (0 = none).
             name: "$Blinc$Div$view",
             param_types: &[
                 Type::Primitive(PrimitiveType::I64),
@@ -5948,23 +4366,14 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_div_view as *const u8,
         },
         BuiltinDescriptor {
-            // `__new_child_list__() -> i64` — allocate a fresh
-            // `Vec<WidgetHandle>` and hand back its raw pointer
-            // as `i64`. Used by `lower_children_arrays` to
-            // synthesise a per-container children buffer that
-            // `__push_child__` then populates before the
-            // container's view extern consumes it.
+            // `__new_child_list__()` — mint `Vec<WidgetHandle>`, populated by `__push_child__`.
             name: "__new_child_list__",
             param_types: &[],
             return_type: Type::Primitive(PrimitiveType::I64),
             ptr: blinc_new_child_list as *const u8,
         },
         BuiltinDescriptor {
-            // `__push_child__(list: i64, child: i64)` — append a
-            // widget handle to the `Vec` minted by
-            // `__new_child_list__`. Returns nothing; the list
-            // pointer stays live so the container extern can
-            // reclaim it.
+            // `__push_child__(list, child)` — append. List pointer stays live for container.
             name: "__push_child__",
             param_types: &[
                 Type::Primitive(PrimitiveType::I64),
@@ -5973,9 +4382,7 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             return_type: Type::Primitive(PrimitiveType::Unit),
             ptr: blinc_push_child as *const u8,
         },
-        // Style-overlay builders. Mirror the child-list pattern:
-        // `__new_style_overlay__` mints the overlay, `__set_*`
-        // setters populate fields, the widget extern reclaims.
+        // Style-overlay builders — mirror the child-list pattern.
         BuiltinDescriptor {
             name: "__new_style_overlay__",
             param_types: &[],
@@ -6030,14 +4437,7 @@ fn builtins() -> Vec<BuiltinDescriptor> {
     ]
 }
 
-/// Project a Blinc-side typed-AST `Type` onto the wire-format
-/// `TypeTag` Zyntax expects in a `ZrtlSymbolSig`.
-///
-/// Only the primitive types we actually use in builtins are
-/// represented today. Adding a new variant here is the small,
-/// localised change required when a new builtin needs a new param /
-/// return type (e.g. when we add `$Blinc$div(...) -> NodeHandle`,
-/// we'll mint a `TypeTag` for opaque host handles).
+/// Map a typed-AST `Type` to the wire-format `TypeTag` for `ZrtlSymbolSig`.
 fn type_to_tag(ty: &Type) -> TypeTag {
     match ty {
         Type::Primitive(PrimitiveType::Unit) => TypeTag::VOID,
@@ -6045,36 +4445,19 @@ fn type_to_tag(ty: &Type) -> TypeTag {
         Type::Primitive(PrimitiveType::I32) => TypeTag::I32,
         Type::Primitive(PrimitiveType::I64) => TypeTag::I64,
         Type::Primitive(PrimitiveType::F64) => TypeTag::F64,
-        // Add more as the builtin surface grows. Falling through to
-        // VOID rather than guessing would silently break codegen, so
-        // panic loudly to surface the gap during prototype iteration.
+        // Panic loudly — silent VOID would break codegen.
         _ => panic!(
             "blinc_dsl_core: no TypeTag mapping for {ty:?} \
-             — extend `type_to_tag` in src/lib.rs when adding new \
-             builtin parameter / return types"
+             — extend `type_to_tag` when adding new builtin types"
         ),
     }
 }
 
-/// Project a Blinc-side typed-AST `Type` onto the
-/// [`NativeType`] shape Zyntax's `runtime.call_function` expects.
-///
-/// Companion to [`type_to_tag`] — `type_to_tag` produces the
-/// `TypeTag` used in stored ZRTL signatures (consumed by
-/// call-site lowering at compile time); this produces the
-/// `NativeType` used by ad-hoc `call_function` invocations at
-/// runtime ([`BlincDsl::query`], guard dispatch, etc.).
-///
-/// Returns `Err(&Type)` when the mapping isn't known, so callers
-/// can surface a helpful diagnostic naming the offender. Adding
-/// new variants here lines up with [`type_to_tag`] — bump both
-/// together when the prop type surface grows.
+/// Map a typed-AST `Type` to the runtime `NativeType` for `call_function`.
+/// Strings cross the FFI as `NativeType::Ptr` (length-prefixed buffer).
 fn type_to_native(ty: &Type) -> Result<NativeType, &Type> {
     match ty {
         Type::Primitive(PrimitiveType::Unit) => Ok(NativeType::Void),
-        // Zyntax marshals strings across the FFI boundary as
-        // length-prefixed pointer buffers — `NativeType::Ptr` is
-        // what `call_function` expects for them.
         Type::Primitive(PrimitiveType::String) => Ok(NativeType::Ptr),
         Type::Primitive(PrimitiveType::I32) => Ok(NativeType::I32),
         Type::Primitive(PrimitiveType::I64) => Ok(NativeType::I64),
@@ -6083,9 +4466,7 @@ fn type_to_native(ty: &Type) -> Result<NativeType, &Type> {
     }
 }
 
-/// Build the ZRTL signature for a builtin. The sig is what's stored
-/// in `backend.symbol_signatures` and consulted at call-site lowering
-/// (see `zyntax/crates/compiler/src/cranelift_backend.rs:2719`).
+/// Build the ZRTL signature for a builtin (stored in `backend.symbol_signatures`).
 fn descriptor_to_sig(b: &BuiltinDescriptor) -> ZrtlSymbolSig {
     assert!(
         b.param_types.len() <= ZRTL_MAX_PARAMS,
@@ -6108,16 +4489,7 @@ fn descriptor_to_sig(b: &BuiltinDescriptor) -> ZrtlSymbolSig {
     }
 }
 
-/// Register all `$Blinc$*` builtins on the given runtime, with full
-/// signatures so call-site lowering matches the typed AST extern
-/// declarations injected by [`inject_builtin_externs`]. Without the
-/// signature path, the call site would default-guess `I64` returns
-/// and platform-default calling conventions and collide with the
-/// extern decl.
-///
-/// Builtins are static `extern "C"` fns — no plugin discovery, no
-/// `.zrtl` files (zynml/src/lib.rs:201-219 is the pattern we
-/// explicitly do NOT copy).
+/// Register all `$Blinc$*` builtins on the runtime with full signatures.
 fn register_builtins(runtime: &mut ZyntaxRuntime) {
     for b in builtins() {
         let sig = descriptor_to_sig(&b);
@@ -6125,42 +4497,10 @@ fn register_builtins(runtime: &mut ZyntaxRuntime) {
     }
 }
 
-/// Rewrite view functions to be value-returning when their body
-/// ends in a substrate widget-primitive call (`$Blinc$<X>$view`).
-///
-/// Blinc views are retained-mode: a `view { Div() { ... } }` body
-/// builds a widget tree and the function returns the root handle
-/// (an `i64` carrying a `Box::into_raw`-style pointer) so the
-/// JIT-side renderer can hand it back to the embed code.
-///
-/// This pass walks every function named `render_view` (the
-/// bare-form top-level view) and every impl method named `view`
-/// (component view) and looks at the last statement:
-///
-///   - **Last stmt is a primitive-view call**
-///     (`Expression(Call($Blinc$<X>$view, ...))`) → rewrite to
-///     `Return(Some(call))` and set the declaration's
-///     `return_type` to `Primitive(I64)` (the widget-handle ABI
-///     type). The JIT then compiles the function with a real i64
-///     return register, and [`JitViewRenderer::render_named`]
-///     picks it up via [`ZyntaxRuntime::call_function`] with the
-///     matching native signature.
-///
-///   - **Anything else** (`text(...)` op-stream call, a `let`, a
-///     conditional without a trailing widget, etc.) → leave alone.
-///     The function stays Unit-returning and the legacy
-///     scene-buffer drain path keeps working.
-///
-/// Why detect `$Blinc$<X>$view` specifically rather than `Type::Any`
-/// or a generic value-return: a Unit-vs-`Any` declared return forks
-/// Zyntax's body classifier into a type-meta path that null-derefs
-/// when invoked via the simpler `call::<()>` ABI the legacy paths
-/// use. Pinning the return to a concrete primitive (`I64`) keeps
-/// every code path on the well-trodden specialised-call road.
-///
-/// MUST run before [`ensure_unit_return`] so its defensive
-/// `Return(None)` doesn't preempt the value-bearing return we
-/// install here.
+/// Rewrite view fns to value-returning (`I64` widget handle) when their body
+/// ends in a `$Blinc$<X>$view` call. MUST run before [`ensure_unit_return`].
+/// Pinning return to a concrete `I64` (not `Any`) keeps Zyntax's body
+/// classifier on the well-trodden specialised-call path.
 fn lower_view_to_value_returning(
     program: &mut TypedProgram,
     value_returning_symbols: &mut std::collections::HashSet<String>,
@@ -6174,16 +4514,8 @@ fn lower_view_to_value_returning(
         )
     }
 
-    /// `Expression(Call(Variable("<X>$view"), ...))` where `<X>` is
-    /// either a substrate-registered widget primitive
-    /// (`$Blinc$Div$view`, `$Blinc$Text$view`, …) or a user-declared
-    /// component whose own view body is itself value-returning
-    /// (resolved on the second pass below). Components whose view
-    /// is a legacy op-stream call (`view { text("hello") }`) stay
-    /// Unit-returning and are NOT promoted here — otherwise
-    /// `render_view` would be declared `I64` but its `Return` expr
-    /// evaluates to Unit, mismatching the JIT ABI and surfacing as
-    /// junk handles at `render_main`.
+    /// Match `Expression(Call(Variable("<X>$view"), ...))` where `<X>` is a
+    /// substrate primitive or a user component whose own view is value-returning.
     fn is_primitive_view_call_stmt(
         stmt: &TypedStatement,
         value_returning_symbols: &std::collections::HashSet<String>,
@@ -6201,20 +4533,15 @@ fn lower_view_to_value_returning(
             return false;
         };
         let s: &str = name.as_ref();
-        // Substrate primitives always have a fixed Rust extern
-        // returning i64 — promote unconditionally.
+        // Substrate primitives are always i64-returning.
         if s.starts_with("$Blinc$") && s.ends_with("$view") {
             return true;
         }
-        // User components: only if their own view method was
-        // itself promoted by an earlier pass.
+        // User components: only if promoted by an earlier pass.
         value_returning_symbols.contains(s)
     }
 
-    /// If the body's last statement is a primitive view call,
-    /// rewrite it to `Return(Some(call))` in place and report
-    /// success so the caller can bump the function's declared
-    /// return type to `Primitive(I64)`.
+    /// Rewrite trailing primitive-call to `Return(Some(call))` and return whether converted.
     fn try_convert_trailing(
         body: &mut zyntax_typed_ast::typed_ast::TypedBlock,
         value_returning_symbols: &std::collections::HashSet<String>,
@@ -6240,21 +4567,12 @@ fn lower_view_to_value_returning(
 
     let widget_handle_type = Type::Primitive(PrimitiveType::I64);
 
-    // Two-pass walk so a top-level `view { Counter() }` only gets
-    // promoted to value-returning when `Counter$view` itself was
-    // promoted on this pass — components whose bodies are still
-    // legacy op-stream calls stay Unit-returning, keeping the JIT
-    // ABI consistent. Pass 1 handles all `view` impl methods (the
-    // sources of `<TypeName>$view` symbols); pass 2 handles
-    // free-standing view functions (which call into the symbols
-    // pass 1 collected).
+    // Pass 1: impl `view` methods. Pass 2: free-standing view fns referencing them.
     for decl in program.declarations.iter_mut() {
         let TypedDeclaration::Impl(imp) = &mut decl.node else {
             continue;
         };
-        // Inherent-impl methods get the `<TypeName>$<method>`
-        // mangling. Pull the type name once and reuse it for
-        // every converted method on this impl.
+        // `<TypeName>$<method>` mangling — pull the type name once per impl.
         let type_name: Option<String> = match &imp.for_type {
             Type::Unresolved(name) => name.resolve_global().map(|s| s.to_string()),
             Type::Named { id, .. } => program
@@ -6302,67 +4620,14 @@ fn lower_view_to_value_returning(
     }
 }
 
-/// Rewrite every substrate primitive call carrying a
-/// `children = Array([...])` named arg (the shape Phase 2c
-/// emits for body-block-bearing primitive widgets) into an
-/// explicit Block expansion that synthesises a per-container
-/// child-list via `__new_child_list__` / `__push_child__`.
-///
-/// Before (Phase 2c output):
-///
-/// ```text
-/// Call($Blinc$Div$view, [], named=[children = Array([
-///     Call($Blinc$Text$view, ["a"]),
-///     Call($Blinc$Text$view, ["b"]),
-/// ])])
-/// ```
-///
-/// After:
-///
-/// ```text
-/// Block {
-///     statements: [
-///         let __blinc_children_0 = __new_child_list__();
-///         __push_child__(__blinc_children_0, $Blinc$Text$view("a"));
-///         __push_child__(__blinc_children_0, $Blinc$Text$view("b"));
-///         $Blinc$Div$view(__blinc_children_0);  // trailing => block value
-///     ]
-/// }
-/// ```
-///
-/// The container extern (`$Blinc$Div$view`) takes the list
-/// pointer, walks each handle, materialises the boxed widgets,
-/// and folds them into the Div's child list. See
-/// [`blinc_div_view`] for the consumption side.
-///
-/// **Recursion:** runs post-order so nested primitive calls
-/// inside a parent's child array get rewritten to Blocks first
-/// — the parent's `__push_child__` then receives a Block
-/// expression that evaluates the inner container at the right
-/// point in source order.
-///
-/// **Where this runs:** after [`lower_view_to_value_returning`]
-/// (so trailing-Return wrapping is settled before the Block
-/// transformation alters expression shapes) and before
-/// [`ensure_unit_return`] (which only cares about the
-/// statement-level trailing shape, not the inner-expression
-/// rewrites we do here).
-///
-/// **What this doesn't yet handle:**
-///
-///   - User-component primitives (callees not starting with
-///     `$Blinc$`) — those still flatten via Phase 2c's fallback.
-///   - Children inside non-trivial expressions (`if cond {
-///     Div() { ... } else { Span() }`). Walked recursively so it
-///     handles direct nesting; if-as-expression and similar
-///     compound shapes inside children arrays land later.
+/// Expand substrate primitive calls carrying `children = Array([...])` (and slot
+/// arrays) into Block expansions backed by `__new_child_list__` / `__push_child__`.
+/// Post-order recursive. MUST run after `lower_view_to_value_returning` and
+/// before `ensure_unit_return`.
 fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
     use zyntax_typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedNamedArg};
 
-    /// Counter for unique `__blinc_children_<N>` idents within a
-    /// single compile. The N values don't carry semantics; they
-    /// just disambiguate so nested blocks don't shadow each
-    /// other's let bindings.
+    /// Counter for unique `__blinc_children_<N>` idents.
     fn next_id(counter: &mut u32) -> u32 {
         let id = *counter;
         *counter += 1;
@@ -6394,9 +4659,7 @@ fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
         }
     }
 
-    /// Post-order rewrite: recurse first so nested primitive
-    /// calls in this expression get converted to Blocks before
-    /// we look at *this* expression's shape.
+    /// Post-order — recurse before rewriting `expr`.
     fn rewrite_expr(expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>, counter: &mut u32) {
         match &mut expr.node {
             TypedExpression::Call(call) => {
@@ -6425,14 +4688,9 @@ fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
             _ => {}
         }
 
-        // For primitives whose registry advertises child slots
-        // (`children` and/or `slot_<Name>` props), gather each
-        // slot's Array value into a `__new_child_list__` Block.
-        // Missing slots get `__style`-style `0` literal fills.
-        // The final call carries each list as a NAMED arg
-        // (`children = Var(__list_N)`, `slot_Header = Var(__list_M)`);
-        // `resolve_extern_widget_named_args` later resolves
-        // those names into positional slots per the registry.
+        // For primitives with child-slot props (`children`, `slot_<Name>`), gather each
+        // Array into a `__new_child_list__` Block. The final call carries the lists as
+        // named args; `resolve_extern_widget_named_args` later positionalises them.
         let span = expr.span;
         let i64_ty = Type::Primitive(PrimitiveType::I64);
         let unit_ty = Type::Primitive(PrimitiveType::Unit);
@@ -6554,14 +4812,11 @@ fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
         }
 
         if !had_real_slot {
-            // No body-supplied slots — the `0`-literal fills are
-            // already on the call; no Block expansion needed.
+            // No body-supplied slots — `0`-literal fills already on call.
             return;
         }
 
-        // Wrap the original call (now with slot named args
-        // pointing at the locally-allocated lists) in a Block
-        // whose trailing expression is the call.
+        // Wrap call in a trailing-expression Block.
         let final_call = TypedExpression::Call(TypedCall {
             callee: call.callee.clone(),
             positional_args: std::mem::take(&mut call.positional_args),
@@ -6580,11 +4835,8 @@ fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
         });
     }
 
-    /// If the call's callee is a substrate-registered primitive
-    /// with at least one child-slot prop (named `children` or
-    /// `slot_<Name>`), return the slot names in registry order.
-    /// Otherwise `None` — leaf primitives (`Text`) and
-    /// non-primitives never lower through this pass.
+    /// Return child-slot prop names (`children`, `slot_<Name>`) in registry order.
+    /// `None` for leaf primitives or non-primitives.
     fn callee_slot_prop_names(call: &TypedCall) -> Option<Vec<String>> {
         let TypedExpression::Variable(callee) = &call.callee.node else {
             return None;
@@ -6614,10 +4866,7 @@ fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
         }
     }
 
-    /// Legacy single-child gate, kept for the old call sites
-    /// (none remain after this refactor, but the function name
-    /// is referenced in earlier docs; remove once those are
-    /// retired).
+    /// Legacy — unused after refactor.
     #[allow(dead_code)]
     fn callee_takes_children(call: &TypedCall) -> bool {
         let TypedExpression::Variable(callee) = &call.callee.node else {
@@ -6627,9 +4876,6 @@ fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
             return false;
         };
         let sym: &str = &sym;
-        // Strip the JIT-linker envelope to recover the user-
-        // visible DSL name. Anything that doesn't match the
-        // convention is not a substrate primitive.
         let Some(name) = sym
             .strip_prefix("$Blinc$")
             .and_then(|s| s.strip_suffix("$view"))
@@ -6667,46 +4913,8 @@ fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
     }
 }
 
-/// Resolve named args on `$Blinc$<X>$view` extern calls into
-/// positional args using the substrate
-/// [`ComponentRegistry`]'s prop order as the source of truth.
-///
-/// Zyntax's `inject_builtin_externs` synthesises extern
-/// declarations with generic parameter names (`p0`, `p1`, …) —
-/// so a DSL call site like `MyWidget(label = "hi", count = 5)`
-/// can't bind by name through the type checker. This pass
-/// closes that gap purely in our lowering layer:
-///
-///   - Looks up the call's substrate definition (strips the
-///     `$Blinc$<Name>$view` envelope to recover the user-visible
-///     name).
-///   - Reads the props list (which the macro / hand-rolled
-///     `ExternWidgetSpec` populated in declaration order).
-///   - For each `TypedNamedArg` whose name matches a prop, slots
-///     its value into the corresponding positional position.
-///   - Positional args already on the call fill the *earliest*
-///     unclaimed positions; named args land at their named
-///     positions. Mixed positional+named call sites work as
-///     long as they don't collide on a slot.
-///   - Clears `named_args` once everything has landed.
-///
-/// **Skipped:** non-primitive callees (user-declared DSL
-/// components — Zyntax's normal name-based parameter binding
-/// handles those via `bind_component_props`); calls referencing
-/// a prop name that isn't in the registry (left as a named arg
-/// so Zyntax's own diagnostics flag it).
-///
-/// **Where this runs:** after [`lower_children_arrays_to_blocks`]
-/// — the `children = Array(...)` named arg is already gone by
-/// the time we look at remaining named args (the children pass
-/// extracts it into Block expansion + a positional list-pointer).
-/// Before [`ensure_unit_return`] which only cares about
-/// statement-level trailing shape.
-///
-/// [`ComponentRegistry`]: blinc_runtime::component::ComponentRegistry
-/// Names recognised as inline styling props in DSL call sites
-/// (e.g., `Div(bg = 0xFF0000, opacity = 0.5)`). Each maps to an
-/// overlay-setter extern with the matching FFI signature.
+/// Inline styling props recognised on DSL primitive call sites. Each maps to
+/// an overlay-setter extern (`__set_overlay_*__`).
 const STYLING_PROP_NAMES: &[(&str, &str, StylingValueKind)] = &[
     ("bg", "__set_overlay_bg__", StylingValueKind::IntColor),
     (
@@ -6737,14 +4945,9 @@ enum StylingValueKind {
     Float,
 }
 
-/// For styled primitives, gather inline styling named args
-/// (`bg`, `opacity`, …) into a `__new_style_overlay__` Block and
-/// attach the overlay pointer as `__style = <ident>` on the
-/// call. Styled primitives are detected by the presence of a
-/// `__style` prop in their registry definition.
-///
-/// Runs after `lower_children_arrays_to_blocks` and before
-/// `resolve_extern_widget_named_args`.
+/// Gather inline styling args (`bg`, `opacity`, …) into a `__new_style_overlay__`
+/// Block and attach overlay pointer as `__style` named arg. MUST run after
+/// `lower_children_arrays_to_blocks` and before `resolve_extern_widget_named_args`.
 fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
     use zyntax_typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedNamedArg};
 
@@ -6998,6 +5201,10 @@ fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
     }
 }
 
+/// Positionalise named args on `$Blinc$<X>$view` calls using the substrate
+/// `ComponentRegistry` prop order. Zyntax's auto-injected extern decls carry
+/// synthetic param names (`p0`, `p1`, …) that can't bind by name. Skipped
+/// for user-declared components (handled by `bind_component_props`).
 fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
     use zyntax_typed_ast::{TypedCall, TypedDeclaration, TypedExpression};
 
@@ -7026,9 +5233,7 @@ fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
     }
 
     fn rewrite_expr(expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>) {
-        // Recurse first — nested calls inside args / blocks get
-        // their own named args resolved before we look at the
-        // outer call.
+        // Recurse first — nested calls resolved before the outer.
         match &mut expr.node {
             TypedExpression::Call(call) => {
                 rewrite_expr(&mut call.callee);
@@ -7056,7 +5261,6 @@ fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
             _ => {}
         }
 
-        // Now look at THIS expression.
         let span = expr.span;
         let TypedExpression::Call(call) = &mut expr.node else {
             return;
@@ -7064,11 +5268,8 @@ fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
         let Some(props) = primitive_callee_props(call) else {
             return;
         };
-        // Note: don't early-out on empty named_args — we may
-        // still need to type-default missing trailing slots
-        // (e.g., `Div()` with no class supplied — the class
-        // slot needs a null-pointer default so call arity
-        // matches the extern signature).
+        // Don't early-out on empty named_args — trailing slots still need defaults
+        // so call arity matches the extern signature.
 
         let mut slots: Vec<Option<zyntax_typed_ast::TypedNode<TypedExpression>>> =
             (0..props.len()).map(|_| None).collect();
@@ -7101,11 +5302,7 @@ fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
             }
         }
 
-        // Materialise the contiguous filled prefix. Trailing
-        // unfilled slots get a type-appropriate default so the
-        // call's arity matches the extern's registered
-        // signature — `Div()` lands as `Div(0, 0, "")`, not
-        // `Div()` with garbage register reads.
+        // Fill unfilled slots with type-appropriate defaults so call arity matches.
         let mut new_positional: Vec<zyntax_typed_ast::TypedNode<TypedExpression>> =
             Vec::with_capacity(slots.len());
         for (slot, (_, ty)) in slots.into_iter().zip(props.iter()) {
@@ -7121,8 +5318,7 @@ fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
         call.named_args = unresolved_named;
     }
 
-    /// If `call` resolves to a substrate-registered primitive,
-    /// return its prop (name, type) pairs in declaration order.
+    /// Substrate primitive's prop (name, type) pairs in declaration order.
     fn primitive_callee_props(call: &TypedCall) -> Option<Vec<(String, Type)>> {
         let TypedExpression::Variable(callee) = &call.callee.node else {
             return None;
@@ -7142,10 +5338,7 @@ fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
         })
     }
 
-    /// Type-appropriate literal for an unsupplied prop slot.
-    /// I64 / I32 → `0`, F64 → `0.0`, String → `""`. Anything
-    /// else falls back to `0` (matches the extern's null /
-    /// sentinel convention).
+    /// Default literal for an unsupplied prop slot (`0` / `0.0` / `""`).
     fn default_literal_for(
         ty: &Type,
         span: zyntax_typed_ast::Span,
@@ -7194,16 +5387,8 @@ fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
     }
 }
 
-/// Append a `Return(None)` to the main function so the body
-/// classifier can't promote a single trailing Expression into a
-/// value-bearing return.
-///
-/// `body_returns_value` (lowering.rs:1610-1633) treats a body with a
-/// single `Expression` statement as value-returning, even when the
-/// declaration is `return_type: Type::Unit`. With the extern decls
-/// from [`inject_builtin_externs`] in place the call's type is `Unit`
-/// rather than `Any`, which avoids most of the damage, but adding an
-/// explicit terminator removes any remaining ambiguity and is cheap.
+/// Append `Return(None)` to user fns so the body classifier can't promote a
+/// trailing Expression into a value-bearing return.
 fn ensure_unit_return(program: &mut TypedProgram) {
     use zyntax_typed_ast::TypedDeclaration;
 
@@ -7231,14 +5416,8 @@ fn ensure_unit_return(program: &mut TypedProgram) {
                     add_trailing_return_if_missing(body);
                 }
             }
-            // Impl methods get compiled as free functions under the
-            // mangled `<TypeName>$<method>` symbol — they need the
-            // same trailing `Return(None)` treatment so the ABI
-            // matches what the runtime's `call::<()>` expects (the
-            // body classifier infers a value-bearing return from a
-            // single trailing `Expression` statement otherwise, and
-            // calling that as `::<()>` deref-faults on a null
-            // type-meta pointer).
+            // Impl methods compile to `<TypeName>$<method>` free fns — need the
+            // same `Return(None)` so `call::<()>` doesn't hit the value-return path.
             TypedDeclaration::Impl(imp) => {
                 for method in &mut imp.methods {
                     if let Some(body) = method.body.as_mut() {
@@ -7255,11 +5434,7 @@ fn ensure_unit_return(program: &mut TypedProgram) {
 mod tests {
     use super::*;
 
-    /// Helper: try to compile a `.blinc` source. Returns the
-    /// stringified error on failure so tests can assert on the
-    /// diagnostic content. Tests don't share a `BlincDsl` instance
-    /// because compiling a broken module pokes runtime state we
-    /// don't want to leak into a follow-up assertion.
+    /// Compile a `.blinc` source and stringify errors. Fresh DSL each call.
     fn try_compile(source: &str, filename: &str) -> Result<Vec<String>, String> {
         let _ = tracing_subscriber::fmt::try_init();
         let dsl = BlincDsl::new().map_err(|e| e.to_string())?;
@@ -7267,13 +5442,9 @@ mod tests {
             .map_err(|e| e.to_string())
     }
 
-    /// Smoke test for the prototype slice — round-trips a tiny
-    /// `component Foo { view { text("...") } }` should compile to a
-    /// callable `Foo$view` symbol. Empty `trait_name` is the
-    /// inherent-impl marker — without it, Zyntax's
-    /// `lower_impl_block` looks for a `trait Foo` (which doesn't
-    /// exist), silently discards the methods, and we get zero
-    /// symbols back. Pin the regression.
+    /// Regression: `component Foo { view { ... } }` must register `Foo$view`.
+    /// Empty `trait_name` is the inherent-impl marker — without it Zyntax's
+    /// `lower_impl_block` silently drops the methods.
     #[test]
     fn compile_component_registers_view_symbol() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7293,10 +5464,7 @@ mod tests {
         );
     }
 
-    /// Prop declared but not referenced in body — the prop arg
-    /// flows through silently and the unused param doesn't disturb
-    /// the compile. Pins the half of `bind_component_props` that
-    /// doesn't need name-resolution of the prop inside the body.
+    /// Unused prop arg flows through silently.
     #[test]
     fn render_component_with_unused_prop() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7321,10 +5489,7 @@ mod tests {
         }
     }
 
-    /// Baseline probe: literal-only f-string interpolation in a
-    /// bare view (free-function body). Validates the
-    /// `fstring_to_concat` normalization + SSA path works AT ALL
-    /// in our DSL setup before we dig into why impl methods fail.
+    /// Bare-view literal-only f-string interpolation.
     #[test]
     fn render_bare_view_with_fstring_literal() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7341,12 +5506,7 @@ mod tests {
         }
     }
 
-    /// End-to-end: `signal title: string` declared, host writes
-    /// via `set_signal_string`, DSL reads via `title.get()`
-    /// inside a view, the rendered text reflects the host
-    /// value. Proves the string-signal pipeline: extern
-    /// registered, ABI matches `$Blinc$text`, signal table
-    /// shared across the JIT boundary.
+    /// End-to-end string-signal pipeline: host writes, DSL reads, render reflects.
     #[test]
     fn render_view_reads_string_signal() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7370,7 +5530,7 @@ mod tests {
             other => panic!("expected DslOp::Text(\"hi Welcome\"), got {other:?}"),
         }
 
-        // Update from host, re-render — view picks up the new value.
+        // Update and re-render — view sees the new value.
         dsl.set_signal_string("title", "Updated");
         let ops = dsl.render_view().expect("render_view");
         match &ops[0] {
@@ -7379,8 +5539,7 @@ mod tests {
         }
     }
 
-    /// Unset string signal renders as empty string (matches the
-    /// `get_str_or_default` substrate behaviour).
+    /// Unset string signal → empty string (matches `get_str_or_default`).
     #[test]
     fn render_view_string_signal_unset_defaults_to_empty() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7403,12 +5562,7 @@ mod tests {
         }
     }
 
-    /// Literal-only f-string interpolation inside an impl-method
-    /// view body. Verifies the `__fstring_format__` /
-    /// `string_concat` Blinc builtins resolve cleanly when the
-    /// view runs as an inherent-impl method. The bare-view case
-    /// is `render_bare_view_with_fstring_literal`; this is the
-    /// same shape inside `component Foo { view { ... } }`.
+    /// f-string interpolation inside an impl-method view body.
     #[test]
     fn render_component_view_with_literal_fstring() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7433,12 +5587,7 @@ mod tests {
         }
     }
 
-    /// End-to-end: `view { Outer() { Inner() } }` actually
-    /// renders both components' scene ops in source order. The
-    /// flatten pass extracts the body Block from the parent
-    /// call's args and inlines the children right after the
-    /// parent. The flat DslOp buffer ends up with the parent's
-    /// ops followed by each child's ops.
+    /// `view { Outer() { Inner() Inner() } }` flattens into parent+child ops in source order.
     #[test]
     fn render_view_with_component_children() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7471,10 +5620,7 @@ mod tests {
         }
     }
 
-    /// End-to-end: `slot Name { ... }` body items flatten into
-    /// the parent's render alongside default children. The slot
-    /// markers themselves are dropped at runtime (no host-side
-    /// named-slot routing yet for the flat DslOp buffer).
+    /// `slot Name { ... }` body items flatten alongside default children.
     #[test]
     fn render_view_with_slots_flattens() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7500,9 +5646,7 @@ mod tests {
         assert_eq!(ops.len(), 3, "expected tabs + 2 tabs, got {ops:?}");
     }
 
-    /// Nested composition: `Outer() { Mid() { Inner() } }` — the
-    /// flatten is recursive, so all three components' ops appear
-    /// in order in the flat DslOp buffer.
+    /// `Outer() { Mid() { Inner() } }` — flatten is recursive.
     #[test]
     fn render_view_with_nested_component_children() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7537,12 +5681,7 @@ mod tests {
         }
     }
 
-    /// End-to-end: a prop value bound to a method param,
-    /// interpolated into an f-string inside the view body, then
-    /// rendered. Exercises the full parse → lower → bind →
-    /// compile → JIT loop with all of: component declaration,
-    /// component call site, prop binding, multi-part f-string,
-    /// and the `__fstring_format__` / `string_concat` builtins.
+    /// Prop value bound to param, interpolated in an f-string, rendered.
     #[test]
     fn render_component_with_prop_in_fstring() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7566,11 +5705,7 @@ mod tests {
         }
     }
 
-    /// AST-level: after `bind_component_props`, the view method's
-    /// params hold the prop list in source order. Doesn't depend
-    /// on the f-string runtime wall — purely checks that the pass
-    /// itself wires the params on. Pin so future grammar changes
-    /// don't accidentally regress the prop → method-param flow.
+    /// `bind_component_props` writes the prop list onto each method's params (source order).
     #[test]
     fn bind_component_props_writes_view_params() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7597,9 +5732,7 @@ mod tests {
             })
             .expect("expected an Impl decl");
 
-        // Both `view` and `on_click` should have the props bound,
-        // in source order. The marker `__component_props__` should
-        // be stripped.
+        // Props bound on both methods; marker stripped.
         for method_name in ["view", "on_click"] {
             let method = impl_block
                 .methods
@@ -7635,11 +5768,7 @@ mod tests {
         );
     }
 
-    /// End-to-end: a bare `view { Counter() }` that calls a defined
-    /// component should compose — `lower_component_calls` rewrites
-    /// `Counter()` to `Call(Variable("Counter"), ...)`, which the
-    /// JIT links against the inherent-impl-mangled `Counter$view`
-    /// symbol... or does it? Pin the current behaviour either way.
+    /// Bare `view { Inner() }` composes via the mangled `Inner$view` symbol.
     #[test]
     fn render_view_invoking_component() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7655,11 +5784,6 @@ mod tests {
         .expect("compile");
 
         let ops = dsl.render_view().expect("render_view");
-        // If lowering rewrites `Inner()` to `Inner$view()`, the
-        // outer view's scene buffer would carry the inner's text.
-        // If not — `Inner` is unresolved at link time — compile
-        // would have failed above, so reaching here at all already
-        // proves that part.
         assert_eq!(
             ops.len(),
             1,
@@ -7671,12 +5795,7 @@ mod tests {
         }
     }
 
-    /// End-to-end: compile a component, invoke its view via
-    /// `render_component`, verify the scene ops show the text. The
-    /// existing `render_component` API calls the bare component
-    /// name; after this commit it instead has to call the mangled
-    /// `<Name>$view` symbol — the prior implementation predates the
-    /// grammar shape and was untested.
+    /// `render_component(name)` invokes the mangled `<name>$view`.
     #[test]
     fn render_component_emits_view_ops() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7699,10 +5818,7 @@ mod tests {
         }
     }
 
-    /// `view { text("...") }` program through the full pipeline and
-    /// checks the host saw the right scene op. If this fails, the
-    /// integration is broken end-to-end and the rest of the plan is
-    /// blocked on fixing it before phase-2 grammar expansion.
+    /// Round-trip: `view { text("...") }` through the full pipeline.
     #[test]
     fn round_trip_text_view() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7719,16 +5835,9 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------
     // Component (Class + Impl) parsing tests.
-    //
-    // Components lower to two TypedDeclarations: a Class for the
-    // data shape, and an Impl for the methods. Same idiom as ml.zyn
-    // structs + inherent impls.
-    // -----------------------------------------------------------------
 
-    /// `component Counter { count: i32, width: i32 }` parses to a
-    /// `TypedDeclaration::Class` with two fields.
+    /// `component Counter { ... }` parses to a `Class` decl with the fields.
     #[test]
     fn parse_component_struct_only() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7765,10 +5874,7 @@ mod tests {
         );
     }
 
-    /// `impl Counter { fn view() { text("hi") } }` parses to a
-    /// `TypedDeclaration::Impl`. The interpreter's Impl-walk
-    /// (interpreter.rs:1017-1080) unwraps each function into a
-    /// `TypedMethod` automatically.
+    /// `impl Counter { fn view() { ... } }` parses to an `Impl` decl with a method.
     #[test]
     fn parse_impl_with_view() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7790,8 +5896,7 @@ mod tests {
             })
             .expect("expected an Impl decl");
 
-        // Empty trait_name is the inherent-impl marker. for_type
-        // carries the component identity.
+        // Empty `trait_name` = inherent-impl marker.
         assert_eq!(impl_block.trait_name.resolve_global().as_deref(), Some(""));
         assert_eq!(impl_block.methods.len(), 1, "expected 1 method (view)");
         assert_eq!(
@@ -7800,16 +5905,9 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // Reactivity tests — `state` keyword wraps the field type in
-    // `Type::Named { State, [T] }`. Plain fields stay as bare `T`.
-    // The host walks Class.fields, treats State<...>-typed fields
-    // as reactive, plain fields as data-only.
-    // -----------------------------------------------------------------
+    // Reactivity tests — `state` wraps the field type in `Type::Named { State, [T] }`.
 
-    /// `state count: i32` lowers to a `TypedField` whose `ty` is
-    /// `Type::Named { name: "State", type_args: [i32] }`. The
-    /// State<...> wrapping is the AST-level reactivity marker.
+    /// `state count: i32` → `TypedField` with `Type::Named { State, [i32] }`.
     #[test]
     fn parse_state_field_wraps_type() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7835,21 +5933,15 @@ mod tests {
         let count_field = &class.fields[0];
         assert_eq!(count_field.name.resolve_global().as_deref(), Some("count"));
 
-        // The `state` keyword wraps the type in `Type::Named { State, [i32] }`.
+        // `state` wraps the type in `Type::Named { State, [i32] }`.
         match &count_field.ty {
             zyntax_typed_ast::Type::Named { id, type_args, .. } => {
-                let name_str = dsl.runtime.lock().ok().map(|_| ());
-                // Type::Named's `id` references the program's type
-                // registry; resolve it back to a name to verify
-                // it's `State`. For now we accept any
-                // Named-with-1-arg as state.
-                let _ = name_str;
+                let _ = dsl.runtime.lock().ok().map(|_| ());
                 assert_eq!(
                     type_args.len(),
                     1,
-                    "expected one type arg (the inner type), got {type_args:?}"
+                    "expected one type arg, got {type_args:?}"
                 );
-                // Inner arg should be the i32 primitive.
                 match &type_args[0] {
                     zyntax_typed_ast::Type::Primitive(prim) => {
                         assert!(
@@ -7861,7 +5953,7 @@ mod tests {
                 }
                 let _ = id;
             }
-            other => panic!("state field should wrap type in Type::Named, got {other:?}"),
+            other => panic!("state field should be Type::Named, got {other:?}"),
         }
     }
 
@@ -7905,7 +5997,6 @@ mod tests {
 
         assert_eq!(class.fields.len(), 2);
 
-        // Field 0: state count → wrapped Named (State<i32>).
         let count_field = &class.fields[0];
         assert_eq!(count_field.name.resolve_global().as_deref(), Some("count"));
         assert!(
@@ -7914,7 +6005,6 @@ mod tests {
             count_field.ty
         );
 
-        // Field 1: plain name → bare Primitive(String).
         let name_field = &class.fields[1];
         assert_eq!(name_field.name.resolve_global().as_deref(), Some("name"));
         assert!(
@@ -7927,10 +6017,7 @@ mod tests {
         );
     }
 
-    /// state+state in the same field list also parses cleanly.
-    /// Pinning this so the false-positive "ambiguity" claim
-    /// doesn't get reintroduced by anyone reading the earlier
-    /// commit message.
+    /// Two `state` fields in the same field list parse cleanly.
     #[test]
     fn parse_two_state_fields_same_list() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7962,11 +6049,7 @@ mod tests {
         }
     }
 
-    /// Optional split form: `component Name { fields }` + `impl Name
-    /// { fn ... }` as separate top-level items. Supported alongside
-    /// the folded form for users who want explicit decl-per-rule
-    /// shape (or are programmatically generating `.blinc` source
-    /// where one decl at a time is easier to emit).
+    /// Split form: separate `component Name { ... }` + `impl Name { ... }` blocks.
     #[test]
     fn parse_component_split_form() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -7997,12 +6080,7 @@ mod tests {
         assert_eq!(impl_count, 1, "expected 1 Impl decl");
     }
 
-    /// Folded `component { fields, view { ... }, fn handler() { ... } }`
-    /// emits BOTH a Class and an Impl from one source-level block.
-    /// Validates the inlined `concat_list([Class], [Impl])` shape
-    /// in the grammar action — relies on the upstream
-    /// `get_field_as_decl_list` flatten patch (#7) so the parent
-    /// `top_level_items` collector unwraps the nested list.
+    /// Folded `component { ... }` emits both Class and Impl from one block.
     #[test]
     fn parse_component_folded() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8010,14 +6088,7 @@ mod tests {
         let dsl = BlincDsl::new().expect("runtime init");
         let program = dsl
             .parse_to_typed_ast(
-                // `view { ... }` does the rendering. Handlers like
-                // `on_click` mutate state / call other functions /
-                // run general logic — they don't render. The body
-                // is empty here because state-mutation syntax
-                // (e.g. `count = count - 1`) isn't in the grammar
-                // yet (next phase-2 slice). The test still
-                // validates that the handler is recognised as a
-                // method on the component's Impl.
+                // Empty `on_click` body — just validates the handler is recognised as a method.
                 r#"
                 component Counter {
                     count: i32
@@ -8029,7 +6100,6 @@ mod tests {
             )
             .expect("parse");
 
-        // One source `component { ... }` block -> two TypedDeclarations.
         let class = program
             .declarations
             .iter()
@@ -8053,7 +6123,6 @@ mod tests {
                 _ => None,
             })
             .expect("expected an Impl decl from the folded component");
-        // Empty trait_name is the inherent-impl marker.
         assert_eq!(impl_block.trait_name.resolve_global().as_deref(), Some(""));
         assert_eq!(
             impl_block.methods.len(),
@@ -8066,7 +6135,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        // view is first (prepended), on_click is second.
+        // view first (prepended), on_click second.
         assert_eq!(
             impl_block.methods[0].name.resolve_global().as_deref(),
             Some("view")
@@ -8077,14 +6146,7 @@ mod tests {
         );
     }
 
-    /// `component Counter (initial: i32, step: i32) { ... }` parses the
-    /// props parenthetical and — after `bind_component_props` runs —
-    /// binds the props as leading params on the view method (and any
-    /// other impl methods). Class.fields holds only the body's
-    /// declarations (state/data fields), not the props. Order
-    /// matters: props come first in the view's param list because
-    /// the call site lowers `Counter(1, 2)` to `Counter$view(1, 2)`
-    /// with positional args matching the prop order.
+    /// Folded component with props binds props as leading method params.
     #[test]
     fn parse_component_with_props_folded() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8102,8 +6164,7 @@ mod tests {
             )
             .expect("parse");
 
-        // Class.fields holds only the body's `state count` field —
-        // props are bound to methods, not stored as class fields.
+        // Class.fields = body fields only (props bind to methods, not Class).
         let class = program
             .declarations
             .iter()
@@ -8118,8 +6179,7 @@ mod tests {
             Some("count")
         );
 
-        // After bind_component_props: the view method has the
-        // props as its leading params, in source order.
+        // After bind_component_props: view has props as leading params (source order).
         let impl_block = program
             .declarations
             .iter()
@@ -8129,7 +6189,6 @@ mod tests {
             })
             .expect("expected an Impl decl");
 
-        // No __component_props__ method left (stripped by the pass).
         assert!(
             !impl_block
                 .methods
@@ -8165,11 +6224,7 @@ mod tests {
         );
     }
 
-    /// Bare struct-only form: `component Pair { sum: i32 }`. The
-    /// bare shape has no methods to bind props to, so the
-    /// `(props)` parenthetical is accepted syntactically but the
-    /// props get silently dropped — see the grammar comment on
-    /// `component_decl`. Class.fields holds only body fields.
+    /// Struct-only form with props: parsed but props silently dropped (no methods to bind to).
     #[test]
     fn parse_component_with_props_struct_only() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8191,9 +6246,7 @@ mod tests {
             })
             .expect("expected a Class decl");
 
-        // Only the body's `sum` field — `left` / `right` props are
-        // dropped because the bare form has no method to bind them
-        // onto.
+        // Only body's `sum` field — props dropped (no method to bind to).
         assert_eq!(class.fields.len(), 1);
         assert_eq!(
             class.fields[0].name.resolve_global().as_deref(),
@@ -8201,10 +6254,7 @@ mod tests {
         );
     }
 
-    /// Empty props parens — `component Foo () { ... }` — is legal and
-    /// equivalent to no parens. Keeps the call-site / def-site
-    /// grammar regular (parser doesn't need a special "must have at
-    /// least one prop" rule). This pins that behaviour.
+    /// Empty props parens (`Foo () { ... }`) is legal.
     #[test]
     fn parse_component_with_empty_props() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8235,11 +6285,7 @@ mod tests {
         assert_eq!(class.fields[0].name.resolve_global().as_deref(), Some("x"));
     }
 
-    /// `Counter()` inside a view body — statement-position
-    /// component call. AFTER the `lower_component_calls` pass, the
-    /// callee is `Variable("Counter")` and there are no positional
-    /// args (the original `__component_call__` marker and its
-    /// leading StringLiteral name have been folded away).
+    /// `Counter()` lowers to `Call(Counter$view, [])` with marker folded away.
     #[test]
     fn parse_component_call_no_args() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8255,9 +6301,6 @@ mod tests {
             )
             .expect("parse");
 
-        // The bare `view` lowers to a free function — its body is
-        // the first user-function body that doesn't belong to the
-        // empty `Counter` Class.
         let stmts = first_user_function_body(&program);
         assert_eq!(stmts.len(), 1, "expected 1 stmt, got {stmts:?}");
 
@@ -8279,9 +6322,7 @@ mod tests {
         assert_eq!(call.named_args.len(), 0, "no named args");
     }
 
-    /// `Counter(1, 2)` — after lowering, positional args appear
-    /// in source order as `positional_args`, no leading
-    /// StringLiteral name.
+    /// `Counter(1, 2)` lowers to positional args in source order.
     #[test]
     fn parse_component_call_positional_args() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8311,7 +6352,6 @@ mod tests {
             Some("Counter$view")
         );
 
-        // [IntLiteral(1), IntLiteral(2)] after lowering
         assert_eq!(call.positional_args.len(), 2);
 
         let TypedExpression::Literal(TypedLiteral::Integer(one)) = &call.positional_args[0].node
@@ -8326,9 +6366,7 @@ mod tests {
         assert_eq!(*two, 2);
     }
 
-    /// `Counter(1, step = 2)` — after lowering, the named arg
-    /// lifts into the Call's native `named_args` vec as a
-    /// `TypedNamedArg`. Positional args stay positional.
+    /// `Counter(1, step = 2)` — named arg lifted into `named_args`.
     #[test]
     fn parse_component_call_named_arg() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8358,7 +6396,6 @@ mod tests {
             Some("Counter$view")
         );
 
-        // Positional: [IntLiteral(1)]
         assert_eq!(call.positional_args.len(), 1);
         let TypedExpression::Literal(TypedLiteral::Integer(one)) = &call.positional_args[0].node
         else {
@@ -8366,7 +6403,6 @@ mod tests {
         };
         assert_eq!(*one, 1);
 
-        // Named: [step = 2]
         assert_eq!(call.named_args.len(), 1);
         assert_eq!(
             call.named_args[0].name.resolve_global().as_deref(),
@@ -8380,11 +6416,7 @@ mod tests {
         assert_eq!(*named_value, 2);
     }
 
-    /// `let widget = Counter(0)` — component call in expression
-    /// position (right-hand side of a `let`). Pins that
-    /// `component_call_expr` is reachable through the full
-    /// expression precedence chain (it sits in `primary_expr`
-    /// alongside the literal / variable / paren alternates).
+    /// `let widget = Counter(0)` — component call in expression position.
     #[test]
     fn parse_component_call_in_expr_position() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8419,31 +6451,17 @@ mod tests {
         assert_eq!(
             callee_name.resolve_global().as_deref(),
             Some("Counter$view"),
-            "after lowering, callee should be the mangled view symbol \
-             (not the bare marker)"
+            "callee should be mangled view symbol after lowering"
         );
     }
 
-    /// `Div` and `Text` are pre-registered by
-    /// `register_blinc_layout_primitives()` at
-    /// `BlincDsl::new()` time, so DSL source can call them
-    /// without the author declaring them. The validation
-    /// pass accepts the references; the registry surfaces
-    /// the right `view_symbol` for the upcoming lowering /
-    /// extern-call wiring.
+    /// `Div` and `Text` are pre-registered at `BlincDsl::new()` time.
     #[test]
     fn blinc_layout_primitives_registered() {
         let _ = tracing_subscriber::fmt::try_init();
 
-        // BlincDsl::new() runs `register_blinc_layout_primitives()`.
         let _dsl = BlincDsl::new().expect("runtime init");
 
-        // Substrate registry should know `Div` + `Text` regardless
-        // of whether any DSL source has been compiled yet.
-        // Div's prop list is intentionally minimal — just
-        // `children`, since universal styling (bg, padding, …)
-        // is planned to come through the `Styled<W>` overlay
-        // rather than per-primitive props.
         let div =
             blinc_runtime::component::with_component_registry(|r| r.get_by_name("Div").cloned())
                 .expect("Div should be pre-registered");
@@ -8460,18 +6478,7 @@ mod tests {
         assert!(text.prop("content").is_some());
     }
 
-    /// End-to-end: `view { Text("hello") }` compiles cleanly,
-    /// the JIT calls `$Blinc$Text$view`, the Rust impl boxes a
-    /// `blinc_layout::Text` and returns the pointer. `render_view`
-    /// (legacy DslOp path) drains an empty scene buffer
-    /// because the new extern doesn't push anything — the
-    /// widget handle flows back through the function return
-    /// instead.
-    ///
-    /// This is the smallest possible value-returning view —
-    /// proves the architecture works end-to-end before Div +
-    /// children + props compound the complexity. The host-side
-    /// walker that reclaims the handle lands in Phase 2e.
+    /// Smallest value-returning view: `view { Text("hello") }` compiles and runs.
     #[test]
     fn render_text_widget_compiles_and_runs() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8527,22 +6534,12 @@ mod tests {
         );
     }
 
-    /// `validate_component_calls` errors when a `__component_call__`
-    /// marker references a component that wasn't declared. Catches
-    /// typos at parse time rather than letting them slip through to
-    /// the (less-helpful) symbol-resolution stage later. The error
-    /// message names the failing component and suggests the
-    /// declaration form.
+    /// Validator rejects undeclared components and names them in the diagnostic.
     #[test]
     fn validate_rejects_unknown_component() {
         let _ = tracing_subscriber::fmt::try_init();
 
-        // Unique name so the global component registry (which
-        // other tests publish into in parallel) doesn't
-        // accidentally have an entry named `Counter` when the
-        // validator reads it. Using
-        // `UnknownComponentValidateTest` keeps this regression
-        // test isolated from cross-test interference.
+        // Unique name to avoid cross-test pollution in the global component registry.
         let dsl = BlincDsl::new().expect("runtime init");
         let result = dsl.parse_to_typed_ast(
             r#"view { UnknownComponentValidateTest(1) }"#,
@@ -8556,11 +6553,7 @@ mod tests {
         );
     }
 
-    /// Forward references — the component is declared AFTER its
-    /// first use. The validation pass collects all known classes
-    /// before checking calls, so source order doesn't matter. Pins
-    /// that we don't accidentally re-introduce an ordering
-    /// constraint via the validate pass.
+    /// Validator accepts forward references (declared after first use).
     #[test]
     fn validate_accepts_forward_reference() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8580,10 +6573,7 @@ mod tests {
         );
     }
 
-    /// Multiple unknown calls report multiple errors — the
-    /// validation pass collects ALL failures rather than bailing on
-    /// the first. Helps users fix every typo in a single
-    /// compile/test cycle instead of one at a time.
+    /// Validator collects ALL unknown-component errors (not just the first).
     #[test]
     fn validate_collects_multiple_unknown_calls() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8610,17 +6600,7 @@ mod tests {
         );
     }
 
-    /// Bare lowercase `counter(0)` must NOT match
-    /// `component_call_expr` — the capital-first `component_name`
-    /// terminal is the explicit disambiguator. The PEG should
-    /// backtrack and try `assign_stmt` (which fails because there's
-    /// `Counter() { Inner(1) }` — body block on a component call.
-    /// After lowering, a body-bearing `Counter() { Inner(1);
-    /// Inner(2) }` becomes a flat statement sequence: the parent's
-    /// `Counter$view()` call followed by each child statement
-    /// inlined at the parent level. The body Block is consumed —
-    /// no trailing arg, no nesting. Models "children render after
-    /// parent" semantics for the flat DslOp scene buffer.
+    /// `Counter() { Inner(1) Inner(2) }` flattens to parent + child stmts; no body-Block arg.
     #[test]
     fn parse_component_call_with_body_children() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8643,7 +6623,6 @@ mod tests {
             .expect("parse");
 
         let stmts = first_user_function_body(&program);
-        // 3 stmts: Counter$view(); Inner$view(1); Inner$view(2)
         assert_eq!(
             stmts.len(),
             3,
@@ -8652,9 +6631,7 @@ mod tests {
         );
 
         fn callee_name(stmt: &zyntax_typed_ast::TypedNode<TypedStatement>) -> Option<String> {
-            // `unwrap_trailing_call` peels the `Return(Some(...))`
-            // that `lower_view_to_value_returning` wraps around
-            // the trailing widget call.
+            // `unwrap_trailing_call` peels `Return(Some(...))` wrappers.
             let TypedExpression::Call(c) = &unwrap_trailing_call(stmt).node else {
                 return None;
             };
@@ -8667,9 +6644,7 @@ mod tests {
         assert_eq!(callee_name(&stmts[1]).as_deref(), Some("Inner$view"));
         assert_eq!(callee_name(&stmts[2]).as_deref(), Some("Inner$view"));
 
-        // The parent call has NO body-Block arg anymore (children
-        // were extracted and inlined). Counter takes no props, so
-        // positional_args should be empty.
+        // Parent has no body-Block arg — children inlined.
         let TypedExpression::Call(c) = &unwrap_trailing_call(&stmts[0]).node else {
             unreachable!()
         };
@@ -8681,11 +6656,7 @@ mod tests {
         );
     }
 
-    /// A bare-form `view { Text("hi") }` ending in a substrate
-    /// widget-primitive call gets rewritten to
-    /// `Return(Some(...))` and its declared return type is bumped
-    /// from `Unit` to widget-handle (`I64`). Pins Phase 2d's
-    /// value-returning view shape.
+    /// Bare-form `view { Text("hi") }` lowers to `Return(Some(...))` with `I64` return.
     #[test]
     fn lower_view_to_value_returning_wraps_primitive_call() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8713,15 +6684,12 @@ mod tests {
             })
             .expect("expected a render_view function");
 
-        // Return type bumped to the widget-handle ABI type.
         assert_eq!(
             render_view.return_type,
             Type::Primitive(PrimitiveType::I64),
             "render_view should return I64 (widget handle) after value-returning rewrite"
         );
 
-        // Body's last statement is now a Return(Some(call)) — not
-        // a bare Expression.
         let body = render_view
             .body
             .as_ref()
@@ -8746,11 +6714,7 @@ mod tests {
         );
     }
 
-    /// A view whose trailing statement is `text("...")` (the
-    /// legacy lowercase op-stream extern, not a substrate widget
-    /// primitive) must NOT get the value-returning rewrite — that
-    /// extern returns Unit and the legacy `render_view` -> scene
-    /// buffer path expects a Unit-returning function.
+    /// Trailing legacy `text(...)` (Unit-returning) does NOT get value-return rewrite.
     #[test]
     fn lower_view_to_value_returning_skips_legacy_text_extern() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8778,8 +6742,6 @@ mod tests {
             })
             .expect("expected a render_view function");
 
-        // Stays Unit-returning — the lowercase `text(...)` extern
-        // is op-stream / Unit.
         assert_eq!(
             render_view.return_type,
             Type::Primitive(PrimitiveType::Unit),
@@ -8801,19 +6763,12 @@ mod tests {
         );
     }
 
-    /// Pin: slot bodies on a substrate-primitive call partition
-    /// into `slot_<Name>` named args + a default `children` named
-    /// arg. Inspects the AST after parse_to_typed_ast — by then
-    /// children-array lowering has minted a child-list per slot.
+    /// Slot bodies partition into `slot_<Name>` + default `children` named args.
     #[test]
     fn slot_bodies_partition_into_named_args() {
         let _ = tracing_subscriber::fmt::try_init();
 
-        // Pre-register a synthetic widget with children + slot
-        // props so the partition has somewhere to route the slot
-        // bodies. Real users go through `register_extern_widget`,
-        // but for an AST-shape test we just plant the
-        // `ComponentDefinition` directly.
+        // Synthetic widget so the partition has somewhere to route slot bodies.
         blinc_runtime::component::with_component_registry_mut(|r| {
             r.register(blinc_runtime::component::ComponentDefinition {
                 name: std::sync::Arc::from("SlotProbe"),
@@ -8846,14 +6801,7 @@ mod tests {
             )
             .expect("parse");
 
-        // The body should have lowered through children-arrays
-        // → Block expansion. Walk into the Block and look for
-        // the trailing call's named-arg shape *before* the
-        // resolve_extern_widget_named_args pass — wait, that
-        // pass already ran in parse_to_typed_ast. So we'll just
-        // assert there's a final call carrying `__blinc_children_*`
-        // variables, AND that the prelude has TWO __new_child_list__
-        // let bindings (one for default children, one for Header).
+        // Assert TWO `__new_child_list__` let bindings (default children + Header).
         let stmts = first_user_function_body(&program);
         let TypedStatement::Return(Some(e)) = &stmts[0].node else {
             panic!("expected Return(Some(...))");
@@ -8886,12 +6834,7 @@ mod tests {
         );
     }
 
-    /// `Text(content = "hi")` — a leaf primitive with one prop
-    /// invoked by name — lowers to a positional call thanks to
-    /// `resolve_extern_widget_named_args`. Pins the named→
-    /// positional reorder explicitly so it can't regress
-    /// silently into an empty positional list (which would JIT
-    /// to garbage register reads).
+    /// `Text(content = "hi")` lowers to a positional call.
     #[test]
     fn named_args_on_primitive_call_resolve_to_positional() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8934,13 +6877,8 @@ mod tests {
         );
     }
 
-    /// Substrate container primitives lower their body Block
-    /// into a `__new_child_list__` + `__push_child__` + final
-    /// container-call Block expansion (the
-    /// `lower_children_arrays_to_blocks` shape). Asserts the
-    /// post-lowering AST end-to-end: a trailing
-    /// `Return(Some(Block({ let, push, push, Div(__list) })))`
-    /// with each push consuming a primitive child call.
+    /// Container primitive body lowers to `let __list__ = __new_child_list__()` +
+    /// `__push_child__`s + trailing container call.
     #[test]
     fn parse_primitive_call_with_body_lowers_to_children_block_expansion() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -8963,9 +6901,6 @@ mod tests {
         let stmts = first_user_function_body(&program);
         assert_eq!(stmts.len(), 1, "body should stay as one stmt");
 
-        // Phase 2d wrapped the trailing expression in
-        // `Return(Some(...))`; the children-array pass then
-        // rewrote the inner Call into a Block expansion.
         let TypedStatement::Return(Some(e)) = &stmts[0].node else {
             panic!(
                 "stmts[0] should be Return(Some(Block)), got: {:?}",
@@ -8979,18 +6914,15 @@ mod tests {
             );
         };
 
-        // Expected statement sequence (4 entries):
-        //   0. let __blinc_children_N = __new_child_list__()
-        //   1. __push_child__(__blinc_children_N, Text$view("a"))
-        //   2. __push_child__(__blinc_children_N, Text$view("b"))
-        //   3. $Blinc$Div$view(__blinc_children_N)   <-- block value
+        // 0: let __blinc_children_N = __new_child_list__()
+        // 1-2: __push_child__(list, Text$view("a"|"b"))
+        // 3: $Blinc$Div$view(list)
         assert_eq!(
             block.statements.len(),
             4,
             "expected 4 stmts (let + 2 pushes + final call), got: {block:?}"
         );
 
-        // Statement 0: the let.
         let TypedStatement::Let(let_stmt) = &block.statements[0].node else {
             panic!("stmt[0] should be Let, got: {:?}", block.statements[0].node);
         };
@@ -9018,7 +6950,6 @@ mod tests {
             "let initialiser should call __new_child_list__"
         );
 
-        // Statements 1 + 2: __push_child__(list, Text$view("..."))
         for (i, stmt) in block.statements.iter().enumerate().skip(1).take(2) {
             let TypedStatement::Expression(expr) = &stmt.node else {
                 panic!("stmt[{i}] should be Expression(Call)");
@@ -9039,15 +6970,13 @@ mod tests {
                 2,
                 "__push_child__ takes (list, child)"
             );
-            // arg 0: Variable refers to the same list ident as the let.
             let TypedExpression::Variable(list_ref) = &push_call.positional_args[0].node else {
-                panic!("__push_child__ arg 0 should be the list ident Variable");
+                panic!("__push_child__ arg 0 should be the list ident");
             };
             assert_eq!(
                 list_ref.resolve_global().as_deref(),
                 Some(list_ident.as_ref())
             );
-            // arg 1: Text$view call.
             let TypedExpression::Call(child_call) = &push_call.positional_args[1].node else {
                 panic!("__push_child__ arg 1 should be a child Call");
             };
@@ -9060,7 +6989,6 @@ mod tests {
             );
         }
 
-        // Statement 3: trailing Div call carrying the list ident.
         let TypedStatement::Expression(final_expr) = &block.statements[3].node else {
             panic!("stmt[3] should be Expression(Call)");
         };
@@ -9074,7 +7002,6 @@ mod tests {
             div_callee.resolve_global().as_deref(),
             Some("$Blinc$Div$view")
         );
-        // Div takes (children, __style, class, on_click).
         assert_eq!(
             div_call.positional_args.len(),
             4,
@@ -9096,13 +7023,7 @@ mod tests {
         );
     }
 
-    /// Body with a `let` binding + component child. The body
-    /// Block flattens into the parent statement list — the `let`
-    /// rides between the parent call and the child call. Note:
-    /// this is just the AST-shape assertion; whether the `let`
-    /// binding's value flows into the child call at runtime is a
-    /// scope question (a flat statement sequence puts the let in
-    /// the OUTER scope, not the inner component's scope).
+    /// Body Block with a `let` flattens; `let` rides between parent and child calls.
     #[test]
     fn parse_component_call_with_let_in_body() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -9125,7 +7046,6 @@ mod tests {
             .expect("parse");
 
         let stmts = first_user_function_body(&program);
-        // 3 stmts: Wrapper$view(); let count = 1; Inner$view(count)
         assert_eq!(
             stmts.len(),
             3,
@@ -9139,13 +7059,7 @@ mod tests {
             matches!(stmts[1].node, TypedStatement::Let(_)),
             "stmts[1] should be the let binding"
         );
-        // `component Wrapper { }` / `component Inner { }` have no
-        // view methods (empty bodies), so neither `Wrapper$view` nor
-        // `Inner$view` gets promoted to value-returning by the
-        // first pass of `lower_view_to_value_returning`. The
-        // trailing `Inner(count)` therefore stays a bare
-        // `Expression(Call(...))` — promotion only fires when the
-        // callee itself returns a widget handle.
+        // Empty component bodies → no view methods → no value-return promotion.
         assert!(
             matches!(stmts[2].node, TypedStatement::Expression(_)),
             "stmts[2] should be the Inner call"
@@ -9183,15 +7097,8 @@ mod tests {
 
         let stmts = first_user_function_body(&program);
 
-        // Flatten output:
-        //   Tabs$view(); Tab$view(1); Tab$view(2)
-        //
-        // The `slot Header { Tab(1) }` lowered to
-        //   `__slot_open__("Header"), Tab$view(1), __slot_close__()`
-        // (linear marker pair from the slot rule's
-        // `concat_list(...)`). flatten then DROPS both markers and
-        // inlines `Tab$view(1)` at the parent level. `Tab(2)` was
-        // already a default child; it appears next.
+        // Flatten output: `Tabs$view(); Tab$view(1); Tab$view(2)`.
+        // Slot markers `__slot_open__` / `__slot_close__` get dropped.
         assert_eq!(
             stmts.len(),
             3,
@@ -9211,7 +7118,7 @@ mod tests {
         assert_eq!(callee_name(&stmts[1]).as_deref(), Some("Tab$view"));
         assert_eq!(callee_name(&stmts[2]).as_deref(), Some("Tab$view"));
 
-        // No slot markers anywhere — strip is complete.
+        // No slot markers remaining.
         for s in stmts {
             let name = callee_name(s).unwrap_or_default();
             assert!(
@@ -9221,12 +7128,7 @@ mod tests {
         }
     }
 
-    /// `lower_component_calls` strips the unused defensive
-    /// `__component_call__` callee identifier from the AST. After
-    /// the pass, there should be no `__component_call__` variable
-    /// references anywhere in the program. Pin this so a future
-    /// regression where the rewrite forgets to swap the callee
-    /// shape is caught immediately.
+    /// `lower_component_calls` strips all `__component_call__` callee refs.
     #[test]
     fn lower_component_calls_strips_marker_callee() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -9245,8 +7147,7 @@ mod tests {
             )
             .expect("parse");
 
-        // Walk the program's expression tree and count any
-        // remaining `__component_call__` references.
+        // Count any remaining `__component_call__` refs.
         fn count_marker_refs(expr: &TypedExpression) -> usize {
             let mut n = 0;
             match expr {
@@ -9308,18 +7209,13 @@ mod tests {
         );
     }
 
-    /// no `=`) and then fail to parse the statement, returning a
-    /// parse error. Pins that the disambiguation rule actually
-    /// disambiguates.
+    /// Lowercase `counter(0)` does not parse as a component call.
     #[test]
     fn parse_lowercase_call_is_not_component_call() {
         let _ = tracing_subscriber::fmt::try_init();
 
         let dsl = BlincDsl::new().expect("runtime init");
-        // `counter(0)` isn't a valid Blinc statement — lowercase
-        // function calls only land via the typed `text(...)` rules
-        // today. So parse should fail (not silently treat `counter`
-        // as a component).
+        // Lowercase calls only land via typed `text(...)` rules.
         let result = dsl.parse_to_typed_ast(r#"view { counter(0) }"#, "lowercase_call.blinc");
         assert!(
             result.is_err(),
@@ -9327,13 +7223,7 @@ mod tests {
         );
     }
 
-    /// Single-prop component on the bare form — `component Only
-    /// (just_one: i32) { }` parses cleanly. With no view/method to
-    /// bind the prop to, the bare form silently drops it (see the
-    /// `component_decl` grammar comment). Class.fields ends up
-    /// empty. This pins the regression where the
-    /// `prop_decl_list` rule miscounts when there's only the head
-    /// `prop_decl` and no `prop_decl_tail` repetitions.
+    /// Single-prop bare component (no body methods) — props silently dropped.
     #[test]
     fn parse_component_with_single_prop() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -9352,17 +7242,10 @@ mod tests {
             })
             .expect("expected a Class");
 
-        // Bare form drops props — no method to bind them onto.
         assert_eq!(class.fields.len(), 0);
     }
 
     /// `text(N)` round-trip — probes the i32 ABI through Cranelift.
-    /// Confirms (a) the integer terminal in the grammar lowers to a
-    /// real `IntLiteral`, (b) PEG backtracks from the string variant
-    /// of `text(...)` and matches the int variant, (c) Zyntax
-    /// type-checks the call against `$Blinc$text_int`'s `(i32) ->
-    /// ()` signature, (d) Cranelift passes the value as an actual
-    /// i32 register, (e) the host receives it without ABI corruption.
     #[test]
     fn round_trip_text_int() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -9379,22 +7262,12 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------
     // F-string parsing tests — TypedAST shape only.
-    //
-    // At this prototype stage the grammar's job is to produce the
-    // right TypedAST and we verify that. JIT round-trip + runtime
-    // concat / format dispatch is the compiler's concern (Zyntax owns
-    // the SSA backend; what shape its f-string handling takes for a
-    // non-`println` caller is something we'll address when the
-    // compiler integration matures, not here).
-    // -----------------------------------------------------------------
 
     use zyntax_typed_ast::typed_ast::{TypedExpression, TypedLiteral};
     use zyntax_typed_ast::TypedDeclaration;
 
-    /// Pull the body statements out of the parsed program's first
-    /// non-extern function. Test-only helper.
+    /// Body statements of the program's first non-extern function (test-only).
     fn first_user_function_body(
         program: &TypedProgram,
     ) -> &[zyntax_typed_ast::TypedNode<TypedStatement>] {
@@ -9412,16 +7285,7 @@ mod tests {
         panic!("no user function found in program")
     }
 
-    /// Test-only helper: peel a `Return(Some(expr))` wrapper to
-    /// expose the inner expression statement, transparently
-    /// matching the pre- and post-value-returning-lowering shape.
-    ///
-    /// `lower_view_to_value_returning` rewrites a view function's
-    /// trailing primitive view call from `Expression(Call(...))`
-    /// to `Return(Some(Call(...)))`. Tests that assert against
-    /// the call shape don't care about the Return wrapper — it's
-    /// an ABI detail of how the JIT hands the widget handle back
-    /// — so they extract via this helper.
+    /// Peel `Return(Some(expr))` to expose the inner expression (test-only).
     fn unwrap_trailing_call(
         stmt: &zyntax_typed_ast::TypedNode<TypedStatement>,
     ) -> &zyntax_typed_ast::TypedNode<TypedExpression> {
@@ -9432,11 +7296,7 @@ mod tests {
         }
     }
 
-    /// `text(f"hello")` — single-part f-string with no
-    /// interpolation. Zyntax's `fold_concat` short-circuits the
-    /// single-part case (interpreter.rs:2365-2370) and returns the
-    /// bare expression, so the parsed AST should look identical to
-    /// `text("hello")`.
+    /// `text(f"hello")` — single-part no-interp f-string parses as plain `text("hello")`.
     #[test]
     fn parse_text_fstring_single_part_text() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -9454,7 +7314,6 @@ mod tests {
         let TypedExpression::Call(call) = &call_node.node else {
             panic!("expected Call");
         };
-        // text("hello") -> the only positional arg is a string literal.
         assert_eq!(call.positional_args.len(), 1);
         let TypedExpression::Literal(TypedLiteral::String(_)) = &call.positional_args[0].node
         else {
@@ -9465,11 +7324,7 @@ mod tests {
         };
     }
 
-    /// `text(f"{42}")` — single interp part. fold_concat's
-    /// short-circuit returns the bare `__fstring_format__(42)` call
-    /// (interpreter.rs:2365-2370 + the wrapper from
-    /// `f_string_interp`). We assert the AST has that one call as
-    /// the arg of `text`.
+    /// `text(f"{42}")` — single interp part → bare `__fstring_format__(42)`.
     #[test]
     fn parse_text_fstring_single_part_interp() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -9486,7 +7341,6 @@ mod tests {
         let TypedExpression::Call(text_call) = &call_node.node else {
             panic!("expected Call");
         };
-        // text(__fstring_format__(42))
         assert_eq!(text_call.positional_args.len(), 1);
         let TypedExpression::Call(fmt_call) = &text_call.positional_args[0].node else {
             panic!(
@@ -9504,10 +7358,7 @@ mod tests {
         );
     }
 
-    /// `text(f"answer: {42}!")` — multi-part f-string. fold_concat
-    /// builds `__fstring__(text_lit, fmt_call_stripped, text_lit)`
-    /// (interpreter.rs:2372-2410). We assert the AST has that
-    /// shape: one `__fstring__` call with three positional args.
+    /// `text(f"answer: {42}!")` → `__fstring__(text, fmt, text)` with 3 args.
     #[test]
     fn parse_text_fstring_multi_part() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -9547,20 +7398,9 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // Expression-layer parsing tests — variable refs, binary
-    // arithmetic, assignment statements. Phase-2 minimal slice.
-    //
-    // Same TypedAST-only verification approach as the f-string tests
-    // — we assert the grammar produces the right shape and let the
-    // compiler handle codegen.
-    // -----------------------------------------------------------------
+    // Expression-layer parsing tests.
 
-    /// `text(f"{count}")` — interpolating a bare variable reference.
-    /// fold_concat short-circuits the single-part case and returns the
-    /// `__fstring_format__(count)` call directly. We assert the call
-    /// arg is a `TypedExpression::Variable`, proving variable refs
-    /// flow through `f_string_expr → expr → primary_expr`.
+    /// `text(f"{count}")` — variable interpolation reaches `primary_expr`.
     #[test]
     fn parse_fstring_variable_ref() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -9584,8 +7424,7 @@ mod tests {
             panic!("expected Variable callee");
         };
         assert_eq!(name.resolve_global().as_deref(), Some("__fstring_format__"));
-        // The arg of __fstring_format__ should now be a Variable("count")
-        // rather than an integer literal.
+        // Arg is Variable("count"), not an int literal.
         assert_eq!(fmt_call.positional_args.len(), 1);
         let TypedExpression::Variable(arg_name) = &fmt_call.positional_args[0].node else {
             panic!(
@@ -9596,13 +7435,7 @@ mod tests {
         assert_eq!(arg_name.resolve_global().as_deref(), Some("count"));
     }
 
-    /// `count = count + 1` inside a method body. Lowers to a
-    /// `TypedStatement::Expression` wrapping `Binary(Variable, Assign,
-    /// Binary(Variable, Add, IntLiteral))`. The Class's reactivity
-    /// marker (`State<i32>`) is irrelevant here — at parse time
-    /// assignment is just an Assign Binary, regardless of whether the
-    /// target is reactive. The compiler / a later pass decides whether
-    /// to lower to `count.set(count.get() + 1)`.
+    /// `count = count + 1` parses as `Binary(Var, Assign, Binary(Var, Add, Int))`.
     #[test]
     fn parse_assignment_state_mutation() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -9630,7 +7463,6 @@ mod tests {
             })
             .expect("expected an Impl decl");
 
-        // Find the on_click method.
         let on_click = impl_block
             .methods
             .iter()
@@ -9645,7 +7477,6 @@ mod tests {
             body.statements
         );
 
-        // Statement: Expression(Binary(Variable("count"), Assign, ...)).
         let TypedStatement::Expression(expr_node) = &body.statements[0].node else {
             panic!("expected Expression stmt");
         };
@@ -9658,13 +7489,11 @@ mod tests {
             outer.op
         );
 
-        // LHS: Variable("count").
         let TypedExpression::Variable(target) = &outer.left.node else {
             panic!("expected Variable target, got {:?}", outer.left.node);
         };
         assert_eq!(target.resolve_global().as_deref(), Some("count"));
 
-        // RHS: Binary(Variable("count"), Add, IntLiteral(1)).
         let TypedExpression::Binary(rhs) = &outer.right.node else {
             panic!("expected RHS Binary, got {:?}", outer.right.node);
         };
@@ -9683,11 +7512,7 @@ mod tests {
         assert_eq!(*n, 1);
     }
 
-    /// Multiplicative binds tighter than additive: `1 + 2 * 3` should
-    /// parse as `Binary(1, Add, Binary(2, Mul, 3))`, not
-    /// `Binary(Binary(1, Add, 2), Mul, 3)`. Pinning this so a future
-    /// well-meaning grammar refactor doesn't accidentally flatten the
-    /// precedence ladder.
+    /// `1 + 2 * 3` parses with Mul binding tighter than Add.
     #[test]
     fn parse_arithmetic_precedence() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -9727,7 +7552,6 @@ mod tests {
         let TypedExpression::Binary(assign) = &node.node else {
             panic!("expected Binary");
         };
-        // RHS is Add at the top with Mul nested on the right.
         let TypedExpression::Binary(add) = &assign.right.node else {
             panic!("RHS should be Binary(Add)");
         };
@@ -9750,10 +7574,7 @@ mod tests {
         );
     }
 
-    /// Parens override precedence: `(1 + 2) * 3` should parse as
-    /// `Binary(Binary(1, Add, 2), Mul, 3)`. Confirms `paren_expr`
-    /// passes its inner expression straight through (no wrapper node)
-    /// and feeds the multiplicative chain.
+    /// `(1 + 2) * 3` — parens override precedence; `paren_expr` is a pass-through.
     #[test]
     fn parse_paren_grouping() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -9794,8 +7615,6 @@ mod tests {
         let TypedExpression::Binary(assign) = &node.node else {
             panic!("expected assign");
         };
-        // RHS top-level should be Mul; the LHS of Mul is the
-        // (1 + 2) Add subtree.
         let TypedExpression::Binary(mul) = &assign.right.node else {
             panic!("RHS should be Binary, got {:?}", assign.right.node);
         };
@@ -9810,16 +7629,7 @@ mod tests {
         assert!(matches!(add.op, zyntax_typed_ast::BinaryOp::Add));
     }
 
-    /// `let derived = count + 1` — immutable local binding.
-    /// Lowers to `TypedStatement::Let` with `mutability ==
-    /// Immutable`, `ty == Type::Any` (no annotation, compiler
-    /// infers), and an initializer Binary expression.
-    ///
-    /// Why we test this end-to-end: the grammar action reads
-    /// `is_mutable: false` / `type_annotation: None`, but the
-    /// interpreter's "Let" construction
-    /// (runtime2/interpreter.rs:381-403) rewrites those into the
-    /// real TypedLet shape. Easy to break by changing field names.
+    /// `let derived = count + 1` lowers to immutable `TypedStatement::Let`.
     #[test]
     fn parse_let_binding() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -9877,11 +7687,7 @@ mod tests {
         assert!(matches!(add.op, zyntax_typed_ast::BinaryOp::Add));
     }
 
-    /// `if count > 0 { text("positive") } else { text("zero") }` —
-    /// conditional rendering. Asserts (a) `>` parses as a
-    /// comparison Binary at the condition, (b) both branches
-    /// produce TypedBlocks with the right number of statements,
-    /// (c) the else_block is populated.
+    /// `if count > 0 { … } else { … }` parses with comparison condition + both branches.
     #[test]
     fn parse_if_else_with_comparison() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -9927,7 +7733,6 @@ mod tests {
             panic!("expected If, got {:?}", view.statements[0].node);
         };
 
-        // Condition is `count > 0` — Binary with BinaryOp::Gt.
         let TypedExpression::Binary(cond) = &if_stmt.condition.node else {
             panic!("expected Binary condition");
         };
@@ -9937,9 +7742,7 @@ mod tests {
             cond.op
         );
 
-        // then-branch has one text("positive") stmt.
         assert_eq!(if_stmt.then_block.statements.len(), 1);
-        // else-branch present, also one stmt.
         let else_block = if_stmt.else_block.as_ref().expect("expected else branch");
         assert_eq!(else_block.statements.len(), 1);
     }
@@ -9989,14 +7792,7 @@ mod tests {
         }
     }
 
-    /// ES6-style namespacing: `LoaderState.Loading` parses via
-    /// the existing postfix field-access layer as
-    /// `Field { object: Variable("LoaderState"), field: "Loading" }`.
-    /// No path/`::` grammar is required — the compiler / type
-    /// resolver decides at lowering time whether `LoaderState` is
-    /// an enum type (variant access) or a regular value (field
-    /// access). Same AST shape either way; matches the
-    /// JS / TypeScript mental model the DSL targets.
+    /// `LoaderState.Loading` parses as `Field { object: Variable, field }`.
     #[test]
     fn parse_dot_namespacing_via_field_access() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10051,8 +7847,7 @@ mod tests {
         assert_eq!(obj_name.resolve_global().as_deref(), Some("LoaderState"));
     }
 
-    /// `a && b` lowers to `Binary(_, And, _)`. Single AND case;
-    /// the next test covers precedence with OR.
+    /// `a && b` lowers to `Binary(_, And, _)`.
     #[test]
     fn parse_logical_and() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10109,10 +7904,7 @@ mod tests {
         assert!(matches!(rhs.op, zyntax_typed_ast::BinaryOp::Lt));
     }
 
-    /// `a || b && c` parses with AND binding tighter than OR:
-    /// top op is Or, RHS is `Binary(b, And, c)`. Pinning the
-    /// precedence ladder so a future grammar refactor can't flip
-    /// `||` and `&&`.
+    /// `a || b && c` — AND binds tighter than OR.
     #[test]
     fn parse_logical_or_and_precedence() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10170,11 +7962,7 @@ mod tests {
         );
     }
 
-    /// Method-call expressions parse via the postfix layer.
-    /// `count.get()` lowers to TypedExpression::MethodCall with
-    /// receiver=Variable("count"), method="get", no args. This is
-    /// the shape state-field reads will take once the deps-list
-    /// view + ViewCtx::get(N) → State<T> chain is wired.
+    /// `count.get()` parses as `MethodCall { receiver, method, [] }`.
     #[test]
     fn parse_method_call_no_args() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10225,8 +8013,6 @@ mod tests {
     }
 
     /// `ctx.get(0)` — method call with one positional arg.
-    /// Confirms `call_args_list` parses comma-separated args and
-    /// the integer literal flows through.
     #[test]
     fn parse_method_call_with_arg() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10277,12 +8063,7 @@ mod tests {
         assert_eq!(*n, 0);
     }
 
-    /// Method calls compose with comparisons: `count.get() > 0`
-    /// parses as Binary(MethodCall, Gt, IntLiteral). Pinning the
-    /// precedence — postfix should bind tighter than binary
-    /// operators, so the method-call subtree is on the LHS of the
-    /// comparison rather than the comparison being inside the
-    /// method's args.
+    /// `count.get() > 0` parses as `Binary(MethodCall, Gt, Int)` — postfix > binary.
     #[test]
     fn parse_method_call_in_condition() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10323,19 +8104,12 @@ mod tests {
             panic!("expected Binary condition");
         };
         assert!(matches!(cmp.op, zyntax_typed_ast::BinaryOp::Gt));
-        // LHS is the method call.
         let TypedExpression::MethodCall(_) = &cmp.left.node else {
             panic!("expected MethodCall on LHS, got {:?}", cmp.left.node);
         };
     }
 
-    /// `view([state1]) {|ctx| stmts}` — explicit-deps closure form.
-    /// Lowers to a function `view(ctx)` whose body starts with a
-    /// synthesised `__view_deps__(state1)` marker call, followed
-    /// by the user's stmts. Asserts (a) the function has one
-    /// parameter named "ctx", (b) the first statement is the
-    /// marker call carrying the right deps, (c) user stmts come
-    /// after the marker.
+    /// `view([deps]) {|ctx| ...}` → `view(ctx)` with leading `__view_deps__(...)` marker.
     #[test]
     fn parse_view_with_deps() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10380,7 +8154,6 @@ mod tests {
         );
         assert_eq!(view.params[0].name.resolve_global().as_deref(), Some("ctx"));
 
-        // (b) first body stmt is `__view_deps__(count, width)`.
         let body = view.body.as_ref().expect("view body");
         assert!(
             body.statements.len() >= 2,
@@ -10408,7 +8181,6 @@ mod tests {
             marker.positional_args
         );
 
-        // (c) marker args are Variable refs with the right names.
         for (i, expected) in ["count", "width"].iter().enumerate() {
             let TypedExpression::Variable(name) = &marker.positional_args[i].node else {
                 panic!("expected Variable arg at {}", i);
@@ -10416,8 +8188,6 @@ mod tests {
             assert_eq!(name.resolve_global().as_deref(), Some(*expected));
         }
 
-        // (d) user statements follow the marker. body[1] should be
-        // the `let c = ctx.get(0)` stmt.
         let TypedStatement::Let(_) = &body.statements[1].node else {
             panic!(
                 "expected user `let` stmt after marker, got {:?}",
@@ -10426,10 +8196,7 @@ mod tests {
         };
     }
 
-    /// Plain `view { stmts }` still works alongside the deps form
-    /// — `view_member` is `view_with_deps | view_simple`. The
-    /// simple form should produce a parameterless function with
-    /// no `__view_deps__` marker.
+    /// Plain `view { ... }` parses as a no-param fn with no `__view_deps__` marker.
     #[test]
     fn parse_view_simple_still_works() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10460,10 +8227,7 @@ mod tests {
             .iter()
             .find(|m| m.name.resolve_global().as_deref() == Some("view"))
             .unwrap();
-        // No params on the simple form.
         assert_eq!(view.params.len(), 0);
-        // No marker — first stmt is the user's text("hi"), not a
-        // __view_deps__ call.
         let body = view.body.as_ref().unwrap();
         let TypedStatement::Expression(first) = &body.statements[0].node else {
             panic!("expected Expression stmt");
@@ -10481,12 +8245,7 @@ mod tests {
         );
     }
 
-    /// `if a { ... } else if b { ... } else { ... }` lowers to a
-    /// recursive nested-If shape: the outer If's else_block holds a
-    /// single-statement block whose only statement is another If
-    /// (with its own else_block holding the final block). Pinning
-    /// the shape so a future grammar refactor doesn't break the
-    /// chain wrapping convention.
+    /// `if/else if/else` lowers to recursive nested-If shape.
     #[test]
     fn parse_else_if_chain() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10530,8 +8289,6 @@ mod tests {
             "view body holds the single outer If"
         );
 
-        // Outer If: condition `count > 100`, then `text("big")`,
-        // else_block is a single-stmt block wrapping the next If.
         let TypedStatement::If(outer) = &view.statements[0].node else {
             panic!("expected outer If");
         };
@@ -10542,8 +8299,6 @@ mod tests {
             "else block should hold one statement (the chained If)"
         );
 
-        // Chained If: condition `count > 10`, then `text("medium")`,
-        // else_block is a one-stmt block with `text("small")`.
         let TypedStatement::If(chained) = &outer_else.statements[0].node else {
             panic!("expected chained If as the only stmt in outer else");
         };
@@ -10556,7 +8311,6 @@ mod tests {
         };
         assert_eq!(*n, 10);
 
-        // Tail else.
         let tail_else = chained.else_block.as_ref().expect("chained else (tail)");
         assert_eq!(
             tail_else.statements.len(),
@@ -10565,9 +8319,7 @@ mod tests {
         );
     }
 
-    /// 4-arm chain `if / else if / else if / else if / else` walks
-    /// to nested depth 4. Pinning that PEG recursion in `if_stmt`
-    /// doesn't bottom out at any chain length.
+    /// 4-arm `if/else if`-chain walks to nested depth 4.
     #[test]
     fn parse_else_if_chain_deep() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10608,8 +8360,6 @@ mod tests {
             .as_ref()
             .unwrap();
 
-        // Walk down the chain — each level should hold a single
-        // `If` in its else_block, with a final tail `else`.
         let mut depth = 0;
         let mut current = match &view_body.statements[0].node {
             TypedStatement::If(i) => i,
@@ -10621,7 +8371,6 @@ mod tests {
                 .else_block
                 .as_ref()
                 .unwrap_or_else(|| panic!("level {depth}: expected an else"));
-            // If the only stmt in else is another If, descend.
             if else_block.statements.len() == 1 {
                 if let TypedStatement::If(next) = &else_block.statements[0].node {
                     current = next;
@@ -10633,9 +8382,7 @@ mod tests {
         assert_eq!(depth, 4, "expected 4 chained Ifs before the tail else");
     }
 
-    /// `else if` without trailing else: `if A { } else if B { }`.
-    /// The chained inner If has `else_block: None`. Pinning the
-    /// no-tail-else case so the recursion handles it correctly.
+    /// `if A { } else if B { }` — chained inner If has `else_block: None`.
     #[test]
     fn parse_else_if_no_trailing_else() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10686,9 +8433,7 @@ mod tests {
         );
     }
 
-    /// `if count > 0 { ... }` with no else — `else_block` is None.
-    /// Pinning the simple form so a future "always emit empty
-    /// else" refactor doesn't sneak in.
+    /// `if … { … }` with no else has `else_block: None`.
     #[test]
     fn parse_if_no_else() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10731,18 +8476,9 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // FSM declaration tests — `fsm Name { state X, initial Y, on
-    // X.Event -> Z }`. Verify the grammar emits the right two-decl
-    // shape (Enum + Impl) and the metadata marker calls inside
-    // `__fsm_meta__`.
-    // -----------------------------------------------------------------
+    // FSM declaration tests.
 
-    /// `fsm Loader { ... }` emits BOTH a TypedDeclaration::Enum
-    /// (states as variants) and a TypedDeclaration::Impl (carrying
-    /// the metadata via `__fsm_meta__`). Pinning that the
-    /// `concat_list` lowering shape stays right — easy to break by
-    /// switching list helpers during a refactor.
+    /// `fsm Name { … }` emits both Enum (states) and Impl (carrying `__fsm_meta__`).
     #[test]
     fn parse_fsm_emits_enum_and_impl() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10783,7 +8519,6 @@ mod tests {
                 .map(|v| v.name.resolve_global())
                 .collect::<Vec<_>>()
         );
-        // Variant names match.
         for (i, expected) in ["Idle", "Loading", "Done"].iter().enumerate() {
             assert_eq!(
                 enum_decl.variants[i].name.resolve_global().as_deref(),
@@ -10792,7 +8527,6 @@ mod tests {
             );
         }
 
-        // Inherent Impl with a single `__fsm_meta__` method.
         let impl_block = program
             .declarations
             .iter()
@@ -10812,18 +8546,8 @@ mod tests {
         );
     }
 
-    /// `__fsm_meta__` body layout after both post-parse passes:
-    ///
-    ///     [0] __fsm_begin__("FsmName")
-    ///     [1] __fsm_initial__("InitialState")
-    ///     [2..n-1] __fsm_transition__ / __fsm_tick__ markers
-    ///     [n-1] __fsm_end__()
-    ///
-    /// Begin/end wrap the body so the host knows which fsm owns
-    /// the markers in between. This test pins (a) the begin
-    /// marker is at body[0] with the right FSM name, (b) the
-    /// initial marker is at body[1] with the right state name,
-    /// (c) the end marker is at the last index.
+    /// `__fsm_meta__` body: `__fsm_begin__("FsmName")` first, `__fsm_initial__("State")`
+    /// next, then transitions, `__fsm_end__()` last.
     #[test]
     fn parse_fsm_initial_marker() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10855,7 +8579,6 @@ mod tests {
         let meta = &impl_block.methods[0];
         let body = meta.body.as_ref().expect("__fsm_meta__ body");
 
-        // Helper to extract (callee, args) at a given index.
         let extract = |idx: usize| -> (String, Vec<String>) {
             let TypedStatement::Expression(node) = &body.statements[idx].node else {
                 panic!("expected Expression stmt at [{idx}]");
@@ -10894,12 +8617,7 @@ mod tests {
         assert!(end_args.is_empty(), "__fsm_end__ takes no args");
     }
 
-    /// Each `on State.Event -> Next` lowers to one
-    /// `__fsm_transition__("State", "Event", "Next")` marker call.
-    /// Verifies all three string args carry the right names and the
-    /// markers appear after the initial-state marker (preserving
-    /// declaration order so the runtime can interpret them
-    /// sequentially).
+    /// `on State.Event -> Next` lowers to `__fsm_transition__("State", "Event", "Next")`.
     #[test]
     fn parse_fsm_transitions() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -10932,7 +8650,7 @@ mod tests {
             .unwrap();
         let body = impl_block.methods[0].body.as_ref().unwrap();
 
-        // begin + initial + 3 transitions + end = 6 stmts.
+        // begin + initial + 3 transitions + end.
         assert_eq!(
             body.statements.len(),
             6,
@@ -10947,8 +8665,7 @@ mod tests {
         ];
 
         for (i, (from, event, to)) in expected_transitions.iter().enumerate() {
-            // Body layout: [0]=begin, [1]=initial, [2..]=transitions,
-            // [last]=end. Transitions start at body[2].
+            // [0]=begin, [1]=initial, [2..]=transitions, [last]=end.
             let stmt = &body.statements[i + 2].node;
             let TypedStatement::Expression(node) = stmt else {
                 panic!("expected Expression stmt at index {}", i + 1);
@@ -10987,14 +8704,7 @@ mod tests {
         }
     }
 
-    /// `tick From -> To when <expr>` — data-guarded transition.
-    /// Lowers to a `__fsm_tick__("From", <guard expr>, "To")`
-    /// marker call. The middle arg is the raw expression (NOT a
-    /// string literal) because the runtime/compiler reads it to
-    /// lower into the body of the `StateTransitions::on_tick`
-    /// impl. Pinning all three arg shapes: from is a string lit,
-    /// guard is a Binary (the expression survives parsing intact),
-    /// to is a string lit.
+    /// `tick From -> To when <expr>` lowers to `__fsm_tick__("From", <expr>, "To")`.
     #[test]
     fn parse_fsm_tick_transition() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -11024,7 +8734,7 @@ mod tests {
             .unwrap();
         let body = impl_block.methods[0].body.as_ref().unwrap();
 
-        // begin + initial + tick + end = 4 stmts. Tick is at body[2].
+        // begin + initial + tick + end. Tick at body[2].
         assert_eq!(body.statements.len(), 4);
         let TypedStatement::Expression(node) = &body.statements[2].node else {
             panic!("expected Expression stmt at body[2]");
@@ -11042,14 +8752,13 @@ mod tests {
         );
         assert_eq!(call.positional_args.len(), 3, "expected (from, guard, to)");
 
-        // arg 0: from = "Loading" string literal.
         let TypedExpression::Literal(TypedLiteral::String(from)) = &call.positional_args[0].node
         else {
             panic!("expected string literal arg 0");
         };
         assert_eq!(from.resolve_global().as_deref(), Some("Loading"));
 
-        // arg 1: guard = Binary(MethodCall, Gt, IntLiteral(100)).
+        // arg 1: guard = `Binary(MethodCall, Gt, IntLiteral(100))`.
         let TypedExpression::Binary(bin) = &call.positional_args[1].node else {
             panic!(
                 "expected Binary guard expression, got {:?}",
@@ -11069,7 +8778,6 @@ mod tests {
         };
         assert_eq!(*n, 100);
 
-        // arg 2: to = "Done" string literal.
         let TypedExpression::Literal(TypedLiteral::String(to)) = &call.positional_args[2].node
         else {
             panic!("expected string literal arg 2");
@@ -11077,11 +8785,7 @@ mod tests {
         assert_eq!(to.resolve_global().as_deref(), Some("Done"));
     }
 
-    /// Mixed event and tick transitions in the same fsm — both
-    /// shapes coexist inside `__fsm_meta__`. Pinning declaration
-    /// order survives so the runtime can interpret transitions
-    /// sequentially (event-driven and data-guarded share priority,
-    /// resolved by the order users wrote them).
+    /// Event + tick transitions coexist in `__fsm_meta__` in declaration order.
     #[test]
     fn parse_fsm_mixed_event_and_tick() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -11114,10 +8818,8 @@ mod tests {
             .unwrap();
         let body = impl_block.methods[0].body.as_ref().unwrap();
 
-        // begin + initial + 3 transitions + end = 6.
         assert_eq!(body.statements.len(), 6);
 
-        // Helper to read a marker callee name from a stmt.
         let callee_at = |idx: usize| -> String {
             let TypedStatement::Expression(node) = &body.statements[idx].node else {
                 panic!("expected Expression at {idx}");
@@ -11174,7 +8876,6 @@ mod tests {
             .unwrap();
         let body = impl_block.methods[0].body.as_ref().unwrap();
 
-        // Body[0] = __fsm_begin__("Loader")
         let TypedStatement::Expression(begin_node) = &body.statements[0].node else {
             panic!("expected Expression at body[0]");
         };
@@ -11199,7 +8900,6 @@ mod tests {
             "__fsm_begin__ should carry the fsm's own name"
         );
 
-        // Last stmt = __fsm_end__()
         let last = body.statements.len() - 1;
         let TypedStatement::Expression(end_node) = &body.statements[last].node else {
             panic!("expected Expression at last");
@@ -11217,13 +8917,7 @@ mod tests {
         );
     }
 
-    /// Post-parse synthesis: an fsm with event-driven transitions
-    /// gets a sibling `<FSM>Event` enum appended to the program's
-    /// declarations. Variants are the unique event names from the
-    /// FSM's `__fsm_transition__` markers, in declaration order.
-    /// Pinning that the bridge between user-facing event names
-    /// (`Start`, `Reset`) and `StateTransitions::on_event(u32)` is
-    /// emitted at parse time, ready for codegen.
+    /// FSM with transitions gets sibling `<FSM>Event` enum synthesised.
     #[test]
     fn synthesize_event_enum_basic() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -11246,8 +8940,7 @@ mod tests {
             )
             .expect("parse");
 
-        // Two enums in the program: the state enum (Loader) and
-        // the synthesised event enum (LoaderEvent).
+        // State enum (Loader) + synthesised event enum (LoaderEvent).
         let enums: Vec<_> = program
             .declarations
             .iter()
@@ -11286,10 +8979,7 @@ mod tests {
         }
     }
 
-    /// Duplicate event names across transitions (e.g. `Click`
-    /// reused on multiple from-states) get deduped — the event
-    /// enum has at most one variant per unique name. Order is the
-    /// first-seen position.
+    /// Duplicate event names dedup to one variant (first-seen order).
     #[test]
     fn synthesize_event_enum_dedup() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -11331,10 +9021,7 @@ mod tests {
         );
     }
 
-    /// Tick-only fsm has no `__fsm_transition__` markers and so
-    /// gets no event enum synthesised. The state enum + impl are
-    /// the only fsm-related decls. Confirms the pass doesn't emit
-    /// an empty stub when there are no events.
+    /// Tick-only FSM gets no event enum synthesised.
     #[test]
     fn synthesize_no_event_enum_for_tick_only_fsm() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -11371,9 +9058,7 @@ mod tests {
         assert_eq!(enums[0].name.resolve_global().as_deref(), Some("Progress"));
     }
 
-    /// `fsm` with no transitions still parses — useful for the
-    /// degenerate "states without yet-defined behaviour" stub. The
-    /// body should have exactly the initial marker, no transitions.
+    /// FSM with no transitions parses — body has only begin/initial/end.
     #[test]
     fn parse_fsm_no_transitions() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -11405,7 +9090,6 @@ mod tests {
             })
             .unwrap();
         let body = impl_block.methods[0].body.as_ref().unwrap();
-        // begin + initial + end = 3.
         assert_eq!(
             body.statements.len(),
             3,
@@ -11413,14 +9097,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // FsmRegistry data-structure tests. These verify the registry's
-    // public API in isolation. The end-to-end "compile a fsm
-    // source, see registry populate" path lands in the next commit
-    // when the host marker builtins are wired up — for now we
-    // exercise upsert/get/remove/iter directly so the API is pinned
-    // before integration arrives.
-    // -----------------------------------------------------------------
+    // FsmRegistry data-structure tests.
 
     use zyntax_typed_ast::type_registry::TypeId;
     use zyntax_typed_ast::InternedString;
@@ -11436,11 +9113,7 @@ mod tests {
         InternedString::new_global(s)
     }
 
-    /// Distinct `FsmId`s (different modules, same TypeId) hash and
-    /// compare distinctly so two same-named fsms in different
-    /// modules don't collide. Same TypeId across modules can happen
-    /// because TypeIds come from a process-global counter — pinning
-    /// the (module, type_id) tuple semantics.
+    /// `FsmId` distinguishes by module (different modules, same TypeId → different ids).
     #[test]
     fn fsm_id_disambiguates_by_module() {
         let a = fid("foo", 7);
@@ -11450,9 +9123,7 @@ mod tests {
         assert_eq!(a, c, "same (module, type_id) → equal");
     }
 
-    /// Upsert + get round-trip with the expected shape, including
-    /// the initial state, transitions, and tick guards. Exercises
-    /// the bulk of the data API.
+    /// Upsert + get round-trips initial state, transitions, tick guards.
     #[test]
     fn fsm_registry_upsert_get() {
         let mut registry = FsmRegistry::new();
@@ -11491,9 +9162,7 @@ mod tests {
         assert_eq!(got.name, Some(intern("Loader")));
     }
 
-    /// Re-inserting the same id replaces the entry (used by
-    /// hot-reload paths). Pinning that the second upsert wins so
-    /// stale state from prior runs doesn't leak.
+    /// Re-inserting the same id replaces the entry (second upsert wins).
     #[test]
     fn fsm_registry_upsert_replaces() {
         let mut registry = FsmRegistry::new();
@@ -11518,9 +9187,7 @@ mod tests {
         assert_eq!(got.initial, Some(intern("V2")), "second upsert should win");
     }
 
-    /// `remove` drops the entry and returns the prior value;
-    /// subsequent `get` returns None. Mirrors the hot-reload-of-a-
-    /// removed-fsm scenario where dispatch should fail loudly.
+    /// `remove` returns the prior value and `get` returns None after.
     #[test]
     fn fsm_registry_remove() {
         let mut registry = FsmRegistry::new();
@@ -11538,18 +9205,13 @@ mod tests {
         assert!(registry.get(&id).is_none(), "remove should drop the entry");
     }
 
-    /// End-to-end: compiling a fsm-bearing program populates the
-    /// global FsmRegistry. Pinning that the (module, TypeId) →
-    /// FsmDefinition wiring works through compile_source. Each test
-    /// scopes by a unique fsm name so the global registry doesn't
-    /// collide across tests in the same process.
+    /// `compile_source` populates the global FsmRegistry (module + TypeId wiring).
     #[test]
     fn compile_source_populates_fsm_registry() {
         let _ = tracing_subscriber::fmt::try_init();
 
         let dsl = BlincDsl::new().expect("runtime init");
-        // Distinct fsm name per test to avoid stepping on the global
-        // registry from concurrent test runs.
+        // Distinct fsm name per test to avoid global-registry collisions.
         dsl.compile_source(
             r#"
             fsm RegistryProbeA {
@@ -11565,8 +9227,6 @@ mod tests {
         )
         .expect("compile");
 
-        // Find the registry entry by name (we don't know the
-        // assigned TypeId from outside).
         let module = InternedString::new_global("main");
         let probe = with_fsm_registry(|r| {
             r.iter()
@@ -11599,23 +9259,13 @@ mod tests {
         );
     }
 
-    /// Each tick guard lifts into a stand-alone top-level
-    /// function. The function name lands on the TickGuard so
-    /// future dispatch can resolve it via `runtime.call::<bool>`.
-    /// Pinning the naming convention
-    /// (`__fsm_tick_guard_<Fsm>_<idx>__`) so a future refactor
-    /// that changes the format breaks loudly here.
+    /// Tick guards lift to top-level fns named `__fsm_tick_guard_<Fsm>_<idx>__`.
     #[test]
     fn compile_source_lifts_tick_guards_to_functions() {
         let _ = tracing_subscriber::fmt::try_init();
 
         let dsl = BlincDsl::new().expect("runtime init");
-        // Two tick guards on the same fsm so we exercise the
-        // index suffix — guard 0 and guard 1. Guards use bare
-        // integer comparisons so the lifted bodies don't need
-        // signal/symbol resolution we haven't wired up yet (the
-        // shape we care about here is the lifting + naming, not
-        // dispatch evaluation).
+        // Two guards on same fsm to exercise the index suffix.
         let function_names = dsl
             .compile_source(
                 r#"
@@ -11632,8 +9282,6 @@ mod tests {
             )
             .expect("compile");
 
-        // Both guard functions should appear in the compiled
-        // function-name list returned from compile_source.
         assert!(
             function_names
                 .iter()
@@ -11649,8 +9297,6 @@ mod tests {
             function_names
         );
 
-        // And the registry entry should reference both names on
-        // its TickGuard records.
         let module = InternedString::new_global("main");
         let def = with_fsm_registry(|r| {
             r.iter()
@@ -11681,9 +9327,6 @@ mod tests {
     }
 
     /// Tick guards land in the registry alongside event transitions.
-    /// Pinning that the marker walker recognises `__fsm_tick__` and
-    /// extracts the (from, to) pair (the guard expression itself is
-    /// stripped for now — see `TickGuard` doc).
     #[test]
     fn compile_source_records_tick_guards_in_registry() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -11730,10 +9373,7 @@ mod tests {
         );
     }
 
-    /// Dispatch round-trip: compile a fsm, find it by name, walk a
-    /// full transition cycle, verify each step lands on the
-    /// expected state. End-to-end coverage of the dispatch API
-    /// against a registry populated by `compile_source`.
+    /// Dispatch round-trip: compile fsm, find by name, walk full transition cycle.
     #[test]
     fn dispatch_round_trip() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -11757,8 +9397,6 @@ mod tests {
 
         let module = InternedString::new_global("main");
 
-        // find_by_name resolves the (module, TypeId) from a bare
-        // string at the boundary.
         let id = with_fsm_registry(|r| r.find_by_name(module, "DispatchProbe"))
             .expect("DispatchProbe should be in the registry");
 
@@ -11784,11 +9422,7 @@ mod tests {
         );
     }
 
-    /// Non-matching transitions return `None`. Three failure modes
-    /// covered: unknown event, wrong from-state, and unknown fsm
-    /// id. Pinning these together ensures callers can use
-    /// `Option::is_some` as a "transition is legal" predicate
-    /// without false positives.
+    /// Non-matching dispatches return `None` (unknown event, wrong from, phantom id).
     #[test]
     fn dispatch_misses_return_none() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -11812,19 +9446,12 @@ mod tests {
         let id = with_fsm_registry(|r| r.find_by_name(module, "DispatchMissProbe"))
             .expect("DispatchMissProbe should be in the registry");
 
-        // (a) unknown event for the current state.
         let miss = with_fsm_registry(|r| r.step_event(&id, "Off", "DoesNotExist"));
         assert!(miss.is_none(), "unknown event should miss");
 
-        // (b) right event but wrong from-state.
-        //     Click is defined on Off and On but not on a state
-        //     that doesn't exist — verify the from-match isn't
-        //     loose.
         let miss = with_fsm_registry(|r| r.step_event(&id, "Nowhere", "Click"));
         assert!(miss.is_none(), "wrong from-state should miss");
 
-        // (c) unknown fsm id (TypeId that doesn't correspond to a
-        //     registered fsm).
         let phantom = FsmId {
             module,
             type_id: TypeId::new(u32::MAX),
@@ -11833,33 +9460,14 @@ mod tests {
         assert!(miss.is_none(), "phantom fsm id should miss");
     }
 
-    /// Serializer for tests that depend on the process-wide
-    /// `blinc_runtime::fsm::GuardDispatcher` slot. `BlincDsl::new()`
-    /// installs a JIT dispatcher pointing at its own runtime; if
-    /// two tests construct `BlincDsl` in parallel, the slot races
-    /// and a later `FsmStateId::on_tick` may dispatch into a
-    /// runtime that doesn't have the expected guard symbol. Tests
-    /// that route tick dispatch through the substrate take this
-    /// lock at entry; tests that drive `dsl.step_tick(...)`
-    /// directly don't need it (they hold the per-dsl runtime
-    /// mutex instead). Cleared automatically when the
-    /// `MutexGuard` drops at test exit.
+    /// Serialiser for tests that share the process-wide `GuardDispatcher` slot.
     static BRIDGE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// End-to-end: DSL component declarations publish into the
-    /// runtime-agnostic `blinc_runtime::component` substrate.
-    /// After `compile_source`, devtools / hot-reload / prop-
-    /// validator code can introspect components by name without
-    /// touching `BlincDsl` — same pattern as the FSM bridge.
+    /// DSL components publish into the runtime-agnostic `component` registry.
     #[test]
     fn publish_components_to_runtime_registry_round_trip() {
         let _ = tracing_subscriber::fmt::try_init();
-        // Serialize against other tests that write to the
-        // global `blinc_runtime::component::ComponentRegistry`
-        // — many tests compile `component Counter { ... }` of
-        // various shapes, and the publisher replaces by name
-        // (hot-reload semantics), so parallel runs race over
-        // which `Counter` definition is current.
+        // Serialise against parallel global-registry writes from other tests.
         let _guard = BRIDGE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -11879,12 +9487,7 @@ mod tests {
         )
         .expect("compile");
 
-        // Both components should be registered in the substrate
-        // under their unique-to-this-test names. Using
-        // distinctive names avoids the global-registry race
-        // where other tests' `component Counter { ... }` /
-        // `component Greeting { ... }` compilations overwrite
-        // ours under parallel test execution.
+        // Unique names avoid parallel-test races on the global registry.
         let counter = blinc_runtime::component::with_component_registry(|r| {
             r.get_by_name("RegistryRoundTripCounter").cloned()
         })
@@ -11916,13 +9519,7 @@ mod tests {
         assert_eq!(greeting.prop_count(), 0);
     }
 
-    /// End-to-end: a widget-shaped consumer (held as
-    /// `Arc<dyn ViewRenderer>` — no `BlincDsl` reference)
-    /// renders a DSL view and gets back the scene ops.
-    /// Mirrors how an actual app would store the renderer:
-    /// construct from `BlincDsl::view_renderer()` once at
-    /// startup, hand the `Arc` to widget code, never touch the
-    /// DSL crate again.
+    /// Widget consumer renders via `Arc<dyn ViewRenderer>` without a `BlincDsl` ref.
     #[test]
     fn jit_view_renderer_round_trip() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -11937,31 +9534,16 @@ mod tests {
         )
         .expect("compile");
 
-        // Cast to the substrate trait — proves the rest of this
-        // test couldn't reach for any `BlincDsl`-specific method
-        // if it wanted to.
         let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
 
-        // Bare view: `view { Greeting() }` runs Greeting's view
-        // (inlined by `lower_component_calls`'s child flatten).
-        // Substrate-public `render_main` returns `ZyntaxValue`
-        // (today `Void` — the legacy DslOp scene-buffer drain
-        // happens inside `BlincDsl::render_view` separately).
-        // Phase 2 of the pivot will make views return real
-        // widget trees here.
         let main_value = blinc_runtime::view::render_main(&renderer).expect("render_main");
         assert_eq!(main_value, ZyntaxValue::Void);
 
-        // Direct component invocation: same shape.
         let comp_value =
             blinc_runtime::view::render_component(&renderer, "Greeting").expect("render_component");
         assert_eq!(comp_value, ZyntaxValue::Void);
 
-        // Unknown component → `NotFound` (well — actually
-        // routes through Cranelift's symbol resolution and
-        // surfaces as `Backend` because that's how the JIT
-        // returns "no such symbol"). Pin whichever shape is
-        // produced so the contract is clear.
+        // Unknown component surfaces as `Backend` (Cranelift symbol resolution).
         let err = blinc_runtime::view::render_component(&renderer, "DoesNotExist")
             .expect_err("unknown component should error");
         assert!(
@@ -12010,30 +9592,19 @@ mod tests {
         );
     }
 
-    /// Rust → DSL interop: a user-defined widget registered via
-    /// `register_extern_widget` is callable from DSL source like
-    /// any built-in primitive. The extern wraps a real
-    /// `blinc_layout::Text` in `WidgetBox::Custom`; the round-trip
-    /// proves both the registration plumbing (JIT thunk + substrate
-    /// registry + value-returning-set entry) and the `Custom`
-    /// payload decode.
+    /// Rust→DSL: `register_extern_widget` makes a Rust widget callable from DSL.
     #[test]
     fn register_extern_widget_rust_to_dsl_round_trip() {
         let _ = tracing_subscriber::fmt::try_init();
 
-        // User-defined Rust extern. Convention: matches what the
-        // planned `#[extern_widget]` proc-macro would generate.
+        // Mirrors what `#[extern_widget]` would generate.
         extern "C" fn fancy_text_view(content_ptr: *const i32) -> i64 {
             if content_ptr.is_null() {
                 return 0;
             }
-            // SAFETY: Zyntax's String FFI hands the matching
-            // length-prefixed buffer when the registered param
-            // type is `String`.
+            // SAFETY: length-prefixed String buffer per param type.
             let content = unsafe { blinc_string_decode(content_ptr) };
             let widget = blinc_layout::text::Text::new(content);
-            // Land in the `Custom` variant — that's the path any
-            // non-`Text`/`Div` user widget takes.
             Box::into_raw(Box::new(WidgetBox::Custom(Box::new(widget)))) as i64
         }
 
@@ -12051,8 +9622,6 @@ mod tests {
         })
         .expect("register_extern_widget_spec");
 
-        // DSL source uses the user widget the same way it'd use a
-        // built-in primitive — no syntactic distinction.
         dsl.compile_source(
             r#"view { FancyText("registered widget") }"#,
             "fancy_text.blinc",
@@ -12067,21 +9636,16 @@ mod tests {
         };
         assert_ne!(handle, 0, "FancyText extern should return a real handle");
 
-        // SAFETY: handle came straight out of `fancy_text_view`
-        // above, which builds `WidgetBox::Custom(Box::new(Text))`.
+        // SAFETY: handle from fancy_text_view → `WidgetBox::Custom(Box::new(Text))`.
         let widget =
             unsafe { materialize_widget(handle) }.expect("non-null handle should decode to Some");
         assert!(
             matches!(*widget, WidgetBox::Custom(_)),
-            "expected WidgetBox::Custom — the variant user widgets land in"
+            "expected WidgetBox::Custom"
         );
     }
 
-    /// DSL → Rust interop: a DSL-declared component is buildable
-    /// from Rust code via `dsl.query(...)`. Compiles a
-    /// `component MyContainer { view { Div() } }`, then queries it
-    /// from Rust and asserts the returned
-    /// `Box<dyn ElementBuilder>` reports itself as a `Div`.
+    /// DSL→Rust: `dsl.query(...)` returns a `Box<dyn ElementBuilder>` for a DSL component.
     #[test]
     fn query_dsl_component_returns_element_builder() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12105,10 +9669,7 @@ mod tests {
         );
     }
 
-    /// Querying a component whose view ends in a non-primitive
-    /// call (so it doesn't get the value-returning rewrite) errors
-    /// rather than silently returning garbage. Pins the "only
-    /// value-returning views are queryable" contract.
+    /// `query()` errors on Unit-returning views (only value-returning are queryable).
     #[test]
     fn query_legacy_unit_returning_component_errors() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12124,8 +9685,7 @@ mod tests {
         )
         .expect("compile");
 
-        // `Box<dyn ElementBuilder>` isn't `Debug`, so use the
-        // err() projection rather than `expect_err`.
+        // `Box<dyn ElementBuilder>` isn't `Debug` — use `.err()`, not `expect_err`.
         let err = dsl
             .query("LegacyGreeting", &[])
             .err()
@@ -12137,8 +9697,7 @@ mod tests {
         );
     }
 
-    /// Querying a name that isn't registered surfaces a clear
-    /// diagnostic rather than crashing in the JIT linker.
+    /// `query()` on an unknown name returns a clear diagnostic.
     #[test]
     fn query_unknown_component_errors_with_helpful_message() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12155,13 +9714,7 @@ mod tests {
         );
     }
 
-    /// End-to-end children plumbing: `view { Div() { Text("a")
-    /// Text("b") } }` builds a real `blinc_layout::Div` whose
-    /// `children_builders()` returns the two `Text` widgets in
-    /// source order. Pins the
-    /// `lower_children_arrays_to_blocks` →
-    /// `__new_child_list__` / `__push_child__` →
-    /// `blinc_div_view` consume-and-fold path.
+    /// End-to-end: `Div { Text() Text() }` produces a Div with two Text children.
     #[test]
     fn jit_view_renderer_div_with_text_children_composes() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12188,8 +9741,7 @@ mod tests {
         };
         assert_ne!(handle, 0, "Div view should return a real handle");
 
-        // Div now lands in Custom(Styled<Div>). The Styled
-        // wrapper delegates `children_builders` to the inner.
+        // Div lands in `Custom(Styled<Div>)`; Styled forwards `children_builders`.
         let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
         let WidgetBox::Custom(builder) = *widget else {
             panic!("expected WidgetBox::Custom (Styled<Div>)");
@@ -12197,12 +9749,7 @@ mod tests {
         assert_eq!(builder.children_builders().len(), 2);
     }
 
-    /// Nested container composition: `Div { Div { Text } }`
-    /// round-trips correctly. The inner Div has 1 Text child,
-    /// the outer Div has 1 Div child. Pins recursive
-    /// `lower_children_arrays_to_blocks` behaviour — each
-    /// nesting level mints its own `__blinc_children_<N>` list
-    /// without leaking into siblings.
+    /// `Div { Div { Text } }` round-trips — each nesting level mints its own child-list.
     #[test]
     fn jit_view_renderer_div_nested_div_composes() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12229,8 +9776,6 @@ mod tests {
         };
         assert_ne!(handle, 0);
 
-        // Outer Div lands in Custom(Styled<Div>). The Styled
-        // wrapper delegates children to the inner Div.
         let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
         let WidgetBox::Custom(outer) = *widget else {
             panic!("outer should be a Custom(Styled<Div>)");
@@ -12238,11 +9783,7 @@ mod tests {
         let outer_children = outer.children_builders();
         assert_eq!(outer_children.len(), 1, "outer Div should have 1 child");
 
-        // Inner Div is also a Styled<Div> with 1 Text child;
-        // `Styled<W>::build` delegates so the element_type_id
-        // reflects whatever the inner widget reports — for an
-        // inner Div from `blinc_layout::div::Div::new()` that's
-        // `ElementTypeId::Div`.
+        // Inner is a Styled<Div>; `element_type_id` delegates to the inner Div.
         let inner = &outer_children[0];
         assert_eq!(
             inner.element_type_id(),
@@ -12278,8 +9819,7 @@ mod tests {
         assert_eq!(props.opacity, 0.5);
         assert!(props.background.is_some(), "background should be set");
         if let Some(blinc_core::layer::Brush::Solid(c)) = props.background {
-            // 16711680 = 0xFF0000 → red. Compare via channels
-            // since Color doesn't impl PartialEq.
+            // 16711680 = 0xFF0000 = red. Color has no PartialEq, so compare channels.
             assert!((c.r - 1.0).abs() < 0.01);
             assert!(c.g.abs() < 0.01);
             assert!(c.b.abs() < 0.01);
@@ -12307,7 +9847,7 @@ mod tests {
             blinc_core::layer::CornerRadius::new(8.0, 8.0, 8.0, 8.0)
         );
         assert!(merged.border_radius_explicit);
-        // Brush doesn't impl PartialEq — compare is_some() instead.
+        // Brush has no PartialEq — compare is_some().
         assert_eq!(merged.background.is_some(), base_props.background.is_some());
         assert_eq!(merged.border_width, base_props.border_width);
         assert_eq!(merged.border_color, base_props.border_color);
@@ -12327,11 +9867,7 @@ mod tests {
         assert_eq!(merged.border_color, base_props.border_color);
     }
 
-    /// `view { Div() }` — the value-returning Div primitive
-    /// returns a non-zero handle that decodes back to a
-    /// `WidgetBox::Div`. The Div is empty (no children plumbed
-    /// through the JIT array-arg path yet, but the round-trip
-    /// works for the container shape).
+    /// `view { Div() }` returns a non-zero handle decoding to `Custom(Styled<Div>)`.
     #[test]
     fn jit_view_renderer_round_trip_value_returning_div() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12348,10 +9884,7 @@ mod tests {
         };
         assert_ne!(handle, 0, "Div view should not return the null handle");
 
-        // SAFETY: see `jit_view_renderer_round_trip_value_returning_text`.
-        // Div now wraps itself in `Styled<Div>` and lands in
-        // the Custom variant; the bare Div variant is reserved
-        // for unstyled raw construction.
+        // Div wraps itself in `Styled<Div>` → Custom variant.
         let widget =
             unsafe { materialize_widget(handle) }.expect("non-null handle should decode to Some");
         assert!(
@@ -12360,28 +9893,11 @@ mod tests {
         );
     }
 
-    /// End-to-end: a DSL-defined FSM round-trips through the
-    /// runtime-agnostic `blinc_runtime::fsm` substrate. After
-    /// `compile_source` runs, the FSM should be registered in
-    /// the global runtime registry, callable from widget code
-    /// (or any other consumer) via `FsmStateId` without that
-    /// consumer depending on Zyntax types.
-    ///
-    /// This pins the JIT half of the JIT/AOT contract: both
-    /// publishers (this one, and a future `blinc_dsl_aot`-style
-    /// build-time codegen) must produce identical substrate
-    /// state for the same source — same state codes in the same
-    /// declaration order, same event codes in first-appearance
-    /// order, same guard symbol names.
+    /// DSL FSM round-trips through the runtime-agnostic `blinc_runtime::fsm`.
     #[test]
     fn publish_to_runtime_registry_round_trip() {
         let _ = tracing_subscriber::fmt::try_init();
-        // Serialize with any other test that takes the bridge
-        // lock and dispatches through the global slot. Other
-        // tests that don't touch the bridge run in parallel
-        // because `BlincDsl::new()` no longer auto-installs the
-        // dispatcher — that's now an explicit
-        // `install_runtime_bridge()` call.
+        // Serialise against other bridge-dispatching tests.
         let _guard = BRIDGE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -12435,9 +9951,7 @@ mod tests {
         assert_eq!(done.state_name().as_deref(), Some("Done"));
     }
 
-    /// Tick dispatch fires when the lifted guard returns `true`.
-    /// `1 > 0` always evaluates to `true`, so step_tick should
-    /// return the to-state.
+    /// Tick dispatch fires when guard returns true.
     #[test]
     fn step_tick_fires_when_guard_true() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12468,8 +9982,7 @@ mod tests {
         );
     }
 
-    /// Tick dispatch returns `None` when the lifted guard returns
-    /// `false`. `1 < 0` is always false, so no transition.
+    /// Tick dispatch returns `None` when guard returns false.
     #[test]
     fn step_tick_no_transition_when_guard_false() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12498,19 +10011,13 @@ mod tests {
         );
     }
 
-    /// Multiple guards from the same from-state: declaration order
-    /// wins. The first guard whose expression returns true short-
-    /// circuits the rest. Pin this against future refactors that
-    /// might re-order guards or evaluate them in parallel.
+    /// First true guard wins (declaration order, short-circuit).
     #[test]
     fn step_tick_first_true_guard_wins() {
         let _ = tracing_subscriber::fmt::try_init();
 
         let dsl = BlincDsl::new().expect("runtime init");
-        // Two guards from Loading: the first is always true (so it
-        // fires), the second would also be true (but never gets a
-        // chance). Verifies "first" semantics — if step_tick eval'd
-        // in arbitrary order or all-at-once, this would flake.
+        // First guard always true so we can verify the second never fires.
         dsl.compile_source(
             r#"
             fsm StepTickPriority {
@@ -12537,10 +10044,7 @@ mod tests {
         );
     }
 
-    /// No tick guard matches the current from-state → `None`.
-    /// Covers two related cases in one: the from-state has no
-    /// guards at all (Done has none), and a state that doesn't
-    /// exist as a from in any rule.
+    /// No matching from-state → `None` (covers both "no rules" and "phantom state").
     #[test]
     fn step_tick_no_matching_from_state() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12562,29 +10066,16 @@ mod tests {
         let module = InternedString::new_global("main");
         let id = with_fsm_registry(|r| r.find_by_name(module, "StepTickNoMatch")).unwrap();
 
-        // Done has no tick rules — should miss.
         let from_done = dsl.step_tick(&id, "Done").expect("step_tick");
         assert!(from_done.is_none(), "Done has no tick rules");
 
-        // Phantom state name with no rules — should also miss.
         let from_phantom = dsl.step_tick(&id, "DoesNotExist").expect("step_tick");
         assert!(from_phantom.is_none(), "phantom from-state should miss");
     }
 
-    // -----------------------------------------------------------------
-    // Signal-resolved guard tests. The `signal <name>: <T>` decl
-    // gets stripped before compile, and every `<name>.get()`
-    // method call becomes a `__signal_get_<T>("<name>")` extern
-    // call. Tests verify the rewrite shape on parsed AST — the
-    // host-builtin side (registering `__signal_get_i32` and a
-    // signal-value table) lands in a follow-up commit.
-    // -----------------------------------------------------------------
+    // Signal-resolved guard tests.
 
-    /// `count.get()` on an `i32` signal lowers to
-    /// `__signal_get_i32("count")`. Verifies (a) the rewrite
-    /// happened (the original MethodCall is gone), (b) the new
-    /// callee is `__signal_get_i32`, (c) the signal name is
-    /// preserved as a string literal arg.
+    /// `count.get()` (i32) lowers to `__signal_get_i32("count")`.
     #[test]
     fn signal_get_rewrites_to_typed_extern_i32() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12605,8 +10096,7 @@ mod tests {
             )
             .expect("parse");
 
-        // The signal_decl extern should be stripped — no more
-        // top-level Function named `count`.
+        // Signal decl stripped — no top-level fn `count`.
         let has_signal_decl = program.declarations.iter().any(|d| {
             let zyntax_typed_ast::TypedDeclaration::Function(f) = &d.node else {
                 return false;
@@ -12618,14 +10108,8 @@ mod tests {
             "signal-marker decl should be stripped before compile"
         );
 
-        // The rewrite happens inside `__fsm_meta__`'s body — the
-        // tick-guard expression is the second arg to a
-        // `__fsm_tick__("from", <guard>, "to")` marker call. After
-        // the rewrite, that <guard> is `Binary(Call(__signal_get_i32,
-        // "count"), Gt, IntLit(100))`. Lifting into a top-level
-        // function happens later, in compile_source's
-        // populate_fsm_registry_pass — at parse_to_typed_ast level
-        // the markers are still in place.
+        // Rewrite lands inside `__fsm_meta__`'s `__fsm_tick__` marker (arg[1] = guard).
+        // Function lifting only runs in compile_source, not parse_to_typed_ast.
         let impl_block = program
             .declarations
             .iter()
@@ -12645,8 +10129,6 @@ mod tests {
             .expect("__fsm_meta__ method");
         let body = meta.body.as_ref().expect("__fsm_meta__ body");
 
-        // Walk body for the __fsm_tick__ marker; arg[1] is the
-        // (now-rewritten) guard expression.
         let tick_call = body
             .statements
             .iter()
@@ -12685,7 +10167,6 @@ mod tests {
             Some("__signal_get_i32"),
             "signal call should rewrite to __signal_get_i32"
         );
-        // Signal name preserved as the first string-literal arg.
         assert_eq!(call.positional_args.len(), 1);
         let TypedExpression::Literal(TypedLiteral::String(name)) = &call.positional_args[0].node
         else {
@@ -12694,13 +10175,7 @@ mod tests {
         assert_eq!(name.resolve_global().as_deref(), Some("count"));
     }
 
-    /// `name.get()` on a `string` signal lowers to
-    /// `__signal_get_string("name")`. Pinning the per-type extern
-    /// dispatch — same DSL surface, different host extern based
-    /// on the signal's declared return type. The signal usage
-    /// goes through a `let` initializer (which accepts any
-    /// expression) since `text(...)` doesn't yet accept method
-    /// calls — the rewrite walker handles let initializers.
+    /// `name.get()` (string) lowers to `__signal_get_string("name")`.
     #[test]
     fn signal_get_rewrites_to_typed_extern_string() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12734,7 +10209,6 @@ mod tests {
             .find(|m| m.name.resolve_global().as_deref() == Some("step"))
             .unwrap();
         let body = step.body.as_ref().unwrap();
-        // body: let s = __signal_get_string("username")
         let TypedStatement::Let(let_node) = &body.statements[0].node else {
             panic!("expected Let stmt");
         };
@@ -12752,10 +10226,7 @@ mod tests {
         );
     }
 
-    /// Multiple signals in the same program — each gets its
-    /// rewrite based on its declared type. Verifies the pass
-    /// builds a signal table from ALL signal_decl markers, not
-    /// just the first one.
+    /// Multiple signals — each rewrites based on its declared type.
     #[test]
     fn multiple_signals_rewrite_independently() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12782,7 +10253,7 @@ mod tests {
             )
             .expect("parse");
 
-        // Both signal-marker decls stripped.
+        // Both signal markers stripped.
         let strays: Vec<_> = program
             .declarations
             .iter()
@@ -12803,9 +10274,7 @@ mod tests {
             "signal markers should all be stripped, got strays: {strays:?}"
         );
 
-        // Verify each signal has its expected extern in some call
-        // somewhere. We just look at the program-wide presence of
-        // both __signal_get_i32 and __signal_get_string callees.
+        // Each signal has its expected extern in some call somewhere.
         fn callee_exists(program: &TypedProgram, callee: &str) -> bool {
             fn walk_expr(e: &zyntax_typed_ast::TypedNode<TypedExpression>, callee: &str) -> bool {
                 match &e.node {
@@ -12869,19 +10338,9 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // Host-machinery + end-to-end signal-guard tests. The DSL
-    // surface (`signal <name>: i32`, `<name>.get()`) gets
-    // rewritten to `__signal_get_i32("<name>")` calls; the host's
-    // `blinc_signal_get_i32` reads from the per-thread
-    // `SIGNAL_TABLE_I32`; `step_tick` JITs the rewritten guard
-    // and dispatches based on the live signal value.
-    // -----------------------------------------------------------------
+    // Host-machinery + end-to-end signal-guard tests.
 
-    /// Round-trip: set signal → 200, compile a guard `> 100`,
-    /// step_tick → fires (200 > 100). Pinning the host extern +
-    /// table + JIT path stays connected. Uses a unique signal
-    /// name so the per-thread table doesn't bleed across tests.
+    /// `signal=200, guard >100` → tick fires.
     #[test]
     fn signal_guard_fires_when_above_threshold() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12914,9 +10373,7 @@ mod tests {
         );
     }
 
-    /// Same shape but signal value below threshold → no fire.
-    /// Together with the above test, pins both branches of the
-    /// guard against the live signal table.
+    /// `signal=50, guard >100` → tick doesn't fire.
     #[test]
     fn signal_guard_no_fire_when_below_threshold() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12947,11 +10404,7 @@ mod tests {
         );
     }
 
-    /// Mutating the signal between step_tick calls flips the
-    /// guard's outcome. Pinning that the table is read at JIT
-    /// time, not snapshotted at compile time — i.e. the guard
-    /// expression dispatches to the live value, the way DSL
-    /// authors expect from a "reactive signal" abstraction.
+    /// Signal table is read at JIT time, not snapshot at compile — mutations are visible.
     #[test]
     fn signal_guard_reflects_updated_value() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -12975,13 +10428,10 @@ mod tests {
         let module = InternedString::new_global("main");
         let id = with_fsm_registry(|r| r.find_by_name(module, "SignalGuardMut")).unwrap();
 
-        // First tick: signal is 0 → guard misses.
         assert!(dsl.step_tick(&id, "Idle").unwrap().is_none());
 
-        // Update signal to a value above threshold.
         dsl.set_signal_i32("e2e_mut", 999);
 
-        // Second tick on the same compiled program: now fires.
         let next = dsl.step_tick(&id, "Idle").expect("step_tick");
         assert_eq!(
             next.and_then(|n| n.resolve_global()).as_deref(),
@@ -12990,26 +10440,9 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // FsmInstance bridge tests. Verifies the dependency-free
-    // bridge between the DSL fsm registry and host code:
-    // construct → current() / dispatch_event() / tick() / reset().
-    // No widget integration or Stateful coupling — just the live
-    // string-keyed state that embedders can wrap however they want.
-    // -----------------------------------------------------------------
+    // Float-literal + f64-signal tests.
 
-    // -----------------------------------------------------------------
-    // Float-literal + f64-signal tests. Verify the new
-    // primary_expr alternate produces a FloatLiteral, the
-    // `signal <name>: f64` decl routes `.get()` to
-    // `__signal_get_f64`, and a guard like
-    // `progress.get() >= 1.0` fires the JIT path correctly.
-    // -----------------------------------------------------------------
-
-    /// `1.0` parses as a `TypedLiteral::Float(f64)`. Pinning the
-    /// new `float` rule against the existing `integer` rule
-    /// (which would otherwise consume `1` as the longer prefix
-    /// without the dot, breaking ambiguity).
+    /// `1.5` parses as `TypedLiteral::Float(f64)`.
     #[test]
     fn parse_float_literal() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -13054,9 +10487,7 @@ mod tests {
         assert!((*v - 1.5_f64).abs() < f64::EPSILON, "expected 1.5, got {v}");
     }
 
-    /// Negative float `-0.25` and scientific notation `1e3` both
-    /// parse via the same `float` rule. Pinning both shapes so a
-    /// future rule simplification doesn't regress.
+    /// `-0.25` and `1e3` both parse via the same `float` rule.
     #[test]
     fn parse_float_literal_signed_and_scientific() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -13104,8 +10535,7 @@ mod tests {
         }
     }
 
-    /// `signal progress: f64` + `progress.get()` should rewrite
-    /// to `__signal_get_f64("progress")`, mirroring the i32 path.
+    /// `signal progress: f64` + `progress.get()` → `__signal_get_f64("progress")`.
     #[test]
     fn signal_get_rewrites_to_typed_extern_f64() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -13126,7 +10556,6 @@ mod tests {
             )
             .expect("parse");
 
-        // Locate the __fsm_meta__ body on the SignalProbeF64 impl.
         let imp = program
             .declarations
             .iter()
@@ -13146,8 +10575,6 @@ mod tests {
             .unwrap();
         let body = meta.body.as_ref().unwrap();
 
-        // Find the __fsm_tick__ marker; arg[1] is the rewritten
-        // guard expression `Binary(Call(__signal_get_f64, "progress"), Ge, FloatLit(1.0))`.
         let tick_call = body
             .statements
             .iter()
@@ -13187,10 +10614,7 @@ mod tests {
         assert!((*v - 1.0_f64).abs() < f64::EPSILON);
     }
 
-    /// End-to-end: compile a fsm with a float-signal guard,
-    /// move the signal across the threshold, watch step_tick
-    /// fire. Verifies the i32-handling pattern extends cleanly
-    /// to f64 — same dispatch, different table.
+    /// End-to-end: float-signal guard threshold crossing fires tick.
     #[test]
     fn float_signal_guard_fires_on_threshold() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -13215,11 +10639,9 @@ mod tests {
         let id = with_fsm_registry(|r| r.find_by_name(module, "FloatGuardProbe"))
             .expect("FloatGuardProbe registered");
 
-        // Below threshold → no transition.
         let next = dsl.step_tick(&id, "Loading").expect("step_tick");
         assert!(next.is_none(), "0.0 < 1.0, should not fire");
 
-        // Cross the threshold.
         dsl.set_signal_f64("e2e_progress", 1.0);
         let next = dsl.step_tick(&id, "Loading").expect("step_tick");
         assert_eq!(
@@ -13229,10 +10651,7 @@ mod tests {
         );
     }
 
-    /// Lifecycle: construct from a registered fsm, dispatch a
-    /// sequence of events, watch `current()` follow each
-    /// transition. End-to-end round-trip through the whole stack
-    /// (parse → registry → instance → dispatch).
+    /// `FsmInstance` lifecycle: construct, dispatch sequence, follow `current()`.
     #[test]
     fn fsm_instance_event_round_trip() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -13275,9 +10694,7 @@ mod tests {
     }
 
     /// Misses: dispatch on an event that doesn't match the
-    /// current from-state should leave `current()` unchanged
-    /// and return false. Pinning that the instance's state
-    /// can't drift on a no-op dispatch.
+    /// Unknown event leaves `current()` unchanged and returns false.
     #[test]
     fn fsm_instance_event_miss_keeps_current() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -13300,18 +10717,12 @@ mod tests {
         let mut instance = FsmInstance::new(&dsl, "main", "InstanceProbeMiss").unwrap();
         assert_eq!(instance.current(), "Off");
 
-        // Wrong event name from Off state → no transition.
         let fired = instance.dispatch_event(&dsl, "DoesNotExist");
         assert!(!fired);
         assert_eq!(instance.current(), "Off", "miss should leave state alone");
     }
 
-    /// Tick + signal end-to-end through FsmInstance: live
-    /// signal value drives the guard, instance updates when
-    /// guard fires. Same plumbing as `signal_guard_*` tests but
-    /// going through `FsmInstance::tick` instead of
-    /// `BlincDsl::step_tick` directly — verifies the bridge
-    /// composes with the JIT-evaluated guard path.
+    /// Signal-guarded tick through `FsmInstance::tick`.
     #[test]
     fn fsm_instance_tick_with_signal_guard() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -13334,23 +10745,18 @@ mod tests {
 
         let mut instance = FsmInstance::new(&dsl, "main", "InstanceProbeTick").unwrap();
 
-        // Signal below threshold → tick is a no-op.
         let fired = instance.tick(&dsl).expect("tick");
         assert!(!fired);
         assert_eq!(instance.current(), "Cold");
 
-        // Raise the signal above threshold.
         dsl.set_signal_i32("instance_tick_count", 200);
 
-        // Now tick fires, instance moves to Hot.
         let fired = instance.tick(&dsl).expect("tick");
         assert!(fired);
         assert_eq!(instance.current(), "Hot");
     }
 
-    /// Reset returns the instance to its declared initial state.
-    /// Pinning that reset() works from any current state, not
-    /// only from the initial state.
+    /// `reset()` returns to the declared initial state from any current state.
     #[test]
     fn fsm_instance_reset() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -13371,11 +10777,9 @@ mod tests {
 
         let mut instance = FsmInstance::new(&dsl, "main", "InstanceProbeReset").unwrap();
 
-        // Move off the initial state.
         instance.dispatch_event(&dsl, "Go");
         assert_eq!(instance.current(), "Working");
 
-        // Reset.
         instance.reset();
         assert_eq!(
             instance.current(),
@@ -13384,9 +10788,7 @@ mod tests {
         );
     }
 
-    /// Construction fails cleanly when the fsm name doesn't
-    /// match any registered fsm in the module. Pinning the
-    /// "missing fsm → None" contract instead of e.g. panicking.
+    /// `FsmInstance::new` returns `None` for unknown fsm names (no panic).
     #[test]
     fn fsm_instance_unknown_name_returns_none() {
         let dsl = BlincDsl::new().expect("runtime init");
@@ -13397,11 +10799,7 @@ mod tests {
         );
     }
 
-    /// Direct `FsmDefinition::step_event` works without going
-    /// through the registry — useful for callers holding a
-    /// borrowed FsmDefinition (e.g. iterating registry contents
-    /// for diagnostics) and for unit-testing transition tables in
-    /// isolation.
+    /// `FsmDefinition::step_event` works directly without the registry.
     #[test]
     fn fsm_definition_step_event_direct() {
         let def = FsmDefinition {
@@ -13440,13 +10838,9 @@ mod tests {
     }
 
     /// `with_fsm_registry` / `with_fsm_registry_mut` round-trip.
-    /// Verifies the global accessors give shared access in both
-    /// directions; if a future refactor switches the lock to
-    /// something non-mutex-shaped these tests fail loudly.
     #[test]
     fn fsm_registry_global_accessors() {
-        // Use a high TypeId so this test is unlikely to collide with
-        // any other test that pokes the global registry.
+        // High TypeId to avoid collisions with parallel tests.
         let id = fid("global_test_module", 9_999);
 
         with_fsm_registry_mut(|r| {
@@ -13465,16 +10859,12 @@ mod tests {
         });
         assert_eq!(initial.as_deref(), Some("Begin"));
 
-        // Cleanup so other tests see a clean global state.
         with_fsm_registry_mut(|r| {
             r.remove(&id);
         });
     }
 
-    /// Mixed-statement view exercises both `text(...)` arg shapes
-    /// (string + integer) coexisting in the same compiled function
-    /// and routing to distinct host builtins via the grammar's PEG
-    /// alternate dispatch.
+    /// Mixed `text("…")` + `text(N)` route to distinct builtins via PEG alternates.
     #[test]
     fn round_trip_text_mixed_args() {
         let _ = tracing_subscriber::fmt::try_init();
@@ -13495,23 +10885,9 @@ mod tests {
         }
     }
 
-    // =================================================================
-    // Diagnostic-channel probes (ROADMAP §3.9 prototype goals)
-    //
-    // These exercise the failure modes we want to make sure surface
-    // as actionable errors with file:line:col spans rather than panics
-    // or generic strings. The assertions are deliberately lenient on
-    // exact wording — Zyntax's diagnostic phrasing isn't stable yet —
-    // but strict on (a) we got a `BlincDslError` (not a panic) and (b)
-    // the string mentions the failing token / construct.
-    //
-    // If any of these regresses to a panic we'll catch it here before
-    // it manifests as a poor user experience in `blinc dev`.
-    // =================================================================
+    // Diagnostic-channel probes — failure modes return `BlincDslError`, not panic.
 
-    /// **Parse error.** Source has a stray brace; the grammar can't
-    /// match it. We expect a `BlincDslError::Compile` with the failing
-    /// position called out.
+    /// Stray closing brace → `BlincDslError::Compile`.
     #[test]
     fn diag_parse_error_unmatched_brace() {
         let err = try_compile("view { text(\"hi\") } }", "parse_err.blinc")
@@ -13523,10 +10899,7 @@ mod tests {
         );
     }
 
-    /// **Arity error.** `text()` with no argument violates the grammar
-    /// rule `text_stmt = { "text" ~ "(" ~ s:string_literal ~ ")" }`.
-    /// This is currently caught at parse time (not type-check time) —
-    /// either is fine for the prototype, we just need a useful error.
+    /// `text()` with no args violates the grammar rule — actionable diagnostic.
     #[test]
     fn diag_arity_error_text_no_args() {
         let err = try_compile("view { text() }", "arity_err.blinc")
@@ -13538,30 +10911,9 @@ mod tests {
         );
     }
 
-    /// **Type error.** The grammar lets us emit a `text(...)` call with
-    /// any expression as the arg, so we forge a typed-AST that calls
-    /// `$Blinc$text` with an int literal. The injected extern decl
-    /// expects `string`; Zyntax's type checker should catch the
-    /// mismatch.
-    ///
-    /// We use `string_literal` in the grammar today, which won't
-    /// produce ints — so this test exercises the type checker by
-    /// wrapping the arg in something the grammar accepts but the
-    /// types reject. Once the grammar grows expression nodes (phase 2)
-    /// the test gets simpler. For now, keep it as a known-skip if the
-    /// grammar can't produce the failing shape.
-    ///
-    /// **Rationale for keeping it:** when phase-2 expressions land
-    /// this test will start exercising real type-mismatch paths
-    /// without modification. It's pinned to the ZRTL signature
-    /// boundary so as long as `$Blinc$text` declares
-    /// `Type::Primitive(String)` the assertion shape stays correct.
+    /// Type-mismatch on `text(...)` — ignored until grammar supports non-string exprs.
     #[test]
-    #[ignore = "phase 2 grammar will introduce expressions \
-                that can be passed to text() — until then the grammar \
-                only accepts string_literal so we can't construct a \
-                type mismatch from source. Re-enable when grammar \
-                supports e.g. integer literals as call args."]
+    #[ignore = "needs phase-2 expression args for text()"]
     fn diag_type_error_text_with_int_literal() {
         let err = try_compile("view { text(42) }", "type_err.blinc")
             .expect_err("expected compile to fail on text(42)");

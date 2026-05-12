@@ -863,8 +863,79 @@ statements = { stmt:statement* }
 // — interpolate via `text(f"{count}")` instead. f-string parts now
 // accept full expressions (see `f_string_expr` below).
 statement = {
-    text_string_stmt | text_int_stmt | if_stmt | let_stmt | component_call_stmt | assign_stmt | method_call_stmt
+    text_string_stmt | text_int_stmt | match_stmt | if_stmt | let_stmt | component_call_stmt | assign_stmt | method_call_stmt
 }
+
+// `match e { "a" -> f(), "b" -> g(), _ -> h() }`. Arrow-arm pattern
+// matching with string-literal patterns + `_` wildcard. Each arm body
+// is a single expression or a brace-block. Emits marker statements
+// the `lower_match_blocks` pass rewrites into an if/else-if chain.
+match_stmt = {
+    "match" ~ scrutinee:expr ~ "{" ~ arms:match_arm+ ~ "}"
+}
+  -> TypedStatement::Block {
+      statements: concat_list(
+          [TypedStatement::Expression {
+              expr: TypedExpression::Call {
+                  callee: Box::new(TypedExpression::Variable { name: intern("__match_begin__") }),
+                  args: [scrutinee],
+              },
+          }],
+          concat_list(
+              arms,
+              [TypedStatement::Expression {
+                  expr: TypedExpression::Call {
+                      callee: Box::new(TypedExpression::Variable { name: intern("__match_end__") }),
+                      args: [],
+                  },
+              }],
+          ),
+      ),
+  }
+
+// Single match arm. Emits a `Block` carrying a `__match_arm__(pat)`
+// marker followed by the body statements. The outer `match_stmt`
+// concatenates all arm-blocks between `__match_begin__` and
+// `__match_end__`.
+match_arm = {
+    pat:match_pattern ~ "->" ~ body:match_arm_body ~ ","?
+}
+  -> TypedStatement::Block {
+      statements: concat_list(
+          [TypedStatement::Expression {
+              expr: TypedExpression::Call {
+                  callee: Box::new(TypedExpression::Variable { name: intern("__match_arm__") }),
+                  args: [pat],
+              },
+          }],
+          body,
+      ),
+  }
+
+// Arm patterns: today a literal string OR the wildcard `_`. The
+// wildcard is encoded as a synthetic `__wildcard__` `StringLiteral`
+// the lowering pass treats specially. Future: int literals, bool,
+// guard expressions, enum patterns once Zyntax-native
+// `TypedPattern` is plumbed through the action-lang.
+match_pattern = { pattern_string | pattern_wildcard }
+
+pattern_string = { s:string_literal }
+  -> s
+
+pattern_wildcard = { "_" }
+  -> TypedExpression::StringLiteral { value: "__wildcard__" }
+
+// Arm bodies: a brace-block of statements, or a single expression
+// (which lowers to a one-statement list). Both produce a `Vec` of
+// `TypedStatement` that the arm rule concatenates after its
+// marker call.
+match_arm_body = { match_arm_body_block | match_arm_body_expr }
+
+match_arm_body_block = { "{" ~ stmts:statement* ~ "}" }
+  -> stmts
+
+match_arm_body_expr = { e:expr }
+  -> concat_list([TypedStatement::Expression { expr: e }], [])
 
 // `<receiver>.<method>(<args>)` as a bare statement. Covers
 // closure / function bodies that need to invoke DSL-side
