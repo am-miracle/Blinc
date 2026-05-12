@@ -53,13 +53,18 @@
 //! - [`instance`] — `FsmStateId` newtype that implements
 //!   `StateTransitions` for `Stateful<FsmStateId>`.
 
+pub mod default_instance;
 pub mod dispatch;
 pub mod instance;
 pub mod registry;
 
+pub use default_instance::{
+    current_state_code, current_state_name, default_state, dispatch_default,
+    register_transition_effect, reset_default, TransitionEffect,
+};
 pub use dispatch::{clear_guard_dispatcher, set_guard_dispatcher, GuardDispatcher};
 pub use instance::FsmStateId;
 pub use registry::{
     with_fsm_registry, with_fsm_registry_mut, EventTransition, FsmDefinition, FsmId, FsmRegistry,
-    TickGuard,
+    TickGuard, TransitionAction,
 };

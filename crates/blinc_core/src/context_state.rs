@@ -347,6 +347,12 @@ pub struct BlincContextState {
     /// On wasm32, callers wrap `!Send` types in an unsafe Send shim
     /// before pushing — safe because wasm is single-threaded.
     pending_custom_passes: Mutex<Vec<Box<dyn std::any::Any + Send>>>,
+    /// Raw CSS strings queued by code that doesn't have direct
+    /// `WindowedContext::add_css` access (DSL programs, plugin
+    /// components, lazy initializers). The windowed runner
+    /// drains this on each frame and forwards each string
+    /// through the primary window's CSS parser.
+    pending_stylesheets: Mutex<Vec<String>>,
 }
 
 impl BlincContextState {
@@ -374,6 +380,7 @@ impl BlincContextState {
             recorder_snapshot_callback: RwLock::new(None),
             recorder_update_callback: RwLock::new(None),
             pending_custom_passes: Mutex::new(Vec::new()),
+            pending_stylesheets: Mutex::new(Vec::new()),
         };
 
         if CONTEXT_STATE.set(state).is_err() {
@@ -406,6 +413,7 @@ impl BlincContextState {
             recorder_snapshot_callback: RwLock::new(None),
             recorder_update_callback: RwLock::new(None),
             pending_custom_passes: Mutex::new(Vec::new()),
+            pending_stylesheets: Mutex::new(Vec::new()),
         };
 
         if CONTEXT_STATE.set(state).is_err() {
@@ -871,6 +879,26 @@ impl BlincContextState {
     /// have direct access to `WindowedContext` or `RenderContext`.
     pub fn register_custom_pass(&self, pass: Box<dyn std::any::Any + Send>) {
         self.pending_custom_passes.lock().unwrap().push(pass);
+    }
+
+    /// Queue a raw CSS string for the windowed runner to feed
+    /// through `WindowedContext::add_css` on the next frame.
+    ///
+    /// Lets code that doesn't hold a `WindowedContext` register
+    /// stylesheets — used by the DSL substrate to install
+    /// `style { … }` blocks during program compilation without
+    /// the host's `build_ui` having to iterate
+    /// `dsl.compiled_stylesheets()` and call `ctx.add_css` by
+    /// hand.
+    pub fn queue_stylesheet(&self, css: impl Into<String>) {
+        self.pending_stylesheets.lock().unwrap().push(css.into());
+    }
+
+    /// Drain the pending stylesheet queue. Called by the
+    /// windowed runner once per frame; each drained string is
+    /// fed through the primary window's CSS parser.
+    pub fn drain_stylesheets(&self) -> Vec<String> {
+        std::mem::take(&mut *self.pending_stylesheets.lock().unwrap())
     }
 
     /// Register a `!Send` custom pass on wasm32. Wraps the value in

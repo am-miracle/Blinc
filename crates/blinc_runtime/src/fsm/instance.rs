@@ -29,7 +29,7 @@ use super::registry::{with_fsm_registry, FsmId};
 /// `Stateful<FsmStateId>`. `Hash + Eq` so the widget framework's
 /// internal change-detection comparisons stay cheap. `Debug` so
 /// diagnostic logs print the `(fsm_id, variant)` tuple.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct FsmStateId {
     pub fsm_id: FsmId,
     pub variant: u32,
@@ -139,11 +139,13 @@ mod tests {
                         from_code: 0,
                         event_code: 0,
                         to_code: 1,
+                        actions: vec![],
                     },
                     EventTransition {
                         from_code: 1,
                         event_code: 1,
                         to_code: 2,
+                        actions: vec![],
                     },
                 ],
                 tick_guards: vec![TickGuard {

@@ -4281,6 +4281,22 @@ impl WindowedApp {
                                 // Build UI element tree
                                 let user_ui = invoke_ui_builder(&mut ui_builder, windowed_ctx);
 
+                                // Drain any CSS queued via
+                                // `BlincContextState::queue_stylesheet`
+                                // (e.g. by `BlincDsl::view_widget`'s
+                                // first invocation). Same pattern
+                                // as `drain_custom_passes` below —
+                                // the queue exists because DSL /
+                                // plugin code doesn't see
+                                // `WindowedContext` directly.
+                                {
+                                    let queued =
+                                        blinc_core::BlincContextState::get().drain_stylesheets();
+                                    for css in queued {
+                                        windowed_ctx.add_css(&css);
+                                    }
+                                }
+
                                 // Compose user UI with overlay layer using a regular Div container
                                 // We use position:relative with the overlay absolutely positioned on top.
                                 let overlay_layer = windowed_ctx.overlay_manager.build_overlay_layer();

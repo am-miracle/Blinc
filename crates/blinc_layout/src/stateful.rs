@@ -1261,6 +1261,24 @@ impl<S: StateTransitions> StatefulInner<S> {
             base_element_id: None,
         }
     }
+
+    /// In-place version of [`Stateful::dispatch`]. Walks the state
+    /// machine via `S::on_event`, updates `state` + marks
+    /// `needs_visual_update` when a transition fires, and returns
+    /// `true` in that case. Caller is responsible for the
+    /// surrounding lock and for calling [`request_redraw`] —
+    /// this stays mutex-agnostic so external substrates (e.g.
+    /// the DSL `default_state` FSM bridge) can hold the lock
+    /// across multiple reads/writes.
+    pub fn dispatch(&mut self, event: u32) -> bool {
+        if let Some(new_state) = self.state.on_event(event) {
+            self.state = new_state;
+            self.needs_visual_update = true;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl<S: StateTransitions + Default> Default for Stateful<S> {
@@ -2199,6 +2217,12 @@ pub struct StatefulBuilder<S: StateTransitions> {
     initial_state: Option<S>,
     /// Parent context key (for nested statefuls)
     parent_key: Option<Arc<String>>,
+    /// Externally-owned `SharedState` to bind to. Takes
+    /// precedence over the builder's key-derived storage —
+    /// useful when the state cell is owned by a substrate
+    /// (e.g. `blinc_runtime::fsm::default_state`) that other
+    /// dispatchers also mutate.
+    shared_state: Option<SharedState<S>>,
 }
 
 impl<S: StateTransitions + Default> StatefulBuilder<S> {
@@ -2210,6 +2234,7 @@ impl<S: StateTransitions + Default> StatefulBuilder<S> {
             deps: Vec::new(),
             initial_state: None,
             parent_key: None,
+            shared_state: None,
         }
     }
 
@@ -2233,6 +2258,20 @@ impl<S: StateTransitions + Default> StatefulBuilder<S> {
         self
     }
 
+    /// Bind the builder to an externally-owned `SharedState<S>`.
+    ///
+    /// Skips the builder's normal key-derived
+    /// `use_shared_state_with` call so the resulting `Stateful`
+    /// shares the exact `Arc<Mutex<StatefulInner<S>>>` callers
+    /// pass in — letting substrates that mutate the state cell
+    /// from outside the widget tree (e.g.
+    /// `blinc_runtime::fsm::default_state`) drive widget
+    /// refresh through the same shared cell.
+    pub fn with_shared_state(mut self, shared: SharedState<S>) -> Self {
+        self.shared_state = Some(shared);
+        self
+    }
+
     /// Build the stateful element with a StateContext callback
     ///
     /// The callback receives a `&StateContext<S>` and returns a `Div`.
@@ -2246,8 +2285,12 @@ impl<S: StateTransitions + Default> StatefulBuilder<S> {
         let parent_key = self.parent_key;
         let deps = self.deps;
 
-        // Get or create persistent SharedState using the key
-        let shared_state = use_shared_state_with::<S>(&key_str, initial);
+        // Reuse an externally-supplied `SharedState` when one was
+        // bound via `with_shared_state` — otherwise fall back to
+        // the key-derived storage.
+        let shared_state = self
+            .shared_state
+            .unwrap_or_else(|| use_shared_state_with::<S>(&key_str, initial));
 
         // Get the reactive graph from context
         let reactive = blinc_core::context_state::BlincContextState::get()
@@ -2439,6 +2482,7 @@ pub fn stateful_with_key<S: StateTransitions + Default>(
         deps: Vec::new(),
         initial_state: None,
         parent_key: None,
+        shared_state: None,
     }
 }
 

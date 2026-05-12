@@ -35,6 +35,22 @@
     __signal_get_i32: "__signal_get_i32",
     __signal_get_f64: "__signal_get_f64",
     __signal_get_string: "__signal_get_string",
+    // Setter mirrors of the `_get_` externs above. Synthesised by
+    // `resolve_signal_calls` from `<sig>.set(v)` / `<sig> = expr`
+    // shapes inside DSL function and closure bodies. Must be in
+    // this map so `inject_builtin_externs` mints matching extern
+    // decls — without them, the SSA Variable→Symbol resolver
+    // inside translated lambda bodies emits `Indirect(Undef)`
+    // calls and the JIT either rejects the function or compiles
+    // it to a `call_indirect → 0` that SIGSEGVs at runtime.
+    __signal_set_i32: "__signal_set_i32",
+    __signal_set_f64: "__signal_set_f64",
+    __signal_set_string: "__signal_set_string",
+    // `<FsmName>.trigger("State.Event")` lowered by
+    // `resolve_fsm_trigger_calls` routes here. Same reason as
+    // above — needs an extern decl in the typed program for
+    // closure-body Variable resolution.
+    __fsm_runtime_trigger__: "__fsm_runtime_trigger__",
     // F-string desugaring: the normalization pass
     // `fstring_to_concat` (zyntax passes/normalization) rewrites
     // multi-part f-strings into `string_concat` chains with
@@ -190,12 +206,104 @@ signal_decl = { "signal" ~ name:identifier ~ ":" ~ ty:state_type }
       is_external: true,
   }
 
-bare_view_item = { "view" ~ "{" ~ stmts:statements ~ "}" }
+// `@stateful` decorator — opt-in marker that tells the host
+// to wrap this view in a reactive container subscribed to
+// every declared `signal` and `fsm`. Without the marker the
+// view materialises once and stays put (Blinc's deliberate
+// "don't redraw unless something asks for it" stance).
+//
+// Lowers to a synthetic `__stateful_view__()` marker call at
+// the head of the view body. The post-parse pass
+// `detect_and_strip_stateful_views` scans every view function
+// for it, records `has_stateful_view` on the `BlincDsl`, and
+// strips the marker so the JIT never sees it.
+// `@stateful` — opt-in reactivity for this view. Two forms:
+//
+//   * `@stateful` (no parens) — subscribe the wrapping
+//     stateful to every `signal` declared in the program.
+//   * `@stateful([count, other_sig])` — subscribe only to the
+//     listed signals. Mirrors `.deps([signal_id])` on Blinc's
+//     `StatefulBuilder`.
+//
+// The lowered marker call carries each named dep as a
+// `StringLiteral` arg so the post-parse pass
+// `detect_and_strip_stateful_views` can scoop them onto
+// `BlincDsl` and `view_widget` can resolve them to live
+// `SignalId`s at wrap time.
+stateful_attr = { "@stateful" ~ deps:stateful_deps? }
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Call {
+          callee: Box::new(TypedExpression::Variable {
+              name: intern("__stateful_view__"),
+          }),
+          args: deps.unwrap_or([]),
+      },
+  }
+
+stateful_deps = { "(" ~ "[" ~ ids:stateful_deps_list ~ "]" ~ ")" }
+  -> ids
+
+stateful_deps_list = { first:stateful_dep_name ~ rest:stateful_deps_tail* }
+  -> prepend_list(first, rest)
+
+stateful_deps_tail = { ","? ~ name:stateful_dep_name }
+  -> name
+
+stateful_dep_name = { name:identifier }
+  -> TypedExpression::StringLiteral { value: name }
+
+// `@fsm([FsmName1, FsmName2])` — peer decorator to `@stateful`
+// that pins which declared FSMs drive this view's refresh.
+// Without it, `view_widget` uses the first-declared FSM as the
+// stateful's `SharedState`. Listed names take precedence; the
+// first listed becomes the binding `SharedState`, the rest are
+// reserved for future multi-FSM wiring.
+//
+// Lowers to a `__fsm_view__("FsmName", …)` marker; the
+// post-parse pass scrapes the names onto `BlincDsl` so they
+// outlive the JIT strip.
+fsm_attr = { "@fsm" ~ names:fsm_attr_names }
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Call {
+          callee: Box::new(TypedExpression::Variable {
+              name: intern("__fsm_view__"),
+          }),
+          args: names,
+      },
+  }
+
+fsm_attr_names = { "(" ~ "[" ~ ids:fsm_attr_names_list ~ "]" ~ ")" }
+  -> ids
+
+fsm_attr_names_list = { first:fsm_attr_name ~ rest:fsm_attr_names_tail* }
+  -> prepend_list(first, rest)
+
+fsm_attr_names_tail = { ","? ~ name:fsm_attr_name }
+  -> name
+
+fsm_attr_name = { name:identifier }
+  -> TypedExpression::StringLiteral { value: name }
+
+// `attrs:stateful_attr*` (using `*` instead of `?`) so the
+// action language gives us a `Vec<TypedStatement>` directly —
+// `concat_list` then composes it with the body statements
+// without needing a sentinel for the absent case. At most one
+// `@stateful` is meaningful but allowing zero-or-more is the
+// shape Blinc's PEG action lang accepts cleanly.
+// `view_attr` collects every `@stateful…` / `@fsm…` marker
+// the author stacked on a view. PEG ordered alternates pick
+// the right decorator off each token; `view_attr*` then
+// gathers the lowered marker statements.
+view_attr = { stateful_attr | fsm_attr }
+
+bare_view_item = { attrs:view_attr* ~ "view" ~ "{" ~ stmts:statements ~ "}" }
   -> TypedDeclaration::Function {
       name: intern("render_view"),
       params: [],
       return_type: Type::Unit,
-      body: Some(TypedBlock { statements: stmts }),
+      body: Some(TypedBlock {
+          statements: concat_list(attrs, stmts),
+      }),
   }
 
 // `component <Name> { fields, <view-form>, fn handler() { ... } }`
@@ -347,12 +455,14 @@ prop_decl = { name:identifier ~ ":" ~ ty:state_type }
 //     components where every field drives the UI.
 view_member = { view_with_deps | view_simple }
 
-view_simple = { "view" ~ "{" ~ stmts:statements ~ "}" }
+view_simple = { attrs:view_attr* ~ "view" ~ "{" ~ stmts:statements ~ "}" }
   -> TypedDeclaration::Function {
       name: intern("view"),
       params: [],
       return_type: Type::Unit,
-      body: Some(TypedBlock { statements: stmts }),
+      body: Some(TypedBlock {
+          statements: concat_list(attrs, stmts),
+      }),
   }
 
 view_with_deps = {
@@ -721,8 +831,43 @@ statements = { stmt:statement* }
 // — interpolate via `text(f"{count}")` instead. f-string parts now
 // accept full expressions (see `f_string_expr` below).
 statement = {
-    text_string_stmt | text_int_stmt | if_stmt | let_stmt | component_call_stmt | assign_stmt
+    text_string_stmt | text_int_stmt | if_stmt | let_stmt | component_call_stmt | assign_stmt | method_call_stmt
 }
+
+// `<receiver>.<method>(<args>)` as a bare statement. Covers
+// closure / function bodies that need to invoke DSL-side
+// methods on signals, FSMs, or any user-defined value:
+//
+//     count.set(count.get() + 1)
+//     Foo.trigger("Idle.Step")
+//     obj.do_thing()
+//
+// Targeted on purpose — accepting ANY expression as a
+// statement would let `text()` (no args) parse as a bare
+// function call, which we want to keep as a parse-time error
+// so authors don't accidentally call a builtin with the wrong
+// shape and silently get nothing rendered.
+//
+// Note on shape: Zyntax's action-language interpreter doesn't
+// expose a direct `TypedExpression::MethodCall { … }`
+// constructor (it builds `MethodCall` only via the postfix
+// `SuffixMethod` machinery). We emit the same logical call as
+// `Call(Field(receiver, method), args)` here — the
+// `resolve_signal_calls` and `resolve_fsm_trigger_calls`
+// rewrite passes recognise both shapes interchangeably.
+method_call_stmt = {
+    receiver:variable_expr ~ "." ~ method:identifier
+    ~ "(" ~ args:call_args_list? ~ ")"
+}
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Call {
+          callee: Box::new(TypedExpression::Field {
+              object: Box::new(receiver),
+              field: intern(method),
+          }),
+          args: args.unwrap_or([]),
+      },
+  }
 
 // Statement-position wrapper around `component_call_expr` — at
 // the top level of a `view { ... }` block, components are
@@ -1119,6 +1264,7 @@ call_args_tail = { ","? ~ e:expr }
 //      keeping literals together feels right.
 //   6. `variable_expr` last as the catch-all bare-name shape.
 primary_expr = {
+    lambda_expr |
     paren_expr |
     f_string_literal |
     string_literal |
@@ -1127,6 +1273,23 @@ primary_expr = {
     component_call_expr |
     variable_expr
 }
+
+// Zero-arg closure: `|| { stmt; stmt; … }`. Lowers directly to
+// `TypedExpression::Lambda { params: [], body: Block(stmts) }`
+// — Zyntax's compiler handles the rest (CreateClosure SSA →
+// `ZrtlClosure*` runtime value). Used for widget event handlers
+// (`Div(on_click = || { count = count + 1 })`).
+//
+// PEG ordered alternates: this rule MUST come before any rule
+// that consumes `||` in primary position. `or_op` ("||") only
+// fires INSIDE `or_expr` after a left operand is already
+// parsed, so a bare `||` at the start of an expression
+// position falls into this rule without ambiguity.
+lambda_expr = { "||" ~ "{" ~ stmts:statement* ~ "}" }
+  -> TypedExpression::Lambda {
+      params: [],
+      body: TypedExpression::Block { statements: stmts },
+  }
 
 // Component call: `Counter(arg)`, `Counter(1, step = 2)`. The
 // capital-first `component_name` terminal is what distinguishes

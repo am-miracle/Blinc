@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// so we pack a `u32` instead of an `Arc<str>` even though the
 /// canonical FSM name also lives in the [`FsmDefinition`] for
 /// diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct FsmId(pub u32);
 
 /// One event-driven transition. Names map to user-facing DSL
@@ -43,6 +43,26 @@ pub struct EventTransition {
     pub event_code: u32,
     /// Target state variant code.
     pub to_code: u32,
+    /// Actions to execute, in source order, after the state
+    /// advances. Captures the `{ count = count + 1 }` blocks
+    /// declared on the DSL `on … -> …` transition.
+    pub actions: Vec<TransitionAction>,
+}
+
+/// Side effect declared on a transition body in the DSL. Kept
+/// to a small, deterministic set so the substrate can execute
+/// each action without dragging in a JIT — both the JIT and
+/// AOT compile paths lower their `{ count = count + 1 }`
+/// syntax into these variants and the runtime executes them
+/// the same way.
+#[derive(Debug, Clone)]
+pub enum TransitionAction {
+    /// `<signal_name> = <int_literal>` — set the named i32
+    /// signal to a constant.
+    SetI32 { signal: Arc<str>, value: i32 },
+    /// `<signal_name> = <signal_name> + <int_literal>` (or `-`)
+    /// — add a constant delta to the named i32 signal.
+    AddI32 { signal: Arc<str>, delta: i32 },
 }
 
 /// One tick-driven (data-guarded) transition. The guard
@@ -273,11 +293,13 @@ mod tests {
                     from_code: 0,
                     event_code: 0,
                     to_code: 1,
+                    actions: vec![],
                 },
                 EventTransition {
                     from_code: 1,
                     event_code: 1,
                     to_code: 2,
+                    actions: vec![],
                 },
             ],
             tick_guards: vec![],

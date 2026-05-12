@@ -1,0 +1,43 @@
+signal count: i32
+
+fsm CounterFsm {
+    state Idle
+    state Counting
+    initial Idle
+    on Idle.Increment -> Counting
+    on Counting.Increment -> Counting
+    on Counting.Reset -> Idle
+    on Idle.Reset -> Idle
+}
+
+component Counter {
+    style {
+        .counter-card    { background: #1e293b; border-radius: 16px; padding: 28px; gap: 16px; color: #ffffff }
+        .counter-row     { gap: 16px }
+        .counter-cta     { background: #3b82f6; border-radius: 10px; padding: 14px }
+        .counter-reset   { background: #ef4444; border-radius: 10px; padding: 14px }
+        .counter-cta *, .counter-reset * { pointer-events: none }
+    }
+    @stateful([count]) @fsm([CounterFsm]) view {
+        Div(class = "counter-card") {
+            Text(f"Count: {count.get()}")
+            Div(class = "counter-row") {
+                Div(class = "counter-cta", on_click = || {
+                    count.set(count.get() + 1)
+                    CounterFsm.trigger("Idle.Increment")
+                    CounterFsm.trigger("Counting.Increment")
+                }) {
+                    Text("+1")
+                }
+                Div(class = "counter-reset", on_click = || {
+                    count.set(0)
+                    CounterFsm.trigger("Counting.Reset")
+                }) {
+                    Text("Reset")
+                }
+            }
+        }
+    }
+}
+
+view { Counter() }

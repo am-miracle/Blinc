@@ -39,10 +39,70 @@ use std::collections::HashMap;
 use zyntax_embed::ZyntaxValue;
 
 thread_local! {
-    /// The underlying `ZyntaxValue`-keyed table. All typed
-    /// accessors route through this single map so the substrate
-    /// has one place to clear / introspect / hot-reload from.
+    /// The underlying `ZyntaxValue`-keyed table. Used as a
+    /// fallback when `BlincContextState` hasn't been initialised
+    /// (headless tests, AOT bootstrap before app start). In a
+    /// running app the typed accessors route through reactive
+    /// `State<T>` instead — see the typed-accessor sections
+    /// below.
     static TABLE: RefCell<HashMap<String, ZyntaxValue>> = RefCell::new(HashMap::new());
+}
+
+/// Stable key under which an i32 signal lives in
+/// `BlincContextState`'s `use_state_keyed` registry. Picking a
+/// fixed prefix means a `Div(on_click = "…")` extern can grab
+/// the same `State<i32>` the host already subscribed to, by
+/// name alone.
+fn i32_key(name: &str) -> String {
+    format!("__sig:i32:{name}")
+}
+
+fn f64_key(name: &str) -> String {
+    format!("__sig:f64:{name}")
+}
+
+fn str_key(name: &str) -> String {
+    format!("__sig:str:{name}")
+}
+
+/// `State<i32>` handle for a named signal. `Some` when
+/// `BlincContextState` is initialised (always true during
+/// `WindowedApp::run`); `None` for headless callers using only
+/// the thread-local table.
+///
+/// Subscribe a stateful container to this and the subtree
+/// re-evaluates whenever any code (FSM transition action,
+/// host write, …) calls `set_i32` on the same name.
+pub fn state_i32(name: &str) -> Option<blinc_core::State<i32>> {
+    if !blinc_core::context_state::BlincContextState::is_initialized() {
+        return None;
+    }
+    Some(blinc_core::context_state::use_state_keyed(
+        &i32_key(name),
+        || 0i32,
+    ))
+}
+
+/// `State<f64>` mirror of [`state_i32`].
+pub fn state_f64(name: &str) -> Option<blinc_core::State<f64>> {
+    if !blinc_core::context_state::BlincContextState::is_initialized() {
+        return None;
+    }
+    Some(blinc_core::context_state::use_state_keyed(
+        &f64_key(name),
+        || 0.0f64,
+    ))
+}
+
+/// `State<String>` mirror of [`state_i32`].
+pub fn state_str(name: &str) -> Option<blinc_core::State<String>> {
+    if !blinc_core::context_state::BlincContextState::is_initialized() {
+        return None;
+    }
+    Some(blinc_core::context_state::use_state_keyed(
+        &str_key(name),
+        String::new,
+    ))
 }
 
 // =====================================================================
@@ -86,18 +146,23 @@ pub fn clear_all() {
 // signals, `Float(f64)` for floats, `String(String)` for
 // strings.
 
-/// Set the current value of an i32-typed signal. Stored
-/// internally as `ZyntaxValue::Int(i64)`; readers using
-/// `get_i32` truncate back.
+/// Set the current value of an i32-typed signal. Writes
+/// through the reactive `State<i32>` when `BlincContextState`
+/// is initialised so any stateful subscriber re-evaluates;
+/// falls back to the thread-local cell otherwise.
 pub fn set_i32(name: &str, value: i32) {
-    set(name, ZyntaxValue::Int(value as i64));
+    if let Some(s) = state_i32(name) {
+        s.set(value);
+    } else {
+        set(name, ZyntaxValue::Int(value as i64));
+    }
 }
 
-/// Read the current value of an i32-typed signal. Returns
-/// `None` when the signal hasn't been set, or when the stored
-/// value isn't actually an int (e.g. the host put a struct in
-/// there).
+/// Read the current value of an i32-typed signal.
 pub fn get_i32(name: &str) -> Option<i32> {
+    if let Some(s) = state_i32(name) {
+        return s.try_get();
+    }
     match get(name) {
         Some(ZyntaxValue::Int(n)) => i32::try_from(n).ok(),
         _ => None,
@@ -117,11 +182,18 @@ pub fn get_i32_or_default(name: &str) -> i32 {
 
 /// f64 mirror of [`set_i32`].
 pub fn set_f64(name: &str, value: f64) {
-    set(name, ZyntaxValue::Float(value));
+    if let Some(s) = state_f64(name) {
+        s.set(value);
+    } else {
+        set(name, ZyntaxValue::Float(value));
+    }
 }
 
 /// f64 mirror of [`get_i32`].
 pub fn get_f64(name: &str) -> Option<f64> {
+    if let Some(s) = state_f64(name) {
+        return s.try_get();
+    }
     match get(name) {
         Some(ZyntaxValue::Float(n)) => Some(n),
         _ => None,
@@ -137,16 +209,21 @@ pub fn get_f64_or_default(name: &str) -> f64 {
 // String typed accessors
 // =====================================================================
 
-/// Set the current value of a string-typed signal. Stored as
-/// `ZyntaxValue::String(owned)`.
+/// Set the current value of a string-typed signal.
 pub fn set_str(name: &str, value: impl Into<String>) {
-    set(name, ZyntaxValue::String(value.into()));
+    let value = value.into();
+    if let Some(s) = state_str(name) {
+        s.set(value);
+    } else {
+        set(name, ZyntaxValue::String(value));
+    }
 }
 
-/// Read the current value of a string-typed signal. Returns
-/// `None` when unset (or when the stored value isn't a
-/// string).
+/// Read the current value of a string-typed signal.
 pub fn get_str(name: &str) -> Option<String> {
+    if let Some(s) = state_str(name) {
+        return s.try_get();
+    }
     match get(name) {
         Some(ZyntaxValue::String(s)) => Some(s),
         _ => None,

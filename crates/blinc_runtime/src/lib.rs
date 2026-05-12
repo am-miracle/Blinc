@@ -26,7 +26,6 @@ pub use zyntax_embed::ZyntaxValue;
 
 pub use blinc_layout;
 
-#[cfg(feature = "blinc_core")]
 pub use blinc_core;
 
 #[cfg(feature = "blinc_animation")]
