@@ -4738,8 +4738,16 @@ impl WindowedApp {
                             visible_anim_for_wake.store(visible_anim, Ordering::Release);
                             let needs_animation_redraw = needs_animation_redraw_raw && visible_anim;
 
-                            // Check if text widgets need continuous redraws (cursor blink)
-                            let needs_cursor_redraw = blinc_layout::widgets::take_needs_continuous_redraw();
+                            // Cursor blink: a focused text input wants the
+                            // cursor visibility flipped every ~400 ms. A
+                            // sticky `has_focused_text_input()` read is the
+                            // right signal — the previous consume-on-read
+                            // flag forced a re-arm every frame which pinned
+                            // CPU at vsync. The cursor-only redraw branch
+                            // below paces this signal via `wake_at` so we
+                            // only paint at blink interval, not vsync.
+                            let needs_cursor_redraw = blinc_layout::widgets::has_focused_text_input();
+                            let _ = blinc_layout::widgets::take_needs_continuous_redraw();
 
                             // Check if motion animations are active (enter/exit animations)
                             let needs_motion_redraw = if let Some(ref rs) = ws.render_state {
@@ -4831,12 +4839,21 @@ impl WindowedApp {
                                 || pointer_query_active
                                 || flow_needs_redraw;
                             if any_redraw_signal {
-                                if needs_cursor_redraw {
-                                    // Keep requesting redraws as long as a text input is focused
-                                    if blinc_layout::widgets::has_focused_text_input() {
-                                        blinc_layout::widgets::text_input::request_continuous_redraw_pub();
-                                    }
-                                }
+                                // Cursor-only: a focused text input is the
+                                // only redraw signal. Pace at the blink
+                                // interval instead of vsync — the cursor
+                                // toggles twice per second, painting every
+                                // frame burns 15–25% CPU on a non-trivial
+                                // UI tree for nothing visible.
+                                let cursor_only = needs_cursor_redraw
+                                    && !needs_animation_redraw
+                                    && !needs_motion_redraw
+                                    && !scroll_animating
+                                    && !needs_overlay_redraw
+                                    && !theme_animating
+                                    && !css_needs_redraw
+                                    && !pointer_query_active
+                                    && !flow_needs_redraw;
 
                                 // Animation-only paths get throttled when the
                                 // app opted into a sub-vsync animation cap.
@@ -4848,8 +4865,7 @@ impl WindowedApp {
                                 // cap because env() pointer queries already
                                 // depend on cursor coordinates that arrive
                                 // at vsync rate.
-                                let interactive = needs_cursor_redraw
-                                    || scroll_animating
+                                let interactive = scroll_animating
                                     || needs_overlay_redraw
                                     || pointer_query_active;
                                 // Per-property smoothness gate (option B).
@@ -4888,7 +4904,15 @@ impl WindowedApp {
                                         || css_needs_redraw
                                         || flow_needs_redraw);
 
-                                if let (true, Some(fps)) = (cap_applies, animation_fps_cap) {
+                                if cursor_only {
+                                    // Cursor blink toggles every ~400 ms
+                                    // (see `RenderState::cursor_blink_interval`).
+                                    // Schedule the next paint at the next
+                                    // toggle, not at vsync.
+                                    let delay = std::time::Duration::from_millis(400);
+                                    frame_dirty.store(true, Ordering::Release);
+                                    wake_proxy_for_pacing.wake_at(delay);
+                                } else if let (true, Some(fps)) = (cap_applies, animation_fps_cap) {
                                     // Defer the next frame instead of
                                     // requesting it immediately. The platform
                                     // shim's lazy timer thread sends a Wake
