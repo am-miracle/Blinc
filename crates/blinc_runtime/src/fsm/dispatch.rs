@@ -68,7 +68,7 @@ fn slot() -> &'static std::sync::RwLock<Option<Arc<dyn GuardDispatcher>>> {
 /// Typically called once at app startup — the JIT path's
 /// `BlincDsl::new()` does this, and the AOT path's generated
 /// init function does it too. Apps that ship without any FSM
-/// support can leave the slot empty; [`FsmStateId::on_tick`]
+/// support can leave the slot empty; `FsmStateId::on_tick`
 /// silently returns `None` in that case (no transitions fire).
 pub fn set_guard_dispatcher(dispatcher: Arc<dyn GuardDispatcher>) {
     let mut guard = slot()

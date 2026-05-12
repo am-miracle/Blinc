@@ -454,7 +454,7 @@ pub use blinc_dsl_macro::extern_widget;
 /// Canonical Zyntax runtime value enum, re-exported for `query` / `ViewRenderer` consumers.
 pub use zyntax_embed::ZyntaxValue;
 
-/// Internals for the [`extern_widget!`] macro's code generation. Not stable API.
+/// Internals for the [`extern_widget`] attribute macro's code generation. Not stable API.
 #[doc(hidden)]
 pub mod __extern_widget_internals {
     pub use crate::{

@@ -119,7 +119,7 @@ pub struct FsmDefinition {
 ///
 /// The widget-layer `Stateful` auto-registers `POINTER_DOWN` /
 /// `POINTER_UP` / etc. handlers on every container and feeds their
-/// numeric codes into [`StatefulInner::dispatch`] → `state.on_event`.
+/// numeric codes into `StatefulInner::dispatch` → `state.on_event`.
 /// For builtin widget states (`ButtonState`, `ScrollState`) those
 /// codes are exactly the transitions the state machine defines. For
 /// DSL FSMs they're meaningless — but without an offset they

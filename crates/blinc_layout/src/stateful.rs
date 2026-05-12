@@ -1262,7 +1262,7 @@ impl<S: StateTransitions> StatefulInner<S> {
         }
     }
 
-    /// In-place version of [`Stateful::dispatch`]. Walks the state
+    /// In-place version of `Stateful::dispatch`. Walks the state
     /// machine via `S::on_event`, updates `state` + marks
     /// `needs_visual_update` when a transition fires, and returns
     /// `true` in that case. Caller is responsible for the
