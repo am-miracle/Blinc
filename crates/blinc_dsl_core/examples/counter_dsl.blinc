@@ -18,19 +18,21 @@ component Counter {
         .counter-reset   { background: #ef4444; border-radius: 10px; padding: 14px }
         .counter-cta *, .counter-reset * { pointer-events: none }
     }
+    init {
+        CounterFsm.subscribe("Counting.Increment", || { count.set(count.get() + 1) })
+        CounterFsm.subscribe("Counting.Reset",     || { count.set(0) })
+    }
     @stateful([count]) @fsm([CounterFsm]) view {
         Div(class = "counter-card") {
             Text(f"Count: {count.get()}")
             Div(class = "counter-row") {
                 Div(class = "counter-cta", on_click = || {
-                    count.set(count.get() + 1)
                     CounterFsm.trigger("Idle.Increment")
                     CounterFsm.trigger("Counting.Increment")
                 }) {
                     Text("+1")
                 }
                 Div(class = "counter-reset", on_click = || {
-                    count.set(0)
                     CounterFsm.trigger("Counting.Reset")
                 }) {
                     Text("Reset")

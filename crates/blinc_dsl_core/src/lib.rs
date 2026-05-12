@@ -355,6 +355,48 @@ extern "C" fn blinc_fsm_runtime_trigger(fsm_ptr: *const i32, path_ptr: *const i3
     blinc_runtime::fsm::dispatch_default(fsm, event);
 }
 
+/// `__fsm_subscribe__("<FsmName>", "<From.Event>", closure_ptr)` —
+/// registers a DSL closure as a path-filtered subscriber to the
+/// FSM's default-instance transitions. Emitted by
+/// `resolve_fsm_subscribe_calls` from
+/// `<FsmName>.subscribe("<From.Event>", || { … })` inside a
+/// component's `init { … }` block.
+///
+/// The closure is a JIT'd Zyntax lambda taking no parameters and
+/// returning Unit — `register_subscriber` filters on the path, so
+/// the closure only runs when its registered filter matches the
+/// just-triggered path. We hold the raw function pointer and call
+/// it via `transmute → extern "C" fn()`.
+///
+/// # Safety
+///
+/// The closure pointer must remain valid for the lifetime of the
+/// process — JIT memory is leak-on-init for the prototype, so
+/// this holds as long as `BlincDsl` (which owns the
+/// `ZyntaxRuntime`) isn't dropped.
+extern "C" fn blinc_fsm_subscribe(fsm_ptr: *const i32, path_ptr: *const i32, closure_ptr: i64) {
+    let Some(fsm) = decode_signal_name(fsm_ptr) else {
+        tracing::warn!("__fsm_subscribe__ called with null fsm pointer");
+        return;
+    };
+    let Some(path) = decode_signal_name(path_ptr) else {
+        tracing::warn!("__fsm_subscribe__ called with null path pointer");
+        return;
+    };
+    if closure_ptr == 0 {
+        tracing::warn!("__fsm_subscribe__ called with null closure pointer");
+        return;
+    }
+    blinc_runtime::fsm::register_subscriber(fsm, path, move || {
+        // SAFETY: the SSA lowering produces an `extern "C"` lambda body
+        // taking zero args and returning Unit. The raw `i64` we received
+        // from CreateClosure points at exactly that ABI.
+        type SubscriberFn = extern "C" fn();
+        let func: SubscriberFn = unsafe { std::mem::transmute(closure_ptr) };
+        func();
+    });
+}
+
 /// `$Blinc$text_int` — integer arm of `text(...)`. Pushes an integer
 /// onto the scene buffer.
 ///
@@ -2318,6 +2360,211 @@ fn resolve_fsm_trigger_calls(program: &mut TypedProgram) {
     }
 }
 
+/// Rewrite `<FsmName>.subscribe(<path_str>, <closure>)` method
+/// calls into `__fsm_subscribe__("<FsmName>", <path_str>,
+/// <closure>)` extern calls. Mirrors [`resolve_fsm_trigger_calls`]
+/// — collects FSM names from impl blocks that carry a synthesised
+/// `__fsm_meta__` method, then walks every function / impl-method
+/// body and rewrites matching call shapes.
+///
+/// The intended call site is inside a component's `init { … }`
+/// block. The closure is a no-arg lambda whose body runs after
+/// every transition whose `"From.Event"` path equals the path
+/// string. Path-filtering happens host-side inside
+/// `blinc_runtime::fsm::register_subscriber`.
+fn resolve_fsm_subscribe_calls(program: &mut TypedProgram) {
+    use std::collections::HashSet;
+    use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
+    use zyntax_typed_ast::InternedString;
+
+    let mut fsm_names: HashSet<InternedString> = HashSet::new();
+    for decl in &program.declarations {
+        if let TypedDeclaration::Impl(imp) = &decl.node {
+            if imp.trait_name.resolve_global().is_some()
+                && imp
+                    .methods
+                    .iter()
+                    .any(|m| m.name.resolve_global().as_deref() == Some("__fsm_meta__"))
+            {
+                fsm_names.insert(imp.trait_name);
+            }
+        }
+    }
+    if fsm_names.is_empty() {
+        return;
+    }
+
+    fn rewrite_expr(
+        expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>,
+        fsm_names: &HashSet<InternedString>,
+    ) {
+        match &mut expr.node {
+            TypedExpression::Binary(b) => {
+                rewrite_expr(&mut b.left, fsm_names);
+                rewrite_expr(&mut b.right, fsm_names);
+            }
+            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand, fsm_names),
+            TypedExpression::Call(c) => {
+                rewrite_expr(&mut c.callee, fsm_names);
+                for a in &mut c.positional_args {
+                    rewrite_expr(a, fsm_names);
+                }
+            }
+            TypedExpression::Field(f) => rewrite_expr(&mut f.object, fsm_names),
+            TypedExpression::Index(idx) => {
+                rewrite_expr(&mut idx.object, fsm_names);
+                rewrite_expr(&mut idx.index, fsm_names);
+            }
+            TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
+                for it in items {
+                    rewrite_expr(it, fsm_names);
+                }
+            }
+            TypedExpression::MethodCall(mc) => {
+                rewrite_expr(&mut mc.receiver, fsm_names);
+                for a in &mut mc.positional_args {
+                    rewrite_expr(a, fsm_names);
+                }
+            }
+            TypedExpression::Block(b) => rewrite_block(b, fsm_names),
+            TypedExpression::If(if_expr) => {
+                rewrite_expr(&mut if_expr.condition, fsm_names);
+                rewrite_expr(&mut if_expr.then_branch, fsm_names);
+                rewrite_expr(&mut if_expr.else_branch, fsm_names);
+            }
+            TypedExpression::Lambda(lam) => match &mut lam.body {
+                zyntax_typed_ast::typed_ast::TypedLambdaBody::Expression(e) => {
+                    rewrite_expr(e, fsm_names);
+                }
+                zyntax_typed_ast::typed_ast::TypedLambdaBody::Block(block) => {
+                    rewrite_block(block, fsm_names);
+                }
+            },
+            _ => {}
+        }
+
+        // Recognise both `MethodCall` (expression position) and
+        // `Call { callee: Field { object, field }, args }`
+        // (statement position via `method_call_stmt`).
+        let subscribe_call = match &expr.node {
+            TypedExpression::MethodCall(mc) if mc.positional_args.len() == 2 => {
+                if let TypedExpression::Variable(receiver_name) = &mc.receiver.node {
+                    Some((
+                        *receiver_name,
+                        mc.method,
+                        mc.positional_args[0].clone(),
+                        mc.positional_args[1].clone(),
+                        expr.span,
+                    ))
+                } else {
+                    None
+                }
+            }
+            TypedExpression::Call(c) if c.positional_args.len() == 2 => {
+                if let TypedExpression::Field(f) = &c.callee.node {
+                    if let TypedExpression::Variable(receiver_name) = &f.object.node {
+                        Some((
+                            *receiver_name,
+                            f.field,
+                            c.positional_args[0].clone(),
+                            c.positional_args[1].clone(),
+                            expr.span,
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        let Some((receiver_name, method, path_arg, closure_arg, span)) = subscribe_call else {
+            return;
+        };
+        if !fsm_names.contains(&receiver_name) {
+            return;
+        }
+        if method.resolve_global().as_deref() != Some("subscribe") {
+            return;
+        }
+
+        let fsm_name_arg = zyntax_typed_ast::TypedNode::new(
+            TypedExpression::Literal(TypedLiteral::String(receiver_name)),
+            Type::Primitive(PrimitiveType::String),
+            span,
+        );
+        let callee = zyntax_typed_ast::TypedNode::new(
+            TypedExpression::Variable(InternedString::new_global("__fsm_subscribe__")),
+            Type::Unknown,
+            span,
+        );
+        expr.node = TypedExpression::Call(TypedCall {
+            callee: Box::new(callee),
+            positional_args: vec![fsm_name_arg, path_arg, closure_arg],
+            named_args: vec![],
+            type_args: vec![],
+        });
+        expr.ty = Type::Primitive(PrimitiveType::Unit);
+    }
+
+    fn rewrite_block(
+        block: &mut zyntax_typed_ast::typed_ast::TypedBlock,
+        fsm_names: &HashSet<InternedString>,
+    ) {
+        for stmt in &mut block.statements {
+            rewrite_stmt(stmt, fsm_names);
+        }
+    }
+
+    fn rewrite_stmt(
+        stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>,
+        fsm_names: &HashSet<InternedString>,
+    ) {
+        match &mut stmt.node {
+            TypedStatement::Expression(e) => rewrite_expr(e, fsm_names),
+            TypedStatement::Let(l) => {
+                if let Some(init) = &mut l.initializer {
+                    rewrite_expr(init, fsm_names);
+                }
+            }
+            TypedStatement::Return(Some(e)) => rewrite_expr(e, fsm_names),
+            TypedStatement::If(if_stmt) => {
+                rewrite_expr(&mut if_stmt.condition, fsm_names);
+                rewrite_block(&mut if_stmt.then_block, fsm_names);
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    rewrite_block(else_block, fsm_names);
+                }
+            }
+            TypedStatement::While(w) => {
+                rewrite_expr(&mut w.condition, fsm_names);
+                rewrite_block(&mut w.body, fsm_names);
+            }
+            TypedStatement::Block(b) => rewrite_block(b, fsm_names),
+            _ => {}
+        }
+    }
+
+    for decl in &mut program.declarations {
+        match &mut decl.node {
+            TypedDeclaration::Function(func) => {
+                if let Some(body) = &mut func.body {
+                    rewrite_block(body, &fsm_names);
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                for method in &mut imp.methods {
+                    if let Some(body) = &mut method.body {
+                        rewrite_block(body, &fsm_names);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Validate that every `__component_call__("Name", ...)` marker
 /// references a `Name` that's been declared as a `component` (a
 /// `TypedDeclaration::Class`) in the same program. The grammar
@@ -4083,7 +4330,13 @@ fn publish_fsms_to_runtime_registry(program: &TypedProgram) {
                 .map(|i| i as u32)
         };
 
-        // Event codes — first-appearance order in transitions.
+        // Event codes — first-appearance order in transitions,
+        // offset into the high range via
+        // [`FSM_EVENT_CODE_OFFSET`](blinc_runtime::fsm::FSM_EVENT_CODE_OFFSET)
+        // so they can't collide with widget pointer event codes (
+        // `POINTER_DOWN = 1` etc. — the widget Stateful auto-feeds
+        // those into `state.on_event`, which would otherwise match
+        // an FSM event sharing the same low code).
         let mut event_names: Vec<std::sync::Arc<str>> = Vec::new();
         let mut event_code_of = |name: zyntax_typed_ast::InternedString| -> u32 {
             let resolved = name.resolve_global().unwrap_or_default();
@@ -4092,10 +4345,10 @@ fn publish_fsms_to_runtime_registry(program: &TypedProgram) {
                 let n_ref: &str = n.as_ref();
                 n_ref == needle
             }) {
-                return i as u32;
+                return i as u32 + blinc_runtime::fsm::FSM_EVENT_CODE_OFFSET;
             }
             event_names.push(std::sync::Arc::from(needle));
-            (event_names.len() - 1) as u32
+            (event_names.len() - 1) as u32 + blinc_runtime::fsm::FSM_EVENT_CODE_OFFSET
         };
 
         let transitions: Vec<blinc_runtime::fsm::EventTransition> = local_def
@@ -4672,6 +4925,7 @@ impl BlincDsl {
         synthesize_fsm_trait_interfaces(&mut typed_program);
         resolve_signal_calls(&mut typed_program);
         resolve_fsm_trigger_calls(&mut typed_program);
+        resolve_fsm_subscribe_calls(&mut typed_program);
 
         // Extract any `style { … }` blocks. The strings live
         // on the DSL for `compiled_stylesheets()` callers AND
@@ -4783,6 +5037,31 @@ impl BlincDsl {
         let function_names = runtime
             .compile_typed_program(typed_program)
             .map_err(|e| BlincDslError::Compile(e.to_string()))?;
+
+        // Eagerly run every component's `init { … }` block exactly
+        // once per compile. The grammar lowers `init { stmts }` into
+        // an `__init__` method on the component's impl, which Zyntax
+        // mangles into a `<Component>$__init__` JIT symbol. Calling
+        // each one here — after `compile_typed_program` returns and
+        // before any view ever mounts — gives the subscribe / setup
+        // statements inside `init` a chance to register before a
+        // first transition can fire.
+        //
+        // Running at compile time (rather than via `on_mount` on the
+        // view's outer container) keeps subscriber registrations from
+        // accumulating across view rebuilds: `view_widget()` can be
+        // called many times per app launch (resize, stateful refresh,
+        // …), but `compile_source` runs exactly once.
+        for name in &function_names {
+            if !name.ends_with("$__init__") {
+                continue;
+            }
+            // Ignore call failures — init is best-effort: a typo'd
+            // signal name or FSM in `init { … }` shouldn't sink the
+            // whole compile. The user-visible failure surfaces at
+            // the first transition that doesn't take.
+            let _ = runtime.call::<()>(name, &[]);
+        }
 
         Ok(function_names)
     }
@@ -4982,6 +5261,7 @@ impl BlincDsl {
         synthesize_fsm_trait_interfaces(&mut program);
         resolve_signal_calls(&mut program);
         resolve_fsm_trigger_calls(&mut program);
+        resolve_fsm_subscribe_calls(&mut program);
         // Strip `@stateful` markers so AST-inspection tests
         // see the same body shape `compile_source` will hand
         // to the JIT.
@@ -5580,6 +5860,26 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ],
             return_type: Type::Primitive(PrimitiveType::Unit),
             ptr: blinc_fsm_runtime_trigger as *const u8,
+        },
+        BuiltinDescriptor {
+            // `<FsmName>.subscribe("<From.Event>", || { ... })`
+            // inside a component's `init { … }` block lowers via
+            // `resolve_fsm_subscribe_calls` to a call here. The
+            // third arg is a `ClosurePtr`-carrying i64 minted by
+            // Zyntax's `CreateClosure` for the lambda value; the
+            // host extern transmutes it back to `extern "C" fn()`
+            // and stashes it in the per-thread subscribers table
+            // inside `blinc_runtime::fsm`, keyed by the path so
+            // the dispatcher only fires matching ones.
+            name: "__fsm_subscribe__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::String),
+                // i64 carries the closure handle (raw fn ptr).
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_fsm_subscribe as *const u8,
         },
         BuiltinDescriptor {
             // `__fstring_format__` (i32 specialisation). The

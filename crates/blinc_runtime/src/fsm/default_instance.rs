@@ -48,7 +48,10 @@ pub fn default_state(fsm_name: &str) -> Option<SharedState<FsmStateId>> {
 /// + the registry's name lookup.
 pub fn current_state_name(fsm_name: &str) -> Option<Arc<str>> {
     if let Some(shared) = default_state(fsm_name) {
-        return shared.lock().ok().and_then(|inner| inner.state.state_name());
+        return shared
+            .lock()
+            .ok()
+            .and_then(|inner| inner.state.state_name());
     }
     let code = current_state_code(fsm_name)?;
     with_fsm_registry(|r| {
@@ -161,6 +164,21 @@ pub fn dispatch_default(fsm_name: &str, event_name: &str) -> Option<(Arc<str>, A
             }
         }
     });
+    let triggered_path = format!("{from_name}.{event_name}");
+    let matched: Vec<Arc<TransitionSubscriber>> = SUBSCRIBERS.with(|s| {
+        s.borrow()
+            .get(fsm_name)
+            .map(|v| {
+                v.iter()
+                    .filter(|(p, _)| p.as_str() == triggered_path.as_str())
+                    .map(|(_, cb)| cb.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    for cb in matched {
+        cb();
+    }
 
     Some((from_name, to_name))
 }
@@ -182,12 +200,51 @@ thread_local! {
     /// `BlincContextState` isn't initialised.
     static FALLBACK_CODES: RefCell<HashMap<Arc<str>, u32>> = RefCell::new(HashMap::new());
     static EFFECTS: RefCell<HashMap<String, Vec<TransitionEffect>>> = RefCell::new(HashMap::new());
+    /// Per-FSM list of `(path, callback)` subscribers registered
+    /// from DSL `init { … }` blocks via
+    /// `<Fsm>.subscribe("From.Event", || { … })`. Each callback
+    /// fires after a successful default-instance transition whose
+    /// `"From.Event"` path equals the registered filter. The
+    /// closure is wrapped in `Arc` so [`dispatch_default`] can snapshot
+    /// the matching subset without holding the borrow across user
+    /// code.
+    static SUBSCRIBERS: RefCell<SubscriberMap> = RefCell::new(HashMap::new());
 }
 
 /// Callback signature for host-side effects registered via
 /// [`register_transition_effect`]. Args are
 /// `(from_state, event, to_state)`.
 pub type TransitionEffect = Box<dyn Fn(&str, &str, &str) + 'static>;
+
+/// Callback signature for DSL-registered FSM subscribers. The
+/// closure takes no args — `register_subscriber` already filters
+/// on the registered `"From.Event"` path, so by the time the
+/// callback fires the path is known to match. Registered from a
+/// DSL `init { ... }` block via
+/// `<Fsm>.subscribe("From.Event", || { … })` — see
+/// [`register_subscriber`].
+pub type TransitionSubscriber = dyn Fn() + 'static;
+
+/// Per-thread subscriber table: FSM name → list of
+/// `(path filter, callback)` pairs. Aliased so the `thread_local!`
+/// + lookup sites don't repeat the deeply-nested generics.
+type SubscriberMap = HashMap<String, Vec<(String, Arc<TransitionSubscriber>)>>;
+
+/// Register a DSL-side subscriber that fires after each successful
+/// default-instance transition whose triggered `"From.Event"` path
+/// equals `path`. Distinct from [`register_transition_effect`]:
+/// subscribers are path-filtered and zero-arg, intended to be
+/// driven by `__fsm_subscribe__` host-extern calls emitted from
+/// DSL `init { ... }` blocks. Effects are intended for host-side
+/// integrations and receive the full `(from, event, to)` triple.
+pub fn register_subscriber(fsm_name: &str, path: &str, cb: impl Fn() + 'static) {
+    SUBSCRIBERS.with(|s| {
+        s.borrow_mut()
+            .entry(fsm_name.to_string())
+            .or_default()
+            .push((path.to_string(), Arc::new(cb)));
+    });
+}
 
 /// Register a callback to run after each successful default-
 /// instance transition for `fsm_name`. Reserved for side
@@ -206,4 +263,5 @@ pub fn register_transition_effect(fsm_name: &str, cb: impl Fn(&str, &str, &str) 
 pub fn clear_all() {
     FALLBACK_CODES.with(|m| m.borrow_mut().clear());
     EFFECTS.with(|e| e.borrow_mut().clear());
+    SUBSCRIBERS.with(|s| s.borrow_mut().clear());
 }

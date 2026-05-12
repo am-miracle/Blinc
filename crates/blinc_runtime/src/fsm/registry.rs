@@ -112,6 +112,27 @@ pub struct FsmDefinition {
     pub tick_guards: Vec<TickGuard>,
 }
 
+/// High-bit-set offset added to every FSM event code so DSL-defined
+/// FSM events can't collide with widget pointer-event codes (which
+/// live in the low range — `POINTER_DOWN = 1`, …, `DRAG_END = 7`,
+/// see [`blinc_core::events::event_types`]).
+///
+/// The widget-layer `Stateful` auto-registers `POINTER_DOWN` /
+/// `POINTER_UP` / etc. handlers on every container and feeds their
+/// numeric codes into [`StatefulInner::dispatch`] → `state.on_event`.
+/// For builtin widget states (`ButtonState`, `ScrollState`) those
+/// codes are exactly the transitions the state machine defines. For
+/// DSL FSMs they're meaningless — but without an offset they
+/// accidentally match the FSM's own sequentially-assigned event
+/// codes (e.g. DSL `Reset` = 1 collides with `POINTER_DOWN` = 1, so
+/// a click silently dispatches `Reset` on the FSM).
+///
+/// Bumping every FSM event code into the high range puts the two
+/// namespaces in disjoint orbits: pointer events stay tiny, FSM
+/// events live above `0x4000_0000`. `step_event` looks up by raw
+/// code and won't match across namespaces.
+pub const FSM_EVENT_CODE_OFFSET: u32 = 0x4000_0000;
+
 impl FsmDefinition {
     /// Look up the variant code for a state name. Returns
     /// `None` when the name isn't registered.
@@ -122,13 +143,15 @@ impl FsmDefinition {
             .map(|i| i as u32)
     }
 
-    /// Look up the event code for an event name. Same
-    /// semantics as [`Self::state_code`].
+    /// Look up the event code for an event name. Adds
+    /// [`FSM_EVENT_CODE_OFFSET`] so the returned code can be passed
+    /// directly to `inner.dispatch(...)` without colliding with
+    /// widget pointer events.
     pub fn event_code(&self, name: &str) -> Option<u32> {
         self.event_names
             .iter()
             .position(|n| n.as_ref() == name)
-            .map(|i| i as u32)
+            .map(|i| i as u32 + FSM_EVENT_CODE_OFFSET)
     }
 
     /// Reverse of [`Self::state_code`] for diagnostics. Returns
@@ -329,7 +352,10 @@ mod tests {
         assert_eq!(def.state_code("Idle"), Some(0));
         assert_eq!(def.state_code("Loading"), Some(1));
         assert_eq!(def.state_code("Nope"), None);
-        assert_eq!(def.event_code("Start"), Some(0));
+        // Event codes carry FSM_EVENT_CODE_OFFSET so they can't
+        // collide with widget pointer-event codes — see the constant's
+        // doc comment for the rationale.
+        assert_eq!(def.event_code("Start"), Some(FSM_EVENT_CODE_OFFSET));
         assert_eq!(def.event_code("Nope"), None);
     }
 }

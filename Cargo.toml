@@ -248,7 +248,6 @@ blinc_platform = { path = "crates/blinc_platform" }
 # reproducible build); this patch block redirects every git-pinned
 # crate back to the sibling repo at `/Users/amaterasu/Vibranium/zyntax`
 # so we can iterate on upstream Zyntax patches (see
-# `crates/blinc_dsl_core/UPSTREAM_PATCHES.md` + the standalone
 # `ZYNTAX_LAMBDA_BODY_BUG.md`) without push-bump-pull cycles.
 # Drop this block before publishing or when the local checkout
 # isn't present.

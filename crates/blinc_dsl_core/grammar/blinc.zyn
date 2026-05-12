@@ -51,6 +51,11 @@
     // above — needs an extern decl in the typed program for
     // closure-body Variable resolution.
     __fsm_runtime_trigger__: "__fsm_runtime_trigger__",
+    // `<FsmName>.subscribe(|state| { … })` inside an `init { … }`
+    // block lowers via `resolve_fsm_subscribe_calls` to a call to
+    // this extern. Same closure-body Variable-resolution reason
+    // as the rest of this section.
+    __fsm_subscribe__: "__fsm_subscribe__",
     // F-string desugaring: the normalization pass
     // `fstring_to_concat` (zyntax passes/normalization) rewrites
     // multi-part f-strings into `string_concat` chains with
@@ -330,6 +335,7 @@ component_folded = {
     "component" ~ name:identifier ~ props:component_props? ~ "{"
     ~ fields:struct_field_list?
     ~ styles:style_decl*
+    ~ init:init_block?
     ~ view:view_member
     ~ extra:impl_fn*
     ~ "}"
@@ -390,7 +396,10 @@ component_folded = {
                   return_type: Type::Unit,
                   body: Some(TypedBlock { statements: [] }),
               }],
-              prepend_list(view, extra),
+              concat_list(
+                  init.unwrap_or([]),
+                  prepend_list(view, extra),
+              ),
           ),
       }],
   )
@@ -453,6 +462,29 @@ prop_decl = { name:identifier ~ ":" ~ ty:state_type }
 //   * `view { stmts }` — implicit "depends on all state". Same
 //     shape as a parameterless `fn view() { stmts }`. Useful for
 //     components where every field drives the UI.
+// `init { ... }` — component construction-time hook. The block's
+// statements run once, on first mount, before the view is laid out.
+// Lowers to a `TypedDeclaration::Function` named `__init__` appended
+// to the component's impl method list. The host-side
+// `view_widget()` helper looks the JIT'd symbol up by
+// `<Component>$__init__` mangling and attaches it as an `on_mount`
+// callback on the wrapping Stateful container so it runs exactly
+// once per app launch.
+//
+// Intended primarily for `<FsmName>.subscribe("Path", || { … })`
+// registrations — wiring FSM transitions to signal writes without
+// the click handler caring about action logic.
+init_block = { "init" ~ "{" ~ stmts:statements ~ "}" }
+  -> concat_list(
+      [TypedDeclaration::Function {
+          name: intern("__init__"),
+          params: [],
+          return_type: Type::Unit,
+          body: Some(TypedBlock { statements: stmts }),
+      }],
+      [],
+  )
+
 view_member = { view_with_deps | view_simple }
 
 view_simple = { attrs:view_attr* ~ "view" ~ "{" ~ stmts:statements ~ "}" }

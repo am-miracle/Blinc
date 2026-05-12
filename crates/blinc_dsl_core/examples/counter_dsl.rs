@@ -33,6 +33,7 @@ fn main() -> Result<()> {
         move |ctx| {
             let source_pane = code(SOURCE)
                 .w_full()
+                .h(ctx.height)
                 .syntax(SyntaxConfig::new(RustHighlighter::new()))
                 .font_size(13.0)
                 .line_height(1.4)
