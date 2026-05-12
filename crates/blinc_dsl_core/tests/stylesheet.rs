@@ -1,20 +1,21 @@
-//! Phase 1 of styling: top-level `stylesheet "..."` blocks.
+//! DSL-side CSS surface: top-level + in-component `style { … }`
+//! blocks, inline `class = "..."` on Div.
 
 use blinc_dsl_core::BlincDsl;
 
-/// A single-line stylesheet block lands in `compiled_stylesheets()`
-/// verbatim (no quotes, no escapes).
 #[test]
-fn stylesheet_block_collected_into_compiled_stylesheets() {
+fn style_block_collected_into_compiled_stylesheets() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let dsl = BlincDsl::new().expect("runtime init");
     dsl.compile_source(
         r##"
-        stylesheet "#header { background: red; }"
+        style {
+            #header { background: red; }
+        }
         view { Text("hi") }
         "##,
-        "stylesheet_basic.blinc",
+        "style_basic.blinc",
     )
     .expect("compile");
 
@@ -27,35 +28,32 @@ fn stylesheet_block_collected_into_compiled_stylesheets() {
     );
 }
 
-/// Multi-line CSS + `@flow` block survive end-to-end. The host
-/// passes the result to `ctx.add_css(...)`, which knows how to
-/// parse `@flow` (no Blinc-side work needed — `css_parser`
-/// handles it).
+/// Multi-line CSS + `@flow` block survive end-to-end. The
+/// `style { ... }` block captures the body with balanced
+/// braces, so nested selector blocks AND `@flow { ... }` work
+/// without escaping.
 #[test]
-fn stylesheet_block_preserves_multiline_and_flow() {
+fn style_block_preserves_multiline_and_flow() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let dsl = BlincDsl::new().expect("runtime init");
-    let css = r#"
-        .card { background: #3b82f6; border-radius: 12px; }
-        @flow ripple {
-            target: fragment;
-            input uv: builtin(uv);
-            input time: builtin(time);
-            node wave = sin(uv.x * 10.0 + time);
-            output color = vec4(wave, wave, wave, 1.0);
-        }
-    "#;
-    let source = format!(
+    dsl.compile_source(
         r##"
-        stylesheet "{}"
-        view {{ Text("hi") }}
+        style {
+            .card { background: #3b82f6; border-radius: 12px; }
+            @flow ripple {
+                target: fragment;
+                input uv: builtin(uv);
+                input time: builtin(time);
+                node wave = sin(uv.x * 10.0 + time);
+                output color = vec4(wave, wave, wave, 1.0);
+            }
+        }
+        view { Text("hi") }
         "##,
-        css.replace('"', "\\\"")
-    );
-
-    dsl.compile_source(&source, "stylesheet_flow.blinc")
-        .expect("compile");
+        "style_flow.blinc",
+    )
+    .expect("compile");
 
     let sheets = dsl.compiled_stylesheets();
     assert_eq!(sheets.len(), 1);
@@ -68,10 +66,10 @@ fn stylesheet_block_preserves_multiline_and_flow() {
 }
 
 /// Inline `class = "..."` on Div lands on the constructed
-/// widget's class list. Pairs with a stylesheet that targets
-/// `.btn` — together they form the standard CSS+class flow
-/// that mirrors the Rust-side `.class("btn")` + `ctx.add_css`
-/// pattern in `styling_demo.rs`.
+/// widget's class list. Pairs with a `style { }` block that
+/// targets `.btn` — together they form the standard
+/// CSS+class flow that mirrors the Rust-side `.class("btn")` +
+/// `ctx.add_css` pattern in `styling_demo.rs`.
 #[test]
 fn div_inline_class_attribute_applies_to_widget() {
     use blinc_dsl_core::{materialize_widget, WidgetBox, ZyntaxValue};
@@ -81,7 +79,7 @@ fn div_inline_class_attribute_applies_to_widget() {
     let dsl = blinc_dsl_core::BlincDsl::new().expect("runtime init");
     dsl.compile_source(
         r##"
-        stylesheet ".btn { background: red; }"
+        style { .btn { background: red; } }
         view { Div(class = "btn primary") }
         "##,
         "class_attr.blinc",
@@ -99,8 +97,6 @@ fn div_inline_class_attribute_applies_to_widget() {
     let WidgetBox::Custom(builder) = *widget else {
         panic!("expected Custom(Styled<Div>)");
     };
-    // The Styled wrapper delegates element_classes() to the
-    // inner Div, which stores the class list.
     let classes = builder.element_classes();
     assert!(
         classes.iter().any(|c| c.as_ref() == "btn"),
@@ -112,20 +108,21 @@ fn div_inline_class_attribute_applies_to_widget() {
     );
 }
 
-/// `stylesheet "..."` declared *inside* a `component { ... }`
-/// body co-locates styling with the component. Content still
-/// flows through `compiled_stylesheets()` — no auto-scoping
-/// today (authors scope via class names per the
-/// `class = "..."` flow).
+/// `style { ... }` inside a `component { ... }` body co-locates
+/// styling with the component definition. Content still flows
+/// through `compiled_stylesheets()` (no auto-scoping yet —
+/// authors scope by class name).
 #[test]
-fn component_scoped_stylesheet_collects() {
+fn component_scoped_style_block_collects() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let dsl = BlincDsl::new().expect("runtime init");
     dsl.compile_source(
         r##"
         component Counter {
-            stylesheet ".counter { color: blue; }"
+            style {
+                .counter { color: blue; }
+            }
             view { Text("hi") }
         }
         view { Counter() }
@@ -137,23 +134,23 @@ fn component_scoped_stylesheet_collects() {
     let sheets = dsl.compiled_stylesheets();
     assert!(
         sheets.iter().any(|s| s.contains(".counter")),
-        "in-component stylesheet should land in compiled_stylesheets, got: {sheets:?}"
+        "in-component style block should land in compiled_stylesheets, got: {sheets:?}"
     );
 }
 
-/// Multiple stylesheet blocks in one source land in order.
+/// Multiple `style { ... }` blocks in one source land in order.
 #[test]
-fn multiple_stylesheet_blocks_collect_in_order() {
+fn multiple_style_blocks_collect_in_order() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let dsl = BlincDsl::new().expect("runtime init");
     dsl.compile_source(
-        r#"
-        stylesheet ".first { color: red; }"
-        stylesheet ".second { color: blue; }"
+        r##"
+        style { .first { color: red; } }
+        style { .second { color: blue; } }
         view { Text("hi") }
-        "#,
-        "stylesheet_multi.blinc",
+        "##,
+        "style_multi.blinc",
     )
     .expect("compile");
 

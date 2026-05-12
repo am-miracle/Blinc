@@ -98,20 +98,24 @@ top_level_items = { item:top_level_item* }
 // `component_decl`. Falling through handles standalone struct-only
 // `component { fields }` decls, standalone `impl` blocks, and the
 // bare `view { ... }` quick-test shape.
-top_level_item = { import_stmt | stylesheet_decl | signal_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
+top_level_item = { import_stmt | style_decl | signal_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
 
-// `stylesheet "..."` — top-level CSS block. The contained text
-// is captured verbatim (multi-line OK) and exposed via
-// `BlincDsl::compiled_stylesheets()`. Hosts pass it to
-// `ctx.add_css(...)` at runtime. Supports the full CSS surface
-// `blinc_layout`'s parser understands — selectors, pseudo-
-// classes, combinators, `@flow` shader DAGs, animations, etc.
+// `style { ...CSS... }` — block-form CSS declaration. Author
+// writes raw CSS between the braces; balanced nested braces
+// (selector bodies like `.foo { ... }`) capture as part of the
+// content. Multi-line by construction. Supports the full CSS
+// surface (`#id`, `.class`, combinators, pseudo-classes,
+// `@flow` shader DAGs, animations).
 //
-// Lowers to a Blinc-private marker function `__blinc_stylesheet__`
-// whose body holds the CSS string as a single expression
-// statement. The pre-compile pass `extract_and_strip_stylesheets`
-// reads it out and removes the decl before JIT.
-stylesheet_decl = { "stylesheet" ~ css:stylesheet_body }
+// Valid at file top level and inside `component { ... }`. Each
+// block lands in `BlincDsl::compiled_stylesheets()`; hosts feed
+// the entries to `ctx.add_css(...)`.
+//
+// Lowers to a Blinc-private marker function
+// `__blinc_stylesheet__` whose body holds the CSS text as a
+// single string-literal statement; `extract_and_strip_stylesheets`
+// reads it out + strips the marker before JIT.
+style_decl = { "style" ~ "{" ~ css:style_block_content ~ "}" }
   -> TypedDeclaration::Function {
       name: intern("__blinc_stylesheet__"),
       params: [],
@@ -123,13 +127,13 @@ stylesheet_decl = { "stylesheet" ~ css:stylesheet_body }
       ] }),
   }
 
-// Quoted CSS body — captures inner text verbatim including
-// newlines. Separate from `string_literal` so multi-line
-// content lands cleanly without escaping.
-stylesheet_body = { "\"" ~ inner:stylesheet_body_chars ~ "\"" }
-  -> inner
-
-stylesheet_body_chars = @{ (!"\"" ~ ANY)* }
+// Balanced-brace capture of arbitrary CSS content. The
+// content rule consumes either a single non-`}` char OR a
+// nested `{ ... }` pair (recursive). `text()` of the
+// captured span gives the verbatim body, braces and all.
+style_block_content = @{ style_block_chars* }
+style_block_chars = @{ style_brace_pair | !"}" ~ ANY }
+style_brace_pair = @{ "{" ~ style_block_content ~ "}" }
 
 // `import { A, B } from "path"` — ES6 named imports. Lowers to
 // `TypedDeclaration::Import`. The path string is captured
@@ -217,7 +221,7 @@ bare_view_item = { "view" ~ "{" ~ stmts:statements ~ "}" }
 component_folded = {
     "component" ~ name:identifier ~ props:component_props? ~ "{"
     ~ fields:struct_field_list?
-    ~ styles:stylesheet_decl*
+    ~ styles:style_decl*
     ~ view:view_member
     ~ extra:impl_fn*
     ~ "}"
