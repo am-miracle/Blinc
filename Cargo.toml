@@ -104,12 +104,6 @@ repository = "https://github.com/project-blinc/Blinc"
 rust-version = "1.75"
 
 [workspace.dependencies]
-# Zyntax is NOT in `[workspace.dependencies]` — each consumer
-# (`blinc_dsl_core`, `blinc_runtime`) pins it directly. Keeps the
-# Zyntax pull scoped to the DSL crates so workspace members that
-# don't touch Zyntax stay fetch-clean. Bump every Zyntax-pinned
-# dep across the workspace together.
-
 # Krio (async runtime) — Zyntax's `krio_adapter` pins to rev `fe0177c`
 # (see zyntax/crates/passes/krio_adapter/Cargo.toml). We declare the
 # same rev here so any Blinc code that opts into the
