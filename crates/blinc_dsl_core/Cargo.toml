@@ -8,9 +8,15 @@ description = "Blinc DSL core — Zyntax-embedded grammar, runtime engine, and c
 publish = false
 
 [dependencies]
-# Zyntax SDK. See workspace dep notes in /Cargo.toml — this is path-pinned
-# during prototyping because upstream is 0.1.0 with no semver guarantees.
-zyntax_embed = { workspace = true }
+# Zyntax SDK. Pinned directly here (rather than via
+# `[workspace.dependencies]`) so the Zyntax pull is gated to the
+# DSL crate — workspace members that don't touch Zyntax stay
+# fetch-clean. `blinc_runtime` carries its own pin against the
+# same rev for the same reason; bump both together when pulling
+# in upstream changes (upstream is `0.1.0` with no semver
+# guarantees and a blanket `#![allow(unused, dead_code, deprecated)]`,
+# so expect occasional breakage).
+zyntax_embed = { git = "https://github.com/darmie/zyntax", rev = "212dba388946d1561dd36c8e7393841159914294" }
 # Direct dep on the typed-AST crate so we can inject extern function
 # declarations into a parsed `TypedProgram` from Rust before passing
 # it to `compile_typed_program`. The grammar-action interpreter
@@ -18,8 +24,8 @@ zyntax_embed = { workspace = true }
 # zyntax/crates/zyn_peg/src/runtime2/interpreter.rs:866-899), so any
 # host that wants statically-registered builtins to round-trip
 # through type inference has to add the extern decls programmatically.
-# Pinned to the same upstream rev as `zyntax_embed` in the workspace
-# Cargo.toml — bump both together when pulling in upstream changes.
+# Pinned to the same upstream rev as `zyntax_embed` above —
+# bump every Zyntax-pinned dep across the workspace together.
 zyntax_typed_ast = { git = "https://github.com/darmie/zyntax", rev = "212dba388946d1561dd36c8e7393841159914294" }
 
 # Zyntax runtime support library (`sdk/zrtl/`). The JIT compiles
