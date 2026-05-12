@@ -1383,9 +1383,11 @@ fn is_signal_decl(func: &zyntax_typed_ast::typed_ast::TypedFunction) -> bool {
 /// `user.get().age` and Zyntax codegens the field load directly).
 /// Walk the program's top-level declarations, drain any
 /// `__blinc_stylesheet__` marker functions (emitted by the
-/// `stylesheet "..."` grammar rule), extract the CSS strings
+/// `style { ... }` grammar rule), extract the CSS strings
 /// they hold in their bodies, and remove them so JIT-compile
-/// doesn't see the marker functions.
+/// doesn't see the marker functions. The extracted text gets
+/// piped through [`auto_inject_semicolons`] so authors can
+/// write `;`-free CSS in `style` blocks.
 fn extract_and_strip_stylesheets(program: &mut TypedProgram, out: &mut Vec<String>) {
     use zyntax_typed_ast::typed_ast::{
         TypedDeclaration, TypedExpression, TypedLiteral, TypedStatement,
@@ -1406,12 +1408,61 @@ fn extract_and_strip_stylesheets(program: &mut TypedProgram, out: &mut Vec<Strin
             };
             if let TypedExpression::Literal(TypedLiteral::String(s)) = &expr.node {
                 if let Some(text) = s.resolve_global() {
-                    out.push(text.to_string());
+                    out.push(auto_inject_semicolons(&text));
                 }
             }
         }
         false
     });
+}
+
+/// Append a `;` to every line inside a `{ ... }` block whose
+/// trailing significant char doesn't already terminate the
+/// declaration. Lets DSL authors omit `;` in `style { ... }`
+/// blocks; the host-side CSS parser (which still uses `;` /
+/// `}` as the value-terminator) sees a well-formed sheet.
+///
+/// Brace-depth tracking is naïve — string-literal / comment
+/// braces will throw off the count. CSS in real `style {}`
+/// blocks rarely contains either at top level, so the
+/// heuristic holds; pathological cases can supply explicit
+/// `;` if needed.
+fn auto_inject_semicolons(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + raw.len() / 8);
+    let mut depth: i32 = 0;
+    for line in raw.split_inclusive('\n') {
+        // Separate the content from the line-ending whitespace
+        // so we can inject `;` *before* the newline.
+        let line_end_idx = line
+            .rfind(|c: char| !c.is_whitespace())
+            .map(|i| i + line[i..].chars().next().map(char::len_utf8).unwrap_or(0))
+            .unwrap_or(line.len());
+        let body = &line[..line_end_idx];
+        let tail = &line[line_end_idx..];
+
+        let depth_before = depth;
+        depth += body.matches('{').count() as i32;
+        depth -= body.matches('}').count() as i32;
+
+        out.push_str(body);
+
+        let trimmed = body.trim_start();
+        let last_char = body.chars().rev().find(|c| !c.is_whitespace());
+        let is_comment_line =
+            trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with("*");
+        let inside_block = depth_before > 0;
+        let needs_semi = inside_block
+            && !is_comment_line
+            && match last_char {
+                None => false,
+                Some(c) => !matches!(c, ';' | '{' | '}' | ',' | '/' | '*'),
+            };
+        if needs_semi {
+            out.push(';');
+        }
+        out.push_str(tail);
+    }
+    out
 }
 
 fn resolve_signal_calls(program: &mut TypedProgram) {
