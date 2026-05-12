@@ -449,7 +449,7 @@ impl<W: blinc_layout::div::ElementBuilder> blinc_layout::div::ElementBuilder for
 }
 
 /// `#[extern_widget]` proc-macro for declaring DSL-exposed Rust widgets.
-pub use blinc_macros::extern_widget;
+pub use blinc_dsl_macro::extern_widget;
 
 /// Canonical Zyntax runtime value enum, re-exported for `query` / `ViewRenderer` consumers.
 pub use zyntax_embed::ZyntaxValue;

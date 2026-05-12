@@ -9,6 +9,7 @@ members = [
     "crates/blinc_layout",
     "crates/blinc_gpu",
     "crates/blinc_macros",
+    "crates/blinc_dsl_macro",
     "crates/blinc_paint",
     "crates/blinc_platform",
     "crates/blinc_recorder",
