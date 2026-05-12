@@ -3114,9 +3114,17 @@ unsafe impl Sync for JitGuardDispatcher {}
 impl blinc_runtime::fsm::GuardDispatcher for JitGuardDispatcher {
     fn call_guard(&self, symbol: &str) -> Option<bool> {
         let runtime = self.runtime.lock().ok()?;
-        let guard_sig = NativeSignature::new(&[], NativeType::I32);
-        let result = runtime.call_function(symbol, &[], &guard_sig).ok()?;
-        Some(matches!(result, ZyntaxValue::Int(v) if v != 0))
+        // Direct JIT dispatch: `call_function` routes through the
+        // new BC interp tier which fails with `Host("missing block
+        // …")` on lifted-guard HIR shapes; `call_raw` routes
+        // through `call_dynamic_function` → zrtl TypeMeta lookup
+        // which null-derefs for user-compiled fns. Transmute the
+        // JIT pointer to `extern "C" fn() -> i32` instead —
+        // exactly the shape `populate_fsm_registry_pass` lifts
+        // guards to.
+        let ptr = runtime.get_function_ptr(symbol)?;
+        let guard: extern "C" fn() -> i32 = unsafe { std::mem::transmute(ptr) };
+        Some(guard() != 0)
     }
 }
 
@@ -3148,12 +3156,14 @@ impl blinc_runtime::view::ViewRenderer for JitViewRenderer {
             )
         })?;
         if is_value_returning {
-            let sig = NativeSignature::new(&[], NativeType::I64);
-            let result = runtime
-                .call_function(symbol, &[], &sig)
-                .map_err(|e| blinc_runtime::view::ViewRenderError::Backend(e.to_string()))?;
-            // Pass `ZyntaxValue::Int(handle)` through; caller decodes via `materialize_widget`.
-            Ok(result)
+            // Direct JIT dispatch — see [`JitGuardDispatcher::call_guard`].
+            let ptr = runtime.get_function_ptr(symbol).ok_or_else(|| {
+                blinc_runtime::view::ViewRenderError::Backend(format!(
+                    "view symbol '{symbol}' not registered in runtime"
+                ))
+            })?;
+            let view: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
+            Ok(ZyntaxValue::Int(view()))
         } else {
             runtime
                 .call::<()>(symbol, &[])
@@ -3983,8 +3993,12 @@ impl BlincDsl {
 
         if is_value_returning {
             // Handle discarded — substrate `ViewRenderer` flows it through to consumers.
-            let sig = NativeSignature::new(&[], NativeType::I64);
-            runtime.call_function(fn_name, &[], &sig)?;
+            // Direct JIT dispatch — see [`JitGuardDispatcher::call_guard`].
+            let ptr = runtime.get_function_ptr(fn_name).ok_or_else(|| {
+                BlincDslError::Compile(format!("view symbol '{fn_name}' not registered in runtime"))
+            })?;
+            let view: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
+            let _ = view();
         } else {
             runtime.call::<()>(fn_name, &[])?;
         }
@@ -4174,20 +4188,18 @@ impl BlincDsl {
             .lock()
             .expect("BlincDsl runtime mutex poisoned");
 
-        // Use `call_function` (not `call`) — user-compiled fns lack a registered
-        // TypeMeta, which panics in `zrtl.rs` type-meta lookup.
-        let guard_sig = NativeSignature::new(&[], NativeType::I32);
-
         for (guard_fn, to) in candidates {
             let Some(name) = guard_fn.resolve_global() else {
                 continue;
             };
-            let result = runtime
-                .call_function(&name, &[], &guard_sig)
-                .map_err(|e| BlincDslError::Compile(e.to_string()))?;
-            // Lifted guards return 1 if the guard fires, 0 otherwise.
-            let fired = matches!(result, ZyntaxValue::Int(v) if v != 0);
-            if fired {
+            // Direct JIT dispatch — see [`JitGuardDispatcher::call_guard`]
+            // for why we transmute the pointer rather than going through
+            // `call_function` or `call_raw`.
+            let Some(ptr) = runtime.get_function_ptr(&name) else {
+                continue;
+            };
+            let guard: extern "C" fn() -> i32 = unsafe { std::mem::transmute(ptr) };
+            if guard() != 0 {
                 return Ok(Some(to));
             }
         }
@@ -9937,9 +9949,14 @@ mod tests {
         assert_eq!(state.state_name().as_deref(), Some("Idle"));
 
         // Event dispatch: Idle + Start → Loading. Event codes
-        // are first-appearance order: Start = 0, Finish = 1.
+        // are first-appearance order (Start = 0, Finish = 1),
+        // offset by `FSM_EVENT_CODE_OFFSET` so they can't collide
+        // with widget pointer-event codes.
         use blinc_runtime::blinc_layout::stateful::StateTransitions;
-        let loading = state.on_event(0).expect("Idle + Start should transition");
+        let start_code = blinc_runtime::fsm::FSM_EVENT_CODE_OFFSET;
+        let loading = state
+            .on_event(start_code)
+            .expect("Idle + Start should transition");
         assert_eq!(loading.variant, 1);
         assert_eq!(loading.state_name().as_deref(), Some("Loading"));
 
