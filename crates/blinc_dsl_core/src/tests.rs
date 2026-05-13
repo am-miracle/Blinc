@@ -1019,7 +1019,7 @@ fn parse_component_call_in_expr_position() {
     );
 }
 
-/// `Div` and `Text` are pre-registered at `BlincDsl::new()` time.
+/// Core `blinc_layout` widgets are pre-registered at `BlincDsl::new()` time.
 #[test]
 fn blinc_layout_primitives_registered() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -1039,6 +1039,16 @@ fn blinc_layout_primitives_registered() {
             .expect("Text should be pre-registered");
     assert_eq!(text.view_symbol.as_ref(), "$Blinc$Text$view");
     assert!(text.prop("content").is_some());
+    assert!(text.prop("__style").is_some());
+
+    for name in [
+        "Stack", "Image", "Svg", "Canvas", "RichText", "Motion", "Notch",
+    ] {
+        let def =
+            blinc_runtime::component::with_component_registry(|r| r.get_by_name(name).cloned())
+                .unwrap_or_else(|| panic!("{name} should be pre-registered"));
+        assert_eq!(def.view_symbol.as_ref(), format!("$Blinc${name}$view"));
+    }
 }
 
 /// Smallest value-returning view: `view { Text("hello") }` compiles and runs.
@@ -1068,13 +1078,8 @@ fn render_text_widget_compiles_and_runs() {
     );
 }
 
-/// DSL source that calls `Div { Text("hi") }` validates
-/// cleanly because both primitives are pre-registered.
-/// Compile / render is NOT exercised here — the extern
-/// bodies aren't wired yet, so a full compile would fail
-/// at JIT link time. This pins the front-end half of the
-/// pivot: the parser + validation pass already accept the
-/// widget-tree DSL shape.
+/// DSL source that calls core layout widgets validates cleanly because
+/// the primitives are pre-registered.
 #[test]
 fn validate_accepts_blinc_layout_primitives() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -1085,6 +1090,13 @@ fn validate_accepts_blinc_layout_primitives() {
             view {
                 Div() {
                     Text("hello")
+                    Stack() { Text("stacked") }
+                    Image("asset.png")
+                    Svg("<svg></svg>")
+                    Canvas()
+                    RichText("Hello <b>World</b>")
+                    Motion() { Text("moving") }
+                    Notch() { Text("notched") }
                 }
             }
             "#,
@@ -1397,7 +1409,7 @@ fn slot_bodies_partition_into_named_args() {
     );
 }
 
-/// `Text(content = "hi")` lowers to a positional call.
+/// `Text(content = "hi")` lowers to a positional call with default style/class slots.
 #[test]
 fn named_args_on_primitive_call_resolve_to_positional() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -1424,7 +1436,11 @@ fn named_args_on_primitive_call_resolve_to_positional() {
         "named args should have been resolved to positional, got: {:?}",
         c.named_args
     );
-    assert_eq!(c.positional_args.len(), 1, "Text takes one (content) prop");
+    assert_eq!(
+        c.positional_args.len(),
+        3,
+        "Text takes content + default style/class props"
+    );
     let TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::String(s)) =
         &c.positional_args[0].node
     else {
@@ -4348,6 +4364,84 @@ fn jit_view_renderer_div_nested_div_composes() {
         "inner child should report itself as a Div"
     );
     assert_eq!(inner.children_builders().len(), 1);
+}
+
+#[test]
+fn core_layout_widgets_compile_and_return_element_builders() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let cases = [
+        (
+            "Stack",
+            r#"view { Stack() { Text("layer") } }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            1,
+        ),
+        (
+            "Image",
+            r#"view { Image("asset.png") }"#,
+            blinc_layout::div::ElementTypeId::Image,
+            0,
+        ),
+        (
+            "Svg",
+            r#"view { Svg("<svg></svg>") }"#,
+            blinc_layout::div::ElementTypeId::Svg,
+            0,
+        ),
+        (
+            "Canvas",
+            r#"view { Canvas() }"#,
+            blinc_layout::div::ElementTypeId::Canvas,
+            0,
+        ),
+        (
+            "RichText",
+            r#"view { RichText("Hello <b>World</b>") }"#,
+            blinc_layout::div::ElementTypeId::StyledText,
+            0,
+        ),
+        (
+            "Motion",
+            r#"view { Motion() { Text("moving") } }"#,
+            blinc_layout::div::ElementTypeId::Motion,
+            1,
+        ),
+        (
+            "Notch",
+            r#"view { Notch() { Text("notched") } }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            1,
+        ),
+    ];
+
+    for (name, source, expected_type, expected_children) in cases {
+        let dsl = BlincDsl::new().expect("runtime init");
+        dsl.compile_source(source, &format!("{name}.blinc"))
+            .unwrap_or_else(|e| panic!("{name} should compile: {e}"));
+
+        let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+        let value = blinc_runtime::view::render_main(&renderer)
+            .unwrap_or_else(|e| panic!("{name} should render: {e}"));
+        let ZyntaxValue::Int(handle) = value else {
+            panic!("{name} should return a widget handle, got: {value:?}");
+        };
+        assert_ne!(handle, 0, "{name} should return a non-null handle");
+
+        let widget = unsafe { materialize_widget(handle) }
+            .unwrap_or_else(|| panic!("{name} handle should materialize"));
+        let builder = widget.into_element_builder();
+        assert_eq!(
+            builder.element_type_id(),
+            expected_type,
+            "{name} should report the expected element type"
+        );
+        assert_eq!(
+            builder.children_builders().len(),
+            expected_children,
+            "{name} should preserve child handles"
+        );
+    }
 }
 
 #[test]

@@ -70,6 +70,13 @@ impl Stack {
         self
     }
 
+    /// Add a boxed child element (will be absolutely positioned).
+    pub fn child_box(mut self, child: Box<dyn ElementBuilder>) -> Self {
+        let wrapper = StackChild::new(child);
+        self.inner.children.push(Box::new(wrapper));
+        self
+    }
+
     /// Add multiple children (each will be absolutely positioned)
     pub fn children<I>(mut self, children: I) -> Self
     where

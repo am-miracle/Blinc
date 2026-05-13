@@ -229,20 +229,66 @@ pub unsafe fn materialize_widget(handle: WidgetHandle) -> Option<Box<WidgetBox>>
     Some(unsafe { Box::from_raw(handle as *mut WidgetBox) })
 }
 
-/// `$Blinc$Text$view(content: string) -> WidgetHandle`
+fn materialize_children(children: WidgetHandle) -> Vec<Box<dyn blinc_layout::div::ElementBuilder>> {
+    if children == 0 {
+        return Vec::new();
+    }
+    let list: Box<Vec<WidgetHandle>> = unsafe { Box::from_raw(children as *mut Vec<WidgetHandle>) };
+    let mut out = Vec::with_capacity(list.len());
+    for handle in *list {
+        if let Some(child_box) = unsafe { materialize_widget(handle) } {
+            out.push(child_box.into_element_builder());
+        }
+    }
+    out
+}
+
+fn decode_string_arg(ptr: *const i32) -> String {
+    if ptr.is_null() {
+        String::new()
+    } else {
+        // SAFETY: all string params use Zyntax's length-prefixed UTF-8 ABI.
+        unsafe { blinc_string_decode(ptr) }.to_string()
+    }
+}
+
+fn decoded_class_names(class_str: *const i32) -> Vec<String> {
+    decode_string_arg(class_str)
+        .split_whitespace()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn leak_custom(widget: impl blinc_layout::div::ElementBuilder + 'static) -> WidgetHandle {
+    Box::into_raw(Box::new(WidgetBox::Custom(Box::new(widget)))) as WidgetHandle
+}
+
+/// `$Blinc$Text$view(content, style, class) -> WidgetHandle`
 ///
 /// # Safety
 ///
 /// `content_ptr` must point at a Zyntax length-prefixed UTF-8 buffer.
-pub(crate) extern "C" fn blinc_text_view(content_ptr: *const i32) -> WidgetHandle {
+pub(crate) extern "C" fn blinc_text_view(
+    content_ptr: *const i32,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
     if content_ptr.is_null() {
         tracing::warn!("$Blinc$Text$view called with null content pointer");
         return 0;
     }
     // SAFETY: see fn-level doc.
     let content = unsafe { blinc_string_decode(content_ptr) };
-    let widget = blinc_layout::text::Text::new(content);
-    Box::into_raw(Box::new(WidgetBox::Text(Box::new(widget)))) as WidgetHandle
+    let mut widget = blinc_layout::text::Text::new(content);
+    for name in decoded_class_names(class_str) {
+        widget = widget.class(name);
+    }
+    if style == 0 {
+        Box::into_raw(Box::new(WidgetBox::Text(Box::new(widget)))) as WidgetHandle
+    } else {
+        let overlay = unsafe { materialize_overlay(style) };
+        leak_custom(Styled::new(widget, overlay))
+    }
 }
 
 /// `$Blinc$Div$view(children, style, class_str, on_click) -> WidgetHandle`.
@@ -254,21 +300,12 @@ pub(crate) extern "C" fn blinc_div_view(
     on_click_closure: i64,
 ) -> WidgetHandle {
     let mut widget = blinc_layout::div::Div::new();
-    if children != 0 {
-        let list: Box<Vec<WidgetHandle>> =
-            unsafe { Box::from_raw(children as *mut Vec<WidgetHandle>) };
-        for handle in *list {
-            if let Some(child_box) = unsafe { materialize_widget(handle) } {
-                widget = widget.child_box(child_box.into_element_builder());
-            }
-        }
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
     }
     // SAFETY: `class_str` is `*const i32` per registered sig.
-    if !class_str.is_null() {
-        let raw = unsafe { blinc_string_decode(class_str) };
-        for name in raw.split_whitespace() {
-            widget = widget.class(name);
-        }
+    for name in decoded_class_names(class_str) {
+        widget = widget.class(name);
     }
     // `on_click` closure is a raw `extern "C" fn()` pointer minted by Zyntax's
     // `CreateClosure` → `func_addr`. Signal writes inside route through
@@ -281,9 +318,87 @@ pub(crate) extern "C" fn blinc_div_view(
         });
     }
     let overlay = unsafe { materialize_overlay(style) };
-    Box::into_raw(Box::new(WidgetBox::Custom(Box::new(Styled::new(
-        widget, overlay,
-    ))))) as WidgetHandle
+    leak_custom(Styled::new(widget, overlay))
+}
+
+/// `$Blinc$Stack$view(children, style) -> WidgetHandle`.
+pub(crate) extern "C" fn blinc_stack_view(children: WidgetHandle, style: i64) -> WidgetHandle {
+    let mut widget = blinc_layout::stack::Stack::new();
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
+    let overlay = unsafe { materialize_overlay(style) };
+    leak_custom(Styled::new(widget, overlay))
+}
+
+/// `$Blinc$Image$view(source, style) -> WidgetHandle`.
+pub(crate) extern "C" fn blinc_image_view(source_ptr: *const i32, style: i64) -> WidgetHandle {
+    if source_ptr.is_null() {
+        tracing::warn!("$Blinc$Image$view called with null source pointer");
+        return 0;
+    }
+    let source = decode_string_arg(source_ptr);
+    let widget = blinc_layout::image::Image::new(source);
+    let overlay = unsafe { materialize_overlay(style) };
+    leak_custom(Styled::new(widget, overlay))
+}
+
+/// `$Blinc$Svg$view(source, style, class) -> WidgetHandle`.
+pub(crate) extern "C" fn blinc_svg_view(
+    source_ptr: *const i32,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    if source_ptr.is_null() {
+        tracing::warn!("$Blinc$Svg$view called with null source pointer");
+        return 0;
+    }
+    let source = decode_string_arg(source_ptr);
+    let mut widget = blinc_layout::svg::Svg::new(source);
+    for name in decoded_class_names(class_str) {
+        widget = widget.class(name);
+    }
+    let overlay = unsafe { materialize_overlay(style) };
+    leak_custom(Styled::new(widget, overlay))
+}
+
+/// `$Blinc$Canvas$view(style) -> WidgetHandle`.
+pub(crate) extern "C" fn blinc_canvas_view(style: i64) -> WidgetHandle {
+    let widget = blinc_layout::canvas::Canvas::new();
+    let overlay = unsafe { materialize_overlay(style) };
+    leak_custom(Styled::new(widget, overlay))
+}
+
+/// `$Blinc$RichText$view(markup, style) -> WidgetHandle`.
+pub(crate) extern "C" fn blinc_rich_text_view(markup_ptr: *const i32, style: i64) -> WidgetHandle {
+    if markup_ptr.is_null() {
+        tracing::warn!("$Blinc$RichText$view called with null markup pointer");
+        return 0;
+    }
+    let markup = decode_string_arg(markup_ptr);
+    let widget = blinc_layout::rich_text::RichText::new(markup);
+    let overlay = unsafe { materialize_overlay(style) };
+    leak_custom(Styled::new(widget, overlay))
+}
+
+/// `$Blinc$Motion$view(children, style) -> WidgetHandle`.
+pub(crate) extern "C" fn blinc_motion_view(children: WidgetHandle, style: i64) -> WidgetHandle {
+    let mut widget = blinc_layout::motion::motion();
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
+    let overlay = unsafe { materialize_overlay(style) };
+    leak_custom(Styled::new(widget, overlay))
+}
+
+/// `$Blinc$Notch$view(children, style) -> WidgetHandle`.
+pub(crate) extern "C" fn blinc_notch_view(children: WidgetHandle, style: i64) -> WidgetHandle {
+    let mut widget = blinc_layout::notch::Notch::new();
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
+    let overlay = unsafe { materialize_overlay(style) };
+    leak_custom(Styled::new(widget, overlay))
 }
 
 /// `__new_child_list__() -> i64` — mints a fresh `Vec<WidgetHandle>` for a container.

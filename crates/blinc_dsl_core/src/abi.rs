@@ -5,9 +5,11 @@ use crate::host::{
     blinc_signal_set_string, blinc_string_concat, blinc_text, blinc_text_int,
 };
 use crate::widget_ffi::{
-    blinc_div_view, blinc_new_child_list, blinc_new_style_overlay, blinc_push_child,
+    blinc_canvas_view, blinc_div_view, blinc_image_view, blinc_motion_view, blinc_new_child_list,
+    blinc_new_style_overlay, blinc_notch_view, blinc_push_child, blinc_rich_text_view,
     blinc_set_overlay_bg, blinc_set_overlay_border_color, blinc_set_overlay_border_width,
-    blinc_set_overlay_corner_radius, blinc_set_overlay_opacity, blinc_text_view,
+    blinc_set_overlay_corner_radius, blinc_set_overlay_opacity, blinc_stack_view, blinc_svg_view,
+    blinc_text_view,
 };
 
 /// Pairs a DSL-visible symbol name with an `extern "C"` fn pointer and signature.
@@ -132,7 +134,11 @@ fn builtins() -> Vec<BuiltinDescriptor> {
         BuiltinDescriptor {
             // `Text("hi")` → leaked `WidgetBox::Text(...)` as i64.
             name: "$Blinc$Text$view",
-            param_types: &[Type::Primitive(PrimitiveType::String)],
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
             return_type: Type::Primitive(PrimitiveType::I64),
             ptr: blinc_text_view as *const u8,
         },
@@ -148,6 +154,67 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ],
             return_type: Type::Primitive(PrimitiveType::I64),
             ptr: blinc_div_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Stack$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_stack_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Image$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_image_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Svg$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_svg_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Canvas$view",
+            param_types: &[Type::Primitive(PrimitiveType::I64)],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_canvas_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$RichText$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_rich_text_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Motion$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_motion_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Notch$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_notch_view as *const u8,
         },
         BuiltinDescriptor {
             // `__new_child_list__()` — mint `Vec<WidgetHandle>`, populated by `__push_child__`.

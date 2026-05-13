@@ -89,45 +89,94 @@ pub(crate) fn register_blinc_layout_primitives() {
     use zyntax_typed_ast::InternedString;
 
     let string_ty = Type::Primitive(PrimitiveType::String);
+    let i64_ty = Type::Primitive(PrimitiveType::I64);
+    let prop = |name: &'static str, ty: Type| PropDef {
+        name: std::sync::Arc::from(name),
+        ty,
+    };
+    let style_prop = || prop("__style", i64_ty.clone());
+    let class_prop = || prop("class", string_ty.clone());
 
     // `Div { ..children }` — container. `children` and `__style` cross as `i64` payloads.
     let div = ComponentDefinition {
         name: std::sync::Arc::from("Div"),
         view_symbol: std::sync::Arc::from("$Blinc$Div$view"),
         props: vec![
-            PropDef {
-                name: std::sync::Arc::from("children"),
-                ty: Type::Primitive(PrimitiveType::I64),
-            },
-            PropDef {
-                name: std::sync::Arc::from("__style"),
-                ty: Type::Primitive(PrimitiveType::I64),
-            },
-            PropDef {
-                name: std::sync::Arc::from("class"),
-                ty: Type::Primitive(PrimitiveType::String),
-            },
-            PropDef {
-                // `on_click = || { … }` — Zyntax closure value as `i64`.
-                name: std::sync::Arc::from("on_click"),
-                ty: Type::Primitive(PrimitiveType::I64),
-            },
+            prop("children", i64_ty.clone()),
+            style_prop(),
+            class_prop(),
+            // `on_click = || { … }` — Zyntax closure value as `i64`.
+            prop("on_click", i64_ty.clone()),
         ],
     };
 
-    // `Text("hi")` — text leaf. Styling props land later.
+    // `Text("hi")` — text leaf.
     let text_widget = ComponentDefinition {
         name: std::sync::Arc::from("Text"),
         view_symbol: std::sync::Arc::from("$Blinc$Text$view"),
-        props: vec![PropDef {
-            name: std::sync::Arc::from("content"),
-            ty: string_ty.clone(),
-        }],
+        props: vec![
+            prop("content", string_ty.clone()),
+            style_prop(),
+            class_prop(),
+        ],
+    };
+
+    let stack = ComponentDefinition {
+        name: std::sync::Arc::from("Stack"),
+        view_symbol: std::sync::Arc::from("$Blinc$Stack$view"),
+        props: vec![prop("children", i64_ty.clone()), style_prop()],
+    };
+
+    let image = ComponentDefinition {
+        name: std::sync::Arc::from("Image"),
+        view_symbol: std::sync::Arc::from("$Blinc$Image$view"),
+        props: vec![prop("source", string_ty.clone()), style_prop()],
+    };
+
+    let svg = ComponentDefinition {
+        name: std::sync::Arc::from("Svg"),
+        view_symbol: std::sync::Arc::from("$Blinc$Svg$view"),
+        props: vec![
+            prop("source", string_ty.clone()),
+            style_prop(),
+            class_prop(),
+        ],
+    };
+
+    let canvas = ComponentDefinition {
+        name: std::sync::Arc::from("Canvas"),
+        view_symbol: std::sync::Arc::from("$Blinc$Canvas$view"),
+        props: vec![style_prop()],
+    };
+
+    let rich_text = ComponentDefinition {
+        name: std::sync::Arc::from("RichText"),
+        view_symbol: std::sync::Arc::from("$Blinc$RichText$view"),
+        props: vec![prop("markup", string_ty.clone()), style_prop()],
+    };
+
+    let motion = ComponentDefinition {
+        name: std::sync::Arc::from("Motion"),
+        view_symbol: std::sync::Arc::from("$Blinc$Motion$view"),
+        props: vec![prop("children", i64_ty.clone()), style_prop()],
+    };
+
+    let notch = ComponentDefinition {
+        name: std::sync::Arc::from("Notch"),
+        view_symbol: std::sync::Arc::from("$Blinc$Notch$view"),
+        props: vec![prop("children", i64_ty.clone()), style_prop()],
     };
 
     blinc_runtime::component::with_component_registry_mut(|r| {
         r.register(div);
         r.register(text_widget);
+        r.register(stack);
+        r.register(image);
+        r.register(svg);
+        r.register(canvas);
+        r.register(rich_text);
+        r.register(motion);
+        r.register(notch);
     });
 
     let _ = InternedString::new_global("__blinc_layout_primitives_marker__");

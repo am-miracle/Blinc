@@ -1307,6 +1307,12 @@ impl Notch {
         self
     }
 
+    /// Add a boxed child element.
+    pub fn child_box(mut self, child: Box<dyn ElementBuilder>) -> Self {
+        self.children.push(child);
+        self
+    }
+
     /// Add multiple children from an iterator
     pub fn children(
         mut self,

@@ -633,6 +633,12 @@ impl Motion {
         self
     }
 
+    /// Add a boxed child element to animate.
+    pub fn child_box(mut self, child: Box<dyn ElementBuilder>) -> Self {
+        self.children.push(child);
+        self
+    }
+
     /// Add multiple children with stagger animation support
     pub fn children<I, E>(mut self, children: I) -> Self
     where
