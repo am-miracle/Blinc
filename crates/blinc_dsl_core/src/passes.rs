@@ -894,6 +894,307 @@ pub(crate) fn resolve_fsm_subscribe_calls(program: &mut TypedProgram) {
     }
 }
 
+/// Lower explicit `struct` constructor calls (`MyData(field = value)`) into
+/// native Zyntax struct literals. Component and widget calls keep flowing
+/// through the normal `__component_call__` path.
+pub(crate) fn lower_struct_literals(program: &mut TypedProgram) -> Result<(), Vec<String>> {
+    use std::collections::{HashMap, HashSet};
+    use zyntax_typed_ast::typed_ast::{
+        TypedDeclaration, TypedExpression, TypedFieldInit, TypedLiteral, TypedStructLiteral,
+    };
+
+    #[derive(Clone)]
+    struct StructInfo {
+        name: zyntax_typed_ast::InternedString,
+        fields: Vec<zyntax_typed_ast::typed_ast::TypedField>,
+    }
+
+    fn marker_struct_name(decl: &zyntax_typed_ast::TypedNode<TypedDeclaration>) -> Option<String> {
+        let TypedDeclaration::Function(func) = &decl.node else {
+            return None;
+        };
+        if func.name.resolve_global().as_deref() != Some("__blinc_struct_type__") {
+            return None;
+        }
+        let body = func.body.as_ref()?;
+        let first = body.statements.first()?;
+        let TypedStatement::Expression(expr) = &first.node else {
+            return None;
+        };
+        let TypedExpression::Literal(TypedLiteral::String(name)) = &expr.node else {
+            return None;
+        };
+        name.resolve_global().map(|s| s.to_string())
+    }
+
+    let explicit_structs: HashSet<String> = program
+        .declarations
+        .iter()
+        .filter_map(marker_struct_name)
+        .collect();
+
+    if explicit_structs.is_empty() {
+        return Ok(());
+    }
+
+    let mut structs: HashMap<String, StructInfo> = HashMap::new();
+    for decl in &program.declarations {
+        if let TypedDeclaration::Class(class) = &decl.node {
+            let Some(name) = class.name.resolve_global() else {
+                continue;
+            };
+            if explicit_structs.contains::<str>(name.as_ref()) {
+                structs.insert(
+                    name.to_string(),
+                    StructInfo {
+                        name: class.name,
+                        fields: class.fields.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    program
+        .declarations
+        .retain(|decl| marker_struct_name(decl).is_none());
+
+    let mut errors = Vec::new();
+
+    fn named_marker_arg(
+        arg: &zyntax_typed_ast::TypedNode<TypedExpression>,
+    ) -> Option<(
+        zyntax_typed_ast::InternedString,
+        zyntax_typed_ast::TypedNode<TypedExpression>,
+    )> {
+        let TypedExpression::Call(inner) = &arg.node else {
+            return None;
+        };
+        let TypedExpression::Variable(inner_callee) = &inner.callee.node else {
+            return None;
+        };
+        if inner_callee.resolve_global().as_deref() != Some("__named__") {
+            return None;
+        }
+        let [name_node, value_node] = inner.positional_args.as_slice() else {
+            return None;
+        };
+        let TypedExpression::Literal(TypedLiteral::String(arg_name)) = &name_node.node else {
+            return None;
+        };
+        Some((*arg_name, value_node.clone()))
+    }
+
+    fn rewrite_expr(
+        expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>,
+        structs: &HashMap<String, StructInfo>,
+        errors: &mut Vec<String>,
+    ) {
+        match &mut expr.node {
+            TypedExpression::Binary(b) => {
+                rewrite_expr(&mut b.left, structs, errors);
+                rewrite_expr(&mut b.right, structs, errors);
+            }
+            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand, structs, errors),
+            TypedExpression::Call(c) => {
+                rewrite_expr(&mut c.callee, structs, errors);
+                for a in &mut c.positional_args {
+                    rewrite_expr(a, structs, errors);
+                }
+                for n in &mut c.named_args {
+                    rewrite_expr(&mut n.value, structs, errors);
+                }
+            }
+            TypedExpression::Field(f) => rewrite_expr(&mut f.object, structs, errors),
+            TypedExpression::Index(idx) => {
+                rewrite_expr(&mut idx.object, structs, errors);
+                rewrite_expr(&mut idx.index, structs, errors);
+            }
+            TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
+                for it in items {
+                    rewrite_expr(it, structs, errors);
+                }
+            }
+            TypedExpression::Struct(s) => {
+                for field in &mut s.fields {
+                    rewrite_expr(&mut field.value, structs, errors);
+                }
+            }
+            TypedExpression::MethodCall(mc) => {
+                rewrite_expr(&mut mc.receiver, structs, errors);
+                for a in &mut mc.positional_args {
+                    rewrite_expr(a, structs, errors);
+                }
+            }
+            TypedExpression::Block(b) => rewrite_block(b, structs, errors),
+            TypedExpression::If(if_expr) => {
+                rewrite_expr(&mut if_expr.condition, structs, errors);
+                rewrite_expr(&mut if_expr.then_branch, structs, errors);
+                rewrite_expr(&mut if_expr.else_branch, structs, errors);
+            }
+            _ => {}
+        }
+
+        let TypedExpression::Call(call) = &expr.node else {
+            return;
+        };
+        let TypedExpression::Variable(callee_name) = &call.callee.node else {
+            return;
+        };
+        if callee_name.resolve_global().as_deref() != Some("__component_call__") {
+            return;
+        }
+        let Some(name_node) = call.positional_args.first() else {
+            return;
+        };
+        let TypedExpression::Literal(TypedLiteral::String(type_name)) = &name_node.node else {
+            return;
+        };
+        let Some(type_name_str) = type_name.resolve_global().map(|s| s.to_string()) else {
+            return;
+        };
+        let Some(info) = structs.get(&type_name_str) else {
+            return;
+        };
+
+        let mut values: HashMap<String, zyntax_typed_ast::TypedNode<TypedExpression>> =
+            HashMap::new();
+        let mut seen = HashSet::new();
+
+        for arg in call.positional_args.iter().skip(1) {
+            if matches!(arg.node, TypedExpression::Block(_)) {
+                errors.push(format!(
+                    "struct `{}` constructors do not accept child bodies; use `{}(field = value)`",
+                    type_name_str, type_name_str
+                ));
+                continue;
+            }
+
+            let Some((field_name, value)) = named_marker_arg(arg) else {
+                errors.push(format!(
+                    "struct `{}` constructors require named fields, e.g. `{}(field = value)`",
+                    type_name_str, type_name_str
+                ));
+                continue;
+            };
+            let Some(field_name_str) = field_name.resolve_global().map(|s| s.to_string()) else {
+                continue;
+            };
+            if !seen.insert(field_name_str.clone()) {
+                errors.push(format!(
+                    "struct `{}` field `{}` is specified more than once",
+                    type_name_str, field_name_str
+                ));
+                continue;
+            }
+            values.insert(field_name_str, value);
+        }
+
+        let declared: HashSet<String> = info
+            .fields
+            .iter()
+            .filter_map(|f| f.name.resolve_global().map(|s| s.to_string()))
+            .collect();
+        for supplied in values.keys() {
+            if !declared.contains(supplied) {
+                errors.push(format!(
+                    "struct `{}` has no field named `{}`",
+                    type_name_str, supplied
+                ));
+            }
+        }
+
+        let mut lowered_fields = Vec::with_capacity(info.fields.len());
+        for field in &info.fields {
+            let Some(field_name) = field.name.resolve_global().map(|s| s.to_string()) else {
+                continue;
+            };
+            let Some(value) = values.remove(&field_name) else {
+                errors.push(format!(
+                    "struct `{}` constructor is missing field `{}`",
+                    type_name_str, field_name
+                ));
+                continue;
+            };
+            lowered_fields.push(TypedFieldInit {
+                name: field.name,
+                value: Box::new(value),
+            });
+        }
+
+        if errors.is_empty() {
+            expr.ty = Type::Unresolved(info.name);
+            expr.node = TypedExpression::Struct(TypedStructLiteral {
+                name: info.name,
+                fields: lowered_fields,
+            });
+        }
+    }
+
+    fn rewrite_block(
+        block: &mut zyntax_typed_ast::typed_ast::TypedBlock,
+        structs: &HashMap<String, StructInfo>,
+        errors: &mut Vec<String>,
+    ) {
+        for stmt in &mut block.statements {
+            rewrite_stmt(stmt, structs, errors);
+        }
+    }
+
+    fn rewrite_stmt(
+        stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>,
+        structs: &HashMap<String, StructInfo>,
+        errors: &mut Vec<String>,
+    ) {
+        match &mut stmt.node {
+            TypedStatement::Expression(e) => rewrite_expr(e, structs, errors),
+            TypedStatement::Let(l) => {
+                if let Some(init) = &mut l.initializer {
+                    rewrite_expr(init, structs, errors);
+                }
+            }
+            TypedStatement::Return(Some(e)) => rewrite_expr(e, structs, errors),
+            TypedStatement::If(if_stmt) => {
+                rewrite_expr(&mut if_stmt.condition, structs, errors);
+                rewrite_block(&mut if_stmt.then_block, structs, errors);
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    rewrite_block(else_block, structs, errors);
+                }
+            }
+            TypedStatement::While(w) => {
+                rewrite_expr(&mut w.condition, structs, errors);
+                rewrite_block(&mut w.body, structs, errors);
+            }
+            TypedStatement::Block(b) => rewrite_block(b, structs, errors),
+            _ => {}
+        }
+    }
+
+    for decl in &mut program.declarations {
+        match &mut decl.node {
+            TypedDeclaration::Function(func) => {
+                if let Some(body) = &mut func.body {
+                    rewrite_block(body, &structs, &mut errors);
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                for method in &mut imp.methods {
+                    if let Some(body) = &mut method.body {
+                        rewrite_block(body, &structs, &mut errors);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
 /// Validate every `__component_call__("Name", ...)` marker references a known
 /// component. Catches typos before Zyntax's less-helpful unresolved-symbol error.
 /// Does NOT rewrite markers — that contract is consumed by `lower_component_calls`.
@@ -973,6 +1274,11 @@ pub(crate) fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec
             TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
                 for it in items {
                     check_expr(it, known, errors);
+                }
+            }
+            TypedExpression::Struct(s) => {
+                for field in &s.fields {
+                    check_expr(&field.value, known, errors);
                 }
             }
             TypedExpression::MethodCall(mc) => {
@@ -1088,6 +1394,11 @@ pub(crate) fn lower_component_calls(program: &mut TypedProgram) {
             TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
                 for it in items {
                     rewrite_expr(it);
+                }
+            }
+            TypedExpression::Struct(s) => {
+                for field in &mut s.fields {
+                    rewrite_expr(&mut field.value);
                 }
             }
             TypedExpression::MethodCall(mc) => {

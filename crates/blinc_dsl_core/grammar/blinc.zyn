@@ -119,7 +119,7 @@ top_level_items = { item:top_level_item* }
 // `component_decl`. Falling through handles standalone struct-only
 // `component { fields }` decls, standalone `impl` blocks, and the
 // bare `view { ... }` quick-test shape.
-top_level_item = { import_stmt | style_decl | signal_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
+top_level_item = { import_stmt | style_decl | signal_decl | struct_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
 
 // `style { ...CSS... }` — block-form CSS declaration. Author
 // writes raw CSS between the braces; balanced nested braces
@@ -561,6 +561,31 @@ component_decl = {
       fields: fields.unwrap_or([]),
   }
 
+// `struct <Name> { fields }` — plain data shape. Zyntax represents
+// structs as `TypedDeclaration::Class`; the marker function is
+// Blinc-private metadata that the post-parse pass consumes before JIT.
+struct_decl = {
+    "struct" ~ name:identifier ~ "{"
+    ~ fields:struct_field_list?
+    ~ "}"
+}
+  -> concat_list(
+      [TypedDeclaration::Class {
+          name: intern(name),
+          fields: fields.unwrap_or([]),
+      }],
+      [TypedDeclaration::Function {
+          name: intern("__blinc_struct_type__"),
+          params: [],
+          return_type: Type::Unit,
+          body: Some(TypedBlock { statements: [
+              TypedStatement::Expression { expr:
+                  TypedExpression::StringLiteral { value: name }
+              },
+          ] }),
+      }],
+  )
+
 // Field list. Each field is either a reactive `state` field
 // (wrapped in `State<T>`) or a plain data field (bare type). PEG
 // ordered alternates inside `struct_field` try `state_field` first
@@ -614,7 +639,7 @@ plain_field = { name:identifier ~ ":" ~ ty:state_type }
 // `prim_*` shape: each primitive is its own rule so the action
 // constructs `Type::Primitive { name: intern("...") }` with the
 // right tag. Extend as the prototype grows.
-state_type = { state_type_f64 | state_type_i32 | state_type_string }
+state_type = { state_type_f64 | state_type_i32 | state_type_string | state_type_named }
 
 state_type_i32 = { "i32" }
   -> Type::Primitive { name: intern("i32") }
@@ -640,6 +665,10 @@ state_type_f64 = { "f64" }
 // what downstream consumers (type checker, codegen) match on.
 state_type_string = { "string" }
   -> Type::Primitive { name: intern("str") }
+
+// Custom data types resolve later against Zyntax's type registry.
+state_type_named = { name:identifier }
+  -> Type::Named { name: intern(name), type_args: [] }
 
 // `impl <Name> { fn ... fn ... }` — methods attached to a
 // previously-declared component. The interpreter's `Impl` path

@@ -1788,6 +1788,157 @@ fn lower_component_calls_strips_marker_callee() {
     );
 }
 
+/// `struct MyData { ... }` lowers `MyData(field = value)` to a native
+/// Zyntax struct literal, not a component/widget view call.
+#[test]
+fn parse_struct_constructor_named_fields_in_decl_order() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    let program = dsl
+        .parse_to_typed_ast(
+            r#"
+                struct MyData {
+                    label: string
+                    count: i32
+                }
+
+                view {
+                    let data = MyData(count = 7, label = "seven")
+                }
+                "#,
+            "struct_constructor.blinc",
+        )
+        .expect("parse");
+
+    assert!(
+        !program.declarations.iter().any(|d| {
+            matches!(
+                &d.node,
+                TypedDeclaration::Function(f)
+                    if f.name.resolve_global().as_deref() == Some("__blinc_struct_type__")
+            )
+        }),
+        "struct marker declarations should be stripped before compile/lowering"
+    );
+
+    let class = program
+        .declarations
+        .iter()
+        .find_map(|d| match &d.node {
+            TypedDeclaration::Class(c) if c.name.resolve_global().as_deref() == Some("MyData") => {
+                Some(c)
+            }
+            _ => None,
+        })
+        .expect("MyData class declaration");
+    let field_names: Vec<_> = class
+        .fields
+        .iter()
+        .filter_map(|f| f.name.resolve_global().map(|s| s.to_string()))
+        .collect();
+    assert_eq!(field_names, ["label", "count"]);
+
+    let stmts = first_user_function_body(&program);
+    let TypedStatement::Let(let_stmt) = &stmts[0].node else {
+        panic!("expected let statement");
+    };
+    let init = let_stmt.initializer.as_ref().expect("initializer");
+    let TypedExpression::Struct(struct_lit) = &init.node else {
+        panic!("expected Struct literal, got {:?}", init.node);
+    };
+
+    assert_eq!(struct_lit.name.resolve_global().as_deref(), Some("MyData"));
+    let lowered_field_names: Vec<_> = struct_lit
+        .fields
+        .iter()
+        .filter_map(|f| f.name.resolve_global().map(|s| s.to_string()))
+        .collect();
+    assert_eq!(
+        lowered_field_names,
+        ["label", "count"],
+        "constructor fields must follow declaration order for SSA aggregate layout"
+    );
+
+    let TypedExpression::Literal(TypedLiteral::String(label)) = &struct_lit.fields[0].value.node
+    else {
+        panic!("label should be a string literal");
+    };
+    assert_eq!(label.resolve_global().as_deref(), Some("seven"));
+
+    let TypedExpression::Literal(TypedLiteral::Integer(count)) = &struct_lit.fields[1].value.node
+    else {
+        panic!("count should be an integer literal");
+    };
+    assert_eq!(*count, 7);
+}
+
+/// Struct fields can reference custom DSL/Rust types by name; the parser keeps
+/// them as named types so Zyntax can bind them through the type registry.
+#[test]
+fn parse_struct_field_can_reference_custom_struct_type() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    let program = dsl
+        .parse_to_typed_ast(
+            r#"
+                struct MyWrapper {
+                    point: Point
+                    label: string
+                }
+
+                view {
+                    let value = MyWrapper(
+                        point = 3,
+                        label = "origin-ish"
+                    )
+                }
+                "#,
+            "nested_struct_constructor.blinc",
+        )
+        .expect("parse");
+
+    let wrapper = program
+        .declarations
+        .iter()
+        .find_map(|d| match &d.node {
+            TypedDeclaration::Class(c)
+                if c.name.resolve_global().as_deref() == Some("MyWrapper") =>
+            {
+                Some(c)
+            }
+            _ => None,
+        })
+        .expect("MyWrapper class declaration");
+    let point_field = wrapper
+        .fields
+        .iter()
+        .find(|f| f.name.resolve_global().as_deref() == Some("point"))
+        .expect("point field");
+    let Type::Named { .. } = &point_field.ty else {
+        panic!(
+            "point field should carry a named custom type, got {:?}",
+            point_field.ty
+        );
+    };
+
+    let stmts = first_user_function_body(&program);
+    let TypedStatement::Let(let_stmt) = &stmts[0].node else {
+        panic!("expected let statement");
+    };
+    let init = let_stmt.initializer.as_ref().expect("initializer");
+    let TypedExpression::Struct(wrapper_lit) = &init.node else {
+        panic!("expected MyWrapper struct literal, got {:?}", init.node);
+    };
+    let TypedExpression::Literal(TypedLiteral::Integer(point_value)) =
+        &wrapper_lit.fields[0].value.node
+    else {
+        panic!("point field should preserve supplied expression");
+    };
+    assert_eq!(*point_value, 3);
+}
+
 /// Lowercase `counter(0)` does not parse as a component call.
 #[test]
 fn parse_lowercase_call_is_not_component_call() {

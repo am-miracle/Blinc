@@ -39,11 +39,11 @@ pub use host::{take_scene_ops, DslOp};
 use passes::{
     bind_component_props, collect_declared, detect_and_strip_stateful_views, ensure_unit_return,
     extract_and_strip_stylesheets, inject_fsm_context_markers, lower_children_arrays_to_blocks,
-    lower_component_calls, lower_match_blocks, lower_styling_args_to_overlays,
-    lower_view_to_value_returning, materialize_view, populate_fsm_registry_pass,
-    resolve_extern_widget_named_args, resolve_fsm_subscribe_calls, resolve_fsm_trigger_calls,
-    resolve_signal_calls, synthesize_fsm_event_enums, synthesize_fsm_trait_interfaces,
-    validate_component_calls,
+    lower_component_calls, lower_match_blocks, lower_struct_literals,
+    lower_styling_args_to_overlays, lower_view_to_value_returning, materialize_view,
+    populate_fsm_registry_pass, resolve_extern_widget_named_args, resolve_fsm_subscribe_calls,
+    resolve_fsm_trigger_calls, resolve_signal_calls, synthesize_fsm_event_enums,
+    synthesize_fsm_trait_interfaces, validate_component_calls,
 };
 use runtime_bridge::{
     publish_components_to_runtime_registry, publish_fsms_to_runtime_registry,
@@ -420,6 +420,9 @@ impl BlincDsl {
             }
         }
 
+        lower_struct_literals(&mut typed_program)
+            .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
+
         // MUST validate BEFORE lower_component_calls — validator reads the marker shape.
         validate_component_calls(&typed_program)
             .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
@@ -736,6 +739,9 @@ impl BlincDsl {
         resolve_fsm_trigger_calls(&mut program);
         resolve_fsm_subscribe_calls(&mut program);
         let _ = detect_and_strip_stateful_views(&mut program);
+
+        lower_struct_literals(&mut program)
+            .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
 
         validate_component_calls(&program)
             .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
