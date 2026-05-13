@@ -75,6 +75,14 @@
     // registered by `builtins()`.
     __new_child_list__: "__new_child_list__",
     __push_child__: "__push_child__",
+    // Struct-value marshalling. Complex widget props cross the
+    // extern ABI as opaque i64 handles.
+    __new_struct_value__: "__new_struct_value__",
+    __set_struct_i32__: "__set_struct_i32__",
+    __set_struct_i64__: "__set_struct_i64__",
+    __set_struct_f64__: "__set_struct_f64__",
+    __set_struct_string__: "__set_struct_string__",
+    __set_struct_handle__: "__set_struct_handle__",
     // Style-overlay marshalling. Same pattern as the child list.
     __new_style_overlay__: "__new_style_overlay__",
     __set_overlay_bg__: "__set_overlay_bg__",

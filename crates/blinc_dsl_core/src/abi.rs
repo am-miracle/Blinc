@@ -6,10 +6,11 @@ use crate::host::{
 };
 use crate::widget_ffi::{
     blinc_canvas_view, blinc_div_view, blinc_image_view, blinc_motion_view, blinc_new_child_list,
-    blinc_new_style_overlay, blinc_notch_view, blinc_push_child, blinc_rich_text_view,
-    blinc_set_overlay_bg, blinc_set_overlay_border_color, blinc_set_overlay_border_width,
-    blinc_set_overlay_corner_radius, blinc_set_overlay_opacity, blinc_stack_view, blinc_svg_view,
-    blinc_text_view,
+    blinc_new_struct_value, blinc_new_style_overlay, blinc_notch_view, blinc_push_child,
+    blinc_rich_text_view, blinc_set_overlay_bg, blinc_set_overlay_border_color,
+    blinc_set_overlay_border_width, blinc_set_overlay_corner_radius, blinc_set_overlay_opacity,
+    blinc_set_struct_f64, blinc_set_struct_handle, blinc_set_struct_i32, blinc_set_struct_i64,
+    blinc_set_struct_string, blinc_stack_view, blinc_svg_view, blinc_text_view,
 };
 
 /// Pairs a DSL-visible symbol name with an `extern "C"` fn pointer and signature.
@@ -232,6 +233,63 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ],
             return_type: Type::Primitive(PrimitiveType::Unit),
             ptr: blinc_push_child as *const u8,
+        },
+        // Struct-value builders — complex widget props cross the extern ABI as i64 handles.
+        BuiltinDescriptor {
+            name: "__new_struct_value__",
+            param_types: &[],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_new_struct_value as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__set_struct_i32__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I32),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_set_struct_i32 as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__set_struct_i64__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_set_struct_i64 as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__set_struct_f64__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::F64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_set_struct_f64 as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__set_struct_string__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_set_struct_string as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__set_struct_handle__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_set_struct_handle as *const u8,
         },
         // Style-overlay builders — mirror the child-list pattern.
         BuiltinDescriptor {

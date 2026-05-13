@@ -13,14 +13,19 @@ use syn::parse_macro_input;
 struct ParamKind {
     ffi_ty: proc_macro2::TokenStream,
     decode: proc_macro2::TokenStream,
-    type_expr: proc_macro2::TokenStream,
+    prop_type_expr: proc_macro2::TokenStream,
+    param_type_expr: proc_macro2::TokenStream,
 }
 
 fn classify_param_type(ty: &syn::Type) -> Option<ParamKind> {
     let syn::Type::Path(p) = ty else {
         return None;
     };
-    let ident = p.path.get_ident()?;
+    let segment = p.path.segments.last()?;
+    if !matches!(segment.arguments, syn::PathArguments::None) {
+        return None;
+    }
+    let ident = &segment.ident;
     match ident.to_string().as_str() {
         "String" => Some(ParamKind {
             ffi_ty: quote! { *const i32 },
@@ -29,7 +34,12 @@ fn classify_param_type(ty: &syn::Type) -> Option<ParamKind> {
                 // hands us a length-prefixed UTF-8 buffer.
                 unsafe { ::blinc_dsl_core::__extern_widget_internals::decode_string(__arg) }
             },
-            type_expr: quote! {
+            prop_type_expr: quote! {
+                ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                    ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::String
+                )
+            },
+            param_type_expr: quote! {
                 ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
                     ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::String
                 )
@@ -38,7 +48,12 @@ fn classify_param_type(ty: &syn::Type) -> Option<ParamKind> {
         "i32" => Some(ParamKind {
             ffi_ty: quote! { i32 },
             decode: quote! { __arg },
-            type_expr: quote! {
+            prop_type_expr: quote! {
+                ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                    ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I32
+                )
+            },
+            param_type_expr: quote! {
                 ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
                     ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I32
                 )
@@ -47,7 +62,12 @@ fn classify_param_type(ty: &syn::Type) -> Option<ParamKind> {
         "i64" => Some(ParamKind {
             ffi_ty: quote! { i64 },
             decode: quote! { __arg },
-            type_expr: quote! {
+            prop_type_expr: quote! {
+                ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                    ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I64
+                )
+            },
+            param_type_expr: quote! {
                 ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
                     ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I64
                 )
@@ -56,13 +76,53 @@ fn classify_param_type(ty: &syn::Type) -> Option<ParamKind> {
         "f64" => Some(ParamKind {
             ffi_ty: quote! { f64 },
             decode: quote! { __arg },
-            type_expr: quote! {
+            prop_type_expr: quote! {
+                ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                    ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::F64
+                )
+            },
+            param_type_expr: quote! {
                 ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
                     ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::F64
                 )
             },
         }),
-        _ => None,
+        "Vec" | "Box" | "Option" => None,
+        _ => {
+            let dsl_type_name = ident.to_string();
+            Some(ParamKind {
+                ffi_ty: quote! { i64 },
+                decode: quote! {
+                    {
+                        // SAFETY: complex DSL struct props are lowered to
+                        // `__new_struct_value__` handles before this thunk is called.
+                        let __value = unsafe {
+                            ::blinc_dsl_core::__extern_widget_internals::decode_struct(__arg)
+                        };
+                        <#ty as ::core::convert::TryFrom<
+                            ::blinc_dsl_core::__extern_widget_internals::BlincStructValue
+                        >>::try_from(__value)
+                            .unwrap_or_else(|_| panic!(
+                                "failed to decode DSL struct prop `{}` as `{}`",
+                                #dsl_type_name,
+                                stringify!(#ty)
+                            ))
+                    }
+                },
+                prop_type_expr: quote! {
+                    ::blinc_dsl_core::__extern_widget_internals::Type::Unresolved(
+                        ::blinc_dsl_core::__extern_widget_internals::InternedString::new_global(
+                            #dsl_type_name
+                        )
+                    )
+                },
+                param_type_expr: quote! {
+                    ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                        ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I64
+                    )
+                },
+            })
+        }
     }
 }
 
@@ -308,8 +368,9 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
         let Some(kind) = classify_param_type(&field.ty) else {
             return syn::Error::new_spanned(
                 &field.ty,
-                "#[extern_widget] scalar fields must be one of: String, i32, i64, f64 (or use \
-                 `#[children]` for a `Vec<Box<dyn ElementBuilder>>` children slot)",
+                "#[extern_widget] fields must be String, i32, i64, f64, or a non-generic custom \
+                 type that implements TryFrom<BlincStructValue> (or use `#[children]` for a \
+                 `Vec<Box<dyn ElementBuilder>>` children slot)",
             )
             .to_compile_error()
             .into();
@@ -318,7 +379,8 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
         let ffi_arg_ident = syn::Ident::new(&format!("__arg_{idx}"), field_ident.span());
         let ffi_ty = &kind.ffi_ty;
         let decode = &kind.decode;
-        let type_expr = &kind.type_expr;
+        let prop_type_expr = &kind.prop_type_expr;
+        let param_type_expr = &kind.param_type_expr;
 
         thunk_params.push(quote! { #ffi_arg_ident: #ffi_ty });
         thunk_decodes.push(quote! {
@@ -331,10 +393,10 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
         prop_defs.push(quote! {
             ::blinc_dsl_core::__extern_widget_internals::PropDef {
                 name: ::std::sync::Arc::from(#field_name),
-                ty: #type_expr,
+                ty: #prop_type_expr,
             }
         });
-        param_types.push(type_expr.clone());
+        param_types.push(param_type_expr.clone());
     }
 
     if styled {

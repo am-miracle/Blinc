@@ -2877,6 +2877,381 @@ pub(crate) fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
     }
 }
 
+/// Marshal complex extern-widget prop struct literals into opaque `i64` handles.
+/// The widget registry keeps the DSL-facing named type; the generated extern
+/// thunk accepts a stable handle ABI.
+pub(crate) fn lower_struct_widget_props_to_handles(
+    program: &mut TypedProgram,
+) -> Result<(), Vec<String>> {
+    use std::collections::HashMap;
+    use zyntax_typed_ast::{TypedCall, TypedDeclaration, TypedExpression};
+
+    type FieldMap = HashMap<String, Type>;
+    type StructFields = HashMap<String, FieldMap>;
+
+    fn is_complex_type(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Unresolved(_) | Type::Named { .. } | Type::Struct { .. }
+        )
+    }
+
+    fn collect_struct_fields(program: &TypedProgram) -> StructFields {
+        let mut out = HashMap::new();
+        for decl in &program.declarations {
+            let TypedDeclaration::Class(class) = &decl.node else {
+                continue;
+            };
+            let Some(class_name) = class.name.resolve_global().map(|s| s.to_string()) else {
+                continue;
+            };
+            let mut fields = HashMap::new();
+            for field in &class.fields {
+                if let Some(name) = field.name.resolve_global() {
+                    fields.insert(name.to_string(), field.ty.clone());
+                }
+            }
+            out.insert(class_name, fields);
+        }
+        out
+    }
+
+    fn next_id(counter: &mut u32) -> u32 {
+        let id = *counter;
+        *counter += 1;
+        id
+    }
+
+    fn setter_for_type(ty: &Type) -> &'static str {
+        match ty {
+            Type::Primitive(PrimitiveType::I32) => "__set_struct_i32__",
+            Type::Primitive(PrimitiveType::F64) => "__set_struct_f64__",
+            Type::Primitive(PrimitiveType::String) => "__set_struct_string__",
+            Type::Unresolved(_) | Type::Named { .. } | Type::Struct { .. } => {
+                "__set_struct_handle__"
+            }
+            _ => "__set_struct_i64__",
+        }
+    }
+
+    fn string_expr(
+        value: &str,
+        span: zyntax_typed_ast::Span,
+    ) -> zyntax_typed_ast::TypedNode<TypedExpression> {
+        typed_node(
+            TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::String(
+                zyntax_typed_ast::InternedString::new_global(value),
+            )),
+            Type::Primitive(PrimitiveType::String),
+            span,
+        )
+    }
+
+    fn call_expr(
+        callee: &str,
+        args: Vec<zyntax_typed_ast::TypedNode<TypedExpression>>,
+        ty: Type,
+        span: zyntax_typed_ast::Span,
+    ) -> zyntax_typed_ast::TypedNode<TypedExpression> {
+        typed_node(
+            TypedExpression::Call(TypedCall {
+                callee: Box::new(typed_node(
+                    TypedExpression::Variable(zyntax_typed_ast::InternedString::new_global(callee)),
+                    Type::Any,
+                    span,
+                )),
+                positional_args: args,
+                named_args: vec![],
+                type_args: vec![],
+            }),
+            ty,
+            span,
+        )
+    }
+
+    fn lower_struct_to_handle(
+        expr: zyntax_typed_ast::TypedNode<TypedExpression>,
+        structs: &StructFields,
+        prelude: &mut Vec<zyntax_typed_ast::TypedNode<TypedStatement>>,
+        counter: &mut u32,
+    ) -> zyntax_typed_ast::TypedNode<TypedExpression> {
+        let span = expr.span;
+        let i64_ty = Type::Primitive(PrimitiveType::I64);
+        let unit_ty = Type::Primitive(PrimitiveType::Unit);
+        let TypedExpression::Struct(struct_lit) = expr.node else {
+            return expr;
+        };
+
+        let struct_name = struct_lit
+            .name
+            .resolve_global()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let id = next_id(counter);
+        let ident =
+            zyntax_typed_ast::InternedString::new_global(&format!("__blinc_struct_value_{id}"));
+
+        prelude.push(typed_node(
+            TypedStatement::Let(zyntax_typed_ast::typed_ast::TypedLet {
+                name: ident,
+                ty: i64_ty.clone(),
+                mutability: zyntax_typed_ast::Mutability::Immutable,
+                initializer: Some(Box::new(call_expr(
+                    "__new_struct_value__",
+                    vec![],
+                    i64_ty.clone(),
+                    span,
+                ))),
+                span,
+            }),
+            unit_ty.clone(),
+            span,
+        ));
+
+        let field_types = structs.get(&struct_name);
+        for field in struct_lit.fields {
+            let field_name = field
+                .name
+                .resolve_global()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let field_ty = field_types
+                .and_then(|fields| fields.get(&field_name))
+                .cloned()
+                .unwrap_or_else(|| field.value.ty.clone());
+            let setter = setter_for_type(&field_ty);
+            let mut value = *field.value;
+            if is_complex_type(&field_ty) && matches!(value.node, TypedExpression::Struct(_)) {
+                value = lower_struct_to_handle(value, structs, prelude, counter);
+            }
+            value.ty = field_ty;
+
+            prelude.push(typed_node(
+                TypedStatement::Expression(Box::new(call_expr(
+                    setter,
+                    vec![
+                        typed_node(TypedExpression::Variable(ident), i64_ty.clone(), span),
+                        string_expr(&field_name, span),
+                        value,
+                    ],
+                    unit_ty.clone(),
+                    span,
+                ))),
+                unit_ty.clone(),
+                span,
+            ));
+        }
+
+        typed_node(TypedExpression::Variable(ident), i64_ty, span)
+    }
+
+    fn lower_arg_if_needed(
+        arg: &mut zyntax_typed_ast::TypedNode<TypedExpression>,
+        prop_ty: &Type,
+        structs: &StructFields,
+        prelude: &mut Vec<zyntax_typed_ast::TypedNode<TypedStatement>>,
+        counter: &mut u32,
+    ) {
+        if !is_complex_type(prop_ty) || !matches!(arg.node, TypedExpression::Struct(_)) {
+            return;
+        }
+        let span = arg.span;
+        let old = std::mem::replace(
+            arg,
+            typed_node(
+                TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(0)),
+                Type::Primitive(PrimitiveType::I64),
+                span,
+            ),
+        );
+        *arg = lower_struct_to_handle(old, structs, prelude, counter);
+    }
+
+    fn extern_props(call: &TypedCall) -> Option<Vec<(String, Type)>> {
+        let TypedExpression::Variable(callee) = &call.callee.node else {
+            return None;
+        };
+        let sym = callee.resolve_global()?;
+        let sym: &str = &sym;
+        let name = sym
+            .strip_prefix("$Blinc$")
+            .and_then(|s| s.strip_suffix("$view"))?;
+        blinc_runtime::component::with_component_registry(|r| {
+            r.get_by_name(name).map(|def| {
+                def.props
+                    .iter()
+                    .map(|p| (p.name.to_string(), p.ty.clone()))
+                    .collect()
+            })
+        })
+    }
+
+    fn walk_stmt(
+        stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>,
+        structs: &StructFields,
+        counter: &mut u32,
+    ) {
+        match &mut stmt.node {
+            TypedStatement::Expression(e) => rewrite_expr(e, structs, counter),
+            TypedStatement::Return(Some(e)) => rewrite_expr(e, structs, counter),
+            TypedStatement::Let(l) => {
+                if let Some(init) = &mut l.initializer {
+                    rewrite_expr(init, structs, counter);
+                }
+            }
+            TypedStatement::If(if_stmt) => {
+                rewrite_expr(&mut if_stmt.condition, structs, counter);
+                for s in &mut if_stmt.then_block.statements {
+                    walk_stmt(s, structs, counter);
+                }
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    for s in &mut else_block.statements {
+                        walk_stmt(s, structs, counter);
+                    }
+                }
+            }
+            TypedStatement::Block(block) => {
+                for s in &mut block.statements {
+                    walk_stmt(s, structs, counter);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rewrite_expr(
+        expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>,
+        structs: &StructFields,
+        counter: &mut u32,
+    ) {
+        match &mut expr.node {
+            TypedExpression::Call(call) => {
+                rewrite_expr(&mut call.callee, structs, counter);
+                for arg in &mut call.positional_args {
+                    rewrite_expr(arg, structs, counter);
+                }
+                for na in &mut call.named_args {
+                    rewrite_expr(&mut na.value, structs, counter);
+                }
+            }
+            TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
+                for item in items {
+                    rewrite_expr(item, structs, counter);
+                }
+            }
+            TypedExpression::Struct(s) => {
+                for field in &mut s.fields {
+                    rewrite_expr(&mut field.value, structs, counter);
+                }
+            }
+            TypedExpression::Block(block) => {
+                for stmt in &mut block.statements {
+                    walk_stmt(stmt, structs, counter);
+                }
+            }
+            TypedExpression::Binary(b) => {
+                rewrite_expr(&mut b.left, structs, counter);
+                rewrite_expr(&mut b.right, structs, counter);
+            }
+            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand, structs, counter),
+            TypedExpression::Field(f) => rewrite_expr(&mut f.object, structs, counter),
+            TypedExpression::Index(idx) => {
+                rewrite_expr(&mut idx.object, structs, counter);
+                rewrite_expr(&mut idx.index, structs, counter);
+            }
+            TypedExpression::MethodCall(mc) => {
+                rewrite_expr(&mut mc.receiver, structs, counter);
+                for arg in &mut mc.positional_args {
+                    rewrite_expr(arg, structs, counter);
+                }
+            }
+            TypedExpression::If(if_expr) => {
+                rewrite_expr(&mut if_expr.condition, structs, counter);
+                rewrite_expr(&mut if_expr.then_branch, structs, counter);
+                rewrite_expr(&mut if_expr.else_branch, structs, counter);
+            }
+            _ => {}
+        }
+
+        let span = expr.span;
+        let Some(props) = (match &expr.node {
+            TypedExpression::Call(call) => extern_props(call),
+            _ => None,
+        }) else {
+            return;
+        };
+        let TypedExpression::Call(call) = &mut expr.node else {
+            return;
+        };
+        let mut prelude = Vec::new();
+
+        for (i, arg) in call.positional_args.iter_mut().enumerate() {
+            if let Some((_, prop_ty)) = props.get(i) {
+                lower_arg_if_needed(arg, prop_ty, structs, &mut prelude, counter);
+            }
+        }
+        for named in &mut call.named_args {
+            let Some(name) = named.name.resolve_global() else {
+                continue;
+            };
+            let Some((_, prop_ty)) = props.iter().find(|(prop_name, _)| prop_name == &*name) else {
+                continue;
+            };
+            lower_arg_if_needed(&mut named.value, prop_ty, structs, &mut prelude, counter);
+        }
+
+        if prelude.is_empty() {
+            return;
+        }
+
+        let final_call = TypedExpression::Call(TypedCall {
+            callee: call.callee.clone(),
+            positional_args: std::mem::take(&mut call.positional_args),
+            named_args: std::mem::take(&mut call.named_args),
+            type_args: std::mem::take(&mut call.type_args),
+        });
+        prelude.push(typed_node(
+            TypedStatement::Expression(Box::new(typed_node(
+                final_call,
+                Type::Primitive(PrimitiveType::I64),
+                span,
+            ))),
+            Type::Primitive(PrimitiveType::I64),
+            span,
+        ));
+        expr.node = TypedExpression::Block(zyntax_typed_ast::typed_ast::TypedBlock {
+            statements: prelude,
+            span,
+        });
+    }
+
+    let structs = collect_struct_fields(program);
+    let mut counter = 0;
+    for decl in program.declarations.iter_mut() {
+        match &mut decl.node {
+            TypedDeclaration::Function(func) => {
+                if let Some(body) = func.body.as_mut() {
+                    for stmt in &mut body.statements {
+                        walk_stmt(stmt, &structs, &mut counter);
+                    }
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                for method in &mut imp.methods {
+                    if let Some(body) = method.body.as_mut() {
+                        for stmt in &mut body.statements {
+                            walk_stmt(stmt, &structs, &mut counter);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
 /// Inline styling props recognised on DSL primitive call sites. Each maps to
 /// an overlay-setter extern (`__set_overlay_*__`).
 const STYLING_PROP_NAMES: &[(&str, &str, StylingValueKind)] = &[

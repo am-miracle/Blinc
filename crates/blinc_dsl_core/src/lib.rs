@@ -40,10 +40,11 @@ use passes::{
     bind_component_props, collect_declared, detect_and_strip_stateful_views, ensure_unit_return,
     extract_and_strip_stylesheets, inject_fsm_context_markers, lower_children_arrays_to_blocks,
     lower_component_calls, lower_match_blocks, lower_struct_literals,
-    lower_styling_args_to_overlays, lower_view_to_value_returning, materialize_view,
-    populate_fsm_registry_pass, resolve_extern_widget_named_args, resolve_fsm_subscribe_calls,
-    resolve_fsm_trigger_calls, resolve_signal_calls, synthesize_fsm_event_enums,
-    synthesize_fsm_trait_interfaces, validate_component_calls,
+    lower_struct_widget_props_to_handles, lower_styling_args_to_overlays,
+    lower_view_to_value_returning, materialize_view, populate_fsm_registry_pass,
+    resolve_extern_widget_named_args, resolve_fsm_subscribe_calls, resolve_fsm_trigger_calls,
+    resolve_signal_calls, synthesize_fsm_event_enums, synthesize_fsm_trait_interfaces,
+    validate_component_calls,
 };
 use runtime_bridge::{
     publish_components_to_runtime_registry, publish_fsms_to_runtime_registry,
@@ -52,8 +53,8 @@ use runtime_bridge::{
 
 pub use blinc_dsl_macro::extern_widget;
 pub use widget_ffi::{
-    __extern_widget_internals, materialize_overlay, materialize_widget, ExternWidget,
-    ExternWidgetSpec, RenderPropsOverlay, Styled, WidgetBox,
+    __extern_widget_internals, materialize_overlay, materialize_widget, BlincStructFieldValue,
+    BlincStructValue, ExternWidget, ExternWidgetSpec, RenderPropsOverlay, Styled, WidgetBox,
 };
 pub use zyntax_embed::ZyntaxValue;
 
@@ -454,6 +455,9 @@ impl BlincDsl {
         // MUST run BEFORE `resolve_extern_widget_named_args` so it sees uniform `__style`.
         lower_styling_args_to_overlays(&mut typed_program);
 
+        lower_struct_widget_props_to_handles(&mut typed_program)
+            .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
+
         // Resolve named args against our component registry — Zyntax's auto-injected
         // extern decls carry synthetic `p0`, `p1`, … param names that can't bind by name.
         resolve_extern_widget_named_args(&mut typed_program);
@@ -757,6 +761,8 @@ impl BlincDsl {
 
         lower_children_arrays_to_blocks(&mut program);
         lower_styling_args_to_overlays(&mut program);
+        lower_struct_widget_props_to_handles(&mut program)
+            .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
         resolve_extern_widget_named_args(&mut program);
 
         Ok(program)

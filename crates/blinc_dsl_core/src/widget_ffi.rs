@@ -1,5 +1,6 @@
 use super::*;
 use crate::host::blinc_string_decode;
+use std::collections::BTreeMap;
 
 // =====================================================================
 // Widget primitives — value-returning externs for `Div` / `Text`
@@ -61,6 +62,69 @@ impl RenderPropsOverlay {
             base.border_color = Some(c);
         }
     }
+}
+
+/// Runtime-owned representation of a DSL `struct` literal after it has been
+/// marshalled across the JIT boundary as an opaque `i64` handle.
+#[derive(Debug, Clone, Default)]
+pub struct BlincStructValue {
+    fields: BTreeMap<String, BlincStructFieldValue>,
+}
+
+impl BlincStructValue {
+    pub fn insert(&mut self, name: impl Into<String>, value: BlincStructFieldValue) {
+        self.fields.insert(name.into(), value);
+    }
+
+    pub fn get(&self, name: &str) -> Option<&BlincStructFieldValue> {
+        self.fields.get(name)
+    }
+
+    pub fn get_string(&self, name: &str) -> Option<&str> {
+        match self.get(name) {
+            Some(BlincStructFieldValue::String(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn get_i32(&self, name: &str) -> Option<i32> {
+        match self.get(name) {
+            Some(BlincStructFieldValue::I32(value)) => Some(*value),
+            Some(BlincStructFieldValue::I64(value)) => (*value).try_into().ok(),
+            _ => None,
+        }
+    }
+
+    pub fn get_i64(&self, name: &str) -> Option<i64> {
+        match self.get(name) {
+            Some(BlincStructFieldValue::I32(value)) => Some(i64::from(*value)),
+            Some(BlincStructFieldValue::I64(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn get_f64(&self, name: &str) -> Option<f64> {
+        match self.get(name) {
+            Some(BlincStructFieldValue::F64(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn get_struct(&self, name: &str) -> Option<&BlincStructValue> {
+        match self.get(name) {
+            Some(BlincStructFieldValue::Struct(value)) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum BlincStructFieldValue {
+    I32(i32),
+    I64(i64),
+    F64(f64),
+    String(String),
+    Struct(BlincStructValue),
 }
 
 /// Wraps a widget with a per-call styling overlay. Build /
@@ -126,11 +190,12 @@ impl<W: blinc_layout::div::ElementBuilder> blinc_layout::div::ElementBuilder for
 #[doc(hidden)]
 pub mod __extern_widget_internals {
     pub use crate::{
-        BlincDsl, BlincDslError, BlincDslResult, ExternWidget, ExternWidgetSpec,
-        RenderPropsOverlay, Styled, WidgetBox,
+        BlincDsl, BlincDslError, BlincDslResult, BlincStructFieldValue, BlincStructValue,
+        ExternWidget, ExternWidgetSpec, RenderPropsOverlay, Styled, WidgetBox,
     };
     pub use blinc_runtime::component::PropDef;
     pub use zyntax_typed_ast::type_registry::{PrimitiveType, Type};
+    pub use zyntax_typed_ast::InternedString;
 
     /// Reclaim a `RenderPropsOverlay` from `__new_style_overlay__` for macro thunks.
     ///
@@ -179,6 +244,18 @@ pub mod __extern_widget_internals {
                 unsafe { super::materialize_widget(h) }.map(|w| w.into_element_builder())
             })
             .collect()
+    }
+
+    /// Decode a DSL struct-value pointer. Null/zero yields an empty struct.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be the `i64`-encoded payload minted by `__new_struct_value__`.
+    pub unsafe fn decode_struct(ptr: i64) -> crate::BlincStructValue {
+        if ptr == 0 {
+            return crate::BlincStructValue::default();
+        }
+        *unsafe { Box::from_raw(ptr as *mut crate::BlincStructValue) }
     }
 }
 
@@ -257,6 +334,71 @@ fn decoded_class_names(class_str: *const i32) -> Vec<String> {
         .split_whitespace()
         .map(ToOwned::to_owned)
         .collect()
+}
+
+pub(crate) extern "C" fn blinc_new_struct_value() -> i64 {
+    Box::into_raw(Box::new(BlincStructValue::default())) as i64
+}
+
+fn with_struct_value(ptr: i64, f: impl FnOnce(&mut BlincStructValue)) {
+    if ptr == 0 {
+        return;
+    }
+    // SAFETY: `ptr` is owned by the DSL-side struct marshalling block until
+    // the final widget thunk consumes it.
+    let value = unsafe { &mut *(ptr as *mut BlincStructValue) };
+    f(value);
+}
+
+pub(crate) extern "C" fn blinc_set_struct_i32(ptr: i64, name_ptr: *const i32, value: i32) {
+    let name = decode_string_arg(name_ptr);
+    with_struct_value(ptr, |s| {
+        s.insert(name, BlincStructFieldValue::I32(value));
+    });
+}
+
+pub(crate) extern "C" fn blinc_set_struct_i64(ptr: i64, name_ptr: *const i32, value: i64) {
+    let name = decode_string_arg(name_ptr);
+    with_struct_value(ptr, |s| {
+        s.insert(name, BlincStructFieldValue::I64(value));
+    });
+}
+
+pub(crate) extern "C" fn blinc_set_struct_f64(ptr: i64, name_ptr: *const i32, value: f64) {
+    let name = decode_string_arg(name_ptr);
+    with_struct_value(ptr, |s| {
+        s.insert(name, BlincStructFieldValue::F64(value));
+    });
+}
+
+pub(crate) extern "C" fn blinc_set_struct_string(
+    ptr: i64,
+    name_ptr: *const i32,
+    value_ptr: *const i32,
+) {
+    let name = decode_string_arg(name_ptr);
+    let value = decode_string_arg(value_ptr);
+    with_struct_value(ptr, |s| {
+        s.insert(name, BlincStructFieldValue::String(value));
+    });
+}
+
+pub(crate) extern "C" fn blinc_set_struct_handle(ptr: i64, name_ptr: *const i32, value_ptr: i64) {
+    let name = decode_string_arg(name_ptr);
+    if value_ptr == 0 {
+        with_struct_value(ptr, |s| {
+            s.insert(
+                name,
+                BlincStructFieldValue::Struct(BlincStructValue::default()),
+            );
+        });
+        return;
+    }
+    // SAFETY: nested struct handles are consumed when inserted into the parent.
+    let nested = *unsafe { Box::from_raw(value_ptr as *mut BlincStructValue) };
+    with_struct_value(ptr, |s| {
+        s.insert(name, BlincStructFieldValue::Struct(nested));
+    });
 }
 
 fn leak_custom(widget: impl blinc_layout::div::ElementBuilder + 'static) -> WidgetHandle {

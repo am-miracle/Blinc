@@ -7,9 +7,11 @@
 //! resolves itself as `crate::...` and so can't host this test.
 
 use blinc_dsl_core::{
-    extern_widget, materialize_widget, BlincDsl, ExternWidget, WidgetBox, ZyntaxValue,
+    extern_widget, materialize_widget, BlincDsl, BlincStructValue, ExternWidget, WidgetBox,
+    ZyntaxValue,
 };
 use blinc_layout::div::ElementBuilder;
+use std::sync::{Mutex, OnceLock};
 
 /// Declare a Rust widget the same way an app would: a plain
 /// struct decorated with `#[extern_widget]`. The struct's fields
@@ -30,6 +32,51 @@ impl ElementBuilder for MacroText {
 
     fn render_props(&self) -> blinc_layout::RenderProps {
         blinc_layout::text::Text::new(&self.content).render_props()
+    }
+
+    fn children_builders(&self) -> &[Box<dyn ElementBuilder>] {
+        &[]
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroBadgeConfig {
+    pub title: String,
+    pub count: i32,
+}
+
+impl TryFrom<BlincStructValue> for MacroBadgeConfig {
+    type Error = &'static str;
+
+    fn try_from(value: BlincStructValue) -> Result<Self, Self::Error> {
+        Ok(Self {
+            title: value
+                .get_string("title")
+                .ok_or("missing title")?
+                .to_string(),
+            count: value.get_i32("count").ok_or("missing count")?,
+        })
+    }
+}
+
+fn last_badge_config() -> &'static Mutex<Option<MacroBadgeConfig>> {
+    static LAST: OnceLock<Mutex<Option<MacroBadgeConfig>>> = OnceLock::new();
+    LAST.get_or_init(|| Mutex::new(None))
+}
+
+#[extern_widget(name = "MacroBadge")]
+pub struct MacroBadge {
+    pub config: MacroBadgeConfig,
+}
+
+impl ElementBuilder for MacroBadge {
+    fn build(&self, tree: &mut blinc_layout::LayoutTree) -> blinc_layout::LayoutNodeId {
+        *last_badge_config().lock().expect("last badge mutex") = Some(self.config.clone());
+        blinc_layout::text::Text::new(&self.config.title).build(tree)
+    }
+
+    fn render_props(&self) -> blinc_layout::RenderProps {
+        blinc_layout::text::Text::new(&self.config.title).render_props()
     }
 
     fn children_builders(&self) -> &[Box<dyn ElementBuilder>] {
@@ -72,6 +119,53 @@ fn extern_widget_macro_round_trip() {
     assert!(
         matches!(*widget, WidgetBox::Custom(_)),
         "macro-emitted thunk should land in WidgetBox::Custom"
+    );
+}
+
+#[test]
+fn extern_widget_macro_decodes_struct_prop() {
+    let _ = tracing_subscriber::fmt::try_init();
+    *last_badge_config().lock().expect("last badge mutex") = None;
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.register_extern_widget::<MacroBadge>()
+        .expect("register MacroBadge");
+
+    dsl.compile_source(
+        r#"
+        struct MacroBadgeConfig {
+            title: string
+            count: i32
+        }
+
+        view {
+            MacroBadge(config = MacroBadgeConfig(count = 7, title = "seven"))
+        }
+        "#,
+        "macro_badge_struct.blinc",
+    )
+    .expect("compile");
+
+    let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+    let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+    let ZyntaxValue::Int(handle) = value else {
+        panic!("expected widget handle, got: {value:?}");
+    };
+    assert_ne!(handle, 0);
+
+    let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+    let WidgetBox::Custom(builder) = *widget else {
+        panic!("expected Custom(MacroBadge)");
+    };
+    let mut tree = blinc_layout::LayoutTree::new();
+    builder.build(&mut tree);
+
+    assert_eq!(
+        *last_badge_config().lock().expect("last badge mutex"),
+        Some(MacroBadgeConfig {
+            title: "seven".to_string(),
+            count: 7,
+        })
     );
 }
 
