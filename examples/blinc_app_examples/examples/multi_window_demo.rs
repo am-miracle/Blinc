@@ -260,7 +260,7 @@ fn modal_ui(ctx: &mut WindowedContext) -> Div {
 
 /// Frameless window with custom title bar and drag region
 fn frameless_window_ui(ctx: &mut WindowedContext) -> Div {
-    let title_bar_color = Color::rgba(0.12, 0.12, 0.15, 1.0);
+    let title_bar_color = Color::rgba(0.12, 0.12, 0.15, 0.8);
     let accent = Color::rgba(0.4, 0.7, 1.0, 1.0);
     let minimize_cb = ctx.minimize_callback();
     let maximize_cb = ctx.maximize_callback();
@@ -352,7 +352,7 @@ fn frameless_window_ui(ctx: &mut WindowedContext) -> Div {
         .child(
             div()
                 .flex_grow()
-                .bg(Color::rgba(0.2, 0.2, 0.3, 1.0))
+                .bg(Color::rgba(0.2, 0.2, 0.3, 0.6))
                 .rounded_corners(0.0, 0.0, 24.0, 24.0)
                 .w_full()
                 .flex_col()
