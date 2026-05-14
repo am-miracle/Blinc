@@ -3081,6 +3081,50 @@ impl WindowedApp {
                         }
                     }
 
+                    // Multi-monitor: window dragged onto a monitor with a different
+                    // DPI / scale factor. Without this handler `windowed_ctx.scale_factor`
+                    // stays stale, the next `Resized` computes logical dims against the
+                    // old DPI, and the surface (which winit may have invalidated during
+                    // the monitor handoff) goes un-reconfigured — observed as a crash
+                    // or wrong-sized render the first time the window crosses monitors.
+                    Event::Window(_, WindowEvent::ScaleFactorChanged { scale_factor }) => {
+                        // Pull the new physical inner size from winit — it reflects what
+                        // the new monitor reports. The companion `Resized` event winit
+                        // fires alongside `ScaleFactorChanged` may arrive before or after
+                        // us, so don't rely on it to drive surface reconfig.
+                        let (phys_w, phys_h) = window.size();
+                        if let (Some(ref blinc_app), Some(ref surf), Some(ref mut config)) =
+                            (&ws.app, &ws.surface, &mut ws.surface_config)
+                        {
+                            if phys_w > 0 && phys_h > 0 {
+                                config.width = phys_w;
+                                config.height = phys_h;
+                                surf.configure(blinc_app.device(), config);
+                            }
+                        }
+                        if let Some(ref mut windowed_ctx) = ws.ctx {
+                            windowed_ctx.scale_factor = scale_factor;
+                            windowed_ctx.physical_width = phys_w as f32;
+                            windowed_ctx.physical_height = phys_h as f32;
+                            let logical_width = phys_w as f32 / scale_factor as f32;
+                            let logical_height = phys_h as f32 / scale_factor as f32;
+                            windowed_ctx.width = logical_width;
+                            windowed_ctx.height = logical_height;
+                            BlincContextState::get()
+                                .set_viewport_size(logical_width, logical_height);
+                            if let Some(ref tree) = ws.render_tree {
+                                windowed_ctx
+                                    .event_router
+                                    .on_window_resize(tree, logical_width, logical_height);
+                                tree.clear_layout_bounds_storages();
+                            }
+                        }
+                        ws.needs_rebuild = true;
+                        ws.needs_relayout = true;
+                        frame_dirty.store(true, Ordering::Release);
+                        window.request_redraw();
+                    }
+
                     Event::Window(_, WindowEvent::Focused(focused)) => {
                         // Update context focus state
                         if let Some(ref mut windowed_ctx) = ws.ctx {
