@@ -69,13 +69,26 @@ impl StableNodeId {
         // ElementRegistry) and is the fastest non-cryptographic hash
         // in the tree; collisions are vanishingly rare for the
         // (u64, usize, &str) tuples we feed it.
+        //
+        // Salt is a fixed non-zero constant. Without it,
+        // `ROOT.derive_child(0, None)` hashes to 0 (the FxHasher
+        // multiplicative-XOR pipeline produces 0 when fed only
+        // zeros from a zero seed), which would collide with
+        // `StableNodeId::ROOT` itself — every node off the root
+        // would think it WAS the root, cross-contaminating
+        // handler_registry / css_anim_store entries. The salt
+        // breaks that and `if h == 0 { 1 }` covers the tiny
+        // residual chance that some other path hashes to 0.
+        const STABLE_ID_SALT: u64 = 0xa017_3b53_0c1e_9d6a;
         let mut hasher = rustc_hash::FxBuildHasher.build_hasher();
+        hasher.write_u64(STABLE_ID_SALT);
         hasher.write_u64(self.0);
         hasher.write_usize(sibling_index);
         if let Some(k) = widget_key {
             hasher.write(k.as_bytes());
         }
-        Self(hasher.finish())
+        let h = hasher.finish();
+        Self(if h == 0 { 1 } else { h })
     }
 }
 
