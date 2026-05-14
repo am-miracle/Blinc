@@ -4074,6 +4074,14 @@ impl GpuRenderer {
             .map_err(RendererError::SurfaceError)
     }
 
+    /// The adapter the device/queue were created against. Needed for
+    /// `Surface::get_capabilities` so callers can negotiate format /
+    /// alpha mode / present mode against what the OS compositor
+    /// actually exposes.
+    pub fn adapter(&self) -> &wgpu::Adapter {
+        &self.adapter
+    }
+
     /// Get the texture format used by this renderer's pipelines
     pub fn texture_format(&self) -> wgpu::TextureFormat {
         self.texture_format

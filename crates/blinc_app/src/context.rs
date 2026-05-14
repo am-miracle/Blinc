@@ -3939,6 +3939,11 @@ impl RenderContext {
         self.renderer.texture_format()
     }
 
+    /// The adapter the renderer was initialized against.
+    pub fn adapter(&self) -> &wgpu::Adapter {
+        self.renderer.adapter()
+    }
+
     /// Create a new wgpu surface for an additional window (multi-window support)
     pub fn create_surface<W>(
         &self,

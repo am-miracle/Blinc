@@ -363,6 +363,13 @@ impl BlincApp {
         self.ctx.texture_format()
     }
 
+    /// The adapter the renderer was initialized against. Needed for
+    /// `Surface::get_capabilities` to negotiate format / alpha mode /
+    /// present mode against what the OS compositor actually exposes.
+    pub fn adapter(&self) -> &wgpu::Adapter {
+        self.ctx.adapter()
+    }
+
     /// Get the shared font registry
     ///
     /// This can be used to share fonts between text measurement and rendering,

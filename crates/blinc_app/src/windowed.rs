@@ -2124,30 +2124,44 @@ impl WindowedApp {
 
     /// Pick the wgpu `CompositeAlphaMode` to configure the surface with.
     ///
-    /// Transparent windows need an alpha mode that lets the OS compositor
-    /// see through to what's behind the window; opaque windows keep
-    /// `Opaque` to match historical behavior. We prefer `PostMultiplied`
-    /// because our shaders write non-premultiplied RGBA; macOS typically
-    /// supports it. `PreMultiplied` is the common fallback on Windows
-    /// DWM. If neither is supported we fall back to `Inherit`/`Auto` —
-    /// some drivers only expose those and will still composite alpha.
+    /// Queries the surface's actual supported modes via
+    /// [`wgpu::Surface::get_capabilities`] and picks the best match.
+    /// Hardcoding `PostMultiplied` for non-Windows panicked on Linux
+    /// Mesa, which only exposes `[Opaque, PreMultiplied]` (GH #34).
     ///
-    /// Note: this doesn't query `surface.get_capabilities()` — it trusts
-    /// the platform choice. If surface config fails because the mode
-    /// isn't supported, wgpu will log a clear error.
+    /// Preference when `transparent` is requested:
+    /// `PostMultiplied` → `PreMultiplied` → `Inherit` → `Auto` →
+    /// `Opaque`. `PostMultiplied` is correct for our non-premultiplied
+    /// shader output; `PreMultiplied` may slightly wash colors out
+    /// against the desktop background but doesn't panic and works on
+    /// Linux Mesa + Windows DWM.
     #[cfg(all(feature = "windowed", not(target_os = "android")))]
-    fn pick_alpha_mode(transparent: bool) -> wgpu::CompositeAlphaMode {
+    fn pick_alpha_mode(
+        surface: &wgpu::Surface,
+        adapter: &wgpu::Adapter,
+        transparent: bool,
+    ) -> wgpu::CompositeAlphaMode {
         if !transparent {
             return wgpu::CompositeAlphaMode::Opaque;
         }
-        #[cfg(target_os = "windows")]
-        {
-            wgpu::CompositeAlphaMode::PreMultiplied
+        let supported = surface.get_capabilities(adapter).alpha_modes;
+        let preference = [
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::CompositeAlphaMode::Inherit,
+            wgpu::CompositeAlphaMode::Auto,
+        ];
+        for mode in preference {
+            if supported.contains(&mode) {
+                return mode;
+            }
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            wgpu::CompositeAlphaMode::PostMultiplied
-        }
+        tracing::warn!(
+            "transparent window requested but the surface exposes no transparent alpha mode \
+             (supported: {:?}) — falling back to Opaque",
+            supported
+        );
+        wgpu::CompositeAlphaMode::Opaque
     }
 
     #[cfg(all(feature = "windowed", not(target_os = "android")))]
@@ -2783,7 +2797,11 @@ impl WindowedApp {
                                     let (width, height) = window.size();
                                     // Use the same texture format that the renderer's pipelines use
                                     let format = blinc_app.texture_format();
-                                    let alpha_mode = Self::pick_alpha_mode(ws.transparent);
+                                    let alpha_mode = Self::pick_alpha_mode(
+                                        &surf,
+                                        blinc_app.adapter(),
+                                        ws.transparent,
+                                    );
                                     if ws.transparent {
                                         blinc_app.set_clear_alpha(0.0);
                                     }
@@ -2917,8 +2935,11 @@ impl WindowedApp {
                                             let (w, h) = window.size();
                                             let format = blinc_app.texture_format();
                                             let window_transparent = window.is_transparent();
-                                            let alpha_mode =
-                                                Self::pick_alpha_mode(window_transparent);
+                                            let alpha_mode = Self::pick_alpha_mode(
+                                                &surf,
+                                                blinc_app.adapter(),
+                                                window_transparent,
+                                            );
                                             let config = wgpu::SurfaceConfiguration {
                                                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                                                     | wgpu::TextureUsages::COPY_SRC,
