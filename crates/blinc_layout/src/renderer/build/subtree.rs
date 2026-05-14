@@ -163,9 +163,14 @@ impl RenderTree {
             self.remove_subtree_nodes(child_id);
         }
 
-        // Remove this node's render data
+        // Remove this node's render data. Handler registry removal
+        // uses the stable id (mapping looked up before we drop the
+        // mapping below) so the registry stays in sync.
+        let stable_for_remove = self.stable_id(node_id);
         self.render_nodes.swap_remove(&node_id);
-        self.handler_registry.remove(node_id);
+        if let Some(stable) = stable_for_remove {
+            self.handler_registry.remove(stable);
+        }
         self.node_states.remove(&node_id);
         self.scroll_offsets.remove(&node_id);
         self.scroll_physics.remove(&node_id);
@@ -291,8 +296,8 @@ impl RenderTree {
                 {
                     let handlers = rebuild.new_child.event_handlers();
                     if !handlers.is_empty() {
-                        self.handler_registry
-                            .register(rebuild.parent_id, handlers.clone());
+                        let stable_id = self.stable_id_or_warn(rebuild.parent_id);
+                        self.handler_registry.register(stable_id, handlers.clone());
                     }
                 }
 
@@ -304,13 +309,31 @@ impl RenderTree {
                 }
                 self.layout_tree.clear_children(rebuild.parent_id);
 
-                // Build new children (if any)
+                // Two-phase: build all new layout nodes first, then
+                // mint stable ids once, then collect. Collect must
+                // run with stable ids available so handlers /
+                // physics / motion bindings register against stable
+                // keys — otherwise the registry entries don't
+                // survive the next rebuild.
                 let children = rebuild.new_child.children_builders();
+                let mut built: Vec<LayoutNodeId> = Vec::with_capacity(children.len());
                 for child in children {
                     let child_id = child.build(&mut self.layout_tree);
                     self.layout_tree.add_child(rebuild.parent_id, child_id);
-                    self.collect_render_props_boxed(child.as_ref(), child_id);
+                    built.push(child_id);
                 }
+
+                // Mint stable ids over the now-complete tree before
+                // collect runs (collect inserts handlers etc.).
+                self.build_generation = self.build_generation.wrapping_add(1);
+                self.mint_stable_ids_walk();
+
+                for (child, child_id) in children.iter().zip(built.iter()) {
+                    self.collect_render_props_boxed(child.as_ref(), *child_id);
+                }
+
+                self.auto_fill_animation_stable_keys();
+                self.sweep_stale_handlers();
 
                 // Apply CSS base styles (class/complex selectors) to new subtree nodes.
                 // collect_render_props_boxed only applies #id styles; class-based
@@ -330,16 +353,8 @@ impl RenderTree {
             crate::stateful::requeue_subtree_rebuilds(not_in_this_tree);
         }
 
-        // Stable-id maps are now stale wherever new children were
-        // built. Re-mint over the whole tree — cheap relative to the
-        // build itself, and avoids needing per-subtree mint logic
-        // (the descendants the caller didn't touch hash to the same
-        // stable id they already had).
-        if needs_layout {
-            self.build_generation = self.build_generation.wrapping_add(1);
-            self.mint_stable_ids_walk();
-            self.auto_fill_animation_stable_keys();
-        }
+        // Mint already ran per subtree-rebuild above, between layout
+        // build and collect. No additional walk needed here.
 
         needs_layout
     }
@@ -387,7 +402,8 @@ impl RenderTree {
                 // During visual-only rebuilds the tree structure doesn't change,
                 // but callbacks may capture new closure state that needs updating.
                 if let Some(handlers) = new_child.event_handlers() {
-                    self.handler_registry.register(*child_id, handlers.clone());
+                    let stable_id = self.stable_id_or_warn(*child_id);
+                    self.handler_registry.register(stable_id, handlers.clone());
                 }
 
                 // Update CSS class registrations so apply_stylesheet_base_styles_for_subtree

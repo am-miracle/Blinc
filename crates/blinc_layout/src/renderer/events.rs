@@ -36,11 +36,12 @@ impl RenderTree {
         mouse_x: f32,
         mouse_y: f32,
     ) {
-        let ctx = crate::event_handler::EventContext::new(event_type, node_id)
+        let mut ctx = crate::event_handler::EventContext::new(event_type, node_id)
             .with_mouse_pos(mouse_x, mouse_y);
+        ctx.stable_id = self.stable_id_or_warn(node_id);
 
         // Check if this node has handlers for this event type
-        if self.handler_registry.has_handler(node_id, event_type) {
+        if self.handler_registry.has_handler(ctx.stable_id, event_type) {
             self.handler_registry.dispatch(&ctx);
             // Don't auto-mark dirty - handlers update values in place
         }
@@ -103,10 +104,12 @@ impl RenderTree {
         drag_delta_y: f32,
         pinch_scale: f32,
     ) {
-        let has_handler = self.handler_registry.has_handler(node_id, event_type);
+        let stable_id = self.stable_id_or_warn(node_id);
+        let has_handler = self.handler_registry.has_handler(stable_id, event_type);
         tracing::debug!(
-            "dispatch_event_full: node={:?}, event_type={}, has_handler={}, drag_delta=({:.1}, {:.1})",
+            "dispatch_event_full: node={:?}, stable={:?}, event_type={}, has_handler={}, drag_delta=({:.1}, {:.1})",
             node_id,
+            stable_id,
             event_type,
             has_handler,
             drag_delta_x,
@@ -119,6 +122,7 @@ impl RenderTree {
             .with_bounds_pos(bounds_x, bounds_y)
             .with_bounds(bounds_width, bounds_height)
             .with_drag_delta(drag_delta_x, drag_delta_y);
+        ctx.stable_id = stable_id;
 
         if event_type == blinc_core::events::event_types::PINCH {
             ctx = ctx.with_pinch(pinch_scale, mouse_x, mouse_y);
@@ -143,16 +147,17 @@ impl RenderTree {
         alt: bool,
         meta: bool,
     ) {
-        let ctx = crate::event_handler::EventContext::new(
+        let mut ctx = crate::event_handler::EventContext::new(
             blinc_core::events::event_types::TEXT_INPUT,
             node_id,
         )
         .with_key_char(key_char)
         .with_modifiers(shift, ctrl, alt, meta);
+        ctx.stable_id = self.stable_id_or_warn(node_id);
 
         if self
             .handler_registry
-            .has_handler(node_id, blinc_core::events::event_types::TEXT_INPUT)
+            .has_handler(ctx.stable_id, blinc_core::events::event_types::TEXT_INPUT)
         {
             self.handler_registry.dispatch(&ctx);
             // Don't auto-mark dirty - text input handler updates values in place
@@ -177,10 +182,12 @@ impl RenderTree {
 
         // Try each node in reverse order (leaf to root) until we find a handler
         for &node_id in ancestors.iter().rev() {
-            if self.handler_registry.has_handler(node_id, event_type) {
-                let ctx = crate::event_handler::EventContext::new(event_type, node_id)
+            let stable_id = self.stable_id_or_warn(node_id);
+            if self.handler_registry.has_handler(stable_id, event_type) {
+                let mut ctx = crate::event_handler::EventContext::new(event_type, node_id)
                     .with_key_char(key_char)
                     .with_modifiers(shift, ctrl, alt, meta);
+                ctx.stable_id = stable_id;
                 self.handler_registry.dispatch(&ctx);
                 // Don't auto-mark dirty - handler updates state in place
                 return; // Stop after first handler found
@@ -202,11 +209,12 @@ impl RenderTree {
         alt: bool,
         meta: bool,
     ) {
-        let ctx = crate::event_handler::EventContext::new(event_type, node_id)
+        let mut ctx = crate::event_handler::EventContext::new(event_type, node_id)
             .with_key_code(key_code)
             .with_modifiers(shift, ctrl, alt, meta);
+        ctx.stable_id = self.stable_id_or_warn(node_id);
 
-        if self.handler_registry.has_handler(node_id, event_type) {
+        if self.handler_registry.has_handler(ctx.stable_id, event_type) {
             self.handler_registry.dispatch(&ctx);
             // Don't auto-mark dirty - handler updates state in place
         }
@@ -229,10 +237,12 @@ impl RenderTree {
     ) {
         // Try each node in reverse order (leaf to root) until we find a handler
         for &node_id in ancestors.iter().rev() {
-            if self.handler_registry.has_handler(node_id, event_type) {
-                let ctx = crate::event_handler::EventContext::new(event_type, node_id)
+            let stable_id = self.stable_id_or_warn(node_id);
+            if self.handler_registry.has_handler(stable_id, event_type) {
+                let mut ctx = crate::event_handler::EventContext::new(event_type, node_id)
                     .with_key_code(key_code)
                     .with_modifiers(shift, ctrl, alt, meta);
+                ctx.stable_id = stable_id;
                 self.handler_registry.dispatch(&ctx);
                 // Don't auto-mark dirty - handler updates state in place
                 return; // Stop after first handler found
@@ -260,8 +270,15 @@ impl RenderTree {
         .with_key_char(key_char)
         .with_modifiers(shift, ctrl, alt, meta);
 
-        self.handler_registry
-            .broadcast(blinc_core::events::event_types::TEXT_INPUT, &ctx);
+        // Snapshot the stable→layout map so the broadcast resolver
+        // doesn't borrow `self` (it's already borrowed mutably
+        // through `self.handler_registry`).
+        let resolver_map = self.stable_to_layout.clone();
+        self.handler_registry.broadcast(
+            blinc_core::events::event_types::TEXT_INPUT,
+            &ctx,
+            |stable| resolver_map.get(&stable).copied(),
+        );
     }
 
     /// Broadcast a key event to ALL key handlers
@@ -284,7 +301,9 @@ impl RenderTree {
         .with_key_code(key_code)
         .with_modifiers(shift, ctrl, alt, meta);
 
-        self.handler_registry.broadcast(event_type, &ctx);
+        let resolver_map = self.stable_to_layout.clone();
+        self.handler_registry
+            .broadcast(event_type, &ctx, |stable| resolver_map.get(&stable).copied());
     }
 
     /// Dispatch a scroll event with scroll delta
@@ -300,16 +319,17 @@ impl RenderTree {
         scroll_delta_x: f32,
         scroll_delta_y: f32,
     ) {
-        let ctx = crate::event_handler::EventContext::new(
+        let mut ctx = crate::event_handler::EventContext::new(
             blinc_core::events::event_types::SCROLL,
             node_id,
         )
         .with_mouse_pos(mouse_x, mouse_y)
         .with_scroll_delta(scroll_delta_x, scroll_delta_y);
+        ctx.stable_id = self.stable_id_or_warn(node_id);
 
         let has_handler = self
             .handler_registry
-            .has_handler(node_id, blinc_core::events::event_types::SCROLL);
+            .has_handler(ctx.stable_id, blinc_core::events::event_types::SCROLL);
 
         if has_handler {
             // Dispatch to handlers - the Scroll element's internal handler will update

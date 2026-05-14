@@ -64,8 +64,14 @@ pub type EventCallback = Rc<dyn Fn(&EventContext)>;
 pub struct EventContext {
     /// The type of event that occurred
     pub event_type: EventType,
-    /// The node that received the event
+    /// The node that received the event (current frame's slotmap key)
     pub node_id: LayoutNodeId,
+    /// Stable identity of the receiving node, survives rebuilds.
+    /// Set by the renderer when constructing the context from a
+    /// hit-test result. Handlers can capture this to dispatch
+    /// programmatic events to the same logical element across
+    /// rebuilds without an explicit `.id("...")`.
+    pub stable_id: crate::tree::StableNodeId,
     /// Mouse position at time of event (if applicable)
     pub mouse_x: f32,
     pub mouse_y: f32,
@@ -112,11 +118,18 @@ pub struct EventContext {
 }
 
 impl EventContext {
-    /// Create a new event context
+    /// Create a new event context.
+    ///
+    /// `stable_id` defaults to `StableNodeId::ROOT` for callers that
+    /// don't have a resolved stable id (mostly test code). The
+    /// renderer's dispatch path always overrides this with the real
+    /// resolved id before invoking handlers — see
+    /// `RenderTree::dispatch_event_full` (renderer/events.rs).
     pub fn new(event_type: EventType, node_id: LayoutNodeId) -> Self {
         Self {
             event_type,
             node_id,
+            stable_id: crate::tree::StableNodeId::ROOT,
             mouse_x: 0.0,
             mouse_y: 0.0,
             local_x: 0.0,
@@ -433,14 +446,26 @@ impl EventHandlers {
     }
 }
 
-/// Global handler registry for the render tree
+/// Global handler registry for the render tree.
 ///
-/// This stores handlers indexed by LayoutNodeId so the EventRouter can
-/// dispatch events to the correct handlers.
+/// Handlers are stored keyed by `StableNodeId` so they survive
+/// rebuilds: a `Stateful` that re-runs `on_state`, a route swap, or
+/// any other rebuild trigger overwrites the existing entry at the
+/// same stable id with a fresh closure rather than going through a
+/// destructive wipe-and-re-register dance. External systems that
+/// capture a stable id can dispatch through the registry across
+/// rebuilds without an explicit `.id("...")` workaround.
+///
+/// Callers translate `LayoutNodeId` → `StableNodeId` at the
+/// renderer boundary (via `RenderTree::stable_id(node_id)`) before
+/// hitting registry methods. `EventContext.stable_id` carries the
+/// resolved id for the dispatch site to read.
 #[derive(Default)]
 pub struct HandlerRegistry {
-    /// Handlers keyed by node ID
-    nodes: HashMap<LayoutNodeId, EventHandlers>,
+    /// Handlers keyed by stable id. The same closure persists across
+    /// rebuilds as long as the element's source location +
+    /// tree position (and any `.id(...)` widget key) stay the same.
+    nodes: HashMap<crate::tree::StableNodeId, EventHandlers>,
 }
 
 impl HandlerRegistry {
@@ -449,41 +474,60 @@ impl HandlerRegistry {
         Self::default()
     }
 
-    /// Register handlers for a node
-    pub fn register(&mut self, node_id: LayoutNodeId, handlers: EventHandlers) {
+    /// Register handlers for a stable node id.
+    ///
+    /// Overwrites any existing entry at the same stable id, so a
+    /// rebuild emitting fresh closures replaces the previous entry
+    /// in place without the registry ever being empty at that key
+    /// during dispatch.
+    pub fn register(&mut self, stable: crate::tree::StableNodeId, handlers: EventHandlers) {
         if !handlers.is_empty() {
-            self.nodes.insert(node_id, handlers);
+            self.nodes.insert(stable, handlers);
         }
     }
 
-    /// Get handlers for a node
-    pub fn get(&self, node_id: LayoutNodeId) -> Option<&EventHandlers> {
-        self.nodes.get(&node_id)
+    /// Get handlers for a stable node id.
+    pub fn get(&self, stable: crate::tree::StableNodeId) -> Option<&EventHandlers> {
+        self.nodes.get(&stable)
     }
 
-    /// Dispatch an event to a node's handlers
+    /// Dispatch an event to a node's handlers using the stable id
+    /// already populated on the `EventContext`. Callers must set
+    /// `ctx.stable_id` before invoking dispatch (the renderer does
+    /// this when building the context from a hit-test result).
     pub fn dispatch(&self, ctx: &EventContext) {
-        if let Some(handlers) = self.nodes.get(&ctx.node_id) {
+        if let Some(handlers) = self.nodes.get(&ctx.stable_id) {
             handlers.dispatch(ctx);
         }
     }
 
-    /// Check if a node has handlers for a specific event type
-    pub fn has_handler(&self, node_id: LayoutNodeId, event_type: EventType) -> bool {
+    /// Check if a node has handlers for a specific event type, by
+    /// stable id.
+    pub fn has_handler(&self, stable: crate::tree::StableNodeId, event_type: EventType) -> bool {
         self.nodes
-            .get(&node_id)
+            .get(&stable)
             .map(|h| h.get(event_type).is_some())
             .unwrap_or(false)
     }
 
-    /// Remove handlers for a node
-    pub fn remove(&mut self, node_id: LayoutNodeId) {
-        self.nodes.remove(&node_id);
+    /// Remove handlers for a stable node id. Called by the renderer
+    /// when a node is genuinely removed from the tree (not on
+    /// rebuild — rebuilt nodes preserve their stable id).
+    pub fn remove(&mut self, stable: crate::tree::StableNodeId) {
+        self.nodes.remove(&stable);
     }
 
     /// Clear all handlers
     pub fn clear(&mut self) {
         self.nodes.clear();
+    }
+
+    /// Drop handler entries whose stable id is no longer in the live
+    /// tree. Called by `RenderTree::sweep_stale_handlers` after
+    /// every mint walk so subtrees removed mid-frame don't leak
+    /// closures.
+    pub fn retain<F: Fn(crate::tree::StableNodeId) -> bool>(&mut self, keep: F) {
+        self.nodes.retain(|stable, _| keep(*stable));
     }
 
     /// Check whether any node has a pointer-related handler registered.
@@ -521,12 +565,27 @@ impl HandlerRegistry {
     /// This is used for keyboard events (TEXT_INPUT, KEY_DOWN) after a tree rebuild,
     /// when the router's focused node ID may be stale. Each handler can check its own
     /// internal focus state to determine if it should process the event.
-    pub fn broadcast(&self, event_type: EventType, base_ctx: &EventContext) {
-        for (node_id, handlers) in &self.nodes {
+    ///
+    /// `node_id_for` resolves each stable id back to the current
+    /// frame's `LayoutNodeId` so handlers reading `ctx.node_id` get
+    /// a live key. The renderer passes a closure backed by its
+    /// `layout_id` lookup; entries whose stable id no longer maps
+    /// to a live layout node are skipped (an unmapped entry means
+    /// the node was removed but the registry hasn't been swept
+    /// yet).
+    pub fn broadcast<F>(&self, event_type: EventType, base_ctx: &EventContext, node_id_for: F)
+    where
+        F: Fn(crate::tree::StableNodeId) -> Option<LayoutNodeId>,
+    {
+        for (stable, handlers) in &self.nodes {
             if handlers.get(event_type).is_some() {
+                let Some(node_id) = node_id_for(*stable) else {
+                    continue;
+                };
                 let ctx = EventContext {
                     event_type,
-                    node_id: *node_id,
+                    node_id,
+                    stable_id: *stable,
                     ..base_ctx.clone()
                 };
                 handlers.dispatch(&ctx);
@@ -534,12 +593,15 @@ impl HandlerRegistry {
         }
     }
 
-    /// Get all node IDs that have handlers for a specific event type
-    pub fn nodes_with_handler(&self, event_type: EventType) -> Vec<LayoutNodeId> {
+    /// Get all stable ids that have handlers for a specific event type
+    pub fn stable_ids_with_handler(
+        &self,
+        event_type: EventType,
+    ) -> Vec<crate::tree::StableNodeId> {
         self.nodes
             .iter()
             .filter(|(_, handlers)| handlers.get(event_type).is_some())
-            .map(|(node_id, _)| *node_id)
+            .map(|(stable, _)| *stable)
             .collect()
     }
 }
@@ -620,6 +682,7 @@ mod tests {
     fn test_handler_registry() {
         let mut registry = HandlerRegistry::new();
         let node_id = create_node_id();
+        let stable_id = crate::tree::StableNodeId::ROOT.derive_child(0, None);
         let call_count = Arc::new(AtomicU32::new(0));
 
         let mut handlers = EventHandlers::new();
@@ -628,12 +691,13 @@ mod tests {
             count.fetch_add(1, Ordering::SeqCst);
         });
 
-        registry.register(node_id, handlers);
+        registry.register(stable_id, handlers);
 
-        assert!(registry.has_handler(node_id, event_types::POINTER_ENTER));
-        assert!(!registry.has_handler(node_id, event_types::POINTER_DOWN));
+        assert!(registry.has_handler(stable_id, event_types::POINTER_ENTER));
+        assert!(!registry.has_handler(stable_id, event_types::POINTER_DOWN));
 
-        let ctx = EventContext::new(event_types::POINTER_ENTER, node_id);
+        let mut ctx = EventContext::new(event_types::POINTER_ENTER, node_id);
+        ctx.stable_id = stable_id;
         registry.dispatch(&ctx);
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1);

@@ -895,7 +895,7 @@ impl RenderTree {
             }
             let handlers = Scroll::create_internal_handlers(Arc::clone(&physics));
             self.scroll_physics.insert(node_id, physics);
-            self.handler_registry.register(node_id, handlers);
+            let stable_id = self.stable_id_or_warn(node_id); self.handler_registry.register(stable_id, handlers);
         }
     }
 }

@@ -473,6 +473,31 @@ impl RenderTree {
         self.layout_to_stable.get(&layout).copied()
     }
 
+    /// Resolve a `LayoutNodeId` to its `StableNodeId`, falling back
+    /// to `StableNodeId::ROOT` with a `tracing::warn!` if no mapping
+    /// is registered.
+    ///
+    /// Used by registry / dispatch sites that need to translate
+    /// non-optionally — every node in the live tree should have a
+    /// minted stable id by the time these run. A warning is
+    /// preferred over an unconditional panic so a stray out-of-walk
+    /// node doesn't take down the renderer; the fallback to ROOT
+    /// will collide with the actual root but the warn surfaces the
+    /// bug for diagnosis.
+    pub(crate) fn stable_id_or_warn(&self, layout: LayoutNodeId) -> crate::tree::StableNodeId {
+        match self.layout_to_stable.get(&layout).copied() {
+            Some(stable) => stable,
+            None => {
+                tracing::warn!(
+                    "stable_id_or_warn: layout node {:?} has no stable id mapping \
+                     (mint_stable_ids_walk hasn't covered it) — falling back to ROOT",
+                    layout,
+                );
+                crate::tree::StableNodeId::ROOT
+            }
+        }
+    }
+
     /// Current build generation. Bumped each full rebuild. Subsystems
     /// that key on `StableNodeId` stamp this on their entries so a
     /// post-build sweep can evict anything that didn't survive the
@@ -520,6 +545,23 @@ impl RenderTree {
                 stack.push((child, child_stable));
             }
         }
+    }
+
+    /// Drop handler-registry entries whose stable id no longer
+    /// maps to a live layout node. Called at the end of every
+    /// build pass so subtrees that disappeared in this rebuild
+    /// don't leak closures.
+    ///
+    /// Replaces today's destructive wipe-and-re-register pattern:
+    /// handlers for nodes whose stable id survives the build pass
+    /// stay resident in the registry, getting their closure entry
+    /// overwritten in-place by the new build's
+    /// `handler_registry.register(stable, fresh_handlers)`. Only
+    /// genuinely-removed nodes lose their entry.
+    pub(crate) fn sweep_stale_handlers(&mut self) {
+        let valid: std::collections::HashSet<crate::tree::StableNodeId> =
+            self.stable_to_layout.keys().copied().collect();
+        self.handler_registry.retain(|stable| valid.contains(&stable));
     }
 
     /// Fill in `stable_key` on `LayoutAnimationConfig` entries that

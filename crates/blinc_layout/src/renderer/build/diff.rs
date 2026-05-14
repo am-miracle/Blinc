@@ -31,6 +31,12 @@ impl RenderTree {
     /// Rebuild children of a node in place
     ///
     /// This removes old children and builds new ones from the provided element builders.
+    ///
+    /// Mint stable ids over the whole tree AFTER the new layout
+    /// nodes exist and BEFORE collect runs — collect_render_props
+    /// registers handlers / scroll physics / motion bindings at the
+    /// freshly-minted stable ids. Without this ordering the
+    /// handlers would key on a stable id that doesn't exist yet.
     pub(crate) fn rebuild_children_in_place(
         &mut self,
         parent_id: LayoutNodeId,
@@ -43,12 +49,27 @@ impl RenderTree {
         }
         self.layout_tree.clear_children(parent_id);
 
-        // Build new children
+        // Layout-only pass: build the new subtree first so the mint
+        // walk sees the complete new shape.
+        let mut built: Vec<LayoutNodeId> = Vec::with_capacity(new_children.len());
         for child in new_children {
             let child_id = child.build(&mut self.layout_tree);
             self.layout_tree.add_child(parent_id, child_id);
-            self.collect_render_props_boxed(child.as_ref(), child_id);
+            built.push(child_id);
         }
+
+        // Mint stable ids over the updated tree before collect, so
+        // handler registration during collect uses stable keys.
+        self.build_generation = self.build_generation.wrapping_add(1);
+        self.mint_stable_ids_walk();
+
+        // Now collect render props with stable ids available.
+        for (child, child_id) in new_children.iter().zip(built.iter()) {
+            self.collect_render_props_boxed(child.as_ref(), *child_id);
+        }
+
+        self.auto_fill_animation_stable_keys();
+        self.sweep_stale_handlers();
     }
 
     /// Analyze what categories of changes occurred between stored tree and new element
@@ -240,7 +261,7 @@ impl RenderTree {
 
         // Update event handlers
         if let Some(handlers) = element.event_handlers() {
-            self.handler_registry.register(node_id, handlers.clone());
+            let stable_id = self.stable_id_or_warn(node_id); self.handler_registry.register(stable_id, handlers.clone());
         }
 
         // Update scroll physics if this is a scroll element
@@ -322,7 +343,7 @@ impl RenderTree {
         self.node_hashes.insert(node_id, (own_hash, tree_hash));
 
         if let Some(handlers) = element.event_handlers() {
-            self.handler_registry.register(node_id, handlers.clone());
+            let stable_id = self.stable_id_or_warn(node_id); self.handler_registry.register(stable_id, handlers.clone());
         }
 
         // Update scroll physics if this is a scroll element

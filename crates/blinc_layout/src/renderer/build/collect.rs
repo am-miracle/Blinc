@@ -40,15 +40,32 @@ use super::super::{
 impl RenderTree {
     /// Recursively build elements into the tree
     ///
-    /// This builds the layout tree first (via element.build()), then walks the
-    /// element tree again to collect render properties for each node.
+    /// Three-phase walk per build pass: layout-build, mint stable
+    /// ids, then collect render props.
+    ///
+    /// `element.build(layout_tree)` materialises all layout nodes
+    /// and parent/child relationships. `root` is set so
+    /// `mint_stable_ids_walk` can find its seed.
+    /// `mint_stable_ids_walk` walks the freshly-built layout tree
+    /// and assigns each node a `StableNodeId` derived from
+    /// `(parent_stable, sibling_index, element_id_if_set)`.
+    /// `collect_render_props` runs last so every collect site has
+    /// `self.stable_id(node_id)` available — handler / scroll
+    /// physics / motion bindings register under stable keys and
+    /// survive subsequent rebuilds. See
+    /// `project_stable_node_id_design` (memory) for the migration
+    /// plan.
     pub(crate) fn build_element<E: ElementBuilder>(&mut self, element: &E) -> LayoutNodeId {
-        // First, build the entire layout tree (this creates all nodes and parent-child relationships)
         let root_id = element.build(&mut self.layout_tree);
-
-        // Now walk the element tree to collect render props for each node
+        self.root = Some(root_id);
+        self.build_generation = self.build_generation.wrapping_add(1);
+        self.mint_stable_ids_walk();
         self.collect_render_props(element, root_id);
-
+        self.auto_fill_animation_stable_keys();
+        // Evict handler entries whose stable id didn't survive this
+        // build pass — replacement for the destructive wipe pattern
+        // that used to live in `update_if_changed`.
+        self.sweep_stale_handlers();
         root_id
     }
 
@@ -98,7 +115,7 @@ impl RenderTree {
 
         // Register event handlers if present
         if let Some(handlers) = element.event_handlers() {
-            self.handler_registry.register(node_id, handlers.clone());
+            let stable_id = self.stable_id_or_warn(node_id); self.handler_registry.register(stable_id, handlers.clone());
         }
 
         // Store scroll physics if this is a scroll element
@@ -326,7 +343,7 @@ impl RenderTree {
 
         // Register event handlers if present
         if let Some(handlers) = element.event_handlers() {
-            self.handler_registry.register(node_id, handlers.clone());
+            let stable_id = self.stable_id_or_warn(node_id); self.handler_registry.register(stable_id, handlers.clone());
         }
 
         // Store scroll physics if this is a scroll element
@@ -629,7 +646,7 @@ impl RenderTree {
 
         // Register event handlers if present
         if let Some(handlers) = element.event_handlers() {
-            self.handler_registry.register(node_id, handlers.clone());
+            let stable_id = self.stable_id_or_warn(node_id); self.handler_registry.register(stable_id, handlers.clone());
         }
 
         // Store scroll physics if this is a scroll element
