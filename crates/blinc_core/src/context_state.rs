@@ -513,10 +513,41 @@ impl BlincContextState {
 
     /// Create a new reactive signal with an initial value (low-level API)
     ///
-    /// **Note**: Prefer `use_state_keyed` in most cases, as it automatically
-    /// persists signals across rebuilds.
+    /// **Note**: Prefer [`Self::use_state`] (auto-keyed by call site)
+    /// for the common case of "a persistent value scoped to this
+    /// place in the source." `use_signal` always creates a fresh
+    /// signal — use it when you genuinely want a one-shot signal
+    /// whose lifetime is tied to the current build (rare).
     pub fn use_signal<T: Send + 'static>(&self, initial: T) -> Signal<T> {
         self.reactive.lock().unwrap().create_signal(initial)
+    }
+
+    /// Create or retrieve a persistent reactive state, auto-keyed by
+    /// call site via `#[track_caller]`. Survives UI rebuilds.
+    ///
+    /// Replacement for `use_state_keyed("name", || init)` when the
+    /// name was just a workaround for "no per-call-site identity."
+    /// Each source location gets its own persistent slot in the
+    /// hooks store.
+    ///
+    /// Limitation: two `use_state` calls at the same source location
+    /// (e.g. inside a loop body) collide. Use
+    /// [`Self::use_state_keyed`] with explicit names for loops.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let count = ctx.use_state(0i32);
+    /// count.set(count.get() + 1);
+    /// ```
+    #[track_caller]
+    pub fn use_state<T>(&self, initial: T) -> State<T>
+    where
+        T: Clone + Send + 'static,
+    {
+        let loc = std::panic::Location::caller();
+        let key = format!("use_state@{}:{}:{}", loc.file(), loc.line(), loc.column());
+        self.use_state_keyed(&key, || initial)
     }
 
     /// Get the current value of a signal
@@ -1036,6 +1067,23 @@ where
     F: FnOnce() -> T,
 {
     BlincContextState::get().use_signal_keyed(key, init)
+}
+
+/// Create a persistent reactive state auto-keyed by call site.
+///
+/// Convenience wrapper around [`BlincContextState::use_state`].
+/// Prefer this over [`use_state_keyed`] when each call site holds
+/// one signal — `#[track_caller]` does the keying for you.
+///
+/// # Panics
+///
+/// Panics if [`BlincContextState::init`] has not been called.
+#[track_caller]
+pub fn use_state<T>(initial: T) -> State<T>
+where
+    T: Clone + Send + 'static,
+{
+    BlincContextState::get().use_state(initial)
 }
 
 /// Request a UI rebuild

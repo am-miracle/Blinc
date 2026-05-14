@@ -1611,11 +1611,19 @@ impl<S: StateTransitions> StateContext<S> {
     /// The signal is keyed with format: `{stateful_key}:signal:{name}`
     /// This ensures the signal persists across rebuilds.
     ///
+    /// Prefer [`Self::use_state`] when each call site holds exactly
+    /// one signal — `use_state` derives the key from
+    /// `#[track_caller]` so you don't have to invent a string. This
+    /// keyed flavour stays for loops and other cases where multiple
+    /// signals share a call site and need explicit disambiguation.
+    ///
     /// # Example
     ///
     /// ```ignore
-    /// let scroll_pos = ctx.use_signal("scroll", || 0.0);
-    /// scroll_pos.set(100.0);
+    /// for (i, item) in items.iter().enumerate() {
+    ///     // Same call site, distinct signals — name is required.
+    ///     let open = ctx.use_signal(&format!("open_{}", i), || false);
+    /// }
     /// ```
     pub fn use_signal<T, F>(&self, name: &str, init: F) -> blinc_core::State<T>
     where
@@ -1628,6 +1636,59 @@ impl<S: StateTransitions> StateContext<S> {
         // Automatically register as dependency so on_state re-runs when signal changes
         self.subscribe(&state);
 
+        state
+    }
+
+    /// Create / retrieve a persistent reactive `State<T>` scoped to
+    /// this stateful, auto-keyed by call site.
+    ///
+    /// Drop-in replacement for the `ctx.use_signal("name", || init)`
+    /// pattern when the name was just a workaround for "no per-call-
+    /// site identity." `#[track_caller]` captures the source
+    /// location, which is stable across rebuilds, so the signal
+    /// survives in the reactive graph between builds.
+    ///
+    /// Limitations:
+    /// - **One signal per call site.** Two `use_state` calls at the
+    ///   exact same source location (e.g. inside a loop iteration
+    ///   that re-uses the same line) collide. Use [`Self::use_signal`]
+    ///   with explicit names for loops.
+    /// - **Initialiser eager**, unlike `use_signal`'s `FnOnce` —
+    ///   the value is computed once at first registration and then
+    ///   ignored. If your initial value is expensive, use
+    ///   `use_signal` so you can defer construction.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn counter(ctx: &StateContext<()>) -> Div {
+    ///     let count = ctx.use_state(0i32);
+    ///     div().child(text(format!("{}", count.get()))).on_click({
+    ///         let count = count.clone();
+    ///         move |_| count.set(count.get() + 1)
+    ///     })
+    /// }
+    /// ```
+    #[track_caller]
+    pub fn use_state<T>(&self, initial: T) -> blinc_core::State<T>
+    where
+        T: Clone + Send + 'static,
+    {
+        let loc = std::panic::Location::caller();
+        // Format chosen to be human-readable in trace output while
+        // staying stable across rebuilds (caller location is
+        // compile-time-fixed). Different stateful instances get
+        // different `full_key()` prefixes so the same source line
+        // reused in two stateful widgets each keep their own state.
+        let signal_key = format!(
+            "{}:state@{}:{}:{}",
+            self.full_key(),
+            loc.file(),
+            loc.line(),
+            loc.column()
+        );
+        let state = blinc_core::context_state::use_state_keyed(&signal_key, || initial);
+        self.subscribe(&state);
         state
     }
 
