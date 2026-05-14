@@ -153,6 +153,10 @@ name = "cn_demo"
 required-features = ["cn"]
 
 [[example]]
+name = "router_navigation"
+required-features = ["cn"]
+
+[[example]]
 name = "tabler_icons_demo"
 required-features = ["tabler-icons"]
 
