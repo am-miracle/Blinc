@@ -37,6 +37,12 @@ impl RenderTree {
         // Compute tree hash for change detection
         tree.tree_hash = Some(DivHash::compute_element_tree(element));
         tree.root = Some(tree.build_element(element));
+        // Mint stable ids over the freshly-built tree. Bumping the
+        // generation first lets the post-build sweep (when migrated
+        // subsystems land in later phases) tell touched-this-frame
+        // entries from stale ones.
+        tree.build_generation = tree.build_generation.wrapping_add(1);
+        tree.mint_stable_ids_walk();
         tree
     }
 
@@ -56,6 +62,8 @@ impl RenderTree {
         // Compute tree hash for change detection
         tree.tree_hash = Some(DivHash::compute_element_tree(element));
         tree.root = Some(tree.build_element(element));
+        tree.build_generation = tree.build_generation.wrapping_add(1);
+        tree.mint_stable_ids_walk();
         tree
     }
 
@@ -92,6 +100,11 @@ impl RenderTree {
         // Rebuild the layout tree
         self.layout_tree = LayoutTree::new();
         self.root = Some(self.build_element(element));
+
+        // Tree structure changed — re-mint stable ids so external
+        // lookups see the new slotmap keys.
+        self.build_generation = self.build_generation.wrapping_add(1);
+        self.mint_stable_ids_walk();
 
         true
     }
@@ -153,6 +166,10 @@ impl RenderTree {
             self.rebuild_changed_subtrees(element, root_id);
             // Also update props for nodes that didn't get rebuilt
             self.update_render_props_in_place(element, root_id);
+            // Structural change: re-mint stable ids so removed nodes
+            // drop out of the maps and new nodes appear.
+            self.build_generation = self.build_generation.wrapping_add(1);
+            self.mint_stable_ids_walk();
             UpdateResult::ChildrenChanged
         } else if changes.layout {
             // Layout changed - update props and need relayout

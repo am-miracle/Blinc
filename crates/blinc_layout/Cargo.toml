@@ -39,6 +39,11 @@ taffy.workspace = true
 slotmap.workspace = true
 indexmap.workspace = true
 
+# Fast non-cryptographic hash used by `StableNodeId::derive_child` —
+# called for every node every build, so the FxHasher's speed matters.
+# Workspace pin (also used by blinc_router and ElementRegistry).
+rustc-hash.workspace = true
+
 # Logging
 tracing.workspace = true
 

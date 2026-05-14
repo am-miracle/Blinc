@@ -252,6 +252,29 @@ pub struct RenderTree {
     /// the three predicate inputs — see
     /// `invalidate_mouse_move_pipeline_cache`.
     mouse_move_pipeline_cache: std::sync::atomic::AtomicI8,
+
+    // ========================================================================
+    // Stable Node Identity (Phase 1 — foundation, no consumer migration yet)
+    // ========================================================================
+    /// `StableNodeId` → current frame's `LayoutNodeId`. Populated during
+    /// build; lets subsystems that key on stable identity resolve to the
+    /// live slotmap key for paint / layout queries.
+    ///
+    /// See `project_stable_node_id_design` for the migration plan.
+    /// Today this is read-only plumbing: no internal map consumes it
+    /// yet. Phase 2 (motion/animation/FLIP) is the first migration.
+    stable_to_layout: HashMap<crate::tree::StableNodeId, LayoutNodeId>,
+    /// Reverse: `LayoutNodeId` → `StableNodeId`. Used during the
+    /// post-build sweep to evict stable entries whose backing layout
+    /// node was removed.
+    layout_to_stable: HashMap<LayoutNodeId, crate::tree::StableNodeId>,
+    /// Monotonic build counter, bumped each time the tree is rebuilt
+    /// from scratch (`from_element*`). Stable subsystems stamp the
+    /// generation they last touched their entries with so a post-build
+    /// sweep can evict anything that didn't get touched this pass —
+    /// the replacement for today's blanket `remove_subtree_nodes`
+    /// wipe. Saturates harmlessly after 2⁶⁴ builds.
+    build_generation: u64,
 }
 
 /// Result of an incremental update attempt
@@ -323,6 +346,10 @@ impl RenderTree {
             flip_previous_bounds: HashMap::new(),
             flip_animations: HashMap::new(),
             mouse_move_pipeline_cache: std::sync::atomic::AtomicI8::new(0),
+            // Phase 1 stable-id foundation — see `project_stable_node_id_design`.
+            stable_to_layout: HashMap::new(),
+            layout_to_stable: HashMap::new(),
+            build_generation: 0,
         }
     }
 
@@ -422,6 +449,100 @@ impl RenderTree {
     /// Get the root node ID
     pub fn root(&self) -> Option<LayoutNodeId> {
         self.root
+    }
+
+    // ========================================================================
+    // Stable Node Identity (read API)
+    // ========================================================================
+
+    /// Resolve a `StableNodeId` to the current frame's `LayoutNodeId`.
+    ///
+    /// Returns `None` if the stable id was minted in a previous frame
+    /// but its layout node no longer exists in the tree (its build
+    /// generation didn't survive the most recent sweep).
+    pub fn layout_id(&self, stable: crate::tree::StableNodeId) -> Option<LayoutNodeId> {
+        self.stable_to_layout.get(&stable).copied()
+    }
+
+    /// Look up the `StableNodeId` minted for a given live `LayoutNodeId`.
+    ///
+    /// Returns `None` for layout nodes created outside the standard
+    /// build walk (shouldn't happen — every node minted by
+    /// `mint_stable_ids_walk` is registered here).
+    pub fn stable_id(&self, layout: LayoutNodeId) -> Option<crate::tree::StableNodeId> {
+        self.layout_to_stable.get(&layout).copied()
+    }
+
+    /// Current build generation. Bumped each full rebuild. Subsystems
+    /// that key on `StableNodeId` stamp this on their entries so a
+    /// post-build sweep can evict anything that didn't survive the
+    /// most recent build pass.
+    pub fn build_generation(&self) -> u64 {
+        self.build_generation
+    }
+
+    /// Walk the live layout tree and (re)mint a `StableNodeId` for
+    /// every node, populating `stable_to_layout` and `layout_to_stable`.
+    ///
+    /// Called after every full rebuild from `from_element*`. Stable
+    /// ids derive from `(parent_stable, sibling_index, element_id_if_set)`,
+    /// so call order + DOM structure + explicit element ids together
+    /// determine the id — deterministic per frame, stable across
+    /// rebuilds for the same structure.
+    ///
+    /// Caller responsibility: bump `build_generation` before calling so
+    /// the eventual sweep can compare against stamps.
+    pub(crate) fn mint_stable_ids_walk(&mut self) {
+        // Wipe the maps; they're entirely regenerated each rebuild
+        // (consumers that need cross-frame stability key by
+        // `StableNodeId` directly; the mapping cache is rebuild-local).
+        self.stable_to_layout.clear();
+        self.layout_to_stable.clear();
+
+        let Some(root_id) = self.root else { return };
+        let root_widget_key = self.element_registry.get_id(root_id);
+        let root_stable = crate::tree::StableNodeId::ROOT.derive_child(0, root_widget_key.as_deref());
+        self.register_stable(root_stable, root_id);
+
+        // Pre-collect the work queue from the layout tree before
+        // touching `self`'s maps mutably during the recursive descent.
+        // Layout-tree reads only need `&self.layout_tree`, but the
+        // recursive registration needs `&mut self`, so flatten first.
+        let mut stack: Vec<(LayoutNodeId, crate::tree::StableNodeId)> =
+            vec![(root_id, root_stable)];
+        while let Some((node, stable)) = stack.pop() {
+            let children = self.layout_tree.children(node);
+            for (i, &child) in children.iter().enumerate() {
+                let widget_key = self.element_registry.get_id(child);
+                let child_stable = stable.derive_child(i, widget_key.as_deref());
+                self.register_stable(child_stable, child);
+                stack.push((child, child_stable));
+            }
+        }
+    }
+
+    /// Insert into both mapping directions. Pulled out so the walk
+    /// reads as a flat recursion without map-bookkeeping noise.
+    fn register_stable(&mut self, stable: crate::tree::StableNodeId, layout: LayoutNodeId) {
+        // Collision check: two different layout nodes hashing to the
+        // same stable id would corrupt the map (a `child_a` lookup
+        // would return `child_b`'s layout id). Log and skip the second
+        // insert — caller's tree shape is degenerate.
+        if let Some(prev) = self.stable_to_layout.get(&stable) {
+            if *prev != layout {
+                tracing::warn!(
+                    "StableNodeId collision: {:?} maps to {:?} and {:?}; \
+                     second registration dropped (rebuild stability for the \
+                     second node may suffer)",
+                    stable,
+                    prev,
+                    layout,
+                );
+                return;
+            }
+        }
+        self.stable_to_layout.insert(stable, layout);
+        self.layout_to_stable.insert(layout, stable);
     }
 
     /// Whether the most recently completed paint pass touched any

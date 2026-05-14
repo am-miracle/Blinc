@@ -11,6 +11,74 @@ new_key_type! {
     pub struct LayoutNodeId;
 }
 
+/// Stable identity for a layout node across tree rebuilds.
+///
+/// `LayoutNodeId` is a slotmap key — every full rebuild reconstructs the
+/// slotmap and regenerates keys, so any subsystem that holds a
+/// `LayoutNodeId` across builds (motion bindings, FLIP previous bounds,
+/// event-handler captures inside `Stateful`, …) gets a dangling key.
+/// `StableNodeId` survives those rebuilds: it's derived from the build
+/// path (parent stable id ⊕ sibling index, plus the
+/// `InstanceKey` of any source-located widget) and recomputed
+/// deterministically each frame.
+///
+/// The build mints the id and registers a two-way mapping on
+/// `RenderTree` (`stable_to_layout` / `layout_to_stable`). Subsystems
+/// that need rebuild-stable state key on `StableNodeId`; the renderer's
+/// per-frame caches (render_nodes, hashes, layout bounds) stay on
+/// `LayoutNodeId` because they're already wiped and rebuilt every pass.
+///
+/// Layout still flows through `LayoutNodeId` — `StableNodeId` is the
+/// identity bookkeeping handle, not a paint-side replacement. See
+/// `project_stable_node_id_design` (memory) for the phased migration
+/// plan and which maps move when.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct StableNodeId(u64);
+
+impl StableNodeId {
+    /// Root of a build pass — used as the seed when minting children
+    /// before any node has been created. The hash mixes this with the
+    /// first child's sibling index, so the actual root node gets a
+    /// non-zero id.
+    pub const ROOT: Self = Self(0);
+
+    /// Raw u64 representation. Stable across rebuilds for the same
+    /// build path; safe to store in FFI / external systems that need a
+    /// plain integer handle.
+    pub fn to_raw(self) -> u64 {
+        self.0
+    }
+
+    /// Reconstruct from a raw `u64`. Caller is responsible for the
+    /// value originating from `to_raw()` on a valid `StableNodeId`.
+    pub fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Derive a child stable id from this node's id and the child's
+    /// position (0-indexed sibling slot) and optional widget-supplied
+    /// key (e.g. an `InstanceKey` string for `Stateful` / `scroll()`).
+    ///
+    /// `widget_key` is hashed in alongside `sibling_index` so two
+    /// widgets at the same position with different keys (e.g. a
+    /// keyed-by-id list re-ordering) get distinct ids and don't drag
+    /// stale state forward.
+    pub fn derive_child(self, sibling_index: usize, widget_key: Option<&str>) -> Self {
+        use std::hash::{BuildHasher, Hasher};
+        // `rustc_hash` is already a workspace dep (used by routes,
+        // ElementRegistry) and is the fastest non-cryptographic hash
+        // in the tree; collisions are vanishingly rare for the
+        // (u64, usize, &str) tuples we feed it.
+        let mut hasher = rustc_hash::FxBuildHasher.build_hasher();
+        hasher.write_u64(self.0);
+        hasher.write_usize(sibling_index);
+        if let Some(k) = widget_key {
+            hasher.write(k.as_bytes());
+        }
+        Self(hasher.finish())
+    }
+}
+
 /// Context stored with text nodes for dynamic measurement during layout
 ///
 /// This allows Taffy to call back and measure text with the actual

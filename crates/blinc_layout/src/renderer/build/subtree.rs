@@ -192,6 +192,17 @@ impl RenderTree {
             store.animations.remove(&node_id);
             store.transitions.remove(&node_id);
         }
+
+        // Drop the stable-id mapping for this layout node. The
+        // post-rebuild `mint_stable_ids_walk` will repopulate
+        // mappings for surviving / new nodes; this prevents stale
+        // entries from lingering between the remove call and the
+        // re-mint (mostly defensive — the mint walk would overwrite
+        // anyway, but removed-and-not-re-added nodes would otherwise
+        // hold a forwarding entry to a freed slotmap key).
+        if let Some(stable) = self.layout_to_stable.remove(&node_id) {
+            self.stable_to_layout.remove(&stable);
+        }
     }
 
     /// Process all pending subtree rebuilds
@@ -317,6 +328,16 @@ impl RenderTree {
         // Put back rebuilds for nodes not in this tree (for other trees to process)
         if !not_in_this_tree.is_empty() {
             crate::stateful::requeue_subtree_rebuilds(not_in_this_tree);
+        }
+
+        // Stable-id maps are now stale wherever new children were
+        // built. Re-mint over the whole tree — cheap relative to the
+        // build itself, and avoids needing per-subtree mint logic
+        // (the descendants the caller didn't touch hash to the same
+        // stable id they already had).
+        if needs_layout {
+            self.build_generation = self.build_generation.wrapping_add(1);
+            self.mint_stable_ids_walk();
         }
 
         needs_layout

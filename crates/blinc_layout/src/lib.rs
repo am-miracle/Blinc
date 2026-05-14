@@ -327,7 +327,7 @@ pub mod prelude {
     pub use crate::rich_text::{rich_text, rich_text_styled, RichText};
     pub use crate::svg::{svg, Svg};
     pub use crate::text::{text, Text};
-    pub use crate::tree::{LayoutNodeId, LayoutTree};
+    pub use crate::tree::{LayoutNodeId, LayoutTree, StableNodeId};
     pub use crate::widgets::{
         scroll, scroll_bouncy, scroll_no_bounce, Scroll, ScrollConfig, ScrollDirection,
         ScrollPhysics, ScrollRenderInfo, SharedScrollPhysics,
