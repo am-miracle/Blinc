@@ -187,15 +187,10 @@ impl RenderTree {
     /// so we translate via `layout_to_stable` before the
     /// containment check.
     pub fn css_has_visible_transitions(&self, painted: &HashSet<LayoutNodeId>) -> bool {
-        let painted_stable: HashSet<crate::tree::StableNodeId> = painted
-            .iter()
-            .filter_map(|n| self.stable_id(*n))
-            .collect();
+        let painted_stable: HashSet<crate::tree::StableNodeId> =
+            painted.iter().filter_map(|n| self.stable_id(*n)).collect();
         let store = self.css_anim_store.lock().unwrap();
-        store
-            .transitions
-            .keys()
-            .any(|s| painted_stable.contains(s))
+        store.transitions.keys().any(|s| painted_stable.contains(s))
     }
 
     /// Apply stylesheet state styles based on EventRouter state.

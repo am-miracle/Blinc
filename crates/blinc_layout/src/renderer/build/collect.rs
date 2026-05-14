@@ -106,9 +106,7 @@ impl RenderTree {
         }
         let child_node_ids = self.layout_tree.children(node_id);
         let child_builders = element.children_builders();
-        for (child_builder, &child_node_id) in
-            child_builders.iter().zip(child_node_ids.iter())
-        {
+        for (child_builder, &child_node_id) in child_builders.iter().zip(child_node_ids.iter()) {
             self.register_element_ids_walk(child_builder.as_ref(), child_node_id);
         }
     }
@@ -159,7 +157,8 @@ impl RenderTree {
 
         // Register event handlers if present
         if let Some(handlers) = element.event_handlers() {
-            let stable_id = self.stable_id_or_warn(node_id); self.handler_registry.register(stable_id, handlers.clone());
+            let stable_id = self.stable_id_or_warn(node_id);
+            self.handler_registry.register(stable_id, handlers.clone());
         }
 
         // Store scroll physics if this is a scroll element
@@ -387,7 +386,8 @@ impl RenderTree {
 
         // Register event handlers if present
         if let Some(handlers) = element.event_handlers() {
-            let stable_id = self.stable_id_or_warn(node_id); self.handler_registry.register(stable_id, handlers.clone());
+            let stable_id = self.stable_id_or_warn(node_id);
+            self.handler_registry.register(stable_id, handlers.clone());
         }
 
         // Store scroll physics if this is a scroll element
@@ -690,7 +690,8 @@ impl RenderTree {
 
         // Register event handlers if present
         if let Some(handlers) = element.event_handlers() {
-            let stable_id = self.stable_id_or_warn(node_id); self.handler_registry.register(stable_id, handlers.clone());
+            let stable_id = self.stable_id_or_warn(node_id);
+            self.handler_registry.register(stable_id, handlers.clone());
         }
 
         // Store scroll physics if this is a scroll element

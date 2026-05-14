@@ -261,7 +261,8 @@ impl RenderTree {
 
         // Update event handlers
         if let Some(handlers) = element.event_handlers() {
-            let stable_id = self.stable_id_or_warn(node_id); self.handler_registry.register(stable_id, handlers.clone());
+            let stable_id = self.stable_id_or_warn(node_id);
+            self.handler_registry.register(stable_id, handlers.clone());
         }
 
         // Update scroll physics if this is a scroll element
@@ -343,7 +344,8 @@ impl RenderTree {
         self.node_hashes.insert(node_id, (own_hash, tree_hash));
 
         if let Some(handlers) = element.event_handlers() {
-            let stable_id = self.stable_id_or_warn(node_id); self.handler_registry.register(stable_id, handlers.clone());
+            let stable_id = self.stable_id_or_warn(node_id);
+            self.handler_registry.register(stable_id, handlers.clone());
         }
 
         // Update scroll physics if this is a scroll element

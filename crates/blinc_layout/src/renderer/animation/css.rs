@@ -244,7 +244,10 @@ impl RenderTree {
         // Collect animation data (stable-keyed) under the lock, then
         // release before resolving back to layout ids for the
         // render_nodes write.
-        let anim_data: Vec<(crate::tree::StableNodeId, blinc_animation::KeyframeProperties)> = {
+        let anim_data: Vec<(
+            crate::tree::StableNodeId,
+            blinc_animation::KeyframeProperties,
+        )> = {
             let store = self.css_anim_store.lock().unwrap();
             store
                 .animations
@@ -270,7 +273,10 @@ impl RenderTree {
         let mut needs_layout = false;
 
         // Collect all stable ids with active animations or transitions that have layout properties
-        let anim_nodes: Vec<(crate::tree::StableNodeId, blinc_animation::KeyframeProperties)> = {
+        let anim_nodes: Vec<(
+            crate::tree::StableNodeId,
+            blinc_animation::KeyframeProperties,
+        )> = {
             let store = self.css_anim_store.lock().unwrap();
             store
                 .animations
@@ -579,9 +585,10 @@ impl RenderTree {
                 .keyframe(1.0, to, easing)
                 .delay(delay_ms)
                 .fill_mode(FillMode::Forwards);
-            store
-                .transitions
-                .insert(stable_id, crate::render_state::ActiveCssAnimation::new(anim));
+            store.transitions.insert(
+                stable_id,
+                crate::render_state::ActiveCssAnimation::new(anim),
+            );
         }
     }
 
@@ -591,7 +598,10 @@ impl RenderTree {
     pub fn apply_all_css_transition_props(&mut self) {
         // Collect transition data (stable-keyed) under the lock,
         // then release before resolving back to layout ids.
-        let trans_data: Vec<(crate::tree::StableNodeId, blinc_animation::KeyframeProperties)> = {
+        let trans_data: Vec<(
+            crate::tree::StableNodeId,
+            blinc_animation::KeyframeProperties,
+        )> = {
             let store = self.css_anim_store.lock().unwrap();
             store
                 .transitions

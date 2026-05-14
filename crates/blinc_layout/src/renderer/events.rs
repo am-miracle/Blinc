@@ -330,8 +330,9 @@ impl RenderTree {
         .with_modifiers(shift, ctrl, alt, meta);
 
         let resolver_map = self.stable_to_layout.clone();
-        self.handler_registry
-            .broadcast(event_type, &ctx, |stable| resolver_map.get(&stable).copied());
+        self.handler_registry.broadcast(event_type, &ctx, |stable| {
+            resolver_map.get(&stable).copied()
+        });
     }
 
     /// Dispatch a scroll event with scroll delta

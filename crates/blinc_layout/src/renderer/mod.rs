@@ -565,7 +565,8 @@ impl RenderTree {
     pub(crate) fn sweep_stale_handlers(&mut self) {
         let valid: std::collections::HashSet<crate::tree::StableNodeId> =
             self.stable_to_layout.keys().copied().collect();
-        self.handler_registry.retain(|stable| valid.contains(&stable));
+        self.handler_registry
+            .retain(|stable| valid.contains(&stable));
     }
 
     /// Fill in `stable_key` on `LayoutAnimationConfig` entries that

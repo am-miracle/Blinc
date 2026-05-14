@@ -594,10 +594,7 @@ impl HandlerRegistry {
     }
 
     /// Get all stable ids that have handlers for a specific event type
-    pub fn stable_ids_with_handler(
-        &self,
-        event_type: EventType,
-    ) -> Vec<crate::tree::StableNodeId> {
+    pub fn stable_ids_with_handler(&self, event_type: EventType) -> Vec<crate::tree::StableNodeId> {
         self.nodes
             .iter()
             .filter(|(_, handlers)| handlers.get(event_type).is_some())
