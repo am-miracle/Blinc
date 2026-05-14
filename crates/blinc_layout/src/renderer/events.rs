@@ -110,19 +110,28 @@ impl RenderTree {
         drag_delta_y: f32,
         pinch_scale: f32,
     ) {
-        // Stale hit-test: bail if the node was removed by a recent rebuild.
+        // Stale hit-test: bail if the node was removed by a recent
+        // rebuild. Trace at info level so a missed click on a live
+        // node (Stateful regression) is visible without enabling
+        // `blinc_layout=debug`. Demote to debug once the
+        // Stateful-click regression is fixed.
         let Some(stable_id) = self.stable_id(node_id) else {
+            tracing::info!(
+                target: "blinc_layout::event_dispatch",
+                "dispatch_event_full: stale node {:?} (no stable id, dropping {})",
+                node_id,
+                event_type,
+            );
             return;
         };
         let has_handler = self.handler_registry.has_handler(stable_id, event_type);
-        tracing::debug!(
-            "dispatch_event_full: node={:?}, stable={:?}, event_type={}, has_handler={}, drag_delta=({:.1}, {:.1})",
+        tracing::info!(
+            target: "blinc_layout::event_dispatch",
+            "dispatch_event_full: node={:?}, stable={:?}, event={}, has_handler={}",
             node_id,
             stable_id,
             event_type,
             has_handler,
-            drag_delta_x,
-            drag_delta_y
         );
 
         let mut ctx = crate::event_handler::EventContext::new(event_type, node_id)
