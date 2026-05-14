@@ -501,7 +501,8 @@ impl RenderTree {
 
         let Some(root_id) = self.root else { return };
         let root_widget_key = self.element_registry.get_id(root_id);
-        let root_stable = crate::tree::StableNodeId::ROOT.derive_child(0, root_widget_key.as_deref());
+        let root_stable =
+            crate::tree::StableNodeId::ROOT.derive_child(0, root_widget_key.as_deref());
         self.register_stable(root_stable, root_id);
 
         // Pre-collect the work queue from the layout tree before
