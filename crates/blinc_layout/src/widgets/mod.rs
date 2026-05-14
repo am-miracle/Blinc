@@ -98,7 +98,7 @@ pub use text_area::{
 
 // Re-export scroll widget
 pub use scroll::{
-    scroll, scroll_no_bounce, Scroll, ScrollConfig, ScrollDirection, ScrollPhysics,
+    scroll, scroll_bouncy, scroll_no_bounce, Scroll, ScrollConfig, ScrollDirection, ScrollPhysics,
     ScrollRenderInfo, ScrollbarConfig, ScrollbarRenderInfo, ScrollbarSize, ScrollbarState,
     ScrollbarVisibility, SharedScrollPhysics,
 };

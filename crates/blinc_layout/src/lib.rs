@@ -329,8 +329,8 @@ pub mod prelude {
     pub use crate::text::{text, Text};
     pub use crate::tree::{LayoutNodeId, LayoutTree};
     pub use crate::widgets::{
-        scroll, scroll_no_bounce, Scroll, ScrollConfig, ScrollDirection, ScrollPhysics,
-        ScrollRenderInfo, SharedScrollPhysics,
+        scroll, scroll_bouncy, scroll_no_bounce, Scroll, ScrollConfig, ScrollDirection,
+        ScrollPhysics, ScrollRenderInfo, SharedScrollPhysics,
     };
 
     // Code block widget with syntax highlighting
