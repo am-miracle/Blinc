@@ -2322,7 +2322,9 @@ impl Div {
 
     /// Set overflow to scroll (enable scrolling with full physics)
     ///
-    /// Creates a scroll container with momentum scrolling, bounce, and scrollbar.
+    /// Creates a scroll container with momentum scrolling and a scrollbar.
+    /// Bounce is disabled by default; use an explicit scroll config/widget
+    /// when rubber-band edges are desired.
     /// This is equivalent to using the `scroll()` widget but configured via the builder API.
     pub fn overflow_scroll(mut self) -> Self {
         self.style.overflow.x = Overflow::Scroll;

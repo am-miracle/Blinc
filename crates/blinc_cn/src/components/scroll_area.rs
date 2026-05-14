@@ -145,7 +145,7 @@ impl Default for ScrollAreaConfig {
             track_color: None,
             width: None,
             height: None,
-            bounce: true,
+            bounce: false,
             content: None,
             rounded: None,
             bg: None,

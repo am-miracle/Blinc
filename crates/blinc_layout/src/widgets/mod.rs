@@ -9,7 +9,7 @@
 //! - [`checkbox()`] - Toggle checkbox with label support
 //! - [`text_input()`] - Single-line text input with validation
 //! - [`text_area()`] - Multi-line text area
-//! - [`scroll()`] - Scrollable container with bounce physics
+//! - [`scroll()`] - Scrollable container with optional bounce physics
 //! - [`code()`] - Code block with syntax highlighting and line numbers
 //!
 //! # Example

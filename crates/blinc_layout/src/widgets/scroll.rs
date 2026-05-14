@@ -1,4 +1,4 @@
-//! Scroll container widget with webkit-style bounce physics
+//! Scroll container widget with optional webkit-style bounce physics
 //!
 //! Provides a scrollable container with smooth momentum and spring-based
 //! edge bounce, similar to iOS/macOS native scroll behavior.
@@ -25,7 +25,7 @@
 //! # Features
 //!
 //! - **Smooth momentum**: Continues scrolling after release with natural deceleration
-//! - **Edge bounce**: Webkit-style spring animation when scrolling past edges
+//! - **Optional edge bounce**: Webkit-style spring animation when explicitly enabled
 //! - **Glass-aware clipping**: Content clips properly even for glass/blur elements
 //! - **FSM-based state**: Clear state machine for Idle, Scrolling, Decelerating, Bouncing
 //! - **Inherits Div**: Full access to all Div methods for layout control
@@ -227,7 +227,7 @@ impl ScrollbarConfig {
 /// Configuration for scroll behavior
 #[derive(Debug, Clone, Copy)]
 pub struct ScrollConfig {
-    /// Enable bounce physics at edges (default: true)
+    /// Enable bounce physics at edges (default: false)
     pub bounce_enabled: bool,
     /// Spring configuration for bounce animation
     pub bounce_spring: SpringConfig,
@@ -246,7 +246,7 @@ pub struct ScrollConfig {
 impl Default for ScrollConfig {
     fn default() -> Self {
         Self {
-            bounce_enabled: true,
+            bounce_enabled: false,
             // iOS-like elastic snap-back: very stiff critically-damped spring
             // Critical damping = 2 * sqrt(stiffness * mass) = 2 * sqrt(3000) ≈ 109.5
             // Using damping = 110 (slightly overdamped) for fast snap with no rebound
@@ -275,9 +275,18 @@ impl ScrollConfig {
         }
     }
 
+    /// Create config with bounce enabled
+    pub fn bouncy() -> Self {
+        Self {
+            bounce_enabled: true,
+            ..Default::default()
+        }
+    }
+
     /// Create config with stiff bounce (less wobbly)
     pub fn stiff_bounce() -> Self {
         Self {
+            bounce_enabled: true,
             bounce_spring: SpringConfig::stiff(),
             ..Default::default()
         }
@@ -286,6 +295,7 @@ impl ScrollConfig {
     /// Create config with gentle bounce (more wobbly)
     pub fn gentle_bounce() -> Self {
         Self {
+            bounce_enabled: true,
             bounce_spring: SpringConfig::gentle(),
             ..Default::default()
         }
@@ -926,10 +936,17 @@ impl ScrollPhysics {
             ScrollState::Idle => false,
 
             ScrollState::Scrolling => {
-                // Active scrolling is driven by scroll events, not ticks.
-                // The rubber-band effect happens in apply_scroll_delta().
-                // Bounce only starts when on_scroll_end() is called.
-                true
+                // Active desktop/free scrolling is driven by scroll events,
+                // not by per-frame physics. Returning true here made one
+                // wheel/trackpad event start a full redraw chain until the
+                // idle timeout settled the state; repeated free scrolling
+                // kept large apps rendering at vsync between input events.
+                //
+                // The exception is an explicit bouncy scroll that is already
+                // overscrolled. Inputs without a reliable end phase still need
+                // a short tick window so `check_idle_bounce` can fire the
+                // rebound spring even when the scrollbar is hidden.
+                self.config.bounce_enabled && self.is_overscrolling()
             }
 
             ScrollState::Decelerating => {
@@ -1071,9 +1088,12 @@ impl ScrollPhysics {
         }
     }
 
-    /// Check if animation is active
+    /// Check if a scroll animation is active.
+    ///
+    /// User-driven `Scrolling` is input-paced and should not by itself
+    /// keep the frame loop alive.
     pub fn is_animating(&self) -> bool {
-        self.state.is_active()
+        matches!(self.state, ScrollState::Decelerating | ScrollState::Bouncing)
     }
 
     /// Set the scroll direction
@@ -1735,7 +1755,7 @@ pub struct ScrollRenderInfo {
 // Scroll Element
 // ============================================================================
 
-/// A scrollable container element with bounce physics
+/// A scrollable container element with optional bounce physics
 ///
 /// Inherits all Div methods via Deref, so you have full layout control.
 ///
@@ -1933,7 +1953,7 @@ impl Scroll {
     // Configuration
     // =========================================================================
 
-    /// Enable or disable bounce physics (default: enabled)
+    /// Enable or disable bounce physics (default: disabled)
     pub fn bounce(self, enabled: bool) -> Self {
         self.physics.lock().unwrap().config.bounce_enabled = enabled;
         self
@@ -2604,21 +2624,9 @@ thread_local! {
 }
 
 /// Look up (or insert) the `SharedScrollPhysics` for a given
-/// `InstanceKey`. The first call at a given source location
-/// allocates fresh physics; every subsequent call (across rebuilds)
-/// returns the same `Arc<Mutex<…>>`.
-fn physics_for_key(key: &crate::key::InstanceKey) -> SharedScrollPhysics {
-    let id = key.get().to_string();
-    SCROLL_PHYSICS_REGISTRY.with(|reg| {
-        let mut reg = reg.borrow_mut();
-        reg.entry(id)
-            .or_insert_with(|| Arc::new(Mutex::new(ScrollPhysics::default())))
-            .clone()
-    })
-}
-
-/// Same lookup as [`physics_for_key`] but seeds fresh entries with a
-/// caller-provided [`ScrollConfig`] instead of the default.
+/// `InstanceKey`, seeding fresh entries with the caller-provided
+/// [`ScrollConfig`]. The first call at a source location allocates
+/// fresh physics; subsequent rebuilds return the same shared object.
 fn physics_for_key_with_config(
     key: &crate::key::InstanceKey,
     config: ScrollConfig,
@@ -2690,7 +2698,7 @@ pub fn scroll() -> Scroll {
 pub fn scroll_bouncy() -> Scroll {
     let key = crate::key::InstanceKey::new("scroll_bouncy");
     #[cfg(not(target_arch = "wasm32"))]
-    let physics = physics_for_key(&key);
+    let physics = physics_for_key_with_config(&key, ScrollConfig::bouncy());
     #[cfg(target_arch = "wasm32")]
     let physics = physics_for_key_with_config(&key, ScrollConfig::no_bounce());
     Scroll::with_physics(physics)
@@ -2728,8 +2736,16 @@ mod tests {
     }
 
     #[test]
+    fn test_scroll_config_default_has_no_bounce() {
+        assert!(!ScrollConfig::default().bounce_enabled);
+        assert!(ScrollConfig::bouncy().bounce_enabled);
+        assert!(ScrollConfig::stiff_bounce().bounce_enabled);
+        assert!(ScrollConfig::gentle_bounce().bounce_enabled);
+    }
+
+    #[test]
     fn test_scroll_physics_overscroll() {
-        let mut physics = ScrollPhysics::default();
+        let mut physics = ScrollPhysics::new(ScrollConfig::bouncy());
         physics.viewport_height = 400.0;
         physics.content_height = 1000.0;
 
@@ -2744,7 +2760,7 @@ mod tests {
         // Create scheduler for bounce animation
         let scheduler = Arc::new(Mutex::new(AnimationScheduler::new()));
 
-        let mut physics = ScrollPhysics::with_scheduler(ScrollConfig::default(), &scheduler);
+        let mut physics = ScrollPhysics::with_scheduler(ScrollConfig::bouncy(), &scheduler);
         physics.viewport_height = 400.0;
         physics.content_height = 1000.0;
 
@@ -2788,6 +2804,33 @@ mod tests {
 
         // Should be clamped
         assert_eq!(physics.offset_y, 0.0);
+    }
+
+    #[test]
+    fn test_scrolling_tick_is_input_paced_not_frame_animating() {
+        let mut physics = ScrollPhysics::default();
+        physics.viewport_height = 400.0;
+        physics.content_height = 1000.0;
+
+        physics.apply_scroll_delta(0.0, -50.0);
+
+        assert_eq!(physics.state, ScrollState::Scrolling);
+        assert!(!physics.tick(1.0 / 60.0));
+        assert!(!physics.is_animating());
+    }
+
+    #[test]
+    fn test_bouncy_overscroll_tick_stays_alive_for_rebound() {
+        let mut physics = ScrollPhysics::new(ScrollConfig::bouncy());
+        physics.viewport_height = 400.0;
+        physics.content_height = 1000.0;
+
+        physics.apply_scroll_delta(0.0, 50.0);
+
+        assert_eq!(physics.state, ScrollState::Scrolling);
+        assert!(physics.is_overscrolling());
+        assert!(physics.tick(1.0 / 60.0));
+        assert!(!physics.is_animating());
     }
 
     #[test]

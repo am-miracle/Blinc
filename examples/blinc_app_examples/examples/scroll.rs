@@ -1,10 +1,10 @@
 //! Scroll Container Example
 //!
-//! This example demonstrates the scroll widget with webkit-style
+//! This example demonstrates the scroll widget with opt-in webkit-style
 //! bounce physics, glass clipping, and scroll event handling.
 //!
 //! Features demonstrated:
-//! - `scroll()` container with bounce physics
+//! - `ScrollConfig::bouncy()` for opt-in bounce physics
 //! - Glass elements clipping properly inside scroll
 //! - Scroll event handling with delta reporting
 //! - Spring animation for edge bounce
@@ -16,7 +16,9 @@
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
 use blinc_core::State;
-use blinc_layout::prelude::{ButtonState, NoState, Scroll, ScrollPhysics, SharedScrollPhysics};
+use blinc_layout::prelude::{
+    ButtonState, NoState, Scroll, ScrollConfig, ScrollPhysics, SharedScrollPhysics,
+};
 use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -52,7 +54,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 
     // Use reactive state for physics - persists across rebuilds
     let physics_state = ctx.use_state_keyed("scroll_physics", || {
-        Arc::new(Mutex::new(ScrollPhysics::default())) as SharedScrollPhysics
+        Arc::new(Mutex::new(ScrollPhysics::new(ScrollConfig::bouncy()))) as SharedScrollPhysics
     });
     let physics = physics_state.get();
 
