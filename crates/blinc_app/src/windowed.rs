@@ -4143,29 +4143,49 @@ impl WindowedApp {
                             // Only structural changes require tree rebuild
                             // =========================================================
 
-                            // Check if event handlers marked anything dirty (auto-rebuild)
+                            // Check if event handlers marked anything dirty (auto-rebuild).
+                            //
+                            // The `tracing::info!` calls below are diagnostic for the
+                            // double-build-on-launch investigation: every rebuild source
+                            // names itself so the source of a spurious rebuild is obvious
+                            // from the default log output. Lower to `debug!` once the
+                            // root cause is fixed and the diagnostic isn't needed.
                             if let Some(ref tree) = ws.render_tree {
                                 if tree.needs_rebuild() {
-                                    tracing::debug!("Rebuild triggered by: dirty_tracker");
+                                    tracing::info!(
+                                        target: "blinc_app::rebuild_source",
+                                        "Rebuild triggered by: dirty_tracker"
+                                    );
                                     ws.needs_rebuild = true;
                                 }
                             }
 
                             // Check if element refs were modified (triggers rebuild)
                             if ref_dirty_flag.swap(false, Ordering::SeqCst) {
-                                tracing::debug!("Rebuild triggered by: ref_dirty_flag (State::set)");
+                                tracing::info!(
+                                    target: "blinc_app::rebuild_source",
+                                    "Rebuild triggered by: ref_dirty_flag (State::set or ctx.request_rebuild)"
+                                );
                                 ws.needs_rebuild = true;
                             }
 
                             // Check if text widgets requested a rebuild (focus/text changes)
                             if blinc_layout::widgets::take_needs_rebuild() {
-                                tracing::debug!("Rebuild triggered by: text widget state change");
+                                tracing::info!(
+                                    target: "blinc_app::rebuild_source",
+                                    "Rebuild triggered by: blinc_layout::widgets::request_rebuild \
+                                     (text-input focus change, request_full_rebuild from theme, etc.)"
+                                );
                                 ws.needs_rebuild = true;
                             }
 
                             // Check if a full relayout was requested (e.g., theme changes)
                             if blinc_layout::widgets::take_needs_relayout() {
-                                tracing::debug!("Relayout triggered by: theme or global state change");
+                                tracing::info!(
+                                    target: "blinc_app::rebuild_source",
+                                    "Relayout triggered by: blinc_layout::widgets::request_relayout \
+                                     (theme color scheme change, font reload, etc.)"
+                                );
                                 ws.needs_relayout = true;
                             }
 
