@@ -59,6 +59,20 @@ fn classify_param_type(ty: &syn::Type) -> Option<ParamKind> {
                 )
             },
         }),
+        "bool" => Some(ParamKind {
+            ffi_ty: quote! { i32 },
+            decode: quote! { __arg != 0 },
+            prop_type_expr: quote! {
+                ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                    ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::Bool
+                )
+            },
+            param_type_expr: quote! {
+                ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                    ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I32
+                )
+            },
+        }),
         "i64" => Some(ParamKind {
             ffi_ty: quote! { i64 },
             decode: quote! { __arg },
@@ -202,8 +216,8 @@ impl syn::parse::Parse for ExternWidgetArgs {
 /// impl ElementBuilder for FancyText { /* … */ }
 /// ```
 ///
-/// Named fields become DSL-visible props; `String` / `i32` / `i64` /
-/// `f64` are supported scalar types today. Mark a `Vec<Box<dyn
+/// Named fields become DSL-visible props; `String` / `bool` / `i32` /
+/// `i64` / `f64` are supported scalar types today. Mark a `Vec<Box<dyn
 /// ElementBuilder>>` field with `#[children]` to receive the parent's
 /// body block, or `#[slot(name = "…")]` for named slots.
 ///

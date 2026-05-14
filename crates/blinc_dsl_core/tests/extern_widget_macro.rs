@@ -43,6 +43,7 @@ impl ElementBuilder for MacroText {
 pub struct MacroBadgeConfig {
     pub title: String,
     pub count: i32,
+    pub featured: bool,
 }
 
 impl TryFrom<BlincStructValue> for MacroBadgeConfig {
@@ -55,6 +56,7 @@ impl TryFrom<BlincStructValue> for MacroBadgeConfig {
                 .ok_or("missing title")?
                 .to_string(),
             count: value.get_i32("count").ok_or("missing count")?,
+            featured: value.get_bool("featured").ok_or("missing featured")?,
         })
     }
 }
@@ -136,10 +138,11 @@ fn extern_widget_macro_decodes_struct_prop() {
         struct MacroBadgeConfig {
             title: string
             count: i32
+            featured: bool
         }
 
         view {
-            MacroBadge(config = MacroBadgeConfig(count = 7, title = "seven"))
+            MacroBadge(config = MacroBadgeConfig(count = 7, featured = true, title = "seven"))
         }
         "#,
         "macro_badge_struct.blinc",
@@ -165,7 +168,73 @@ fn extern_widget_macro_decodes_struct_prop() {
         Some(MacroBadgeConfig {
             title: "seven".to_string(),
             count: 7,
+            featured: true,
         })
+    );
+}
+
+fn last_switch_enabled() -> &'static Mutex<Option<bool>> {
+    static LAST: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
+    LAST.get_or_init(|| Mutex::new(None))
+}
+
+#[extern_widget(name = "MacroSwitch")]
+pub struct MacroSwitch {
+    pub enabled: bool,
+}
+
+impl ElementBuilder for MacroSwitch {
+    fn build(&self, tree: &mut blinc_layout::LayoutTree) -> blinc_layout::LayoutNodeId {
+        *last_switch_enabled().lock().expect("last switch mutex") = Some(self.enabled);
+        blinc_layout::div::Div::new().build(tree)
+    }
+
+    fn render_props(&self) -> blinc_layout::RenderProps {
+        blinc_layout::div::Div::new().render_props()
+    }
+
+    fn children_builders(&self) -> &[Box<dyn ElementBuilder>] {
+        &[]
+    }
+}
+
+#[test]
+fn extern_widget_macro_decodes_bool_prop() {
+    let _ = tracing_subscriber::fmt::try_init();
+    *last_switch_enabled().lock().expect("last switch mutex") = None;
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.register_extern_widget::<MacroSwitch>()
+        .expect("register MacroSwitch");
+
+    dsl.compile_source(
+        r#"
+        view {
+            let enabled = true
+            MacroSwitch(enabled = enabled)
+        }
+        "#,
+        "macro_switch_bool.blinc",
+    )
+    .expect("compile");
+
+    let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+    let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+    let ZyntaxValue::Int(handle) = value else {
+        panic!("expected widget handle, got: {value:?}");
+    };
+    assert_ne!(handle, 0);
+
+    let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+    let WidgetBox::Custom(builder) = *widget else {
+        panic!("expected Custom(MacroSwitch)");
+    };
+    let mut tree = blinc_layout::LayoutTree::new();
+    builder.build(&mut tree);
+
+    assert_eq!(
+        *last_switch_enabled().lock().expect("last switch mutex"),
+        Some(true)
     );
 }
 

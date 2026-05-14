@@ -2924,6 +2924,7 @@ pub(crate) fn lower_struct_widget_props_to_handles(
 
     fn setter_for_type(ty: &Type) -> &'static str {
         match ty {
+            Type::Primitive(PrimitiveType::Bool) => "__set_struct_bool__",
             Type::Primitive(PrimitiveType::I32) => "__set_struct_i32__",
             Type::Primitive(PrimitiveType::F64) => "__set_struct_f64__",
             Type::Primitive(PrimitiveType::String) => "__set_struct_string__",
@@ -2945,6 +2946,45 @@ pub(crate) fn lower_struct_widget_props_to_handles(
             Type::Primitive(PrimitiveType::String),
             span,
         )
+    }
+
+    fn bool_literal_as_i32(
+        expr: zyntax_typed_ast::TypedNode<TypedExpression>,
+    ) -> zyntax_typed_ast::TypedNode<TypedExpression> {
+        let span = expr.span;
+        let expr_ty = expr.ty.clone();
+        match expr.node {
+            TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Bool(value)) => typed_node(
+                TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(if value {
+                    1
+                } else {
+                    0
+                })),
+                Type::Primitive(PrimitiveType::I32),
+                span,
+            ),
+            other if matches!(&expr_ty, Type::Primitive(PrimitiveType::Bool)) => {
+                let bool_expr = typed_node(other, Type::Primitive(PrimitiveType::Bool), span);
+                typed_node(
+                    TypedExpression::If(zyntax_typed_ast::typed_ast::TypedIfExpr {
+                        condition: Box::new(bool_expr),
+                        then_branch: Box::new(typed_node(
+                            TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(1)),
+                            Type::Primitive(PrimitiveType::I32),
+                            span,
+                        )),
+                        else_branch: Box::new(typed_node(
+                            TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(0)),
+                            Type::Primitive(PrimitiveType::I32),
+                            span,
+                        )),
+                    }),
+                    Type::Primitive(PrimitiveType::I32),
+                    span,
+                )
+            }
+            other => typed_node(other, expr_ty, span),
+        }
     }
 
     fn call_expr(
@@ -3024,7 +3064,11 @@ pub(crate) fn lower_struct_widget_props_to_handles(
             if is_complex_type(&field_ty) && matches!(value.node, TypedExpression::Struct(_)) {
                 value = lower_struct_to_handle(value, structs, prelude, counter);
             }
-            value.ty = field_ty;
+            if matches!(field_ty, Type::Primitive(PrimitiveType::Bool)) {
+                value = bool_literal_as_i32(value);
+            } else {
+                value.ty = field_ty;
+            }
 
             prelude.push(typed_node(
                 TypedStatement::Expression(Box::new(call_expr(
@@ -3616,7 +3660,7 @@ pub(crate) fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
         let mut overflow: Vec<zyntax_typed_ast::TypedNode<TypedExpression>> = Vec::new();
         for (i, arg) in existing_positional.into_iter().enumerate() {
             if i < slots.len() {
-                slots[i] = Some(arg);
+                slots[i] = Some(coerce_extern_arg_for_prop(arg, &props[i].1));
             } else {
                 overflow.push(arg);
             }
@@ -3634,7 +3678,7 @@ pub(crate) fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
                 if slots[pos].is_some() {
                     unresolved_named.push(na);
                 } else {
-                    slots[pos] = Some(*na.value);
+                    slots[pos] = Some(coerce_extern_arg_for_prop(*na.value, &props[pos].1));
                 }
             } else {
                 unresolved_named.push(na);
@@ -3655,6 +3699,51 @@ pub(crate) fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
 
         call.positional_args = new_positional;
         call.named_args = unresolved_named;
+    }
+
+    /// Bool-like widget props keep an `i32` extern ABI slot, so a DSL
+    /// `true`/`false` literal is lowered to `1`/`0` before the final call.
+    fn coerce_extern_arg_for_prop(
+        arg: zyntax_typed_ast::TypedNode<TypedExpression>,
+        ty: &Type,
+    ) -> zyntax_typed_ast::TypedNode<TypedExpression> {
+        if !matches!(ty, Type::Primitive(PrimitiveType::Bool)) {
+            return arg;
+        }
+        let span = arg.span;
+        let arg_ty = arg.ty;
+        match arg.node {
+            TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Bool(value)) => typed_node(
+                TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(if value {
+                    1
+                } else {
+                    0
+                })),
+                Type::Primitive(PrimitiveType::I32),
+                span,
+            ),
+            other if matches!(&arg_ty, Type::Primitive(PrimitiveType::Bool)) => {
+                let bool_expr = typed_node(other, Type::Primitive(PrimitiveType::Bool), span);
+                typed_node(
+                    TypedExpression::If(zyntax_typed_ast::typed_ast::TypedIfExpr {
+                        condition: Box::new(bool_expr),
+                        then_branch: Box::new(typed_node(
+                            TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(1)),
+                            Type::Primitive(PrimitiveType::I32),
+                            span,
+                        )),
+                        else_branch: Box::new(typed_node(
+                            TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(0)),
+                            Type::Primitive(PrimitiveType::I32),
+                            span,
+                        )),
+                    }),
+                    Type::Primitive(PrimitiveType::I32),
+                    span,
+                )
+            }
+            other => typed_node(other, arg_ty, span),
+        }
     }
 
     /// Substrate primitive's prop (name, type) pairs in declaration order.
@@ -3683,6 +3772,11 @@ pub(crate) fn resolve_extern_widget_named_args(program: &mut TypedProgram) {
         span: zyntax_typed_ast::Span,
     ) -> zyntax_typed_ast::TypedNode<TypedExpression> {
         match ty {
+            Type::Primitive(PrimitiveType::Bool) => typed_node(
+                TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(0)),
+                Type::Primitive(PrimitiveType::I32),
+                span,
+            ),
             Type::Primitive(PrimitiveType::F64) => typed_node(
                 TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Float(0.0)),
                 ty.clone(),

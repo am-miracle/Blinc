@@ -1873,6 +1873,72 @@ fn parse_struct_constructor_named_fields_in_decl_order() {
     assert_eq!(*count, 7);
 }
 
+#[test]
+fn parse_bool_literals_and_struct_field_type() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    let program = dsl
+        .parse_to_typed_ast(
+            r#"
+                struct Toggle {
+                    enabled: bool
+                }
+
+                view {
+                    let toggle = Toggle(enabled = true)
+                    let disabled = false
+                }
+                "#,
+            "bool_literals.blinc",
+        )
+        .expect("parse");
+
+    let class = program
+        .declarations
+        .iter()
+        .find_map(|d| match &d.node {
+            TypedDeclaration::Class(c) if c.name.resolve_global().as_deref() == Some("Toggle") => {
+                Some(c)
+            }
+            _ => None,
+        })
+        .expect("Toggle class declaration");
+    assert!(matches!(
+        class.fields[0].ty,
+        Type::Primitive(PrimitiveType::Bool)
+    ));
+
+    let stmts = first_user_function_body(&program);
+    let TypedStatement::Let(toggle_let) = &stmts[0].node else {
+        panic!("expected toggle let statement");
+    };
+    let init = toggle_let.initializer.as_ref().expect("toggle initializer");
+    let TypedExpression::Struct(struct_lit) = &init.node else {
+        panic!("expected Toggle struct literal, got {:?}", init.node);
+    };
+    let TypedExpression::Literal(TypedLiteral::Bool(enabled)) = &struct_lit.fields[0].value.node
+    else {
+        panic!(
+            "enabled should be a bool literal, got {:?}",
+            struct_lit.fields[0].value.node
+        );
+    };
+    assert!(*enabled);
+
+    let TypedStatement::Let(disabled_let) = &stmts[1].node else {
+        panic!("expected disabled let statement");
+    };
+    let disabled = disabled_let
+        .initializer
+        .as_ref()
+        .expect("disabled initializer");
+    let TypedExpression::Literal(TypedLiteral::Bool(value)) = &disabled.node else {
+        panic!("disabled should be a bool literal");
+    };
+    assert!(!*value);
+}
+
 /// Struct fields can reference custom DSL/Rust types by name; the parser keeps
 /// them as named types so Zyntax can bind them through the type registry.
 #[test]
@@ -4690,7 +4756,7 @@ fn core_layout_widgets_compile_and_return_element_builders() {
         ),
         (
             "TaskItem",
-            r#"view { TaskItem(checked = 1) { Text("done") } }"#,
+            r#"view { TaskItem(checked = true) { Text("done") } }"#,
             blinc_layout::div::ElementTypeId::Div,
             Some(2),
         ),
@@ -4716,7 +4782,7 @@ fn core_layout_widgets_compile_and_return_element_builders() {
         ),
         (
             "Checkbox",
-            r#"view { Checkbox(label="Done", checked=1) }"#,
+            r#"view { Checkbox(label="Done", checked=true) }"#,
             blinc_layout::div::ElementTypeId::Div,
             None,
         ),
@@ -4734,7 +4800,7 @@ fn core_layout_widgets_compile_and_return_element_builders() {
         ),
         (
             "Code",
-            r#"view { Code(content="let x = 1", line_numbers=1) }"#,
+            r#"view { Code(content="let x = 1", line_numbers=true) }"#,
             blinc_layout::div::ElementTypeId::Div,
             None,
         ),
@@ -4818,7 +4884,12 @@ fn div_overflow_scroll_prop_enables_scroll_physics() {
 
     let dsl = BlincDsl::new().expect("runtime init");
     dsl.compile_source(
-        r#"view { Div(overflow_scroll = 1) { Text("scroll me") } }"#,
+        r#"
+            view {
+                let scrolling = true
+                Div(overflow_scroll = scrolling) { Text("scroll me") }
+            }
+        "#,
         "div_overflow_scroll.blinc",
     )
     .expect("compile");

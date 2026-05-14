@@ -90,6 +90,7 @@ impl BlincStructValue {
     pub fn get_i32(&self, name: &str) -> Option<i32> {
         match self.get(name) {
             Some(BlincStructFieldValue::I32(value)) => Some(*value),
+            Some(BlincStructFieldValue::Bool(value)) => Some(i32::from(*value)),
             Some(BlincStructFieldValue::I64(value)) => (*value).try_into().ok(),
             _ => None,
         }
@@ -98,6 +99,7 @@ impl BlincStructValue {
     pub fn get_i64(&self, name: &str) -> Option<i64> {
         match self.get(name) {
             Some(BlincStructFieldValue::I32(value)) => Some(i64::from(*value)),
+            Some(BlincStructFieldValue::Bool(value)) => Some(i64::from(*value)),
             Some(BlincStructFieldValue::I64(value)) => Some(*value),
             _ => None,
         }
@@ -106,6 +108,15 @@ impl BlincStructValue {
     pub fn get_f64(&self, name: &str) -> Option<f64> {
         match self.get(name) {
             Some(BlincStructFieldValue::F64(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn get_bool(&self, name: &str) -> Option<bool> {
+        match self.get(name) {
+            Some(BlincStructFieldValue::Bool(value)) => Some(*value),
+            Some(BlincStructFieldValue::I32(value)) => Some(*value != 0),
+            Some(BlincStructFieldValue::I64(value)) => Some(*value != 0),
             _ => None,
         }
     }
@@ -120,6 +131,7 @@ impl BlincStructValue {
 
 #[derive(Debug, Clone)]
 pub enum BlincStructFieldValue {
+    Bool(bool),
     I32(i32),
     I64(i64),
     F64(f64),
@@ -383,6 +395,13 @@ pub(crate) extern "C" fn blinc_set_struct_i32(ptr: i64, name_ptr: *const i32, va
     let name = decode_string_arg(name_ptr);
     with_struct_value(ptr, |s| {
         s.insert(name, BlincStructFieldValue::I32(value));
+    });
+}
+
+pub(crate) extern "C" fn blinc_set_struct_bool(ptr: i64, name_ptr: *const i32, value: i32) {
+    let name = decode_string_arg(name_ptr);
+    with_struct_value(ptr, |s| {
+        s.insert(name, BlincStructFieldValue::Bool(value != 0));
     });
 }
 

@@ -80,6 +80,7 @@
     __new_struct_value__: "__new_struct_value__",
     __set_struct_i32__: "__set_struct_i32__",
     __set_struct_i64__: "__set_struct_i64__",
+    __set_struct_bool__: "__set_struct_bool__",
     __set_struct_f64__: "__set_struct_f64__",
     __set_struct_string__: "__set_struct_string__",
     __set_struct_handle__: "__set_struct_handle__",
@@ -647,7 +648,10 @@ plain_field = { name:identifier ~ ":" ~ ty:state_type }
 // `prim_*` shape: each primitive is its own rule so the action
 // constructs `Type::Primitive { name: intern("...") }` with the
 // right tag. Extend as the prototype grows.
-state_type = { state_type_f64 | state_type_i32 | state_type_string | state_type_named }
+state_type = { state_type_bool | state_type_f64 | state_type_i32 | state_type_string | state_type_named }
+
+state_type_bool = { "bool" }
+  -> Type::Primitive { name: intern("bool") }
 
 state_type_i32 = { "i32" }
   -> Type::Primitive { name: intern("i32") }
@@ -1191,6 +1195,10 @@ string_inner = { !("\"" | "\\") ~ ANY | "\\" ~ ANY }
 integer = @{ ("+" | "-")? ~ ASCII_DIGIT+ }
   -> TypedExpression::IntLiteral { value: parse_int(text()) }
 
+// Boolean literal.
+bool_literal = @{ "true" | "false" }
+  -> TypedExpression::BoolLiteral { value: parse_bool(text()) }
+
 // Float literal. Mirrors ml.zyn:2846 — accepts both `1.0`-style
 // and scientific (`1e-3`) forms. Must come before `integer` in
 // `primary_expr` because `1` alone is a valid prefix of `1.0`,
@@ -1410,6 +1418,7 @@ primary_expr = {
     string_literal |
     float |
     integer |
+    bool_literal |
     component_call_expr |
     variable_expr
 }

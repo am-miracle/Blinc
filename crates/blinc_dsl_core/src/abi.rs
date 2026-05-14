@@ -13,11 +13,11 @@ use crate::widget_ffi::{
     blinc_new_style_overlay, blinc_notch_view, blinc_ol_view, blinc_p_view, blinc_pre_view,
     blinc_push_child, blinc_rich_text_view, blinc_set_overlay_bg, blinc_set_overlay_border_color,
     blinc_set_overlay_border_width, blinc_set_overlay_corner_radius, blinc_set_overlay_opacity,
-    blinc_set_struct_f64, blinc_set_struct_handle, blinc_set_struct_i32, blinc_set_struct_i64,
-    blinc_set_struct_string, blinc_small_view, blinc_span_view, blinc_stack_view,
-    blinc_strong_view, blinc_svg_view, blinc_table_view, blinc_task_item_view, blinc_tbody_view,
-    blinc_td_view, blinc_text_area_view, blinc_text_input_view, blinc_text_view, blinc_tfoot_view,
-    blinc_th_view, blinc_thead_view, blinc_tr_view, blinc_ul_view,
+    blinc_set_struct_bool, blinc_set_struct_f64, blinc_set_struct_handle, blinc_set_struct_i32,
+    blinc_set_struct_i64, blinc_set_struct_string, blinc_small_view, blinc_span_view,
+    blinc_stack_view, blinc_strong_view, blinc_svg_view, blinc_table_view, blinc_task_item_view,
+    blinc_tbody_view, blinc_td_view, blinc_text_area_view, blinc_text_input_view, blinc_text_view,
+    blinc_tfoot_view, blinc_th_view, blinc_thead_view, blinc_tr_view, blinc_ul_view,
 };
 
 /// Pairs a DSL-visible symbol name with an `extern "C"` fn pointer and signature.
@@ -617,6 +617,16 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_set_struct_i32 as *const u8,
         },
         BuiltinDescriptor {
+            name: "__set_struct_bool__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I32),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_set_struct_bool as *const u8,
+        },
+        BuiltinDescriptor {
             name: "__set_struct_i64__",
             param_types: &[
                 Type::Primitive(PrimitiveType::I64),
@@ -715,6 +725,7 @@ fn builtins() -> Vec<BuiltinDescriptor> {
 pub(crate) fn type_to_tag(ty: &Type) -> TypeTag {
     match ty {
         Type::Primitive(PrimitiveType::Unit) => TypeTag::VOID,
+        Type::Primitive(PrimitiveType::Bool) => TypeTag::BOOL,
         Type::Primitive(PrimitiveType::String) => TypeTag::STRING,
         Type::Primitive(PrimitiveType::I32) => TypeTag::I32,
         Type::Primitive(PrimitiveType::I64) => TypeTag::I64,
@@ -732,6 +743,7 @@ pub(crate) fn type_to_tag(ty: &Type) -> TypeTag {
 pub(crate) fn type_to_native(ty: &Type) -> Result<NativeType, &Type> {
     match ty {
         Type::Primitive(PrimitiveType::Unit) => Ok(NativeType::Void),
+        Type::Primitive(PrimitiveType::Bool) => Ok(NativeType::Bool),
         Type::Primitive(PrimitiveType::String) => Ok(NativeType::Ptr),
         Type::Primitive(PrimitiveType::I32) => Ok(NativeType::I32),
         Type::Primitive(PrimitiveType::I64) => Ok(NativeType::I64),

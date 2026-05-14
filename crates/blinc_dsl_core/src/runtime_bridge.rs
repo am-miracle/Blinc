@@ -90,6 +90,7 @@ pub(crate) fn register_blinc_layout_primitives() {
 
     let string_ty = Type::Primitive(PrimitiveType::String);
     let i64_ty = Type::Primitive(PrimitiveType::I64);
+    let bool_ty = Type::Primitive(PrimitiveType::Bool);
     let prop = |name: &'static str, ty: Type| PropDef {
         name: std::sync::Arc::from(name),
         ty,
@@ -115,8 +116,8 @@ pub(crate) fn register_blinc_layout_primitives() {
             class_prop(),
             // `on_click = || { … }` — Zyntax closure value as `i64`.
             prop("on_click", i64_ty.clone()),
-            // `overflow_scroll = 1` — use Div's built-in scroll physics.
-            prop("overflow_scroll", Type::Primitive(PrimitiveType::I32)),
+            // `overflow_scroll = true` — use Div's built-in scroll physics.
+            prop("overflow_scroll", bool_ty.clone()),
         ],
     };
 
@@ -255,7 +256,7 @@ pub(crate) fn register_blinc_layout_primitives() {
             view_symbol: std::sync::Arc::from("$Blinc$TaskItem$view"),
             props: vec![
                 prop("children", i64_ty.clone()),
-                prop("checked", Type::Primitive(PrimitiveType::I32)),
+                prop("checked", bool_ty.clone()),
                 style_prop(),
             ],
         });
@@ -291,7 +292,7 @@ pub(crate) fn register_blinc_layout_primitives() {
             view_symbol: std::sync::Arc::from("$Blinc$Checkbox$view"),
             props: vec![
                 prop("label", string_ty.clone()),
-                prop("checked", Type::Primitive(PrimitiveType::I32)),
+                prop("checked", bool_ty.clone()),
                 style_prop(),
             ],
         });
@@ -319,7 +320,7 @@ pub(crate) fn register_blinc_layout_primitives() {
             view_symbol: std::sync::Arc::from("$Blinc$Code$view"),
             props: vec![
                 prop("content", string_ty.clone()),
-                prop("line_numbers", Type::Primitive(PrimitiveType::I32)),
+                prop("line_numbers", bool_ty.clone()),
                 style_prop(),
             ],
         });
