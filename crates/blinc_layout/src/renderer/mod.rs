@@ -640,6 +640,26 @@ impl RenderTree {
         self.painted_node_ids.borrow()
     }
 
+    /// `painted_node_ids()` projected through `layout_to_stable`.
+    ///
+    /// Allocates a fresh `HashSet<StableNodeId>` each call so the
+    /// caller can hold it across mutating renderer calls (looking
+    /// up by `StableNodeId` against the CSS animation store, etc.).
+    /// Cost is proportional to the painted-set size, dominated by
+    /// the same paint walk that produced it — the once-per-frame
+    /// allocation is unmeasurable in practice.
+    ///
+    /// Migration helper for Phase 5: subsystems keyed by
+    /// `StableNodeId` (`CssAnimationStore`, soon others) need the
+    /// painted set in stable terms; this is the conversion point.
+    pub fn painted_stable_ids(&self) -> HashSet<crate::tree::StableNodeId> {
+        let painted = self.painted_node_ids.borrow();
+        painted
+            .iter()
+            .filter_map(|n| self.layout_to_stable.get(n).copied())
+            .collect()
+    }
+
     /// Update root node dimensions for window resize.
     ///
     /// Fast path that avoids full tree rebuild — only updates the root layout

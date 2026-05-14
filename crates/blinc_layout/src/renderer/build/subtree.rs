@@ -192,10 +192,17 @@ impl RenderTree {
         self.hover_css_animations.remove(&node_id);
         self.complex_state_affected.remove(&node_id);
 
-        // Remove CSS animations/transitions for this node from the shared store
-        if let Ok(mut store) = self.css_anim_store.lock() {
-            store.animations.remove(&node_id);
-            store.transitions.remove(&node_id);
+        // Remove CSS animations/transitions for this node from the
+        // shared store. The store is now stable-keyed (Phase 5), so
+        // we look up the stable id before dropping the mapping
+        // below. Skipping this when there's no mapping is safe — a
+        // node without a stable id never had a chance to register
+        // CSS animations through the stable-keyed path.
+        if let Some(stable) = self.stable_id(node_id) {
+            if let Ok(mut store) = self.css_anim_store.lock() {
+                store.animations.remove(&stable);
+                store.transitions.remove(&stable);
+            }
         }
 
         // Drop the stable-id mapping for this layout node. The

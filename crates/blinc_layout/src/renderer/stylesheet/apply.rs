@@ -544,8 +544,9 @@ impl RenderTree {
         node_id: LayoutNodeId,
     ) -> Option<blinc_animation::KeyframeProperties> {
         self.snapshot_keyframe_properties(node_id).map(|mut kp| {
+            let stable_id = self.stable_id(node_id);
             let store = self.css_anim_store.lock().unwrap();
-            if let Some(active) = store.transitions.get(&node_id) {
+            if let Some(active) = stable_id.and_then(|sid| store.transitions.get(&sid)) {
                 let cp = &active.current_properties;
                 if cp.rotate.is_some() {
                     kp.rotate = cp.rotate;

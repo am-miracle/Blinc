@@ -44,8 +44,9 @@ impl RenderTree {
 
         // Resolve the full keyframe animation
         if let Some(animation) = stylesheet.resolve_keyframe_animation(&element_id) {
+            let stable_id = self.stable_id_or_warn(node_id);
             self.css_anim_store.lock().unwrap().animations.insert(
-                node_id,
+                stable_id,
                 crate::render_state::ActiveCssAnimation::new(animation),
             );
             return true;
@@ -77,8 +78,9 @@ impl RenderTree {
         if let Some(animation) =
             stylesheet.resolve_keyframe_animation_with_state(&element_id, state)
         {
+            let stable_id = self.stable_id_or_warn(node_id);
             self.css_anim_store.lock().unwrap().animations.insert(
-                node_id,
+                stable_id,
                 crate::render_state::ActiveCssAnimation::new(animation),
             );
             return true;
@@ -91,8 +93,11 @@ impl RenderTree {
     ///
     /// Call this during rendering to apply animated values.
     pub fn apply_css_animation_to_props(&self, node_id: LayoutNodeId, props: &mut RenderProps) {
+        let Some(stable_id) = self.stable_id(node_id) else {
+            return;
+        };
         let store = self.css_anim_store.lock().unwrap();
-        if let Some(active_anim) = store.animations.get(&node_id) {
+        if let Some(active_anim) = store.animations.get(&stable_id) {
             let anim_props = &active_anim.current_properties;
 
             // Apply animated opacity
@@ -146,30 +151,37 @@ impl RenderTree {
         &self,
         node_id: LayoutNodeId,
     ) -> Option<blinc_animation::KeyframeProperties> {
+        let stable_id = self.stable_id(node_id)?;
         let store = self.css_anim_store.lock().unwrap();
         store
             .animations
-            .get(&node_id)
+            .get(&stable_id)
             .map(|a| a.current_properties.clone())
     }
 
     /// Check if a node has an active CSS animation
     pub fn has_css_animation(&self, node_id: LayoutNodeId) -> bool {
+        let Some(stable_id) = self.stable_id(node_id) else {
+            return false;
+        };
         let store = self.css_anim_store.lock().unwrap();
         store
             .animations
-            .get(&node_id)
+            .get(&stable_id)
             .map(|a| a.is_playing)
             .unwrap_or(false)
     }
 
     /// Stop CSS animation for a node
     pub fn stop_css_animation(&mut self, node_id: LayoutNodeId) {
+        let Some(stable_id) = self.stable_id(node_id) else {
+            return;
+        };
         self.css_anim_store
             .lock()
             .unwrap()
             .animations
-            .remove(&node_id);
+            .remove(&stable_id);
     }
 
     /// Check if there are no active CSS animations
@@ -201,12 +213,15 @@ impl RenderTree {
 
         for (element_id, node_id) in &registered_ids {
             // Skip if already has an active animation (lock briefly, release before calling start)
+            let Some(stable_id) = self.stable_id(*node_id) else {
+                continue;
+            };
             let already_has = self
                 .css_anim_store
                 .lock()
                 .unwrap()
                 .animations
-                .contains_key(node_id);
+                .contains_key(&stable_id);
             if already_has {
                 continue;
             }
@@ -226,16 +241,21 @@ impl RenderTree {
     /// This mutates render props in-place with current animation values (opacity, transform).
     /// The background thread ticks animations; this reads the latest values and applies them.
     pub fn apply_all_css_animation_props(&mut self) {
-        // Collect animation data under the lock, then release before modifying render_nodes
-        let anim_data: Vec<(LayoutNodeId, blinc_animation::KeyframeProperties)> = {
+        // Collect animation data (stable-keyed) under the lock, then
+        // release before resolving back to layout ids for the
+        // render_nodes write.
+        let anim_data: Vec<(crate::tree::StableNodeId, blinc_animation::KeyframeProperties)> = {
             let store = self.css_anim_store.lock().unwrap();
             store
                 .animations
                 .iter()
-                .map(|(nid, a)| (*nid, a.current_properties.clone()))
+                .map(|(sid, a)| (*sid, a.current_properties.clone()))
                 .collect()
         };
-        for (node_id, anim_props) in anim_data {
+        for (stable_id, anim_props) in anim_data {
+            let Some(node_id) = self.layout_id(stable_id) else {
+                continue;
+            };
             if let Some(render_node) = self.render_nodes.get_mut(&node_id) {
                 Self::apply_keyframe_props_to_render(&mut render_node.props, &anim_props);
             }
@@ -249,23 +269,26 @@ impl RenderTree {
         use taffy::prelude::*;
         let mut needs_layout = false;
 
-        // Collect all nodes with active animations or transitions that have layout properties
-        let anim_nodes: Vec<(LayoutNodeId, blinc_animation::KeyframeProperties)> = {
+        // Collect all stable ids with active animations or transitions that have layout properties
+        let anim_nodes: Vec<(crate::tree::StableNodeId, blinc_animation::KeyframeProperties)> = {
             let store = self.css_anim_store.lock().unwrap();
             store
                 .animations
                 .iter()
-                .map(|(nid, anim)| (*nid, anim.current_properties.clone()))
+                .map(|(sid, anim)| (*sid, anim.current_properties.clone()))
                 .chain(
                     store
                         .transitions
                         .iter()
-                        .map(|(nid, anim)| (*nid, anim.current_properties.clone())),
+                        .map(|(sid, anim)| (*sid, anim.current_properties.clone())),
                 )
                 .collect()
         };
 
-        for (node_id, anim_props) in anim_nodes {
+        for (stable_id, anim_props) in anim_nodes {
+            let Some(node_id) = self.layout_id(stable_id) else {
+                continue;
+            };
             let has_layout_props = anim_props.width.is_some()
                 || anim_props.height.is_some()
                 || anim_props.padding.is_some()
@@ -396,6 +419,11 @@ impl RenderTree {
             FillMode, KeyframeProperties, MultiKeyframe, MultiKeyframeAnimation,
         };
 
+        // Resolve once at the top so every `store.transitions[&_]`
+        // access below uses the stable id (the store migrated to
+        // stable keys in Phase 5).
+        let stable_id = self.stable_id_or_warn(node_id);
+
         // Lock the shared store for the duration of this method
         let mut store = self.css_anim_store.lock().unwrap();
 
@@ -413,7 +441,7 @@ impl RenderTree {
                 if before.$field != after.$field {
                     if let Some(t) = transition_set.get($prop_name) {
                         // If a transition is already active, use current interpolated value as "from"
-                        let from_val = if let Some(active) = store.transitions.get(&node_id) {
+                        let from_val = if let Some(active) = store.transitions.get(&stable_id) {
                             if active.current_properties.$field.is_some() {
                                 active.current_properties.$field.clone()
                             } else {
@@ -436,7 +464,7 @@ impl RenderTree {
             ($field:ident, $prop_name:expr, default $def:expr) => {
                 if before.$field != after.$field {
                     if let Some(t) = transition_set.get($prop_name) {
-                        let from_val = if let Some(active) = store.transitions.get(&node_id) {
+                        let from_val = if let Some(active) = store.transitions.get(&stable_id) {
                             if active.current_properties.$field.is_some() {
                                 active.current_properties.$field.clone()
                             } else {
@@ -539,7 +567,7 @@ impl RenderTree {
         if has_any && duration_ms > 0 {
             // If a transition already exists heading to the same target, let it continue
             // rather than restarting with a fresh duration each frame
-            if let Some(existing) = store.transitions.get(&node_id) {
+            if let Some(existing) = store.transitions.get(&stable_id) {
                 if let Some(last_kf) = existing.animation.last_keyframe() {
                     if last_kf.properties == to {
                         return; // Same target — let existing transition finish
@@ -553,7 +581,7 @@ impl RenderTree {
                 .fill_mode(FillMode::Forwards);
             store
                 .transitions
-                .insert(node_id, crate::render_state::ActiveCssAnimation::new(anim));
+                .insert(stable_id, crate::render_state::ActiveCssAnimation::new(anim));
         }
     }
 
@@ -561,16 +589,20 @@ impl RenderTree {
     ///
     /// The background thread ticks transitions; this reads the latest values and applies them.
     pub fn apply_all_css_transition_props(&mut self) {
-        // Collect transition data under the lock, then release before modifying render_nodes
-        let trans_data: Vec<(LayoutNodeId, blinc_animation::KeyframeProperties)> = {
+        // Collect transition data (stable-keyed) under the lock,
+        // then release before resolving back to layout ids.
+        let trans_data: Vec<(crate::tree::StableNodeId, blinc_animation::KeyframeProperties)> = {
             let store = self.css_anim_store.lock().unwrap();
             store
                 .transitions
                 .iter()
-                .map(|(nid, a)| (*nid, a.current_properties.clone()))
+                .map(|(sid, a)| (*sid, a.current_properties.clone()))
                 .collect()
         };
-        for (node_id, anim_props) in trans_data {
+        for (stable_id, anim_props) in trans_data {
+            let Some(node_id) = self.layout_id(stable_id) else {
+                continue;
+            };
             if let Some(render_node) = self.render_nodes.get_mut(&node_id) {
                 Self::apply_keyframe_props_to_render(&mut render_node.props, &anim_props);
             }

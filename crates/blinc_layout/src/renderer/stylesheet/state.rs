@@ -181,9 +181,21 @@ impl RenderTree {
     /// Returns `true` when there's at least one transition whose
     /// target node was painted in the most recent frame, i.e. the
     /// chain should keep firing for it.
+    ///
+    /// `painted` is the `LayoutNodeId` set the paint walker
+    /// produced; the store is keyed by `StableNodeId` (Phase 5),
+    /// so we translate via `layout_to_stable` before the
+    /// containment check.
     pub fn css_has_visible_transitions(&self, painted: &HashSet<LayoutNodeId>) -> bool {
+        let painted_stable: HashSet<crate::tree::StableNodeId> = painted
+            .iter()
+            .filter_map(|n| self.stable_id(*n))
+            .collect();
         let store = self.css_anim_store.lock().unwrap();
-        store.transitions.keys().any(|n| painted.contains(n))
+        store
+            .transitions
+            .keys()
+            .any(|s| painted_stable.contains(s))
     }
 
     /// Apply stylesheet state styles based on EventRouter state.
@@ -266,12 +278,12 @@ impl RenderTree {
                     .is_some();
                 if base_has_anim {
                     self.start_css_animation_for_element(node_id);
-                } else {
+                } else if let Some(stable) = self.stable_id(node_id) {
                     self.css_anim_store
                         .lock()
                         .unwrap()
                         .animations
-                        .remove(&node_id);
+                        .remove(&stable);
                 }
                 any_applied = true;
             }

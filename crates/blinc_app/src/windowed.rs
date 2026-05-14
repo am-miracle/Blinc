@@ -4867,10 +4867,15 @@ impl WindowedApp {
                             // that triggers another frame.
                             let _ = css_active; // keep tick side-effects, drop signal
                             let css_needs_redraw = ws.render_tree.as_ref().is_some_and(|t| {
+                                // CSS store keyed by `StableNodeId` (Phase 5);
+                                // FLIP / visual-animation visibility checks
+                                // still take `LayoutNodeId`, so we keep both.
+                                let painted_stable = t.painted_stable_ids();
                                 let painted = t.painted_node_ids();
                                 let store = t.css_anim_store();
                                 let store_guard = store.lock().unwrap();
-                                let store_visible = store_guard.has_visible_active(&painted);
+                                let store_visible =
+                                    store_guard.has_visible_active(&painted_stable);
                                 drop(store_guard);
                                 store_visible
                                     || t.css_has_visible_transitions(&painted)
@@ -4960,11 +4965,12 @@ impl WindowedApp {
                                     .render_tree
                                     .as_ref()
                                     .is_some_and(|t| {
+                                        let painted_stable = t.painted_stable_ids();
                                         let painted = t.painted_node_ids();
                                         let store = t.css_anim_store();
                                         let store_guard = store.lock().unwrap();
                                         let store_vsync =
-                                            store_guard.has_visible_vsync_class(&painted);
+                                            store_guard.has_visible_vsync_class(&painted_stable);
                                         drop(store_guard);
                                         store_vsync
                                             || t.has_active_visible_flip_animations(&painted)

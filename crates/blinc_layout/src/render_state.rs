@@ -308,12 +308,20 @@ impl ActiveCssAnimation {
 /// The background thread ticks all animations at 120fps via a tick callback.
 /// The main thread inserts/removes animations and reads `current_properties`
 /// to apply animated values to render props.
+///
+/// Keyed by `StableNodeId` (Phase 5 of the layout-id stability
+/// refactor — see `project_stable_node_id_design`). Animations
+/// survive rebuilds: a `Stateful` re-running its `on_state`, a
+/// route swap, or any other rebuild trigger overwrites the entry
+/// at the same stable id with fresh state. Previously
+/// `LayoutNodeId`-keyed, which forced animations to restart on
+/// every rebuild.
 #[derive(Default)]
 pub struct CssAnimationStore {
     /// Active CSS keyframe animations (from stylesheet `animation:` property)
-    pub animations: HashMap<LayoutNodeId, ActiveCssAnimation>,
+    pub animations: HashMap<crate::tree::StableNodeId, ActiveCssAnimation>,
     /// Active CSS transitions (from stylesheet `transition:` property)
-    pub transitions: HashMap<LayoutNodeId, ActiveCssAnimation>,
+    pub transitions: HashMap<crate::tree::StableNodeId, ActiveCssAnimation>,
 }
 
 impl CssAnimationStore {
@@ -333,7 +341,10 @@ impl CssAnimationStore {
     /// chain die when the user isn't looking at the moving parts;
     /// when they scroll back, `tick(dt_ms)` catches up by elapsed
     /// time so the visible state is still correct.
-    pub fn has_visible_active(&self, painted: &std::collections::HashSet<LayoutNodeId>) -> bool {
+    pub fn has_visible_active(
+        &self,
+        painted: &std::collections::HashSet<crate::tree::StableNodeId>,
+    ) -> bool {
         self.animations.keys().any(|n| painted.contains(n))
             || self.transitions.keys().any(|n| painted.contains(n))
     }
@@ -352,7 +363,7 @@ impl CssAnimationStore {
     /// tolerate the cap fine.
     pub fn has_visible_vsync_class(
         &self,
-        painted: &std::collections::HashSet<LayoutNodeId>,
+        painted: &std::collections::HashSet<crate::tree::StableNodeId>,
     ) -> bool {
         self.animations
             .iter()
