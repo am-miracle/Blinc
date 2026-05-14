@@ -790,6 +790,26 @@ impl AnimationScheduler {
             }
         }
 
+        // Mirror the bg-thread path: when work is still active, flip
+        // `needs_redraw` so the windowed runner's Phase 5
+        // `take_needs_redraw()` keeps re-arming the redraw chain.
+        // Without this, Main-mode loops sit in `ControlFlow::Wait`
+        // after the first paint — timelines / spring values /
+        // canvas-driven animations only advance on the next stray
+        // input event.
+        //
+        // Deliberately NOT OR'd with `continuous_redraw`: the
+        // bg-thread path includes it because the bg thread ticks
+        // autonomously and needs to signal main "render now". In
+        // Main mode the windowed runner reads
+        // `widgets::has_focused_text_input()` directly and paces
+        // cursor blinks via `wake_at(400ms)` (issue #28 follow-up);
+        // mirroring `continuous_redraw` here would defeat that
+        // pacing and pin focused-input idle at vsync (~30 % CPU).
+        if has_active {
+            self.needs_redraw.store(true, Ordering::Release);
+        }
+
         has_active
     }
 
