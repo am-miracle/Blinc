@@ -477,13 +477,17 @@ impl RenderTree {
     /// to `StableNodeId::ROOT` with a `tracing::warn!` if no mapping
     /// is registered.
     ///
-    /// Used by registry / dispatch sites that need to translate
-    /// non-optionally — every node in the live tree should have a
-    /// minted stable id by the time these run. A warning is
-    /// preferred over an unconditional panic so a stray out-of-walk
-    /// node doesn't take down the renderer; the fallback to ROOT
-    /// will collide with the actual root but the warn surfaces the
-    /// bug for diagnosis.
+    /// Used by **registration** sites — collect_render_props inserting
+    /// into handler_registry / css_anim_store / etc. — where every
+    /// live node should have a minted stable id (mint runs before
+    /// collect). A missing mapping there is a real bug worth
+    /// surfacing.
+    ///
+    /// Event **dispatch** sites should NOT use this — they routinely
+    /// see node ids that have just been removed by a rebuild
+    /// (stale hit-test result, pending queued event). Those should
+    /// use [`Self::stable_id`] (`Option`) and skip silently when
+    /// the node is gone.
     pub(crate) fn stable_id_or_warn(&self, layout: LayoutNodeId) -> crate::tree::StableNodeId {
         match self.layout_to_stable.get(&layout).copied() {
             Some(stable) => stable,

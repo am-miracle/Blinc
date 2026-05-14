@@ -245,10 +245,12 @@ impl RenderTree {
 
         let mut target: Option<LayoutNodeId> = None;
         for &node_id in &chain {
-            let stable_id = self.stable_id_or_warn(node_id);
             let has_handler = self
-                .handler_registry
-                .has_handler(stable_id, blinc_core::events::event_types::SCROLL);
+                .stable_id(node_id)
+                .is_some_and(|sid| {
+                    self.handler_registry
+                        .has_handler(sid, blinc_core::events::event_types::SCROLL)
+                });
             let has_registered_physics = self.scroll_physics.contains_key(&node_id);
             if has_handler || has_registered_physics {
                 target = Some(node_id);
@@ -303,7 +305,7 @@ impl RenderTree {
                 )
                 .with_mouse_pos(mouse_x, mouse_y)
                 .with_scroll_delta(dispatch_x, dispatch_y);
-                ctx.stable_id = self.stable_id_or_warn(node_id);
+                ctx.stable_id = self.stable_id(node_id).unwrap_or(crate::tree::StableNodeId::ROOT);
                 self.handler_registry.dispatch(&ctx);
                 self.last_scroll_target = Some((node_id, now_ms));
             }
@@ -351,10 +353,12 @@ impl RenderTree {
         // cursor's current scrollable gets the delta, with no chaining.
         let mut target: Option<LayoutNodeId> = None;
         for &node_id in &chain {
-            let stable_id = self.stable_id_or_warn(node_id);
             let has_handler = self
-                .handler_registry
-                .has_handler(stable_id, blinc_core::events::event_types::SCROLL);
+                .stable_id(node_id)
+                .is_some_and(|sid| {
+                    self.handler_registry
+                        .has_handler(sid, blinc_core::events::event_types::SCROLL)
+                });
             let has_registered_physics = self.scroll_physics.contains_key(&node_id);
             if has_handler || has_registered_physics {
                 target = Some(node_id);
@@ -403,7 +407,7 @@ impl RenderTree {
                 .with_mouse_pos(mouse_x, mouse_y)
                 .with_scroll_delta(dispatch_x, dispatch_y)
                 .with_scroll_time(scroll_time);
-                ctx.stable_id = self.stable_id_or_warn(node_id);
+                ctx.stable_id = self.stable_id(node_id).unwrap_or(crate::tree::StableNodeId::ROOT);
                 self.handler_registry.dispatch(&ctx);
                 self.last_scroll_target = Some((node_id, scroll_time));
             }
@@ -439,7 +443,9 @@ impl RenderTree {
         );
 
         for node_id in chain {
-            let stable_id = self.stable_id_or_warn(node_id);
+            let Some(stable_id) = self.stable_id(node_id) else {
+                continue;
+            };
             if !self.handler_registry.has_handler(stable_id, event_type) {
                 continue;
             }
