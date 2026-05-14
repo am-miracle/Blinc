@@ -43,6 +43,11 @@ impl RenderTree {
         // entries from stale ones.
         tree.build_generation = tree.build_generation.wrapping_add(1);
         tree.mint_stable_ids_walk();
+        // Stamp `stable_key` on layout-animation configs that didn't
+        // supply one. The deterministic auto-key makes the keyed
+        // animation-survival path the only path — see
+        // `project_stable_node_id_design` Phase 2.
+        tree.auto_fill_animation_stable_keys();
         tree
     }
 
@@ -64,6 +69,7 @@ impl RenderTree {
         tree.root = Some(tree.build_element(element));
         tree.build_generation = tree.build_generation.wrapping_add(1);
         tree.mint_stable_ids_walk();
+        tree.auto_fill_animation_stable_keys();
         tree
     }
 
@@ -105,6 +111,7 @@ impl RenderTree {
         // lookups see the new slotmap keys.
         self.build_generation = self.build_generation.wrapping_add(1);
         self.mint_stable_ids_walk();
+        self.auto_fill_animation_stable_keys();
 
         true
     }
@@ -170,6 +177,7 @@ impl RenderTree {
             // drop out of the maps and new nodes appear.
             self.build_generation = self.build_generation.wrapping_add(1);
             self.mint_stable_ids_walk();
+            self.auto_fill_animation_stable_keys();
             UpdateResult::ChildrenChanged
         } else if changes.layout {
             // Layout changed - update props and need relayout

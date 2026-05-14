@@ -521,6 +521,32 @@ impl RenderTree {
         }
     }
 
+    /// Fill in `stable_key` on `LayoutAnimationConfig` entries that
+    /// don't already have one, using the freshly-minted
+    /// `StableNodeId` for each node. Run right after
+    /// `mint_stable_ids_walk` so the existing keyed-survival path
+    /// (`previous_bounds_by_key` + `layout_animations_by_key`)
+    /// becomes the only path — animations whose user-supplied config
+    /// didn't bother with `stable_key` survive rebuilds for free
+    /// because the auto-key is deterministic across builds.
+    ///
+    /// Visual animations (`VisualAnimationConfig::key`) already
+    /// require a non-empty key, so no companion pass is needed
+    /// there.
+    pub(crate) fn auto_fill_animation_stable_keys(&mut self) {
+        // Clone the resolution map so we can mutate configs without a
+        // double borrow.
+        let layout_to_stable_snapshot = self.layout_to_stable.clone();
+        for (node_id, config) in self.layout_animation_configs.iter_mut() {
+            if config.stable_key.is_some() {
+                continue;
+            }
+            if let Some(stable) = layout_to_stable_snapshot.get(node_id) {
+                config.stable_key = Some(format!("auto:{}", stable.to_raw()));
+            }
+        }
+    }
+
     /// Insert into both mapping directions. Pulled out so the walk
     /// reads as a flat recursion without map-bookkeeping noise.
     fn register_stable(&mut self, stable: crate::tree::StableNodeId, layout: LayoutNodeId) {

@@ -338,6 +338,7 @@ impl RenderTree {
         if needs_layout {
             self.build_generation = self.build_generation.wrapping_add(1);
             self.mint_stable_ids_walk();
+            self.auto_fill_animation_stable_keys();
         }
 
         needs_layout
