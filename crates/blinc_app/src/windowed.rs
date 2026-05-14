@@ -3087,16 +3087,34 @@ impl WindowedApp {
                     // old DPI, and the surface (which winit may have invalidated during
                     // the monitor handoff) goes un-reconfigured — observed as a crash
                     // or wrong-sized render the first time the window crosses monitors.
+                    //
+                    // Guard against the no-op case: macOS fires `ScaleFactorChanged`
+                    // early in window setup to report the real backing scale (1.0 → 2.0
+                    // on a Retina display). When the reported factor matches what the
+                    // context already has, the rebuild this handler used to force was
+                    // pure waste — observed as "build_ui called twice on launch" on
+                    // cn_demo. Only fire the rebuild path when scale, physical dims,
+                    // or surface config actually changed.
                     Event::Window(_, WindowEvent::ScaleFactorChanged { scale_factor }) => {
-                        // Pull the new physical inner size from winit — it reflects what
-                        // the new monitor reports. The companion `Resized` event winit
-                        // fires alongside `ScaleFactorChanged` may arrive before or after
-                        // us, so don't rely on it to drive surface reconfig.
                         let (phys_w, phys_h) = window.size();
+                        let prev_scale = ws.ctx.as_ref().map(|c| c.scale_factor).unwrap_or(0.0);
+                        let prev_phys_w = ws.ctx.as_ref().map(|c| c.physical_width).unwrap_or(0.0);
+                        let prev_phys_h = ws.ctx.as_ref().map(|c| c.physical_height).unwrap_or(0.0);
+                        let scale_changed = (scale_factor - prev_scale).abs() > f64::EPSILON;
+                        let dims_changed = (phys_w as f32 - prev_phys_w).abs() > f32::EPSILON
+                            || (phys_h as f32 - prev_phys_h).abs() > f32::EPSILON;
+                        if !scale_changed && !dims_changed {
+                            // No-op event — common at startup on macOS Retina.
+                            return ControlFlow::Continue;
+                        }
+
                         if let (Some(ref blinc_app), Some(ref surf), Some(ref mut config)) =
                             (&ws.app, &ws.surface, &mut ws.surface_config)
                         {
-                            if phys_w > 0 && phys_h > 0 {
+                            if phys_w > 0
+                                && phys_h > 0
+                                && (config.width != phys_w || config.height != phys_h)
+                            {
                                 config.width = phys_w;
                                 config.height = phys_h;
                                 surf.configure(blinc_app.device(), config);
