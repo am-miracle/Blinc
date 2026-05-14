@@ -26,7 +26,7 @@ fn main() -> Result<()> {
         WindowConfig {
             title: "Blinc DSL — Counter".to_string(),
             width: 1200,
-            height: 640,
+            height: 800,
             resizable: true,
             ..Default::default()
         },
