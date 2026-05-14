@@ -149,8 +149,19 @@ impl RenderTree {
         // 3. Add the new child to the parent
         self.layout_tree.add_child(parent_id, new_child_id);
 
-        // 4. Collect render props for the new subtree
+        // 4. Mint stable ids over the updated tree BEFORE collect.
+        // Handler registration in collect_render_props (Phase 3)
+        // looks up `self.stable_id_or_warn(node_id)` — without this
+        // mint, the new subtree's nodes have no stable id yet and
+        // the warn fires per node.
+        self.build_generation = self.build_generation.wrapping_add(1);
+        self.mint_stable_ids_walk();
+
+        // 5. Collect render props for the new subtree, then run the
+        // standard post-build housekeeping.
         self.collect_render_props(new_child, new_child_id);
+        self.auto_fill_animation_stable_keys();
+        self.sweep_stale_handlers();
 
         new_child_id
     }
