@@ -5,12 +5,19 @@ use crate::host::{
     blinc_signal_set_string, blinc_string_concat, blinc_text, blinc_text_int,
 };
 use crate::widget_ffi::{
-    blinc_canvas_view, blinc_div_view, blinc_image_view, blinc_motion_view, blinc_new_child_list,
-    blinc_new_struct_value, blinc_new_style_overlay, blinc_notch_view, blinc_push_child,
-    blinc_rich_text_view, blinc_set_overlay_bg, blinc_set_overlay_border_color,
+    blinc_b_view, blinc_blockquote_view, blinc_button_view, blinc_canvas_view, blinc_caption_view,
+    blinc_cell_view, blinc_checkbox_view, blinc_code_view, blinc_div_view, blinc_h1_view,
+    blinc_h2_view, blinc_h3_view, blinc_h4_view, blinc_h5_view, blinc_h6_view, blinc_hr_view,
+    blinc_image_view, blinc_inline_code_view, blinc_label_view, blinc_li_view, blinc_link_view,
+    blinc_motion_view, blinc_muted_view, blinc_new_child_list, blinc_new_struct_value,
+    blinc_new_style_overlay, blinc_notch_view, blinc_ol_view, blinc_p_view, blinc_pre_view,
+    blinc_push_child, blinc_rich_text_view, blinc_set_overlay_bg, blinc_set_overlay_border_color,
     blinc_set_overlay_border_width, blinc_set_overlay_corner_radius, blinc_set_overlay_opacity,
     blinc_set_struct_f64, blinc_set_struct_handle, blinc_set_struct_i32, blinc_set_struct_i64,
-    blinc_set_struct_string, blinc_stack_view, blinc_svg_view, blinc_text_view,
+    blinc_set_struct_string, blinc_small_view, blinc_span_view, blinc_stack_view,
+    blinc_strong_view, blinc_svg_view, blinc_table_view, blinc_task_item_view, blinc_tbody_view,
+    blinc_td_view, blinc_text_area_view, blinc_text_input_view, blinc_text_view, blinc_tfoot_view,
+    blinc_th_view, blinc_thead_view, blinc_tr_view, blinc_ul_view,
 };
 
 /// Pairs a DSL-visible symbol name with an `extern "C"` fn pointer and signature.
@@ -133,6 +140,156 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_string_concat as *const u8,
         },
         BuiltinDescriptor {
+            name: "$Blinc$H1$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_h1_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$H2$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_h2_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$H3$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_h3_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$H4$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_h4_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$H5$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_h5_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$H6$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_h6_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$P$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_p_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Span$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_span_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Small$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_small_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Label$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_label_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Muted$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_muted_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Strong$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_strong_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$B$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_b_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Caption$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_caption_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$InlineCode$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_inline_code_view as *const u8,
+        },
+        BuiltinDescriptor {
             // `Text("hi")` → leaked `WidgetBox::Text(...)` as i64.
             name: "$Blinc$Text$view",
             param_types: &[
@@ -144,7 +301,7 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_text_view as *const u8,
         },
         BuiltinDescriptor {
-            // `Div(children, style, class, on_click)`. `class` = whitespace-sep names,
+            // `Div(children, style, class, on_click, overflow_scroll)`. `class` = whitespace-sep names,
             // `on_click` = raw fn ptr as i64 (0 = none).
             name: "$Blinc$Div$view",
             param_types: &[
@@ -152,6 +309,7 @@ fn builtins() -> Vec<BuiltinDescriptor> {
                 Type::Primitive(PrimitiveType::I64),
                 Type::Primitive(PrimitiveType::String),
                 Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I32),
             ],
             return_type: Type::Primitive(PrimitiveType::I64),
             ptr: blinc_div_view as *const u8,
@@ -216,6 +374,213 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ],
             return_type: Type::Primitive(PrimitiveType::I64),
             ptr: blinc_notch_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Hr$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_hr_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Blockquote$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_blockquote_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Link$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_link_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Ul$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_ul_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Ol$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I32),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_ol_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Li$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_li_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$TaskItem$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I32),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_task_item_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Table$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_table_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Thead$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_thead_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Tbody$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_tbody_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Tfoot$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_tfoot_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Tr$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_tr_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Th$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_th_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Td$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_td_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Cell$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_cell_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Button$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_button_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Checkbox$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I32),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_checkbox_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$TextInput$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_text_input_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$TextArea$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I32),
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::String),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_text_area_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Code$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I32),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_code_view as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "$Blinc$Pre$view",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_pre_view as *const u8,
         },
         BuiltinDescriptor {
             // `__new_child_list__()` — mint `Vec<WidgetHandle>`, populated by `__push_child__`.

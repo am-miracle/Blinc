@@ -88,6 +88,12 @@ impl Blockquote {
         self
     }
 
+    /// Add a boxed child element to the blockquote content area.
+    pub fn child_box(mut self, child: Box<dyn ElementBuilder>) -> Self {
+        self.inner = self.inner.child_box(child);
+        self
+    }
+
     /// Set the element ID for CSS selector targeting
     pub fn id(mut self, id: &str) -> Self {
         self.css_element_id = Some(id.to_string());

@@ -222,6 +222,12 @@ impl TableCell {
         self
     }
 
+    /// Add a boxed child element to this cell.
+    pub fn child_box(mut self, child: Box<dyn crate::div::ElementBuilder>) -> Self {
+        self.inner = self.inner.child_box(child);
+        self
+    }
+
     /// Set cell width in pixels
     pub fn w(mut self, px: f32) -> Self {
         self.inner = self.inner.w(px).flex_shrink_0();

@@ -1583,8 +1583,8 @@ fn parse_primitive_call_with_body_lowers_to_children_block_expansion() {
     );
     assert_eq!(
         div_call.positional_args.len(),
-        4,
-        "Div takes (children, __style, class, on_click)"
+        5,
+        "Div takes (children, __style, class, on_click, overflow_scroll)"
     );
     let TypedExpression::Variable(div_list_arg) = &div_call.positional_args[0].node else {
         panic!("Div arg 0 should be the list ident Variable");
@@ -4520,49 +4520,229 @@ fn jit_view_renderer_div_nested_div_composes() {
 #[test]
 fn core_layout_widgets_compile_and_return_element_builders() {
     let _ = tracing_subscriber::fmt::try_init();
+    let _ = blinc_theme::ThemeState::try_get().unwrap_or_else(|| {
+        blinc_theme::ThemeState::init_default();
+        blinc_theme::ThemeState::get()
+    });
 
     let cases = [
         (
             "Stack",
             r#"view { Stack() { Text("layer") } }"#,
             blinc_layout::div::ElementTypeId::Div,
-            1,
+            Some(1),
         ),
         (
             "Image",
             r#"view { Image("asset.png") }"#,
             blinc_layout::div::ElementTypeId::Image,
-            0,
+            Some(0),
         ),
         (
             "Svg",
             r#"view { Svg("<svg></svg>") }"#,
             blinc_layout::div::ElementTypeId::Svg,
-            0,
+            Some(0),
         ),
         (
             "Canvas",
             r#"view { Canvas() }"#,
             blinc_layout::div::ElementTypeId::Canvas,
-            0,
+            Some(0),
         ),
         (
             "RichText",
             r#"view { RichText("Hello <b>World</b>") }"#,
             blinc_layout::div::ElementTypeId::StyledText,
-            0,
+            Some(0),
         ),
         (
             "Motion",
             r#"view { Motion() { Text("moving") } }"#,
             blinc_layout::div::ElementTypeId::Motion,
-            1,
+            Some(1),
         ),
         (
             "Notch",
             r#"view { Notch() { Text("notched") } }"#,
             blinc_layout::div::ElementTypeId::Div,
-            1,
+            Some(1),
+        ),
+        (
+            "H1",
+            r#"view { H1(content="Title") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "H2",
+            r#"view { H2(content="Section") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "H3",
+            r#"view { H3(content="Subsection") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "H4",
+            r#"view { H4(content="Group") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "H5",
+            r#"view { H5(content="Minor") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "H6",
+            r#"view { H6(content="Tiny") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "P",
+            r#"view { P(content="Paragraph") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "Span",
+            r#"view { Span(content="inline") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "Small",
+            r#"view { Small(content="fine print") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "Label",
+            r#"view { Label(content="Name") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "Muted",
+            r#"view { Muted(content="subtle") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "Strong",
+            r#"view { Strong(content="important") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "B",
+            r#"view { B(content="bold") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "Caption",
+            r#"view { Caption(content="caption") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "InlineCode",
+            r#"view { InlineCode(content="let x = 1") }"#,
+            blinc_layout::div::ElementTypeId::Text,
+            Some(0),
+        ),
+        (
+            "Hr",
+            r#"view { Hr() }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            Some(1),
+        ),
+        (
+            "Blockquote",
+            r#"view { Blockquote() { P(content="quoted") } }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            Some(1),
+        ),
+        (
+            "Link",
+            r#"view { Link(label="Docs", url="example") }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            Some(1),
+        ),
+        (
+            "Ul",
+            r#"view { Ul() { Li() { Text("one") } } }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            Some(1),
+        ),
+        (
+            "Ol",
+            r#"view { Ol(start = 3) { Li() { Text("three") } } }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            Some(1),
+        ),
+        (
+            "TaskItem",
+            r#"view { TaskItem(checked = 1) { Text("done") } }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            Some(2),
+        ),
+        (
+            "Table",
+            r#"
+                view {
+                    Table {
+                        Thead { Tr { Th(content="Name") } }
+                        Tbody { Tr { Td(content="Ada") } }
+                        Tfoot { Tr { Cell { Text("Total") } } }
+                    }
+                }
+            "#,
+            blinc_layout::div::ElementTypeId::Div,
+            Some(3),
+        ),
+        (
+            "Button",
+            r#"view { Button(label="Save") }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            None,
+        ),
+        (
+            "Checkbox",
+            r#"view { Checkbox(label="Done", checked=1) }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            None,
+        ),
+        (
+            "TextInput",
+            r#"view { TextInput(placeholder="Name") }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            None,
+        ),
+        (
+            "TextArea",
+            r#"view { TextArea(placeholder="Notes", rows=4) }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            None,
+        ),
+        (
+            "Code",
+            r#"view { Code(content="let x = 1", line_numbers=1) }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            None,
+        ),
+        (
+            "Pre",
+            r#"view { Pre(content="plain text") }"#,
+            blinc_layout::div::ElementTypeId::Div,
+            None,
         ),
     ];
 
@@ -4587,11 +4767,13 @@ fn core_layout_widgets_compile_and_return_element_builders() {
             expected_type,
             "{name} should report the expected element type"
         );
-        assert_eq!(
-            builder.children_builders().len(),
-            expected_children,
-            "{name} should preserve child handles"
-        );
+        if let Some(expected_children) = expected_children {
+            assert_eq!(
+                builder.children_builders().len(),
+                expected_children,
+                "{name} should preserve child handles"
+            );
+        }
     }
 }
 
@@ -4628,6 +4810,31 @@ fn div_with_inline_styling_args_applies_overlay() {
     } else {
         panic!("background should be a solid brush");
     }
+}
+
+#[test]
+fn div_overflow_scroll_prop_enables_scroll_physics() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"view { Div(overflow_scroll = 1) { Text("scroll me") } }"#,
+        "div_overflow_scroll.blinc",
+    )
+    .expect("compile");
+
+    let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+    let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+    let ZyntaxValue::Int(handle) = value else {
+        panic!("expected widget handle, got: {value:?}");
+    };
+
+    let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+    let builder = widget.into_element_builder();
+    assert!(
+        builder.scroll_physics().is_some(),
+        "overflow_scroll should route through Div::overflow_scroll"
+    );
 }
 
 #[test]

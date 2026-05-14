@@ -336,6 +336,35 @@ fn decoded_class_names(class_str: *const i32) -> Vec<String> {
         .collect()
 }
 
+fn ensure_theme_state() {
+    let _ = blinc_theme::ThemeState::try_get().unwrap_or_else(|| {
+        blinc_theme::ThemeState::init_default();
+        blinc_theme::ThemeState::get()
+    });
+}
+
+fn ensure_context_state() {
+    if blinc_core::BlincContextState::try_get().is_some() {
+        return;
+    }
+
+    let reactive = std::sync::Arc::new(std::sync::Mutex::new(
+        blinc_core::reactive::ReactiveGraph::new(),
+    ));
+    let hooks = std::sync::Arc::new(std::sync::Mutex::new(blinc_core::HookState::new()));
+    let dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    blinc_core::BlincContextState::init(reactive, hooks, dirty);
+}
+
+fn dsl_state_key(kind: &str, label: &str) -> String {
+    let mut key = String::with_capacity(kind.len() + label.len() + 16);
+    key.push_str("blinc-dsl:");
+    key.push_str(kind);
+    key.push(':');
+    key.push_str(label);
+    key
+}
+
 pub(crate) extern "C" fn blinc_new_struct_value() -> i64 {
     Box::into_raw(Box::new(BlincStructValue::default())) as i64
 }
@@ -405,6 +434,74 @@ fn leak_custom(widget: impl blinc_layout::div::ElementBuilder + 'static) -> Widg
     Box::into_raw(Box::new(WidgetBox::Custom(Box::new(widget)))) as WidgetHandle
 }
 
+fn finish_text_widget(
+    mut widget: blinc_layout::text::Text,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    for name in decoded_class_names(class_str) {
+        widget = widget.class(name);
+    }
+    if style == 0 {
+        Box::into_raw(Box::new(WidgetBox::Text(Box::new(widget)))) as WidgetHandle
+    } else {
+        let overlay = unsafe { materialize_overlay(style) };
+        leak_custom(Styled::new(widget, overlay))
+    }
+}
+
+fn finish_div_widget(
+    mut widget: blinc_layout::div::Div,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    for name in decoded_class_names(class_str) {
+        widget = widget.class(name);
+    }
+    let overlay = unsafe { materialize_overlay(style) };
+    leak_custom(Styled::new(widget, overlay))
+}
+
+fn finish_custom_widget(
+    widget: impl blinc_layout::div::ElementBuilder + 'static,
+    style: i64,
+) -> WidgetHandle {
+    let overlay = unsafe { materialize_overlay(style) };
+    leak_custom(Styled::new(widget, overlay))
+}
+
+macro_rules! typography_view {
+    ($fn_name:ident, $builder:path) => {
+        pub(crate) extern "C" fn $fn_name(
+            content_ptr: *const i32,
+            style: i64,
+            class_str: *const i32,
+        ) -> WidgetHandle {
+            let content = decode_string_arg(content_ptr);
+            finish_text_widget($builder(content), style, class_str)
+        }
+    };
+}
+
+typography_view!(blinc_h1_view, blinc_layout::typography::h1);
+typography_view!(blinc_h2_view, blinc_layout::typography::h2);
+typography_view!(blinc_h3_view, blinc_layout::typography::h3);
+typography_view!(blinc_h4_view, blinc_layout::typography::h4);
+typography_view!(blinc_h5_view, blinc_layout::typography::h5);
+typography_view!(blinc_h6_view, blinc_layout::typography::h6);
+typography_view!(blinc_p_view, blinc_layout::typography::p);
+typography_view!(blinc_span_view, blinc_layout::typography::span);
+typography_view!(blinc_small_view, blinc_layout::typography::small);
+typography_view!(blinc_label_view, blinc_layout::typography::label);
+typography_view!(blinc_muted_view, blinc_layout::typography::muted);
+typography_view!(blinc_strong_view, blinc_layout::typography::strong);
+typography_view!(blinc_b_view, blinc_layout::typography::b);
+typography_view!(blinc_caption_view, blinc_layout::typography::caption);
+typography_view!(
+    blinc_inline_code_view,
+    blinc_layout::typography::inline_code
+);
+
 /// `$Blinc$Text$view(content, style, class) -> WidgetHandle`
 ///
 /// # Safety
@@ -421,16 +518,256 @@ pub(crate) extern "C" fn blinc_text_view(
     }
     // SAFETY: see fn-level doc.
     let content = unsafe { blinc_string_decode(content_ptr) };
-    let mut widget = blinc_layout::text::Text::new(content);
+    finish_text_widget(blinc_layout::text::Text::new(content), style, class_str)
+}
+
+pub(crate) extern "C" fn blinc_hr_view(style: i64, class_str: *const i32) -> WidgetHandle {
+    finish_div_widget(blinc_layout::widgets::hr(), style, class_str)
+}
+
+pub(crate) extern "C" fn blinc_blockquote_view(
+    children: WidgetHandle,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    let mut widget = blinc_layout::widgets::blockquote();
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
     for name in decoded_class_names(class_str) {
-        widget = widget.class(name);
+        widget = widget.class(&name);
     }
-    if style == 0 {
-        Box::into_raw(Box::new(WidgetBox::Text(Box::new(widget)))) as WidgetHandle
-    } else {
-        let overlay = unsafe { materialize_overlay(style) };
-        leak_custom(Styled::new(widget, overlay))
+    finish_custom_widget(widget, style)
+}
+
+pub(crate) extern "C" fn blinc_link_view(
+    label_ptr: *const i32,
+    url_ptr: *const i32,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    let label = decode_string_arg(label_ptr);
+    let url = decode_string_arg(url_ptr);
+    let mut widget = blinc_layout::widgets::link(label, url);
+    for name in decoded_class_names(class_str) {
+        widget = widget.class(&name);
     }
+    finish_custom_widget(widget, style)
+}
+
+pub(crate) extern "C" fn blinc_ul_view(
+    children: WidgetHandle,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    let mut widget = blinc_layout::widgets::ul();
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
+    for name in decoded_class_names(class_str) {
+        widget = widget.class(&name);
+    }
+    finish_custom_widget(widget, style)
+}
+
+pub(crate) extern "C" fn blinc_ol_view(
+    children: WidgetHandle,
+    start: i32,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    let mut widget = blinc_layout::widgets::ol_start(start.max(1) as usize);
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
+    for name in decoded_class_names(class_str) {
+        widget = widget.class(&name);
+    }
+    finish_custom_widget(widget, style)
+}
+
+pub(crate) extern "C" fn blinc_li_view(children: WidgetHandle, style: i64) -> WidgetHandle {
+    let mut widget = blinc_layout::widgets::li();
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
+    finish_custom_widget(widget, style)
+}
+
+pub(crate) extern "C" fn blinc_task_item_view(
+    children: WidgetHandle,
+    checked: i32,
+    style: i64,
+) -> WidgetHandle {
+    let mut widget = blinc_layout::widgets::task_item(checked != 0);
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
+    finish_custom_widget(widget, style)
+}
+
+pub(crate) extern "C" fn blinc_table_view(
+    children: WidgetHandle,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    let mut widget = blinc_layout::widgets::table();
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
+    finish_div_widget(widget, style, class_str)
+}
+
+pub(crate) extern "C" fn blinc_thead_view(
+    children: WidgetHandle,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    let mut widget = blinc_layout::widgets::thead();
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
+    finish_div_widget(widget, style, class_str)
+}
+
+pub(crate) extern "C" fn blinc_tbody_view(
+    children: WidgetHandle,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    let mut widget = blinc_layout::widgets::tbody();
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
+    finish_div_widget(widget, style, class_str)
+}
+
+pub(crate) extern "C" fn blinc_tfoot_view(
+    children: WidgetHandle,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    let mut widget = blinc_layout::widgets::tfoot();
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
+    finish_div_widget(widget, style, class_str)
+}
+
+pub(crate) extern "C" fn blinc_tr_view(
+    children: WidgetHandle,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    let mut widget = blinc_layout::widgets::tr();
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
+    finish_div_widget(widget, style, class_str)
+}
+
+pub(crate) extern "C" fn blinc_th_view(content_ptr: *const i32, style: i64) -> WidgetHandle {
+    let content = decode_string_arg(content_ptr);
+    finish_custom_widget(blinc_layout::widgets::th(content), style)
+}
+
+pub(crate) extern "C" fn blinc_td_view(content_ptr: *const i32, style: i64) -> WidgetHandle {
+    let content = decode_string_arg(content_ptr);
+    finish_custom_widget(blinc_layout::widgets::td(content), style)
+}
+
+pub(crate) extern "C" fn blinc_cell_view(children: WidgetHandle, style: i64) -> WidgetHandle {
+    let mut widget = blinc_layout::widgets::cell();
+    for child in materialize_children(children) {
+        widget = widget.child_box(child);
+    }
+    finish_custom_widget(widget, style)
+}
+
+pub(crate) extern "C" fn blinc_button_view(
+    label_ptr: *const i32,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    ensure_theme_state();
+    ensure_context_state();
+    let label = decode_string_arg(label_ptr);
+    let key = dsl_state_key("button", &label);
+    let state = blinc_layout::use_shared_state_with::<blinc_layout::stateful::ButtonState>(
+        &key,
+        blinc_layout::stateful::ButtonState::Idle,
+    );
+    let mut widget = blinc_layout::widgets::button(state, label);
+    for name in decoded_class_names(class_str) {
+        widget = widget.class(&name);
+    }
+    finish_custom_widget(widget, style)
+}
+
+pub(crate) extern "C" fn blinc_checkbox_view(
+    label_ptr: *const i32,
+    checked: i32,
+    style: i64,
+) -> WidgetHandle {
+    ensure_theme_state();
+    ensure_context_state();
+    let label = decode_string_arg(label_ptr);
+    let key = dsl_state_key("checkbox", &label);
+    let state = blinc_core::use_state_keyed(&key, || checked != 0);
+    let widget = blinc_layout::widgets::checkbox_labeled(&state, label);
+    finish_custom_widget(widget, style)
+}
+
+pub(crate) extern "C" fn blinc_text_input_view(
+    placeholder_ptr: *const i32,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    ensure_theme_state();
+    let placeholder = decode_string_arg(placeholder_ptr);
+    let state = blinc_layout::widgets::text_input_state_with_placeholder(placeholder.clone());
+    let mut widget = blinc_layout::widgets::text_input(&state).placeholder(placeholder);
+    for name in decoded_class_names(class_str) {
+        widget = widget.class(&name);
+    }
+    finish_custom_widget(widget, style)
+}
+
+pub(crate) extern "C" fn blinc_text_area_view(
+    placeholder_ptr: *const i32,
+    rows: i32,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
+    ensure_theme_state();
+    let placeholder = decode_string_arg(placeholder_ptr);
+    let state = blinc_layout::widgets::text_area_state_with_placeholder(placeholder.clone());
+    let mut widget = blinc_layout::widgets::text_area(&state)
+        .placeholder(placeholder)
+        .rows(rows.max(1) as usize);
+    for name in decoded_class_names(class_str) {
+        widget = widget.class(&name);
+    }
+    finish_custom_widget(widget, style)
+}
+
+pub(crate) extern "C" fn blinc_code_view(
+    content_ptr: *const i32,
+    line_numbers: i32,
+    style: i64,
+) -> WidgetHandle {
+    ensure_theme_state();
+    let content = decode_string_arg(content_ptr);
+    finish_custom_widget(
+        blinc_layout::widgets::code(content).line_numbers(line_numbers != 0),
+        style,
+    )
+}
+
+pub(crate) extern "C" fn blinc_pre_view(content_ptr: *const i32, style: i64) -> WidgetHandle {
+    ensure_theme_state();
+    let content = decode_string_arg(content_ptr);
+    finish_custom_widget(blinc_layout::widgets::pre(content), style)
 }
 
 /// `$Blinc$Div$view(children, style, class_str, on_click) -> WidgetHandle`.
@@ -440,6 +777,7 @@ pub(crate) extern "C" fn blinc_div_view(
     style: i64,
     class_str: *const i32,
     on_click_closure: i64,
+    overflow_scroll: i32,
 ) -> WidgetHandle {
     let mut widget = blinc_layout::div::Div::new();
     for child in materialize_children(children) {
@@ -458,6 +796,9 @@ pub(crate) extern "C" fn blinc_div_view(
         widget = widget.cursor_pointer().on_click(move |_ctx| {
             func();
         });
+    }
+    if overflow_scroll != 0 {
+        widget = widget.overflow_scroll();
     }
     let overlay = unsafe { materialize_overlay(style) };
     leak_custom(Styled::new(widget, overlay))

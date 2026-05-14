@@ -96,6 +96,14 @@ pub(crate) fn register_blinc_layout_primitives() {
     };
     let style_prop = || prop("__style", i64_ty.clone());
     let class_prop = || prop("class", string_ty.clone());
+    let text_props = || {
+        vec![
+            prop("content", string_ty.clone()),
+            style_prop(),
+            class_prop(),
+        ]
+    };
+    let child_props = || vec![prop("children", i64_ty.clone()), style_prop(), class_prop()];
 
     // `Div { ..children }` — container. `children` and `__style` cross as `i64` payloads.
     let div = ComponentDefinition {
@@ -107,6 +115,8 @@ pub(crate) fn register_blinc_layout_primitives() {
             class_prop(),
             // `on_click = || { … }` — Zyntax closure value as `i64`.
             prop("on_click", i64_ty.clone()),
+            // `overflow_scroll = 1` — use Div's built-in scroll physics.
+            prop("overflow_scroll", Type::Primitive(PrimitiveType::I32)),
         ],
     };
 
@@ -170,6 +180,29 @@ pub(crate) fn register_blinc_layout_primitives() {
     blinc_runtime::component::with_component_registry_mut(|r| {
         r.register(div);
         r.register(text_widget);
+        for name in [
+            "H1",
+            "H2",
+            "H3",
+            "H4",
+            "H5",
+            "H6",
+            "P",
+            "Span",
+            "Small",
+            "Label",
+            "Muted",
+            "Strong",
+            "B",
+            "Caption",
+            "InlineCode",
+        ] {
+            r.register(ComponentDefinition {
+                name: std::sync::Arc::from(name),
+                view_symbol: std::sync::Arc::from(format!("$Blinc${name}$view").as_str()),
+                props: text_props(),
+            });
+        }
         r.register(stack);
         r.register(image);
         r.register(svg);
@@ -177,6 +210,124 @@ pub(crate) fn register_blinc_layout_primitives() {
         r.register(rich_text);
         r.register(motion);
         r.register(notch);
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("Hr"),
+            view_symbol: std::sync::Arc::from("$Blinc$Hr$view"),
+            props: vec![style_prop(), class_prop()],
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("Blockquote"),
+            view_symbol: std::sync::Arc::from("$Blinc$Blockquote$view"),
+            props: child_props(),
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("Link"),
+            view_symbol: std::sync::Arc::from("$Blinc$Link$view"),
+            props: vec![
+                prop("label", string_ty.clone()),
+                prop("url", string_ty.clone()),
+                style_prop(),
+                class_prop(),
+            ],
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("Ul"),
+            view_symbol: std::sync::Arc::from("$Blinc$Ul$view"),
+            props: child_props(),
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("Ol"),
+            view_symbol: std::sync::Arc::from("$Blinc$Ol$view"),
+            props: vec![
+                prop("children", i64_ty.clone()),
+                prop("start", Type::Primitive(PrimitiveType::I32)),
+                style_prop(),
+                class_prop(),
+            ],
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("Li"),
+            view_symbol: std::sync::Arc::from("$Blinc$Li$view"),
+            props: vec![prop("children", i64_ty.clone()), style_prop()],
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("TaskItem"),
+            view_symbol: std::sync::Arc::from("$Blinc$TaskItem$view"),
+            props: vec![
+                prop("children", i64_ty.clone()),
+                prop("checked", Type::Primitive(PrimitiveType::I32)),
+                style_prop(),
+            ],
+        });
+        for name in ["Table", "Thead", "Tbody", "Tfoot", "Tr"] {
+            r.register(ComponentDefinition {
+                name: std::sync::Arc::from(name),
+                view_symbol: std::sync::Arc::from(format!("$Blinc${name}$view").as_str()),
+                props: child_props(),
+            });
+        }
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("Th"),
+            view_symbol: std::sync::Arc::from("$Blinc$Th$view"),
+            props: vec![prop("content", string_ty.clone()), style_prop()],
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("Td"),
+            view_symbol: std::sync::Arc::from("$Blinc$Td$view"),
+            props: vec![prop("content", string_ty.clone()), style_prop()],
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("Cell"),
+            view_symbol: std::sync::Arc::from("$Blinc$Cell$view"),
+            props: vec![prop("children", i64_ty.clone()), style_prop()],
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("Button"),
+            view_symbol: std::sync::Arc::from("$Blinc$Button$view"),
+            props: vec![prop("label", string_ty.clone()), style_prop(), class_prop()],
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("Checkbox"),
+            view_symbol: std::sync::Arc::from("$Blinc$Checkbox$view"),
+            props: vec![
+                prop("label", string_ty.clone()),
+                prop("checked", Type::Primitive(PrimitiveType::I32)),
+                style_prop(),
+            ],
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("TextInput"),
+            view_symbol: std::sync::Arc::from("$Blinc$TextInput$view"),
+            props: vec![
+                prop("placeholder", string_ty.clone()),
+                style_prop(),
+                class_prop(),
+            ],
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("TextArea"),
+            view_symbol: std::sync::Arc::from("$Blinc$TextArea$view"),
+            props: vec![
+                prop("placeholder", string_ty.clone()),
+                prop("rows", Type::Primitive(PrimitiveType::I32)),
+                style_prop(),
+                class_prop(),
+            ],
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("Code"),
+            view_symbol: std::sync::Arc::from("$Blinc$Code$view"),
+            props: vec![
+                prop("content", string_ty.clone()),
+                prop("line_numbers", Type::Primitive(PrimitiveType::I32)),
+                style_prop(),
+            ],
+        });
+        r.register(ComponentDefinition {
+            name: std::sync::Arc::from("Pre"),
+            view_symbol: std::sync::Arc::from("$Blinc$Pre$view"),
+            props: vec![prop("content", string_ty.clone()), style_prop()],
+        });
     });
 
     let _ = InternedString::new_global("__blinc_layout_primitives_marker__");

@@ -1431,7 +1431,8 @@ lambda_expr = { "||" ~ "{" ~ stmts:statement* ~ "}" }
       body: TypedExpression::Block { statements: stmts },
   }
 
-// Component call: `Counter(arg)`, `Counter(1, step = 2)`. The
+// Component call: `Counter(arg)`, `Counter(1, step = 2)`, or
+// zero-arg body sugar `Counter { Child() }`. The
 // capital-first `component_name` terminal is what distinguishes
 // a component call from a bare variable reference (which is what
 // `variable_expr` would otherwise match). This mirrors the React /
@@ -1450,7 +1451,9 @@ lambda_expr = { "||" ~ "{" ~ stmts:statement* ~ "}" }
 // without needing to consult the type registry mid-parse. Mirrors
 // the `__fsm_*` and `__view_deps__` marker pattern already used
 // elsewhere in this grammar.
-component_call_expr = { name:component_name ~ "(" ~ args:component_args_list? ~ ")" ~ body:component_body? }
+component_call_expr = { component_call_with_args | component_call_body_only }
+
+component_call_with_args = { name:component_name ~ "(" ~ args:component_args_list? ~ ")" ~ body:component_body? }
   -> TypedExpression::Call {
       callee: Box::new(TypedExpression::Variable { name: intern("__component_call__") }),
       args: prepend_list(
@@ -1459,6 +1462,15 @@ component_call_expr = { name:component_name ~ "(" ~ args:component_args_list? ~ 
               args.unwrap_or([]),
               body.unwrap_or([]),
           ),
+      ),
+  }
+
+component_call_body_only = { name:component_name ~ body:component_body }
+  -> TypedExpression::Call {
+      callee: Box::new(TypedExpression::Variable { name: intern("__component_call__") }),
+      args: prepend_list(
+          TypedExpression::StringLiteral { value: name },
+          body,
       ),
   }
 
