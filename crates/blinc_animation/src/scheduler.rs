@@ -1555,23 +1555,7 @@ impl AnimatedValue {
         }
     }
 
-    /// Set value immediately without animation.
-    ///
-    /// Updates `current` (and `target`) in place — the next read via
-    /// `get()` returns the new value. Removes any active spring so
-    /// the scheduler isn't fighting the direct update.
-    ///
-    /// Also requests a redraw so consumers binding this value
-    /// (motion containers, layout offsets, etc.) actually paint the
-    /// new value on the next frame. Without the redraw nudge,
-    /// callers driving the value from a non-state-mutating event
-    /// (e.g. `on_mouse_move` in a pull-to-refresh handler that uses
-    /// `set_immediate` per pixel) would update the value but get no
-    /// repaint — bare-mouse-move events don't flip `frame_dirty`,
-    /// and the post-dispatch redraw gate only checks
-    /// `peek_needs_redraw()` / pending subtree rebuilds, both of
-    /// which `set_immediate` leaves alone. Result: jank visible as
-    /// "drag is laggy / value catches up later".
+    /// Set value immediately without animation
     pub fn set_immediate(&mut self, value: f32) {
         // Remove any active spring
         if let Some(id) = self.spring_id.take() {
@@ -1579,12 +1563,6 @@ impl AnimatedValue {
         }
         self.current = value;
         self.target = value;
-        // Request a redraw so the new value is actually painted.
-        // `request_redraw` flips the scheduler's `needs_redraw` flag
-        // and calls the wake callback (which the windowed runner uses
-        // to flip `frame_dirty` + `wake_proxy.wake()`), guaranteeing
-        // the next `Event::Frame` actually re-renders.
-        self.handle.request_redraw();
     }
 
     /// Pause the spring — freezes at current position, step() is no-op

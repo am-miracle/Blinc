@@ -201,10 +201,10 @@ impl RenderTree {
             self.register_visual_animation_config(node_id, config);
         }
 
-        // Register element ID if present (for selector API)
-        if let Some(id) = element.element_id() {
-            self.element_registry.register(id, node_id);
-        }
+        // Element IDs are pre-registered by `register_element_ids_walk`
+        // before mint runs, so mint reads consistent `widget_key`s on
+        // every pass. Re-registering here would just trip the duplicate
+        // warning — skip.
 
         // Register CSS classes for complex selector matching
         let classes = element.element_classes();
@@ -429,10 +429,10 @@ impl RenderTree {
             self.register_visual_animation_config(node_id, config);
         }
 
-        // Register element ID if present (for selector API)
-        if let Some(id) = element.element_id() {
-            self.element_registry.register(id, node_id);
-        }
+        // Element IDs are pre-registered by `register_element_ids_walk`
+        // before mint runs, so mint reads consistent `widget_key`s on
+        // every pass. Re-registering here would just trip the duplicate
+        // warning — skip.
 
         // Register CSS classes for complex selector matching
         let classes = element.element_classes();
@@ -723,10 +723,10 @@ impl RenderTree {
             self.register_visual_animation_config(node_id, config);
         }
 
-        // Register element ID if present (for selector API)
-        if let Some(id) = element.element_id() {
-            self.element_registry.register(id, node_id);
-        }
+        // Element IDs are pre-registered by `register_element_ids_walk`
+        // before mint runs, so mint reads consistent `widget_key`s on
+        // every pass. Re-registering here would just trip the duplicate
+        // warning — skip.
 
         // Register CSS classes for complex selector matching
         let classes = element.element_classes();
