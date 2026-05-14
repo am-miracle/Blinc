@@ -111,12 +111,12 @@ impl RenderTree {
         pinch_scale: f32,
     ) {
         // Stale hit-test: bail if the node was removed by a recent
-        // rebuild. Trace at info level so a missed click on a live
-        // node (Stateful regression) is visible without enabling
-        // `blinc_layout=debug`. Demote to debug once the
-        // Stateful-click regression is fixed.
+        // rebuild. The skip itself is normal (queued events for
+        // nodes that just disappeared); only log the dropped-event
+        // signal at debug — info-level on every dispatch dominated
+        // the log.
         let Some(stable_id) = self.stable_id(node_id) else {
-            tracing::info!(
+            tracing::debug!(
                 target: "blinc_layout::event_dispatch",
                 "dispatch_event_full: stale node {:?} (no stable id, dropping {})",
                 node_id,
@@ -125,7 +125,7 @@ impl RenderTree {
             return;
         };
         let has_handler = self.handler_registry.has_handler(stable_id, event_type);
-        tracing::info!(
+        tracing::debug!(
             target: "blinc_layout::event_dispatch",
             "dispatch_event_full: node={:?}, stable={:?}, event={}, has_handler={}",
             node_id,
