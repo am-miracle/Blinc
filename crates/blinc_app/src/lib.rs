@@ -253,7 +253,7 @@ pub mod prelude {
     pub use blinc_core::reactive::{Derived, Effect, ReactiveGraph, Signal};
 
     // Platform types
-    pub use blinc_platform::{AnimationThreadMode, WindowConfig};
+    pub use blinc_platform::{AnimationThreadMode, WindowConfig, WindowLevel};
 
     // Derive macro for components
     pub use blinc_macros::BlincComponent;
