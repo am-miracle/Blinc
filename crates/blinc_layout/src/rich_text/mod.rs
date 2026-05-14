@@ -144,12 +144,7 @@ impl RichText {
             line_height: 1.2,
             measured_width: 0.0,
             ascender: 14.0 * 0.8,
-            // Use pointer cursor if there are links, otherwise text cursor
-            cursor: Some(if has_links {
-                crate::element::CursorStyle::Pointer
-            } else {
-                crate::element::CursorStyle::Text
-            }),
+            cursor: has_links.then_some(crate::element::CursorStyle::Pointer),
             word_spacing: 0.0,
             event_handlers: EventHandlers::new(),
             link_regions: Arc::new(Vec::new()),
@@ -210,11 +205,7 @@ impl RichText {
             line_height: 1.2,
             measured_width: 0.0,
             ascender: 14.0 * 0.8,
-            cursor: Some(if has_links {
-                crate::element::CursorStyle::Pointer
-            } else {
-                crate::element::CursorStyle::Text
-            }),
+            cursor: has_links.then_some(crate::element::CursorStyle::Pointer),
             word_spacing: 0.0,
             event_handlers: EventHandlers::new(),
             link_regions: Arc::new(Vec::new()),
@@ -708,6 +699,7 @@ mod tests {
         let rt = rich_text("Hello World");
         assert_eq!(rt.content(), "Hello World");
         assert!(rt.spans().is_empty());
+        assert_eq!(rt.render_props().cursor, None);
     }
 
     #[test]
@@ -748,6 +740,10 @@ mod tests {
         let rt = rich_text(r#"Visit <a href="https://example.com">our website</a> for info"#);
         assert_eq!(rt.content(), "Visit our website for info");
         assert_eq!(rt.spans().len(), 1);
+        assert_eq!(
+            rt.render_props().cursor,
+            Some(crate::element::CursorStyle::Pointer)
+        );
         assert_eq!(
             rt.spans()[0].link_url,
             Some("https://example.com".to_string())

@@ -74,7 +74,7 @@ pub struct Text {
     underline: bool,
     /// Whether this element is transparent to hit-testing
     pointer_events_none: bool,
-    /// Cursor style when hovering over this text (default: Text cursor)
+    /// Cursor style when hovering over this text (default: no override)
     cursor: Option<crate::element::CursorStyle>,
     /// Element ID for CSS selector matching and programmatic queries
     element_id: Option<String>,
@@ -130,7 +130,7 @@ impl Text {
             strikethrough: false,
             underline: false,
             pointer_events_none: false,
-            cursor: Some(crate::element::CursorStyle::Text), // Text cursor by default
+            cursor: None,
             element_id: None,
             semantic_type: None,
             classes: Vec::new(),
@@ -724,6 +724,18 @@ mod tests {
 
         assert_eq!(t.content(), "Hello");
         assert_eq!(t.font_size(), 16.0);
+    }
+
+    #[test]
+    fn test_text_has_no_cursor_by_default() {
+        let t = text("Label");
+        assert_eq!(t.render_props().cursor, None);
+
+        let t = t.cursor(crate::element::CursorStyle::Text);
+        assert_eq!(
+            t.render_props().cursor,
+            Some(crate::element::CursorStyle::Text)
+        );
     }
 
     #[test]

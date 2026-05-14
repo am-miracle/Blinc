@@ -727,6 +727,11 @@ impl RenderTree {
         self.scroll_physics.contains_key(&node_id)
     }
 
+    /// Check if a scroll container opted into viewport-culling descendants.
+    pub(crate) fn is_viewport_cull_scroll(&self, node_id: LayoutNodeId) -> bool {
+        self.viewport_cull_scrolls.contains(&node_id)
+    }
+
     pub fn get_scroll_offset(&self, node_id: LayoutNodeId) -> (f32, f32) {
         // Check scroll physics first (has direction-aware scroll from element)
         let (x, y) = if let Some(physics) = self.scroll_physics.get(&node_id) {

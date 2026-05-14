@@ -2511,7 +2511,35 @@ impl WindowedApp {
                     event,
                     Event::Input(_, InputEvent::Mouse(MouseEvent::Moved { .. }))
                 );
-                if !matches!(event, Event::Frame(_)) && !is_bare_mouse_move {
+                let event_wid = match &event {
+                    Event::Window(wid, _) | Event::Input(wid, _) | Event::Frame(wid) => Some(*wid),
+                    _ => None,
+                };
+                let is_secondary = event_wid
+                    .map(|wid| primary_wid.is_some_and(|p| wid != p))
+                    .unwrap_or(false);
+                // Mouse button press/release on a non-interactive area
+                // doesn't need to schedule a redraw — if the click fires
+                // a handler that mutates state, the post-dispatch check
+                // (`peek_needs_redraw || has_pending_subtree_rebuilds`)
+                // at the bottom of the input branch will arm one. Without
+                // this gate, every click on empty space ran two full
+                // renders (press + release) on cn_demo's complex tree,
+                // burning ~30 % CPU for rapid clicks where nothing
+                // visible changes. Scroll/keyboard/touch events kept
+                // unconditional because their handlers commonly update
+                // physics or input state via paths that don't go through
+                // `NEEDS_REDRAW` (scroll offset, IME composition).
+                let is_mouse_button = matches!(
+                    event,
+                    Event::Input(
+                        _,
+                        InputEvent::Mouse(
+                            MouseEvent::ButtonPressed { .. } | MouseEvent::ButtonReleased { .. }
+                        )
+                    )
+                );
+                if !matches!(event, Event::Frame(_)) && !is_bare_mouse_move && !is_mouse_button {
                     frame_dirty.store(true, Ordering::Release);
                     window.request_redraw();
                 }
@@ -2539,7 +2567,7 @@ impl WindowedApp {
                 // branch returns ~immediately and the closure exits
                 // without touching `ws.ctx`, `ws.render_tree`, or
                 // any allocator.
-                if is_bare_mouse_move {
+                if is_bare_mouse_move && !is_secondary {
                     let pipeline_needed = ws
                         .render_tree
                         .as_ref()
@@ -2547,16 +2575,53 @@ impl WindowedApp {
                     if !pipeline_needed {
                         return ControlFlow::Continue;
                     }
+                    // Cursor-only fast path. When the tree has cursor
+                    // styles but no pointer handlers / hover rules, the
+                    // entire input branch below ends up allocating two
+                    // `Vec<PendingEvent>`s + boxing a `FnMut` event
+                    // callback per move just to fall into the cursor-
+                    // resolve early-return at the very top. For
+                    // `hello_blinc` (a single `text()` with the default
+                    // I-beam cursor style) that allocation churn was the
+                    // entire 11 % CPU baseline during continuous mouse
+                    // movement. Resolving cursor inline up here keeps
+                    // the bare-move-only-needs-cursor case allocation-
+                    // free and reuses the `last_cursor` cache so the
+                    // OS `set_cursor` syscall only fires on transitions.
+                    let needs_pointer_dispatch = ws
+                        .render_tree
+                        .as_ref()
+                        .is_some_and(|tree| {
+                            tree.handler_registry().has_any_pointer_handler()
+                                || tree
+                                    .stylesheet()
+                                    .is_some_and(|s| s.has_pointer_state_rules())
+                        });
+                    if !needs_pointer_dispatch {
+                        if let (Some(ref mut blinc_ctx), Some(ref tree)) =
+                            (&mut ws.ctx, &ws.render_tree)
+                        {
+                            if let Event::Input(
+                                _,
+                                InputEvent::Mouse(MouseEvent::Moved { x, y }),
+                            ) = &event
+                            {
+                                let scale = blinc_ctx.scale_factor as f32;
+                                let lx = *x / scale;
+                                let ly = *y / scale;
+                                let cursor = tree
+                                    .get_cursor_at(&blinc_ctx.event_router, lx, ly)
+                                    .unwrap_or(CursorStyle::Default);
+                                let want = convert_cursor_style(cursor);
+                                if ws.last_cursor != Some(want) {
+                                    window.set_cursor(want);
+                                    ws.last_cursor = Some(want);
+                                }
+                            }
+                        }
+                        return ControlFlow::Continue;
+                    }
                 }
-
-                // Check if this event is for a secondary window
-                let event_wid = match &event {
-                    Event::Window(wid, _) | Event::Input(wid, _) | Event::Frame(wid) => Some(*wid),
-                    _ => None,
-                };
-                let is_secondary = event_wid
-                    .map(|wid| primary_wid.is_some_and(|p| wid != p))
-                    .unwrap_or(false);
 
                 // Handle secondary window events
                 if is_secondary {

@@ -422,13 +422,39 @@ impl EventRouter {
 
         let mut events = Vec::new();
 
-        // Hit test to find elements under pointer (with optional occlusion filtering)
-        let hits = if overlay_bounds.is_empty() {
-            self.hit_test_all(tree, x, y)
+        // Hit test to find elements under pointer. The common no-overlay case
+        // only needs the topmost hit chain (root -> leaf) for hover enter/leave
+        // and event bubbling, so avoid `hit_test_all`'s sibling walk on every
+        // mouse move in large scroll views.
+        let (hits, current_hovered): (Vec<HitTestResult>, HashSet<LayoutNodeId>) = if overlay_bounds
+            .is_empty()
+        {
+            if let Some(hit) = self.hit_test(tree, x, y) {
+                let hovered = hit
+                    .ancestors
+                    .iter()
+                    .copied()
+                    .filter(|node| {
+                        let in_bounds = hit.ancestor_bounds.get(&node.to_raw()).is_some_and(
+                            |&(bx, by, bw, bh)| x >= bx && x < bx + bw && y >= by && y < by + bh,
+                        );
+                        let pointer_events_none = tree
+                            .get_render_node(*node)
+                            .map(|n| n.props.pointer_events_none)
+                            .unwrap_or(false);
+                        in_bounds && !pointer_events_none
+                    })
+                    .collect();
+                (vec![hit], hovered)
+            } else {
+                (Vec::new(), HashSet::new())
+            }
         } else {
-            self.hit_test_all_with_occlusion(tree, x, y, overlay_bounds, overlay_layer_id)
+            let hits =
+                self.hit_test_all_with_occlusion(tree, x, y, overlay_bounds, overlay_layer_id);
+            let hovered = hits.iter().map(|h| h.node).collect();
+            (hits, hovered)
         };
-        let current_hovered: HashSet<LayoutNodeId> = hits.iter().map(|h| h.node).collect();
 
         // Store bounds for all hit nodes (for event handlers to access via get_node_bounds)
         // Clear previous bounds and populate with current hit test results
@@ -1153,15 +1179,18 @@ impl EventRouter {
     /// that contains the point.
     pub fn hit_test(&self, tree: &RenderTree, x: f32, y: f32) -> Option<HitTestResult> {
         let root = tree.root()?;
+        let mut ancestors = Vec::new();
+        let mut ancestor_bounds = std::collections::HashMap::new();
         self.hit_test_node(
             tree,
             root,
             x,
             y,
             (0.0, 0.0),
-            Vec::new(),
-            std::collections::HashMap::new(),
+            &mut ancestors,
+            &mut ancestor_bounds,
             (0.0, 0.0),
+            None,
         )
     }
 
@@ -1181,6 +1210,7 @@ impl EventRouter {
                 std::collections::HashMap::new(),
                 &mut results,
                 (0.0, 0.0),
+                None,
             );
         }
         results
@@ -1195,9 +1225,10 @@ impl EventRouter {
         x: f32,
         y: f32,
         parent_offset: (f32, f32),
-        mut ancestors: Vec<LayoutNodeId>,
-        mut ancestor_bounds: std::collections::HashMap<u64, (f32, f32, f32, f32)>,
+        ancestors: &mut Vec<LayoutNodeId>,
+        ancestor_bounds: &mut std::collections::HashMap<u64, (f32, f32, f32, f32)>,
         cumulative_scroll: (f32, f32),
+        active_cull_viewport: Option<(f32, f32, f32, f32)>,
     ) -> Option<HitTestResult> {
         let bounds = tree.layout().get_bounds(node, parent_offset)?;
 
@@ -1238,9 +1269,10 @@ impl EventRouter {
         );
 
         ancestors.push(node);
+        let bounds_key = node.to_raw();
         // Store this node's bounds for event bubbling
         ancestor_bounds.insert(
-            node.to_raw(),
+            bounds_key,
             (bounds.x, bounds.y, bounds.width, bounds.height),
         );
 
@@ -1257,6 +1289,11 @@ impl EventRouter {
                 cumulative_scroll.0 + scroll_offset.0,
                 cumulative_scroll.1 + scroll_offset.1,
             )
+        };
+        let cull_viewport = if tree.is_viewport_cull_scroll(node) {
+            Some((bounds.x, bounds.y, bounds.width, bounds.height))
+        } else {
+            active_cull_viewport
         };
 
         // Check children in reverse order (last child is on top).
@@ -1307,15 +1344,34 @@ impl EventRouter {
                 child_cumulative = new_cumulative_scroll;
             }
 
+            // Match the paint path for `scroll().viewport_cull(true)`: once
+            // a culling scroll is active, ordinary off-viewport child subtrees
+            // are neither painted nor hit-testable. Visible nested scrolls are
+            // still walked and remain the first scroll target in the hit chain.
+            if let Some((cx, cy, cw, ch)) = cull_viewport {
+                if !child_is_fixed && !child_is_sticky && !child_is_fg {
+                    if let Some(cb) = tree.layout().get_bounds(child, child_offset) {
+                        let intersects = cb.x + cb.width > cx
+                            && cb.x < cx + cw
+                            && cb.y + cb.height > cy
+                            && cb.y < cy + ch;
+                        if !intersects {
+                            continue;
+                        }
+                    }
+                }
+            }
+
             if let Some(mut result) = self.hit_test_node(
                 tree,
                 child,
                 x,
                 y,
                 child_offset,
-                ancestors.clone(),
-                ancestor_bounds.clone(),
+                ancestors,
+                ancestor_bounds,
                 child_cumulative,
+                cull_viewport,
             ) {
                 // Mark result as foreground if this child or the result itself is foreground
                 if child_is_fg {
@@ -1349,44 +1405,48 @@ impl EventRouter {
             }
         }
 
-        if let Some(result) = best_hit {
-            return Some(result);
-        }
+        let result = if best_hit.is_some() {
+            best_hit
+        } else if !in_bounds {
+            // If the point was outside this node's own bounds, don't return
+            // this node as a target (only its overflow children could match).
+            None
+        } else {
+            // No child hit - check if this node has pointer_events_none
+            // If so, return None to let the hit fall through to siblings
+            let pointer_events_none = tree
+                .get_render_node(node)
+                .map(|n| n.props.pointer_events_none)
+                .unwrap_or(false);
 
-        // If the point was outside this node's own bounds, don't return
-        // this node as a target (only its overflow children could match).
-        if !in_bounds {
-            return None;
-        }
+            if pointer_events_none {
+                tracing::trace!(
+                    "hit_test_node: node={:?} has pointer_events_none, passing through",
+                    node
+                );
+                None
+            } else {
+                // This node is the target. Clone the traversal state only
+                // once, when we actually have a hit to return; the old code
+                // cloned it for every sibling probe during mouse movement.
+                Some(HitTestResult {
+                    node,
+                    local_x: x - bounds.x,
+                    local_y: y - bounds.y,
+                    ancestors: ancestors.clone(),
+                    bounds_x: bounds.x,
+                    bounds_y: bounds.y,
+                    bounds_width: bounds.width,
+                    bounds_height: bounds.height,
+                    ancestor_bounds: ancestor_bounds.clone(),
+                    is_foreground: false,
+                })
+            }
+        };
 
-        // No child hit - check if this node has pointer_events_none
-        // If so, return None to let the hit fall through to siblings
-        let pointer_events_none = tree
-            .get_render_node(node)
-            .map(|n| n.props.pointer_events_none)
-            .unwrap_or(false);
-
-        if pointer_events_none {
-            tracing::trace!(
-                "hit_test_node: node={:?} has pointer_events_none, passing through",
-                node
-            );
-            return None;
-        }
-
-        // This node is the target
-        Some(HitTestResult {
-            node,
-            local_x: x - bounds.x,
-            local_y: y - bounds.y,
-            ancestors,
-            bounds_x: bounds.x,
-            bounds_y: bounds.y,
-            bounds_width: bounds.width,
-            bounds_height: bounds.height,
-            ancestor_bounds,
-            is_foreground: false,
-        })
+        ancestor_bounds.remove(&bounds_key);
+        ancestors.pop();
+        result
     }
 
     /// Recursive hit test collecting all hits
@@ -1402,6 +1462,7 @@ impl EventRouter {
         mut ancestor_bounds: std::collections::HashMap<u64, (f32, f32, f32, f32)>,
         results: &mut Vec<HitTestResult>,
         cumulative_scroll: (f32, f32),
+        active_cull_viewport: Option<(f32, f32, f32, f32)>,
     ) {
         let Some(bounds) = tree.layout().get_bounds(node, parent_offset) else {
             return;
@@ -1466,6 +1527,11 @@ impl EventRouter {
                 cumulative_scroll.1 + scroll_offset.1,
             )
         };
+        let cull_viewport = if tree.is_viewport_cull_scroll(node) {
+            Some((bounds.x, bounds.y, bounds.width, bounds.height))
+        } else {
+            active_cull_viewport
+        };
 
         // Check children
         let children = tree.layout().children(node);
@@ -1497,6 +1563,23 @@ impl EventRouter {
                 child_cumulative = new_cumulative_scroll;
             }
 
+            if let Some((cx, cy, cw, ch)) = cull_viewport {
+                let child_is_fg = child_render
+                    .map(|n| n.props.layer == crate::element::RenderLayer::Foreground)
+                    .unwrap_or(false);
+                if !child_is_fixed && !child_is_sticky && !child_is_fg {
+                    if let Some(cb) = tree.layout().get_bounds(child, child_offset) {
+                        let intersects = cb.x + cb.width > cx
+                            && cb.x < cx + cw
+                            && cb.y + cb.height > cy
+                            && cb.y < cy + ch;
+                        if !intersects {
+                            continue;
+                        }
+                    }
+                }
+            }
+
             self.hit_test_node_all(
                 tree,
                 child,
@@ -1507,6 +1590,7 @@ impl EventRouter {
                 ancestor_bounds.clone(),
                 results,
                 child_cumulative,
+                cull_viewport,
             );
         }
     }
@@ -1694,6 +1778,53 @@ mod tests {
         // Miss - outside bounds
         let result = router.hit_test(&tree, 500.0, 500.0);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_hit_test_nested_scroll_after_outer_scroll_offset() {
+        let ui = scroll()
+            .id("outer")
+            .w(200.0)
+            .h(100.0)
+            .viewport_cull(true)
+            .child(
+                div()
+                    .w_full()
+                    .flex_col()
+                    .child(div().id("spacer").w_full().h(120.0))
+                    .child(
+                        scroll()
+                            .id("inner")
+                            .w_full()
+                            .h(80.0)
+                            .child(div().id("inner-content").w_full().h(160.0)),
+                    ),
+            );
+
+        let mut tree = RenderTree::from_element(&ui);
+        tree.compute_layout(200.0, 100.0);
+
+        let outer = tree.query_by_id("outer").expect("outer scroll");
+        let inner = tree.query_by_id("inner").expect("inner scroll");
+        tree.dispatch_scroll_chain(outer, &[outer], 50.0, 50.0, 0.0, -120.0);
+
+        let router = EventRouter::new();
+        let hit = router
+            .hit_test(&tree, 50.0, 40.0)
+            .expect("visible inner scroll should be hit");
+
+        assert!(hit.ancestors.contains(&inner));
+
+        let first_scroll = std::iter::once(hit.node)
+            .chain(
+                hit.ancestors
+                    .iter()
+                    .rev()
+                    .copied()
+                    .filter(|ancestor| *ancestor != hit.node),
+            )
+            .find(|node| tree.is_scroll_container(*node));
+        assert_eq!(first_scroll, Some(inner));
     }
 
     #[test]

@@ -417,9 +417,9 @@ fn mark_button(
 ) -> Div {
     let state_for_click = Arc::clone(state);
     let version_for_click = version.clone();
-    // `no_cursor()` clears the text element's default I-beam so the
-    // parent button's pointer cursor wins on hover. This only affects
-    // the cursor style — hit-testing and rendering are unchanged.
+    // Keep the label passive so the parent button's pointer cursor
+    // wins on hover. This only affects cursor style; hit-testing and
+    // rendering are unchanged.
     let mut t = crate::text::text(label)
         .size(13.0)
         .color(Color::WHITE)
