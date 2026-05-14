@@ -1204,13 +1204,21 @@ impl RenderState {
         }
     }
 
-    /// Get the current motion values for a node
+    /// Get the current motion values for a node.
     ///
-    /// Returns the interpolated keyframe values if the node has an active motion.
+    /// Completed motions keep their final values so rendering can still read
+    /// them; use [`Self::is_motion_active`] to decide whether a redraw loop is
+    /// still needed.
     pub fn get_motion_values(&self, node_id: LayoutNodeId) -> Option<&MotionKeyframe> {
         self.get(node_id)
             .and_then(|s| s.motion.as_ref())
             .map(|m| &m.current)
+    }
+
+    /// Check if a node's motion is still animating.
+    pub fn is_motion_active(&self, node_id: LayoutNodeId) -> bool {
+        self.get(node_id)
+            .is_some_and(NodeRenderState::has_active_motion)
     }
 
     /// Check if a node's motion animation is complete and should be removed
@@ -1578,9 +1586,20 @@ impl RenderState {
         }
     }
 
-    /// Get the current motion values for a stable-keyed animation
+    /// Get the current motion values for a stable-keyed animation.
+    ///
+    /// Completed motions keep their final values so rendering can still read
+    /// them; use [`Self::is_stable_motion_active`] to decide whether a redraw
+    /// loop is still needed.
     pub fn get_stable_motion_values(&self, key: &str) -> Option<&MotionKeyframe> {
         self.stable_motions.get(key).map(|m| &m.current)
+    }
+
+    /// Check if a stable-keyed motion is still animating.
+    pub fn is_stable_motion_active(&self, key: &str) -> bool {
+        self.stable_motions
+            .get(key)
+            .is_some_and(|m| !matches!(m.state, MotionState::Visible | MotionState::Removed))
     }
 
     /// Get the animation state for a stable-keyed motion
@@ -1939,5 +1958,48 @@ mod tests {
         // Tick again
         state.tick(300);
         assert!(state.cursor_visible());
+    }
+
+    #[test]
+    fn test_completed_node_motion_is_not_active() {
+        let scheduler = Arc::new(Mutex::new(AnimationScheduler::new()));
+        let mut state = RenderState::new(scheduler);
+        let node_id = LayoutNodeId::default();
+        let config = MotionAnimation {
+            enter_from: Some(MotionKeyframe::new().opacity(0.0)),
+            enter_duration_ms: 50,
+            ..Default::default()
+        };
+
+        state.start_enter_motion(node_id, config);
+        assert!(state.is_motion_active(node_id));
+
+        state.tick(0);
+        state.tick(100);
+
+        assert!(!state.is_motion_active(node_id));
+        assert!(state.get_motion_values(node_id).is_some());
+    }
+
+    #[test]
+    fn test_completed_stable_motion_is_not_active() {
+        let scheduler = Arc::new(Mutex::new(AnimationScheduler::new()));
+        let mut state = RenderState::new(scheduler);
+        let config = MotionAnimation {
+            enter_from: Some(MotionKeyframe::new().opacity(0.0)),
+            enter_duration_ms: 50,
+            ..Default::default()
+        };
+
+        state.start_stable_motion("motion:navmenu_test", config, false);
+        assert!(state.is_stable_motion_active("motion:navmenu_test"));
+
+        state.tick(0);
+        state.tick(100);
+
+        assert!(!state.is_stable_motion_active("motion:navmenu_test"));
+        assert!(state
+            .get_stable_motion_values("motion:navmenu_test")
+            .is_some());
     }
 }

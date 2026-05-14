@@ -1093,7 +1093,10 @@ impl ScrollPhysics {
     /// User-driven `Scrolling` is input-paced and should not by itself
     /// keep the frame loop alive.
     pub fn is_animating(&self) -> bool {
-        matches!(self.state, ScrollState::Decelerating | ScrollState::Bouncing)
+        matches!(
+            self.state,
+            ScrollState::Decelerating | ScrollState::Bouncing
+        )
     }
 
     /// Set the scroll direction

@@ -257,7 +257,12 @@ impl RenderTree {
             // the value is now constant — including it here pinned
             // the chain at vsync forever.
             let has_active_binding = motion_bindings_ref.is_some_and(|b| b.is_any_animating());
-            let has_active_motion = motion_values.is_some();
+            let has_active_motion = if let Some(ref stable_key) = render_node.props.motion_stable_id
+            {
+                render_state.is_stable_motion_active(stable_key)
+            } else {
+                render_state.is_motion_active(node)
+            };
             if canvas_paints || has_active_binding || has_active_motion {
                 self.visible_anim_active.set(true);
             }
