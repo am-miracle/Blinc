@@ -377,7 +377,8 @@ impl RenderTree {
 
         // Collect current interaction state into sets for efficient lookup
         let hovered_nodes: HashSet<LayoutNodeId> = router.hovered_nodes().collect();
-        let pressed_nodes: HashSet<LayoutNodeId> = router.pressed_target().into_iter().collect();
+        let pressed_nodes: HashSet<LayoutNodeId> =
+            router.pressed_target(self).into_iter().collect();
         let focused_node: Option<LayoutNodeId> = {
             // Check all registered nodes for focus
             let mut focused = None;
@@ -636,7 +637,8 @@ impl RenderTree {
 
         // Collect interaction state
         let hovered_nodes: HashSet<LayoutNodeId> = router.hovered_nodes().collect();
-        let pressed_nodes: HashSet<LayoutNodeId> = router.pressed_target().into_iter().collect();
+        let pressed_nodes: HashSet<LayoutNodeId> =
+            router.pressed_target(self).into_iter().collect();
         let focused_node: Option<LayoutNodeId> = {
             let mut focused = None;
             for id in self.element_registry.all_ids() {

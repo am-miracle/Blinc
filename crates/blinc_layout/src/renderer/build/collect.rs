@@ -58,6 +58,23 @@ impl RenderTree {
     pub(crate) fn build_element<E: ElementBuilder>(&mut self, element: &E) -> LayoutNodeId {
         let root_id = element.build(&mut self.layout_tree);
         self.root = Some(root_id);
+        // CRITICAL ordering: `mint_stable_ids_walk` derives each
+        // stable id from `(parent_stable, sibling_index,
+        // widget_key)` where `widget_key` is the node's
+        // `element_id` as looked up from `element_registry`. If we
+        // mint BEFORE registering ids, every node with `.id()` is
+        // derived with `widget_key=None` the first time but with
+        // `widget_key=Some("...")` on every subsequent mint — so
+        // its stable id (and every descendant's, since `derive_child`
+        // recurses on `parent_stable`) changes between the initial
+        // build and the next subtree rebuild. Handlers registered
+        // under the initial stable id end up orphaned and the
+        // post-rebuild `sweep_stale_handlers` evicts them, leaving
+        // the live node with no handler — click handlers stop
+        // firing on whole subtrees rooted at any `.id()`'d node.
+        // Pre-walk the subtree so `element_registry.get_id(node)`
+        // returns the same value on every mint pass.
+        self.register_element_ids_walk(element, root_id);
         self.build_generation = self.build_generation.wrapping_add(1);
         self.mint_stable_ids_walk();
         self.collect_render_props(element, root_id);
@@ -67,6 +84,33 @@ impl RenderTree {
         // that used to live in `update_if_changed`.
         self.sweep_stale_handlers();
         root_id
+    }
+
+    /// Pre-register `element_id`s for the subtree rooted at
+    /// `node_id` so `mint_stable_ids_walk` reads consistent
+    /// `widget_key`s on every pass.
+    ///
+    /// Walks the `ElementBuilder` tree and the layout tree in
+    /// lockstep — both have identical shape after `build()`, so
+    /// `child_builders[i]` corresponds to `layout_tree.children(node)[i]`.
+    /// Registers ids in `element_registry` only; render props,
+    /// handlers, classes, and the rest of `collect_render_props_boxed`
+    /// run later (after mint).
+    pub(crate) fn register_element_ids_walk(
+        &mut self,
+        element: &dyn ElementBuilder,
+        node_id: LayoutNodeId,
+    ) {
+        if let Some(id) = element.element_id() {
+            self.element_registry.register(id, node_id);
+        }
+        let child_node_ids = self.layout_tree.children(node_id);
+        let child_builders = element.children_builders();
+        for (child_builder, &child_node_id) in
+            child_builders.iter().zip(child_node_ids.iter())
+        {
+            self.register_element_ids_walk(child_builder.as_ref(), child_node_id);
+        }
     }
 
     /// Collect render properties from an element and its children

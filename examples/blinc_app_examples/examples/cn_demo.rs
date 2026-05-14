@@ -21,6 +21,7 @@ fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        // .with_env_filter("blinc_layout::event_dispatch=debug")
         .init();
 
     let config = WindowConfig {

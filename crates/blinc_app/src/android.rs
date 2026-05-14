@@ -606,7 +606,7 @@ impl AndroidApp {
                                             tracing::debug!("Touch CANCEL");
                                             windowed_ctx.pointer_query.set_pressure(0.0);
                                             windowed_ctx.pointer_query.set_touch_count(0);
-                                            router.on_mouse_leave();
+                                            router.on_mouse_leave(&*tree);
                                             pinch_state.reset();
                                             last_touch_x = None;
                                             last_touch_y = None;
@@ -805,7 +805,7 @@ impl AndroidApp {
                                                 blinc_layout::widgets::text_input::cancel_long_press_timer();
                                                 windowed_ctx.pointer_query.set_pressure(0.0);
                                                 windowed_ctx.pointer_query.set_touch_count(0);
-                                                router.on_mouse_leave();
+                                                router.on_mouse_leave(&*tree);
                                                 pinch_state.reset();
                                                 // Clear touch tracking on cancel too
                                                 last_touch_x = None;

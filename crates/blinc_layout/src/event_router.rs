@@ -112,11 +112,16 @@ pub struct EventRouter {
     /// Elements currently under the pointer (for enter/leave tracking)
     hovered: HashSet<LayoutNodeId>,
 
-    /// Element where mouse button was pressed (for proper release targeting)
-    pressed_target: Option<LayoutNodeId>,
+    /// Element where mouse button was pressed (for proper release
+    /// targeting). Stored as `StableNodeId` so rebuilds between
+    /// mouse-down and mouse-up don't invalidate the target; the
+    /// release path resolves back to the current LayoutNodeId via
+    /// `tree.layout_id()`.
+    pressed_target: Option<crate::tree::StableNodeId>,
 
-    /// Ancestors of pressed target (for event bubbling on release)
-    pressed_ancestors: Vec<LayoutNodeId>,
+    /// Ancestors of pressed target (for event bubbling on release).
+    /// Same stable-id treatment as `pressed_target`.
+    pressed_ancestors: Vec<crate::tree::StableNodeId>,
 
     /// Currently focused element (receives keyboard events)
     focused: Option<LayoutNodeId>,
@@ -230,9 +235,12 @@ impl EventRouter {
         self.hovered.contains(&node_id)
     }
 
-    /// Check if a specific node is currently pressed
-    pub fn is_pressed(&self, node_id: LayoutNodeId) -> bool {
-        self.pressed_target == Some(node_id)
+    /// Check if a specific node is currently pressed, by its
+    /// stable id (the source-of-truth for the router's pressed
+    /// state). Callers holding a `LayoutNodeId` should look up its
+    /// stable id via `tree.stable_id(node)` first.
+    pub fn is_pressed(&self, stable: crate::tree::StableNodeId) -> bool {
+        self.pressed_target == Some(stable)
     }
 
     /// Check if a specific node is currently focused
@@ -245,9 +253,27 @@ impl EventRouter {
         self.hovered.iter().copied()
     }
 
-    /// Get the pressed target node, if any
-    pub fn pressed_target(&self) -> Option<LayoutNodeId> {
+    /// Get the pressed target as a `StableNodeId`, if any.
+    ///
+    /// Callers needing a `LayoutNodeId` for the current frame should
+    /// resolve via `tree.layout_id(stable)` (which returns `None`
+    /// when the press happened on a subtree that has since been
+    /// removed by a rebuild).
+    pub fn pressed_target_stable(&self) -> Option<crate::tree::StableNodeId> {
         self.pressed_target
+    }
+
+    /// Resolve the pressed target to a live `LayoutNodeId` for the
+    /// given tree, or `None` if no press is in flight or the press
+    /// target was removed by an intervening rebuild.
+    pub fn pressed_target(&self, tree: &RenderTree) -> Option<LayoutNodeId> {
+        self.pressed_target.and_then(|s| tree.layout_id(s))
+    }
+
+    /// `true` if a press is currently in flight (cheap; no tree
+    /// lookup needed).
+    pub fn has_pressed_target(&self) -> bool {
+        self.pressed_target.is_some()
     }
 
     /// Set the event callback for routing events to elements
@@ -486,8 +512,11 @@ impl EventRouter {
 
         self.hovered = current_hovered;
 
-        // Drag detection: if we have a pressed target and moved, emit DRAG
-        if let Some(target) = self.pressed_target {
+        // Drag detection: if we have a pressed target and moved, emit DRAG.
+        // `pressed_target` is a stable id; resolve to the live layout id
+        // for this frame before emitting so a rebuild between mouse-down
+        // and the move doesn't drop the drag.
+        if let Some(stable_target) = self.pressed_target {
             // Update drag delta
             self.drag_delta_x = x - self.drag_start_x;
             self.drag_delta_y = y - self.drag_start_y;
@@ -498,32 +527,36 @@ impl EventRouter {
                 || self.drag_delta_y.abs() > DRAG_THRESHOLD;
 
             tracing::debug!(
-                "Drag check: target={:?}, delta=({:.1}, {:.1}), threshold_exceeded={}, is_dragging={}",
-                target, self.drag_delta_x, self.drag_delta_y, delta_exceeds, self.is_dragging
+                "Drag check: stable_target={:?}, delta=({:.1}, {:.1}), threshold_exceeded={}, is_dragging={}",
+                stable_target, self.drag_delta_x, self.drag_delta_y, delta_exceeds, self.is_dragging
             );
 
             if !self.is_dragging && delta_exceeds {
                 self.is_dragging = true;
                 tracing::debug!(
-                    "DRAG started: target={:?}, delta=({:.1}, {:.1})",
-                    target,
+                    "DRAG started: stable_target={:?}, delta=({:.1}, {:.1})",
+                    stable_target,
                     self.drag_delta_x,
                     self.drag_delta_y
                 );
             }
 
-            // Emit DRAG event to the pressed target
+            // Emit DRAG event to the pressed target (resolved per-frame)
             if self.is_dragging {
-                tracing::debug!(
-                    "Emitting DRAG to {:?}, delta=({:.1}, {:.1})",
-                    target,
-                    self.drag_delta_x,
-                    self.drag_delta_y
-                );
-                self.emit_event(target, event_types::DRAG);
-                events.push((target, event_types::DRAG));
+                if let Some(target) = tree.layout_id(stable_target) {
+                    tracing::debug!(
+                        "Emitting DRAG to {:?}, delta=({:.1}, {:.1})",
+                        target,
+                        self.drag_delta_x,
+                        self.drag_delta_y
+                    );
+                    self.emit_event(target, event_types::DRAG);
+                    events.push((target, event_types::DRAG));
+                }
 
-                // Collect ancestors to avoid borrow conflict
+                // Bubble DRAG to ancestors (skip the target itself —
+                // last entry of ancestors). Collect first to avoid
+                // borrow conflict.
                 let ancestors: Vec<_> = self
                     .pressed_ancestors
                     .iter()
@@ -531,9 +564,11 @@ impl EventRouter {
                     .skip(1)
                     .copied()
                     .collect();
-                for ancestor in ancestors {
-                    self.emit_event(ancestor, event_types::DRAG);
-                    events.push((ancestor, event_types::DRAG));
+                for stable_ancestor in ancestors {
+                    if let Some(ancestor) = tree.layout_id(stable_ancestor) {
+                        self.emit_event(ancestor, event_types::DRAG);
+                        events.push((ancestor, event_types::DRAG));
+                    }
                 }
             }
         }
@@ -578,9 +613,16 @@ impl EventRouter {
 
         // Hit test for the topmost element
         if let Some(hit) = self.hit_test(tree, x, y) {
-            self.pressed_target = Some(hit.node);
-            // Store ancestors for bubbling on release
-            self.pressed_ancestors = hit.ancestors.clone();
+            // Record the press as a stable id so a rebuild between
+            // mouse-down and mouse-up (or a mid-drag rebuild) doesn't
+            // strand the release on a recycled slotmap key.
+            self.pressed_target = tree.stable_id(hit.node);
+            // Store ancestors for bubbling on release, also stable.
+            self.pressed_ancestors = hit
+                .ancestors
+                .iter()
+                .filter_map(|&n| tree.stable_id(n))
+                .collect();
             // Store local coordinates and bounds for event handlers
             self.last_hit_local_x = hit.local_x;
             self.last_hit_local_y = hit.local_y;
@@ -643,7 +685,7 @@ impl EventRouter {
     /// (ensures proper button release even if cursor moved).
     pub fn on_mouse_up(
         &mut self,
-        _tree: &RenderTree,
+        tree: &RenderTree,
         x: f32,
         y: f32,
         button: MouseButton,
@@ -657,57 +699,76 @@ impl EventRouter {
         let was_dragging = self.is_dragging;
 
         tracing::debug!(
-            "on_mouse_up: pressed_target={:?}, was_dragging={}, pos=({:.1}, {:.1})",
+            "on_mouse_up: pressed_target_stable={:?}, was_dragging={}, pos=({:.1}, {:.1})",
             self.pressed_target,
             was_dragging,
             x,
             y
         );
 
-        // Release goes to the element where press started
-        if let Some(target) = self.pressed_target.take() {
-            // If we were dragging, emit DRAG_END before POINTER_UP
-            if was_dragging {
-                self.emit_event(target, event_types::DRAG_END);
-                events.push((target, event_types::DRAG_END));
-            }
+        // Release goes to the element where press started. Resolve
+        // the stable id to the live layout id for this frame — if
+        // the press target's subtree was removed by an intervening
+        // rebuild, `layout_id` returns None and we silently drop
+        // the release (the unmount-time UNMOUNT event was already
+        // emitted by `on_unmount`).
+        if let Some(stable_target) = self.pressed_target.take() {
+            let target = tree.layout_id(stable_target);
 
-            // Record mouse up event (only if recording is enabled)
-            #[cfg(feature = "recorder")]
-            if recorder_bridge::is_recording() {
-                recorder_bridge::record_event(RecorderEventData::MouseUp {
-                    x,
-                    y,
-                    button: RecorderMouseButton::from(button),
-                    target_element: Some(format!("{:?}", target)),
-                });
+            if let Some(target) = target {
+                // If we were dragging, emit DRAG_END before POINTER_UP
+                if was_dragging {
+                    self.emit_event(target, event_types::DRAG_END);
+                    events.push((target, event_types::DRAG_END));
+                }
 
-                // If not dragging, also record a click event
-                if !was_dragging {
-                    recorder_bridge::record_event(RecorderEventData::Click {
+                // Record mouse up event (only if recording is enabled)
+                #[cfg(feature = "recorder")]
+                if recorder_bridge::is_recording() {
+                    recorder_bridge::record_event(RecorderEventData::MouseUp {
                         x,
                         y,
                         button: RecorderMouseButton::from(button),
                         target_element: Some(format!("{:?}", target)),
                     });
+
+                    // If not dragging, also record a click event
+                    if !was_dragging {
+                        recorder_bridge::record_event(RecorderEventData::Click {
+                            x,
+                            y,
+                            button: RecorderMouseButton::from(button),
+                            target_element: Some(format!("{:?}", target)),
+                        });
+                    }
                 }
+
+                // Emit to the target first
+                tracing::debug!("on_mouse_up: emitting POINTER_UP to target {:?}", target);
+                self.emit_event(target, event_types::POINTER_UP);
+                events.push((target, event_types::POINTER_UP));
+            } else {
+                tracing::debug!(
+                    "on_mouse_up: press target {:?} no longer in tree (removed mid-press) — dropping release",
+                    stable_target
+                );
             }
 
-            // Emit to the target first
-            tracing::debug!("on_mouse_up: emitting POINTER_UP to target {:?}", target);
-            self.emit_event(target, event_types::POINTER_UP);
-            events.push((target, event_types::POINTER_UP));
-
-            // Bubble through ancestors (stored from on_mouse_down)
-            // ancestors is root to leaf, so reverse and skip the target node (last element)
+            // Bubble through ancestors (stored from on_mouse_down).
+            // Each ancestor is resolved independently — some may
+            // have survived the rebuild even if the press target
+            // didn't, so we still want to deliver POINTER_UP to
+            // those.
             let ancestors = std::mem::take(&mut self.pressed_ancestors);
-            for &ancestor in ancestors.iter().rev().skip(1) {
-                if was_dragging {
-                    self.emit_event(ancestor, event_types::DRAG_END);
-                    events.push((ancestor, event_types::DRAG_END));
+            for &stable_ancestor in ancestors.iter().rev().skip(1) {
+                if let Some(ancestor) = tree.layout_id(stable_ancestor) {
+                    if was_dragging {
+                        self.emit_event(ancestor, event_types::DRAG_END);
+                        events.push((ancestor, event_types::DRAG_END));
+                    }
+                    self.emit_event(ancestor, event_types::POINTER_UP);
+                    events.push((ancestor, event_types::POINTER_UP));
                 }
-                self.emit_event(ancestor, event_types::POINTER_UP);
-                events.push((ancestor, event_types::POINTER_UP));
             }
         } else {
             self.pressed_ancestors.clear();
@@ -725,35 +786,46 @@ impl EventRouter {
     ///
     /// Emits POINTER_LEAVE to all currently hovered elements.
     /// Also emits POINTER_UP to the pressed target if there is one (mouse left while dragging).
-    pub fn on_mouse_leave(&mut self) -> Vec<(LayoutNodeId, u32)> {
+    pub fn on_mouse_leave(&mut self, tree: &RenderTree) -> Vec<(LayoutNodeId, u32)> {
         let mut events = Vec::new();
 
-        // If we were pressing/dragging, emit POINTER_UP to clean up state
-        // This handles the case where mouse leaves the window while dragging
-        if let Some(target) = self.pressed_target.take() {
-            tracing::debug!(
-                "on_mouse_leave: emitting POINTER_UP to pressed_target {:?} (mouse left window while pressing)",
-                target
-            );
+        // If we were pressing/dragging, emit POINTER_UP to clean up
+        // state. `pressed_target` is a stable id; resolve to the
+        // current frame's layout id (None if the target's subtree
+        // was removed by a rebuild — we still clear the press).
+        if let Some(stable_target) = self.pressed_target.take() {
+            if let Some(target) = tree.layout_id(stable_target) {
+                tracing::debug!(
+                    "on_mouse_leave: emitting POINTER_UP to pressed_target {:?} (mouse left window while pressing)",
+                    target
+                );
 
-            // If we were dragging, emit DRAG_END before POINTER_UP
-            if self.is_dragging {
-                self.emit_event(target, event_types::DRAG_END);
-                events.push((target, event_types::DRAG_END));
+                // If we were dragging, emit DRAG_END before POINTER_UP
+                if self.is_dragging {
+                    self.emit_event(target, event_types::DRAG_END);
+                    events.push((target, event_types::DRAG_END));
+                }
+
+                self.emit_event(target, event_types::POINTER_UP);
+                events.push((target, event_types::POINTER_UP));
+            } else {
+                tracing::debug!(
+                    "on_mouse_leave: press target {:?} no longer in tree — dropping POINTER_UP",
+                    stable_target
+                );
             }
 
-            self.emit_event(target, event_types::POINTER_UP);
-            events.push((target, event_types::POINTER_UP));
-
-            // Bubble through ancestors
+            // Bubble through ancestors — resolve each independently
             let ancestors = std::mem::take(&mut self.pressed_ancestors);
-            for &ancestor in ancestors.iter().rev().skip(1) {
-                if self.is_dragging {
-                    self.emit_event(ancestor, event_types::DRAG_END);
-                    events.push((ancestor, event_types::DRAG_END));
+            for &stable_ancestor in ancestors.iter().rev().skip(1) {
+                if let Some(ancestor) = tree.layout_id(stable_ancestor) {
+                    if self.is_dragging {
+                        self.emit_event(ancestor, event_types::DRAG_END);
+                        events.push((ancestor, event_types::DRAG_END));
+                    }
+                    self.emit_event(ancestor, event_types::POINTER_UP);
+                    events.push((ancestor, event_types::POINTER_UP));
                 }
-                self.emit_event(ancestor, event_types::POINTER_UP);
-                events.push((ancestor, event_types::POINTER_UP));
             }
 
             // Reset drag state
@@ -995,13 +1067,16 @@ impl EventRouter {
     /// Should be called before an element is removed from the render tree.
     /// Emits UNMOUNT to the element. Also clears any state associated with
     /// the element (hover, focus, pressed target).
-    pub fn on_unmount(&mut self, node: LayoutNodeId) {
+    pub fn on_unmount(&mut self, tree: &RenderTree, node: LayoutNodeId) {
         self.emit_event(node, event_types::UNMOUNT);
 
         // Clear any state associated with this node
         self.hovered.remove(&node);
-        if self.pressed_target == Some(node) {
-            self.pressed_target = None;
+        if let Some(stable) = tree.stable_id(node) {
+            if self.pressed_target == Some(stable) {
+                self.pressed_target = None;
+                self.pressed_ancestors.clear();
+            }
         }
         if self.focused == Some(node) {
             self.focused = None;
@@ -1038,7 +1113,7 @@ impl EventRouter {
 
         // Nodes in old but not new -> unmounted
         for node in old_nodes.difference(&new_nodes) {
-            self.on_unmount(*node);
+            self.on_unmount(new_tree, *node);
             unmounted.push(*node);
         }
 
@@ -1790,7 +1865,7 @@ mod tests {
         assert!(focused.is_some());
 
         // Unmount the focused node
-        router.on_unmount(focused.unwrap());
+        router.on_unmount(&tree, focused.unwrap());
 
         // Focus should be cleared
         assert!(router.focused().is_none());

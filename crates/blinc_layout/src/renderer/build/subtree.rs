@@ -149,7 +149,12 @@ impl RenderTree {
         // 3. Add the new child to the parent
         self.layout_tree.add_child(parent_id, new_child_id);
 
-        // 4. Mint stable ids over the updated tree BEFORE collect.
+        // 4. Pre-register element ids for the new subtree BEFORE
+        // mint so `widget_key` is consistent across mint passes —
+        // see `build_element` for the full rationale.
+        self.register_element_ids_walk(new_child, new_child_id);
+
+        // 5. Mint stable ids over the updated tree BEFORE collect.
         // Handler registration in collect_render_props (Phase 3)
         // looks up `self.stable_id_or_warn(node_id)` — without this
         // mint, the new subtree's nodes have no stable id yet and
@@ -339,6 +344,20 @@ impl RenderTree {
                     let child_id = child.build(&mut self.layout_tree);
                     self.layout_tree.add_child(rebuild.parent_id, child_id);
                     built.push(child_id);
+                }
+
+                // Pre-register element ids for the new subtree
+                // BEFORE mint so `widget_key` is read consistently
+                // on every mint pass. Without this, mint derives
+                // each `.id()`'d descendant's stable id with
+                // `widget_key=None` the first time (registry not
+                // yet populated) but `widget_key=Some(...)` on
+                // every subsequent mint — descendants' stable ids
+                // shift and previously-registered handlers go
+                // orphaned. See `build_element` for the same fix
+                // at initial build.
+                for (child, child_id) in children.iter().zip(built.iter()) {
+                    self.register_element_ids_walk(child.as_ref(), *child_id);
                 }
 
                 // Mint stable ids over the now-complete tree before

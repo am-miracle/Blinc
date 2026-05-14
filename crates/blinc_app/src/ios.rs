@@ -902,7 +902,7 @@ impl IOSRenderContext {
                     .on_mouse_up(tree, lx, ly, MouseButton::Left);
                 // On touch devices, finger lift means pointer leaves too
                 // This transitions ButtonState from Hovered back to Idle
-                self.windowed_ctx.event_router.on_mouse_leave();
+                self.windowed_ctx.event_router.on_mouse_leave(tree);
 
                 // Mark touch ended for scroll physics
                 if self.is_scrolling {
@@ -915,7 +915,7 @@ impl IOSRenderContext {
             TouchPhase::Cancelled => {
                 tracing::trace!("[Blinc] iOS Touch CANCELLED");
                 blinc_layout::widgets::text_input::cancel_long_press_timer();
-                self.windowed_ctx.event_router.on_mouse_leave();
+                self.windowed_ctx.event_router.on_mouse_leave(tree);
                 // Clear touch tracking on cancel too
                 self.last_touch_pos = None;
                 if self.is_scrolling {

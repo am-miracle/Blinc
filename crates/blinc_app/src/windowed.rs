@@ -3503,7 +3503,7 @@ impl WindowedApp {
                                     MouseEvent::Left => {
                                         // on_mouse_leave now emits POINTER_UP if there was a pressed target
                                         // This handles the case where mouse leaves window while dragging
-                                        router.on_mouse_leave();
+                                        router.on_mouse_leave(tree);
                                         // Reset cursor to default when mouse leaves window
                                         let want = blinc_platform::Cursor::Default;
                                         if ws.last_cursor != Some(want) {
@@ -3811,7 +3811,7 @@ impl WindowedApp {
                                             // This will emit POINTER_UP if there was a pressed target
                                             windowed_ctx.pointer_query.set_pressure(0.0);
                                             windowed_ctx.pointer_query.set_touch_count(0);
-                                            router.on_mouse_leave();
+                                            router.on_mouse_leave(tree);
                                         }
                                     }
                                 }
@@ -4701,7 +4701,7 @@ impl WindowedApp {
                             // Update continuous pointer query state
                             if !windowed_ctx.pointer_query.is_empty() {
                                 let (mx, my) = windowed_ctx.event_router.mouse_position();
-                                let is_pressed = windowed_ctx.event_router.pressed_target().is_some();
+                                let is_pressed = windowed_ctx.event_router.has_pressed_target();
                                 let dt_sec = dt_ms / 1000.0;
                                 let time_sec = current_time as f64 / 1000.0;
                                 // Use event router's hit test results for hover detection.

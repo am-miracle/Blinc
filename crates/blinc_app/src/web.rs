@@ -2609,7 +2609,7 @@ impl WebApp {
         // Pointer query (calc(env(pointer-x)) etc.)
         if !self.ctx.pointer_query.is_empty() {
             let (mx, my) = self.ctx.event_router.mouse_position();
-            let is_pressed = self.ctx.event_router.pressed_target().is_some();
+            let is_pressed = self.ctx.event_router.has_pressed_target();
             let dt_sec = dt_ms / 1000.0;
             let time_sec = now as f64 / 1000.0;
             let registry = Arc::clone(self.ctx.element_registry());

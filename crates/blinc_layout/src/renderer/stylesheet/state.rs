@@ -241,9 +241,14 @@ impl RenderTree {
                 continue;
             }
 
-            // Get current interaction state from router
+            // Get current interaction state from router. `is_pressed`
+            // is keyed by stable id so it survives rebuilds; resolve
+            // the layout id to a stable id before asking.
             let hovered = router.is_hovered(node_id);
-            let pressed = router.is_pressed(node_id);
+            let pressed = self
+                .stable_id(node_id)
+                .map(|s| router.is_pressed(s))
+                .unwrap_or(false);
             let focused = router.is_focused(node_id);
 
             // Apply state styles
@@ -365,8 +370,13 @@ impl RenderTree {
                 }
             }
 
-            // Active/pressed state (overrides hover)
-            if router.is_pressed(node_id) {
+            // Active/pressed state (overrides hover) — router stores
+            // pressed by stable id; resolve the layout id first.
+            let pressed_here = self
+                .stable_id(node_id)
+                .map(|s| router.is_pressed(s))
+                .unwrap_or(false);
+            if pressed_here {
                 if let Some(active) = stylesheet.get_with_state(element_id, ElementState::Active) {
                     if let Some(ref dps) = active.dynamic_properties {
                         dynamic_props.extend(dps.iter());
