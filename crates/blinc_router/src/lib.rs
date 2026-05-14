@@ -91,7 +91,6 @@ pub struct Router {
     inner: Arc<Mutex<RouterInner>>,
 }
 
-
 impl Router {
     /// Lazily create (and return) the route-version signal.
     ///
