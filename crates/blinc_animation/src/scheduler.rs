@@ -700,6 +700,7 @@ impl AnimationScheduler {
             inner: Arc::downgrade(&self.inner),
             needs_redraw: Arc::clone(&self.needs_redraw),
             wakeup: Arc::clone(&self.wakeup),
+            wake_callback: self.wake_callback.clone(),
         }
     }
 
@@ -1111,15 +1112,34 @@ pub struct SchedulerHandle {
     inner: Weak<Mutex<SchedulerInner>>,
     needs_redraw: Arc<AtomicBool>,
     wakeup: Arc<(Mutex<bool>, Condvar)>,
+    /// Optional wake callback shared with the parent `AnimationScheduler`.
+    /// In `AnimationThreadMode::Main`, mutations from a background
+    /// thread (worker, timer, `on_ready` after the 200ms delay) need
+    /// to wake the main event loop or the next tick never fires.
+    /// Without this, calling `set_spring_target` from off-main does
+    /// nothing visible until some unrelated event happens to
+    /// schedule a redraw.
+    wake_callback: Option<WakeCallback>,
 }
 
 impl SchedulerHandle {
-    /// Wake the scheduler's bg thread if it's parked. Called whenever
-    /// a mutation could transition `has_active` from false to true.
+    /// Wake the scheduler's bg thread if it's parked AND fire the
+    /// main-thread wake callback. Called whenever a mutation could
+    /// transition `has_active` from false to true.
+    ///
+    /// In `AnimationThreadMode::Background` the bg-thread wake is
+    /// what matters; in `Main` mode the wake_callback is the only
+    /// thing that gets the main thread out of `ControlFlow::Wait`.
+    /// Doing both makes the handle work correctly under either
+    /// mode without callers having to care which is active.
     fn wake(&self) {
         let mut pending = self.wakeup.0.lock().unwrap();
         *pending = true;
         self.wakeup.1.notify_one();
+        drop(pending);
+        if let Some(cb) = &self.wake_callback {
+            cb();
+        }
     }
 
     /// Request a redraw from anywhere — fires the scheduler's
