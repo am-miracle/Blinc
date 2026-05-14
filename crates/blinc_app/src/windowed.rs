@@ -2894,6 +2894,23 @@ impl WindowedApp {
                             #[allow(clippy::map_entry)]
                             if !secondary_windows.contains_key(&wid) {
                                 if let Some(ref blinc_app) = ws.app {
+                                    // Pop the matching pending request up front so we can use
+                                    // its `max_frame_latency` on the surface config below.
+                                    // Match by title — winit's `WindowId` isn't known to the
+                                    // pending side, and titles are practically unique per
+                                    // open_window call.
+                                    let pending_req = {
+                                        let winit_title = window.winit_window().title();
+                                        pending_builders().lock().ok().and_then(|mut p| {
+                                            p.iter()
+                                                .position(|r| r.config.title == winit_title)
+                                                .map(|idx| p.remove(idx))
+                                        })
+                                    };
+                                    let secondary_latency = pending_req
+                                        .as_ref()
+                                        .map(|r| r.config.max_frame_latency.clamp(1, 3))
+                                        .unwrap_or(2);
                                     let winit_window = window.winit_window_arc();
                                     match blinc_app.create_surface_for_window(winit_window) {
                                         Ok(surf) => {
@@ -2911,7 +2928,7 @@ impl WindowedApp {
                                                 present_mode: wgpu::PresentMode::AutoVsync,
                                                 alpha_mode,
                                                 view_formats: vec![],
-                                                desired_maximum_frame_latency: 2,
+                                                desired_maximum_frame_latency: secondary_latency,
                                             };
                                             surf.configure(blinc_app.device(), &config);
 
@@ -2961,19 +2978,11 @@ impl WindowedApp {
                                             );
                                             sws.render_state = Some(rs);
 
-                                            // Pop the UI builder from the pending queue
-                                            if let Ok(mut pending) =
-                                                pending_builders().lock()
-                                            {
-                                                // Find matching request by config title
-                                                let title =
-                                                    window.winit_window().title();
-                                                if let Some(idx) = pending.iter().position(|r| {
-                                                    r.config.title == title
-                                                }) {
-                                                    let req = pending.remove(idx);
-                                                    sws.ui_builder = req.builder;
-                                                }
+                                            // Adopt the UI builder from the pending request
+                                            // that we already popped above (along with the
+                                            // surface frame latency).
+                                            if let Some(req) = pending_req {
+                                                sws.ui_builder = req.builder;
                                             }
 
                                             // Per-window callbacks are set via set_window_actions above.

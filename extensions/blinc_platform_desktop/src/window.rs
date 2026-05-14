@@ -1,11 +1,11 @@
 //! Desktop window implementation using winit
 
-use blinc_platform::{Cursor, Window, WindowConfig};
+use blinc_platform::{Cursor, Window, WindowConfig, WindowLevel};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use winit::dpi::LogicalSize;
 use winit::event_loop::ActiveEventLoop;
-use winit::window::{Window as WinitWindow, WindowAttributes};
+use winit::window::{Window as WinitWindow, WindowAttributes, WindowLevel as WinitWindowLevel};
 
 /// Desktop window wrapping a winit window
 pub struct DesktopWindow {
@@ -29,7 +29,11 @@ impl DesktopWindow {
             .with_inner_size(LogicalSize::new(config.width, config.height))
             .with_resizable(config.resizable)
             .with_decorations(config.decorations)
-            .with_transparent(config.transparent);
+            .with_transparent(config.transparent)
+            .with_maximized(config.maximized)
+            .with_visible(config.visible)
+            .with_active(config.active)
+            .with_window_level(map_window_level(config.window_level));
 
         if config.fullscreen {
             attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
@@ -44,6 +48,8 @@ impl DesktopWindow {
             attrs = attrs.with_position(winit::dpi::LogicalPosition::new(x, y));
         }
 
+        attrs = apply_platform_attrs(attrs, config);
+
         let window = event_loop.create_window(attrs)?;
 
         // Center window on screen if requested
@@ -57,12 +63,17 @@ impl DesktopWindow {
             }
         }
 
-        // Enable IME (Input Method Editor) for international text input
-        window.set_ime_allowed(true);
+        // IME — winit's `with_ime_allowed` exists only on the
+        // attributes for some platforms; the portable path is to set
+        // it post-create.
+        window.set_ime_allowed(config.ime_allowed);
+        if !config.cursor_visible {
+            window.set_cursor_visible(false);
+        }
 
         Ok(Self {
             window: Arc::new(window),
-            focused: AtomicBool::new(true),
+            focused: AtomicBool::new(config.active),
             transparent: config.transparent,
         })
     }
@@ -206,3 +217,71 @@ impl Window for DesktopWindow {
 // Safety: Window operations are thread-safe via winit's internal synchronization
 unsafe impl Send for DesktopWindow {}
 unsafe impl Sync for DesktopWindow {}
+
+fn map_window_level(level: WindowLevel) -> WinitWindowLevel {
+    match level {
+        WindowLevel::AlwaysOnBottom => WinitWindowLevel::AlwaysOnBottom,
+        WindowLevel::Normal => WinitWindowLevel::Normal,
+        WindowLevel::AlwaysOnTop => WinitWindowLevel::AlwaysOnTop,
+    }
+}
+
+/// Apply platform-specific extension attributes (macOS title-bar
+/// styling, Windows taskbar / shadow / class, X11 WM_CLASS). The
+/// `cfg(target_os)` gates keep cross-platform builds from pulling in
+/// extension traits they don't need.
+#[allow(unused_mut, unused_variables, clippy::let_and_return)]
+fn apply_platform_attrs(mut attrs: WindowAttributes, config: &WindowConfig) -> WindowAttributes {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        if config.macos_titlebar_transparent {
+            attrs = attrs.with_titlebar_transparent(true);
+        }
+        if config.macos_titlebar_hidden {
+            attrs = attrs.with_titlebar_hidden(true);
+        }
+        if config.macos_titlebar_buttons_hidden {
+            attrs = attrs.with_titlebar_buttons_hidden(true);
+        }
+        if config.macos_fullsize_content_view {
+            attrs = attrs.with_fullsize_content_view(true);
+        }
+        if config.macos_movable_by_window_background {
+            attrs = attrs.with_movable_by_window_background(true);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        if config.windows_skip_taskbar {
+            attrs = attrs.with_skip_taskbar(true);
+        }
+        if config.windows_undecorated_shadow {
+            attrs = attrs.with_undecorated_shadow(true);
+        }
+        // Windows drag_and_drop is enabled by default in winit;
+        // forward the config flag only when it'd actually change
+        // the default to avoid surprising users on older drivers.
+        if !config.windows_drag_and_drop {
+            attrs = attrs.with_drag_and_drop(false);
+        }
+        if let Some(class) = &config.windows_class_name {
+            attrs = attrs.with_class_name(class.clone());
+        }
+    }
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    {
+        use winit::platform::x11::WindowAttributesExtX11;
+        if let Some((instance, class)) = &config.x11_class {
+            attrs = attrs.with_name(instance.clone(), class.clone());
+        }
+    }
+    attrs
+}

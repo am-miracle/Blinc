@@ -12,6 +12,19 @@ impl WindowId {
     pub const PRIMARY: WindowId = WindowId(0);
 }
 
+/// Window stacking level. Maps to winit's `WindowLevel`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowLevel {
+    /// Below regular windows. The window won't trap focus by default.
+    AlwaysOnBottom,
+    /// Normal stacking — the default for OS-managed Z order.
+    #[default]
+    Normal,
+    /// Floats above regular windows. Useful for tool palettes, HUDs,
+    /// always-visible overlays.
+    AlwaysOnTop,
+}
+
 /// Where animation scheduler ticking happens.
 ///
 /// Blinc's animation scheduler advances springs, keyframe animations,
@@ -63,10 +76,27 @@ pub struct WindowConfig {
     pub decorations: bool,
     /// Whether the window should be transparent
     pub transparent: bool,
-    /// Whether the window should always be on top
-    pub always_on_top: bool,
+    /// Window stacking level. Default [`WindowLevel::Normal`].
+    pub window_level: WindowLevel,
     /// Whether to start in fullscreen mode
     pub fullscreen: bool,
+    /// Whether to start in a maximized state.
+    pub maximized: bool,
+    /// Whether the window is visible at creation. `false` creates a
+    /// hidden window that must be shown later. Default `true`.
+    pub visible: bool,
+    /// Whether the window receives keyboard focus at creation.
+    /// Default `true`. Set `false` for tool palettes / panels that
+    /// shouldn't steal focus from the main window.
+    pub active: bool,
+    /// Whether the cursor is visible inside the window. Default `true`.
+    /// Toggling at runtime is also exposed via [`Window::set_cursor`]
+    /// with [`Cursor::None`].
+    pub cursor_visible: bool,
+    /// Whether the OS Input Method Editor is allowed for international
+    /// text input. Default `true`. Set `false` for game / CAD apps that
+    /// need raw keyboard.
+    pub ime_allowed: bool,
     /// Minimum window size in logical pixels (None = no constraint)
     pub min_size: Option<(u32, u32)>,
     /// Maximum window size in logical pixels (None = no constraint)
@@ -75,10 +105,54 @@ pub struct WindowConfig {
     pub position: Option<(i32, i32)>,
     /// Whether to center the window on the screen at creation
     pub center: bool,
-    /// Whether this window is modal (blocks input to other windows while open)
+    /// Whether this window is modal (blocks input to other windows
+    /// while open). Enforced inside Blinc's event router; the OS
+    /// itself isn't signaled (cross-platform modal hints don't exist
+    /// in winit 0.30). For OS-level modality on a specific platform,
+    /// combine with [`Self::macos_titlebar_buttons_hidden`] or the
+    /// equivalent platform-specific knob.
     pub modal: bool,
-    /// Parent window ID for modal relationships (None = top-level)
+    /// Parent window ID. Used by Blinc's modal input-blocking to
+    /// identify which window remains interactive while `modal` is
+    /// set. Not currently signaled to winit — adding an OS-level
+    /// parent-child relationship requires raw window handle plumbing
+    /// (winit's `with_parent_window` is `unsafe` and platform-specific).
     pub parent: Option<WindowId>,
+
+    /// macOS: render the titlebar transparently so the window
+    /// background shows through. Pair with
+    /// [`Self::macos_fullsize_content_view`] for an edge-to-edge
+    /// content area.
+    pub macos_titlebar_transparent: bool,
+    /// macOS: hide the titlebar entirely. Window keeps the traffic-
+    /// light buttons unless [`Self::macos_titlebar_buttons_hidden`]
+    /// is also set.
+    pub macos_titlebar_hidden: bool,
+    /// macOS: hide the close / minimize / zoom buttons.
+    pub macos_titlebar_buttons_hidden: bool,
+    /// macOS: let the content view extend under the titlebar area.
+    /// Required when drawing custom title-bar chrome.
+    pub macos_fullsize_content_view: bool,
+    /// macOS: allow the user to drag the window by clicking and
+    /// holding anywhere on the background (not just the titlebar).
+    pub macos_movable_by_window_background: bool,
+
+    /// Windows: hide this window from the taskbar.
+    pub windows_skip_taskbar: bool,
+    /// Windows: draw the standard window shadow under a borderless
+    /// window (`decorations = false`). No effect when decorations are
+    /// enabled (Windows draws the shadow automatically).
+    pub windows_undecorated_shadow: bool,
+    /// Windows: enable native drag-and-drop file targets. Default `true`.
+    pub windows_drag_and_drop: bool,
+    /// Windows: optional class-name override. Useful when an app needs
+    /// to distinguish window classes for OS-level grouping or
+    /// automation tools. Default `None` uses winit's class.
+    pub windows_class_name: Option<String>,
+
+    /// X11: window class / instance name. Maps to the `WM_CLASS`
+    /// hint that window managers use for grouping and rules.
+    pub x11_class: Option<(String, String)>,
     /// How many frames the GPU is allowed to queue ahead of the
     /// currently-presented frame. `2` is the wgpu default and gives
     /// the smoothest pacing under vsync. `1` halves the GPU memory
@@ -155,14 +229,29 @@ impl Default for WindowConfig {
             resizable: true,
             decorations: true,
             transparent: false,
-            always_on_top: false,
+            window_level: WindowLevel::Normal,
             fullscreen: false,
+            maximized: false,
+            visible: true,
+            active: true,
+            cursor_visible: true,
+            ime_allowed: true,
             min_size: None,
             max_size: None,
             position: None,
             center: false,
             modal: false,
             parent: None,
+            macos_titlebar_transparent: false,
+            macos_titlebar_hidden: false,
+            macos_titlebar_buttons_hidden: false,
+            macos_fullsize_content_view: false,
+            macos_movable_by_window_background: false,
+            windows_skip_taskbar: false,
+            windows_undecorated_shadow: false,
+            windows_drag_and_drop: true,
+            windows_class_name: None,
+            x11_class: None,
             max_frame_latency: 2,
             animation_fps_cap: None,
             animation_thread_mode: AnimationThreadMode::default(),
@@ -210,15 +299,57 @@ impl WindowConfig {
         self
     }
 
-    /// Set whether the window is always on top
+    /// Set whether the window is always on top. Shortcut for
+    /// `.window_level(WindowLevel::AlwaysOnTop)`.
     pub fn always_on_top(mut self, always_on_top: bool) -> Self {
-        self.always_on_top = always_on_top;
+        self.window_level = if always_on_top {
+            WindowLevel::AlwaysOnTop
+        } else {
+            WindowLevel::Normal
+        };
+        self
+    }
+
+    /// Set the window stacking level explicitly.
+    pub fn window_level(mut self, level: WindowLevel) -> Self {
+        self.window_level = level;
         self
     }
 
     /// Set whether to start in fullscreen
     pub fn fullscreen(mut self, fullscreen: bool) -> Self {
         self.fullscreen = fullscreen;
+        self
+    }
+
+    /// Set whether to start in a maximized state.
+    pub fn maximized(mut self, maximized: bool) -> Self {
+        self.maximized = maximized;
+        self
+    }
+
+    /// Set whether the window is visible at creation. `false` creates
+    /// a hidden window that must be shown later.
+    pub fn visible(mut self, visible: bool) -> Self {
+        self.visible = visible;
+        self
+    }
+
+    /// Set whether the window receives keyboard focus at creation.
+    pub fn active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
+    }
+
+    /// Set whether the cursor is visible inside the window at creation.
+    pub fn cursor_visible(mut self, visible: bool) -> Self {
+        self.cursor_visible = visible;
+        self
+    }
+
+    /// Set whether the OS Input Method Editor is allowed.
+    pub fn ime_allowed(mut self, allowed: bool) -> Self {
+        self.ime_allowed = allowed;
         self
     }
 
@@ -284,6 +415,68 @@ impl WindowConfig {
     /// need fixed-rate execution regardless of rendering load.
     pub fn animation_thread_mode(mut self, mode: AnimationThreadMode) -> Self {
         self.animation_thread_mode = mode;
+        self
+    }
+
+    /// macOS: render the titlebar transparently.
+    pub fn macos_titlebar_transparent(mut self, transparent: bool) -> Self {
+        self.macos_titlebar_transparent = transparent;
+        self
+    }
+
+    /// macOS: hide the titlebar entirely.
+    pub fn macos_titlebar_hidden(mut self, hidden: bool) -> Self {
+        self.macos_titlebar_hidden = hidden;
+        self
+    }
+
+    /// macOS: hide the close / minimize / zoom buttons.
+    pub fn macos_titlebar_buttons_hidden(mut self, hidden: bool) -> Self {
+        self.macos_titlebar_buttons_hidden = hidden;
+        self
+    }
+
+    /// macOS: extend the content view under the titlebar.
+    pub fn macos_fullsize_content_view(mut self, fullsize: bool) -> Self {
+        self.macos_fullsize_content_view = fullsize;
+        self
+    }
+
+    /// macOS: drag the window by clicking anywhere on the background.
+    pub fn macos_movable_by_window_background(mut self, movable: bool) -> Self {
+        self.macos_movable_by_window_background = movable;
+        self
+    }
+
+    /// Windows: hide this window from the taskbar.
+    pub fn windows_skip_taskbar(mut self, skip: bool) -> Self {
+        self.windows_skip_taskbar = skip;
+        self
+    }
+
+    /// Windows: draw the standard window shadow under a borderless
+    /// window. No-op when decorations are enabled.
+    pub fn windows_undecorated_shadow(mut self, shadow: bool) -> Self {
+        self.windows_undecorated_shadow = shadow;
+        self
+    }
+
+    /// Windows: enable native drag-and-drop file targets.
+    pub fn windows_drag_and_drop(mut self, enabled: bool) -> Self {
+        self.windows_drag_and_drop = enabled;
+        self
+    }
+
+    /// Windows: override the OS-level class name. Useful for window
+    /// grouping and automation tools.
+    pub fn windows_class_name(mut self, name: impl Into<String>) -> Self {
+        self.windows_class_name = Some(name.into());
+        self
+    }
+
+    /// X11: set the `WM_CLASS` hint (instance, class).
+    pub fn x11_class(mut self, instance: impl Into<String>, class: impl Into<String>) -> Self {
+        self.x11_class = Some((instance.into(), class.into()));
         self
     }
 }
