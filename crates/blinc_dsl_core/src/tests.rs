@@ -4528,7 +4528,7 @@ fn core_layout_widgets_compile_and_return_element_builders() {
     let cases = [
         (
             "Stack",
-            r#"view { Stack() { Text("layer") } }"#,
+            r#"view { Stack { Text("layer") } }"#,
             blinc_layout::div::ElementTypeId::Div,
             Some(1),
         ),
@@ -4558,13 +4558,13 @@ fn core_layout_widgets_compile_and_return_element_builders() {
         ),
         (
             "Motion",
-            r#"view { Motion() { Text("moving") } }"#,
+            r#"view { Motion { Text("moving") } }"#,
             blinc_layout::div::ElementTypeId::Motion,
             Some(1),
         ),
         (
             "Notch",
-            r#"view { Notch() { Text("notched") } }"#,
+            r#"view { Notch { Text("notched") } }"#,
             blinc_layout::div::ElementTypeId::Div,
             Some(1),
         ),
@@ -4660,13 +4660,13 @@ fn core_layout_widgets_compile_and_return_element_builders() {
         ),
         (
             "Hr",
-            r#"view { Hr() }"#,
+            r#"view { Hr }"#,
             blinc_layout::div::ElementTypeId::Div,
             Some(1),
         ),
         (
             "Blockquote",
-            r#"view { Blockquote() { P(content="quoted") } }"#,
+            r#"view { Blockquote { P(content="quoted") } }"#,
             blinc_layout::div::ElementTypeId::Div,
             Some(1),
         ),
@@ -4678,13 +4678,13 @@ fn core_layout_widgets_compile_and_return_element_builders() {
         ),
         (
             "Ul",
-            r#"view { Ul() { Li() { Text("one") } } }"#,
+            r#"view { Ul { Li { Text("one") } } }"#,
             blinc_layout::div::ElementTypeId::Div,
             Some(1),
         ),
         (
             "Ol",
-            r#"view { Ol(start = 3) { Li() { Text("three") } } }"#,
+            r#"view { Ol(start = 3) { Li { Text("three") } } }"#,
             blinc_layout::div::ElementTypeId::Div,
             Some(1),
         ),
