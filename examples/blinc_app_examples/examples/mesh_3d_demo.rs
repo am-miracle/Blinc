@@ -162,6 +162,13 @@ fn try_load_assets() -> Option<(Arc<MeshData>, Vec<u8>)> {
     Some((Arc::new(helmet), hdr_bytes))
 }
 
+fn register_scheduler_tick() {
+    let scheduler_for_redraw = get_scheduler();
+    get_scheduler().register_tick_callback(move |_dt: f32| {
+        scheduler_for_redraw.request_redraw();
+    });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Async asset handle — slot populated by the loader, `scene_ready`
 // flipped once `slot.set` has succeeded.
@@ -193,6 +200,7 @@ impl AsyncAssets {
                 tracing::error!("mesh_3d_demo: asset load failed");
                 return;
             };
+            register_scheduler_tick();
             tracing::info!("mesh_3d_demo: applying HDRI ({} bytes)", hdr_bytes.len());
             kit.set_hdri(&hdr_bytes, 256);
             let _ = slot.set(helmet);
@@ -203,6 +211,7 @@ impl AsyncAssets {
         #[cfg(target_arch = "wasm32")]
         {
             wasm_bindgen_futures::spawn_local(async move {
+                register_scheduler_tick();
                 loop {
                     if let Some((helmet, hdr_bytes)) = try_load_assets() {
                         tracing::info!("mesh_3d_demo: applying HDRI ({} bytes)", hdr_bytes.len());
