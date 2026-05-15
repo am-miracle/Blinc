@@ -3092,51 +3092,56 @@ impl RenderContext {
                     let base_width = bounds.width * scale;
                     let base_height = bounds.height * scale;
 
-                    // Scale motion translate by DPI factor (motion values are in layout coordinates)
-                    let scaled_motion_tx = effective_motion_translate.0 * scale;
-                    let scaled_motion_ty = effective_motion_translate.1 * scale;
+                    // Motion (scale-around-center + translate) is composed into the glyph
+                    // affine instead of being baked into font_size/position. This keeps
+                    // glyph rasterization at base size — without this, every animation
+                    // frame stamps a fresh `(font_id, glyph_id, font_size)` cache key,
+                    // overflowing the glyph LRU and triggering atlas growth, which then
+                    // distorts text after repeated transitions.
+                    let has_motion_scale = (effective_motion_scale.0 - 1.0).abs() > 1e-6
+                        || (effective_motion_scale.1 - 1.0).abs() > 1e-6;
+                    let has_motion_translate = effective_motion_translate.0.abs() > 1e-6
+                        || effective_motion_translate.1.abs() > 1e-6;
+                    let motion_affine = if has_motion_scale || has_motion_translate {
+                        let (sx, sy) = effective_motion_scale;
+                        let (tx, ty) = effective_motion_translate;
+                        let (cx, cy) = effective_motion_scale_center.unwrap_or((0.0, 0.0));
+                        // Scale around (cx, cy) plus translate (tx, ty) — all in layout coords.
+                        Some([sx, 0.0, 0.0, sy, cx * (1.0 - sx) + tx, cy * (1.0 - sy) + ty])
+                    } else {
+                        None
+                    };
 
-                    // Apply motion scale and translation
-                    // When there's a motion scale center (from parent Motion container),
-                    // we must scale around THAT center, not the text element's own center.
-                    // This matches how shapes are rendered - the scale transform is pushed
-                    // at the Motion container level and affects all children relative to
-                    // the container's center.
-                    let (scaled_x, scaled_y, scaled_width, scaled_height) =
-                        if let Some((motion_center_x, motion_center_y)) =
-                            effective_motion_scale_center
-                        {
-                            // Scale position around the motion container's center (in DPI-scaled coordinates)
-                            let motion_center_x_scaled = motion_center_x * scale;
-                            let motion_center_y_scaled = motion_center_y * scale;
+                    // Compose motion_affine ∘ node_css_affine (motion is the outer transform).
+                    let text_affine = match (motion_affine, node_css_affine) {
+                        (Some(m), Some(c)) => {
+                            let [ma, mb, mc, md, mtx, mty] = m;
+                            let [ca, cb, cc, cd, ctx, cty] = c;
+                            Some([
+                                ma * ca + mc * cb,
+                                mb * ca + md * cb,
+                                ma * cc + mc * cd,
+                                mb * cc + md * cd,
+                                ma * ctx + mc * cty + mtx,
+                                mb * ctx + md * cty + mty,
+                            ])
+                        }
+                        (Some(m), None) => Some(m),
+                        (None, c) => c,
+                    };
 
-                            // Calculate position relative to motion center
-                            let rel_x = base_x - motion_center_x_scaled;
-                            let rel_y = base_y - motion_center_y_scaled;
-
-                            // Apply scale to relative position and size
-                            let scaled_rel_x = rel_x * effective_motion_scale.0;
-                            let scaled_rel_y = rel_y * effective_motion_scale.1;
-                            let scaled_w = base_width * effective_motion_scale.0;
-                            let scaled_h = base_height * effective_motion_scale.1;
-
-                            // Apply motion translation and convert back to absolute position
-                            let final_x = motion_center_x_scaled + scaled_rel_x + scaled_motion_tx;
-                            let final_y = motion_center_y_scaled + scaled_rel_y + scaled_motion_ty;
-
-                            (final_x, final_y, scaled_w, scaled_h)
-                        } else {
-                            // No motion scale center - just apply translation (no scale effect)
-                            let final_x = base_x + scaled_motion_tx;
-                            let final_y = base_y + scaled_motion_ty;
-                            (final_x, final_y, base_width, base_height)
-                        };
+                    // Glyph layout uses the BASE box — motion is applied via text_affine
+                    // at glyph emission, so position/size here intentionally exclude motion.
+                    let scaled_x = base_x;
+                    let scaled_y = base_y;
+                    let scaled_width = base_width;
+                    let scaled_height = base_height;
 
                     // Use CSS-overridden font size if available (from stylesheet/animation/transition)
                     let base_font_size = render_node.props.font_size.unwrap_or(text_data.font_size);
-                    let scaled_font_size = base_font_size * effective_motion_scale.1 * scale;
-                    let scaled_measured_width =
-                        text_data.measured_width * effective_motion_scale.0 * scale;
+                    // Rasterize at base size only — motion scale is in text_affine.
+                    let scaled_font_size = base_font_size * scale;
+                    let scaled_measured_width = text_data.measured_width * scale;
 
                     // Intersect primary clip with scroll clip — text only supports
                     // a single clip rect so we must merge both boundaries.
@@ -3277,7 +3282,7 @@ impl RenderContext {
                             .letter_spacing
                             .unwrap_or(text_data.letter_spacing),
                         z_index: *z_layer,
-                        ascender: text_data.ascender * effective_motion_scale.1 * scale,
+                        ascender: text_data.ascender * scale,
                         strikethrough: render_node.props.text_decoration.map_or(
                             text_data.strikethrough,
                             |td| {
@@ -3295,7 +3300,7 @@ impl RenderContext {
                         ),
                         decoration_color: render_node.props.text_decoration_color,
                         decoration_thickness: render_node.props.text_decoration_thickness,
-                        css_affine: node_css_affine,
+                        css_affine: text_affine,
                         text_shadow: render_node.props.text_shadow,
                         transform_3d_layer: inside_3d_layer.clone(),
                         is_foreground: children_inside_foreground,

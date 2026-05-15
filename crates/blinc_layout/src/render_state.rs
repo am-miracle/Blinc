@@ -1154,7 +1154,33 @@ impl RenderState {
     /// Start an enter motion animation for a node
     ///
     /// This is called when a node with motion config first appears in the tree.
+    ///
+    /// **No-op if the node already has an active motion in flight.**
+    /// `initialize_motion_animations` runs after every layout pass (full
+    /// rebuild + every subtree rebuild + every Stateful refresh), so a
+    /// node carrying motion config gets this method invoked many times
+    /// per its lifetime. Without the existing-state guard, every frame
+    /// reset the FSM back to `Entering { progress: 0.0 }` and the
+    /// animation could never advance — visible as a transient-motion
+    /// page that stays at `scale=0, opacity=0` forever (GH #39
+    /// follow-up). Mirrors the same guard `start_stable_motion` has on
+    /// `Suspended | Waiting | Entering | Visible`.
     pub fn start_enter_motion(&mut self, node_id: LayoutNodeId, config: MotionAnimation) {
+        if let Some(state) = self.node_states.get(&node_id) {
+            if let Some(ref motion) = state.motion {
+                match motion.state {
+                    MotionState::Suspended
+                    | MotionState::Waiting { .. }
+                    | MotionState::Entering { .. }
+                    | MotionState::Visible
+                    | MotionState::Exiting { .. } => return,
+                    MotionState::Removed => {
+                        // Allow restart after a completed exit.
+                    }
+                }
+            }
+        }
+
         let state = self.get_or_create(node_id);
 
         // Determine initial state based on delay

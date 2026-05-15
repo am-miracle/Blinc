@@ -338,12 +338,13 @@ impl Router {
                         path: matched.path.clone(),
                         router: self.clone(),
                     };
-                    (*view, ctx)
+                    let transition = matched.transition.clone();
+                    (*view, ctx, transition)
                 })
             })
         };
 
-        if let Some((view, ctx)) = view_and_ctx {
+        if let Some((view, ctx, transition)) = view_and_ctx {
             let route_path = ctx.path.clone();
 
             // Manage animation suspension scopes
@@ -381,7 +382,56 @@ impl Router {
             // Exit the scope
             blinc_animation::suspension::exit_scope();
 
-            result
+            // Wrap in a motion container when the route declares a
+            // `PageTransition` so the page actually animates on
+            // appear. The `Stateful` outlet builds a fresh subtree
+            // per navigation, so the new view's motion container
+            // is freshly minted on every route change → its
+            // `enter_animation` plays automatically.
+            //
+            // `.transient()` is critical here: without it, motion
+            // defaults to `use_stable_key=true` and reuses the
+            // same `RenderState::stable_motions` entry on every
+            // navigation. The state machine (Waiting → Entering →
+            // Active → ...) accumulates partial transitions
+            // across rebuilds, and after ~5 navigations the
+            // residual state corrupts the transform/opacity
+            // applied to the new view (visible as ghosted /
+            // half-scaled glyphs in the GH #39 reproducer).
+            // With `transient`, motion state is keyed by the
+            // freshly-allocated `LayoutNodeId`, cleaned up on
+            // subtree removal, and every navigation starts from
+            // a clean Waiting state.
+            //
+            // The `exit_animation` is set for completeness but
+            // won't fire today: the previous view's subtree is
+            // removed wholesale on rebuild, before any exit
+            // motion could run. Proper exit playback needs the
+            // outlet to keep the outgoing view in the tree until
+            // the motion settles (the pattern used by
+            // `widgets::overlay::transition` which calls
+            // `query_motion(key).exit()` and defers the unmount).
+            // Filed as a follow-up; the enter half is what makes
+            // GH #39's reproducer visibly transition.
+            if let Some(transition) = transition {
+                // The host `Div` + motion wrapper must size to fit
+                // their child (the view), not collapse to zero and
+                // not expand to fill — `router.outlet()` is most
+                // often parked inside a centered flex parent (see
+                // the GH #35 reproducer) and we want the wrapped
+                // page to occupy exactly the space the bare view
+                // would have. `w_fit().h_fit()` matches the natural
+                // sizing of the view returned by the route closure.
+                blinc_layout::div::div().w_fit().h_fit().child(
+                    blinc_layout::motion::motion()
+                        .transient()
+                        .enter_animation(transition.enter)
+                        .exit_animation(transition.exit)
+                        .child(result),
+                )
+            } else {
+                result
+            }
         } else {
             blinc_layout::div::div()
         }

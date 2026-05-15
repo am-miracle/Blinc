@@ -31,7 +31,7 @@
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;
 use blinc_cn::cn;
-use blinc_router::{use_router, Route, RouteContext, RouterBuilder};
+use blinc_router::{use_router, PageTransition, Route, RouteContext, RouterBuilder};
 
 fn home_page(_ctx: RouteContext) -> Div {
     let router = use_router();
@@ -84,9 +84,31 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
+    // GH #39 reproducer + visual check: per-route `PageTransition`
+    // should make navigations visibly animate. Pre-fix, the
+    // matched-route's `transition` field was never read in
+    // `Router::build_current_view`, so navigating between routes
+    // produced an instant swap with no motion. The fix wraps the
+    // built view in a `motion()` container with the configured
+    // enter/exit animations.
+    //
+    // While testing this, also keep an eye on CPU usage between
+    // navigations: the new motion container should settle and the
+    // redraw chain should quiet (CPU back to ~0 %) within ~250 ms of
+    // landing on a route.
     let router = RouterBuilder::new()
-        .route(Route::new("/").name("home").view(home_page))
-        .route(Route::new("/counter").name("counter").view(counter_page))
+        .route(
+            Route::new("/")
+                .name("home")
+                .view(home_page)
+                .transition(PageTransition::scale()),
+        )
+        .route(
+            Route::new("/counter")
+                .name("counter")
+                .view(counter_page)
+                .transition(PageTransition::scale()),
+        )
         .not_found(not_found)
         .initial("/")
         .build();
