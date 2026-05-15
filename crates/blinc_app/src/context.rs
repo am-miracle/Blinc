@@ -4005,6 +4005,14 @@ impl RenderContext {
         height: u32,
         target: &wgpu::TextureView,
     ) -> Result<()> {
+        // Sub-Phase 4 timing — disabled by default; gated by
+        // `RUST_LOG=blinc_app::frame_timing=trace` (same target the
+        // outer per-phase instrumentation uses). Lets us see whether
+        // the 18 ms Phase 4 cost is the paint walker, the
+        // text/SVG/image collector, or the GPU pipeline — three very
+        // different optimization targets.
+        let p4_start = std::time::Instant::now();
+
         // Get scale factor for HiDPI rendering
         let scale_factor = tree.scale_factor();
 
@@ -4014,6 +4022,7 @@ impl RenderContext {
 
         // Render with motion animations applied (all layers to same context)
         tree.render_with_motion(&mut ctx, render_state);
+        let t_paint_walker = p4_start.elapsed();
 
         // Take the batch (mutable so CSS-transformed text primitives can be added)
         let mut batch = ctx.take_batch();
@@ -4028,8 +4037,10 @@ impl RenderContext {
         let pending_meshes = ctx.take_pending_meshes();
 
         // Collect text, SVG, image, and flow elements WITH motion state
+        let collect_start = std::time::Instant::now();
         let (all_texts, all_svgs, all_images, flow_elements) =
             self.collect_render_elements_with_state(tree, Some(render_state));
+        let t_collect_elements = collect_start.elapsed();
 
         // Partition elements into normal (no 3D ancestor) and 3D-layer groups.
         // Elements inside a 3D-transformed parent need to be rendered to an offscreen
@@ -4912,6 +4923,18 @@ impl RenderContext {
 
         // Periodic cache stats (every ~5s at 60fps)
         self.log_cache_stats();
+
+        let t_total_p4 = p4_start.elapsed();
+        let t_gpu = t_total_p4
+            .saturating_sub(t_paint_walker)
+            .saturating_sub(t_collect_elements);
+        tracing::trace!(
+            target: "blinc_app::frame_timing",
+            paint_walker_us = t_paint_walker.as_micros() as u64,
+            collect_elements_us = t_collect_elements.as_micros() as u64,
+            gpu_us = t_gpu.as_micros() as u64,
+            "p4_breakdown"
+        );
 
         Ok(())
     }

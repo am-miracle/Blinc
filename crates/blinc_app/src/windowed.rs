@@ -193,6 +193,16 @@ pub(crate) struct WindowState {
     pub needs_relayout: bool,
     /// Last frame timestamp for CSS animation delta
     pub last_frame_time_ms: u64,
+    /// Timestamp of the last frame that actually ran Phase 4 (render +
+    /// GPU submit + present). Distinct from `last_frame_time_ms`,
+    /// which advances every Frame event we processed — including
+    /// tick-only frames where scheduler animations were ticked but
+    /// the paint pipeline was skipped under `animation_fps_cap`.
+    /// Drives the decoupled-tick decision: we render only when the
+    /// elapsed time since this stamp ≥ the cap interval (or some
+    /// non-spring source needs a frame, in which case we render
+    /// regardless of the cap). `0` until the first paint.
+    pub last_paint_time_ms: u64,
     /// Active touch point IDs
     pub active_touch_ids: std::collections::HashSet<u64>,
     /// UI builder for this window (None = default static UI)
@@ -230,6 +240,7 @@ impl WindowState {
             needs_rebuild: true,
             needs_relayout: false,
             last_frame_time_ms: 0,
+            last_paint_time_ms: 0,
             active_touch_ids: std::collections::HashSet::new(),
             ui_builder: None,
             transparent: false,
@@ -4745,6 +4756,59 @@ impl WindowedApp {
 
                             t_phase3 = phase3_start.elapsed();
 
+                            // Decouple render from tick. Animation-only frames
+                            // (no rebuild, no relayout, no stateful redraw,
+                            // no input-driven dirty) cost ~6 ms of CPU per
+                            // rendered frame on cn_demo — overwhelmingly in
+                            // GPU dispatch (the paint walker itself is only
+                            // ~0.1 ms, see the `p4_breakdown` trace). Pushing
+                            // spring tick to vsync but capping paint at the
+                            // configured `animation_fps_cap` keeps physics
+                            // integration accurate while halving render cost.
+                            //
+                            // Always render when: there's no cap, this is the
+                            // very first paint, a rebuild ran this frame,
+                            // layout was recomputed, or the cap interval has
+                            // elapsed. Skip Phase 4 + present otherwise (the
+                            // scheduler's `has_active` path will re-arm the
+                            // next vsync Frame for the next tick).
+                            let should_render = match animation_fps_cap {
+                                None => true,
+                                Some(_) if did_rebuild => true,
+                                Some(_) if ws.needs_relayout => true,
+                                Some(_) if ws.last_paint_time_ms == 0 => true,
+                                Some(fps) => {
+                                    let cap_interval_ms = 1000u64 / fps as u64;
+                                    current_time.saturating_sub(ws.last_paint_time_ms)
+                                        >= cap_interval_ms
+                                }
+                            };
+                            if !should_render {
+                                // Re-arm so the next vsync Frame still fires
+                                // (we need it for the next tick — without
+                                // this, the scheduler ticks once and then
+                                // the chain dies until something else wakes
+                                // the loop).
+                                frame_dirty.store(true, Ordering::Release);
+                                window.request_redraw();
+                                let t_total = frame_start.elapsed();
+                                tracing::trace!(
+                                    target: "blinc_app::frame_timing",
+                                    total_us = t_total.as_micros() as u64,
+                                    p1_rebuild_check_us = t_phase1.as_micros() as u64,
+                                    p2_rebuild_us = t_phase2.as_micros() as u64,
+                                    p3_tick_us = t_phase3.as_micros() as u64,
+                                    p4_render_us = 0u64,
+                                    p5_chain_us = 0u64,
+                                    did_rebuild,
+                                    dirty_springs = dirty_spring_count,
+                                    skipped = true,
+                                    "frame"
+                                );
+                                return ControlFlow::Continue;
+                            }
+                            ws.last_paint_time_ms = current_time;
+
                             // =========================================================
                             // PHASE 4: Render
                             // Combines stable tree structure with dynamic render state
@@ -5066,67 +5130,6 @@ impl WindowedApp {
                                     && !pointer_query_active
                                     && !flow_needs_redraw;
 
-                                // Animation-only paths get throttled when the
-                                // app opted into a sub-vsync animation cap.
-                                // "Animation-only" means none of the signals
-                                // tied to direct user interaction or
-                                // physics-driven scroll are active — those
-                                // need vsync responsiveness to feel right.
-                                // `pointer_query_active` also bypasses the
-                                // cap because env() pointer queries already
-                                // depend on cursor coordinates that arrive
-                                // at vsync rate.
-                                let interactive = scroll_animating
-                                    || needs_overlay_redraw
-                                    || pointer_query_active;
-                                // Per-property smoothness gate (option B).
-                                // Even when only animation signals are firing,
-                                // if any visible animation is touching a
-                                // vsync-class property — transforms, 3D
-                                // rotation, layout sizing, font-size,
-                                // clip-path geometry — capping to 30 fps
-                                // would visibly stair-step. Bounds
-                                // animations (FLIP, animate_bounds) are
-                                // always vsync because they animate
-                                // position/size by definition. Stateful
-                                // animations are opaque; we treat them as
-                                // cap-OK and accept the trade-off — apps
-                                // that drive transforms via Stateful and
-                                // need vsync should leave the cap off.
-                                let needs_vsync_for_animation = ws
-                                    .render_tree
-                                    .as_ref()
-                                    .is_some_and(|t| {
-                                        let painted_stable = t.painted_stable_ids();
-                                        let painted = t.painted_node_ids();
-                                        let store = t.css_anim_store();
-                                        let store_guard = store.lock().unwrap();
-                                        let store_vsync =
-                                            store_guard.has_visible_vsync_class(&painted_stable);
-                                        drop(store_guard);
-                                        // Motion bindings drive transforms (translate / scale
-                                        // / rotate) and opacity off SharedAnimatedValues —
-                                        // capping those to 30 fps stair-steps spring physics
-                                        // (cn::progress_animated, pull-to-refresh translate
-                                        // on motion_demo). The paint walker sets
-                                        // `visible_binding_active` whenever a painted motion
-                                        // node has at least one binding mid-flight; treating
-                                        // that the same as a CSS-vsync class keeps spring
-                                        // bindings at vsync while leaving the cap honored
-                                        // for everything else.
-                                        t.visible_binding_active()
-                                            || store_vsync
-                                            || t.has_active_visible_flip_animations(&painted)
-                                            || t.has_active_visible_visual_animations(&painted)
-                                    });
-                                let cap_applies = !interactive
-                                    && !needs_vsync_for_animation
-                                    && (needs_animation_redraw
-                                        || needs_motion_redraw
-                                        || theme_animating
-                                        || css_needs_redraw
-                                        || flow_needs_redraw);
-
                                 if cursor_only {
                                     // Cursor blink toggles every ~400 ms
                                     // (see `RenderState::cursor_blink_interval`).
@@ -5135,22 +5138,20 @@ impl WindowedApp {
                                     let delay = std::time::Duration::from_millis(400);
                                     frame_dirty.store(true, Ordering::Release);
                                     wake_proxy_for_pacing.wake_at(delay);
-                                } else if let (true, Some(fps)) = (cap_applies, animation_fps_cap) {
-                                    // Defer the next frame instead of
-                                    // requesting it immediately. The platform
-                                    // shim's lazy timer thread sends a Wake
-                                    // event after `delay`, which the shim's
-                                    // `user_event` handler turns into
-                                    // `request_redraw()` for every window.
-                                    // We flip `frame_dirty` ahead of time so
-                                    // the deferred `Event::Frame` actually
-                                    // renders instead of hitting the skip
-                                    // gate at the top of the Frame handler.
-                                    let delay =
-                                        std::time::Duration::from_millis(1000 / fps as u64);
-                                    frame_dirty.store(true, Ordering::Release);
-                                    wake_proxy_for_pacing.wake_at(delay);
                                 } else {
+                                    // `animation_fps_cap` no longer gates the
+                                    // *frame* rate — Phase 4 entry now gates
+                                    // *render* using the cap, so we want to
+                                    // keep pumping Frames at vsync even when
+                                    // the cap is in effect so the scheduler's
+                                    // Phase 3 tick advances every vsync
+                                    // interval. The decoupled-tick model
+                                    // (vsync tick / capped render) only
+                                    // works if Frames keep arriving — hence
+                                    // the unconditional request_redraw +
+                                    // dirty flip here. Tick-only frames pay
+                                    // ~10 µs (P1 check + P3 tick) and skip
+                                    // the ~6 ms paint pipeline.
                                     // The next frame should render — pair the
                                     // `request_redraw` call with a dirty flip so
                                     // the start-of-frame skip check doesn't drop

@@ -49,16 +49,6 @@ impl RenderTree {
         // `visible_anim_active()` after this returns to gate the
         // end-of-frame redraw chain.
         self.visible_anim_active.set(false);
-        // Same lifecycle for the visible-binding flag: set whenever a
-        // painted motion node has an active spring/keyframe/timeline
-        // binding. Drives the windowed runner's
-        // `needs_vsync_for_animation` gate so transforms (translate,
-        // scale, rotate) bypass `animation_fps_cap` and run at vsync
-        // — without this, an app with a `fps_cap = 30` would visibly
-        // stair-step bound spring animations (cn::progress_animated,
-        // pull-to-refresh translate, etc.) even when they're the
-        // sole animation source on screen.
-        self.visible_binding_active.set(false);
         // Same lifecycle for the painted-node set: cleared here, grown
         // by the walk, queried via `painted_node_ids()` to filter
         // animating Statefuls down to those whose node is actually on
@@ -258,15 +248,15 @@ impl RenderTree {
         // off-screen spinner whose paint is culled still pinned the
         // chain at vsync because the scheduler's needs_redraw stays
         // true regardless of visibility.
-        // Tracked separately so the windowed runner can bypass
-        // `animation_fps_cap` whenever a painted motion node is
-        // driving a transform-class property at vsync rate.
-        let has_active_binding = motion_bindings_ref.is_some_and(|b| b.is_any_animating());
-        if has_active_binding {
-            self.visible_binding_active.set(true);
-        }
         if !self.visible_anim_active.get() {
             let canvas_paints = matches!(render_node.element_type, ElementType::Canvas(_));
+            // Bindings only count as a redraw signal when the
+            // underlying animated value is *actually* mid-flight.
+            // A settled spring binding (e.g. `cn::progress_animated`
+            // after it reached 75 %) leaves the binding in place but
+            // the value is now constant — including it here pinned
+            // the chain at vsync forever.
+            let has_active_binding = motion_bindings_ref.is_some_and(|b| b.is_any_animating());
             let has_active_motion = if let Some(ref stable_key) = render_node.props.motion_stable_id
             {
                 render_state.is_stable_motion_active(stable_key)

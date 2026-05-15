@@ -107,16 +107,6 @@ pub struct RenderTree {
     /// off-screen nodes, the chain stops until something brings them
     /// back into view.
     visible_anim_active: Cell<bool>,
-    /// Set during paint when a visible motion node has an active
-    /// spring/keyframe/timeline binding (translate / scale / rotate /
-    /// opacity). Subset of `visible_anim_active` — that flag covers
-    /// Canvas elements and motion FSM state too; this one is
-    /// specifically the "transform-class property is animating at
-    /// vsync" signal the windowed runner needs to bypass
-    /// `animation_fps_cap`. Without splitting them out, capping the
-    /// non-binding animations to 30 fps would stair-step bound spring
-    /// transforms (cn::progress_animated, pull-to-refresh translate).
-    visible_binding_active: Cell<bool>,
     /// Set of node ids that the paint walker actually rendered in the
     /// current frame (after viewport culling, motion-skip, and
     /// occlusion gates). Read by the windowed app at the end of the
@@ -321,7 +311,6 @@ impl RenderTree {
             viewport_cull_scrolls: std::collections::HashSet::new(),
             cull_viewport: Cell::new(None),
             visible_anim_active: Cell::new(false),
-            visible_binding_active: Cell::new(false),
             painted_node_ids: RefCell::new(HashSet::new()),
             motion_bindings: HashMap::new(),
             last_scroll_tick_ms: None,
@@ -642,15 +631,6 @@ impl RenderTree {
     /// until input or scroll brings them back into view.
     pub fn visible_anim_active(&self) -> bool {
         self.visible_anim_active.get()
-    }
-
-    /// Whether the last paint hit a visible motion node with an
-    /// active spring / keyframe / timeline binding (translate / scale
-    /// / rotate / opacity). Strict subset of [`Self::visible_anim_active`].
-    /// Used by the windowed runner to bypass `animation_fps_cap` for
-    /// vsync-class transform animations.
-    pub fn visible_binding_active(&self) -> bool {
-        self.visible_binding_active.get()
     }
 
     /// Borrow the set of node ids that the paint walker rendered in
