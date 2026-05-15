@@ -141,7 +141,38 @@ struct SchedulerInner {
     tick_callbacks: SlotMap<TickCallbackId, TickCallback>,
     last_frame: Instant,
     target_fps: u32,
+    /// Springs whose `value()` moved by ≥ `DIRTY_EPSILON` during the
+    /// most recent tick, or whose target was just changed. Drained by
+    /// the windowed runner each frame via
+    /// [`SchedulerHandle::take_dirty_springs`] — the eventual consumer
+    /// is the animation-only fast Phase 4 path, which patches the
+    /// touched nodes' `GpuPrimitive` transform / opacity in place and
+    /// skips the full paint walker.
+    ///
+    /// Insert sites:
+    /// - `tick` / `tick_frame_inner` after `spring.step` if the value
+    ///   actually moved.
+    /// - `SchedulerHandle::set_spring_target` (so the very first
+    ///   frame after `set_target` is treated as dirty even if the
+    ///   subsequent step happens to be within epsilon).
+    /// - `AnimatedValue::set_immediate` when the value really changed.
+    /// - `register_spring` (a brand-new spring is implicitly dirty —
+    ///   its initial value just appeared and downstream consumers
+    ///   haven't seen it).
+    ///
+    /// Lifetime: drained whenever a consumer asks for it. Settled
+    /// springs that aren't touched stay out of the set, so an
+    /// off-screen spinner that's already at rest costs nothing.
+    dirty_springs: std::collections::HashSet<SpringId>,
 }
+
+/// Minimum value delta that counts as "this spring moved this tick".
+/// Below this we consider the spring effectively settled for the
+/// purposes of triggering a fast-path repaint. Matches the
+/// `EPSILON` used inside `Spring::is_settled` so the two stay in
+/// sync — a spring that's already "settled enough to skip the next
+/// integration step" shouldn't be dirtying GPU buffers either.
+const DIRTY_EPSILON: f32 = 0.01;
 
 /// Callback type for waking up the main thread from the animation thread.
 ///
@@ -227,6 +258,7 @@ impl AnimationScheduler {
                 tick_callbacks: SlotMap::with_key(),
                 last_frame: Instant::now(),
                 target_fps: 120,
+                dirty_springs: std::collections::HashSet::new(),
             })),
             stop_flag: Arc::new(AtomicBool::new(false)),
             needs_redraw: Arc::new(AtomicBool::new(false)),
@@ -339,9 +371,21 @@ impl AnimationScheduler {
             let dt_ms = dt * 1000.0;
             inner.last_frame = now;
 
-            // Update all springs
-            for (_, spring) in inner.springs.iter_mut() {
-                spring.step(dt);
+            // Update all springs. A spring whose `value()` actually
+            // moves this tick is marked dirty for the fast-path
+            // Phase 4 consumer; springs that didn't move (already
+            // settled, or stepped within epsilon) stay out of the
+            // set so an off-screen spinner pinging tick at 120 Hz
+            // doesn't churn the GPU upload buffer.
+            let collected_ids: Vec<SpringId> = inner.springs.iter().map(|(id, _)| id).collect();
+            for id in &collected_ids {
+                if let Some(spring) = inner.springs.get_mut(*id) {
+                    let prev = spring.value();
+                    spring.step(dt);
+                    if (spring.value() - prev).abs() >= DIRTY_EPSILON {
+                        inner.dirty_springs.insert(*id);
+                    }
+                }
             }
 
             // Update all keyframe animations
@@ -756,8 +800,19 @@ impl AnimationScheduler {
             let dt_ms = dt * 1000.0;
             inner.last_frame = now;
 
-            for (_, spring) in inner.springs.iter_mut() {
-                spring.step(dt);
+            // Step springs and record those whose value actually
+            // moved (≥ DIRTY_EPSILON) into `dirty_springs`. Mirrors
+            // the bg-thread tick_frame_inner path so both modes feed
+            // the same fast-path consumer.
+            let collected_ids: Vec<SpringId> = inner.springs.iter().map(|(id, _)| id).collect();
+            for id in &collected_ids {
+                if let Some(spring) = inner.springs.get_mut(*id) {
+                    let prev = spring.value();
+                    spring.step(dt);
+                    if (spring.value() - prev).abs() >= DIRTY_EPSILON {
+                        inner.dirty_springs.insert(*id);
+                    }
+                }
             }
             for (_, keyframe) in inner.keyframes.iter_mut() {
                 keyframe.tick(dt_ms);
@@ -1173,7 +1228,14 @@ impl SchedulerHandle {
             // Reset last_frame to now to prevent huge dt on first tick
             // This ensures new springs start animating smoothly from their current frame
             guard.last_frame = Instant::now();
-            guard.springs.insert(spring)
+            let id = guard.springs.insert(spring);
+            // A freshly registered spring is implicitly dirty — its
+            // initial value just materialized and downstream
+            // consumers haven't had a chance to observe it yet.
+            // Without this, the very first paint after a new motion
+            // binding mounts could miss the value for one frame.
+            guard.dirty_springs.insert(id);
+            id
         });
         if id.is_some() {
             self.wake();
@@ -1184,9 +1246,15 @@ impl SchedulerHandle {
     /// Update a spring's target
     pub fn set_spring_target(&self, id: SpringId, target: f32) {
         if let Some(inner) = self.inner.upgrade() {
-            if let Some(spring) = inner.lock().unwrap().springs.get_mut(id) {
+            let mut guard = inner.lock().unwrap();
+            if let Some(spring) = guard.springs.get_mut(id) {
                 spring.set_target(target);
             }
+            // Even if the next tick happens to settle within
+            // DIRTY_EPSILON (very short throw, tight spring), the
+            // intent here is "the user requested a new state" — mark
+            // dirty so the fast path repaints at least one frame.
+            guard.dirty_springs.insert(id);
         }
         self.wake();
     }
@@ -1219,8 +1287,47 @@ impl SchedulerHandle {
     /// Remove a spring
     pub fn remove_spring(&self, id: SpringId) {
         if let Some(inner) = self.inner.upgrade() {
-            inner.lock().unwrap().springs.remove(id);
+            let mut guard = inner.lock().unwrap();
+            guard.springs.remove(id);
+            // Removed springs can't dirty anything later — drop the
+            // entry so a stale id never makes it into a fast-path
+            // drain (slotmap reuses the slot; without this you could
+            // chase a phantom binding).
+            guard.dirty_springs.remove(&id);
         }
+    }
+
+    /// Drain springs that moved (or had their target set / were
+    /// freshly registered) since the last drain. The returned ids
+    /// are intended for the windowed runner's fast Phase 4 path —
+    /// each id maps to a `(LayoutNodeId, target_property)` via a
+    /// bindings index, and the consumer patches the corresponding
+    /// `GpuPrimitive` field in place instead of running the full
+    /// paint walker.
+    ///
+    /// Calling this clears the set. Empty return means "no
+    /// scheduler-tracked animation changed this frame" — at which
+    /// point the fast path can return immediately without walking
+    /// the tree.
+    pub fn take_dirty_springs(&self) -> Vec<SpringId> {
+        self.inner
+            .upgrade()
+            .map(|inner| {
+                let mut guard = inner.lock().unwrap();
+                guard.dirty_springs.drain().collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Peek at the count of dirty springs without draining. Useful
+    /// for the windowed runner's "should we even bother taking the
+    /// fast path this frame" gate — at zero we know upfront there
+    /// is no scheduler-side change to consume.
+    pub fn dirty_spring_count(&self) -> usize {
+        self.inner
+            .upgrade()
+            .map(|inner| inner.lock().unwrap().dirty_springs.len())
+            .unwrap_or(0)
     }
 
     /// Pause a spring — freezes at current position
@@ -2311,6 +2418,66 @@ mod tests {
         // Value should have moved
         let value = scheduler.get_spring_value(id).unwrap();
         assert!(value > 0.0);
+    }
+
+    #[test]
+    fn test_dirty_springs_tracked_through_lifecycle() {
+        // The fast-path Phase 4 consumer drains this set every frame
+        // to decide which `GpuPrimitive`s need their transform / opacity
+        // patched in place. Lifecycle: register → set_target → tick
+        // (each step adds the id) → drain clears → next tick after
+        // settle stops adding.
+        let scheduler = AnimationScheduler::new();
+        let handle = scheduler.handle();
+
+        // Fresh registration is implicitly dirty (initial value just
+        // appeared; downstream hasn't seen it yet).
+        let spring = Spring::new(SpringConfig::stiff(), 0.0);
+        let id = handle.register_spring(spring).unwrap();
+        assert!(
+            handle.take_dirty_springs().contains(&id),
+            "register_spring should mark the new spring dirty"
+        );
+        assert_eq!(
+            handle.dirty_spring_count(),
+            0,
+            "take_dirty_springs should have drained"
+        );
+
+        // set_spring_target marks dirty even before any tick — the
+        // user requested a state change, fast path needs to repaint.
+        handle.set_spring_target(id, 100.0);
+        assert!(handle.take_dirty_springs().contains(&id));
+
+        // Ticks that move the spring mark it dirty. We may need a few
+        // iterations: `register_spring` resets `last_frame=now`, so
+        // the very first post-register tick has dt≈0 and may not
+        // cross `DIRTY_EPSILON`. Drive a few µs of real time between
+        // ticks and accumulate.
+        let mut saw_dirty = false;
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            scheduler.tick();
+            if handle.take_dirty_springs().contains(&id) {
+                saw_dirty = true;
+                break;
+            }
+        }
+        assert!(saw_dirty, "a moving tick should mark the spring dirty");
+
+        // Removing the spring drops the dirty entry — a stale id
+        // must never make it into a downstream drain (slotmap
+        // reuses the slot). We rely on the next `set_spring_target`
+        // to re-arm; that flow is the one the runtime exercises.
+        let _ = handle.take_dirty_springs();
+        handle.set_spring_target(id, 200.0);
+        assert!(handle.dirty_spring_count() > 0);
+        handle.remove_spring(id);
+        assert_eq!(
+            handle.dirty_spring_count(),
+            0,
+            "remove_spring should drop the dirty entry"
+        );
     }
 
     #[test]
