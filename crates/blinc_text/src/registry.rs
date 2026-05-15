@@ -103,15 +103,48 @@ const KNOWN_FONT_PATHS: &[&str] = &[
     target_os = "ios"
 )))]
 const KNOWN_FONT_PATHS: &[&str] = &[
-    // Linux common paths
+    // Debian/Ubuntu
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-    // Noto fonts
+    "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
     "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
     "/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf",
+    // Arch/openSUSE
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+    "/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf",
+    "/usr/share/fonts/TTF/DejaVuSerif.ttf",
+    "/usr/share/fonts/TTF/DejaVuSerif-Bold.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+    "/usr/share/fonts/liberation/LiberationMono-Bold.ttf",
+    "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+    "/usr/share/fonts/noto/NotoMono-Regular.ttf",
+    // Fedora/RHEL package paths
+    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
+    "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono-Bold.ttf",
+    "/usr/share/fonts/dejavu-serif-fonts/DejaVuSerif.ttf",
+    "/usr/share/fonts/dejavu-serif-fonts/DejaVuSerif-Bold.ttf",
+    "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf",
+    "/usr/share/fonts/liberation-mono/LiberationMono-Bold.ttf",
+    "/usr/share/fonts/google-noto-sans/NotoSans-Regular.ttf",
+    "/usr/share/fonts/google-noto-sans/NotoSans-Bold.ttf",
+    "/usr/share/fonts/google-noto-mono/NotoMono-Regular.ttf",
 ];
 
 /// Font registry that discovers and caches system fonts

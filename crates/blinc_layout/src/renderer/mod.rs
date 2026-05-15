@@ -1461,4 +1461,26 @@ mod tests {
 
         let _ = crate::stateful::take_pending_subtree_rebuilds();
     }
+
+    #[test]
+    fn descendant_subtree_rebuilds_are_dropped_before_parent_rebuild() {
+        let _ = crate::stateful::take_pending_subtree_rebuilds();
+
+        let ui = div().child(div().child(div()));
+        let mut tree = RenderTree::from_element(&ui);
+        let root = tree.root().unwrap();
+        let parent = tree.layout_tree.children(root)[0];
+        let stale_child = tree.layout_tree.children(parent)[0];
+
+        crate::stateful::queue_subtree_rebuild(stale_child, div().child(div()));
+        crate::stateful::queue_subtree_rebuild(parent, div().child(div()));
+
+        assert!(crate::stateful::has_pending_subtree_rebuilds());
+        assert!(tree.process_pending_subtree_rebuilds());
+        assert!(!crate::stateful::has_pending_subtree_rebuilds());
+        assert!(tree.layout_tree.node_exists(parent));
+        assert!(!tree.layout_tree.node_exists(stale_child));
+
+        let _ = crate::stateful::take_pending_subtree_rebuilds();
+    }
 }

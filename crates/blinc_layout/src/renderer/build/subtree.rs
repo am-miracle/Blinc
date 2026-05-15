@@ -262,8 +262,14 @@ impl RenderTree {
 
         let mut needs_layout = false;
         let mut stale_rebuilds = 0usize;
+        let mut superseded_rebuilds = 0usize;
+        let structural_rebuilds_by_node: std::collections::HashMap<LayoutNodeId, usize> = pending
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, rebuild)| rebuild.needs_layout.then_some((rebuild.parent_id, idx)))
+            .collect();
 
-        for rebuild in pending {
+        for (idx, rebuild) in pending.into_iter().enumerate() {
             // Skip stale rebuilds. This can happen when multiple statefuls queue
             // work in one input cycle and a parent subtree rebuild removes a child
             // that also queued its own hover/press refresh.
@@ -275,6 +281,36 @@ impl RenderTree {
                 stale_rebuilds += 1;
                 continue;
             }
+
+            // Drop work that will be overwritten by a pending structural rebuild.
+            // Navigation clicks often queue button visual state updates and an
+            // outlet replacement in the same event turn. Processing descendant
+            // updates first is wasted work, and on slower Linux machines that can
+            // make a simple route change feel sticky.
+            if let Some(&structural_idx) = structural_rebuilds_by_node.get(&rebuild.parent_id) {
+                if idx < structural_idx {
+                    tracing::debug!(
+                        "Subtree rebuild: node {:?} superseded by later structural rebuild",
+                        rebuild.parent_id
+                    );
+                    superseded_rebuilds += 1;
+                    continue;
+                }
+            }
+            if self
+                .layout_tree
+                .ancestors(rebuild.parent_id)
+                .iter()
+                .any(|ancestor| structural_rebuilds_by_node.contains_key(ancestor))
+            {
+                tracing::debug!(
+                    "Subtree rebuild: node {:?} superseded by pending ancestor rebuild",
+                    rebuild.parent_id
+                );
+                superseded_rebuilds += 1;
+                continue;
+            }
+
             tracing::debug!(
                 "Subtree rebuild: processing node {:?}, needs_layout={}",
                 rebuild.parent_id,
@@ -391,6 +427,12 @@ impl RenderTree {
 
         if stale_rebuilds > 0 {
             tracing::debug!("Dropped {} stale subtree rebuild(s)", stale_rebuilds);
+        }
+        if superseded_rebuilds > 0 {
+            tracing::debug!(
+                "Dropped {} superseded subtree rebuild(s)",
+                superseded_rebuilds
+            );
         }
 
         // Mint already ran per subtree-rebuild above, between layout
