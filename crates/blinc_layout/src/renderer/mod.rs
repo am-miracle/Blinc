@@ -1441,4 +1441,24 @@ mod tests {
         assert_eq!(bounds.width, 200.0);
         assert_eq!(bounds.height, 200.0);
     }
+
+    #[test]
+    fn stale_subtree_rebuilds_are_dropped_after_parent_rebuild() {
+        let _ = crate::stateful::take_pending_subtree_rebuilds();
+
+        let ui = div().child(div().child(div()));
+        let mut tree = RenderTree::from_element(&ui);
+        let root = tree.root().unwrap();
+        let parent = tree.layout_tree.children(root)[0];
+        let stale_child = tree.layout_tree.children(parent)[0];
+
+        crate::stateful::queue_subtree_rebuild(parent, div().child(div()));
+        crate::stateful::queue_subtree_rebuild(stale_child, div());
+
+        assert!(crate::stateful::has_pending_subtree_rebuilds());
+        assert!(tree.process_pending_subtree_rebuilds());
+        assert!(!crate::stateful::has_pending_subtree_rebuilds());
+
+        let _ = crate::stateful::take_pending_subtree_rebuilds();
+    }
 }

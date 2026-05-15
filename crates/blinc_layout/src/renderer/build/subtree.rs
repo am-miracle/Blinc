@@ -242,8 +242,10 @@ impl RenderTree {
     /// Returns true if any rebuild requires layout recomputation.
     /// Visual-only rebuilds (hover/press) return false.
     ///
-    /// Processes only rebuilds for nodes that exist in this tree.
-    /// Rebuilds for nodes in other trees (e.g., overlay) are put back in the queue.
+    /// Processes only rebuilds for nodes that still exist in this tree.
+    /// Rebuilds for nodes removed by an earlier pending rebuild are stale and
+    /// are dropped; otherwise the global queue stays non-empty forever and the
+    /// app keeps requesting redraws while idle.
     pub fn process_pending_subtree_rebuilds(&mut self) -> bool {
         let pending = crate::stateful::take_pending_subtree_rebuilds();
         if pending.is_empty() {
@@ -259,16 +261,18 @@ impl RenderTree {
         tracing::debug!("Processing {} pending subtree rebuilds", pending.len());
 
         let mut needs_layout = false;
-        let mut not_in_this_tree = Vec::new();
+        let mut stale_rebuilds = 0usize;
 
         for rebuild in pending {
-            // Skip if this node doesn't exist in this tree - save for other trees
+            // Skip stale rebuilds. This can happen when multiple statefuls queue
+            // work in one input cycle and a parent subtree rebuild removes a child
+            // that also queued its own hover/press refresh.
             if !self.layout_tree.node_exists(rebuild.parent_id) {
                 tracing::debug!(
-                    "Subtree rebuild: node {:?} not in this tree, requeuing",
+                    "Subtree rebuild: node {:?} no longer exists, dropping stale rebuild",
                     rebuild.parent_id
                 );
-                not_in_this_tree.push(rebuild);
+                stale_rebuilds += 1;
                 continue;
             }
             tracing::debug!(
@@ -385,9 +389,8 @@ impl RenderTree {
             }
         }
 
-        // Put back rebuilds for nodes not in this tree (for other trees to process)
-        if !not_in_this_tree.is_empty() {
-            crate::stateful::requeue_subtree_rebuilds(not_in_this_tree);
+        if stale_rebuilds > 0 {
+            tracing::debug!("Dropped {} stale subtree rebuild(s)", stale_rebuilds);
         }
 
         // Mint already ran per subtree-rebuild above, between layout
