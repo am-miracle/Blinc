@@ -54,6 +54,13 @@ impl RenderTree {
         // animating Statefuls down to those whose node is actually on
         // screen this frame.
         self.painted_node_ids.borrow_mut().clear();
+        // Same lifecycle for composite-binding metadata: cleared at
+        // the top of every full paint, repopulated by
+        // `render_layer_with_motion` for any painted node whose
+        // motion bindings are mid-flight. The Phase-4 fast path
+        // reads this between full paints to patch the cached
+        // primitive buffer in place.
+        self.composite_bindings.borrow_mut().clear();
 
         if let Some(root) = self.root {
             // Apply DPI scale factor if set (for HiDPI display support)
@@ -239,6 +246,20 @@ impl RenderTree {
         let motion_bindings_ref = self.motion_bindings.get(&node);
         let binding_transform = motion_bindings_ref.and_then(|b| b.get_transform());
         let binding_opacity = motion_bindings_ref.and_then(|b| b.get_opacity());
+
+        // Snapshot the BG batch length BEFORE this node emits any
+        // primitives. Together with the count we capture after the
+        // child recursion completes (just before transform pops), this
+        // gives the compositor-path fast Phase 4 the inclusive-
+        // exclusive primitive range this binding's subtree owns. Free
+        // when the node has no active binding — we still record the
+        // entry on the hot path, but the consumer skips ranges whose
+        // binding values match the previous frame.
+        let composite_bg_start = if motion_bindings_ref.is_some_and(|b| b.is_any_animating()) {
+            Some(ctx.bg_primitive_count())
+        } else {
+            None
+        };
 
         // We've passed all the cull / visibility / motion-removed
         // gates; this node is going to paint. Record whether it
@@ -1306,6 +1327,105 @@ impl RenderTree {
                         self.render_scrollbar(ctx, bounds.width, bounds.height, &info);
                     }
                 }
+            }
+        }
+
+        // Compositor-path metadata. If this node had an active motion
+        // binding when we entered, capture the primitive range its
+        // subtree contributed plus the motion values that landed in
+        // those primitives. The Phase-4 fast path reads this map to
+        // patch `bounds.xy` (translate), `local_affine` + bounds-around-
+        // centre (scale / rotation), and `color.a` (opacity) without
+        // re-walking the tree on every spring step.
+        //
+        // Values read here MUST match what got composed into the
+        // emitted primitives:
+        //  - `node_motion_translate` already combines RenderState +
+        //    binding translate; that's exactly the (tx, ty) that
+        //    `push_transform` shifted children by.
+        //  - `node_motion_opacity` includes the binding's opacity and
+        //    the element's own opacity, multiplied. The fast path
+        //    delta-applies the *ratio* `new/last` so this captures the
+        //    full multiplier.
+        //  - Scale / rotation come from `motion_values.resolved_scale`
+        //    and the binding's rotation getter. Captured even when 1.0
+        //    / 0.0 so the fast path can transition out of an animation
+        //    cleanly.
+        //  - Centre is the absolute (post-parent-offset) midpoint of
+        //    the element, in DPI-pre-scale logical pixels. The
+        //    consumer scales by the renderer's DPI factor.
+        if let Some(start) = composite_bg_start {
+            let end = ctx.bg_primitive_count();
+            if end >= start {
+                let (binding_tx, binding_ty) = motion_bindings_ref
+                    .map(|b| {
+                        let tx = b
+                            .translate_x
+                            .as_ref()
+                            .and_then(|v| v.lock().ok().map(|g| g.get()))
+                            .unwrap_or(0.0);
+                        let ty = b
+                            .translate_y
+                            .as_ref()
+                            .and_then(|v| v.lock().ok().map(|g| g.get()))
+                            .unwrap_or(0.0);
+                        (tx, ty)
+                    })
+                    .unwrap_or((0.0, 0.0));
+                let (state_tx, state_ty) = motion_values
+                    .map(|m| m.resolved_translate())
+                    .unwrap_or((0.0, 0.0));
+                let last_translate = (state_tx + binding_tx, state_ty + binding_ty);
+                let (state_sx, state_sy) = motion_values
+                    .map(|m| m.resolved_scale())
+                    .unwrap_or((1.0, 1.0));
+                let binding_scale_xy = motion_bindings_ref
+                    .map(|b| {
+                        let s = b
+                            .scale
+                            .as_ref()
+                            .and_then(|v| v.lock().ok().map(|g| g.get()))
+                            .unwrap_or(1.0);
+                        let sx = b
+                            .scale_x
+                            .as_ref()
+                            .and_then(|v| v.lock().ok().map(|g| g.get()))
+                            .unwrap_or(1.0);
+                        let sy = b
+                            .scale_y
+                            .as_ref()
+                            .and_then(|v| v.lock().ok().map(|g| g.get()))
+                            .unwrap_or(1.0);
+                        (sx * s, sy * s)
+                    })
+                    .unwrap_or((1.0, 1.0));
+                let last_scale = (state_sx * binding_scale_xy.0, state_sy * binding_scale_xy.1);
+                let last_rotation_rad = motion_bindings_ref
+                    .map(|b| {
+                        let deg = b
+                            .rotation
+                            .as_ref()
+                            .and_then(|v| v.lock().ok().map(|g| g.get()))
+                            .unwrap_or(0.0);
+                        deg.to_radians()
+                    })
+                    .unwrap_or(0.0);
+                let last_opacity = node_motion_opacity;
+                let centre = (
+                    bounds.x + bounds.width / 2.0,
+                    bounds.y + bounds.height / 2.0,
+                );
+                self.composite_bindings.borrow_mut().insert(
+                    node,
+                    super::super::CompositeBindingMeta {
+                        primitive_range: start..end,
+                        last_translate,
+                        last_scale,
+                        last_rotation_rad,
+                        last_opacity,
+                        centre,
+                    },
+                );
             }
         }
 

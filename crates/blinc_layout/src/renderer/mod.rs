@@ -65,6 +65,44 @@ pub use types::{
     RenderTreeDebugStats, StyledTextData, StyledTextSpan, SvgData, TextData,
 };
 
+/// Compositor-path metadata recorded for one motion-bound node during
+/// paint. Lets a follow-up "animation-only" frame patch the cached
+/// `GpuPrimitive` buffer in place — without re-walking the tree —
+/// by knowing which primitives the binding's subtree owns and what
+/// motion values were baked into them at last paint.
+///
+/// Mirrors the browser compositor's per-layer cached transform: the
+/// expensive paint pass runs once, and per-vsync we just delta the
+/// transform/opacity on the affected primitives.
+#[derive(Clone, Debug)]
+pub struct CompositeBindingMeta {
+    /// Inclusive-exclusive range into the cached primitive buffer
+    /// covering every primitive emitted while this binding's
+    /// transform stack was active (the binding's owning node plus
+    /// every descendant). Empty range means the subtree emitted no
+    /// SDF primitives (text-only subtrees, glass overlay, etc.) and
+    /// the fast path can skip the entry.
+    pub primitive_range: std::ops::Range<usize>,
+    /// Motion translate baked into the primitive bounds at last paint
+    /// (logical pixels, pre-DPI). The fast path computes
+    /// `new_translate - last_translate` and shifts each primitive's
+    /// `bounds.xy` by that delta.
+    pub last_translate: (f32, f32),
+    /// Motion uniform scale baked at last paint. Identity = `(1.0, 1.0)`.
+    /// Scale changes require both bounds and `local_affine` updates,
+    /// computed around the binding's centre point — captured below.
+    pub last_scale: (f32, f32),
+    /// Motion rotation in radians baked at last paint.
+    pub last_rotation_rad: f32,
+    /// Motion opacity baked at last paint. Each primitive's
+    /// `color.a` / `border_color.a` / `shadow_color.a` was multiplied
+    /// by this; the fast path scales by `new_opacity / last_opacity`.
+    pub last_opacity: f32,
+    /// Centre point (logical pixels, absolute) used for scale and
+    /// rotation. Same coordinate frame as `last_translate`.
+    pub centre: (f32, f32),
+}
+
 /// RenderTree - bridges layout computation and rendering
 pub struct RenderTree {
     /// The underlying layout tree
@@ -121,6 +159,25 @@ pub struct RenderTree {
     painted_node_ids: RefCell<HashSet<LayoutNodeId>>,
     /// Motion bindings for continuous animations (keyed by node_id)
     motion_bindings: HashMap<LayoutNodeId, crate::motion::MotionBindings>,
+    /// Compositor-path metadata captured during paint for nodes whose
+    /// transform / opacity is driven by motion bindings. Records the
+    /// range of primitives the paint walker emitted for the binding's
+    /// subtree plus the motion values that were baked into them, so a
+    /// follow-up "animation-only" frame can patch the cached
+    /// `GpuPrimitive` buffer in place — delta-applying the change to
+    /// just those primitives — instead of re-running the walker and
+    /// re-uploading the whole batch. Mirrors the browser compositor
+    /// path: paint runs once, composition just shuffles cached layers
+    /// per vsync.
+    ///
+    /// Cleared at the top of every full paint and grown back during
+    /// the recursive walk. The downstream consumer (Phase-4 fast
+    /// path) reads from this AND from the primitive cache the
+    /// renderer keeps after upload. When the cache is invalidated
+    /// (rebuild, layout change, structural state change) this map
+    /// stays alive but its entries are ignored — the next full paint
+    /// clears and repopulates.
+    composite_bindings: RefCell<HashMap<LayoutNodeId, CompositeBindingMeta>>,
     /// Last tick time for scroll physics (in milliseconds)
     last_scroll_tick_ms: Option<u64>,
     /// DPI scale factor (physical / logical pixels)
@@ -313,6 +370,7 @@ impl RenderTree {
             visible_anim_active: Cell::new(false),
             painted_node_ids: RefCell::new(HashSet::new()),
             motion_bindings: HashMap::new(),
+            composite_bindings: RefCell::new(HashMap::new()),
             last_scroll_tick_ms: None,
             scale_factor: 1.0,
             animations: Weak::new(),
@@ -643,6 +701,33 @@ impl RenderTree {
     /// read it after the paint pass and before the next frame begins.
     pub fn painted_node_ids(&self) -> std::cell::Ref<'_, HashSet<LayoutNodeId>> {
         self.painted_node_ids.borrow()
+    }
+
+    /// Borrow the map of motion-bound nodes → composite-path metadata
+    /// captured during the most recent paint. The Phase-4 fast path
+    /// reads from this to delta-apply translate / scale / rotate /
+    /// opacity to the cached `GpuPrimitive` buffer without re-walking
+    /// the tree. Populated by `render_layer_with_motion` whenever a
+    /// node with `motion_bindings.is_any_animating()` is painted;
+    /// stale entries (for nodes that didn't paint this frame) are
+    /// cleared at the top of every full paint.
+    pub fn composite_bindings(
+        &self,
+    ) -> std::cell::Ref<'_, HashMap<LayoutNodeId, CompositeBindingMeta>> {
+        self.composite_bindings.borrow()
+    }
+
+    /// Mutable accessor for the composite-bindings map. Used by the
+    /// paint walker to insert/update entries during the walk, and by
+    /// the Phase-4 fast path to update `last_*` values after a
+    /// delta-apply succeeds (so the next frame's delta is computed
+    /// against the value just written to the GPU, not the original
+    /// paint-time value — otherwise the second fast-path frame would
+    /// double-apply).
+    pub fn composite_bindings_mut(
+        &self,
+    ) -> std::cell::RefMut<'_, HashMap<LayoutNodeId, CompositeBindingMeta>> {
+        self.composite_bindings.borrow_mut()
     }
 
     /// `painted_node_ids()` projected through `layout_to_stable`.

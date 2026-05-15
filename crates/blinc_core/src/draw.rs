@@ -1715,6 +1715,16 @@ pub trait DrawContext {
         0
     }
 
+    /// Number of background-batch primitives the context has emitted
+    /// so far this frame. Read by the paint walker to bracket the
+    /// primitive range a node (and its descendants) contributes, so
+    /// the compositor-path fast Phase 4 knows which primitives to
+    /// patch when a motion binding's value changes. Default `0` for
+    /// contexts that don't track primitives (mock test contexts).
+    fn bg_primitive_count(&self) -> usize {
+        0
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // 3D Transform (per-element, transient)
     // ─────────────────────────────────────────────────────────────────────────
