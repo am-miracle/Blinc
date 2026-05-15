@@ -1122,6 +1122,17 @@ pub struct SchedulerHandle {
     wake_callback: Option<WakeCallback>,
 }
 
+// SAFETY: Mirrors the wasm-only safety boundary on `AnimationScheduler`.
+// `SchedulerHandle` carries the same wake callback so web can capture
+// `Rc<RefCell<_>>`, but on `wasm32-unknown-unknown` all scheduler access is
+// driven on the browser main thread. Marking the handle keeps global caches
+// of scheduler-backed animation values usable without requiring native
+// `Send + Sync` bounds for web callbacks.
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for SchedulerHandle {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for SchedulerHandle {}
+
 impl SchedulerHandle {
     /// Wake the scheduler's bg thread if it's parked AND fire the
     /// main-thread wake callback. Called whenever a mutation could
