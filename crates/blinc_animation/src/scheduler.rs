@@ -1572,8 +1572,28 @@ impl AnimatedValue {
         if let Some(id) = self.spring_id.take() {
             self.handle.remove_spring(id);
         }
+        // Symmetric with `set_target`: a value mutation that is going
+        // to drive a visual change needs to nudge the redraw chain.
+        // Without this nudge, drag-style flows like
+        // `cn::slider`/`motion_demo`'s pull-to-refresh only repaint
+        // when some other event coincidentally flips `frame_dirty`,
+        // because (a) `set_immediate` removes the spring so the
+        // binding-vsync paint-walker signal can't carry the change,
+        // and (b) bare mouse-moves on the input fast path skip
+        // `frame_dirty=true` to keep idle CPU down. Gated on a real
+        // value change so the previously-reverted unconditional
+        // version (which redraws on no-op writes, e.g.
+        // `set_immediate(self.current)` from idle ticks of
+        // `visual_animation`) stays gone. `wake` is what `set_target`
+        // already calls via `set_spring_target`; same code path,
+        // same idempotent dirty flip + wake-proxy ping.
+        let changed = (self.current - value).abs() > f32::EPSILON
+            || (self.target - value).abs() > f32::EPSILON;
         self.current = value;
         self.target = value;
+        if changed {
+            self.handle.wake();
+        }
     }
 
     /// Pause the spring — freezes at current position, step() is no-op

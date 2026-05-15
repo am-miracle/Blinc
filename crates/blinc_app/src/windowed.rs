@@ -5075,7 +5075,18 @@ impl WindowedApp {
                                         let store_vsync =
                                             store_guard.has_visible_vsync_class(&painted_stable);
                                         drop(store_guard);
-                                        store_vsync
+                                        // Motion bindings drive transforms (translate / scale
+                                        // / rotate) and opacity off SharedAnimatedValues —
+                                        // capping those to 30 fps stair-steps spring physics
+                                        // (cn::progress_animated, pull-to-refresh translate
+                                        // on motion_demo). The paint walker sets
+                                        // `visible_binding_active` whenever a painted motion
+                                        // node has at least one binding mid-flight; treating
+                                        // that the same as a CSS-vsync class keeps spring
+                                        // bindings at vsync while leaving the cap honored
+                                        // for everything else.
+                                        t.visible_binding_active()
+                                            || store_vsync
                                             || t.has_active_visible_flip_animations(&painted)
                                             || t.has_active_visible_visual_animations(&painted)
                                     });
