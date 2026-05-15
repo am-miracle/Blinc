@@ -4175,6 +4175,21 @@ impl WindowedApp {
                             Some(ref mut rs),
                         ) = (&mut ws.app, &ws.surface, &ws.surface_config, &mut ws.ctx, &mut ws.render_state)
                         {
+                            // Per-phase frame timing. Cheap when the trace target
+                            // is disabled (Instant::now is ~10 ns on macOS); gated
+                            // behind a single check at frame end so format args
+                            // aren't evaluated in production builds. Enable with
+                            // `RUST_LOG=blinc_app::frame_timing=trace` to see
+                            // where the frame budget is actually going.
+                            let frame_start = std::time::Instant::now();
+                            let mut t_phase1 = std::time::Duration::ZERO;
+                            let mut t_phase2 = std::time::Duration::ZERO;
+                            let mut t_phase3 = std::time::Duration::ZERO;
+                            let mut t_phase4 = std::time::Duration::ZERO;
+                            let mut t_phase5 = std::time::Duration::ZERO;
+                            let mut did_rebuild = false;
+                            let mut dirty_spring_count = 0usize;
+
                             // Get current frame
                             let frame = match surf.get_current_texture() {
                                 Ok(f) => f,
@@ -4225,6 +4240,7 @@ impl WindowedApp {
                             // PHASE 1: Check if tree structure needs rebuild
                             // Only structural changes require tree rebuild
                             // =========================================================
+                            let phase1_start = std::time::Instant::now();
 
                             // Check if event handlers marked anything dirty (auto-rebuild).
                             //
@@ -4390,10 +4406,13 @@ impl WindowedApp {
                                 window.request_redraw();
                             }
 
+                            t_phase1 = phase1_start.elapsed();
+
                             // =========================================================
                             // PHASE 2: Build/rebuild tree only for structural changes
                             // This must happen BEFORE tick() so motion animations are available
                             // =========================================================
+                            let phase2_start = std::time::Instant::now();
 
                             // Begin stable motion frame tracking
                             // This clears the "used" set so we can detect which motions are no longer in the tree
@@ -4647,6 +4666,7 @@ impl WindowedApp {
                                 }
 
                                 ws.needs_rebuild = false;
+                                did_rebuild = true;
                                 let was_first_rebuild = windowed_ctx.rebuild_count == 0;
                                 windowed_ctx.rebuild_count = windowed_ctx.rebuild_count.saturating_add(1);
 
@@ -4672,10 +4692,13 @@ impl WindowedApp {
                             // after the first rebuild are executed immediately since the UI
                             // is already ready at that point.
 
+                            t_phase2 = phase2_start.elapsed();
+
                             // =========================================================
                             // PHASE 3: Tick animations and dynamic render state
                             // This must happen AFTER tree rebuild so motions are initialized
                             // =========================================================
+                            let phase3_start = std::time::Instant::now();
 
                             // Process any pending motion exit cancellations
                             // This must happen before tick() so cancelled motions don't continue exiting
@@ -4720,10 +4743,13 @@ impl WindowedApp {
                             // Note: scroll physics tick moved to before PHASE 1 (before any rebuilds)
                             // so that ScrollRef has up-to-date values when stateful components rebuild
 
+                            t_phase3 = phase3_start.elapsed();
+
                             // =========================================================
                             // PHASE 4: Render
                             // Combines stable tree structure with dynamic render state
                             // =========================================================
+                            let phase4_start = std::time::Instant::now();
 
                             // Sync text input/textarea focus to EventRouter so CSS :focus matching works
                             {
@@ -4848,17 +4874,20 @@ impl WindowedApp {
                             windowed_ctx.had_visible_overlays = has_visible_overlays;
 
                             frame.present();
+                            t_phase4 = phase4_start.elapsed();
 
                             // =========================================================
                             // PHASE 5: Request next frame if animations are active
                             // This ensures smooth animation without waiting for events
                             // =========================================================
+                            let phase5_start = std::time::Instant::now();
 
                             // Check if background animation thread signaled that redraw is needed
                             // The background thread runs at 120fps and sets this flag when
                             // there are active animations (springs, keyframes, timelines)
                             let scheduler = windowed_ctx.animations.lock().unwrap();
                             let needs_animation_redraw_raw = scheduler.take_needs_redraw();
+                            dirty_spring_count = scheduler.dirty_spring_count();
                             drop(scheduler); // Release lock before request_redraw
 
                             // Check if stateful elements have active spring animations
@@ -5132,6 +5161,32 @@ impl WindowedApp {
                                     window.request_redraw();
                                 }
                             }
+                            t_phase5 = phase5_start.elapsed();
+                            let t_total = frame_start.elapsed();
+                            // Per-phase breakdown. Disabled by default;
+                            // RUST_LOG=blinc_app::frame_timing=trace surfaces it.
+                            // The four phase totals will not exactly sum to
+                            // `total` — the small gaps cover surface acquire +
+                            // scheduling work that happens between the labelled
+                            // sections (e.g. cursor sync, animation policy
+                            // decisions). `did_rebuild` + `dirty_springs`
+                            // contextualize the timings: if `did_rebuild=false`
+                            // and `dirty_springs=1` then any time spent in
+                            // phase 4 is paint walker overhead for what should
+                            // be a one-binding update — a candidate for the
+                            // upcoming fast Phase 4.
+                            tracing::trace!(
+                                target: "blinc_app::frame_timing",
+                                total_us = t_total.as_micros() as u64,
+                                p1_rebuild_check_us = t_phase1.as_micros() as u64,
+                                p2_rebuild_us = t_phase2.as_micros() as u64,
+                                p3_tick_us = t_phase3.as_micros() as u64,
+                                p4_render_us = t_phase4.as_micros() as u64,
+                                p5_chain_us = t_phase5.as_micros() as u64,
+                                did_rebuild,
+                                dirty_springs = dirty_spring_count,
+                                "frame"
+                            );
                         }
                     }
 

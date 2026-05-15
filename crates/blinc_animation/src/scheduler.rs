@@ -882,6 +882,21 @@ impl AnimationScheduler {
         self.inner.lock().unwrap().springs.len()
     }
 
+    /// Drain springs that moved (or had their target set / were
+    /// freshly registered) since the last drain. Counterpart to
+    /// [`SchedulerHandle::take_dirty_springs`]; same semantics, just
+    /// accessible from `&AnimationScheduler` without going through a
+    /// handle. The windowed runner's frame-timing instrumentation
+    /// reads this without first cloning the handle.
+    pub fn take_dirty_springs(&self) -> Vec<SpringId> {
+        self.inner.lock().unwrap().dirty_springs.drain().collect()
+    }
+
+    /// Peek at the dirty-spring count without draining.
+    pub fn dirty_spring_count(&self) -> usize {
+        self.inner.lock().unwrap().dirty_springs.len()
+    }
+
     /// Get the number of active keyframe animations
     pub fn keyframe_count(&self) -> usize {
         self.inner.lock().unwrap().keyframes.len()
@@ -1255,6 +1270,16 @@ impl SchedulerHandle {
             // intent here is "the user requested a new state" — mark
             // dirty so the fast path repaints at least one frame.
             guard.dirty_springs.insert(id);
+            // Reset the tick clock so the first post-target step uses
+            // a fresh, small dt. Without this, a spring that settled
+            // (so `last_frame` stopped advancing) and is re-armed
+            // seconds later sees `dt = idle time` on the very next
+            // tick — RK4 substepping then runs ~`idle / 8 ms`
+            // iterations and the value snaps almost the whole way
+            // to target in one frame, defeating the spring's
+            // perceived duration. Mirrors what `register_spring`
+            // already does for the same reason on fresh registration.
+            guard.last_frame = Instant::now();
         }
         self.wake();
     }
