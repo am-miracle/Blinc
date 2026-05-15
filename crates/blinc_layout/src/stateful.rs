@@ -2611,6 +2611,7 @@ impl<S: StateTransitions> Stateful<S> {
             // Log children count after callback
             let children_count = self.inner.borrow().children.len();
             tracing::trace!("After callback: {} children in inner Div", children_count);
+            self.update_previous_structural_hash();
         }
     }
 
@@ -3211,7 +3212,17 @@ impl<S: StateTransitions> Stateful<S> {
                     self.event_handlers_cache.borrow_mut().merge(handlers_clone);
                 }
             }
+
+            self.update_previous_structural_hash();
         }
+    }
+
+    fn update_previous_structural_hash(&self) {
+        let structural_hash = {
+            let inner = self.inner.borrow();
+            crate::diff::DivHash::compute_structural_tree(&*inner)
+        };
+        self.shared_state.lock().unwrap().previous_structural_hash = Some(structural_hash);
     }
 
     pub fn id(self, id: &str) -> Self {

@@ -730,9 +730,6 @@ fn hash_element_structural(element: &dyn ElementBuilder, hasher: &mut impl Hashe
     if let Some(text_info) = element.text_render_info() {
         text_info.content.hash(hasher);
         hash_f32(text_info.font_size, hasher);
-        for c in &text_info.color {
-            hash_f32(*c, hasher);
-        }
     }
 
     if let Some(svg_info) = element.svg_render_info() {
@@ -1334,6 +1331,7 @@ pub fn render_props_eq(a: &RenderProps, b: &RenderProps) -> bool {
 mod tests {
     use super::*;
     use crate::div::div;
+    use crate::text::text;
 
     #[test]
     fn test_hash_stability() {
@@ -1422,6 +1420,24 @@ mod tests {
         assert!(
             result.changes.visual,
             "Opacity change should be detected as visual change"
+        );
+    }
+
+    #[test]
+    fn test_structural_hash_ignores_text_color() {
+        let div1 = div().child(text("2").color(Color::WHITE));
+        let div2 = div().child(text("2").color(Color::BLACK));
+        let div3 = div().child(text("3").color(Color::WHITE));
+
+        assert_eq!(
+            DivHash::compute_structural_tree(&div1),
+            DivHash::compute_structural_tree(&div2),
+            "Text color is visual-only and should not force a structural rebuild"
+        );
+        assert_ne!(
+            DivHash::compute_structural_tree(&div1),
+            DivHash::compute_structural_tree(&div3),
+            "Text content changes must still force a structural rebuild"
         );
     }
 }

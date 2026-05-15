@@ -553,7 +553,6 @@ pub const CN_STYLES: &str = r#"
     border-radius: 6px;
     cursor: pointer;
     color: var(--text-primary);
-    transition: background 150ms;
 }
 .cn-pagination-btn:hover {
     background: var(--surface-elevated);

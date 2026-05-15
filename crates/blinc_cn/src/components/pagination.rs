@@ -472,6 +472,7 @@ where
                 .size(font_size)
                 .color(text_color)
                 .medium()
+                .pointer_events_none()
                 .no_cursor(),
         );
     if is_current {
