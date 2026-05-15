@@ -23,7 +23,7 @@ default = []
 
 # Canvas + GPU primitives (canvas_kit_demo, mesh_3d_demo, and the
 # 3D-pipeline base used by every glTF demo).
-canvas = ["dep:blinc_canvas_kit"]
+canvas = ["dep:blinc_canvas_kit", "dep:blinc_input"]
 
 # Audio + video playback. Enables the `media` widgets in
 # `blinc_layout` (which themselves pull `blinc_media`).

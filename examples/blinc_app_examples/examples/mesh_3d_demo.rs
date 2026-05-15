@@ -49,6 +49,7 @@ use blinc_canvas_kit::prelude::*;
 use blinc_core::{
     AlphaMode, Color, Light, Mat4, Material, MeshData, State, TextureData, Vec3, Vertex,
 };
+use blinc_input::InputState;
 
 const HELMET_GLTF_DIR: &str = "examples/blinc_app_examples/examples/assets/3d/DamagedHelmet";
 const HDR_PATH: &str = "examples/blinc_app_examples/examples/assets/3d/rogland_clear_night_2k.hdr";
@@ -169,12 +170,14 @@ fn try_load_assets() -> Option<(Arc<MeshData>, Vec<u8>)> {
 #[derive(Clone)]
 struct AsyncAssets {
     slot: Arc<OnceLock<Arc<MeshData>>>,
+    input: InputState,
 }
 
 impl AsyncAssets {
     fn new() -> Self {
         Self {
             slot: Arc::new(OnceLock::new()),
+            input: InputState::new(),
         }
     }
 
@@ -261,6 +264,7 @@ fn main() -> Result<()> {
         title: "3D Mesh Demo — DamagedHelmet".to_string(),
         width: 960,
         height: 720,
+        animation_fps_cap: Some(60),
         ..Default::default()
     };
 
@@ -308,12 +312,15 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         .expect("assets handle should exist after use_state_keyed init");
 
     let assets_ren = assets.clone();
-    let viewport = kit.element(move |ctx, _bounds| {
-        let Some(helmet) = assets_ren.get() else {
-            return;
-        };
-        ctx.draw_mesh_data(helmet.clone(), Mat4::default());
-    });
+    let viewport = kit
+        .with_input(&assets.input)
+        .element(move |ctx, _bounds| {
+            let Some(helmet) = assets_ren.get() else {
+                return;
+            };
+            ctx.draw_mesh_data(helmet.clone(), Mat4::default());
+        })
+        .id("mesh_3d_viewport");
 
     // Loading overlay — same structure every refresh, `.hidden()`
     // toggled on ready. See `gltf_animation_demo` for why the shape
