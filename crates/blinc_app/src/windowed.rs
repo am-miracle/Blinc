@@ -4756,41 +4756,53 @@ impl WindowedApp {
 
                             t_phase3 = phase3_start.elapsed();
 
-                            // Decouple render from tick. Animation-only frames
-                            // (no rebuild, no relayout, no stateful redraw,
-                            // no input-driven dirty) cost ~6 ms of CPU per
-                            // rendered frame on cn_demo — overwhelmingly in
-                            // GPU dispatch (the paint walker itself is only
-                            // ~0.1 ms, see the `p4_breakdown` trace). Pushing
-                            // spring tick to vsync but capping paint at the
-                            // configured `animation_fps_cap` keeps physics
-                            // integration accurate while halving render cost.
+                            // Animation-only frames (no rebuild, no relayout,
+                            // no stateful redraw, no input-driven dirty)
+                            // cost ~6 ms of CPU per rendered frame on
+                            // cn_demo — overwhelmingly in GPU dispatch (the
+                            // paint walker itself is only ~0.1 ms, see the
+                            // `p4_breakdown` trace). When the app set an
+                            // `animation_fps_cap`, throttle Phase 4 to that
+                            // rate without losing the scheduler's Phase 3
+                            // tick. The `wake_at` below schedules the next
+                            // Frame for exactly the moment the cap interval
+                            // elapses, so we don't get the spinning request
+                            // _redraw / immediate-Frame loop that pinned
+                            // CPU at 100 % (winit on macOS delivers
+                            // `request_redraw`'d frames back-to-back at
+                            // microsecond cadence, *not* vsync-locked, so
+                            // the previous "re-arm at vsync" implementation
+                            // burned 3000+ tick-only frames per second).
                             //
-                            // Always render when: there's no cap, this is the
-                            // very first paint, a rebuild ran this frame,
-                            // layout was recomputed, or the cap interval has
-                            // elapsed. Skip Phase 4 + present otherwise (the
-                            // scheduler's `has_active` path will re-arm the
-                            // next vsync Frame for the next tick).
-                            let should_render = match animation_fps_cap {
+                            // Always render when: there's no cap, this is
+                            // the very first paint, a rebuild ran this
+                            // frame, or the cap interval has elapsed. Skip
+                            // Phase 4 + present otherwise.
+                            let cap_interval_ms = animation_fps_cap.map(|fps| 1000u64 / fps as u64);
+                            let elapsed_since_paint =
+                                current_time.saturating_sub(ws.last_paint_time_ms);
+                            let should_render = match cap_interval_ms {
                                 None => true,
                                 Some(_) if did_rebuild => true,
                                 Some(_) if ws.needs_relayout => true,
                                 Some(_) if ws.last_paint_time_ms == 0 => true,
-                                Some(fps) => {
-                                    let cap_interval_ms = 1000u64 / fps as u64;
-                                    current_time.saturating_sub(ws.last_paint_time_ms)
-                                        >= cap_interval_ms
-                                }
+                                Some(interval) => elapsed_since_paint >= interval,
                             };
                             if !should_render {
-                                // Re-arm so the next vsync Frame still fires
-                                // (we need it for the next tick — without
-                                // this, the scheduler ticks once and then
-                                // the chain dies until something else wakes
-                                // the loop).
-                                frame_dirty.store(true, Ordering::Release);
-                                window.request_redraw();
+                                // Schedule the next Frame for exactly the
+                                // moment the cap interval elapses. `wake_at`
+                                // routes through the platform shim's timer
+                                // thread (same path the cursor-blink pacing
+                                // and the old `cap_applies` branch use), so
+                                // we get one tick per cap interval instead
+                                // of thousands per second.
+                                if let Some(interval) = cap_interval_ms {
+                                    let remaining =
+                                        interval.saturating_sub(elapsed_since_paint).max(1);
+                                    frame_dirty.store(true, Ordering::Release);
+                                    wake_proxy_for_pacing
+                                        .wake_at(std::time::Duration::from_millis(remaining));
+                                }
                                 let t_total = frame_start.elapsed();
                                 tracing::trace!(
                                     target: "blinc_app::frame_timing",
@@ -5138,26 +5150,31 @@ impl WindowedApp {
                                     let delay = std::time::Duration::from_millis(400);
                                     frame_dirty.store(true, Ordering::Release);
                                     wake_proxy_for_pacing.wake_at(delay);
+                                } else if let Some(fps) = animation_fps_cap {
+                                    // Cap is set → pace the next Frame at
+                                    // exactly the cap interval. Otherwise
+                                    // (`request_redraw`) winit on macOS
+                                    // would deliver Frames back-to-back at
+                                    // microsecond cadence — Phase 4 would
+                                    // skip them via the cap-elapsed check
+                                    // but the loop still spun 3000+ times
+                                    // per second, pinning CPU at 100 % under
+                                    // continuous click + active animation.
+                                    // `wake_at` routes through the platform
+                                    // shim's timer thread so the next Frame
+                                    // arrives at the exact moment Phase 4
+                                    // is allowed to render. Matches the
+                                    // cap-elapsed check in Phase 4 — both
+                                    // paths converge on the same cadence.
+                                    let delay = std::time::Duration::from_millis(1000 / fps as u64);
+                                    frame_dirty.store(true, Ordering::Release);
+                                    wake_proxy_for_pacing.wake_at(delay);
                                 } else {
-                                    // `animation_fps_cap` no longer gates the
-                                    // *frame* rate — Phase 4 entry now gates
-                                    // *render* using the cap, so we want to
-                                    // keep pumping Frames at vsync even when
-                                    // the cap is in effect so the scheduler's
-                                    // Phase 3 tick advances every vsync
-                                    // interval. The decoupled-tick model
-                                    // (vsync tick / capped render) only
-                                    // works if Frames keep arriving — hence
-                                    // the unconditional request_redraw +
-                                    // dirty flip here. Tick-only frames pay
-                                    // ~10 µs (P1 check + P3 tick) and skip
-                                    // the ~6 ms paint pipeline.
-                                    // The next frame should render — pair the
-                                    // `request_redraw` call with a dirty flip so
-                                    // the start-of-frame skip check doesn't drop
-                                    // it. Without this the redraw chain would
-                                    // request a frame that then immediately
-                                    // returns early.
+                                    // No cap configured → render at vsync.
+                                    // `request_redraw` here is fine because
+                                    // every Frame results in a render
+                                    // (Phase 4's cap branch is None → always
+                                    // renders), so we never spin.
                                     frame_dirty.store(true, Ordering::Release);
                                     window.request_redraw();
                                 }
