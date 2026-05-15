@@ -229,7 +229,7 @@ pub use blinc_layout::prelude::*;
 pub use blinc_layout::RenderTree;
 
 // Re-export platform types for windowed applications
-pub use blinc_platform::{AnimationThreadMode, WindowConfig};
+pub use blinc_platform::{AnimationThreadMode, WindowConfig, WindowLevel};
 
 // Re-export derive macro
 pub use blinc_macros::BlincComponent;

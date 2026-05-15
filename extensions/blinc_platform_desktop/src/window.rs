@@ -51,6 +51,7 @@ impl DesktopWindow {
         attrs = apply_platform_attrs(attrs, config);
 
         let window = event_loop.create_window(attrs)?;
+        apply_window_level(&window, config.window_level);
 
         // Center window on screen if requested
         if config.center {
@@ -209,6 +210,10 @@ impl Window for DesktopWindow {
         self.window.set_visible(false);
     }
 
+    fn set_window_level(&self, level: WindowLevel) {
+        apply_window_level(&self.window, level);
+    }
+
     fn is_transparent(&self) -> bool {
         self.transparent
     }
@@ -224,6 +229,16 @@ fn map_window_level(level: WindowLevel) -> WinitWindowLevel {
         WindowLevel::Normal => WinitWindowLevel::Normal,
         WindowLevel::AlwaysOnTop => WinitWindowLevel::AlwaysOnTop,
     }
+}
+
+fn apply_window_level(window: &WinitWindow, level: WindowLevel) {
+    let level = map_window_level(level);
+    // Creation attributes seed winit's cached state on some backends;
+    // toggling through Normal forces a real platform update.
+    if level != WinitWindowLevel::Normal {
+        window.set_window_level(WinitWindowLevel::Normal);
+    }
+    window.set_window_level(level);
 }
 
 /// Apply platform-specific extension attributes (macOS title-bar

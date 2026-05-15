@@ -536,6 +536,12 @@ pub trait Window: Send {
     /// Close the window
     fn close(&self) {}
 
+    /// Change the window stacking level.
+    ///
+    /// Platform backends may treat this as a hint or ignore it where
+    /// the native windowing system does not expose stacking levels.
+    fn set_window_level(&self, _level: WindowLevel) {}
+
     /// Whether the window was configured with a transparent surface.
     /// Default `false` for platforms where transparency isn't supported
     /// or relevant.
