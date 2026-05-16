@@ -5054,7 +5054,24 @@ impl RenderContext {
         // `apply_binding_deltas` checks (which also guard against
         // scale/rotation).
         let collect_start = std::time::Instant::now();
+        // Mid-flight motion (either a `MotionBindings` spring or a
+        // `motion()` wrapper's enter / exit FSM) shifts the
+        // text/SVG/image positions of every element underneath it.
+        // The cached text/SVG/image vectors carry positions baked
+        // in at last-collect time, so reusing them on the fast
+        // path freezes the text at frame-1 positions while
+        // `apply_binding_deltas` keeps shifting the underlying SDF
+        // primitives — visual effect: text falls off motion-bound
+        // cards as they slide / fade in.
+        //
+        // Cheap fix: invalidate the text/SVG/image cache whenever
+        // any motion source is live. Same cost posture as the
+        // walker re-collect on a full paint, but cheap relative to
+        // a walker re-run.
+        let any_motion_active = render_state.has_active_motions()
+            || tree.motion_bindings_map().values().any(|b| b.is_any_animating());
         let cache_hit = used_fast_paint
+            && !any_motion_active
             && self.cached_texts.is_some()
             && self.cached_svgs.is_some()
             && self.cached_images.is_some()
