@@ -1505,6 +1505,7 @@ pub struct LayerCommandEntry {
 }
 
 /// Batch of GPU primitives for efficient rendering
+#[derive(Clone)]
 pub struct PrimitiveBatch {
     /// Background primitives (rendered before glass)
     pub primitives: Vec<GpuPrimitive>,

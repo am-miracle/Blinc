@@ -138,6 +138,24 @@ pub struct RenderContext {
     // desktop runner updates it per-window so a mix of opaque and
     // transparent windows can share the same RenderContext.
     clear_alpha: f32,
+    // Cached `PrimitiveBatch` from the most recent full Phase 4
+    // paint. Lives across frames so the compositor-path fast Phase 4
+    // can patch primitives in place (using
+    // `RenderTree::composite_bindings` ranges) and re-render without
+    // re-walking the tree.
+    //
+    // Invalidated (set to `None`) any time the next frame can't
+    // safely reuse the cache — tree rebuild, layout change, CSS state
+    // change, stylesheet reparse, scroll offset change. The fast
+    // path is opt-in per frame: callers must check
+    // `cached_bg_batch.is_some()` AND that no invalidator fired this
+    // frame before consuming.
+    //
+    // Memory: roughly `bytes_per_primitive * primitive_count`. For
+    // cn_demo (~400 primitives at ~256 bytes each = 100 KB), this
+    // is a small fixed cost in exchange for skipping a 1 ms paint
+    // walker + 1 ms collect every frame.
+    cached_bg_batch: Option<blinc_gpu::PrimitiveBatch>,
 }
 
 struct CachedTexture {
@@ -370,6 +388,7 @@ impl RenderContext {
             has_active_flows: false,
             frame_count: 0,
             clear_alpha: 1.0,
+            cached_bg_batch: None,
         }
     }
 
@@ -382,6 +401,28 @@ impl RenderContext {
     /// can see through to whatever is behind the window.
     pub fn set_clear_alpha(&mut self, alpha: f32) {
         self.clear_alpha = alpha;
+    }
+
+    /// Drop the cached primitive batch + companion element lists. Called
+    /// by the windowed runner any time the next frame can't safely
+    /// reuse the cache — tree rebuild, layout recompute, CSS state
+    /// transition, stylesheet reparse, scroll offset change, scale
+    /// factor change, surface resize. The next paint will run the
+    /// full walker and repopulate the cache.
+    ///
+    /// Safe to call even when no cache is set (clears the companion
+    /// vecs unconditionally for symmetry).
+    pub fn invalidate_render_cache(&mut self) {
+        self.cached_bg_batch = None;
+    }
+
+    /// Whether the renderer has a usable cached batch from the most
+    /// recent full paint. The Phase-4 fast path checks this before
+    /// attempting the compositor route — if `false` (first paint
+    /// after rebuild, after invalidate, etc.) the runner must take
+    /// the full path.
+    pub fn has_render_cache(&self) -> bool {
+        self.cached_bg_batch.is_some()
     }
 
     /// Update the current cursor position in physical pixels (for @flow pointer input)
@@ -4435,6 +4476,21 @@ impl RenderContext {
             }
             self.renderer.set_glyph_atlas(atlas, color_atlas);
         }
+
+        // Snapshot the post-walker, post-CSS-text batch for the
+        // compositor fast path (Phase 4 follow-up frame). At this
+        // point `batch.primitives` matches what the walker emitted
+        // and what the bindings in `RenderTree::composite_bindings`
+        // reference by index. Subsequent rendering only reads from
+        // `batch` (the `render_with_clear` calls take `&`), so a
+        // clone here is safe and the original keeps flowing through
+        // the rest of the function.
+        //
+        // Cost: one `Vec::clone()` of `GpuPrimitive` (each ~288 B).
+        // For cn_demo with ~400 primitives that's ~110 KB / frame
+        // memcpy — ~30 µs on M-series silicon — in exchange for
+        // skipping the full paint walker on follow-up frames.
+        self.cached_bg_batch = Some(batch.clone());
 
         let has_glass = batch.glass_count() > 0;
         let has_layer_effects_in_batch = batch.has_layer_effects();
