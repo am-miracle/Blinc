@@ -540,20 +540,28 @@ pub fn motion() -> Motion {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
             // Default to filling parent container (acts as transparent
-            // wrapper). Both width and height are `Percent(100%)` so
-            // motion takes the parent's bounds in both flex AND
-            // absolute-positioned parents — earlier `height: Auto +
-            // flex_grow: 1.0` only filled height in flex parents.
-            // Inside an `absolute()` parent the height collapsed to 0,
-            // which made motion's centred rotation pivot at top-left
-            // instead of the rotating subtree's centre, and rotated
-            // children disappeared off-screen (the spinner-arc bug).
-            // `flex_grow: 1.0` is preserved so motion still distributes
-            // remaining space inside a flex layout when sibling
-            // children have fixed sizes.
+            // wrapper). `height: Auto + flex_grow: 1.0` lets motion
+            // size to its content in non-flex parents while expanding
+            // to fill available space in flex parents.
+            //
+            // A previous attempt at `height: Percent(100%)` broke
+            // switch-thumb vertical centring: the thumb sits inside
+            // `motion().translate_x(...)` in a row-flex parent with
+            // `items_center`. With Auto-height + flex_grow, motion
+            // sized to its child (the small thumb) and items_center
+            // on the parent centred it vertically. With Percent(100%)
+            // height, motion took the full track height and the
+            // column-flex layout pinned the thumb to the top of that
+            // full-height area — visually it looked like the knob had
+            // slipped above the track.
+            //
+            // Cases that need motion to fill an absolute-positioned
+            // parent (e.g. spinner arc rotation around the parent's
+            // centre) should size their parent explicitly or use a
+            // sized inner div under motion.
             size: taffy::Size {
                 width: taffy::Dimension::Percent(1.0),
-                height: taffy::Dimension::Percent(1.0),
+                height: taffy::Dimension::Auto,
             },
             flex_grow: 1.0,
             ..Style::default()
