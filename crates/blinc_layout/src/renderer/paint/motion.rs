@@ -249,17 +249,28 @@ impl RenderTree {
 
         // Snapshot the BG batch length BEFORE this node emits any
         // primitives. Together with the count we capture after the
-        // child recursion completes (just before transform pops), this
-        // gives the compositor-path fast Phase 4 the inclusive-
-        // exclusive primitive range this binding's subtree owns. Free
-        // when the node has no active binding — we still record the
-        // entry on the hot path, but the consumer skips ranges whose
-        // binding values match the previous frame.
-        let composite_bg_start = if motion_bindings_ref.is_some_and(|b| b.is_any_animating()) {
-            Some(ctx.bg_primitive_count())
-        } else {
-            None
-        };
+        // child recursion completes (just before transform pops),
+        // this gives the compositor-path fast Phase 4 the
+        // inclusive-exclusive primitive range this binding's subtree
+        // owns.
+        //
+        // Record every painted node with motion bindings — not just
+        // ones currently animating. Reason: an animation can become
+        // active *after* a full paint runs (e.g. `on_ready`-triggered
+        // `set_target`, `query_motion().start()`, timer callbacks).
+        // The cache from that paint has no entry for the bound node,
+        // so the next-frame fast path has nothing to patch and the
+        // animation appears frozen until a full repaint is triggered
+        // by something else (mouse moving, etc.). Recording the
+        // binding's primitive range up front means
+        // `apply_binding_deltas` has a target to write to as soon as
+        // the spring starts moving — no second full paint required.
+        //
+        // Cost is tiny: a `HashMap` entry per motion-bound painted
+        // node (cn_demo has ~13). Bindings whose values match
+        // `last_*` are early-out'd inside `apply_binding_deltas` so
+        // no GPU work happens for them.
+        let composite_bg_start = motion_bindings_ref.map(|_| ctx.bg_primitive_count());
 
         // We've passed all the cull / visibility / motion-removed
         // gates; this node is going to paint. Record whether it

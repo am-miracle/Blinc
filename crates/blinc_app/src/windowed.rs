@@ -3248,24 +3248,19 @@ impl WindowedApp {
 
                     // Handle input events
                     Event::Input(_, input_event) => {
-                        // Drop the compositor's primitive cache on any
-                        // input. The cache only knows how to delta-apply
-                        // motion-binding values; everything else an
-                        // input can change — scroll offsets, hover /
-                        // focus / active state, pointer position for
-                        // `@flow` shaders, drag state, IME composition
-                        // — would render stale if reused. Cheaper to
-                        // repopulate the cache on the very next full
-                        // paint than to track every per-input source
-                        // separately. The fast path stays active
-                        // between input events (idle spinner /
-                        // skeleton / progress animations), which is
-                        // where it pays off anyway. Costs ~one cache-
-                        // sized memcpy per input event, well under
-                        // the cost of the input dispatch itself.
-                        if let Some(ref mut app) = ws.app {
-                            app.invalidate_render_cache();
-                        }
+                        // Cache invalidation now happens AFTER dispatch
+                        // (see the post-dispatch `peek_needs_redraw`
+                        // block at the bottom of this arm), gated on a
+                        // signal that the dispatch actually changed
+                        // render state. Invalidating up front for every
+                        // input — including bare mouse-moves that just
+                        // hit-test and produce no state change — meant
+                        // the cache never lived more than a single
+                        // frame on a UI with hover-eligible elements
+                        // (cn_demo's buttons make `mouse_move_pipeline_
+                        // _needed()` return `true`, so every mouse-move
+                        // enters this arm). Fast path was rebuilding
+                        // constantly and CPU never dropped.
                         // Pending event structure for deferred dispatch
                         #[derive(Clone)]
                         struct PendingEvent {
@@ -4165,6 +4160,34 @@ impl WindowedApp {
                             {
                                 frame_dirty.store(true, Ordering::Release);
                                 window.request_redraw();
+                                // Dispatch produced a real state change —
+                                // drop the compositor cache so the next
+                                // paint repopulates it with the new
+                                // hover / focus / scroll / state. Bare
+                                // mouse-moves that didn't trigger any
+                                // handler (`peek_needs_redraw` stayed
+                                // false) leave the cache intact and the
+                                // next frame can take the fast path.
+                                // This is what lets idle animations
+                                // ride the cache for many frames in a
+                                // row even with the mouse moving over
+                                // hover-eligible elements.
+                                if let Some(ref mut app) = ws.app {
+                                    app.invalidate_render_cache();
+                                }
+                            }
+                            // Scroll events update `tree.scroll_offsets`
+                            // through `dispatch_scroll`, which doesn't
+                            // route through `stateful::request_redraw` —
+                            // the offsets just get a new value. The
+                            // cache would render with the pre-scroll
+                            // child positions if reused. Force
+                            // invalidation any frame a scroll input
+                            // landed.
+                            if scroll_info.is_some() || scroll_ended {
+                                if let Some(ref mut app) = ws.app {
+                                    app.invalidate_render_cache();
+                                }
                             }
                         }
                     }
@@ -4963,6 +4986,17 @@ impl WindowedApp {
                                 //    (`scroll_animating`)
                                 //  - cold start (no cache yet,
                                 //    `last_paint_time_ms == 0`)
+                                // Per-frame gate. The walker now records
+                                // `composite_bindings` for every painted
+                                // motion-bound node (animating or not),
+                                // so a newly-active spring on a visible
+                                // node finds its target entry already in
+                                // the map on the very next fast-path
+                                // frame. Off-screen nodes are still
+                                // culled and unrecorded — when they
+                                // scroll into view, the input event
+                                // invalidates the cache and the next
+                                // full paint records them.
                                 let try_fast_paint = !did_rebuild
                                     && !ws.needs_relayout
                                     && !css_active
