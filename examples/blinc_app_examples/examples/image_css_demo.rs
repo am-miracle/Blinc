@@ -19,9 +19,9 @@ const IMG: &str = "examples/blinc_app_examples/examples/assets/avatar.jpg";
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     let config = WindowConfig {
         title: "Image CSS Styling Demo".to_string(),
