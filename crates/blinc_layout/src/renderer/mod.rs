@@ -215,6 +215,16 @@ pub struct RenderTree {
     /// `true` from `render_layer_with_motion` when a Canvas node
     /// intersects the viewport.
     had_canvas_painted: Cell<bool>,
+    /// When `true`, the paint walker skips invoking each
+    /// `Canvas` node's `render_fn` while still recording the
+    /// `CanvasPaintRecord` for later replay. Used by the layer
+    /// compositor: the static-layer cache pass paints everything
+    /// EXCEPT canvas content (so the cache has transparent regions
+    /// where the canvases live), and each frame the renderer
+    /// overlays fresh canvas content on top. Reset to `false` at
+    /// the start of every full paint; set via
+    /// [`Self::set_skip_canvas_drawing`].
+    skip_canvas_drawing: Cell<bool>,
     /// Set of node ids that the paint walker actually rendered in the
     /// current frame (after viewport culling, motion-skip, and
     /// occlusion gates). Read by the windowed app at the end of the
@@ -448,6 +458,7 @@ impl RenderTree {
             cull_viewport: Cell::new(None),
             visible_anim_active: Cell::new(false),
             had_canvas_painted: Cell::new(false),
+            skip_canvas_drawing: Cell::new(false),
             painted_node_ids: RefCell::new(HashSet::new()),
             motion_bindings: HashMap::new(),
             composite_bindings: RefCell::new(HashMap::new()),
@@ -802,6 +813,21 @@ impl RenderTree {
     /// `true` whenever a Canvas node intersects the viewport).
     pub fn set_had_canvas_painted(&self, value: bool) {
         self.had_canvas_painted.set(value);
+    }
+
+    /// Whether the walker should skip invoking canvas `render_fn`s
+    /// on the next full paint while still recording each canvas's
+    /// paint state. The layer compositor sets this to `true` before
+    /// the static-cache paint so canvas regions in the cached
+    /// texture stay transparent — fresh canvas content is then
+    /// overlaid on top each frame.
+    pub fn skip_canvas_drawing(&self) -> bool {
+        self.skip_canvas_drawing.get()
+    }
+
+    /// Setter for [`Self::skip_canvas_drawing`].
+    pub fn set_skip_canvas_drawing(&self, value: bool) {
+        self.skip_canvas_drawing.set(value);
     }
 
     /// Borrow the set of node ids that the paint walker rendered in

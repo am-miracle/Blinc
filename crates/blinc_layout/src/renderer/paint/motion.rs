@@ -1095,18 +1095,29 @@ impl RenderTree {
                     };
 
                     // Snapshot the transform / opacity / z-layer
-                    // state at canvas paint time. The fast path
-                    // replays into a scratch `GpuPaintContext` with
-                    // these values pre-pushed so the canvas closure
-                    // emits primitives at exactly the same screen
-                    // coords / opacity / draw-order it had on this
-                    // full paint — no walker re-run required.
+                    // state at canvas paint time. The fast path (and
+                    // the layer compositor's overlay pass) replays
+                    // into a scratch `GpuPaintContext` with these
+                    // values pre-pushed so the canvas closure emits
+                    // primitives at exactly the same screen coords /
+                    // opacity / draw-order it had on this full paint.
                     let saved_affine = ctx.current_affine_elements();
                     let saved_opacity = ctx.current_opacity();
                     let saved_z_layer = ctx.z_layer();
                     let canvas_start = ctx.bg_primitive_count();
+                    let skip_drawing = self.skip_canvas_drawing.get();
 
-                    render_fn(ctx, canvas_bounds);
+                    // The layer compositor uses `skip_canvas_drawing`
+                    // to keep the cached static texture transparent
+                    // in canvas regions — fresh canvas content is
+                    // overlaid each frame on top of the cache. When
+                    // the flag is set, we still walk the canvas (to
+                    // record the paint state for the overlay pass)
+                    // but skip the actual `render_fn` invocation, so
+                    // no primitives land in the static batch.
+                    if !skip_drawing {
+                        render_fn(ctx, canvas_bounds);
+                    }
 
                     let canvas_end = ctx.bg_primitive_count();
 
@@ -1121,8 +1132,15 @@ impl RenderTree {
                     // Foreground); on the two non-matching passes the
                     // canvas doesn't emit to the bg batch and a
                     // captured `(start..start)` empty range would
-                    // clobber the real one via HashMap::insert.
-                    if effective_layer == target_layer && canvas_end > canvas_start {
+                    // clobber the real one via HashMap::insert. When
+                    // `skip_drawing` is set the primitive range is
+                    // empty (no emission) — record it anyway so the
+                    // overlay pass has a `render_fn` + transform
+                    // state to replay; the empty range is just a
+                    // bookkeeping marker.
+                    let layer_matches = effective_layer == target_layer;
+                    let has_emission = canvas_end > canvas_start;
+                    if layer_matches && (has_emission || skip_drawing) {
                         self.canvas_paint_records.borrow_mut().insert(
                             node,
                             super::super::CanvasPaintRecord {
