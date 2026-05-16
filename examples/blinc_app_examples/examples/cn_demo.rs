@@ -30,7 +30,8 @@ fn main() -> Result<()> {
         height: 900,
         resizable: true,
         fullscreen: false,
-        animation_fps_cap: Some(30),
+        animation_fps_cap: Some(60),
+        max_frame_latency: 1,
         ..Default::default()
     };
 

@@ -495,7 +495,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                 .items_center()
                 .justify_center()
                 .child(
-                    text("Loading cutegirl_g1… (asset is gitignored — see README)")
+                    text("Loading cutegirl_g1… (asset is gitignored for web — see README)")
                         .size(16.0)
                         .color(Color::rgba(0.95, 0.95, 0.95, 1.0)),
                 );
