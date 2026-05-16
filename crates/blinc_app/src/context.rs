@@ -4641,10 +4641,50 @@ impl RenderContext {
         // correct rule is "any binding animating → invalidate";
         // smarter mappings (motion-bound subtrees move to the
         // overlay batch) can land later without changing call sites.
-        let bindings_animating = tree
-            .motion_bindings_map()
-            .values()
-            .any(|b| b.is_any_animating());
+        // Detect bindings whose current value would visibly diverge
+        // from what the static-layer cache was painted with.
+        //
+        // `is_any_animating()` is too sensitive for this purpose:
+        // under-damped springs (e.g. `SpringConfig::gentle()`)
+        // asymptotically oscillate around the target at sub-pixel
+        // amplitude for many seconds before
+        // `(value - target).abs() < 0.01` clears the gate. Those
+        // sub-pixel wobbles round to the same pixel after
+        // rasterization, so the cache stays visually correct — but
+        // the "is animating" reading was forcing a full repaint per
+        // frame anyway, pinning CPU at vsync forever.
+        //
+        // Treat a binding as "visibly animating" only if its current
+        // value differs from its target by more than half a logical
+        // pixel. Same posture for rotations (degrees) — half a
+        // degree at typical spinner sizes (16-32 px) is less than a
+        // pixel of arc-length travel. Timeline-driven bindings (used
+        // by spinners — but those are canvases, not motion-bound,
+        // so this branch wouldn't hit) always count as animating
+        // because they have no notion of "target settled".
+        const VISIBLE_PIXEL_EPS: f32 = 0.5;
+        const VISIBLE_DEG_EPS: f32 = 0.5;
+        let value_far_from_target = |v: &Option<blinc_animation::SharedAnimatedValue>,
+                                     eps: f32|
+         -> bool {
+            v.as_ref()
+                .and_then(|s| s.lock().ok())
+                .map(|g| (g.get() - g.target()).abs() > eps)
+                .unwrap_or(false)
+        };
+        let bindings_animating = tree.motion_bindings_map().values().any(|b| {
+            value_far_from_target(&b.translate_x, VISIBLE_PIXEL_EPS)
+                || value_far_from_target(&b.translate_y, VISIBLE_PIXEL_EPS)
+                || value_far_from_target(&b.scale, 0.01)
+                || value_far_from_target(&b.scale_x, 0.01)
+                || value_far_from_target(&b.scale_y, 0.01)
+                || value_far_from_target(&b.rotation, VISIBLE_DEG_EPS)
+                || value_far_from_target(&b.opacity, 0.01)
+                || b.rotation_timeline
+                    .as_ref()
+                    .and_then(|t| t.timeline.lock().ok())
+                    .is_some_and(|g| g.is_playing())
+        });
         if bindings_animating {
             self.renderer.invalidate_static_layer();
         }
