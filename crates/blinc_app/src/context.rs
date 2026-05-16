@@ -581,14 +581,24 @@ impl RenderContext {
             }
 
             // ----------------------------------------------------------------
-            // Scale / rotation: not yet handled by the fast path.
-            // If a binding has a non-identity scale or non-zero
-            // rotation animating, return `Err(())` so the caller
-            // falls back to the full paint path. Comparison is
-            // value-based, not pointer-based — a binding can hold
-            // an idle (settled) scale spring and still be safe to
-            // patch as long as the value hasn't moved since the
-            // last full paint.
+            // Scale: scale around the binding's recorded centre. For each
+            // primitive in the range, transform `bounds` from the
+            // last_scale to the new scale, keeping the binding centre
+            // fixed.
+            //
+            //   bounds_local = (old_bounds - centre) / last_scale
+            //   new_bounds   = centre + new_scale * bounds_local
+            //                = centre + (new_scale / last_scale) * (old_bounds - centre)
+            //   delta        = (new_scale/last_scale - 1) * (old_bounds - centre)
+            //
+            // Size scales by the same ratio: bounds.w *= new_scale/last_scale.
+            //
+            // Bails (fast-path falls back to full walker) when
+            // `last_scale` is degenerate (~0) — that ratio would
+            // explode. The centre stored in `composite_bindings` is in
+            // logical pixels (pre-DPI); bounds are in physical pixels,
+            // so we scale the centre by `scale` before computing the
+            // delta.
             // ----------------------------------------------------------------
             let binding_scale = bindings_for_node
                 .scale
@@ -610,9 +620,38 @@ impl RenderContext {
             if (new_sx - meta.last_scale.0).abs() > f32::EPSILON
                 || (new_sy - meta.last_scale.1).abs() > f32::EPSILON
             {
-                return false;
+                if meta.last_scale.0.abs() < f32::EPSILON || meta.last_scale.1.abs() < f32::EPSILON
+                {
+                    return false;
+                }
+                let ratio_x = new_sx / meta.last_scale.0;
+                let ratio_y = new_sy / meta.last_scale.1;
+                let cx_phys = meta.centre.0 * scale;
+                let cy_phys = meta.centre.1 * scale;
+                if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                    for p in prims.iter_mut() {
+                        p.bounds[0] = cx_phys + (p.bounds[0] - cx_phys) * ratio_x;
+                        p.bounds[1] = cy_phys + (p.bounds[1] - cy_phys) * ratio_y;
+                        p.bounds[2] *= ratio_x;
+                        p.bounds[3] *= ratio_y;
+                    }
+                }
+                meta.last_scale = (new_sx, new_sy);
             }
 
+            // ----------------------------------------------------------------
+            // Rotation: not yet handled by the fast path.
+            //
+            // Rotation around the binding centre would compose into each
+            // primitive's `local_affine` (2×2 rotation matrix) AND require
+            // shifting `bounds` around the centre. The composition with
+            // any CSS-transform that already populated `local_affine`
+            // makes the math non-trivial — deferred until we either
+            // (a) reserve `local_affine` exclusively for motion or
+            // (b) split into separate "css_affine" + "motion_affine"
+            // shader-side. Until then, any rotation change bails to
+            // the full paint path.
+            // ----------------------------------------------------------------
             let binding_rotation_deg = bindings_for_node
                 .rotation
                 .as_ref()
