@@ -1,6 +1,11 @@
 //! Spinner component for loading indicators
 //!
-//! A circular loading indicator that spins continuously using canvas animation.
+//! A circular loading indicator that spins continuously. Renders as
+//! two single primitives — a static circular ring (track) and a
+//! polygon-clipped arc (270° of a ring) rotating via a motion
+//! binding. No canvas closure, no per-segment dots: just two SDF
+//! primitives total that the compositor fast path can patch in
+//! place via the rotation binding.
 //!
 //! # Example
 //!
@@ -8,41 +13,20 @@
 //! use blinc_cn::prelude::*;
 //! use blinc_animation::AnimationContextExt;
 //!
-//! // Create a spinning loader
 //! fn loading_view(ctx: &impl AnimationContext) -> impl ElementBuilder {
 //!     let timeline = ctx.use_animated_timeline();
 //!     cn::spinner(timeline)
 //! }
-//!
-//! // Custom size and colors
-//! fn custom_spinner(ctx: &impl AnimationContext) -> impl ElementBuilder {
-//!     let timeline = ctx.use_animated_timeline();
-//!     cn::spinner(timeline)
-//!         .size(SpinnerSize::Large)
-//!         .color(Color::BLUE)
-//!         .track_color(Color::rgba(0.0, 0.0, 1.0, 0.2))
-//! }
-//!
-//! // Custom rotation duration (slower spin)
-//! fn slow_spinner(ctx: &impl AnimationContext) -> impl ElementBuilder {
-//!     let timeline = ctx.use_animated_timeline();
-//!     cn::spinner(timeline)
-//!         .duration_ms(2000) // 2 seconds per rotation
-//! }
 //! ```
 
 use blinc_animation::SharedAnimatedTimeline;
-use blinc_core::{Brush, Color, CornerRadius, DrawContext, Rect};
-use blinc_layout::canvas::{CanvasBounds, CanvasRenderFn};
-use blinc_layout::div::ElementTypeId;
-use blinc_layout::element::RenderProps;
+use blinc_core::layer::{ClipLength, ClipPath};
+use blinc_core::Color;
+use blinc_layout::div::{Div, ElementTypeId};
+use blinc_layout::motion::motion;
 use blinc_layout::prelude::*;
-use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_theme::{ColorToken, ThemeState};
-use std::f32::consts::PI;
-use std::rc::Rc;
-use std::sync::Arc;
-use taffy::Style;
+use std::cell::OnceCell;
 
 /// Spinner size variants
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -74,242 +58,217 @@ impl SpinnerSize {
     }
 }
 
-/// Animated spinner component for loading indicators
-///
-/// Uses a canvas element with `AnimatedTimeline` for continuous rotation.
-/// The timeline is configured automatically with infinite looping.
-/// Canvas redraws every frame, making animation smooth.
-pub struct Spinner {
+#[derive(Clone)]
+struct SpinnerConfig {
     timeline: SharedAnimatedTimeline,
     size: SpinnerSize,
     color: Option<Color>,
     track_color: Option<Color>,
     duration_ms: u32,
-    /// User-added CSS classes
     classes: Vec<std::sync::Arc<str>>,
-    /// User-set element ID
     user_id: Option<String>,
 }
 
+/// Animated spinner component for loading indicators
+pub struct Spinner {
+    config: SpinnerConfig,
+    built: OnceCell<Div>,
+}
+
 impl Spinner {
-    /// Create a new spinning spinner
-    ///
-    /// The timeline will be configured for infinite rotation on first render.
     pub fn new(timeline: SharedAnimatedTimeline) -> Self {
         Self {
-            timeline,
-            size: SpinnerSize::default(),
-            color: None,
-            track_color: None,
-            duration_ms: 1000, // 1 second per rotation
-            classes: Vec::new(),
-            user_id: None,
+            config: SpinnerConfig {
+                timeline,
+                size: SpinnerSize::default(),
+                color: None,
+                track_color: None,
+                duration_ms: 1000,
+                classes: Vec::new(),
+                user_id: None,
+            },
+            built: OnceCell::new(),
         }
     }
 
-    /// Set the spinner size
     pub fn size(mut self, size: SpinnerSize) -> Self {
-        self.size = size;
+        self.config.size = size;
         self
     }
 
-    /// Set the spinner color (the spinning arc)
     pub fn color(mut self, color: impl Into<Color>) -> Self {
-        self.color = Some(color.into());
+        self.config.color = Some(color.into());
         self
     }
 
-    /// Set the track color (the background circle)
     pub fn track_color(mut self, color: impl Into<Color>) -> Self {
-        self.track_color = Some(color.into());
+        self.config.track_color = Some(color.into());
         self
     }
 
-    /// Set the rotation duration in milliseconds (default: 1000ms)
-    ///
-    /// Lower values = faster spin, higher values = slower spin.
     pub fn duration_ms(mut self, duration: u32) -> Self {
-        self.duration_ms = duration;
+        self.config.duration_ms = duration;
         self
     }
 
-    /// Add a CSS class for selector matching
     pub fn class(mut self, name: impl AsRef<str>) -> Self {
-        self.classes.push(blinc_core::intern::intern(name.as_ref()));
+        self.config
+            .classes
+            .push(blinc_core::intern::intern(name.as_ref()));
         self
     }
 
-    /// Set the element ID for CSS selector matching
     pub fn id(mut self, id: &str) -> Self {
-        self.user_id = Some(id.to_string());
+        self.config.user_id = Some(id.to_string());
         self
     }
 
-    /// Create the canvas render function for this spinner
-    fn create_render_fn(&self) -> CanvasRenderFn {
-        let theme = ThemeState::get();
+    fn get_or_build(&self) -> &Div {
+        self.built.get_or_init(|| build_spinner_div(&self.config))
+    }
+}
 
-        let diameter = self.size.diameter();
-        let border_width = self.size.border_width();
-        let spinner_color = self
-            .color
-            .unwrap_or_else(|| theme.color(ColorToken::Primary));
-        let track_color = self
-            .track_color
-            .unwrap_or_else(|| theme.color(ColorToken::Border));
-        let timeline = Arc::clone(&self.timeline);
-        let duration_ms = self.duration_ms;
+/// Build the spinner as two stacked primitives:
+///   - Track: a circular ring (`rounded` + `border`) showing the
+///     full circumference. Static.
+///   - Arc: same ring clipped to 270° via a polygon clip-path that
+///     hides the top-right quadrant. Wrapped in a `motion()` with
+///     `rotate_timeline` so the arc spins; the gap traverses the
+///     circle as the timeline advances.
+///
+/// Two primitives per spinner instead of 56 segment-dots. The
+/// compositor fast path patches the rotation onto the arc's
+/// primitive in place each frame — no walker, no per-segment
+/// dispatch, no canvas closure.
+fn build_spinner_div(cfg: &SpinnerConfig) -> Div {
+    let theme = ThemeState::get();
+    let diameter = cfg.size.diameter();
+    let border_width = cfg.size.border_width();
+    let spinner_color = cfg
+        .color
+        .unwrap_or_else(|| theme.color(ColorToken::Primary));
+    let track_color = cfg
+        .track_color
+        .unwrap_or_else(|| theme.color(ColorToken::Border));
 
-        // Configure timeline on first access (closure only runs once)
-        let entry_id = timeline.lock().unwrap().configure(|t| {
-            let id = t.add(0, duration_ms, 0.0, 360.0);
-            t.set_loop(-1); // Infinite loop
-            t.start();
-            id
+    let total_size = diameter + border_width * 2.0;
+    let cx = total_size / 2.0;
+    let cy = total_size / 2.0;
+
+    let entry_id = cfg.timeline.lock().unwrap().configure(|t| {
+        let id = t.add(0, cfg.duration_ms, 0.0, 360.0);
+        t.set_loop(-1);
+        t.start();
+        id
+    });
+
+    // Static track: a full circular ring. `rounded(total_size/2)`
+    // turns the square into a circle; `border(...)` draws the
+    // outline of that circle as a uniform stroke.
+    let track = div()
+        .absolute()
+        .top(0.0)
+        .left(0.0)
+        .w(total_size)
+        .h(total_size)
+        .rounded(total_size / 2.0)
+        .border(border_width, track_color);
+
+    // Arc: same ring, but clipped to 270° via an L-shaped polygon
+    // that covers all of the box EXCEPT the top-right quadrant.
+    // The polygon goes:
+    //   (0,0) → (cx,0) → (cx,cy) → (size,cy) → (size,size) → (0,size)
+    // which traces an L from TL down through centre to right-centre
+    // and around to BL. The enclosed area is "left half + bottom
+    // half" — the top-right quadrant is the cut-out. Applied to the
+    // circular ring, this gives a 270° arc with the 90° gap in the
+    // top-right.
+    //
+    // NOT marked `.absolute()` so it contributes to the motion
+    // wrapper's intrinsic size — without that, motion's height
+    // collapses to 0 and the rotation pivot lands at top-centre
+    // instead of the geometric centre.
+    let arc = div()
+        .w(total_size)
+        .h(total_size)
+        .rounded(total_size / 2.0)
+        .border(border_width, spinner_color)
+        .clip_path(ClipPath::Polygon {
+            points: vec![
+                (ClipLength::Px(0.0), ClipLength::Px(0.0)),
+                (ClipLength::Px(cx), ClipLength::Px(0.0)),
+                (ClipLength::Px(cx), ClipLength::Px(cy)),
+                (ClipLength::Px(total_size), ClipLength::Px(cy)),
+                (ClipLength::Px(total_size), ClipLength::Px(total_size)),
+                (ClipLength::Px(0.0), ClipLength::Px(total_size)),
+            ],
         });
 
-        let render_timeline = Arc::clone(&timeline);
+    // Wrap the arc in motion so the compositor's rotation patcher
+    // can spin it. `rotate_timeline` binds the rotation degrees to
+    // the spinner's looping timeline; the walker applies the
+    // rotation as `T(c) * R(θ) * T(-c)` around the motion's bounds
+    // centre, and `apply_binding_deltas` patches the per-frame
+    // delta onto the arc primitive in place.
+    let spinning_motion = motion()
+        .rotate_timeline(cfg.timeline.clone(), entry_id)
+        .child(arc);
 
-        Rc::new(move |ctx: &mut dyn DrawContext, bounds: CanvasBounds| {
-            // Get current rotation angle from timeline
-            let angle_deg = render_timeline.lock().unwrap().get(entry_id).unwrap_or(0.0);
-            let angle_rad = angle_deg * PI / 180.0;
+    // Absolute overlay so the spinning arc composes on top of the
+    // track at identical coordinates.
+    let spinning_overlay = div()
+        .absolute()
+        .top(0.0)
+        .left(0.0)
+        .w(total_size)
+        .h(total_size)
+        .child(spinning_motion);
 
-            let cx = bounds.width / 2.0;
-            let cy = bounds.height / 2.0;
-            let radius = (diameter - border_width) / 2.0;
-
-            // Draw track circle (background)
-            let track_segments = 32;
-            for i in 0..track_segments {
-                let t1 = i as f32 / track_segments as f32;
-                let t2 = (i + 1) as f32 / track_segments as f32;
-
-                let a1 = t1 * PI * 2.0;
-                let a2 = t2 * PI * 2.0;
-
-                let x1 = cx + radius * a1.cos();
-                let y1 = cy + radius * a1.sin();
-                let x2 = cx + radius * a2.cos();
-                let y2 = cy + radius * a2.sin();
-
-                let dx = x2 - x1;
-                let dy = y2 - y1;
-                let len = (dx * dx + dy * dy).sqrt();
-
-                ctx.fill_rect(
-                    Rect::new(
-                        x1 - border_width / 2.0,
-                        y1 - border_width / 2.0,
-                        len + border_width,
-                        border_width,
-                    ),
-                    CornerRadius::uniform(border_width / 2.0),
-                    Brush::Solid(track_color),
-                );
-            }
-
-            // Draw spinning arc (270 degrees with fade effect)
-            let arc_length = PI * 1.5; // 270 degrees
-            let segments = 24;
-
-            for i in 0..segments {
-                let t1 = i as f32 / segments as f32;
-                let t2 = (i + 1) as f32 / segments as f32;
-
-                let a1 = angle_rad + t1 * arc_length;
-                let a2 = angle_rad + t2 * arc_length;
-
-                let x1 = cx + radius * a1.cos();
-                let y1 = cy + radius * a1.sin();
-                let x2 = cx + radius * a2.cos();
-                let y2 = cy + radius * a2.sin();
-
-                let dx = x2 - x1;
-                let dy = y2 - y1;
-                let len = (dx * dx + dy * dy).sqrt();
-
-                // Fade effect: trail fades out behind the leading edge
-                let alpha = 0.3 + 0.7 * t1;
-                let color_with_alpha =
-                    Color::rgba(spinner_color.r, spinner_color.g, spinner_color.b, alpha);
-
-                ctx.fill_rect(
-                    Rect::new(
-                        x1 - border_width / 2.0,
-                        y1 - border_width / 2.0,
-                        len + border_width,
-                        border_width,
-                    ),
-                    CornerRadius::uniform(border_width / 2.0),
-                    Brush::Solid(color_with_alpha),
-                );
-            }
-        })
+    let mut container = div()
+        .relative()
+        .w(total_size)
+        .h(total_size)
+        .child(track)
+        .child(spinning_overlay);
+    for class in &cfg.classes {
+        container = container.class(class.as_ref());
     }
+    if let Some(id) = &cfg.user_id {
+        container = container.id(id);
+    }
+    container
 }
 
 impl ElementBuilder for Spinner {
-    fn build(&self, tree: &mut LayoutTree) -> LayoutNodeId {
-        let diameter = self.size.diameter();
-        let border_width = self.size.border_width();
-        // Add padding on both sides to account for the border width so drawing doesn't clip
-        let total_size = diameter + border_width * 2.0;
-        let style = Style {
-            size: taffy::Size {
-                width: taffy::Dimension::Length(total_size),
-                height: taffy::Dimension::Length(total_size),
-            },
-            ..Default::default()
-        };
-        tree.create_node(style)
+    fn build(&self, tree: &mut blinc_layout::tree::LayoutTree) -> blinc_layout::tree::LayoutNodeId {
+        self.get_or_build().build(tree)
     }
 
-    fn render_props(&self) -> RenderProps {
-        RenderProps::default()
+    fn render_props(&self) -> blinc_layout::element::RenderProps {
+        self.get_or_build().render_props()
     }
 
     fn children_builders(&self) -> &[Box<dyn ElementBuilder>] {
-        &[]
+        self.get_or_build().children_builders()
     }
 
     fn element_type_id(&self) -> ElementTypeId {
-        ElementTypeId::Canvas
+        self.get_or_build().element_type_id()
     }
 
-    fn canvas_render_info(&self) -> Option<CanvasRenderFn> {
-        Some(self.create_render_fn())
-    }
-
-    fn layout_style(&self) -> Option<&Style> {
-        None
+    fn layout_style(&self) -> Option<&taffy::Style> {
+        self.get_or_build().layout_style()
     }
 
     fn element_classes(&self) -> &[std::sync::Arc<str>] {
-        &self.classes
+        self.get_or_build().element_classes()
     }
 
     fn element_id(&self) -> Option<&str> {
-        self.user_id.as_deref()
+        self.get_or_build().element_id()
     }
 }
 
-/// Create an animated spinner loading indicator
-///
-/// Takes an `AnimatedTimeline` from the animation context. The timeline
-/// is automatically configured for infinite rotation.
-///
-/// # Example
-///
-/// ```ignore
-/// use blinc_cn::prelude::*;
-/// use blinc_animation::AnimationContextExt;
-///
-/// fn loading(ctx: &impl AnimationContext) -> impl ElementBuilder {
-///     let timeline = ctx.use_animated_timeline();
-///     cn::spinner(timeline)
-/// }
-/// ```
 pub fn spinner(timeline: SharedAnimatedTimeline) -> Spinner {
     Spinner::new(timeline)
 }
