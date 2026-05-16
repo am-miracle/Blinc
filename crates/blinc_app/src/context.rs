@@ -630,9 +630,19 @@ impl RenderContext {
             records_ref.values().cloned().collect();
         drop(records_ref);
 
+        // Reuse a single scratch `GpuPaintContext` across every
+        // canvas in the frame. `GpuPaintContext::new` allocates a
+        // handful of `Vec`s + a `PrimitiveBatch`, all of which
+        // benefit from reuse — cn_demo's three spinners running at
+        // 30 fps would otherwise build 90 fresh contexts per
+        // second. `take_batch` returns the emitted primitives and
+        // leaves the batch empty for the next iteration; the
+        // transform / opacity stacks get explicit `pop`s after each
+        // canvas so the scratch ends every loop iteration in the
+        // same fresh state.
+        let mut scratch = GpuPaintContext::new(width as f32, height as f32);
         let mut prims = Vec::new();
         for record in records {
-            let mut scratch = GpuPaintContext::new(width as f32, height as f32);
 
             // Replay the ancestor clip stack BEFORE pushing the
             // canvas's affine. `push_clip` transforms the supplied
@@ -690,6 +700,14 @@ impl RenderContext {
             if push_local_clip {
                 scratch.pop_clip();
             }
+            // Pop the affine + opacity we pushed before invoking
+            // the closure so the scratch context returns to its
+            // initial state for the next canvas. `take_batch`
+            // returns the primitives and resets the internal
+            // batch, but transform/opacity stacks need explicit
+            // pops to keep the reuse correct.
+            scratch.pop_transform();
+            scratch.pop_opacity();
             if pushed_ancestor_clip {
                 scratch.pop_clip();
             }
