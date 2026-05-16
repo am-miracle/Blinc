@@ -492,6 +492,113 @@ impl RenderContext {
     /// `composite_bindings` map so the next frame's delta is
     /// computed against the value just written to the GPU, not the
     /// original paint-time value (otherwise multiple fast-path
+    /// Re-invoke every recorded canvas's `render_fn` and splice the
+    /// resulting primitives back into the cached `bg_batch` at the
+    /// range the walker recorded for that canvas.
+    ///
+    /// Lets the compositor fast path stay engaged when there's an
+    /// in-viewport canvas: only the ~tens of primitives the canvas
+    /// emits get refreshed, the surrounding ~thousand primitives in
+    /// the cache stay untouched, and the full paint walker doesn't
+    /// run. On `cn_demo` (3 spinners on screen, ~1000 primitives in
+    /// the tree) this is the difference between ~46 % CPU and a
+    /// fraction of that.
+    ///
+    /// Bails (returns `false`, caller falls back to full paint) when:
+    ///   - There's no cached batch.
+    ///   - A canvas emits a different primitive count this frame than
+    ///     it did on the last full paint. A count change shifts every
+    ///     subsequent range stored in `composite_bindings` /
+    ///     `canvas_paint_records`, and rebuilding that bookkeeping
+    ///     correctly is more work than re-walking the tree.
+    ///
+    /// Returns `true` when every canvas replayed successfully OR
+    /// there were no canvases to redraw (no-op fast-path).
+    pub fn redraw_canvases(
+        &mut self,
+        tree: &blinc_layout::RenderTree,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        use blinc_core::{layer::Affine2D, DrawContext, Rect, Transform};
+        use blinc_gpu::GpuPaintContext;
+
+        let batch = match self.cached_bg_batch.as_mut() {
+            Some(b) => b,
+            None => return false,
+        };
+
+        let records_ref = tree.canvas_paint_records();
+        if records_ref.is_empty() {
+            return true;
+        }
+        // Clone records out of the RefCell so we don't hold the
+        // borrow across the canvas closure invocation (closures can
+        // reach back into the scheduler / state and we don't want
+        // to deadlock the renderer's bookkeeping).
+        let mut sorted: Vec<blinc_layout::renderer::CanvasPaintRecord> =
+            records_ref.values().cloned().collect();
+        drop(records_ref);
+        sorted.sort_by_key(|r| r.primitive_range.start);
+
+        for record in &sorted {
+            // Scratch context. Width / height match the real frame
+            // so any viewport-dependent calculations inside fill_*
+            // (currently none, but defensively correct) get the
+            // right reference frame.
+            let mut scratch = GpuPaintContext::new(width as f32, height as f32);
+
+            // Replay the transform stack. `push_transform` composes
+            // with `Affine2D::IDENTITY` from the fresh stack, so
+            // pushing the saved affine reproduces the exact affine
+            // the walker had at canvas paint time.
+            scratch.push_transform(Transform::Affine2D(Affine2D {
+                elements: record.affine,
+            }));
+            scratch.push_opacity(record.opacity);
+            scratch.set_z_layer(record.z_layer);
+
+            let local_clip_rect = if record.clips_content {
+                let clip_rect = Rect::new(0.0, 0.0, record.bounds_wh.0, record.bounds_wh.1);
+                scratch.push_clip(blinc_core::layer::ClipShape::rect(clip_rect));
+                Some(clip_rect)
+            } else {
+                None
+            };
+            let _ = local_clip_rect;
+
+            let canvas_bounds = blinc_layout::canvas::CanvasBounds {
+                x: 0.0,
+                y: 0.0,
+                width: record.bounds_wh.0,
+                height: record.bounds_wh.1,
+            };
+            (record.render_fn)(&mut scratch as &mut dyn DrawContext, canvas_bounds);
+
+            if record.clips_content {
+                scratch.pop_clip();
+            }
+
+            // Capture the freshly emitted primitives. The scratch
+            // context's batch only contains what `render_fn` just
+            // emitted (we pushed nothing else into it that produces
+            // primitives) so we can splice the whole `primitives`
+            // vec back into the cached batch.
+            let new_batch = scratch.take_batch();
+            let new_count = new_batch.primitives.len();
+            let old_count = record.primitive_range.end - record.primitive_range.start;
+            if new_count != old_count {
+                // Splice would shift every subsequent range — bail.
+                return false;
+            }
+            for (i, p) in new_batch.primitives.into_iter().enumerate() {
+                batch.primitives[record.primitive_range.start + i] = p;
+            }
+        }
+
+        true
+    }
+
     /// frames in a row would double-apply).
     pub fn apply_binding_deltas(&mut self, tree: &blinc_layout::RenderTree, scale: f32) -> bool {
         let batch = match self.cached_bg_batch.as_mut() {
@@ -4450,12 +4557,23 @@ impl RenderContext {
         // Get scale factor for HiDPI rendering
         let scale_factor = tree.scale_factor();
 
-        // Try the compositor fast path: if `apply_binding_deltas`
-        // succeeds, skip the paint walker entirely and reuse the
-        // patched cached batch. Falls through to the full walker
-        // path if any binding can't be delta-applied (scale or
-        // rotation moved, no cache, etc.).
-        let used_fast_paint = try_fast_paint && self.apply_binding_deltas(tree, scale_factor);
+        // Try the compositor fast path. Two steps in sequence:
+        //
+        //   1. `redraw_canvases` — re-invokes every recorded
+        //      canvas's `render_fn` and splices the fresh primitives
+        //      into the cached batch. Bails (returns false) when a
+        //      canvas's primitive count has changed since the last
+        //      full paint or no cached batch exists.
+        //
+        //   2. `apply_binding_deltas` — patches motion-binding
+        //      transform / opacity changes onto the (possibly
+        //      canvas-refreshed) cached batch.
+        //
+        // Either step bailing falls all the way through to the full
+        // walker path and repopulates the cache.
+        let used_fast_paint = try_fast_paint
+            && self.redraw_canvases(tree, width, height)
+            && self.apply_binding_deltas(tree, scale_factor);
 
         // Create a single paint context for all layers with text rendering support
         let mut ctx =

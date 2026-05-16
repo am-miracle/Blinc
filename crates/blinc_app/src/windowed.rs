@@ -4987,22 +4987,19 @@ impl WindowedApp {
                                 // scroll into view, the input event
                                 // invalidates the cache and the next
                                 // full paint records them.
-                                // Bail when the last paint included an
-                                // in-viewport canvas: canvases re-run their
-                                // draw callback every frame off the scheduler's
-                                // timelines / continuous values, so the cached
-                                // primitive batch goes stale instantly. Without
-                                // this gate, the fast path skips the walker, the
-                                // canvas callback never fires, and the animation
-                                // freezes until the user moves the mouse. Set by
-                                // `render_layer_with_motion` whenever a Canvas
-                                // node intersects the viewport.
-                                let had_canvas = tree.had_canvas_painted();
+                                // Canvas presence no longer bails the fast
+                                // path — `BlincApp::redraw_canvases`
+                                // re-invokes each recorded canvas's
+                                // `render_fn` into a scratch context and
+                                // splices the fresh primitives into the
+                                // cached batch, so the surrounding tree
+                                // stays cached and the walker doesn't run.
+                                // See the split-paint flow in
+                                // `render_tree_with_motion_opt`.
                                 let try_fast_paint = !did_rebuild
                                     && !ws.needs_relayout
                                     && !css_active
                                     && !scroll_animating
-                                    && !had_canvas
                                     && ws.last_paint_time_ms != 0
                                     && blinc_app.has_render_cache();
 

@@ -68,6 +68,10 @@ impl RenderTree {
         // reads this between full paints to patch the cached
         // primitive buffer in place.
         self.composite_bindings.borrow_mut().clear();
+        // Canvas paint records have the same lifecycle: the walker
+        // rebuilds them on every full paint, the fast path consumes
+        // them between full paints.
+        self.canvas_paint_records.borrow_mut().clear();
 
         if let Some(root) = self.root {
             // Apply DPI scale factor if set (for HiDPI display support)
@@ -1089,10 +1093,48 @@ impl RenderTree {
                         width: bounds.width,
                         height: bounds.height,
                     };
+
+                    // Snapshot the transform / opacity / z-layer
+                    // state at canvas paint time. The fast path
+                    // replays into a scratch `GpuPaintContext` with
+                    // these values pre-pushed so the canvas closure
+                    // emits primitives at exactly the same screen
+                    // coords / opacity / draw-order it had on this
+                    // full paint — no walker re-run required.
+                    let saved_affine = ctx.current_affine_elements();
+                    let saved_opacity = ctx.current_opacity();
+                    let saved_z_layer = ctx.z_layer();
+                    let canvas_start = ctx.bg_primitive_count();
+
                     render_fn(ctx, canvas_bounds);
+
+                    let canvas_end = ctx.bg_primitive_count();
 
                     if should_clip {
                         ctx.pop_clip();
+                    }
+
+                    // Only record when on the matching layer pass —
+                    // mirrors the `composite_bindings` recording at
+                    // the bottom of this fn. The walker runs three
+                    // times per frame (Background / Glass /
+                    // Foreground); on the two non-matching passes the
+                    // canvas doesn't emit to the bg batch and a
+                    // captured `(start..start)` empty range would
+                    // clobber the real one via HashMap::insert.
+                    if effective_layer == target_layer && canvas_end > canvas_start {
+                        self.canvas_paint_records.borrow_mut().insert(
+                            node,
+                            super::super::CanvasPaintRecord {
+                                primitive_range: canvas_start..canvas_end,
+                                affine: saved_affine,
+                                bounds_wh: (bounds.width, bounds.height),
+                                render_fn: render_fn.clone(),
+                                clips_content: should_clip,
+                                z_layer: saved_z_layer,
+                                opacity: saved_opacity,
+                            },
+                        );
                     }
                 }
             }

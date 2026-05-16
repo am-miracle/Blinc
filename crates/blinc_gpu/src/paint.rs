@@ -1530,6 +1530,10 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         self.batch.primitives.len()
     }
 
+    fn current_affine_elements(&self) -> [f32; 6] {
+        self.current_affine().elements
+    }
+
     fn set_3d_transform(&mut self, rx_rad: f32, ry_rad: f32, perspective_d: f32) {
         self.current_3d_sin_rx = rx_rad.sin();
         self.current_3d_cos_rx = rx_rad.cos();

@@ -1725,6 +1725,20 @@ pub trait DrawContext {
         0
     }
 
+    /// Snapshot the current composed affine transform as
+    /// `[a, b, c, d, tx, ty]`.
+    ///
+    /// The compositor's split-paint hook uses this when the walker
+    /// reaches a `Canvas` node — it captures the affine at paint
+    /// time so a later fast-path frame can replay the canvas's
+    /// `render_fn` with the same transform state without re-walking
+    /// the rest of the tree. Default identity; real implementations
+    /// in `blinc_gpu` override with the top of their transform
+    /// stack.
+    fn current_affine_elements(&self) -> [f32; 6] {
+        [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // 3D Transform (per-element, transient)
     // ─────────────────────────────────────────────────────────────────────────

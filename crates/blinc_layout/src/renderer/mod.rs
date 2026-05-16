@@ -72,6 +72,64 @@ pub use types::{
 /// motion values were baked into them at last paint.
 ///
 /// Mirrors the browser compositor's per-layer cached transform: the
+/// Per-canvas state captured by the paint walker so the compositor
+/// fast path can re-invoke the `render_fn` next frame without
+/// re-walking the tree. The walker records this on every
+/// `ElementType::Canvas` node that intersects the viewport; the
+/// fast path reads it back to splice fresh canvas primitives into
+/// the cached batch in place.
+///
+/// The `render_fn` is reference-counted so cloning the record is
+/// cheap (just bumps an Rc). `affine` is the composed transform
+/// stack at paint time — pushing it onto a scratch
+/// `GpuPaintContext` reproduces the same coordinate frame the
+/// walker had when it last invoked the closure.
+#[derive(Clone)]
+pub struct CanvasPaintRecord {
+    /// Inclusive-exclusive range into the cached primitive batch
+    /// covering every primitive the `render_fn` emitted on the last
+    /// full paint. The fast path splices new primitives into this
+    /// range; if the new count differs from `len(range)`, it must
+    /// either rebuild adjacent ranges or fall back to a full paint.
+    pub primitive_range: std::ops::Range<usize>,
+    /// Composed affine `[a, b, c, d, tx, ty]` on the paint stack
+    /// when the walker reached the canvas. Pre-multiplies the
+    /// transform-rect math inside `render_fn`'s `DrawContext::fill_*`
+    /// calls.
+    pub affine: [f32; 6],
+    /// Local-coord bounds (origin always `(0, 0)` — the affine
+    /// carries the absolute position) passed to the `render_fn`.
+    pub bounds_wh: (f32, f32),
+    /// Closure the canvas wants invoked. Cloned `Rc` — fast.
+    pub render_fn: crate::canvas::CanvasRenderFn,
+    /// Whether the walker pushed an own-bounds clip before invoking
+    /// `render_fn`. The replay must mirror this — otherwise spillover
+    /// from a draw callback that intentionally over-draws would
+    /// leak past the canvas's box.
+    pub clips_content: bool,
+    /// Z-layer the walker assigned when emitting the canvas. The
+    /// scratch context replays at the same layer so the splice
+    /// preserves the cached batch's draw order.
+    pub z_layer: u32,
+    /// Combined opacity multiplier (from ancestor opacity stack)
+    /// at paint time. Replayed onto the scratch context so colours
+    /// inside the canvas closure pick up the same opacity.
+    pub opacity: f32,
+}
+
+impl std::fmt::Debug for CanvasPaintRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CanvasPaintRecord")
+            .field("primitive_range", &self.primitive_range)
+            .field("affine", &self.affine)
+            .field("bounds_wh", &self.bounds_wh)
+            .field("clips_content", &self.clips_content)
+            .field("z_layer", &self.z_layer)
+            .field("opacity", &self.opacity)
+            .finish()
+    }
+}
+
 /// expensive paint pass runs once, and per-vsync we just delta the
 /// transform/opacity on the affected primitives.
 #[derive(Clone, Debug)]
@@ -190,6 +248,15 @@ pub struct RenderTree {
     /// stays alive but its entries are ignored — the next full paint
     /// clears and repopulates.
     composite_bindings: RefCell<HashMap<LayoutNodeId, CompositeBindingMeta>>,
+    /// Per-canvas paint state captured during full paint so the
+    /// fast path can re-invoke each canvas's `render_fn` next frame
+    /// without re-walking the rest of the tree. Same lifecycle as
+    /// `composite_bindings` — cleared at the top of every full
+    /// paint, populated by `render_layer_with_motion`, drained by
+    /// the fast path's canvas-splice step. Stale entries are
+    /// ignored after a cache invalidation; the next full paint
+    /// repopulates from scratch.
+    canvas_paint_records: RefCell<HashMap<LayoutNodeId, CanvasPaintRecord>>,
     /// Last tick time for scroll physics (in milliseconds)
     last_scroll_tick_ms: Option<u64>,
     /// DPI scale factor (physical / logical pixels)
@@ -384,6 +451,7 @@ impl RenderTree {
             painted_node_ids: RefCell::new(HashSet::new()),
             motion_bindings: HashMap::new(),
             composite_bindings: RefCell::new(HashMap::new()),
+            canvas_paint_records: RefCell::new(HashMap::new()),
             last_scroll_tick_ms: None,
             scale_factor: 1.0,
             animations: Weak::new(),
@@ -773,6 +841,26 @@ impl RenderTree {
         &self,
     ) -> std::cell::RefMut<'_, HashMap<LayoutNodeId, CompositeBindingMeta>> {
         self.composite_bindings.borrow_mut()
+    }
+
+    /// Borrow the map of canvases the walker captured on the most
+    /// recent full paint. The compositor fast path iterates this to
+    /// re-invoke each canvas's `render_fn` and splice the resulting
+    /// primitives back into the cached batch in place.
+    pub fn canvas_paint_records(
+        &self,
+    ) -> std::cell::Ref<'_, HashMap<LayoutNodeId, CanvasPaintRecord>> {
+        self.canvas_paint_records.borrow()
+    }
+
+    /// Mutable variant of [`Self::canvas_paint_records`] for the
+    /// fast path to update `primitive_range` if a re-paint emits
+    /// a different number of primitives than the cached entry
+    /// recorded.
+    pub fn canvas_paint_records_mut(
+        &self,
+    ) -> std::cell::RefMut<'_, HashMap<LayoutNodeId, CanvasPaintRecord>> {
+        self.canvas_paint_records.borrow_mut()
     }
 
     /// `painted_node_ids()` projected through `layout_to_stable`.
