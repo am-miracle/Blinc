@@ -3255,6 +3255,23 @@ impl WindowedApp {
 
                     // Handle input events
                     Event::Input(_, input_event) => {
+                        // Classify the event up front — `input_event` is
+                        // consumed by the match below, so the
+                        // post-dispatch redraw gate at the bottom of
+                        // this arm can't peek at it. Bool flags are
+                        // cheap and survive the move.
+                        let is_button_event = matches!(
+                            input_event,
+                            InputEvent::Mouse(MouseEvent::ButtonPressed { .. })
+                                | InputEvent::Mouse(MouseEvent::ButtonReleased { .. })
+                                | InputEvent::Touch(_)
+                        );
+                        let is_move_event = matches!(
+                            input_event,
+                            InputEvent::Mouse(MouseEvent::Moved { .. })
+                                | InputEvent::Mouse(MouseEvent::Entered)
+                                | InputEvent::Mouse(MouseEvent::Left),
+                        );
                         // Cache invalidation now happens AFTER dispatch
                         // (see the post-dispatch `peek_needs_redraw`
                         // block at the bottom of this arm), gated on a
@@ -4184,6 +4201,46 @@ impl WindowedApp {
                             if had_scroll {
                                 if let Some(ref mut app) = ws.app {
                                     app.invalidate_render_cache();
+                                }
+                            }
+                            // Interactive elements that don't route through
+                            // `stateful::request_redraw` — canvas closures
+                            // that read mouse position to draw hover state
+                            // (`blinc_canvas_kit::kit.element(...)`), the
+                            // `pointer_query` calc(env(...)) cursor
+                            // subscribers, custom `on_pointer_*` handlers
+                            // that update private state — all need a frame
+                            // to paint their response to the event, but
+                            // pre-fix the `state_changed` gate above
+                            // missed them. The visible symptom was the
+                            // user's "I have to scroll for the next frame
+                            // to render" report: scroll was the only path
+                            // that unconditionally invalidated.
+                            //
+                            // For mouse-button events (down / up) we
+                            // unconditionally invalidate + redraw because
+                            // a click is always a candidate state change.
+                            // For mouse moves we only redraw when
+                            // interactive subscribers exist on the tree —
+                            // a static UI with no pointer-aware nodes
+                            // shouldn't pay redraw cost for every cursor
+                            // wiggle. Same gate the windowed redraw chain
+                            // already uses: pointer_query elements or
+                            // any node with an attached pointer handler.
+                            if !state_changed && !had_scroll {
+                                let has_pointer_subscribers = ws
+                                    .ctx
+                                    .as_ref()
+                                    .is_some_and(|c| !c.pointer_query.is_empty())
+                                    || ws.render_tree.as_ref().is_some_and(|t| {
+                                        t.handler_registry().has_any_pointer_handler()
+                                    });
+                                if is_button_event || (is_move_event && has_pointer_subscribers) {
+                                    frame_dirty.store(true, Ordering::Release);
+                                    window.request_redraw();
+                                    if let Some(ref mut app) = ws.app {
+                                        app.invalidate_render_cache();
+                                    }
                                 }
                             }
                         }
