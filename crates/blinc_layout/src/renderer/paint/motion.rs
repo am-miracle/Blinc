@@ -49,6 +49,13 @@ impl RenderTree {
         // `visible_anim_active()` after this returns to gate the
         // end-of-frame redraw chain.
         self.visible_anim_active.set(false);
+        // Same lifecycle for the canvas-detection flag: cleared at the
+        // top of every full paint, set by `render_layer_with_motion`
+        // when a Canvas node intersects the viewport. The fast path
+        // reads this between paints — a `true` value forces it to
+        // bail back to the walker so the canvas's draw callback
+        // actually runs.
+        self.had_canvas_painted.set(false);
         // Same lifecycle for the painted-node set: cleared here, grown
         // by the walk, queried via `painted_node_ids()` to filter
         // animating Statefuls down to those whose node is actually on
@@ -288,23 +295,32 @@ impl RenderTree {
         // effect. Without this gate, cn_demo's 3 always-rotating
         // spinners pinned the chain at vsync forever even after
         // scrolling past them — 30 % CPU at idle.
-        if intersects_viewport && !self.visible_anim_active.get() {
+        if intersects_viewport {
             let canvas_paints = matches!(render_node.element_type, ElementType::Canvas(_));
-            // Bindings only count as a redraw signal when the
-            // underlying animated value is *actually* mid-flight.
-            // A settled spring binding (e.g. `cn::progress_animated`
-            // after it reached 75 %) leaves the binding in place but
-            // the value is now constant — including it here pinned
-            // the chain at vsync forever.
-            let has_active_binding = motion_bindings_ref.is_some_and(|b| b.is_any_animating());
-            let has_active_motion = if let Some(ref stable_key) = render_node.props.motion_stable_id
-            {
-                render_state.is_stable_motion_active(stable_key)
-            } else {
-                render_state.is_motion_active(node)
-            };
-            if canvas_paints || has_active_binding || has_active_motion {
-                self.visible_anim_active.set(true);
+            // Record canvas presence regardless of whether
+            // `visible_anim_active` is already set — the fast path
+            // needs to know about any in-viewport canvas, not just
+            // the first one the walker sees.
+            if canvas_paints {
+                self.had_canvas_painted.set(true);
+            }
+            if !self.visible_anim_active.get() {
+                // Bindings only count as a redraw signal when the
+                // underlying animated value is *actually* mid-flight.
+                // A settled spring binding (e.g. `cn::progress_animated`
+                // after it reached 75 %) leaves the binding in place but
+                // the value is now constant — including it here pinned
+                // the chain at vsync forever.
+                let has_active_binding = motion_bindings_ref.is_some_and(|b| b.is_any_animating());
+                let has_active_motion = if let Some(ref stable_key) = render_node.props.motion_stable_id
+                {
+                    render_state.is_stable_motion_active(stable_key)
+                } else {
+                    render_state.is_motion_active(node)
+                };
+                if canvas_paints || has_active_binding || has_active_motion {
+                    self.visible_anim_active.set(true);
+                }
             }
         }
 

@@ -145,6 +145,18 @@ pub struct RenderTree {
     /// off-screen nodes, the chain stops until something brings them
     /// back into view.
     visible_anim_active: Cell<bool>,
+    /// True if the paint walker painted at least one in-viewport
+    /// `ElementType::Canvas` node this frame. Canvases re-run their
+    /// draw callback every frame off the scheduler's timelines /
+    /// continuous values, so the cached primitive batch goes stale
+    /// instantly. The compositor fast path checks this flag and
+    /// bails to a full paint whenever it's set — without that bail
+    /// the walker never runs, the canvas draw callback never fires,
+    /// and the animation freezes until the user moves the mouse.
+    /// Reset to `false` at the top of `render_with_motion`; set to
+    /// `true` from `render_layer_with_motion` when a Canvas node
+    /// intersects the viewport.
+    had_canvas_painted: Cell<bool>,
     /// Set of node ids that the paint walker actually rendered in the
     /// current frame (after viewport culling, motion-skip, and
     /// occlusion gates). Read by the windowed app at the end of the
@@ -368,6 +380,7 @@ impl RenderTree {
             viewport_cull_scrolls: std::collections::HashSet::new(),
             cull_viewport: Cell::new(None),
             visible_anim_active: Cell::new(false),
+            had_canvas_painted: Cell::new(false),
             painted_node_ids: RefCell::new(HashSet::new()),
             motion_bindings: HashMap::new(),
             composite_bindings: RefCell::new(HashMap::new()),
@@ -704,6 +717,23 @@ impl RenderTree {
     /// will set it again only if there's still active work.
     pub fn set_visible_anim_active(&self, value: bool) {
         self.visible_anim_active.set(value);
+    }
+
+    /// Whether the paint walker painted at least one in-viewport
+    /// canvas in the most recent full paint. Read by the windowed
+    /// app's fast-path gate to bail to a full paint when any canvas
+    /// is on screen — canvases re-run their draw callback every
+    /// frame and the cached primitives go stale instantly. See
+    /// `had_canvas_painted` field doc for more.
+    pub fn had_canvas_painted(&self) -> bool {
+        self.had_canvas_painted.get()
+    }
+
+    /// Setter for `had_canvas_painted`. Called by the paint walker
+    /// (reset to `false` at the top of `render_with_motion`, set to
+    /// `true` whenever a Canvas node intersects the viewport).
+    pub fn set_had_canvas_painted(&self, value: bool) {
+        self.had_canvas_painted.set(value);
     }
 
     /// Borrow the set of node ids that the paint walker rendered in
