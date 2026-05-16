@@ -1354,6 +1354,16 @@ impl RenderTree {
     pub fn has_motion_bindings(&self, node_id: LayoutNodeId) -> bool {
         self.motion_bindings.contains_key(&node_id)
     }
+
+    /// Borrow the full motion-bindings map. Used by the
+    /// compositor-path fast-paint helper to sample the current
+    /// spring values for every bound node without going through
+    /// the per-node lookup helpers (which fetch one property at a
+    /// time and would lock each `SharedAnimatedValue` 4 times per
+    /// node).
+    pub fn motion_bindings_map(&self) -> &HashMap<LayoutNodeId, crate::motion::MotionBindings> {
+        &self.motion_bindings
+    }
     /// Check if the tree has any dirty nodes (needs rebuild)
     pub fn needs_rebuild(&self) -> bool {
         self.dirty_tracker.has_dirty()

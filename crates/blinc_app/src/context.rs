@@ -425,6 +425,183 @@ impl RenderContext {
         self.cached_bg_batch.is_some()
     }
 
+    /// Apply motion-binding deltas to the cached primitive batch in
+    /// place. Mirrors what the paint walker would have re-emitted if
+    /// it ran this frame, but in O(bound-nodes × primitives-per-node)
+    /// instead of O(whole tree). The caller drives the fast Phase-4
+    /// path:
+    ///
+    ///   1. The runner detects that only motion bindings changed
+    ///      this frame (no rebuild / no layout / etc.) and that
+    ///      [`Self::has_render_cache`] returns `true`.
+    ///   2. The runner calls `apply_binding_deltas(tree, scale)`.
+    ///   3. On `Ok(())`, the runner re-renders from the patched
+    ///      cached batch (currently still through the full GPU
+    ///      pipeline — see follow-ups for partial uploads / command
+    ///      list reuse).
+    ///   4. On `Err(())`, the runner falls back to the full paint
+    ///      path. Returning `Err` is conservative: any binding that
+    ///      changed a property the patcher doesn't handle yet
+    ///      (scale, rotation, anything affecting bounds of children
+    ///      with their own CSS transforms) routes to the full path.
+    ///
+    /// Properties handled today: `translate_x` / `translate_y`
+    /// (delta-applied to `bounds.xy`) and `opacity` (ratio-applied
+    /// to every `color.a` / `border_color.a` / `shadow_color.a` in
+    /// the binding's primitive range). Scale / rotation are
+    /// deferred — they need `local_affine` updates plus
+    /// bounds-around-centre recomputation that interacts with
+    /// existing CSS transforms in non-trivial ways.
+    ///
+    /// `scale` is the DPI scale factor — needed because
+    /// `last_translate` is recorded in logical pixels (matches the
+    /// motion-binding API) but `bounds.xy` is in physical pixels.
+    /// The function multiplies the delta by `scale` before
+    /// applying.
+    ///
+    /// After a successful patch, the function updates each
+    /// binding's `last_translate` / `last_opacity` on the
+    /// `composite_bindings` map so the next frame's delta is
+    /// computed against the value just written to the GPU, not the
+    /// original paint-time value (otherwise multiple fast-path
+    /// frames in a row would double-apply).
+    pub fn apply_binding_deltas(
+        &mut self,
+        tree: &blinc_layout::RenderTree,
+        scale: f32,
+    ) -> bool {
+        let batch = match self.cached_bg_batch.as_mut() {
+            Some(b) => b,
+            None => return false,
+        };
+        let mut bindings = tree.composite_bindings_mut();
+        if bindings.is_empty() {
+            // Cache is valid but nothing animated changed — fast
+            // path can re-use the cache as-is. Caller still needs
+            // to dispatch a render to present a fresh frame
+            // (otherwise the surface shows the previous frame).
+            return true;
+        }
+
+        // Walk every recorded binding. Read the current spring
+        // values (post-tick), compute the delta vs the values baked
+        // into the cached batch, and patch every primitive in the
+        // binding's range.
+        let motion_bindings = tree.motion_bindings_map();
+        for (node, meta) in bindings.iter_mut() {
+            let bindings_for_node = match motion_bindings.get(node) {
+                Some(b) => b,
+                None => continue,
+            };
+
+            // ----------------------------------------------------------------
+            // Translate: read new (tx, ty), compute pixel-space delta,
+            // shift every primitive's `bounds.xy` by it.
+            // ----------------------------------------------------------------
+            let (binding_tx, binding_ty) = {
+                let tx = bindings_for_node
+                    .translate_x
+                    .as_ref()
+                    .and_then(|v| v.lock().ok().map(|g| g.get()))
+                    .unwrap_or(0.0);
+                let ty = bindings_for_node
+                    .translate_y
+                    .as_ref()
+                    .and_then(|v| v.lock().ok().map(|g| g.get()))
+                    .unwrap_or(0.0);
+                (tx, ty)
+            };
+            let new_translate = (binding_tx, binding_ty);
+            let dx_logical = new_translate.0 - meta.last_translate.0;
+            let dy_logical = new_translate.1 - meta.last_translate.1;
+            if dx_logical.abs() > f32::EPSILON || dy_logical.abs() > f32::EPSILON {
+                let dx_phys = dx_logical * scale;
+                let dy_phys = dy_logical * scale;
+                if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                    for p in prims.iter_mut() {
+                        p.bounds[0] += dx_phys;
+                        p.bounds[1] += dy_phys;
+                    }
+                }
+                meta.last_translate = new_translate;
+            }
+
+            // ----------------------------------------------------------------
+            // Opacity: read new value, compute ratio against the
+            // baked-in value, scale every alpha-bearing channel by it.
+            //
+            // Skip when last_opacity is ~0 (would divide by zero) —
+            // any node painted with opacity 0 wasn't visible last
+            // frame, so the delta-apply isn't meaningful and the
+            // caller should fall back to the full path. Returning
+            // `Err` is the conservative choice.
+            // ----------------------------------------------------------------
+            let new_opacity = bindings_for_node
+                .opacity
+                .as_ref()
+                .and_then(|v| v.lock().ok().map(|g| g.get()))
+                .unwrap_or(meta.last_opacity);
+            if (new_opacity - meta.last_opacity).abs() > f32::EPSILON {
+                if meta.last_opacity.abs() < f32::EPSILON {
+                    return false;
+                }
+                let ratio = new_opacity / meta.last_opacity;
+                if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                    for p in prims.iter_mut() {
+                        p.color[3] *= ratio;
+                        p.border_color[3] *= ratio;
+                        p.shadow_color[3] *= ratio;
+                    }
+                }
+                meta.last_opacity = new_opacity;
+            }
+
+            // ----------------------------------------------------------------
+            // Scale / rotation: not yet handled by the fast path.
+            // If a binding has a non-identity scale or non-zero
+            // rotation animating, return `Err(())` so the caller
+            // falls back to the full paint path. Comparison is
+            // value-based, not pointer-based — a binding can hold
+            // an idle (settled) scale spring and still be safe to
+            // patch as long as the value hasn't moved since the
+            // last full paint.
+            // ----------------------------------------------------------------
+            let binding_scale = bindings_for_node
+                .scale
+                .as_ref()
+                .and_then(|v| v.lock().ok().map(|g| g.get()))
+                .unwrap_or(1.0);
+            let binding_scale_x = bindings_for_node
+                .scale_x
+                .as_ref()
+                .and_then(|v| v.lock().ok().map(|g| g.get()))
+                .unwrap_or(1.0);
+            let binding_scale_y = bindings_for_node
+                .scale_y
+                .as_ref()
+                .and_then(|v| v.lock().ok().map(|g| g.get()))
+                .unwrap_or(1.0);
+            let new_sx = binding_scale_x * binding_scale;
+            let new_sy = binding_scale_y * binding_scale;
+            if (new_sx - meta.last_scale.0).abs() > f32::EPSILON
+                || (new_sy - meta.last_scale.1).abs() > f32::EPSILON
+            {
+                return false;
+            }
+
+            let binding_rotation_deg = bindings_for_node
+                .rotation
+                .as_ref()
+                .and_then(|v| v.lock().ok().map(|g| g.get()))
+                .unwrap_or(0.0);
+            let new_rotation_rad = binding_rotation_deg.to_radians();
+            if (new_rotation_rad - meta.last_rotation_rad).abs() > f32::EPSILON {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Update the current cursor position in physical pixels (for @flow pointer input)
     /// Register a custom render pass with the GPU renderer.
     ///
