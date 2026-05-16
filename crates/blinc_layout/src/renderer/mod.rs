@@ -127,6 +127,60 @@ pub struct CanvasPaintRecord {
     pub opacity: f32,
 }
 
+/// Per motion-bound subtree state captured by the paint walker so
+/// the compositor fast path can re-emit the subtree's primitives
+/// next frame without re-walking the rest of the tree.
+///
+/// Parallel to [`CanvasPaintRecord`]: a motion-bound subtree
+/// (rooted at a node with [`crate::motion::MotionBindings`] whose
+/// values are moving) is OPTED OUT of the static-layer cache. Each
+/// frame the compositor's overlay pass re-walks just that subtree
+/// (with the current binding values applied) and dispatches the
+/// resulting primitives on top of the blitted cache. Surrounding
+/// elements stay cached — no walker work for them, no re-dispatch.
+#[derive(Clone)]
+pub struct MotionSubtreeRecord {
+    /// Inclusive-exclusive range of primitives the walker emitted
+    /// while walking this subtree on the last full paint, in the
+    /// cached batch. Empty when the static-cache pass had
+    /// `skip_motion_drawing` set (the usual case once the
+    /// compositor has bootstrapped) — the entry's purpose then is
+    /// purely to mark "this subtree should be re-walked into the
+    /// overlay each frame".
+    pub primitive_range: std::ops::Range<usize>,
+    /// Composed affine on the paint stack at the moment the walker
+    /// reached this subtree's root, BEFORE the binding's own
+    /// translate/scale/rotate transforms were pushed. The overlay
+    /// pass replays this affine and then lets the walker re-push
+    /// the binding transforms with current values.
+    pub affine: [f32; 6],
+    /// Local bounds of the subtree's root (width / height in
+    /// logical pixels). Used as the bounds parameter to the walker
+    /// when invoking the partial paint.
+    pub bounds_wh: (f32, f32),
+    /// Ancestor clip stack snapshot (screen-coord AABB) for the
+    /// overlay pass to scissor-clip the re-emitted primitives.
+    /// Same purpose as [`CanvasPaintRecord::ancestor_clip_aabb`].
+    pub ancestor_clip_aabb: Option<[f32; 4]>,
+    /// Z-layer in effect at paint time.
+    pub z_layer: u32,
+    /// Combined opacity multiplier at paint time.
+    pub opacity: f32,
+}
+
+impl std::fmt::Debug for MotionSubtreeRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MotionSubtreeRecord")
+            .field("primitive_range", &self.primitive_range)
+            .field("affine", &self.affine)
+            .field("bounds_wh", &self.bounds_wh)
+            .field("ancestor_clip_aabb", &self.ancestor_clip_aabb)
+            .field("z_layer", &self.z_layer)
+            .field("opacity", &self.opacity)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for CanvasPaintRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CanvasPaintRecord")
@@ -236,6 +290,25 @@ pub struct RenderTree {
     /// the start of every full paint; set via
     /// [`Self::set_skip_canvas_drawing`].
     skip_canvas_drawing: Cell<bool>,
+    /// When `true`, the paint walker SKIPS emitting primitives for
+    /// motion-bound subtrees and records them into
+    /// `motion_subtree_records` instead. The compositor's overlay
+    /// pass re-walks those subtrees each frame with current binding
+    /// values. Same architecture as [`Self::skip_canvas_drawing`]
+    /// but for motion-bound nodes — surrounding (static) elements
+    /// stay in the cache; only the animated subtrees re-emit per
+    /// frame.
+    skip_motion_drawing: Cell<bool>,
+    /// Compositor bookkeeping: was any motion binding mid-flight on
+    /// the previous frame? When this value transitions between
+    /// `true` and `false`, the static-layer cache must be
+    /// invalidated — the cache pixels currently bake in the
+    /// PREVIOUS motion state (subtrees included or excluded) and
+    /// the change means they're stale. Without this, you get
+    /// double-rendering (cached static bar + overlay bar) when an
+    /// animation starts. Read / written by the compositor entry
+    /// point.
+    last_bindings_animating: Cell<bool>,
     /// Set of node ids that the paint walker actually rendered in the
     /// current frame (after viewport culling, motion-skip, and
     /// occlusion gates). Read by the windowed app at the end of the
@@ -278,6 +351,15 @@ pub struct RenderTree {
     /// ignored after a cache invalidation; the next full paint
     /// repopulates from scratch.
     canvas_paint_records: RefCell<HashMap<LayoutNodeId, CanvasPaintRecord>>,
+    /// Per motion-bound subtree records — same lifecycle as
+    /// `canvas_paint_records`. Cleared at the top of every full
+    /// paint, populated by `render_layer_with_motion` whenever a
+    /// node with mid-flight motion bindings is reached. The
+    /// compositor's overlay pass re-walks each recorded subtree
+    /// every frame with current binding values; the subtrees are
+    /// excluded from the static-layer cache via
+    /// `skip_motion_drawing`.
+    motion_subtree_records: RefCell<HashMap<LayoutNodeId, MotionSubtreeRecord>>,
     /// Last tick time for scroll physics (in milliseconds)
     last_scroll_tick_ms: Option<u64>,
     /// DPI scale factor (physical / logical pixels)
@@ -470,10 +552,13 @@ impl RenderTree {
             visible_anim_active: Cell::new(false),
             had_canvas_painted: Cell::new(false),
             skip_canvas_drawing: Cell::new(false),
+            skip_motion_drawing: Cell::new(false),
+            last_bindings_animating: Cell::new(false),
             painted_node_ids: RefCell::new(HashSet::new()),
             motion_bindings: HashMap::new(),
             composite_bindings: RefCell::new(HashMap::new()),
             canvas_paint_records: RefCell::new(HashMap::new()),
+            motion_subtree_records: RefCell::new(HashMap::new()),
             last_scroll_tick_ms: None,
             scale_factor: 1.0,
             animations: Weak::new(),
@@ -839,6 +924,52 @@ impl RenderTree {
     /// Setter for [`Self::skip_canvas_drawing`].
     pub fn set_skip_canvas_drawing(&self, value: bool) {
         self.skip_canvas_drawing.set(value);
+    }
+
+    /// Whether the walker should skip emitting primitives for motion
+    /// -bound subtrees this paint. Used by the compositor's static-
+    /// cache pass to keep motion-bound regions out of the cached
+    /// texture; the overlay pass re-walks those subtrees each frame
+    /// with current binding values.
+    pub fn skip_motion_drawing(&self) -> bool {
+        self.skip_motion_drawing.get()
+    }
+
+    /// Setter for [`Self::skip_motion_drawing`].
+    pub fn set_skip_motion_drawing(&self, value: bool) {
+        self.skip_motion_drawing.set(value);
+    }
+
+    /// Whether any motion binding was mid-flight at the moment the
+    /// previous frame's compositor entry point computed
+    /// `bindings_animating`. Used to detect animating↔settled
+    /// transitions — at a transition the static-layer cache is
+    /// stale (its pixels still bake in the previous motion state)
+    /// and must be invalidated.
+    pub fn last_bindings_animating(&self) -> bool {
+        self.last_bindings_animating.get()
+    }
+
+    /// Setter for [`Self::last_bindings_animating`]. Called by the
+    /// compositor after deciding the current frame's animating
+    /// state.
+    pub fn set_last_bindings_animating(&self, value: bool) {
+        self.last_bindings_animating.set(value);
+    }
+
+    /// Borrow the motion-bound subtree records the walker captured
+    /// on the most recent full paint.
+    pub fn motion_subtree_records(
+        &self,
+    ) -> std::cell::Ref<'_, HashMap<LayoutNodeId, MotionSubtreeRecord>> {
+        self.motion_subtree_records.borrow()
+    }
+
+    /// Mutable variant of [`Self::motion_subtree_records`].
+    pub fn motion_subtree_records_mut(
+        &self,
+    ) -> std::cell::RefMut<'_, HashMap<LayoutNodeId, MotionSubtreeRecord>> {
+        self.motion_subtree_records.borrow_mut()
     }
 
     /// Borrow the set of node ids that the paint walker rendered in

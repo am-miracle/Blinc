@@ -613,6 +613,100 @@ impl RenderContext {
     /// fresh `Vec<GpuPrimitive>` this returns is then dispatched on
     /// top with `LoadOp::Load` — so the canvas content animates at
     /// vsync while the surrounding tree never re-renders.
+    /// Re-walk every recorded motion-bound subtree into a scratch
+    /// context with the saved ambient state (affine, opacity, clip,
+    /// z-layer) restored. Returns the freshly-emitted primitives
+    /// for the overlay dispatch.
+    ///
+    /// Parallel to [`Self::collect_canvas_overlay_primitives`]:
+    /// every frame, the compositor re-emits these subtrees with
+    /// current binding values applied. The walker only visits the
+    /// recorded subtrees — not the surrounding tree — so the cost
+    /// scales with the number of animated subtrees, not the total
+    /// node count.
+    pub fn collect_motion_subtree_overlay_primitives(
+        &self,
+        tree: &blinc_layout::RenderTree,
+        render_state: &blinc_layout::RenderState,
+        width: u32,
+        height: u32,
+    ) -> Vec<blinc_gpu::primitives::GpuPrimitive> {
+        use blinc_core::{layer::Affine2D, Rect, Transform};
+        use blinc_gpu::GpuPaintContext;
+        use blinc_layout::element::RenderLayer;
+
+        let records_ref = tree.motion_subtree_records();
+        if records_ref.is_empty() {
+            return Vec::new();
+        }
+        let records: Vec<(
+            blinc_layout::tree::LayoutNodeId,
+            blinc_layout::renderer::MotionSubtreeRecord,
+        )> = records_ref
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        drop(records_ref);
+
+        // Clear the skip flag locally so the re-walk actually
+        // emits primitives this time (the static-cache pass set
+        // it; the overlay pass clears it for the re-walk).
+        let prev_skip = tree.skip_motion_drawing();
+        tree.set_skip_motion_drawing(false);
+
+        let mut scratch = GpuPaintContext::new(width as f32, height as f32);
+        let mut prims = Vec::new();
+        for (node, record) in records {
+            // Push ancestor clip (screen-coord rect) BEFORE the
+            // affine — same trick as the canvas overlay so the rect
+            // stays in screen coords.
+            let mut pushed_ancestor_clip = false;
+            if let Some([cx, cy, cw, ch]) = record.ancestor_clip_aabb {
+                if cw > 0.0 && ch > 0.0 {
+                    scratch.push_clip(blinc_core::layer::ClipShape::rect(Rect::new(
+                        cx, cy, cw, ch,
+                    )));
+                    pushed_ancestor_clip = true;
+                } else {
+                    continue; // fully clipped, no work
+                }
+            }
+            scratch.push_transform(Transform::Affine2D(Affine2D {
+                elements: record.affine,
+            }));
+            scratch.push_opacity(record.opacity);
+            scratch.set_z_layer(record.z_layer);
+
+            // Re-walk the subtree. The walker pushes its own
+            // binding-driven transforms (rotation around centre,
+            // etc.) on top of the affine we set up — exactly the
+            // composition the original full paint had, except now
+            // with the spring/timeline's CURRENT value instead of
+            // the value baked into the cache.
+            tree.render_subtree_for_overlay(
+                &mut scratch as &mut dyn blinc_core::DrawContext,
+                node,
+                render_state,
+                RenderLayer::Background,
+            );
+
+            scratch.pop_transform();
+            scratch.pop_opacity();
+            if pushed_ancestor_clip {
+                scratch.pop_clip();
+            }
+
+            let new_batch = scratch.take_batch();
+            prims.extend(new_batch.primitives);
+        }
+
+        // Restore the skip flag so the next full paint behaves
+        // consistently.
+        tree.set_skip_motion_drawing(prev_skip);
+
+        prims
+    }
+
     pub fn collect_canvas_overlay_primitives(
         &self,
         tree: &blinc_layout::RenderTree,
@@ -4759,8 +4853,27 @@ impl RenderContext {
                     .and_then(|t| t.timeline.lock().ok())
                     .is_some_and(|g| g.is_playing())
         });
-        if bindings_animating {
+        // Motion bindings transitioning between settled and
+        // animating require a static-cache rebuild — the cache
+        // pixels bake in the previous `skip_motion_drawing`
+        // decision:
+        //
+        //   - false→true: the cache still has the bar at its
+        //     settled position. The overlay would draw the moving
+        //     bar on top, producing a double image. Invalidate so
+        //     the next paint rebuilds the cache WITHOUT the bar
+        //     (it'll live in the overlay only).
+        //   - true→false: the cache has no bar (overlay-only last
+        //     frame). Invalidate so the next paint rebuilds the
+        //     cache WITH the bar at its settled position.
+        //
+        // While `bindings_animating` stays stable, the cache
+        // remains valid — no per-frame invalidation cost during the
+        // animation itself.
+        let last_anim = tree.last_bindings_animating();
+        if bindings_animating != last_anim {
             self.renderer.invalidate_static_layer();
+            tree.set_last_bindings_animating(bindings_animating);
         }
 
         // Fast path: cache valid AND caller is fine with reusing it.
@@ -4770,9 +4883,22 @@ impl RenderContext {
             && self.cached_bg_batch.is_some();
 
         if use_fast {
-            let canvas_prims = self.collect_canvas_overlay_primitives(tree, width, height);
+            // Combine canvas and motion-bound subtree overlays into
+            // a single dispatch. Both sets contain primitives that
+            // change frame-to-frame (canvas closure output / motion
+            // binding values); both are excluded from the static
+            // cache for the same reason.
+            let mut overlay_prims =
+                self.collect_canvas_overlay_primitives(tree, width, height);
+            let motion_prims = self.collect_motion_subtree_overlay_primitives(
+                tree,
+                render_state,
+                width,
+                height,
+            );
+            overlay_prims.extend(motion_prims);
             self.renderer
-                .composite_frame(target_view, target_texture, &canvas_prims);
+                .composite_frame(target_view, target_texture, &overlay_prims);
 
             // The walker normally writes `visible_anim_active` from
             // its per-frame observations (canvas paints, active
@@ -4827,14 +4953,16 @@ impl RenderContext {
         };
 
         tree.set_skip_canvas_drawing(true);
+        // Motion-bound subtrees are likewise excluded from the
+        // static cache — the overlay pass re-walks them every frame
+        // with current binding values. Walker still records each
+        // subtree's paint state (affine, opacity, clip, z-layer)
+        // into `motion_subtree_records` even though it emits no
+        // primitives.
+        tree.set_skip_motion_drawing(true);
         // Pass `try_fast_paint=true` so the inner call can take its
         // `apply_binding_deltas`-then-dispatch path when the cache
-        // is structurally valid but pixel-stale (the
-        // bindings-animating case). That skips the walker for the
-        // surrounding tree — only the patched binding values
-        // re-flow through dispatch, no traversal of unrelated
-        // nodes. Falls back to the full walker only when the cache
-        // is genuinely invalid (rebuild, layout change).
+        // is structurally valid but pixel-stale.
         let inner_try_fast = self.cached_bg_batch.is_some();
         let result = self.render_tree_with_motion_opt(
             tree,
@@ -4846,14 +4974,21 @@ impl RenderContext {
             inner_try_fast,
         );
         tree.set_skip_canvas_drawing(false);
+        tree.set_skip_motion_drawing(false);
         result?;
 
         self.renderer.mark_static_layer_valid();
 
-        // Composite static cache + canvas overlay onto the surface.
-        let canvas_prims = self.collect_canvas_overlay_primitives(tree, width, height);
+        // Composite static cache + canvas overlay + motion-subtree
+        // overlay onto the surface. Both overlay batches contain
+        // primitives excluded from the static cache; both are
+        // re-emitted every frame with current values.
+        let mut overlay_prims = self.collect_canvas_overlay_primitives(tree, width, height);
+        let motion_prims =
+            self.collect_motion_subtree_overlay_primitives(tree, render_state, width, height);
+        overlay_prims.extend(motion_prims);
         self.renderer
-            .composite_frame(target_view, target_texture, &canvas_prims);
+            .composite_frame(target_view, target_texture, &overlay_prims);
         Ok(())
     }
 
