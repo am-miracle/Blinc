@@ -4879,6 +4879,58 @@ impl RenderContext {
 
         self.renderer.mark_static_layer_valid();
 
+        // ----- Compositor v2 Phase 2 verification trace -----
+        // Compare the new `dynamic_regions` map populated by the
+        // walker against the legacy `canvas_paint_records` +
+        // `composite_bindings` records the existing composite path
+        // still consumes. The expected invariant: every canvas in
+        // `canvas_paint_records` produces a `DynamicKind::Canvas`
+        // entry; every motion-bound node whose status was
+        // `Animating(Motion)` produces a `DynamicKind::MotionSubtree`
+        // entry. Run with `RUST_LOG=blinc_app::v2_regions=trace`.
+        if tracing::enabled!(target: "blinc_app::v2_regions", tracing::Level::TRACE) {
+            let regions = tree.dynamic_regions();
+            let canvas_count = regions
+                .values()
+                .filter(|r| {
+                    matches!(
+                        r.kind,
+                        blinc_layout::renderer::DynamicKind::Canvas { .. }
+                    )
+                })
+                .count();
+            let motion_count = regions
+                .values()
+                .filter(|r| {
+                    matches!(
+                        r.kind,
+                        blinc_layout::renderer::DynamicKind::MotionSubtree
+                    )
+                })
+                .count();
+            let css_count = regions
+                .values()
+                .filter(|r| {
+                    matches!(
+                        r.kind,
+                        blinc_layout::renderer::DynamicKind::CssAnimated
+                    )
+                })
+                .count();
+            let legacy_canvas = tree.canvas_paint_records().len();
+            let legacy_motion = tree.composite_bindings().len();
+            tracing::trace!(
+                target: "blinc_app::v2_regions",
+                regions = regions.len(),
+                canvas = canvas_count,
+                motion = motion_count,
+                css = css_count,
+                legacy_canvas,
+                legacy_motion,
+                "v2 dynamic regions",
+            );
+        }
+
         // Composite static cache + canvas overlay onto the surface.
         let canvas_prims = self.collect_canvas_overlay_primitives(tree, width, height);
         self.renderer

@@ -72,6 +72,19 @@ impl RenderTree {
         // rebuilds them on every full paint, the fast path consumes
         // them between full paints.
         self.canvas_paint_records.borrow_mut().clear();
+        // Compositor v2 dynamic-region map — populated by the walker
+        // (Phase 2: in parallel with the legacy records above; Phase 3:
+        // becomes the sole source). Cleared at the top of every full
+        // paint with the same lifecycle as the legacy maps.
+        //
+        // `current_animation_status` is expected to be populated by
+        // the caller (`try_render_with_compositor` always runs
+        // `compute_animation_status` before invoking the walker).
+        // If we got here through some other path with no statuses,
+        // the walker still functions — it just won't produce any
+        // `DynamicRegion` entries this frame, and the legacy paths
+        // continue to handle emission as before.
+        self.dynamic_regions.borrow_mut().clear();
 
         if let Some(root) = self.root {
             // Apply DPI scale factor if set (for HiDPI display support)
@@ -151,6 +164,7 @@ impl RenderTree {
     ) {
         // Debug: uncomment to trace all nodes
         // eprintln!("render_layer_with_motion: visiting node {:?}, target_layer={:?}", node, target_layer);
+
 
         // Use animated bounds if a layout animation is active, otherwise use layout bounds
         let Some(bounds) = self.get_render_bounds(node, parent_offset) else {
@@ -282,6 +296,30 @@ impl RenderTree {
         // `last_*` are early-out'd inside `apply_binding_deltas` so
         // no GPU work happens for them.
         let composite_bg_start = motion_bindings_ref.map(|_| ctx.bg_primitive_count());
+
+        // Compositor v2 ambient snapshot for motion-bound subtrees.
+        // Captured BEFORE this node pushes any of its own transforms
+        // so the saved affine represents the parent environment —
+        // re-walking the subtree will re-push the node's own
+        // position/motion/rotation/etc. transforms on top of this.
+        //
+        // Mirrors `composite_bg_start` above: we only snapshot when
+        // motion bindings are present. Canvas nodes get their own
+        // snapshot at the canvas paint site (with the post-transform
+        // affine, because the canvas closure executes after the
+        // node's transforms have all pushed).
+        //
+        // The actual `DynamicRegion` insert happens at the bottom of
+        // this fn alongside the legacy `composite_bindings` insert,
+        // gated on the node's `AnimationStatus` being `Animating`.
+        let v2_motion_ambient = motion_bindings_ref.map(|_| {
+            (
+                ctx.current_affine_elements(),
+                ctx.current_opacity(),
+                ctx.current_clip_aabb(),
+                ctx.z_layer(),
+            )
+        });
 
         // We've passed all the cull / visibility / motion-removed
         // gates; this node is going to paint. Record whether it
@@ -1160,6 +1198,40 @@ impl RenderTree {
                                 opacity: saved_opacity,
                             },
                         );
+
+                        // Compositor v2 parallel-populate: every
+                        // canvas is unconditionally
+                        // `Animating(Canvas)` in the new status
+                        // model, so record a `DynamicRegion`
+                        // alongside the legacy paint record. The
+                        // composite path won't read these yet
+                        // (Phase 3 makes the swap); this is purely
+                        // verification scaffolding.
+                        let region_screen_aabb = Self::affine_screen_aabb(
+                            &saved_affine,
+                            bounds.width,
+                            bounds.height,
+                            self.scale_factor,
+                        );
+                        let region_clip_aabb = saved_ancestor_clip;
+                        self.dynamic_regions.borrow_mut().insert(
+                            node,
+                            super::super::DynamicRegion {
+                                root: node,
+                                screen_aabb: region_screen_aabb,
+                                ambient: super::super::AmbientPaintState {
+                                    affine: saved_affine,
+                                    opacity: saved_opacity,
+                                    clip_aabb: region_clip_aabb,
+                                    z_layer: saved_z_layer,
+                                },
+                                kind: super::super::DynamicKind::Canvas {
+                                    render_fn: render_fn.clone(),
+                                    clips_content: should_clip,
+                                    bounds_wh: (bounds.width, bounds.height),
+                                },
+                            },
+                        );
                     }
                 }
             }
@@ -1539,6 +1611,77 @@ impl RenderTree {
                         centre,
                     },
                 );
+
+                // Compositor v2 parallel-populate for motion-bound
+                // subtrees. Gated on the node's status being
+                // `Animating(Motion)` or `Animating(Css)` — settled
+                // bindings (no recent oscillation) sit in the static
+                // cache; only bindings that the status computation
+                // flagged as in-flight (or in hysteresis cooldown)
+                // get a region. The legacy `composite_bindings`
+                // entry above stays in place either way because the
+                // fast-path delta-patcher needs the primitive range
+                // for any bound node (settled or not).
+                let status = self
+                    .current_animation_status
+                    .borrow()
+                    .get(&node)
+                    .copied();
+                let kind_match = match status {
+                    Some(super::super::AnimationStatus::Animating(
+                        super::super::AnimatedKind::Motion,
+                    )) => Some(super::super::DynamicKind::MotionSubtree),
+                    Some(super::super::AnimationStatus::Animating(
+                        super::super::AnimatedKind::Css,
+                    )) => Some(super::super::DynamicKind::CssAnimated),
+                    _ => None,
+                };
+                if let (Some(kind), Some((amb_affine, amb_opacity, amb_clip, amb_z))) =
+                    (kind_match, v2_motion_ambient)
+                {
+                    let region_screen_aabb = Self::affine_screen_aabb(
+                        &amb_affine,
+                        // Bounds at this point are in parent-local
+                        // coords; the parent's offset is baked into
+                        // `amb_affine` already, so we transform
+                        // (bounds.x, bounds.y, w, h) — NOT (0, 0,
+                        // w, h) — through the parent affine.
+                        // `affine_screen_aabb` takes the local-space
+                        // box and the parent transform; pass bounds
+                        // with origin (bounds.x, bounds.y) baked in
+                        // by translating the affine first.
+                        bounds.width,
+                        bounds.height,
+                        self.scale_factor,
+                    );
+                    // Shift the AABB by the node's parent-relative
+                    // offset (bounds.x / bounds.y), scaled by DPI,
+                    // so the captured region matches the node's
+                    // actual on-screen position.
+                    let dpi = self.scale_factor.max(1.0);
+                    let offset_x = bounds.x * dpi;
+                    let offset_y = bounds.y * dpi;
+                    let shifted_aabb = [
+                        region_screen_aabb[0] + offset_x,
+                        region_screen_aabb[1] + offset_y,
+                        region_screen_aabb[2] + offset_x,
+                        region_screen_aabb[3] + offset_y,
+                    ];
+                    self.dynamic_regions.borrow_mut().insert(
+                        node,
+                        super::super::DynamicRegion {
+                            root: node,
+                            screen_aabb: shifted_aabb,
+                            ambient: super::super::AmbientPaintState {
+                                affine: amb_affine,
+                                opacity: amb_opacity,
+                                clip_aabb: amb_clip,
+                                z_layer: amb_z,
+                            },
+                            kind,
+                        },
+                    );
+                }
             }
         }
 

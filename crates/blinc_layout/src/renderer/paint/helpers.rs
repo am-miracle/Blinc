@@ -42,6 +42,57 @@ impl RenderTree {
             .values()
             .any(|node| matches!(node.props.material, Some(Material::Glass(_))))
     }
+
+    /// Transform a local-space axis-aligned `(0, 0, width, height)`
+    /// rectangle through a 6-element affine `[a, b, c, d, tx, ty]`
+    /// and scale by `dpi`, returning the screen-space AABB as
+    /// `[min_x, min_y, max_x, max_y]`.
+    ///
+    /// Used by the Compositor v2 walker to compute each
+    /// `DynamicRegion`'s `screen_aabb` for dispatch-scissor and
+    /// (Phase 4) damage-rect rebuild. Always returns a
+    /// conservative (axis-aligned) bound — for rotated affines this
+    /// expands to enclose all four corners after transformation,
+    /// which is exactly what a scissor / damage rect needs.
+    ///
+    /// Affine convention matches the rest of the renderer:
+    /// `new_x = a*x + c*y + tx`, `new_y = b*x + d*y + ty`.
+    pub(crate) fn affine_screen_aabb(
+        affine: &[f32; 6],
+        width: f32,
+        height: f32,
+        dpi: f32,
+    ) -> [f32; 4] {
+        let [a, b, c, d, tx, ty] = *affine;
+        let corners = [
+            (0.0, 0.0),
+            (width, 0.0),
+            (0.0, height),
+            (width, height),
+        ];
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for (x, y) in corners {
+            let nx = a * x + c * y + tx;
+            let ny = b * x + d * y + ty;
+            if nx < min_x {
+                min_x = nx;
+            }
+            if ny < min_y {
+                min_y = ny;
+            }
+            if nx > max_x {
+                max_x = nx;
+            }
+            if ny > max_y {
+                max_y = ny;
+            }
+        }
+        let dpi = dpi.max(1.0);
+        [min_x * dpi, min_y * dpi, max_x * dpi, max_y * dpi]
+    }
 }
 
 /// Apply opacity to a brush by modifying its alpha component

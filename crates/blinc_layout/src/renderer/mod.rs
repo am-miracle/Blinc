@@ -466,6 +466,18 @@ pub struct RenderTree {
     /// — Phase 1 only writes this from
     /// `compute_animation_status`; Phase 4 consumes it.
     previous_animation_status: RefCell<HashMap<LayoutNodeId, AnimationStatus>>,
+    /// Current frame's animation classification per node — the live
+    /// map the walker reads from while emitting primitives. Written
+    /// once at the top of every full paint by
+    /// `compute_animation_status` (which also returns a `Vec` for
+    /// the compositor's transition-detection path). Cleared and
+    /// repopulated each frame, never persists.
+    ///
+    /// Stored as a `HashMap` rather than the `Vec` produced by
+    /// `compute_animation_status` because the walker does point
+    /// lookups: `current_animation_status.get(&node)` once per
+    /// painted node, ~thousands of times per frame.
+    current_animation_status: RefCell<HashMap<LayoutNodeId, AnimationStatus>>,
     /// Hysteresis counter — frames spent classified as `Static`
     /// since the node last appeared `Animating`. Once the count
     /// reaches `SETTLED_STREAK_THRESHOLD`, the node is allowed to
@@ -672,6 +684,7 @@ impl RenderTree {
             canvas_paint_records: RefCell::new(HashMap::new()),
             dynamic_regions: RefCell::new(HashMap::new()),
             previous_animation_status: RefCell::new(HashMap::new()),
+            current_animation_status: RefCell::new(HashMap::new()),
             settled_streak: RefCell::new(HashMap::new()),
             last_scroll_tick_ms: None,
             scale_factor: 1.0,
@@ -1237,6 +1250,22 @@ impl RenderTree {
             result.push((node, final_status));
         }
         drop(streak_writer);
+
+        // Mirror the result into the live map the walker reads from
+        // each frame. Keeping the side-effect inside the compute
+        // function means there's no way to forget to repopulate it
+        // before the walker runs; callers stay pure consumers of the
+        // returned `Vec` (used for transition detection, tracing,
+        // etc.).
+        {
+            let mut current = self.current_animation_status.borrow_mut();
+            current.clear();
+            current.reserve(result.len());
+            for (node, status) in &result {
+                current.insert(*node, *status);
+            }
+        }
+
         result
     }
 
@@ -1247,6 +1276,16 @@ impl RenderTree {
         &self,
     ) -> std::cell::Ref<'_, HashMap<LayoutNodeId, AnimationStatus>> {
         self.previous_animation_status.borrow()
+    }
+
+    /// Borrow the current frame's animation-status map. Populated as
+    /// a side-effect of [`Self::compute_animation_status`] and
+    /// consumed by the walker on the same frame to decide which
+    /// nodes are dynamic.
+    pub fn current_animation_status(
+        &self,
+    ) -> std::cell::Ref<'_, HashMap<LayoutNodeId, AnimationStatus>> {
+        self.current_animation_status.borrow()
     }
 
     /// Replace the stored previous-status map with the supplied
