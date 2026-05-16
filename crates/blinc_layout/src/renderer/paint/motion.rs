@@ -280,7 +280,15 @@ impl RenderTree {
         // off-screen spinner whose paint is culled still pinned the
         // chain at vsync because the scheduler's needs_redraw stays
         // true regardless of visibility.
-        if !self.visible_anim_active.get() {
+        //
+        // Gate on `intersects_viewport`: spinners / canvas / active
+        // bindings that have scrolled out of the viewport should NOT
+        // keep the chain alive. The walker still walks them (the GPU
+        // clips them at draw time) but their motion has no visible
+        // effect. Without this gate, cn_demo's 3 always-rotating
+        // spinners pinned the chain at vsync forever even after
+        // scrolling past them — 30 % CPU at idle.
+        if intersects_viewport && !self.visible_anim_active.get() {
             let canvas_paints = matches!(render_node.element_type, ElementType::Canvas(_));
             // Bindings only count as a redraw signal when the
             // underlying animated value is *actually* mid-flight.
