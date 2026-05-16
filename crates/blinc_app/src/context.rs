@@ -4829,31 +4829,39 @@ impl RenderContext {
                         .and_then(|t| t.timeline.lock().ok())
                         .is_some_and(|g| g.is_playing())
             });
-        // FSM-driven motion (motion()'s enter / exit, e.g.
-        // PageTransition::scale() on a router page) advances motion
-        // values per frame via render_state.motion_values, but
-        // apply_binding_deltas only patches motion_bindings — FSM
-        // motion has no representation in the cached primitive
-        // buffer's delta-patch path. Without forcing a cache rebuild
-        // each frame the FSM is alive, the walker only runs at the
-        // first paint with the FSM's INITIAL motion_values (scale=0
-        // for `scale()`, opacity=0 for `fade_in()`, etc.) and the
-        // motion container stays frozen at its entry state — pages
-        // invisible, motion-wrapped overlays never appearing.
+        // Cache-invalidation gate — Site B in the animation-driver
+        // map. The single source of truth is
+        // `RenderTree::has_any_active_animation`, which ORs in
+        // every system that mutates state per frame:
         //
-        // Same posture for visual / layout animations
-        // (`animate_bounds`, `animate_layout` — accordions,
-        // FLIP-style position transitions). Their per-frame
-        // re-layout shifts text positions, but apply_binding_deltas
-        // doesn't touch them and the cached primitives + text vecs
-        // stay frozen. Symptom on the accordion: the
-        // ANIMATION proceeds, but the text layer doesn't follow —
-        // labels stay at last-collect positions while the bordered
-        // container around them slides.
-        let fsm_motion_active = render_state.has_active_motions();
-        let visual_animations_active = tree.has_active_visual_animations()
-            || tree.has_active_layout_animations();
-        if bindings_animating || fsm_motion_active || visual_animations_active {
+        // - MotionBindings (springs, set_immediate-driven drag,
+        //   rotation timelines)
+        // - motion() FSM enter / exit (PageTransition, fade_in,
+        //   etc.)
+        // - animate_bounds / animate_layout (accordion height,
+        //   FLIP-style position transitions)
+        // - FLIP transitions on string IDs
+        // - CSS keyframe animations
+        // - CSS property transitions (the image placeholder
+        //   fade-in, hover styles, etc.)
+        //
+        // Without this union, individual systems went unaccounted
+        // for and produced the "transition only plays when I
+        // scroll" symptom — the scheduler ticks the animation, the
+        // windowed redraw chain fires `request_redraw`, but the
+        // compositor fast path here saw cache-valid and returned
+        // the frozen surface. Any input event coincidentally
+        // invalidated the cache and the animation appeared to
+        // "catch up".
+        //
+        // `bindings_animating` here also catches `set_immediate`
+        // drift (binding's current value diverges from
+        // composite_bindings.last_translate) — the
+        // `has_any_active_animation` path covers spring-mid-flight
+        // and rotation_timeline but not set_immediate, so we keep
+        // the drift signal alongside.
+        let animations_active = tree.has_any_active_animation(render_state);
+        if bindings_animating || animations_active {
             self.renderer.invalidate_static_layer();
             // Also invalidate the cached text / SVG / image vectors
             // up-front. Without this clear, the downstream
@@ -4905,8 +4913,25 @@ impl RenderContext {
             // separate signal (`render_state.has_active_motions()`)
             // that the windowed runner ORs in alongside this flag,
             // so we don't need to mirror them here.
+            // Site C in the animation-driver map. Mirror the
+            // unified predicate the cache-invalidation gate uses,
+            // visibility-filtered so a CSS keyframe on a node
+            // scrolled out of view doesn't pin the chain forever.
+            // The fast path doesn't have a fresh painted set
+            // (walker didn't run this frame); use the last walker
+            // pass's set, which the windowed runner's redraw gate
+            // also relies on.
             let has_visible_canvas = !tree.canvas_paint_records().is_empty();
-            tree.set_visible_anim_active(bindings_animating || has_visible_canvas);
+            let any_visible_anim = {
+                let painted_set = tree.painted_node_ids().clone();
+                let painted_stable = tree.painted_stable_ids();
+                tree.has_any_active_animation_visible(
+                    render_state,
+                    &painted_set,
+                    &painted_stable,
+                )
+            };
+            tree.set_visible_anim_active(any_visible_anim || has_visible_canvas);
 
             return Ok(());
         }
@@ -4945,24 +4970,20 @@ impl RenderContext {
         // nodes. Falls back to the full walker only when the cache
         // is genuinely invalid (rebuild, layout change).
         //
-        // FSM motion + visual / layout animations are exceptions to
-        // the fast path. `apply_binding_deltas` only patches
-        // `motion_bindings` primitive ranges — it has no
-        // representation for `motion_values` (motion() enter/exit,
-        // PageTransition::scale()) or for animated bounds /
-        // layout transitions (accordion's `animate_bounds`,
-        // FLIP-style position transitions). On the fast path the
-        // cached primitives stay frozen at frame-1 values for
-        // these systems while the parallel text/SVG/image
-        // collection re-emits at current-frame values — the
-        // resulting mismatch is what produced the distorted text /
-        // labels-not-following-accordion artifacts. Force the
-        // walker through whenever any of these systems are live so
-        // primitives and text both reflect the same animation
-        // state this frame.
-        let inner_try_fast = self.cached_bg_batch.is_some()
-            && !fsm_motion_active
-            && !visual_animations_active;
+        // `apply_binding_deltas` can ONLY patch motion_binding
+        // primitive ranges (translate / scale / rotation /
+        // opacity). It has no representation for any other
+        // animation system — motion() FSM, animate_bounds,
+        // animate_layout, FLIP, CSS keyframes, CSS transitions.
+        // When ANY of those systems is live, the inner fast path
+        // must fall through to the walker so primitives + text
+        // emit at the current animation state in lockstep.
+        //
+        // `bindings_animating` (which includes the set_immediate
+        // drift case) doesn't require the walker — the patch
+        // covers it.
+        let inner_try_fast =
+            self.cached_bg_batch.is_some() && !animations_active;
         let result = self.render_tree_with_motion_opt(
             tree,
             render_state,
@@ -5033,6 +5054,26 @@ impl RenderContext {
         let canvas_prims = self.collect_canvas_overlay_primitives(tree, width, height);
         self.renderer
             .composite_frame(target_view, target_texture, &canvas_prims);
+
+        // Site C bookkeeping (slow-path counterpart). The walker
+        // ran (or got bypassed by apply_binding_deltas) — either
+        // way, we know the painted set this frame matches what
+        // the inner render emitted. Mirror the fast-path
+        // visibility-gated set_visible_anim_active so the windowed
+        // runner's redraw chain gets a consistent signal whether
+        // we landed on the fast or slow path.
+        let has_visible_canvas = !tree.canvas_paint_records().is_empty();
+        let any_visible_anim = {
+            let painted_set = tree.painted_node_ids().clone();
+            let painted_stable = tree.painted_stable_ids();
+            tree.has_any_active_animation_visible(
+                render_state,
+                &painted_set,
+                &painted_stable,
+            )
+        };
+        tree.set_visible_anim_active(any_visible_anim || has_visible_canvas);
+
         Ok(())
     }
 
