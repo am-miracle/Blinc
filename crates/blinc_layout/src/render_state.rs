@@ -345,8 +345,17 @@ impl CssAnimationStore {
         &self,
         painted: &std::collections::HashSet<crate::tree::StableNodeId>,
     ) -> bool {
-        self.animations.keys().any(|n| painted.contains(n))
-            || self.transitions.keys().any(|n| painted.contains(n))
+        // Match `has_active_animations` / `has_active_transitions`:
+        // gate on the `is_playing` flag so completed entries kept
+        // in the map for same-target restart suppression don't
+        // pin the windowed redraw chain forever.
+        self.animations
+            .iter()
+            .any(|(n, a)| a.is_playing && painted.contains(n))
+            || self
+                .transitions
+                .iter()
+                .any(|(n, t)| t.is_playing && painted.contains(n))
     }
 
     /// Whether any visible animation or transition is currently

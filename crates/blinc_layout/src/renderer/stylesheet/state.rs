@@ -190,7 +190,14 @@ impl RenderTree {
         let painted_stable: HashSet<crate::tree::StableNodeId> =
             painted.iter().filter_map(|n| self.stable_id(*n)).collect();
         let store = self.css_anim_store.lock().unwrap();
-        store.transitions.keys().any(|s| painted_stable.contains(s))
+        // Match `has_active_transitions`: only PLAYING transitions
+        // count as a redraw signal. Completed transitions stay in
+        // the map for same-target restart prevention but should
+        // not pin the chain.
+        store
+            .transitions
+            .iter()
+            .any(|(s, t)| t.is_playing && painted_stable.contains(s))
     }
 
     /// Apply stylesheet state styles based on EventRouter state.
