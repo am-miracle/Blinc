@@ -147,6 +147,16 @@ pub struct RenderContext {
     image_cache: LruCache<String, GpuImage>,
     // Tracks when each image first appeared in the cache (for fade-in animation)
     image_load_times: std::collections::HashMap<String, web_time::Instant>,
+    /// Per-source fade end deadline (`loaded_at + fade_duration_ms`).
+    /// Populated only when the element that triggered the load specified
+    /// `fade_duration_ms > 0`. Used at the frame boundary to decide
+    /// whether the redraw chain should stay alive — once `now >= deadline`
+    /// the fade has visually settled and we can stop firing frames.
+    ///
+    /// Stored separately from `image_load_times` (which is just the
+    /// load timestamp consumed by `fade_factor` calc) so existing
+    /// fade-factor code paths stay unchanged.
+    image_fade_deadlines: std::collections::HashMap<String, web_time::Instant>,
     // LRU cache for parsed SVG documents (avoids re-parsing)
     svg_cache: LruCache<u64, SvgDocument>,
     // Texture atlas for rasterized SVGs (single shared GPU texture, shelf-packed)
@@ -438,6 +448,7 @@ impl RenderContext {
             msaa_texture: None,
             image_cache: LruCache::new(NonZeroUsize::new(IMAGE_CACHE_CAPACITY).unwrap()),
             image_load_times: std::collections::HashMap::new(),
+            image_fade_deadlines: std::collections::HashMap::new(),
             svg_cache: LruCache::new(NonZeroUsize::new(SVG_CACHE_CAPACITY).unwrap()),
             svg_atlas,
             scratch_glyphs: Vec::with_capacity(1024), // Pre-allocate for typical text
@@ -1712,6 +1723,7 @@ impl RenderContext {
         for k in &dropped {
             self.image_cache.pop(k);
             self.image_load_times.remove(k);
+            self.image_fade_deadlines.remove(k);
         }
         if !dropped.is_empty() {
             tracing::info!(
@@ -2141,8 +2153,21 @@ impl RenderContext {
             // LruCache::put evicts oldest entry if at capacity
             self.image_cache.put(image.source.clone(), gpu_image);
             // Record load time for fade-in animation
+            let now = web_time::Instant::now();
             self.image_load_times
-                .insert(image.source.clone(), web_time::Instant::now());
+                .insert(image.source.clone(), now);
+            // Record the exact fade-end deadline so the frame-boundary
+            // redraw gate can stop firing as soon as the fade settles,
+            // instead of a conservative 2 s upper bound that pinned
+            // CPU for ~1.5 s of doing-nothing redraws after the fade
+            // was visually done. Skip when no fade requested.
+            if image.fade_duration_ms > 0 {
+                if let Some(deadline) =
+                    now.checked_add(std::time::Duration::from_millis(image.fade_duration_ms as u64))
+                {
+                    self.image_fade_deadlines.insert(image.source.clone(), deadline);
+                }
+            }
         }
     }
 
@@ -4785,18 +4810,17 @@ impl RenderContext {
         // of whether the fast or slow path runs this frame. The
         // image dispatch only runs on the slow path; once the
         // cache is warm we'd never re-set this flag mid-fade, so
-        // we compute it from `image_load_times` directly here.
+        // we read the deadline map directly here.
         //
-        // Conservative upper bound: any image loaded within the
-        // last 2 s might still be fading (typical fade durations
-        // are 100-500 ms, but accept some over-firing in exchange
-        // for not needing per-source duration tracking).
-        const MAX_FADE_MS: u128 = 2000;
+        // Deadline = `loaded_at + fade_duration_ms` captured at
+        // image-load time. Once `now >= deadline`, the fade has
+        // visually settled and we drop the entry so the redraw
+        // gate stops firing. Previously a blanket 2 s upper bound
+        // pinned the chain for ~1.5 s of nothing-changing frames
+        // (the actual fade was 250-500 ms).
         let now = web_time::Instant::now();
-        self.has_pending_image_fade = self
-            .image_load_times
-            .values()
-            .any(|t| now.duration_since(*t).as_millis() < MAX_FADE_MS);
+        self.image_fade_deadlines.retain(|_, deadline| now < *deadline);
+        self.has_pending_image_fade = !self.image_fade_deadlines.is_empty();
 
         if self.has_pending_image_fade {
             // Force the slow path so the image dispatch actually
