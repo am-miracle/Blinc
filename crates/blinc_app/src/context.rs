@@ -4960,13 +4960,10 @@ impl RenderContext {
         // into `motion_subtree_records` even though it emits no
         // primitives.
         tree.set_skip_motion_drawing(true);
-        // `apply_binding_deltas` patches the cached batch in place
-        // — but those cached primitives include the motion-bound
-        // subtree from before the skip flag was set. Reusing them
-        // would bake the bar into the cache on top of having it in
-        // the overlay (double-image). Force a full walker pass so
-        // the skip flag actually takes effect this frame.
-        let inner_try_fast = false;
+        // Pass `try_fast_paint=true` so the inner call can take its
+        // `apply_binding_deltas`-then-dispatch path when the cache
+        // is structurally valid but pixel-stale.
+        let inner_try_fast = self.cached_bg_batch.is_some();
         let result = self.render_tree_with_motion_opt(
             tree,
             render_state,
