@@ -691,6 +691,21 @@ impl RenderTree {
         self.visible_anim_active.get()
     }
 
+    /// Manually mark the visible-animation flag. Called by the
+    /// compositor fast path when `apply_binding_deltas` detects a
+    /// motion binding that actually moved this frame — without it,
+    /// Phase 5's redraw chain dies because the walker (which is the
+    /// other writer of this flag) didn't run.
+    ///
+    /// The flag is reset to `false` at the start of every full paint
+    /// (`render_with_motion`), so a stale `true` from a previous
+    /// fast-path frame can't keep the chain alive forever — the
+    /// next full paint will clear it and the walker / fast path
+    /// will set it again only if there's still active work.
+    pub fn set_visible_anim_active(&self, value: bool) {
+        self.visible_anim_active.set(value);
+    }
+
     /// Borrow the set of node ids that the paint walker rendered in
     /// the most recent frame.
     ///

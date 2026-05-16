@@ -511,7 +511,21 @@ impl RenderContext {
         // values (post-tick), compute the delta vs the values baked
         // into the cached batch, and patch every primitive in the
         // binding's range.
+        //
+        // Track whether any binding's value moved this frame so we
+        // can flag `visible_anim_active` on the tree below. The
+        // walker is the other writer of that flag (called from
+        // `render_with_motion`'s entry, then updated as it visits
+        // bound nodes), but on the fast path the walker doesn't run
+        // — without this manual mark the flag stays at whatever the
+        // previous full paint left it at, and Phase 5's redraw
+        // chain gates `needs_animation_redraw && visible_anim` →
+        // false → no next frame → spring stops ticking → animation
+        // freezes until something else (mouse move, scroll) wakes
+        // the loop. That's the "animation doesn't play until I move
+        // the mouse" symptom this addresses.
         let motion_bindings = tree.motion_bindings_map();
+        let mut any_binding_active = false;
         for (node, meta) in bindings.iter_mut() {
             let bindings_for_node = match motion_bindings.get(node) {
                 Some(b) => b,
@@ -548,6 +562,7 @@ impl RenderContext {
                     }
                 }
                 meta.last_translate = new_translate;
+                any_binding_active = true;
             }
 
             // ----------------------------------------------------------------
@@ -578,6 +593,7 @@ impl RenderContext {
                     }
                 }
                 meta.last_opacity = new_opacity;
+                any_binding_active = true;
             }
 
             // ----------------------------------------------------------------
@@ -637,6 +653,7 @@ impl RenderContext {
                     }
                 }
                 meta.last_scale = (new_sx, new_sy);
+                any_binding_active = true;
             }
 
             // ----------------------------------------------------------------
@@ -661,6 +678,20 @@ impl RenderContext {
             if (new_rotation_rad - meta.last_rotation_rad).abs() > f32::EPSILON {
                 return false;
             }
+        }
+        // Tell Phase 5's redraw chain that there's still visible
+        // animation work to drive — without this, `visible_anim_active`
+        // stays at whatever value the previous full paint left it at
+        // (typically `false` once an animation has settled), so the
+        // chain gates out `needs_animation_redraw` and the next frame
+        // never fires. We only set `true` (not `false` if nothing
+        // moved) because other writers — the walker on a full paint,
+        // canvas / motion-FSM paths — also drive this flag, and we
+        // don't want to clear what they set. The walker resets to
+        // `false` at the top of every full paint, so a stale `true`
+        // can't keep the chain alive forever.
+        if any_binding_active {
+            tree.set_visible_anim_active(true);
         }
         true
     }

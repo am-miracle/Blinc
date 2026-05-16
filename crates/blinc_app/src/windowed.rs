@@ -4155,23 +4155,15 @@ impl WindowedApp {
                             // redraw so the queued work actually runs.
                             // Sliders, sortable lists, splitter panes — any
                             // Stateful-driven drag — flow through here.
-                            if blinc_layout::peek_needs_redraw()
-                                || blinc_layout::has_pending_subtree_rebuilds()
-                            {
+                            let state_changed = blinc_layout::peek_needs_redraw()
+                                || blinc_layout::has_pending_subtree_rebuilds();
+                            if state_changed {
                                 frame_dirty.store(true, Ordering::Release);
                                 window.request_redraw();
                                 // Dispatch produced a real state change —
                                 // drop the compositor cache so the next
                                 // paint repopulates it with the new
-                                // hover / focus / scroll / state. Bare
-                                // mouse-moves that didn't trigger any
-                                // handler (`peek_needs_redraw` stayed
-                                // false) leave the cache intact and the
-                                // next frame can take the fast path.
-                                // This is what lets idle animations
-                                // ride the cache for many frames in a
-                                // row even with the mouse moving over
-                                // hover-eligible elements.
+                                // hover / focus / scroll / state.
                                 if let Some(ref mut app) = ws.app {
                                     app.invalidate_render_cache();
                                 }
@@ -4179,12 +4171,10 @@ impl WindowedApp {
                             // Scroll events update `tree.scroll_offsets`
                             // through `dispatch_scroll`, which doesn't
                             // route through `stateful::request_redraw` —
-                            // the offsets just get a new value. The
-                            // cache would render with the pre-scroll
-                            // child positions if reused. Force
-                            // invalidation any frame a scroll input
-                            // landed.
-                            if scroll_info.is_some() || scroll_ended {
+                            // force invalidation any frame a scroll
+                            // input landed.
+                            let had_scroll = scroll_info.is_some() || scroll_ended;
+                            if had_scroll {
                                 if let Some(ref mut app) = ws.app {
                                     app.invalidate_render_cache();
                                 }
