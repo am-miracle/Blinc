@@ -2534,16 +2534,6 @@ impl Div {
         self
     }
 
-    /// Apply a `clip-path` shape to mask the element's contents.
-    /// Common use is a polygon clip for arbitrary cut-outs (spinner
-    /// arcs, donut wedges). Rendered via the GPU's polygon-clip
-    /// pipeline — no extra primitive beyond the polygon vertices
-    /// it consumes.
-    pub fn clip_path(mut self, path: ClipPath) -> Self {
-        self.clip_path = Some(path);
-        self
-    }
-
     /// Set corner radius with full pill shape (radius = min(w,h)/2)
     pub fn rounded_full(mut self) -> Self {
         // Use a large value; actual pill shape depends on element size
