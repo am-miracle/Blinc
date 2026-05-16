@@ -4880,7 +4880,20 @@ impl RenderContext {
         // re-flow through dispatch, no traversal of unrelated
         // nodes. Falls back to the full walker only when the cache
         // is genuinely invalid (rebuild, layout change).
-        let inner_try_fast = self.cached_bg_batch.is_some();
+        //
+        // FSM motion is the exception. `apply_binding_deltas` only
+        // patches `motion_bindings` primitive ranges — it has no
+        // representation for `motion_values` (scale / opacity /
+        // translate from a `motion().fade_in()` or
+        // PageTransition::scale() FSM). On the fast path, the
+        // cached primitives stay frozen at the FSM's initial state
+        // while the parallel text/SVG/image collection re-emits at
+        // the CURRENT FSM state — the resulting mismatch is what
+        // produced the distorted text we just shipped. Force the
+        // walker through whenever `has_active_motions()` reports a
+        // live FSM so primitives and text both reflect the same
+        // motion_values this frame.
+        let inner_try_fast = self.cached_bg_batch.is_some() && !fsm_motion_active;
         let result = self.render_tree_with_motion_opt(
             tree,
             render_state,
