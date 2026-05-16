@@ -4699,6 +4699,25 @@ impl RenderContext {
         // Detect bindings whose current value would visibly diverge
         // from what the static-layer cache was painted with.
         //
+        // Important: a binding being animating does NOT mean we
+        // should re-walk the whole tree. The cached batch
+        // (`cached_bg_batch`) can be patched in place via
+        // `apply_binding_deltas` (translates/scales/rotations) and
+        // re-dispatched to the static-layer texture — no walker, no
+        // re-emission of surrounding elements. Surrounding elements
+        // have nothing to do with the active binding; only the
+        // binding-bound primitives' values change.
+        //
+        // What we DO need to invalidate when bindings move: the
+        // cached static-layer TEXTURE pixels, because they were
+        // rasterized from the pre-patch batch. The next render must
+        // dispatch the patched batch into the texture before blitting
+        // to the surface. We rely on the inner
+        // `render_tree_with_motion_opt(try_fast_paint=true)` to take
+        // the apply_binding_deltas-then-dispatch path; the full
+        // walker only runs when the cache is actually structurally
+        // invalid.
+        //
         // `is_any_animating()` is too sensitive for this purpose:
         // under-damped springs (e.g. `SpringConfig::gentle()`)
         // asymptotically oscillate around the target at sub-pixel
@@ -4808,6 +4827,15 @@ impl RenderContext {
         };
 
         tree.set_skip_canvas_drawing(true);
+        // Pass `try_fast_paint=true` so the inner call can take its
+        // `apply_binding_deltas`-then-dispatch path when the cache
+        // is structurally valid but pixel-stale (the
+        // bindings-animating case). That skips the walker for the
+        // surrounding tree — only the patched binding values
+        // re-flow through dispatch, no traversal of unrelated
+        // nodes. Falls back to the full walker only when the cache
+        // is genuinely invalid (rebuild, layout change).
+        let inner_try_fast = self.cached_bg_batch.is_some();
         let result = self.render_tree_with_motion_opt(
             tree,
             render_state,
@@ -4815,7 +4843,7 @@ impl RenderContext {
             height,
             &static_view,
             None, // suppress compositor mode inside the inner call
-            false,
+            inner_try_fast,
         );
         tree.set_skip_canvas_drawing(false);
         result?;
