@@ -9,7 +9,7 @@
 use crate::atlas::{ColorGlyphAtlas, GlyphAtlas, GlyphInfo};
 use crate::emoji::{is_emoji, is_variation_selector, is_zwj};
 use crate::font::FontFace;
-use crate::layout::{LayoutOptions, PositionedGlyph, TextLayoutEngine};
+use crate::layout::{LayoutOptions, PositionedGlyph, TextLayout, TextLayoutEngine};
 use crate::rasterizer::GlyphRasterizer;
 use crate::registry::{FontRegistry, GenericFont};
 use crate::shaper::TextShaper;
@@ -23,6 +23,44 @@ const GLYPH_CACHE_CAPACITY: usize = 512;
 
 /// Maximum number of color glyphs (emoji) to keep in cache
 const COLOR_GLYPH_CACHE_CAPACITY: usize = 128;
+
+/// Maximum number of HarfBuzz layout results to keep cached.
+///
+/// HarfBuzz shaping (text → positioned glyph list) is the dominant
+/// per-frame cost for text rendering in a UI: every text element on
+/// screen is re-shaped each redraw even when its content/font/size
+/// haven't changed. A 256-entry LRU keyed by the shaping inputs lets
+/// repeated calls reuse the previously-shaped layout. Hits skip
+/// HarfBuzz entirely; misses incur one shape and one insert.
+const LAYOUT_CACHE_CAPACITY: usize = 256;
+
+/// Cache key for shaped text layout results.
+///
+/// Captures every input that influences HarfBuzz's output and the
+/// layout engine's line-breaking decisions. Floating-point fields
+/// stored as bit patterns so the key is byte-exact (same `font_size`
+/// → same cache slot regardless of representation).
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct LayoutCacheKey {
+    /// Text content. Owned so the cache lives beyond the caller's borrow.
+    text: String,
+    /// Hash of font name + generic + weight + italic (see `font_id_with_style`).
+    font_id: u32,
+    /// `f32::to_bits(font_size)` — bit-exact match.
+    font_size_bits: u32,
+    /// Bit pattern of `options.max_width`, or `u32::MAX` for `None`.
+    max_width_bits: u32,
+    /// `options.alignment` (Left/Center/Right).
+    alignment: crate::layout::TextAlignment,
+    /// `options.anchor` (Top/Baseline/Center).
+    anchor: crate::layout::TextAnchor,
+    /// `options.line_break` (Word/Character/None).
+    line_break: crate::layout::LineBreakMode,
+    /// `f32::to_bits(line_height)`.
+    line_height_bits: u32,
+    /// `f32::to_bits(letter_spacing)`.
+    letter_spacing_bits: u32,
+}
 
 /// A GPU glyph instance for rendering
 #[derive(Debug, Clone, Copy)]
@@ -83,6 +121,15 @@ pub struct TextRenderer {
     glyph_cache: LruCache<(u32, u16, u16), GlyphInfo>,
     /// LRU cache for color glyphs (emoji) - same key format
     color_glyph_cache: LruCache<(u32, u16, u16), GlyphInfo>,
+    /// LRU cache for HarfBuzz layout results. Stores `Arc<TextLayout>`
+    /// (the positioned glyph list + width/height) keyed by every
+    /// shaping input. Repeated calls with identical text/font/size
+    /// reuse the cached layout instead of re-running HarfBuzz.
+    ///
+    /// Holds only the layout — UVs / glyph rasterization happens
+    /// downstream and stays atlas-fresh, so atlas growth doesn't
+    /// invalidate cached layouts.
+    layout_cache: LruCache<LayoutCacheKey, Arc<TextLayout>>,
 }
 
 impl TextRenderer {
@@ -102,6 +149,7 @@ impl TextRenderer {
             color_glyph_cache: LruCache::new(
                 NonZeroUsize::new(COLOR_GLYPH_CACHE_CAPACITY).unwrap(),
             ),
+            layout_cache: LruCache::new(NonZeroUsize::new(LAYOUT_CACHE_CAPACITY).unwrap()),
         }
     }
 
@@ -121,6 +169,7 @@ impl TextRenderer {
             color_glyph_cache: LruCache::new(
                 NonZeroUsize::new(COLOR_GLYPH_CACHE_CAPACITY).unwrap(),
             ),
+            layout_cache: LruCache::new(NonZeroUsize::new(LAYOUT_CACHE_CAPACITY).unwrap()),
         }
     }
 
@@ -139,6 +188,7 @@ impl TextRenderer {
             color_glyph_cache: LruCache::new(
                 NonZeroUsize::new(COLOR_GLYPH_CACHE_CAPACITY).unwrap(),
             ),
+            layout_cache: LruCache::new(NonZeroUsize::new(LAYOUT_CACHE_CAPACITY).unwrap()),
         }
     }
 
@@ -366,8 +416,37 @@ impl TextRenderer {
         let mut emoji_font_loaded = false;
         let mut symbol_font_loaded = false;
 
-        // Layout the text
-        let layout = self.layout_engine.layout(text, &font, font_size, options);
+        // Layout the text. HarfBuzz shaping dominates the per-text
+        // cost (microseconds per call × hundreds of texts × every
+        // frame), so we cache by the inputs that fully determine the
+        // shaping output. Same text/font/size/options ⇒ identical
+        // `TextLayout`; cache hits skip HarfBuzz entirely.
+        //
+        // The layout records glyph_ids in font space; UVs/rasterized
+        // bitmaps are looked up downstream from the (separately
+        // maintained) glyph rasterization cache, so atlas growth
+        // doesn't invalidate cached layouts.
+        let cache_key = LayoutCacheKey {
+            text: text.to_string(),
+            font_id,
+            font_size_bits: font_size.to_bits(),
+            max_width_bits: options
+                .max_width
+                .map(|w| w.to_bits())
+                .unwrap_or(u32::MAX),
+            alignment: options.alignment,
+            anchor: options.anchor,
+            line_break: options.line_break,
+            line_height_bits: options.line_height.to_bits(),
+            letter_spacing_bits: options.letter_spacing.to_bits(),
+        };
+        let layout = if let Some(cached) = self.layout_cache.get(&cache_key) {
+            Arc::clone(cached)
+        } else {
+            let fresh = Arc::new(self.layout_engine.layout(text, &font, font_size, options));
+            self.layout_cache.put(cache_key, Arc::clone(&fresh));
+            fresh
+        };
 
         // Collect positioned glyphs for processing
         let positioned_glyphs: Vec<_> = layout.glyphs().cloned().collect();
@@ -634,8 +713,31 @@ impl TextRenderer {
             )
         };
 
-        // Layout the text (this gives us proper positions from HarfBuzz)
-        let layout = self.layout_engine.layout(text, &font, font_size, options);
+        // Layout the text (this gives us proper positions from
+        // HarfBuzz). Cached on the same LRU as `prepare_text_internal`
+        // — repeated calls with identical text/font/size/options
+        // bypass HarfBuzz entirely.
+        let cache_key = LayoutCacheKey {
+            text: text.to_string(),
+            font_id,
+            font_size_bits: font_size.to_bits(),
+            max_width_bits: options
+                .max_width
+                .map(|w| w.to_bits())
+                .unwrap_or(u32::MAX),
+            alignment: options.alignment,
+            anchor: options.anchor,
+            line_break: options.line_break,
+            line_height_bits: options.line_height.to_bits(),
+            letter_spacing_bits: options.letter_spacing.to_bits(),
+        };
+        let layout = if let Some(cached) = self.layout_cache.get(&cache_key) {
+            Arc::clone(cached)
+        } else {
+            let fresh = Arc::new(self.layout_engine.layout(text, &font, font_size, options));
+            self.layout_cache.put(cache_key, Arc::clone(&fresh));
+            fresh
+        };
 
         // Collect positioned glyphs
         let positioned_glyphs: Vec<_> = layout.glyphs().cloned().collect();

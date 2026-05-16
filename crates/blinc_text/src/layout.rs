@@ -6,7 +6,7 @@ use crate::font::FontFace;
 use crate::shaper::{ShapedGlyph, ShapedText, TextShaper};
 
 /// Text alignment options (horizontal)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextAlignment {
     #[default]
     Left,
@@ -15,7 +15,7 @@ pub enum TextAlignment {
 }
 
 /// Vertical anchor point for text positioning
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextAnchor {
     /// Y coordinate is the top of the text bounding box
     #[default]
@@ -27,7 +27,7 @@ pub enum TextAnchor {
 }
 
 /// Line break mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum LineBreakMode {
     /// Break at word boundaries
     #[default]
