@@ -73,6 +73,55 @@ fn bc_eligible(source_uri: &str, width: u32, height: u32) -> bool {
 }
 
 /// Intersect two axis-aligned clip rects [x, y, w, h], returning their overlap.
+/// Union AABB (`[x, y, w, h]` in screen pixels) of every primitive
+/// in `range`, computed from each primitive's `bounds`. Skips zero-
+/// size primitives so they don't pull the union to the origin.
+/// Returns `None` for empty ranges or ranges of degenerate prims.
+fn bounds_union_of_range(
+    primitives: &[blinc_gpu::primitives::GpuPrimitive],
+    range: &std::ops::Range<usize>,
+) -> Option<[f32; 4]> {
+    if range.start >= range.end || range.end > primitives.len() {
+        return None;
+    }
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for p in &primitives[range.start..range.end] {
+        let [x, y, w, h] = p.bounds;
+        if w <= 0.0 || h <= 0.0 {
+            continue;
+        }
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x + w);
+        max_y = max_y.max(y + h);
+    }
+    if min_x.is_finite() && max_x > min_x && max_y > min_y {
+        Some([min_x, min_y, max_x - min_x, max_y - min_y])
+    } else {
+        None
+    }
+}
+
+/// Union of two optional AABBs. Returns `None` when both are `None`,
+/// the populated one when only one is set, and the bounding box of
+/// both otherwise.
+fn union_aabbs(a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> Option<[f32; 4]> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(r), None) | (None, Some(r)) => Some(r),
+        (Some([ax, ay, aw, ah]), Some([bx, by, bw, bh])) => {
+            let min_x = ax.min(bx);
+            let min_y = ay.min(by);
+            let max_x = (ax + aw).max(bx + bw);
+            let max_y = (ay + ah).max(by + bh);
+            Some([min_x, min_y, max_x - min_x, max_y - min_y])
+        }
+    }
+}
+
 fn intersect_clip_rects(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     let x1 = a[0].max(b[0]);
     let y1 = a[1].max(b[1]);
@@ -147,6 +196,16 @@ pub struct RenderContext {
     image_cache: LruCache<String, GpuImage>,
     // Tracks when each image first appeared in the cache (for fade-in animation)
     image_load_times: std::collections::HashMap<String, web_time::Instant>,
+    /// Damage rectangles populated by the most recent
+    /// `apply_binding_deltas` call. Each entry is the union of a
+    /// motion-bound subtree's previous on-screen AABB and its new
+    /// AABB after delta patching, in screen pixels (post-DPI).
+    ///
+    /// The compositor v2 damage-rect path reads this after the fast
+    /// path runs and re-renders just these regions of the static
+    /// cache (with scissor + `LoadOp::Load`) instead of invalidating
+    /// the whole layer.
+    last_binding_damage_rects: Vec<[f32; 4]>,
     /// Per-source fade end deadline (`loaded_at + fade_duration_ms`).
     /// Populated only when the element that triggered the load specified
     /// `fade_duration_ms > 0`. Used at the frame boundary to decide
@@ -449,6 +508,7 @@ impl RenderContext {
             image_cache: LruCache::new(NonZeroUsize::new(IMAGE_CACHE_CAPACITY).unwrap()),
             image_load_times: std::collections::HashMap::new(),
             image_fade_deadlines: std::collections::HashMap::new(),
+            last_binding_damage_rects: Vec::new(),
             svg_cache: LruCache::new(NonZeroUsize::new(SVG_CACHE_CAPACITY).unwrap()),
             svg_atlas,
             scratch_glyphs: Vec::with_capacity(1024), // Pre-allocate for typical text
@@ -819,6 +879,7 @@ impl RenderContext {
 
     /// frames in a row would double-apply).
     pub fn apply_binding_deltas(&mut self, tree: &blinc_layout::RenderTree, scale: f32) -> bool {
+        self.last_binding_damage_rects.clear();
         let batch = match self.cached_bg_batch.as_mut() {
             Some(b) => b,
             None => return false,
@@ -851,11 +912,18 @@ impl RenderContext {
         // the mouse" symptom this addresses.
         let motion_bindings = tree.motion_bindings_map();
         let mut any_binding_active = false;
+        let mut damage_rects: Vec<[f32; 4]> = Vec::new();
         for (node, meta) in bindings.iter_mut() {
             let bindings_for_node = match motion_bindings.get(node) {
                 Some(b) => b,
                 None => continue,
             };
+            // Snapshot the AABB before any patching this frame. The
+            // damage rect for this binding = union of the AABB before
+            // and after — whichever pixels the static cache might be
+            // showing stale need re-painting.
+            let aabb_before = meta.last_screen_aabb;
+            let mut binding_moved = false;
 
             // Is this binding mid-flight? Mirrors `walker_motion_bindings_ref.
             // is_any_animating()`. A binding can be active even if no value
@@ -901,6 +969,7 @@ impl RenderContext {
                 }
                 meta.last_translate = new_translate;
                 any_binding_active = true;
+                binding_moved = true;
             }
 
             // ----------------------------------------------------------------
@@ -932,6 +1001,7 @@ impl RenderContext {
                 }
                 meta.last_opacity = new_opacity;
                 any_binding_active = true;
+                binding_moved = true;
             }
 
             // ----------------------------------------------------------------
@@ -992,6 +1062,7 @@ impl RenderContext {
                 }
                 meta.last_scale = (new_sx, new_sy);
                 any_binding_active = true;
+                binding_moved = true;
             }
 
             // ----------------------------------------------------------------
@@ -1090,8 +1161,31 @@ impl RenderContext {
                 }
                 meta.last_rotation_rad = new_rotation_rad;
                 any_binding_active = true;
+                binding_moved = true;
+            }
+
+            // Damage rect = union of the AABB before this frame's
+            // patches and the AABB after. Read both off the cached
+            // batch directly (post-patch primitives sit in
+            // `meta.primitive_range`). The union is what the
+            // compositor v2 path will re-render in the static cache:
+            // old pixels covered by the before-AABB get cleared, new
+            // pixels at the after-AABB get painted, so the static
+            // cache stays consistent with the motion-bound element's
+            // current position without invalidating the entire layer.
+            //
+            // Skip when nothing visually moved this frame — empty
+            // damage rect set lets the caller blit-only without
+            // touching the cache.
+            if binding_moved {
+                let aabb_after = bounds_union_of_range(&batch.primitives, &meta.primitive_range);
+                if let Some(rect) = union_aabbs(aabb_before, aabb_after) {
+                    damage_rects.push(rect);
+                }
+                meta.last_screen_aabb = aabb_after;
             }
         }
+        self.last_binding_damage_rects = damage_rects;
         // Authoritatively write `visible_anim_active` from what we
         // observed this frame. The walker resets it to `false` at the
         // top of every full paint and sets `true` only if it visits a
@@ -5068,7 +5162,39 @@ impl RenderContext {
                 "cache_invalidated"
             );
         }
-        if bindings_animating || other_animations_active {
+        // Compositor v2 damage-rect path: scaffolding in place but
+        // OFF by default. The scissored re-render correctly handles
+        // SDF primitives, but the static cache also contains TEXT
+        // GLYPHS (dispatched by `render_text` into the same texture)
+        // and SVG / image content. The damage-rect path clears the
+        // scissor region but only re-draws SDF primitives — wiping
+        // any text/SVG in the damage rect, which then re-appears
+        // when the next slow-path frame fires.
+        //
+        // For motion-bound animations next to text (cn_demo's
+        // progress bar, switch, slider), this presents as the
+        // animated element "vibrating" — text near the moving
+        // element flashes in and out as paths alternate.
+        //
+        // To finish Phase 3 cleanly we need to either:
+        //   (a) Re-dispatch text/SVG/image inside the damage rect
+        //       too (requires caching their per-frame collected
+        //       state on fast-path frames so it's available without
+        //       re-running the collect pipeline).
+        //   (b) Extract motion-bound primitives from the cache
+        //       entirely — the "compositor v2 proper" approach
+        //       where the cache holds static content only and
+        //       motion-bound elements get a separate per-frame
+        //       overlay.
+        //
+        // Opt-in via `BLINC_DAMAGE_RECT=1` to try the partial
+        // implementation. Useful for experimentation / when only
+        // pure-SDF subtrees are animating. Default off so visuals
+        // stay correct.
+        let damage_rect_enabled = std::env::var("BLINC_DAMAGE_RECT").as_deref() == Ok("1");
+        let damage_rect_eligible =
+            damage_rect_enabled && bindings_animating && !other_animations_active;
+        if !damage_rect_eligible && (bindings_animating || other_animations_active) {
             self.renderer.invalidate_static_layer();
             // Also invalidate the cached text / SVG / image vectors
             // up-front. Without this clear, the downstream
@@ -5093,6 +5219,42 @@ impl RenderContext {
             try_fast_paint && self.renderer.static_layer_valid() && self.cached_bg_batch.is_some();
 
         if use_fast {
+            // Compositor v2 damage-rect step: when motion bindings
+            // are animating, patch the cached batch in-place and
+            // repaint the affected regions of the static cache.
+            // `apply_binding_deltas` populates
+            // `self.last_binding_damage_rects` with one union-AABB per
+            // moved binding. We then call `render_static_layer_damaged`
+            // to clear-and-redraw those rects inside the cache (with
+            // scissor; `LoadOp::Load` preserves the surrounding
+            // pixels). Falls back to invalidation + slow path on any
+            // condition the damage-rect path can't handle.
+            if damage_rect_eligible && self.cached_bg_batch.is_some() {
+                let scale_factor = tree.scale_factor();
+                let patched = self.apply_binding_deltas(tree, scale_factor);
+                if patched && !self.last_binding_damage_rects.is_empty() {
+                    let damaged = self.last_binding_damage_rects.clone();
+                    let batch_ref = self
+                        .cached_bg_batch
+                        .as_ref()
+                        .expect("use_fast implies cached_bg_batch is Some");
+                    let ok = self
+                        .renderer
+                        .render_static_layer_damaged(&damaged, batch_ref);
+                    if !ok {
+                        // Batch had content the damage-rect path
+                        // can't handle (layer effects, paths, 3D
+                        // viewports). Bail to full invalidation and
+                        // fall through — next frame will re-walk.
+                        self.renderer.invalidate_static_layer();
+                        self.cached_texts = None;
+                        self.cached_svgs = None;
+                        self.cached_images = None;
+                        self.cached_flows = None;
+                    }
+                }
+            }
+
             // Full canvas overlay — drains SDF primitives + raw-
             // RGBA images (video frames) + 3D meshes from every
             // canvas closure. composite_frame blits the static

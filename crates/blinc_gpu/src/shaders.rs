@@ -2216,6 +2216,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Compositor v2 damage-rect scissored-clear shader.
+///
+/// Draws a fullscreen triangle that outputs `(0, 0, 0, 0)`. Combined
+/// with a REPLACE blend pipeline and an active `set_scissor_rect`,
+/// it zeros the damaged region of the static cache so the
+/// subsequent SDF dispatch can re-paint without ghosting on
+/// anti-aliased / semi-transparent edges.
+pub const CLEAR_QUAD_SHADER: &str = include_str!("shaders/clear_quad.wgsl");
+
 /// Split SDF shader: Core shapes (Rect, Circle, Ellipse)
 ///
 /// Handles prim_type 0-2 with full features: borders, gradients,

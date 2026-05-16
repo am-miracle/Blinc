@@ -1597,6 +1597,7 @@ impl RenderTree {
                     bounds.x + bounds.width / 2.0,
                     bounds.y + bounds.height / 2.0,
                 );
+                let last_screen_aabb = ctx.bg_primitive_aabb(start, end);
                 self.composite_bindings.borrow_mut().insert(
                     node,
                     super::super::CompositeBindingMeta {
@@ -1606,6 +1607,7 @@ impl RenderTree {
                         last_rotation_rad,
                         last_opacity,
                         centre,
+                        last_screen_aabb,
                     },
                 );
 

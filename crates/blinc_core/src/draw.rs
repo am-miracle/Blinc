@@ -1725,6 +1725,19 @@ pub trait DrawContext {
         0
     }
 
+    /// Union AABB (`[x, y, w, h]` in screen pixels, post-DPI) of every
+    /// background-batch primitive in `start..end`. Used by the
+    /// compositor v2 damage-rect path: it captures the on-screen
+    /// rectangle a motion-bound subtree occupied at last paint so the
+    /// fast path can union it with the new AABB and re-render just
+    /// the damaged region of the static cache.
+    ///
+    /// Returns `None` if `start >= end`, the range is out of bounds,
+    /// or the context doesn't track primitives (mock test contexts).
+    fn bg_primitive_aabb(&self, _start: usize, _end: usize) -> Option<[f32; 4]> {
+        None
+    }
+
     /// Snapshot the intersected AABB of all currently-pushed clips,
     /// in *screen coordinates* (i.e. each `push_clip` entry already
     /// transformed by the affine that was on the stack at the time

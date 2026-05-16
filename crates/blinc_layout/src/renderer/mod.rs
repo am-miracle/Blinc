@@ -344,6 +344,17 @@ pub struct CompositeBindingMeta {
     /// Centre point (logical pixels, absolute) used for scale and
     /// rotation. Same coordinate frame as `last_translate`.
     pub centre: (f32, f32),
+    /// Union AABB of every primitive in `primitive_range` at last
+    /// paint, in screen pixels (post-DPI). `None` if the range was
+    /// empty or the context didn't track primitive bounds.
+    ///
+    /// Used by the compositor v2 damage-rect path: the fast path
+    /// reads this on each motion-binding tick, computes the new AABB
+    /// (translate / scale / rotation deltas applied), and re-renders
+    /// `union(last_screen_aabb, new_aabb)` of the static cache instead
+    /// of invalidating the whole layer. Lets motion-bound elements
+    /// move without forcing a full slow-path re-paint every frame.
+    pub last_screen_aabb: Option<[f32; 4]>,
 }
 
 /// RenderTree - bridges layout computation and rendering

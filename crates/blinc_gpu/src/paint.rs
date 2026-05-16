@@ -1530,6 +1530,31 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         self.batch.primitives.len()
     }
 
+    fn bg_primitive_aabb(&self, start: usize, end: usize) -> Option<[f32; 4]> {
+        if start >= end || end > self.batch.primitives.len() {
+            return None;
+        }
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for p in &self.batch.primitives[start..end] {
+            let [x, y, w, h] = p.bounds;
+            if w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x + w);
+            max_y = max_y.max(y + h);
+        }
+        if min_x.is_finite() && max_x > min_x && max_y > min_y {
+            Some([min_x, min_y, max_x - min_x, max_y - min_y])
+        } else {
+            None
+        }
+    }
+
     fn current_affine_elements(&self) -> [f32; 6] {
         self.current_affine().elements
     }

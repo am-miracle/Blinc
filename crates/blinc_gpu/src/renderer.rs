@@ -34,12 +34,12 @@ use crate::primitives::{
     Sdf3DUniform, SdfPipelineCategory, SdfVertexInstance, Uniforms, Viewport3D,
 };
 use crate::shaders::{
-    BLUR_SHADER, COLOR_MATRIX_SHADER, COMPOSITE_SHADER, DROP_SHADOW_SHADER, GLASS_DT_SHADER,
-    GLASS_SHADER, GLOW_SHADER, IMAGE_SHADER, LAYER_COMPOSITE_SHADER, MASK_IMAGE_SHADER,
-    MESH_DT_SHADER, PATH_SHADER, SDF_3D_DT_SHADER, SDF_3D_SHADER, SDF_3D_VB_SHADER,
-    SDF_CORE_DT_SHADER, SDF_CORE_SHADER, SDF_CORE_VB_SHADER, SDF_NOTCH_DT_SHADER, SDF_NOTCH_SHADER,
-    SDF_NOTCH_VB_SHADER, SDF_SHADER, SDF_SHADOW_DT_SHADER, SDF_SHADOW_SHADER, SDF_SHADOW_VB_SHADER,
-    SIMPLE_GLASS_DT_SHADER, SIMPLE_GLASS_SHADER, TEXT_DT_SHADER, TEXT_SHADER,
+    BLUR_SHADER, CLEAR_QUAD_SHADER, COLOR_MATRIX_SHADER, COMPOSITE_SHADER, DROP_SHADOW_SHADER,
+    GLASS_DT_SHADER, GLASS_SHADER, GLOW_SHADER, IMAGE_SHADER, LAYER_COMPOSITE_SHADER,
+    MASK_IMAGE_SHADER, MESH_DT_SHADER, PATH_SHADER, SDF_3D_DT_SHADER, SDF_3D_SHADER,
+    SDF_3D_VB_SHADER, SDF_CORE_DT_SHADER, SDF_CORE_SHADER, SDF_CORE_VB_SHADER, SDF_NOTCH_DT_SHADER,
+    SDF_NOTCH_SHADER, SDF_NOTCH_VB_SHADER, SDF_SHADER, SDF_SHADOW_DT_SHADER, SDF_SHADOW_SHADER,
+    SDF_SHADOW_VB_SHADER, SIMPLE_GLASS_DT_SHADER, SIMPLE_GLASS_SHADER, TEXT_DT_SHADER, TEXT_SHADER,
 };
 
 fn env_u64(name: &str) -> Option<u64> {
@@ -190,6 +190,15 @@ impl std::fmt::Display for RendererError {
 }
 
 impl std::error::Error for RendererError {}
+
+/// Axis-aligned bounding box intersection test. Each rect is
+/// `[x, y, w, h]` (top-left origin, screen pixels). Returns true when
+/// the rects overlap (zero-area overlap counts as no intersection).
+fn aabb_intersects(a: [f32; 4], b: [f32; 4]) -> bool {
+    let [ax, ay, aw, ah] = a;
+    let [bx, by, bw, bh] = b;
+    ax + aw > bx && bx + bw > ax && ay + ah > by && by + bh > ay
+}
 
 /// Configuration for creating a renderer
 #[derive(Clone, Debug)]
@@ -376,6 +385,13 @@ struct Pipelines {
     path_overlay: wgpu::RenderPipeline,
     /// Pipeline for layer composition (blend modes)
     layer_composite: wgpu::RenderPipeline,
+    /// Compositor v2 damage-rect scissored clear. Draws a fullscreen
+    /// triangle with REPLACE blend writing `(0,0,0,0)`; combined with
+    /// `set_scissor_rect`, only the damaged region is zeroed. Used by
+    /// `render_static_layer_damaged` to clear ghost pixels from the
+    /// motion-bound element's previous position before the SDF
+    /// dispatch re-paints over it.
+    clear_quad: wgpu::RenderPipeline,
 }
 
 /// Effect pipelines lazily created on first use to reduce GPU memory for simple apps
@@ -2102,6 +2118,11 @@ impl GpuRenderer {
             source: wgpu::ShaderSource::Wgsl(LAYER_COMPOSITE_SHADER.into()),
         });
 
+        let clear_quad_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Clear Quad Shader"),
+            source: wgpu::ShaderSource::Wgsl(CLEAR_QUAD_SHADER.into()),
+        });
+
         // Split SDF shaders — specialized pipelines for each primitive category.
         // Three tiers:
         //   Tier 1 (full): Storage buffers in VS + FS — sdf_*.wgsl
@@ -2172,6 +2193,7 @@ impl GpuRenderer {
             &composite_shader,
             &path_shader,
             &layer_composite_shader,
+            &clear_quad_shader,
             texture_format,
             config.sample_count,
             has_vertex_storage,
@@ -3063,6 +3085,7 @@ impl GpuRenderer {
         composite_shader: &wgpu::ShaderModule,
         path_shader: &wgpu::ShaderModule,
         layer_composite_shader: &wgpu::ShaderModule,
+        clear_quad_shader: &wgpu::ShaderModule,
         texture_format: wgpu::TextureFormat,
         sample_count: u32,
         has_vertex_storage: bool,
@@ -3524,6 +3547,54 @@ impl GpuRenderer {
             cache: None,
         });
 
+        // Compositor v2 scissored clear. No bindings, no vertex
+        // buffer — the shader generates a fullscreen triangle from
+        // `vertex_index`. REPLACE blend so the fragment's
+        // `(0,0,0,0)` output fully overwrites the attachment inside
+        // the active scissor rect.
+        let clear_quad_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Clear Quad Pipeline Layout"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+        let clear_quad = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Clear Quad Pipeline"),
+            layout: Some(&clear_quad_layout),
+            vertex: wgpu::VertexState {
+                module: clear_quad_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: clear_quad_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: texture_format,
+                    // REPLACE blend: fragment output replaces dest
+                    // verbatim. No multiplicative compositing — we
+                    // want the cleared pixels to be exactly
+                    // (0,0,0,0), not blended with whatever was there.
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: overlay_multisample_state,
+            multiview: None,
+            cache: None,
+        });
+
         Pipelines {
             sdf,
             sdf_overlay,
@@ -3542,6 +3613,7 @@ impl GpuRenderer {
             path,
             path_overlay,
             layer_composite,
+            clear_quad,
         }
     }
 
@@ -4504,6 +4576,205 @@ impl GpuRenderer {
         if let Some(layer) = self.static_layer.as_mut() {
             layer.valid = true;
         }
+    }
+
+    /// Re-render the static layer only within `damage_rects`. Pixels
+    /// outside the union are untouched; pixels inside are cleared and
+    /// re-drawn from every primitive in `batch` whose AABB intersects
+    /// the union. The static layer stays `valid` afterwards.
+    ///
+    /// Returns `false` when the cache isn't valid or layer effects /
+    /// non-SDF content is present in the batch — caller should fall
+    /// back to a full repaint. Damage-rect re-render currently only
+    /// supports the plain SDF pipeline (no layer commands, no paths,
+    /// no 3D viewports). Adding those is straightforward but out of
+    /// scope for the first Phase-3 cut.
+    pub fn render_static_layer_damaged(
+        &mut self,
+        damage_rects: &[[f32; 4]],
+        batch: &PrimitiveBatch,
+    ) -> bool {
+        let Some(layer) = self.static_layer.as_ref() else {
+            return false;
+        };
+        if !layer.valid {
+            return false;
+        }
+        // Bail to full repaint when the batch has anything the
+        // simple SDF path can't handle inside a scissor. The slow
+        // path will still produce the correct output; we just lose
+        // the damage-rect speedup for this frame.
+        if !batch.layer_commands.is_empty()
+            || !batch.paths.vertices.is_empty()
+            || !batch.viewports_3d.is_empty()
+            || !batch.particle_viewports.is_empty()
+        {
+            return false;
+        }
+        if damage_rects.is_empty() {
+            // No damage — caller can skip the dispatch entirely.
+            return true;
+        }
+
+        let view = layer.view.clone();
+        let layer_width = layer.width as f32;
+        let layer_height = layer.height as f32;
+
+        // Union all damage rects into a single scissor (wgpu only
+        // supports one scissor per pass). Clamp to layer extent —
+        // a damage rect can extend past the cache when a binding's
+        // primitives moved off-screen.
+        //
+        // Pad outward by `AABB_PAD` pixels. SDF primitives anti-
+        // alias at the edges of their `bounds`; without padding,
+        // 1-pixel AA pixels at the trailing edge of the moved
+        // element stay in the cache from the previous frame and
+        // produce a faint "vibrating" outline as the bounds round
+        // sub-pixel positions differently each frame. 4 px is well
+        // over the AA distance for typical UI font sizes and
+        // corner radii (~1-2 px) while still keeping the damage
+        // rect proportional to the actual movement.
+        const AABB_PAD: f32 = 4.0;
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for [x, y, w, h] in damage_rects.iter().copied() {
+            if w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+            min_x = min_x.min(x - AABB_PAD);
+            min_y = min_y.min(y - AABB_PAD);
+            max_x = max_x.max(x + w + AABB_PAD);
+            max_y = max_y.max(y + h + AABB_PAD);
+        }
+        if !min_x.is_finite() || max_x <= min_x || max_y <= min_y {
+            return true;
+        }
+        let scissor_x = min_x.max(0.0).floor() as u32;
+        let scissor_y = min_y.max(0.0).floor() as u32;
+        let scissor_right = max_x.min(layer_width).ceil() as u32;
+        let scissor_bottom = max_y.min(layer_height).ceil() as u32;
+        if scissor_right <= scissor_x || scissor_bottom <= scissor_y {
+            return true;
+        }
+        let scissor_w = scissor_right - scissor_x;
+        let scissor_h = scissor_bottom - scissor_y;
+
+        // Cull primitives to only those intersecting the union rect.
+        // The static cache outside the scissor is preserved by
+        // `LoadOp::Load`, so we skip every prim whose AABB doesn't
+        // touch the damaged region. Keeps the upload + draw cost
+        // proportional to the damage, not the whole scene.
+        let scissor_rect = [
+            scissor_x as f32,
+            scissor_y as f32,
+            scissor_w as f32,
+            scissor_h as f32,
+        ];
+        let visible: Vec<GpuPrimitive> = batch
+            .primitives
+            .iter()
+            .filter(|p| {
+                let [x, y, w, h] = p.bounds;
+                if w <= 0.0 || h <= 0.0 {
+                    return false;
+                }
+                aabb_intersects(scissor_rect, [x, y, w, h])
+            })
+            .copied()
+            .collect();
+
+        // Update uniforms (viewport is the cache extent, not the
+        // window — primitives were emitted into cache pixel space).
+        let uniforms = Uniforms {
+            viewport_size: [layer_width, layer_height],
+            _padding: [0.0; 2],
+        };
+        self.queue
+            .write_buffer(&self.buffers.uniforms, 0, bytemuck::bytes_of(&uniforms));
+
+        let sdf_ranges = if visible.is_empty() {
+            SdfPrimitiveRanges::default()
+        } else {
+            self.upload_sorted_primitives(&visible)
+        };
+        self.update_aux_data_buffer(batch);
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("blinc-damage-rect-encoder"),
+            });
+
+        // Two-pass damage-rect re-render. wgpu's `LoadOp::Clear`
+        // ignores `set_scissor_rect`, so we can't clear-inside-
+        // scissor in one pass. Instead:
+        //
+        //   Pass 1: `LoadOp::Load` + scissor + clear-quad pipeline.
+        //           The clear-quad shader generates a fullscreen
+        //           triangle that writes `(0,0,0,0)` with REPLACE
+        //           blend, but the active scissor confines the
+        //           writes to the damaged region. Result: the
+        //           damaged region is genuinely zeroed; pixels
+        //           outside the scissor are untouched.
+        //
+        //   Pass 2: `LoadOp::Load` + scissor + SDF dispatch. All
+        //           primitives whose AABB intersects the union of
+        //           damage rects re-paint into the now-cleared
+        //           region in z-order. Outside-scissor pixels stay
+        //           as they were.
+        {
+            let mut clear_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blinc-damage-rect-clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            clear_pass.set_scissor_rect(scissor_x, scissor_y, scissor_w, scissor_h);
+            clear_pass.set_pipeline(&self.pipelines.clear_quad);
+            clear_pass.draw(0..3, 0..1);
+        }
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blinc-damage-rect-draw"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            render_pass.set_scissor_rect(scissor_x, scissor_y, scissor_w, scissor_h);
+            if !visible.is_empty() {
+                render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
+                Self::draw_split_sdf(
+                    &mut render_pass,
+                    &self.pipelines,
+                    &sdf_ranges,
+                    false,
+                    self.sdf_vb_buffer(),
+                );
+            }
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        true
     }
 
     /// `copy_texture_to_texture` the static-cache onto the supplied
