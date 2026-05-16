@@ -1263,6 +1263,55 @@ impl GpuRenderer {
         }
     }
 
+    /// Write only the given subranges of `primitives` to the GPU
+    /// storage buffer, leaving the rest as it was after the previous
+    /// upload. Used by the compositor fast path: when an animation
+    /// frame patched only the primitives covered by a handful of
+    /// motion-bound subtrees, we re-upload just those byte ranges
+    /// (each one `range.len() × sizeof::<GpuPrimitive>()` bytes) via
+    /// `queue.write_buffer(offset, slice)` instead of pushing the
+    /// whole batch.
+    ///
+    /// Caller guarantees:
+    ///  - `primitives` is the SAME-length view as what was uploaded
+    ///    on the previous full paint (no insertions / deletions).
+    ///  - Each range is in-bounds (`end <= primitives.len()`).
+    ///  - DT-mode (no storage buffers) is **not** in use — partial
+    ///    upload via `write_texture` isn't worth the complexity for
+    ///    a fallback path; fall back to the full
+    ///    `write_primitives_safe` if `has_storage_buffers` is false.
+    ///
+    /// Cost (cn_demo benchmark): full upload was ~100 KB / frame
+    /// (~150 µs of `queue.write_buffer` overhead). A typical fast-path
+    /// frame patches a single binding's range — for the
+    /// `cn::progress_animated` indicator that's <10 primitives or
+    /// ~2.5 KB / frame, putting the write closer to ~5 µs.
+    pub fn write_primitives_partial(
+        &self,
+        primitives: &[GpuPrimitive],
+        ranges: &[std::ops::Range<usize>],
+    ) {
+        if primitives.is_empty() || ranges.is_empty() || !self.has_storage_buffers {
+            return;
+        }
+        let stride = std::mem::size_of::<GpuPrimitive>() as u64;
+        let max_primitives = self.config.max_primitives;
+        for range in ranges {
+            // Clip to the same capacity bounds `write_primitives_safe`
+            // uses for the full upload — keeps both paths consistent
+            // when an app accidentally over-emits.
+            let end = range.end.min(primitives.len()).min(max_primitives);
+            if range.start >= end {
+                continue;
+            }
+            let slice = &primitives[range.start..end];
+            let bytes = bytemuck::cast_slice::<GpuPrimitive, u8>(slice);
+            let offset_bytes = (range.start as u64) * stride;
+            self.queue
+                .write_buffer(&self.buffers.primitives, offset_bytes, bytes);
+        }
+    }
+
     /// Safely write primitives to buffer, truncating if necessary to prevent overflow
     fn write_primitives_safe(&self, primitives: &[GpuPrimitive]) {
         if primitives.is_empty() {
