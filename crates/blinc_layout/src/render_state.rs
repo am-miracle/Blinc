@@ -418,9 +418,20 @@ impl CssAnimationStore {
         self.animations.values().any(|a| a.is_playing)
     }
 
-    /// Check if there are any active CSS transitions
+    /// Check if there are any *playing* CSS transitions.
+    ///
+    /// Completed transitions intentionally stay in `self.transitions`
+    /// so the same-target guard in `detect_and_start_transitions`
+    /// can match against them (avoids endless restart loops on
+    /// repeat hover styles). Checking `!is_empty()` here would mean
+    /// the redraw / cache-invalidation chain fires forever after
+    /// the first transition completes — observed in
+    /// `image_css_demo`: hovering a `mask-image` transition pinned
+    /// CPU at ~100 % indefinitely after the cursor moved away.
+    /// Match `has_active_animations` and gate on the `is_playing`
+    /// flag instead.
     pub fn has_active_transitions(&self) -> bool {
-        !self.transitions.is_empty()
+        self.transitions.values().any(|t| t.is_playing)
     }
 }
 
