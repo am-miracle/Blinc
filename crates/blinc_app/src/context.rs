@@ -4628,6 +4628,27 @@ impl RenderContext {
     ) -> Result<()> {
         self.renderer.ensure_static_layer(width, height);
 
+        // If any motion binding is mid-flight the static-layer cache
+        // is stale this frame — its primitives encode the binding's
+        // position at the last full paint, not the spring's current
+        // value. Invalidate the cache so the compositor takes the
+        // full-paint branch and rebuilds it.
+        //
+        // Canvases don't trigger this because their content is
+        // overlaid each frame; only non-canvas binding-bound subtrees
+        // (the cn_demo `progress_animated` indicator's translate_x
+        // is the canonical case) need to invalidate. The simplest
+        // correct rule is "any binding animating → invalidate";
+        // smarter mappings (motion-bound subtrees move to the
+        // overlay batch) can land later without changing call sites.
+        let bindings_animating = tree
+            .motion_bindings_map()
+            .values()
+            .any(|b| b.is_any_animating());
+        if bindings_animating {
+            self.renderer.invalidate_static_layer();
+        }
+
         // Fast path: cache valid AND caller is fine with reusing it.
         // Skip the entire walker / dispatch chain — just composite.
         let use_fast = try_fast_paint
