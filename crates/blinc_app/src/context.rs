@@ -532,6 +532,32 @@ impl RenderContext {
                 None => continue,
             };
 
+            // Is this binding mid-flight? Mirrors `walker_motion_bindings_ref.
+            // is_any_animating()`. A binding can be active even if no value
+            // actually moved this frame — e.g. the very first tick after a
+            // fresh `set_target` has `dt ≈ 0` (because `set_spring_target`
+            // resets `last_frame = now`), so the spring sits at its old value
+            // for one frame before integration starts producing real
+            // displacement. Without flagging visible_anim_active on those
+            // frames, Phase 5's redraw chain dies and the animation freezes
+            // until something else wakes the loop.
+            if bindings_for_node.is_any_animating() {
+                any_binding_active = true;
+            }
+
+            // Bail on `rotation_timeline` (spinners). The fast path
+            // doesn't patch rotation today — neither the spring
+            // version nor the timeline-driven version — so a frame
+            // where a spinner is mid-rotation would render its
+            // primitives at a stale rotation. Cheaper to route the
+            // whole frame to the full walker than to leave the
+            // spinner frozen between fast-path frames.
+            if let Some(ref rt) = bindings_for_node.rotation_timeline {
+                if rt.timeline.lock().is_ok_and(|g| g.is_playing()) {
+                    return false;
+                }
+            }
+
             // ----------------------------------------------------------------
             // Translate: read new (tx, ty), compute pixel-space delta,
             // shift every primitive's `bounds.xy` by it.
