@@ -1365,9 +1365,21 @@ impl RenderTree {
         //  - Centre is the absolute (post-parent-offset) midpoint of
         //    the element, in DPI-pre-scale logical pixels. The
         //    consumer scales by the renderer's DPI factor.
-        if let Some(start) = composite_bg_start {
+        // Only record on the pass that actually emits the node's
+        // primitives — i.e. the pass whose `target_layer` matches
+        // the node's `effective_layer`. The walker is invoked three
+        // times per frame (Background / Glass / Foreground); on the
+        // two non-matching passes the subtree walks but emits
+        // nothing, so the captured `(start..end)` would be an empty
+        // range. Without this guard, the BG pass's correct range
+        // gets clobbered by Glass / Foreground's empty range when
+        // `insert` overwrites — the fast path then iterates zero
+        // primitives, patches nothing, and the bar appears frozen.
+        if let Some(start) = composite_bg_start
+            .filter(|_| effective_layer == target_layer)
+        {
             let end = ctx.bg_primitive_count();
-            if end >= start {
+            if end > start {
                 let (binding_tx, binding_ty) = motion_bindings_ref
                     .map(|b| {
                         let tx = b
