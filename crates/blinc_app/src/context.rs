@@ -4841,11 +4841,19 @@ impl RenderContext {
         // motion container stays frozen at its entry state — pages
         // invisible, motion-wrapped overlays never appearing.
         //
-        // Same cache-invalidation posture as `bindings_animating`:
-        // mid-flight = stale cache; settle = next frame goes
-        // through the full walker once, then steady-state.
+        // Same posture for visual / layout animations
+        // (`animate_bounds`, `animate_layout` — accordions,
+        // FLIP-style position transitions). Their per-frame
+        // re-layout shifts text positions, but apply_binding_deltas
+        // doesn't touch them and the cached primitives + text vecs
+        // stay frozen. Symptom on the accordion: the
+        // ANIMATION proceeds, but the text layer doesn't follow —
+        // labels stay at last-collect positions while the bordered
+        // container around them slides.
         let fsm_motion_active = render_state.has_active_motions();
-        if bindings_animating || fsm_motion_active {
+        let visual_animations_active = tree.has_active_visual_animations()
+            || tree.has_active_layout_animations();
+        if bindings_animating || fsm_motion_active || visual_animations_active {
             self.renderer.invalidate_static_layer();
         }
 
@@ -4922,19 +4930,24 @@ impl RenderContext {
         // nodes. Falls back to the full walker only when the cache
         // is genuinely invalid (rebuild, layout change).
         //
-        // FSM motion is the exception. `apply_binding_deltas` only
-        // patches `motion_bindings` primitive ranges — it has no
-        // representation for `motion_values` (scale / opacity /
-        // translate from a `motion().fade_in()` or
-        // PageTransition::scale() FSM). On the fast path, the
-        // cached primitives stay frozen at the FSM's initial state
-        // while the parallel text/SVG/image collection re-emits at
-        // the CURRENT FSM state — the resulting mismatch is what
-        // produced the distorted text we just shipped. Force the
-        // walker through whenever `has_active_motions()` reports a
-        // live FSM so primitives and text both reflect the same
-        // motion_values this frame.
-        let inner_try_fast = self.cached_bg_batch.is_some() && !fsm_motion_active;
+        // FSM motion + visual / layout animations are exceptions to
+        // the fast path. `apply_binding_deltas` only patches
+        // `motion_bindings` primitive ranges — it has no
+        // representation for `motion_values` (motion() enter/exit,
+        // PageTransition::scale()) or for animated bounds /
+        // layout transitions (accordion's `animate_bounds`,
+        // FLIP-style position transitions). On the fast path the
+        // cached primitives stay frozen at frame-1 values for
+        // these systems while the parallel text/SVG/image
+        // collection re-emits at current-frame values — the
+        // resulting mismatch is what produced the distorted text /
+        // labels-not-following-accordion artifacts. Force the
+        // walker through whenever any of these systems are live so
+        // primitives and text both reflect the same animation
+        // state this frame.
+        let inner_try_fast = self.cached_bg_batch.is_some()
+            && !fsm_motion_active
+            && !visual_animations_active;
         let result = self.render_tree_with_motion_opt(
             tree,
             render_state,
@@ -5148,6 +5161,8 @@ impl RenderContext {
         // pull-to-refresh-style drag flows that wouldn't otherwise
         // trip `is_any_animating`.
         let any_motion_active = render_state.has_active_motions()
+            || tree.has_active_visual_animations()
+            || tree.has_active_layout_animations()
             || tree.motion_bindings_map().values().any(|b| b.is_any_animating())
             || {
                 let bindings_table = tree.motion_bindings_map();
