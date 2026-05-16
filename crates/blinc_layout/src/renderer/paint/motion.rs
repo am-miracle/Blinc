@@ -1447,15 +1447,14 @@ impl RenderTree {
                     })
                     .unwrap_or((1.0, 1.0));
                 let last_scale = (state_sx * binding_scale_xy.0, state_sy * binding_scale_xy.1);
+                // Use the same `get_rotation()` accessor the walker
+                // and fast path both consume, so timeline-driven
+                // rotations (spinners) get a non-zero baseline here
+                // instead of falling back to 0 and producing a
+                // spurious "180° jump" on the next fast-path frame.
                 let last_rotation_rad = motion_bindings_ref
-                    .map(|b| {
-                        let deg = b
-                            .rotation
-                            .as_ref()
-                            .and_then(|v| v.lock().ok().map(|g| g.get()))
-                            .unwrap_or(0.0);
-                        deg.to_radians()
-                    })
+                    .and_then(|b| b.get_rotation())
+                    .map(|deg| deg.to_radians())
                     .unwrap_or(0.0);
                 let last_opacity = node_motion_opacity;
                 let centre = (

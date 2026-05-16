@@ -545,19 +545,6 @@ impl RenderContext {
                 any_binding_active = true;
             }
 
-            // Bail on `rotation_timeline` (spinners). The fast path
-            // doesn't patch rotation today — neither the spring
-            // version nor the timeline-driven version — so a frame
-            // where a spinner is mid-rotation would render its
-            // primitives at a stale rotation. Cheaper to route the
-            // whole frame to the full walker than to leave the
-            // spinner frozen between fast-path frames.
-            if let Some(ref rt) = bindings_for_node.rotation_timeline {
-                if rt.timeline.lock().is_ok_and(|g| g.is_playing()) {
-                    return false;
-                }
-            }
-
             // ----------------------------------------------------------------
             // Translate: read new (tx, ty), compute pixel-space delta,
             // shift every primitive's `bounds.xy` by it.
@@ -683,26 +670,101 @@ impl RenderContext {
             }
 
             // ----------------------------------------------------------------
-            // Rotation: not yet handled by the fast path.
+            // Rotation: spring `binding.rotation` (degrees) plus
+            // timeline-driven `rotation_timeline` (also degrees) both
+            // accumulate via `MotionBindings::get_rotation()`. Apply
+            // the delta vs the rotation baked into the cached batch
+            // by composing onto each primitive's existing rotation
+            // sin/cos and local_affine, and by rotating every
+            // primitive's centre around the binding centre.
             //
-            // Rotation around the binding centre would compose into each
-            // primitive's `local_affine` (2×2 rotation matrix) AND require
-            // shifting `bounds` around the centre. The composition with
-            // any CSS-transform that already populated `local_affine`
-            // makes the math non-trivial — deferred until we either
-            // (a) reserve `local_affine` exclusively for motion or
-            // (b) split into separate "css_affine" + "motion_affine"
-            // shader-side. Until then, any rotation change bails to
-            // the full paint path.
+            // The walker applies binding rotation as
+            // `T(c) * R(θ) * T(-c)` *after* any parent CSS transform
+            // had already populated the transform stack, so the
+            // baked-in rotation/affine values are
+            //     parent_affine * R(old_θ)
+            // and each primitive's centre is in physical pixels.
+            // Composing a *delta* `δ = new_θ − old_θ` as a rotation
+            // around the SAME binding centre updates both correctly:
+            //
+            //   new_total = parent_affine * R(new_θ)
+            //             = parent_affine * R(old_θ) * R(δ)
+            //
+            // and the centres pivot the same way:
+            //
+            //   p' − c = R(δ) · (p − c)
+            //
+            // which is what the loop below does in two passes (one
+            // for the rotation/local_affine fields, one for the
+            // centre / `bounds.xy`). Independent of any parent CSS
+            // rotation that was on the stack at paint time — the
+            // delta application doesn't depend on knowing it.
             // ----------------------------------------------------------------
-            let binding_rotation_deg = bindings_for_node
-                .rotation
-                .as_ref()
-                .and_then(|v| v.lock().ok().map(|g| g.get()))
+            let new_rotation_rad = bindings_for_node
+                .get_rotation()
+                .map(|deg| deg.to_radians())
                 .unwrap_or(0.0);
-            let new_rotation_rad = binding_rotation_deg.to_radians();
-            if (new_rotation_rad - meta.last_rotation_rad).abs() > f32::EPSILON {
-                return false;
+            let drot = new_rotation_rad - meta.last_rotation_rad;
+            if drot.abs() > f32::EPSILON {
+                let (sin_d, cos_d) = drot.sin_cos();
+                let cx_phys = meta.centre.0 * scale;
+                let cy_phys = meta.centre.1 * scale;
+                if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                    for p in prims.iter_mut() {
+                        // Rotate the primitive's centre around the
+                        // binding centre by `δ`. `p.bounds` is the
+                        // axis-aligned AABB at the (DPI-scaled)
+                        // centre; the GPU vertex shader rebuilds the
+                        // post-rotation AABB at draw time off the
+                        // rotation sin/cos fields, so we only need
+                        // the centre to track the pivot.
+                        let cx = p.bounds[0] + p.bounds[2] * 0.5;
+                        let cy = p.bounds[1] + p.bounds[3] * 0.5;
+                        let dx = cx - cx_phys;
+                        let dy = cy - cy_phys;
+                        let new_dx = dx * cos_d - dy * sin_d;
+                        let new_dy = dx * sin_d + dy * cos_d;
+                        let new_cx = cx_phys + new_dx;
+                        let new_cy = cy_phys + new_dy;
+                        p.bounds[0] = new_cx - p.bounds[2] * 0.5;
+                        p.bounds[1] = new_cy - p.bounds[3] * 0.5;
+
+                        // Compose δ onto the stored rotation
+                        // `[sin α, cos α, sin_ry, cos_ry]`. Working
+                        // in (sin, cos) avoids any atan2 round-trip.
+                        // `α + δ` keeps the Y-rotation slots intact.
+                        let sin_a = p.rotation[0];
+                        let cos_a = p.rotation[1];
+                        p.rotation[0] = sin_a * cos_d + cos_a * sin_d;
+                        p.rotation[1] = cos_a * cos_d - sin_a * sin_d;
+
+                        // Compose δ onto local_affine. The walker
+                        // builds local_affine as the parent affine
+                        // post-multiplied by every transform on the
+                        // stack, so the binding rotation that's
+                        // baked in is in the same position (rightmost
+                        // factor). To advance the rotation by `δ`,
+                        // post-multiply by R(δ):
+                        //
+                        //   new = old · R(δ)
+                        //
+                        // Column 0 of new = R(δ)ᵀ applied to col 0
+                        // of old, etc., which in flat [a, b, c, d]
+                        // layout is the formula below. Works for
+                        // any old that's `parent · R(α)` — the parent
+                        // factor passes through unchanged.
+                        let a = p.local_affine[0];
+                        let b = p.local_affine[1];
+                        let c = p.local_affine[2];
+                        let d = p.local_affine[3];
+                        p.local_affine[0] = a * cos_d + c * sin_d;
+                        p.local_affine[1] = b * cos_d + d * sin_d;
+                        p.local_affine[2] = -a * sin_d + c * cos_d;
+                        p.local_affine[3] = -b * sin_d + d * cos_d;
+                    }
+                }
+                meta.last_rotation_rad = new_rotation_rad;
+                any_binding_active = true;
             }
         }
         // Authoritatively write `visible_anim_active` from what we
