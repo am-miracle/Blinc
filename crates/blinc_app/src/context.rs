@@ -4775,19 +4775,60 @@ impl RenderContext {
                 .map(|g| (g.get() - g.target()).abs() > eps)
                 .unwrap_or(false)
         };
-        let bindings_animating = tree.motion_bindings_map().values().any(|b| {
-            value_far_from_target(&b.translate_x, VISIBLE_PIXEL_EPS)
-                || value_far_from_target(&b.translate_y, VISIBLE_PIXEL_EPS)
-                || value_far_from_target(&b.scale, 0.01)
-                || value_far_from_target(&b.scale_x, 0.01)
-                || value_far_from_target(&b.scale_y, 0.01)
-                || value_far_from_target(&b.rotation, VISIBLE_DEG_EPS)
-                || value_far_from_target(&b.opacity, 0.01)
-                || b.rotation_timeline
+        // Detect direct-write motion (`set_immediate`): the binding
+        // is at its target (so `is_any_animating` returns false and
+        // value_far_from_target won't fire) but its CURRENT value
+        // has drifted from the cache's `last_translate` /
+        // `last_opacity` snapshot. Compare against composite_bindings
+        // — the walker's record of what got baked into the cached
+        // primitive batch — for the bindings where mismatch
+        // visibly matters: translate and opacity. Scale / rotation
+        // also drift, but their resting value is already detected
+        // by `value_far_from_target` (any `set_immediate` to a
+        // value that differs from the binding's target would also
+        // re-target it, tripping the mid-flight gate). Keeping the
+        // drift check tight (just translate + opacity) avoids
+        // false positives that would pin CPU forever.
+        let direct_write_drift = {
+            let bindings_table = tree.motion_bindings_map();
+            tree.composite_bindings().iter().any(|(node, meta)| {
+                let Some(b) = bindings_table.get(node) else {
+                    return false;
+                };
+                let cx = b
+                    .translate_x
                     .as_ref()
-                    .and_then(|t| t.timeline.lock().ok())
-                    .is_some_and(|g| g.is_playing())
-        });
+                    .and_then(|v| v.lock().ok())
+                    .map(|g| g.get())
+                    .unwrap_or(0.0);
+                let cy = b
+                    .translate_y
+                    .as_ref()
+                    .and_then(|v| v.lock().ok())
+                    .map(|g| g.get())
+                    .unwrap_or(0.0);
+                if (cx - meta.last_translate.0).abs() > VISIBLE_PIXEL_EPS
+                    || (cy - meta.last_translate.1).abs() > VISIBLE_PIXEL_EPS
+                {
+                    return true;
+                }
+                false
+            })
+        };
+        let bindings_animating = direct_write_drift
+            || tree.motion_bindings_map().values().any(|b| {
+                value_far_from_target(&b.translate_x, VISIBLE_PIXEL_EPS)
+                    || value_far_from_target(&b.translate_y, VISIBLE_PIXEL_EPS)
+                    || value_far_from_target(&b.scale, 0.01)
+                    || value_far_from_target(&b.scale_x, 0.01)
+                    || value_far_from_target(&b.scale_y, 0.01)
+                    || value_far_from_target(&b.rotation, VISIBLE_DEG_EPS)
+                    || value_far_from_target(&b.opacity, 0.01)
+                    || b.rotation_timeline
+                        .as_ref()
+                        .and_then(|t| t.timeline.lock().ok())
+                        .is_some_and(|g| g.is_playing())
+            });
         // FSM-driven motion (motion()'s enter / exit, e.g.
         // PageTransition::scale() on a router page) advances motion
         // values per frame via render_state.motion_values, but
@@ -5097,8 +5138,50 @@ impl RenderContext {
         // any motion source is live. Same cost posture as the
         // walker re-collect on a full paint, but cheap relative to
         // a walker re-run.
+        //
+        // Also catch direct mutations via `set_immediate` — those
+        // remove the underlying spring so `is_any_animating()`
+        // returns false, but the binding's current value has
+        // diverged from the cached primitive snapshot. Comparing
+        // current vs `composite_bindings`' `last_translate` /
+        // `last_scale` / `last_rotation` / `last_opacity` catches
+        // pull-to-refresh-style drag flows that wouldn't otherwise
+        // trip `is_any_animating`.
         let any_motion_active = render_state.has_active_motions()
-            || tree.motion_bindings_map().values().any(|b| b.is_any_animating());
+            || tree.motion_bindings_map().values().any(|b| b.is_any_animating())
+            || {
+                let bindings_table = tree.motion_bindings_map();
+                tree.composite_bindings().iter().any(|(node, meta)| {
+                    let Some(b) = bindings_table.get(node) else {
+                        return false;
+                    };
+                    let cx = b
+                        .translate_x
+                        .as_ref()
+                        .and_then(|v| v.lock().ok())
+                        .map(|g| g.get())
+                        .unwrap_or(0.0);
+                    let cy = b
+                        .translate_y
+                        .as_ref()
+                        .and_then(|v| v.lock().ok())
+                        .map(|g| g.get())
+                        .unwrap_or(0.0);
+                    if (cx - meta.last_translate.0).abs() > 0.5
+                        || (cy - meta.last_translate.1).abs() > 0.5
+                    {
+                        return true;
+                    }
+                    if let Some(ref v) = b.opacity {
+                        if let Ok(g) = v.lock() {
+                            if (g.get() - meta.last_opacity).abs() > 0.01 {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                })
+            };
         let cache_hit = used_fast_paint
             && !any_motion_active
             && self.cached_texts.is_some()
