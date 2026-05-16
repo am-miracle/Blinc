@@ -539,10 +539,21 @@ pub fn motion() -> Motion {
         style: Style {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
-            // Default to filling parent container (acts as transparent wrapper)
+            // Default to filling parent container (acts as transparent
+            // wrapper). Both width and height are `Percent(100%)` so
+            // motion takes the parent's bounds in both flex AND
+            // absolute-positioned parents — earlier `height: Auto +
+            // flex_grow: 1.0` only filled height in flex parents.
+            // Inside an `absolute()` parent the height collapsed to 0,
+            // which made motion's centred rotation pivot at top-left
+            // instead of the rotating subtree's centre, and rotated
+            // children disappeared off-screen (the spinner-arc bug).
+            // `flex_grow: 1.0` is preserved so motion still distributes
+            // remaining space inside a flex layout when sibling
+            // children have fixed sizes.
             size: taffy::Size {
                 width: taffy::Dimension::Percent(1.0),
-                height: taffy::Dimension::Auto,
+                height: taffy::Dimension::Percent(1.0),
             },
             flex_grow: 1.0,
             ..Style::default()

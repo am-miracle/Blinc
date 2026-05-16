@@ -2313,6 +2313,14 @@ impl Div {
         self
     }
 
+    /// Set the CSS `clip-path`. Restricts the element's painted
+    /// pixels to the supplied shape (polygon, circle, ellipse,
+    /// inset, rect, xywh, or SVG path).
+    pub fn clip_path(mut self, path: ClipPath) -> Self {
+        self.clip_path = Some(path);
+        self
+    }
+
     /// Set overflow to visible (default, content can extend beyond bounds)
     pub fn overflow_visible(mut self) -> Self {
         self.style.overflow.x = Overflow::Visible;

@@ -5077,11 +5077,26 @@ impl RenderContext {
         // must fall through to the walker so primitives + text
         // emit at the current animation state in lockstep.
         //
-        // `bindings_animating` (which includes the set_immediate
-        // drift case) doesn't require the walker — the patch
-        // covers it.
-        let inner_try_fast =
-            self.cached_bg_batch.is_some() && !animations_active;
+        // `bindings_animating` (which includes the
+        // set_immediate-drift case AND always-playing rotation
+        // timelines — the cn::spinner case) doesn't require the
+        // walker because apply_binding_deltas handles all four
+        // patchable channels. Splitting it out here is what keeps
+        // a rotating spinner at ~1 % CPU instead of forcing a
+        // full-tree re-walk every frame.
+        let needs_walker = render_state.has_active_motions()
+            || tree.has_active_visual_animations()
+            || tree.has_active_layout_animations()
+            || tree.has_active_flip_animations()
+            || {
+                let store = tree.css_anim_store();
+                let guard = store.lock();
+                match guard {
+                    Ok(g) => g.has_active_animations() || g.has_active_transitions(),
+                    Err(_) => false,
+                }
+            };
+        let inner_try_fast = self.cached_bg_batch.is_some() && !needs_walker;
         let result = self.render_tree_with_motion_opt(
             tree,
             render_state,
