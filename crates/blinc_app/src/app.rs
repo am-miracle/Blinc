@@ -233,6 +233,43 @@ impl BlincApp {
             .render_tree_with_motion(tree, render_state, width, height, target)
     }
 
+    /// Render with motion, with optional compositor fast-path.
+    /// Forwards to [`RenderContext::render_tree_with_motion_opt`].
+    /// `try_fast_paint=true` lets the renderer skip the paint walker
+    /// when only motion bindings changed this frame and the cached
+    /// `PrimitiveBatch` from the last full paint can be patched in
+    /// place.
+    pub fn render_tree_with_motion_opt(
+        &mut self,
+        tree: &RenderTree,
+        render_state: &blinc_layout::RenderState,
+        target: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        try_fast_paint: bool,
+    ) -> Result<()> {
+        self.ctx.render_tree_with_motion_opt(
+            tree,
+            render_state,
+            width,
+            height,
+            target,
+            try_fast_paint,
+        )
+    }
+
+    /// Whether the renderer has a usable cached `PrimitiveBatch` from
+    /// the most recent full paint. Phase-4 fast-path gate.
+    pub fn has_render_cache(&self) -> bool {
+        self.ctx.has_render_cache()
+    }
+
+    /// Drop the cached `PrimitiveBatch`. Forces the next paint to
+    /// take the full walker path and repopulate the cache.
+    pub fn invalidate_render_cache(&mut self) {
+        self.ctx.invalidate_render_cache();
+    }
+
     /// Set the alpha used when clearing the main render target.
     ///
     /// The desktop runner calls this before each window's render so that

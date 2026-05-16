@@ -4919,14 +4919,33 @@ impl WindowedApp {
                                 // the same BlincApp.
                                 blinc_app.set_clear_alpha(if ws.transparent { 0.0 } else { 1.0 });
 
+                                // Compositor fast-path eligibility: skip the
+                                // paint walker and use the cached `PrimitiveBatch`
+                                // (delta-patched by `apply_binding_deltas`) when
+                                // *nothing* but motion bindings could have
+                                // changed this frame. Conservative — any of
+                                // these signals trips the full path, which
+                                // re-runs the walker and repopulates the
+                                // cache cleanly. Without the cache the helper
+                                // returns `false` internally and the renderer
+                                // falls back to the walker anyway, so this
+                                // gate is for performance, not correctness.
+                                let try_fast_paint = !did_rebuild
+                                    && !ws.needs_relayout
+                                    && !css_active
+                                    && !scroll_animating
+                                    && ws.last_paint_time_ms != 0
+                                    && blinc_app.has_render_cache();
+
                                 // Render with motion animations
                                 // Use physical pixel dimensions for the render surface
-                                let result = blinc_app.render_tree_with_motion(
+                                let result = blinc_app.render_tree_with_motion_opt(
                                     tree,
                                     rs,
                                     &view,
                                     windowed_ctx.physical_width as u32,
                                     windowed_ctx.physical_height as u32,
+                                    try_fast_paint,
                                 );
                                 if let Err(e) = result {
                                     tracing::error!("Render error: {}", e);

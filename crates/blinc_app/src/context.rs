@@ -465,11 +465,7 @@ impl RenderContext {
     /// computed against the value just written to the GPU, not the
     /// original paint-time value (otherwise multiple fast-path
     /// frames in a row would double-apply).
-    pub fn apply_binding_deltas(
-        &mut self,
-        tree: &blinc_layout::RenderTree,
-        scale: f32,
-    ) -> bool {
+    pub fn apply_binding_deltas(&mut self, tree: &blinc_layout::RenderTree, scale: f32) -> bool {
         let batch = match self.cached_bg_batch.as_mut() {
             Some(b) => b,
             None => return false,
@@ -4223,6 +4219,32 @@ impl RenderContext {
         height: u32,
         target: &wgpu::TextureView,
     ) -> Result<()> {
+        self.render_tree_with_motion_opt(tree, render_state, width, height, target, false)
+    }
+
+    /// Render with motion. `try_fast_paint = true` lets the renderer
+    /// skip the paint walker when the cached `PrimitiveBatch` from a
+    /// previous full paint is valid and `apply_binding_deltas` can
+    /// patch it in place (i.e. only translate / opacity changed
+    /// this frame, no scale / rotation moved). On a successful
+    /// fast path: skip `tree.render_with_motion(&mut ctx, ...)`,
+    /// take the patched cached batch instead of `ctx.take_batch()`,
+    /// continue with the existing GPU pipeline.
+    ///
+    /// On any "fast path not applicable" signal (no cache,
+    /// `composite_bindings` requires scale/rotation that the helper
+    /// can't handle yet, fast path explicitly disabled) the function
+    /// falls back to the full walker path and repopulates the
+    /// cache.
+    pub fn render_tree_with_motion_opt(
+        &mut self,
+        tree: &RenderTree,
+        render_state: &blinc_layout::RenderState,
+        width: u32,
+        height: u32,
+        target: &wgpu::TextureView,
+        try_fast_paint: bool,
+    ) -> Result<()> {
         // Sub-Phase 4 timing — disabled by default; gated by
         // `RUST_LOG=blinc_app::frame_timing=trace` (same target the
         // outer per-phase instrumentation uses). Lets us see whether
@@ -4234,16 +4256,37 @@ impl RenderContext {
         // Get scale factor for HiDPI rendering
         let scale_factor = tree.scale_factor();
 
+        // Try the compositor fast path: if `apply_binding_deltas`
+        // succeeds, skip the paint walker entirely and reuse the
+        // patched cached batch. Falls through to the full walker
+        // path if any binding can't be delta-applied (scale or
+        // rotation moved, no cache, etc.).
+        let used_fast_paint = try_fast_paint && self.apply_binding_deltas(tree, scale_factor);
+
         // Create a single paint context for all layers with text rendering support
         let mut ctx =
             GpuPaintContext::with_text_context(width as f32, height as f32, &mut self.text_ctx);
 
-        // Render with motion animations applied (all layers to same context)
-        tree.render_with_motion(&mut ctx, render_state);
+        // Skip the walker on the fast path — the cached batch already
+        // contains the post-walker primitives, and `apply_binding_deltas`
+        // just shifted them to match this frame's spring values. On the
+        // full path, run the walker normally and use whatever it
+        // emitted into `ctx`.
+        if !used_fast_paint {
+            tree.render_with_motion(&mut ctx, render_state);
+        }
         let t_paint_walker = p4_start.elapsed();
 
-        // Take the batch (mutable so CSS-transformed text primitives can be added)
-        let mut batch = ctx.take_batch();
+        // Take the batch (mutable so CSS-transformed text primitives can be added).
+        // Fast path: clone the patched cache; full path: take from ctx.
+        let mut batch = if used_fast_paint {
+            self.cached_bg_batch
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| ctx.take_batch())
+        } else {
+            ctx.take_batch()
+        };
 
         // Take any 3D mesh draws captured via `ctx.draw_mesh_data(...)`
         // inside canvas callbacks. These are dispatched after all 2D
