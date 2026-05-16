@@ -4919,23 +4919,42 @@ impl WindowedApp {
                                 // the same BlincApp.
                                 blinc_app.set_clear_alpha(if ws.transparent { 0.0 } else { 1.0 });
 
-                                // Compositor fast-path eligibility: skip the
-                                // paint walker and use the cached `PrimitiveBatch`
-                                // (delta-patched by `apply_binding_deltas`) when
-                                // *nothing* but motion bindings could have
-                                // changed this frame. Conservative — any of
-                                // these signals trips the full path, which
-                                // re-runs the walker and repopulates the
-                                // cache cleanly. Without the cache the helper
-                                // returns `false` internally and the renderer
-                                // falls back to the walker anyway, so this
-                                // gate is for performance, not correctness.
-                                let try_fast_paint = !did_rebuild
-                                    && !ws.needs_relayout
-                                    && !css_active
-                                    && !scroll_animating
-                                    && ws.last_paint_time_ms != 0
-                                    && blinc_app.has_render_cache();
+                                // Compositor fast-path is currently disabled.
+                                //
+                                // The cache + delta-apply path works for
+                                // strictly motion-only frames, but several
+                                // sources of state change don't flow through
+                                // the current gate (`did_rebuild`,
+                                // `needs_relayout`, `css_active`,
+                                // `scroll_animating`):
+                                //
+                                //  - User-driven scroll (wheel / trackpad)
+                                //    changes scroll offsets without setting
+                                //    `scroll_animating` (that flag is just
+                                //    for physics decay). The fast path
+                                //    reuses the cached batch with stale
+                                //    child positions, the redraw chain
+                                //    stalls, and scroll appears frozen.
+                                //  - Hover / focus / IME state changes
+                                //    aren't tracked here either.
+                                //
+                                // Until the cache invalidation is plumbed
+                                // through every input source (or the cache
+                                // is reframed to patch scroll offsets the
+                                // same way it patches motion translates),
+                                // route through the full paint path. The
+                                // upstream pieces (`apply_binding_deltas`,
+                                // `write_primitives_partial`, the cache
+                                // itself, the binding metadata) stay in
+                                // place for the follow-up that wires it
+                                // properly.
+                                let try_fast_paint = false;
+                                let _ = (
+                                    did_rebuild,
+                                    css_active,
+                                    scroll_animating,
+                                    blinc_app.has_render_cache(),
+                                );
 
                                 // Render with motion animations
                                 // Use physical pixel dimensions for the render surface
