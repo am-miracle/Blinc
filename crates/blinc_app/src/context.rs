@@ -5006,8 +5006,69 @@ impl RenderContext {
         // `has_any_active_animation` path covers spring-mid-flight
         // and rotation_timeline but not set_immediate, so we keep
         // the drift signal alongside.
-        let animations_active = tree.has_any_active_animation(render_state);
-        if bindings_animating || animations_active {
+        // Non-motion-binding animation systems. We intentionally
+        // exclude `motion_bindings.is_any_animating()` here because
+        // `bindings_animating` above already covers motion bindings
+        // with the `VISIBLE_PIXEL_EPS` (0.5 px) threshold — the same
+        // threshold our composite path uses to decide whether to
+        // patch a binding's primitive range. `is_any_animating` on
+        // the spring uses a much tighter 0.01 px threshold, so a
+        // settled-but-not-officially-settled spring (between 0.01 px
+        // and 0.5 px) was triggering full cache invalidation every
+        // frame for sub-pixel oscillation that wasn't visible. The
+        // captured `cache_invalidation` trace showed this accounted
+        // for ~44 % of all invalidations during cn_demo — a
+        // 1:1-replaceable drop in slow-path frames.
+        let css_anim_active = {
+            let store = tree.css_anim_store();
+            let active = match store.lock() {
+                Ok(g) => g.has_active_animations() || g.has_active_transitions(),
+                Err(_) => false,
+            };
+            active
+        };
+        let other_animations_active = render_state.has_active_motions()
+            || tree.has_active_visual_animations()
+            || tree.has_active_layout_animations()
+            || tree.has_active_flip_animations()
+            || css_anim_active;
+        // Diagnostic: name the predicate that's invalidating the
+        // static cache. Pinpoints which animation source keeps the
+        // compositor slow path active in steady state. Off unless
+        // `RUST_LOG=blinc_app::cache_invalidation=trace` is set.
+        if tracing::enabled!(target: "blinc_app::cache_invalidation", tracing::Level::TRACE)
+            && (bindings_animating || other_animations_active)
+        {
+            let mb_anim = tree
+                .motion_bindings_map()
+                .values()
+                .any(|b| b.is_any_animating());
+            let fsm = render_state.has_active_motions();
+            let visual = tree.has_active_visual_animations();
+            let layout = tree.has_active_layout_animations();
+            let flip = tree.has_active_flip_animations();
+            let (css_anim, css_xition) = {
+                let store = tree.css_anim_store();
+                let g = store.lock();
+                match g {
+                    Ok(s) => (s.has_active_animations(), s.has_active_transitions()),
+                    Err(_) => (false, false),
+                }
+            };
+            tracing::trace!(
+                target: "blinc_app::cache_invalidation",
+                bindings = bindings_animating,
+                motion_binding_anim = mb_anim,
+                fsm,
+                visual,
+                layout,
+                flip,
+                css_anim,
+                css_xition,
+                "cache_invalidated"
+            );
+        }
+        if bindings_animating || other_animations_active {
             self.renderer.invalidate_static_layer();
             // Also invalidate the cached text / SVG / image vectors
             // up-front. Without this clear, the downstream
