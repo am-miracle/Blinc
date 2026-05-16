@@ -160,6 +160,15 @@ pub struct RenderContext {
     cursor_pos: [f32; 2],
     // Whether the last render contained @flow shader elements (triggers continuous redraw)
     has_active_flows: bool,
+    /// Whether any image emitted during the last render is in the
+    /// middle of its load-time fade-in (`fade_factor < 1.0`). Kept
+    /// separate from `has_active_flows` because the flows flag is
+    /// authoritatively reset to `!flow_elements.is_empty()` at the
+    /// end of dispatch — image-fade signals set in the middle of
+    /// dispatch get overwritten otherwise. Read by the windowed
+    /// runner's redraw-gate via `has_pending_image_fade()` so the
+    /// chain keeps firing until every image's fade completes.
+    has_pending_image_fade: bool,
     // Frame counter for periodic cache stats logging
     frame_count: u64,
     // Alpha value used when clearing the main render target. 1.0 for
@@ -437,6 +446,7 @@ impl RenderContext {
             scratch_images: Vec::with_capacity(32),   // Pre-allocate for image elements
             cursor_pos: [0.0; 2],
             has_active_flows: false,
+            has_pending_image_fade: false,
             frame_count: 0,
             clear_alpha: 1.0,
             cached_bg_batch: None,
@@ -1119,6 +1129,14 @@ impl RenderContext {
     /// Used to trigger continuous redraws for animated flow shaders.
     pub fn has_active_flows(&self) -> bool {
         self.has_active_flows
+    }
+
+    /// Whether any image emitted during the last render is mid load-time
+    /// fade-in. Read by the windowed runner's redraw-gate; without
+    /// this signal, the fade ticks invisibly and the user has to
+    /// jiggle the cursor for the image to finish fading in.
+    pub fn has_pending_image_fade(&self) -> bool {
+        self.has_pending_image_fade
     }
 
     /// Set the current render target texture for blend mode two-pass compositing.
@@ -2293,8 +2311,13 @@ impl RenderContext {
                 1.0
             };
             if fade_factor < 1.0 {
-                // Force continuous redraw while fade is in progress
-                self.has_active_flows = true;
+                // Force continuous redraw while fade is in progress.
+                // Uses the dedicated `has_pending_image_fade` flag
+                // because `has_active_flows` is authoritatively
+                // reset at the end of dispatch from the flow_elements
+                // count — setting it here would be silently
+                // overwritten by that reset.
+                self.has_pending_image_fade = true;
             }
 
             // If image is not loaded and has a placeholder, render placeholder
@@ -2542,7 +2565,9 @@ impl RenderContext {
                 1.0
             };
             if fade_factor < 1.0 {
-                self.has_active_flows = true;
+                // See sibling dispatch site for rationale: use the
+                // dedicated image-fade flag, not the flows flag.
+                self.has_pending_image_fade = true;
             }
 
             // Convert object_fit byte to ObjectFit enum
@@ -4762,6 +4787,12 @@ impl RenderContext {
         try_fast_paint: bool,
     ) -> Result<()> {
         self.renderer.ensure_static_layer(width, height);
+
+        // Reset the image-fade flag each frame. Re-armed below by
+        // any image dispatch where `fade_factor < 1.0`. Without
+        // the reset the flag latches once an image starts fading
+        // and the windowed redraw chain stays alive forever.
+        self.has_pending_image_fade = false;
 
         // ----- Compositor v2 Phase 1 verification trace -----
         // Compute the per-node animation status from the new model

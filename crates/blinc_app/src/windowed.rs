@@ -5247,6 +5247,16 @@ impl WindowedApp {
                             // @flow shaders using time/animation builtins need continuous redraws
                             let flow_needs_redraw = blinc_app.has_active_flows();
 
+                            // Image load-time fade-ins tick a per-image
+                            // `fade_factor` based on elapsed wall-time;
+                            // without firing redraw each frame the fade
+                            // sits frozen until the user wiggles the
+                            // mouse. Read the dedicated flag set in
+                            // `RenderContext` so flows-flag overwrites
+                            // can't clobber the signal mid-dispatch.
+                            let image_fade_needs_redraw =
+                                blinc_app.context().has_pending_image_fade();
+
                             // Log which signal(s) kept the redraw chain alive at trace
                             // level. Run with `RUST_LOG=blinc_app=trace` to see what's
                             // pinning a stuck-busy frame loop. Writes nothing in normal
@@ -5263,6 +5273,7 @@ impl WindowedApp {
                                 css = css_needs_redraw,
                                 pointer_query = pointer_query_active,
                                 flow = flow_needs_redraw,
+                                image_fade = image_fade_needs_redraw,
                                 "redraw chain"
                             );
 
@@ -5274,7 +5285,8 @@ impl WindowedApp {
                                 || theme_animating
                                 || css_needs_redraw
                                 || pointer_query_active
-                                || flow_needs_redraw;
+                                || flow_needs_redraw
+                                || image_fade_needs_redraw;
                             if any_redraw_signal {
                                 // Cursor-only: a focused text input is the
                                 // only redraw signal. Pace at the blink
