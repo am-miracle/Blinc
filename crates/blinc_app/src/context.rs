@@ -705,20 +705,28 @@ impl RenderContext {
                 return false;
             }
         }
-        // Tell Phase 5's redraw chain that there's still visible
-        // animation work to drive — without this, `visible_anim_active`
-        // stays at whatever value the previous full paint left it at
-        // (typically `false` once an animation has settled), so the
-        // chain gates out `needs_animation_redraw` and the next frame
-        // never fires. We only set `true` (not `false` if nothing
-        // moved) because other writers — the walker on a full paint,
-        // canvas / motion-FSM paths — also drive this flag, and we
-        // don't want to clear what they set. The walker resets to
-        // `false` at the top of every full paint, so a stale `true`
-        // can't keep the chain alive forever.
-        if any_binding_active {
-            tree.set_visible_anim_active(true);
-        }
+        // Authoritatively write `visible_anim_active` from what we
+        // observed this frame. The walker resets it to `false` at the
+        // top of every full paint and sets `true` only if it visits a
+        // node that's actually animating — but on the fast path the
+        // walker doesn't run. If we only set `true` (the previous
+        // posture), a `true` set by the last full paint stays latched
+        // forever once the spring settles: `is_any_animating()`
+        // returns false, no value moved, `any_binding_active` stays
+        // false, we leave the flag alone — but the flag is still
+        // `true` from before, so Phase 5's `needs_animation_redraw =
+        // raw && visible_anim` stays `true`, the chain keeps firing
+        // request_redraw, and CPU pins at vsync forever.
+        //
+        // Writing authoritatively works on the fast path because the
+        // gate (`try_fast_paint`) already requires no rebuild / no
+        // relayout / no CSS activity / no scroll — the only remaining
+        // dynamic source is motion bindings, which we track. Motion
+        // FSM (enter/exit) drives its own redraw signal
+        // (`needs_motion_redraw`) and Statefuls drive
+        // `has_visible_animating_statefuls`, so neither relies on
+        // `visible_anim_active` to stay alive.
+        tree.set_visible_anim_active(any_binding_active);
         true
     }
 

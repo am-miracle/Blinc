@@ -1314,6 +1314,23 @@ impl ScrollPhysics {
             }
         };
 
+        // Early-out when the requested target hasn't actually moved.
+        // `update_scrollbar_visibility` is invoked every time the
+        // scrollbar state machine ticks (`tick_scrollbar`'s FadingOut
+        // transition, the Scrolling auto-detect inside the same fn,
+        // wheel input, etc.). The previous code unconditionally
+        // dropped the old spring and added a new one — each `add_spring`
+        // calls `notify_active`, which fires the windowed runner's
+        // wake_callback and flips `frame_dirty=true`. The cn_demo
+        // scrollbar (Auto visibility) was rapidly toggling
+        // FadingOut↔Idle while the spring settled towards 0, calling
+        // this fn every frame, creating a new spring every frame,
+        // pinging the wake callback every frame, and pinning CPU at
+        // 30 % forever even though nothing visually changed once the
+        // opacity reached 0.
+        if (self.scrollbar_target_opacity - target).abs() < f32::EPSILON {
+            return;
+        }
         self.scrollbar_target_opacity = target;
 
         // Animate opacity using spring if scheduler available
