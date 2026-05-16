@@ -72,11 +72,6 @@ impl RenderTree {
         // rebuilds them on every full paint, the fast path consumes
         // them between full paints.
         self.canvas_paint_records.borrow_mut().clear();
-        // Motion-bound subtree records: same lifecycle. The walker
-        // populates these on every full paint when
-        // `skip_motion_drawing` is set; the overlay pass consumes
-        // them between paints.
-        self.motion_subtree_records.borrow_mut().clear();
 
         if let Some(root) = self.root {
             // Apply DPI scale factor if set (for HiDPI display support)
@@ -132,42 +127,6 @@ impl RenderTree {
                 ctx.pop_transform();
             }
         }
-    }
-
-    /// Public entry point for re-walking a single subtree (the
-    /// compositor's motion-bound overlay pass). Caller is
-    /// responsible for setting up the scratch `DrawContext` with the
-    /// correct ambient state — the affine that was on the stack
-    /// when the walker originally reached this subtree, plus
-    /// opacity, clip, and z-layer. After this call returns, the
-    /// scratch context's batch holds the primitives the subtree
-    /// emitted with current binding values applied.
-    ///
-    /// Internally a thin wrapper over `render_layer_with_motion`
-    /// with `parent_offset = (0, 0)`. The walker's bounds-lookup
-    /// for the subtree root then returns the node's
-    /// local-coordinate bounds (no double-positioning), and the
-    /// `transform_rect` calls inside the walker apply the saved
-    /// affine on the scratch stack to land primitives at the right
-    /// screen coords.
-    pub fn render_subtree_for_overlay(
-        &self,
-        ctx: &mut dyn DrawContext,
-        node: LayoutNodeId,
-        render_state: &crate::render_state::RenderState,
-        target_layer: RenderLayer,
-    ) {
-        self.render_layer_with_motion(
-            ctx,
-            node,
-            (0.0, 0.0),
-            target_layer,
-            0,
-            false,
-            render_state,
-            1.0,
-            (0.0, 0.0),
-        );
     }
 
     /// Render a layer with motion animation support
@@ -296,79 +255,6 @@ impl RenderTree {
         // outer Option so non-bound nodes never reach the mutex-locked
         // accessors at all.
         let motion_bindings_ref = self.motion_bindings.get(&node);
-
-        // Layer-compositor: motion-bound subtree overlay.
-        //
-        // When `skip_motion_drawing` is set (the static-cache pass)
-        // and this node has motion bindings whose values are
-        // mid-flight, we EXIT EARLY — recording the subtree's paint
-        // state but emitting no primitives. The compositor's overlay
-        // pass re-walks just this subtree each frame with current
-        // binding values, so the static cache stays canonical for
-        // surrounding elements (no walker work for them on
-        // animation frames).
-        //
-        // Only triggers on the matching layer pass — same posture as
-        // `composite_bindings` and `canvas_paint_records`. Counts as
-        // animating only when a binding's current value diverges
-        // from its target by more than half a pixel (translates) or
-        // half a degree (rotation) — matches the compositor's
-        // `bindings_animating` visibility threshold. Settled
-        // bindings stay in the cache as before.
-        let should_skip_for_motion_overlay = self.skip_motion_drawing.get()
-            && motion_bindings_ref.is_some_and(|b| {
-                let translate_far =
-                    |v: &Option<blinc_animation::SharedAnimatedValue>, eps: f32| -> bool {
-                        v.as_ref()
-                            .and_then(|s| s.lock().ok())
-                            .map(|g| (g.get() - g.target()).abs() > eps)
-                            .unwrap_or(false)
-                    };
-                translate_far(&b.translate_x, 0.5)
-                    || translate_far(&b.translate_y, 0.5)
-                    || translate_far(&b.scale, 0.01)
-                    || translate_far(&b.scale_x, 0.01)
-                    || translate_far(&b.scale_y, 0.01)
-                    || translate_far(&b.rotation, 0.5)
-                    || translate_far(&b.opacity, 0.01)
-                    || b.rotation_timeline
-                        .as_ref()
-                        .and_then(|t| t.timeline.lock().ok())
-                        .is_some_and(|g| g.is_playing())
-            });
-        if should_skip_for_motion_overlay {
-            let saved_affine = ctx.current_affine_elements();
-            let saved_opacity = ctx.current_opacity();
-            let saved_z_layer = ctx.z_layer();
-            let saved_ancestor_clip = ctx.current_clip_aabb();
-            // `entry().or_insert_with` — the walker runs 3 layer
-            // passes per frame and may reach this node on more than
-            // one. We want the FIRST pass's snapshot (BG pass
-            // typically) to win because that's the one the overlay
-            // will replay against.
-            self.motion_subtree_records
-                .borrow_mut()
-                .entry(node)
-                .or_insert_with(|| super::super::MotionSubtreeRecord {
-                    primitive_range: ctx.bg_primitive_count()..ctx.bg_primitive_count(),
-                    affine: saved_affine,
-                    bounds_wh: (bounds.width, bounds.height),
-                    ancestor_clip_aabb: saved_ancestor_clip,
-                    z_layer: saved_z_layer,
-                    opacity: saved_opacity,
-                });
-            // Mark this node as painted (it logically *was* present
-            // on this layer pass, even though its pixels live in the
-            // overlay). Without this, the redraw chain forgets the
-            // node and Phase 5 may incorrectly stop the animation
-            // signal.
-            if intersects_viewport {
-                self.painted_node_ids.borrow_mut().insert(node);
-            }
-            self.visible_anim_active.set(true);
-            return;
-        }
-
         let binding_transform = motion_bindings_ref.and_then(|b| b.get_transform());
         let binding_opacity = motion_bindings_ref.and_then(|b| b.get_opacity());
 
