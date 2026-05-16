@@ -442,6 +442,11 @@ impl RenderContext {
         self.cached_svgs = None;
         self.cached_images = None;
         self.cached_flows = None;
+        // Compositor static cache rides on the same lifecycle as the
+        // primitive-batch cache — anything that would invalidate the
+        // batch (rebuild, layout change, scroll, hover state change,
+        // CSS state change) also makes the cached texture stale.
+        self.renderer.invalidate_static_layer();
     }
 
     /// Whether the renderer has a usable cached batch from the most
@@ -597,6 +602,64 @@ impl RenderContext {
         }
 
         true
+    }
+
+    /// Re-invoke every recorded canvas closure into a fresh scratch
+    /// context and return the union of their emitted primitives.
+    ///
+    /// Used by the layer compositor as the dynamic overlay batch:
+    /// every frame, the static texture (containing the
+    /// canvas-skipped paint) is blitted onto the surface, and the
+    /// fresh `Vec<GpuPrimitive>` this returns is then dispatched on
+    /// top with `LoadOp::Load` — so the canvas content animates at
+    /// vsync while the surrounding tree never re-renders.
+    pub fn collect_canvas_overlay_primitives(
+        &self,
+        tree: &blinc_layout::RenderTree,
+        width: u32,
+        height: u32,
+    ) -> Vec<blinc_gpu::primitives::GpuPrimitive> {
+        use blinc_core::{layer::Affine2D, DrawContext, Rect, Transform};
+        use blinc_gpu::GpuPaintContext;
+
+        let records_ref = tree.canvas_paint_records();
+        if records_ref.is_empty() {
+            return Vec::new();
+        }
+        let records: Vec<blinc_layout::renderer::CanvasPaintRecord> =
+            records_ref.values().cloned().collect();
+        drop(records_ref);
+
+        let mut prims = Vec::new();
+        for record in records {
+            let mut scratch = GpuPaintContext::new(width as f32, height as f32);
+            scratch.push_transform(Transform::Affine2D(Affine2D {
+                elements: record.affine,
+            }));
+            scratch.push_opacity(record.opacity);
+            scratch.set_z_layer(record.z_layer);
+            if record.clips_content {
+                scratch.push_clip(blinc_core::layer::ClipShape::rect(Rect::new(
+                    0.0,
+                    0.0,
+                    record.bounds_wh.0,
+                    record.bounds_wh.1,
+                )));
+            }
+            let canvas_bounds = blinc_layout::canvas::CanvasBounds {
+                x: 0.0,
+                y: 0.0,
+                width: record.bounds_wh.0,
+                height: record.bounds_wh.1,
+            };
+            (record.render_fn)(&mut scratch as &mut dyn DrawContext, canvas_bounds);
+            if record.clips_content {
+                scratch.pop_clip();
+            }
+            let new_batch = scratch.take_batch();
+            prims.extend(new_batch.primitives);
+        }
+        prims
     }
 
     /// frames in a row would double-apply).
@@ -4520,7 +4583,7 @@ impl RenderContext {
         height: u32,
         target: &wgpu::TextureView,
     ) -> Result<()> {
-        self.render_tree_with_motion_opt(tree, render_state, width, height, target, false)
+        self.render_tree_with_motion_opt(tree, render_state, width, height, target, None, false)
     }
 
     /// Render with motion. `try_fast_paint = true` lets the renderer
@@ -4537,6 +4600,93 @@ impl RenderContext {
     /// can't handle yet, fast path explicitly disabled) the function
     /// falls back to the full walker path and repopulates the
     /// cache.
+    /// Layer-compositor render path. When the renderer can use it,
+    /// this is dramatically cheaper per frame than
+    /// [`Self::render_tree_with_motion_opt`]:
+    ///
+    /// - The walker output is rendered once into an offscreen
+    ///   "static layer" texture, with canvas drawing skipped (so
+    ///   the canvas regions stay transparent in the cache).
+    /// - Every subsequent frame, the cache is blitted onto the
+    ///   surface (one `copy_texture_to_texture`) and the fresh
+    ///   canvas primitives are dispatched on top with
+    ///   `LoadOp::Load`.
+    ///
+    /// Falls back to the existing `render_tree_with_motion_opt`
+    /// path when `target_texture` is `None` (no surface texture
+    /// reference available — e.g. offscreen render-to-view callers)
+    /// or any compositor invariant is violated.
+    fn try_render_with_compositor(
+        &mut self,
+        tree: &RenderTree,
+        render_state: &blinc_layout::RenderState,
+        width: u32,
+        height: u32,
+        target_view: &wgpu::TextureView,
+        target_texture: &wgpu::Texture,
+        try_fast_paint: bool,
+    ) -> Result<()> {
+        self.renderer.ensure_static_layer(width, height);
+
+        // Fast path: cache valid AND caller is fine with reusing it.
+        // Skip the entire walker / dispatch chain — just composite.
+        let use_fast = try_fast_paint
+            && self.renderer.static_layer_valid()
+            && self.cached_bg_batch.is_some();
+
+        if use_fast {
+            let canvas_prims = self.collect_canvas_overlay_primitives(tree, width, height);
+            self.renderer
+                .composite_frame(target_view, target_texture, &canvas_prims);
+            return Ok(());
+        }
+
+        // Full paint into the static layer. The existing
+        // `render_tree_with_motion_opt` is reused with the
+        // static-layer view as its target. `skip_canvas_drawing` is
+        // set so the walker doesn't emit canvas primitives — those
+        // are re-emitted into the overlay batch below.
+        let static_view = self.renderer.static_layer_view().cloned();
+        let static_view = match static_view {
+            Some(v) => v,
+            None => {
+                // Static layer not allocated (zero-size viewport?) —
+                // fall through to the non-compositor path so the
+                // frame still presents.
+                return self.render_tree_with_motion_opt(
+                    tree,
+                    render_state,
+                    width,
+                    height,
+                    target_view,
+                    None,
+                    try_fast_paint,
+                );
+            }
+        };
+
+        tree.set_skip_canvas_drawing(true);
+        let result = self.render_tree_with_motion_opt(
+            tree,
+            render_state,
+            width,
+            height,
+            &static_view,
+            None, // suppress compositor mode inside the inner call
+            false,
+        );
+        tree.set_skip_canvas_drawing(false);
+        result?;
+
+        self.renderer.mark_static_layer_valid();
+
+        // Composite static cache + canvas overlay onto the surface.
+        let canvas_prims = self.collect_canvas_overlay_primitives(tree, width, height);
+        self.renderer
+            .composite_frame(target_view, target_texture, &canvas_prims);
+        Ok(())
+    }
+
     pub fn render_tree_with_motion_opt(
         &mut self,
         tree: &RenderTree,
@@ -4544,8 +4694,30 @@ impl RenderContext {
         width: u32,
         height: u32,
         target: &wgpu::TextureView,
+        target_texture: Option<&wgpu::Texture>,
         try_fast_paint: bool,
     ) -> Result<()> {
+        // Layer-compositor mode: a surface texture is available
+        // (`target_texture` is `Some`). Route through the cached
+        // static-layer path, which paints the non-canvas tree once
+        // and overlays only canvas primitives per frame.
+        //
+        // The inner `render_tree_with_motion_opt` call still drives
+        // the walker for the full-paint case — it just renders into
+        // the static layer view instead of the surface, with
+        // `target_texture = None` so this dispatch branch doesn't
+        // recurse.
+        if let Some(texture) = target_texture {
+            return self.try_render_with_compositor(
+                tree,
+                render_state,
+                width,
+                height,
+                target,
+                texture,
+                try_fast_paint,
+            );
+        }
         // Sub-Phase 4 timing — disabled by default; gated by
         // `RUST_LOG=blinc_app::frame_timing=trace` (same target the
         // outer per-phase instrumentation uses). Lets us see whether

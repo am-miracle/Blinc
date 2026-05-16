@@ -2882,8 +2882,14 @@ impl WindowedApp {
                                         blinc_app.set_clear_alpha(0.0);
                                     }
                                     let config = wgpu::SurfaceConfiguration {
+                                        // COPY_DST is required by the layer
+                                        // compositor's `composite_frame` step —
+                                        // it `copy_texture_to_texture`s the
+                                        // cached static layer into the surface
+                                        // before drawing canvas overlays on top.
                                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                                            | wgpu::TextureUsages::COPY_SRC,
+                                            | wgpu::TextureUsages::COPY_SRC
+                                            | wgpu::TextureUsages::COPY_DST,
                                         format,
                                         width,
                                         height,
@@ -3018,7 +3024,8 @@ impl WindowedApp {
                                             );
                                             let config = wgpu::SurfaceConfiguration {
                                                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                                                    | wgpu::TextureUsages::COPY_SRC,
+                                                    | wgpu::TextureUsages::COPY_SRC
+                                                    | wgpu::TextureUsages::COPY_DST,
                                                 format,
                                                 width: w,
                                                 height: h,
@@ -5009,6 +5016,7 @@ impl WindowedApp {
                                     tree,
                                     rs,
                                     &view,
+                                    Some(&frame.texture),
                                     windowed_ctx.physical_width as u32,
                                     windowed_ctx.physical_height as u32,
                                     try_fast_paint,

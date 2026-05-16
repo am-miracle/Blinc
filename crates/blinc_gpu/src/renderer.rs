@@ -1178,6 +1178,38 @@ pub struct GpuRenderer {
     /// (all desktop adapters support BC; WebGL2 on iOS Safari and
     /// a handful of older browsers do not).
     pub(crate) has_texture_compression_bc: bool,
+    /// Layer-compositor static cache. Holds the most recent full-paint
+    /// output for the bg primitive batch / text / SVG / image / flow
+    /// passes, *excluding* canvas content (the walker is invoked with
+    /// `RenderTree::set_skip_canvas_drawing(true)` for that pass).
+    /// Each compositor frame blits this texture to the surface and
+    /// then draws fresh canvas content on top — see
+    /// `blit_static_layer_to` and `render_overlay` for the dispatch
+    /// side. Lazily allocated; reset on viewport resize.
+    static_layer: Option<StaticLayer>,
+}
+
+/// Offscreen render target backing the layer compositor's static-tree
+/// cache. The renderer renders the full bg / text / SVG / image / flow
+/// content into this texture once per "static" full paint; every
+/// subsequent fast-path frame copies the texture onto the surface
+/// and overlays only the canvas primitives that change frame-to-frame.
+pub struct StaticLayer {
+    /// Storage for the cached image. Sized to the current viewport;
+    /// reallocated on resize.
+    pub(crate) texture: wgpu::Texture,
+    /// View used as a render attachment when rendering INTO the cache
+    /// (`RenderAttachment` usage) and bound for the blit when reading
+    /// FROM it (`COPY_SRC` usage).
+    pub(crate) view: wgpu::TextureView,
+    /// Physical pixel width.
+    pub(crate) width: u32,
+    /// Physical pixel height.
+    pub(crate) height: u32,
+    /// `true` after the renderer has written a frame into the texture;
+    /// `false` after construction or invalidation. The compositor
+    /// path falls back to full paint while `valid == false`.
+    pub(crate) valid: bool,
 }
 
 /// Image rendering pipeline (created lazily on first image render)
@@ -2353,6 +2385,7 @@ impl GpuRenderer {
             has_vertex_storage,
             has_storage_buffers,
             has_texture_compression_bc,
+            static_layer: None,
         })
     }
 
@@ -4369,6 +4402,240 @@ impl GpuRenderer {
     }
 
     /// Render primitives with a specified clear color
+    /// Ensure the layer-compositor's static-cache texture exists at
+    /// the given dimensions and matches the surface format. Allocates
+    /// on first use; reallocates on viewport resize. Marks the new
+    /// texture invalid so the next `render_with_clear` knows it has
+    /// to repaint the cache from scratch.
+    pub fn ensure_static_layer(&mut self, width: u32, height: u32) {
+        if let Some(layer) = &self.static_layer {
+            if layer.width == width && layer.height == height {
+                return;
+            }
+        }
+        if width == 0 || height == 0 {
+            return;
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("blinc-static-layer"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.texture_format,
+            // RENDER_ATTACHMENT so we can render into it; COPY_SRC so
+            // we can `copy_texture_to_texture` it onto the surface
+            // each compositor frame.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("blinc-static-layer-view"),
+            ..Default::default()
+        });
+        self.static_layer = Some(StaticLayer {
+            texture,
+            view,
+            width,
+            height,
+            valid: false,
+        });
+    }
+
+    /// Mark the static-cache texture invalid. Called when the
+    /// composition source changes (rebuild, layout change, CSS state
+    /// flip, scroll, motion-binding tick) — the next compositor
+    /// frame will repaint the cache before using it.
+    pub fn invalidate_static_layer(&mut self) {
+        if let Some(layer) = self.static_layer.as_mut() {
+            layer.valid = false;
+        }
+    }
+
+    /// `true` if a static-cache texture exists and was painted into
+    /// since the last invalidation. The compositor's fast path
+    /// blits the cache when this is true; otherwise it falls back to
+    /// rendering the cache afresh.
+    pub fn static_layer_valid(&self) -> bool {
+        self.static_layer
+            .as_ref()
+            .map(|l| l.valid)
+            .unwrap_or(false)
+    }
+
+    /// Borrow the static-layer view, if the cache has been
+    /// allocated. The compositor uses this as the render target for
+    /// the static paint pass (everything goes into the offscreen
+    /// texture instead of the surface).
+    pub fn static_layer_view(&self) -> Option<&wgpu::TextureView> {
+        self.static_layer.as_ref().map(|l| &l.view)
+    }
+
+    /// Mark the static-layer cache freshly painted. Called by the
+    /// compositor after `render_static_layer` (or after an inner
+    /// `render_with_clear` that targeted the static layer view)
+    /// completes — flips `static_layer_valid()` to true so the next
+    /// fast-path frame blits instead of repainting.
+    pub fn mark_static_layer_valid(&mut self) {
+        if let Some(layer) = self.static_layer.as_mut() {
+            layer.valid = true;
+        }
+    }
+
+    /// Render `batch` into the static-cache texture. The caller is
+    /// expected to have called `ensure_static_layer` first; this
+    /// method asserts in debug and no-ops in release if the cache is
+    /// missing. After this returns, [`Self::static_layer_valid`]
+    /// reads `true` and [`Self::blit_static_layer_into`] will copy
+    /// the freshly-painted cache onto the surface.
+    pub fn render_static_layer(&mut self, batch: &PrimitiveBatch, clear_color: [f64; 4]) {
+        // Take the view out as a clone-of-handle so we can pass it
+        // to render_with_clear without holding a borrow into
+        // self.static_layer (render_with_clear needs `&mut self`).
+        let view = match &self.static_layer {
+            Some(layer) => layer.view.clone(),
+            None => {
+                debug_assert!(false, "render_static_layer without ensure_static_layer");
+                return;
+            }
+        };
+        self.render_with_clear(&view, batch, clear_color);
+        if let Some(layer) = self.static_layer.as_mut() {
+            layer.valid = true;
+        }
+    }
+
+    /// `copy_texture_to_texture` the static-cache onto the supplied
+    /// surface texture. Caller must use the underlying `wgpu::Texture`
+    /// (not a `TextureView`) because that's what `CommandEncoder::
+    /// copy_texture_to_texture` requires. Returns `false` if the
+    /// cache hasn't been painted yet — in that case the caller
+    /// should fall back to a full repaint.
+    pub fn blit_static_layer_into(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target_texture: &wgpu::Texture,
+    ) -> bool {
+        let Some(layer) = &self.static_layer else {
+            return false;
+        };
+        if !layer.valid {
+            return false;
+        }
+        let extent = wgpu::Extent3d {
+            width: layer.width,
+            height: layer.height,
+            depth_or_array_layers: 1,
+        };
+        encoder.copy_texture_to_texture(
+            layer.texture.as_image_copy(),
+            target_texture.as_image_copy(),
+            extent,
+        );
+        true
+    }
+
+    /// Layer-compositor composite step: blit the cached static
+    /// layer onto the surface and then dispatch `overlay_primitives`
+    /// (typically canvas content re-emitted this frame) on top.
+    ///
+    /// Done in a single command-encoder submission so the GPU sees
+    /// blit-then-load-then-draw as one ordered batch — no extra
+    /// submit overhead vs the previous full-paint path.
+    ///
+    /// Returns `false` if the static layer hasn't been painted yet;
+    /// the caller should fall back to a full repaint into the cache
+    /// before retrying.
+    pub fn composite_frame(
+        &mut self,
+        target_view: &wgpu::TextureView,
+        target_texture: &wgpu::Texture,
+        overlay_primitives: &[GpuPrimitive],
+    ) -> bool {
+        // First, validate the cache and capture the extent. We can't
+        // hold a borrow into `self.static_layer` across the upload
+        // calls below (they take `&mut self`), so we just record what
+        // we need.
+        let extent = match &self.static_layer {
+            Some(layer) if layer.valid => wgpu::Extent3d {
+                width: layer.width,
+                height: layer.height,
+                depth_or_array_layers: 1,
+            },
+            _ => return false,
+        };
+
+        // Upload + sort overlay primitives (smaller than the full
+        // batch — typically <200 prims for cn_demo's spinners). The
+        // SDF GPU buffer is shared with the static pass that wrote
+        // earlier this frame, but the GPU has already consumed
+        // those reads in the static-layer render pass, so the queue
+        // is allowed to overwrite the buffer here.
+        let uniforms = Uniforms {
+            viewport_size: [self.viewport_size.0 as f32, self.viewport_size.1 as f32],
+            _padding: [0.0; 2],
+        };
+        self.queue
+            .write_buffer(&self.buffers.uniforms, 0, bytemuck::bytes_of(&uniforms));
+
+        let visible_overlay: Vec<GpuPrimitive> = overlay_primitives
+            .iter()
+            .filter(|p| self.is_primitive_visible(p))
+            .copied()
+            .collect();
+        let sdf_ranges = if visible_overlay.is_empty() {
+            SdfPrimitiveRanges::default()
+        } else {
+            self.upload_sorted_primitives(&visible_overlay)
+        };
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("blinc-compositor-encoder"),
+            });
+
+        // 1. Blit static cache onto surface (replaces all pixels).
+        let source_copy = self.static_layer.as_ref().unwrap().texture.as_image_copy();
+        let dest_copy = target_texture.as_image_copy();
+        encoder.copy_texture_to_texture(source_copy, dest_copy, extent);
+
+        // 2. Draw overlay primitives on top with `LoadOp::Load` so
+        //    the just-blitted cache content is preserved.
+        if !visible_overlay.is_empty() {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blinc-compositor-overlay-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
+            Self::draw_split_sdf(
+                &mut render_pass,
+                &self.pipelines,
+                &sdf_ranges,
+                false,
+                self.sdf_vb_buffer(),
+            );
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        true
+    }
+
     ///
     /// # Arguments
     /// * `target` - The texture view to render to

@@ -244,6 +244,7 @@ impl BlincApp {
         tree: &RenderTree,
         render_state: &blinc_layout::RenderState,
         target: &wgpu::TextureView,
+        target_texture: Option<&wgpu::Texture>,
         width: u32,
         height: u32,
         try_fast_paint: bool,
@@ -254,6 +255,7 @@ impl BlincApp {
             width,
             height,
             target,
+            target_texture,
             try_fast_paint,
         )
     }
