@@ -26,6 +26,7 @@ fn main() -> Result<()> {
         title: "Keyframe Canvas Animations".to_string(),
         width: 800,
         height: 600,
+        animation_fps_cap: Some(25),
         ..Default::default()
     };
 
