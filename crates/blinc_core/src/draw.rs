@@ -1725,6 +1725,25 @@ pub trait DrawContext {
         0
     }
 
+    /// Snapshot the intersected AABB of all currently-pushed clips,
+    /// in *screen coordinates* (i.e. each `push_clip` entry already
+    /// transformed by the affine that was on the stack at the time
+    /// of push).
+    ///
+    /// Returns `None` when the stack is empty (no active clip).
+    /// Returns `Some([x, y, w, h])` otherwise — the intersection
+    /// rectangle, or zero-size if the rects don't overlap.
+    ///
+    /// Used by the layer compositor: when the walker reaches a
+    /// `Canvas` node, the ancestor clip stack (scroll viewports,
+    /// overflow:hidden containers, etc.) is active. The compositor's
+    /// overlay pass needs to apply the same clip so canvas content
+    /// scrolled out of its parent stays hidden. Default returns
+    /// `None` for contexts without a clip stack (mock tests).
+    fn current_clip_aabb(&self) -> Option<[f32; 4]> {
+        None
+    }
+
     /// Snapshot the current composed affine transform as
     /// `[a, b, c, d, tx, ty]`.
     ///

@@ -633,12 +633,46 @@ impl RenderContext {
         let mut prims = Vec::new();
         for record in records {
             let mut scratch = GpuPaintContext::new(width as f32, height as f32);
+
+            // Replay the ancestor clip stack BEFORE pushing the
+            // canvas's affine. `push_clip` transforms the supplied
+            // rect by the current affine, so pushing a screen-coord
+            // rect on the fresh stack (current affine = identity)
+            // keeps it in screen coords — exactly what we want for
+            // a scissor that comes from a scroll-container ancestor.
+            //
+            // `ancestor_clip_aabb` already includes the canvas's
+            // own clip (the snapshot was taken AFTER `clips_content`
+            // had been pushed during the walker pass), so we skip
+            // the per-canvas `clips_content` re-push below — the
+            // intersection is already baked into the single rect we
+            // push here.
+            let mut pushed_ancestor_clip = false;
+            if let Some([cx, cy, cw, ch]) = record.ancestor_clip_aabb {
+                if cw > 0.0 && ch > 0.0 {
+                    scratch.push_clip(blinc_core::layer::ClipShape::rect(Rect::new(
+                        cx, cy, cw, ch,
+                    )));
+                    pushed_ancestor_clip = true;
+                } else {
+                    // Empty intersection — canvas is fully clipped
+                    // out, emit no primitives this frame.
+                    continue;
+                }
+            }
+
             scratch.push_transform(Transform::Affine2D(Affine2D {
                 elements: record.affine,
             }));
             scratch.push_opacity(record.opacity);
             scratch.set_z_layer(record.z_layer);
-            if record.clips_content {
+
+            // Only push the canvas's own clip when we don't have an
+            // ancestor snapshot (e.g. root-level canvas). When the
+            // ancestor snapshot exists it already includes the
+            // canvas's own clip.
+            let push_local_clip = record.clips_content && record.ancestor_clip_aabb.is_none();
+            if push_local_clip {
                 scratch.push_clip(blinc_core::layer::ClipShape::rect(Rect::new(
                     0.0,
                     0.0,
@@ -653,7 +687,10 @@ impl RenderContext {
                 height: record.bounds_wh.1,
             };
             (record.render_fn)(&mut scratch as &mut dyn DrawContext, canvas_bounds);
-            if record.clips_content {
+            if push_local_clip {
+                scratch.pop_clip();
+            }
+            if pushed_ancestor_clip {
                 scratch.pop_clip();
             }
             let new_batch = scratch.take_batch();

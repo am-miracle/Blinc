@@ -107,6 +107,16 @@ pub struct CanvasPaintRecord {
     /// from a draw callback that intentionally over-draws would
     /// leak past the canvas's box.
     pub clips_content: bool,
+    /// Intersected AABB of all ancestor clips that were active when
+    /// the walker reached this canvas, in screen coordinates. Used
+    /// by the compositor overlay pass as a scissor rect so canvas
+    /// content scrolled out of its parent viewport stays hidden —
+    /// without this, the cached static texture has the right
+    /// (empty) region but the per-frame overlay draws on top
+    /// unconditionally, producing "spinner floats above the scroll
+    /// region" artifacts. `None` means no ancestor clip was active
+    /// (root-level canvas).
+    pub ancestor_clip_aabb: Option<[f32; 4]>,
     /// Z-layer the walker assigned when emitting the canvas. The
     /// scratch context replays at the same layer so the splice
     /// preserves the cached batch's draw order.
@@ -124,6 +134,7 @@ impl std::fmt::Debug for CanvasPaintRecord {
             .field("affine", &self.affine)
             .field("bounds_wh", &self.bounds_wh)
             .field("clips_content", &self.clips_content)
+            .field("ancestor_clip_aabb", &self.ancestor_clip_aabb)
             .field("z_layer", &self.z_layer)
             .field("opacity", &self.opacity)
             .finish()

@@ -1104,6 +1104,12 @@ impl RenderTree {
                     let saved_affine = ctx.current_affine_elements();
                     let saved_opacity = ctx.current_opacity();
                     let saved_z_layer = ctx.z_layer();
+                    // Snapshot the ancestor clip stack BEFORE the
+                    // canvas's own clip (if any) is pushed below —
+                    // the overlay pass replays this so canvas
+                    // content scrolled out of its parent's
+                    // viewport stays hidden.
+                    let saved_ancestor_clip = ctx.current_clip_aabb();
                     let canvas_start = ctx.bg_primitive_count();
                     let skip_drawing = self.skip_canvas_drawing.get();
 
@@ -1149,6 +1155,7 @@ impl RenderTree {
                                 bounds_wh: (bounds.width, bounds.height),
                                 render_fn: render_fn.clone(),
                                 clips_content: should_clip,
+                                ancestor_clip_aabb: saved_ancestor_clip,
                                 z_layer: saved_z_layer,
                                 opacity: saved_opacity,
                             },

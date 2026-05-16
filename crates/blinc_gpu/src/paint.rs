@@ -1534,6 +1534,69 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         self.current_affine().elements
     }
 
+    fn current_clip_aabb(&self) -> Option<[f32; 4]> {
+        if self.clip_stack.is_empty() {
+            return None;
+        }
+        // Each clip in the stack is already in screen coordinates
+        // (push_clip transforms by the active affine on entry). The
+        // effective bounds is the intersection of every entry's
+        // AABB. Non-rect clips (circles, paths, polygons) contribute
+        // their bounding box — the compositor overlay uses the
+        // result as a scissor rect, so a looser-than-necessary AABB
+        // is safe (over-includes pixels) while a tighter bound would
+        // be incorrect.
+        let mut min_x = f32::NEG_INFINITY;
+        let mut min_y = f32::NEG_INFINITY;
+        let mut max_x = f32::INFINITY;
+        let mut max_y = f32::INFINITY;
+        for (shape, _, _) in &self.clip_stack {
+            let (sx, sy, sw, sh) = match shape {
+                ClipShape::Rect(r) => (r.x(), r.y(), r.width(), r.height()),
+                ClipShape::RoundedRect { rect, .. } => {
+                    (rect.x(), rect.y(), rect.width(), rect.height())
+                }
+                ClipShape::Circle { center, radius } => (
+                    center.x - radius,
+                    center.y - radius,
+                    radius * 2.0,
+                    radius * 2.0,
+                ),
+                ClipShape::Ellipse { center, radii } => (
+                    center.x - radii.x,
+                    center.y - radii.y,
+                    radii.x * 2.0,
+                    radii.y * 2.0,
+                ),
+                ClipShape::Polygon(pts) => {
+                    if pts.is_empty() {
+                        continue;
+                    }
+                    let mut pmin_x = f32::INFINITY;
+                    let mut pmin_y = f32::INFINITY;
+                    let mut pmax_x = f32::NEG_INFINITY;
+                    let mut pmax_y = f32::NEG_INFINITY;
+                    for p in pts {
+                        pmin_x = pmin_x.min(p.x);
+                        pmin_y = pmin_y.min(p.y);
+                        pmax_x = pmax_x.max(p.x);
+                        pmax_y = pmax_y.max(p.y);
+                    }
+                    (pmin_x, pmin_y, pmax_x - pmin_x, pmax_y - pmin_y)
+                }
+                ClipShape::Path(_) => continue, // skip — no easy AABB
+            };
+            min_x = min_x.max(sx);
+            min_y = min_y.max(sy);
+            max_x = max_x.min(sx + sw);
+            max_y = max_y.min(sy + sh);
+        }
+        if max_x <= min_x || max_y <= min_y {
+            return Some([min_x, min_y, 0.0, 0.0]);
+        }
+        Some([min_x, min_y, max_x - min_x, max_y - min_y])
+    }
+
     fn set_3d_transform(&mut self, rx_rad: f32, ry_rad: f32, perspective_d: f32) {
         self.current_3d_sin_rx = rx_rad.sin();
         self.current_3d_cos_rx = rx_rad.cos();
