@@ -4683,6 +4683,35 @@ impl RenderContext {
     ) -> Result<()> {
         self.renderer.ensure_static_layer(width, height);
 
+        // ----- Compositor v2 Phase 1 verification trace -----
+        // Compute the per-node animation status from the new model
+        // (motion bindings + canvas presence + CSS-anim store, with
+        // hysteresis) and log it. Behaviour-neutral — the actual
+        // composite path below still uses the legacy
+        // `bindings_animating` boolean. Phase 2 wires the status
+        // map into the walker; Phase 3 replaces the legacy path.
+        //
+        // Enable with `RUST_LOG=blinc_app::v2_status=trace` to see
+        // the classification each frame:
+        //   v2_status frame anim_count=1 static_count=0 \
+        //     entries=[(LayoutNodeId(108v1), Animating(Motion))]
+        let v2_statuses = tree.compute_animation_status();
+        if tracing::enabled!(target: "blinc_app::v2_status", tracing::Level::TRACE) {
+            let anim_count = v2_statuses
+                .iter()
+                .filter(|(_, s)| matches!(s, blinc_layout::renderer::AnimationStatus::Animating(_)))
+                .count();
+            let static_count = v2_statuses.len() - anim_count;
+            tracing::trace!(
+                target: "blinc_app::v2_status",
+                anim_count,
+                static_count,
+                entries = ?v2_statuses,
+                "v2 animation status",
+            );
+        }
+        tree.commit_animation_status(&v2_statuses);
+
         // If any motion binding is mid-flight the static-layer cache
         // is stale this frame — its primitives encode the binding's
         // position at the last full paint, not the spring's current

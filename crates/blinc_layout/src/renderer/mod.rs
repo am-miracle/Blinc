@@ -70,6 +70,180 @@ pub use types::{
 /// `GpuPrimitive` buffer in place — without re-walking the tree —
 /// by knowing which primitives the binding's subtree owns and what
 /// motion values were baked into them at last paint.
+// =============================================================
+// Compositor v2 — DynamicRegion / AnimationStatus
+// =============================================================
+//
+// Per-node `AnimationStatus` partitions the render tree into a
+// **static set** (cacheable in the static-layer texture) and a
+// **dynamic set** (re-emitted every frame). The static-layer cache
+// is the one source of truth for static pixels; transitions in the
+// dynamic set invalidate ONLY their own screen-AABB region of the
+// cache, not the whole texture.
+//
+// See `/Users/amaterasu/.claude/plans/purring-juggling-tulip.md`
+// for the full architecture brief. These types are added in Phase 1
+// alongside the legacy `CanvasPaintRecord` / `CompositeBindingMeta`
+// / `MotionSubtreeRecord` structures; Phase 3 replaces them.
+
+/// Per-node animation classification, recomputed at the start of
+/// every compositor frame from the union of motion bindings,
+/// canvas presence, and the CSS-animation store.
+///
+/// Hysteresis: once a node is `Animating`, it stays animating until
+/// the `settled_streak` counter on `RenderTree` reaches
+/// `SETTLED_STREAK_THRESHOLD` frames of stability. This avoids
+/// thrashing on sub-pixel spring oscillation around a target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimationStatus {
+    /// Node's pixels are stable; safe to bake into the static-layer
+    /// cache. Walker emits primitives normally.
+    Static,
+    /// Node has at least one mid-flight motion binding,
+    /// always-playing rotation timeline, canvas closure, or active
+    /// CSS keyframe / transition. Walker skips primitive emission
+    /// and the compositor re-walks the subtree (or invokes the
+    /// canvas closure) into the per-frame overlay batch.
+    Animating(AnimatedKind),
+}
+
+/// What's driving a node's animation. Precedence when multiple
+/// sources apply: `Canvas` > `Motion` > `Css` — the deepest
+/// per-frame work wins. Stored as the `kind` field of the resulting
+/// `DynamicRegion` for dispatch routing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimatedKind {
+    /// `ElementType::Canvas` with a `render_fn` — closure is
+    /// invoked into a scratch context each frame.
+    Canvas,
+    /// `MotionBindings` whose `is_any_animating` returns true (a
+    /// mid-flight spring, opacity tween, or always-playing
+    /// `rotation_timeline`) — subtree is re-walked each frame with
+    /// the current binding values pushed onto the paint context.
+    Motion,
+    /// Node has a CSS keyframe or transition currently advancing.
+    /// Same dispatch path as `Motion` but driven by the CSS-anim
+    /// store rather than `MotionBindings`.
+    Css,
+}
+
+/// The number of consecutive frames a node must be classified as
+/// `Static` (no binding mid-flight, no CSS anim active, etc.)
+/// before it can leave the dynamic set. Prevents flapping on
+/// under-damped springs that oscillate at sub-pixel amplitude near
+/// their target for many seconds before formally settling.
+pub const SETTLED_STREAK_THRESHOLD: u32 = 30;
+
+/// Ambient paint-context state captured at the moment the walker
+/// reached a dynamic region's root, for the overlay pass to replay
+/// when re-emitting the subtree's primitives next frame.
+#[derive(Clone, Copy, Debug)]
+pub struct AmbientPaintState {
+    /// Composed affine `[a, b, c, d, tx, ty]` on the paint stack.
+    pub affine: [f32; 6],
+    /// Combined opacity multiplier from ancestor opacity stack.
+    pub opacity: f32,
+    /// Intersected screen-coord AABB of the ancestor clip stack.
+    /// Used as the scissor for the overlay dispatch so a canvas
+    /// scrolled out of its parent scroll container stays hidden.
+    /// `None` when no ancestor clip is active.
+    pub clip_aabb: Option<[f32; 4]>,
+    /// Z-layer in effect at paint time.
+    pub z_layer: u32,
+}
+
+/// Routing payload identifying what dynamic-region kind a record
+/// represents and how the compositor should re-emit it each frame.
+pub enum DynamicKind {
+    /// Canvas region — clone the `render_fn` to re-invoke per frame.
+    Canvas {
+        render_fn: crate::canvas::CanvasRenderFn,
+        /// Whether the canvas's own bounds should be pushed as a
+        /// clip before invoking `render_fn` (mirrors the walker's
+        /// `clips_content` handling).
+        clips_content: bool,
+        /// Local-coord bounds passed to `render_fn`.
+        bounds_wh: (f32, f32),
+    },
+    /// Motion-bound subtree — re-walk the subtree with the current
+    /// binding values pushed by the walker's normal binding-
+    /// transform logic.
+    MotionSubtree,
+    /// CSS-animated node — re-walk like `MotionSubtree`, but
+    /// distinguished so future damage-rect logic can treat CSS
+    /// timelines separately if needed.
+    CssAnimated,
+}
+
+impl Clone for DynamicKind {
+    fn clone(&self) -> Self {
+        match self {
+            DynamicKind::Canvas {
+                render_fn,
+                clips_content,
+                bounds_wh,
+            } => DynamicKind::Canvas {
+                render_fn: render_fn.clone(),
+                clips_content: *clips_content,
+                bounds_wh: *bounds_wh,
+            },
+            DynamicKind::MotionSubtree => DynamicKind::MotionSubtree,
+            DynamicKind::CssAnimated => DynamicKind::CssAnimated,
+        }
+    }
+}
+
+impl std::fmt::Debug for DynamicKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DynamicKind::Canvas {
+                clips_content,
+                bounds_wh,
+                ..
+            } => f
+                .debug_struct("Canvas")
+                .field("clips_content", clips_content)
+                .field("bounds_wh", bounds_wh)
+                .finish(),
+            DynamicKind::MotionSubtree => write!(f, "MotionSubtree"),
+            DynamicKind::CssAnimated => write!(f, "CssAnimated"),
+        }
+    }
+}
+
+/// One animated region in the tree. Replaces the separate
+/// `CanvasPaintRecord` and `MotionSubtreeRecord` records under the
+/// Compositor v2 model: every node whose `AnimationStatus` is
+/// `Animating` gets exactly one of these on each full paint.
+///
+/// The compositor reads the dynamic-region set every frame and:
+/// 1. Blits the static-layer texture onto the surface.
+/// 2. For each region: re-walks (or re-invokes the canvas closure)
+///    with the saved ambient state, dispatches the resulting
+///    primitives with `scissor = region.screen_aabb` and
+///    `LoadOp::Load`.
+/// 3. Presents.
+///
+/// The `screen_aabb` is the pixel bounds the region's primitives
+/// occupy *after* applying the saved affine. Used both for the
+/// dispatch scissor and (when the region's animation status flips)
+/// for the damage-rect static-cache rebuild.
+#[derive(Clone, Debug)]
+pub struct DynamicRegion {
+    /// Layout node id of the subtree's root.
+    pub root: LayoutNodeId,
+    /// Screen-coord AABB of the region's primitives (or canvas
+    /// bounds), measured in physical pixels. Used as the dispatch
+    /// scissor every frame and as the damage rect on transitions.
+    pub screen_aabb: [f32; 4],
+    /// Paint-context state at the moment the walker reached the
+    /// region's root.
+    pub ambient: AmbientPaintState,
+    /// What kind of dynamic content this region holds + the data
+    /// needed to re-emit it.
+    pub kind: DynamicKind,
+}
+
 ///
 /// Mirrors the browser compositor's per-layer cached transform: the
 /// Per-canvas state captured by the paint walker so the compositor
@@ -278,6 +452,28 @@ pub struct RenderTree {
     /// ignored after a cache invalidation; the next full paint
     /// repopulates from scratch.
     canvas_paint_records: RefCell<HashMap<LayoutNodeId, CanvasPaintRecord>>,
+    // --- Compositor v2 storage (Phase 1; populated by Phase 2) ---
+    /// Unified per-region map: every node classified as
+    /// `AnimationStatus::Animating` produces one entry here. The
+    /// compositor's per-frame dispatch iterates this map, re-emits
+    /// each region's primitives, and uses `screen_aabb` as the
+    /// scissor rect. Cleared at the top of every full paint;
+    /// repopulated by `render_layer_with_motion`.
+    dynamic_regions: RefCell<HashMap<LayoutNodeId, DynamicRegion>>,
+    /// Previous frame's animation classification per node. Used to
+    /// detect transitions (Static ↔ Animating) for the
+    /// damage-rect cache-rebuild path. Persists across full paints
+    /// — Phase 1 only writes this from
+    /// `compute_animation_status`; Phase 4 consumes it.
+    previous_animation_status: RefCell<HashMap<LayoutNodeId, AnimationStatus>>,
+    /// Hysteresis counter — frames spent classified as `Static`
+    /// since the node last appeared `Animating`. Once the count
+    /// reaches `SETTLED_STREAK_THRESHOLD`, the node is allowed to
+    /// move back to the static set; below the threshold the node
+    /// stays in the dynamic set even though no current
+    /// animation source is mid-flight. Avoids flapping on
+    /// under-damped spring oscillation around a target.
+    settled_streak: RefCell<HashMap<LayoutNodeId, u32>>,
     /// Last tick time for scroll physics (in milliseconds)
     last_scroll_tick_ms: Option<u64>,
     /// DPI scale factor (physical / logical pixels)
@@ -474,6 +670,9 @@ impl RenderTree {
             motion_bindings: HashMap::new(),
             composite_bindings: RefCell::new(HashMap::new()),
             canvas_paint_records: RefCell::new(HashMap::new()),
+            dynamic_regions: RefCell::new(HashMap::new()),
+            previous_animation_status: RefCell::new(HashMap::new()),
+            settled_streak: RefCell::new(HashMap::new()),
             last_scroll_tick_ms: None,
             scale_factor: 1.0,
             animations: Weak::new(),
@@ -898,6 +1097,169 @@ impl RenderTree {
         &self,
     ) -> std::cell::RefMut<'_, HashMap<LayoutNodeId, CanvasPaintRecord>> {
         self.canvas_paint_records.borrow_mut()
+    }
+
+    /// Borrow the Compositor v2 dynamic-region map. Populated by the
+    /// walker for every node classified as
+    /// [`AnimationStatus::Animating`]; consumed each frame by the
+    /// compositor's per-region dispatch path.
+    pub fn dynamic_regions(&self) -> std::cell::Ref<'_, HashMap<LayoutNodeId, DynamicRegion>> {
+        self.dynamic_regions.borrow()
+    }
+
+    /// Mutable variant of [`Self::dynamic_regions`].
+    pub fn dynamic_regions_mut(
+        &self,
+    ) -> std::cell::RefMut<'_, HashMap<LayoutNodeId, DynamicRegion>> {
+        self.dynamic_regions.borrow_mut()
+    }
+
+    /// Compute the animation status for every node that has any
+    /// known animation source.
+    ///
+    /// Inputs consulted:
+    /// - [`Self::motion_bindings`] (`is_any_animating` on each)
+    /// - [`Self::render_nodes`] for `ElementType::Canvas` presence
+    /// - [`Self::css_anim_store`] for active CSS keyframes /
+    ///   transitions, looked up by `StableNodeId`
+    ///
+    /// Applies hysteresis via [`Self::settled_streak`]: once a node
+    /// is `Animating`, it must spend
+    /// [`SETTLED_STREAK_THRESHOLD`] consecutive frames classified
+    /// as `Static` before it's allowed to leave the dynamic set.
+    /// This is what prevents under-damped springs from flapping a
+    /// node in and out of the dynamic set as the value oscillates
+    /// sub-pixel around the target.
+    ///
+    /// Returned vector is keyed by `LayoutNodeId`; only nodes with
+    /// at least one possible animation source appear (nodes with
+    /// none are implicitly `Static`).
+    ///
+    /// Cost: linear in `motion_bindings.len()` + canvas-node count
+    /// + css animation/transition count. No tree traversal.
+    pub fn compute_animation_status(&self) -> Vec<(LayoutNodeId, AnimationStatus)> {
+        use std::collections::HashSet;
+
+        // Step 1: collect candidate nodes from each source. A node
+        // can appear in more than one; precedence resolves below.
+        let mut candidates: HashSet<LayoutNodeId> = HashSet::new();
+        let mut canvas_nodes: HashSet<LayoutNodeId> = HashSet::new();
+        let mut motion_animating: HashSet<LayoutNodeId> = HashSet::new();
+        let mut css_animating: HashSet<LayoutNodeId> = HashSet::new();
+
+        // Motion bindings: every node with a `MotionBindings` entry
+        // is a candidate; the entry's `is_any_animating` decides
+        // whether it's currently Animating-ish.
+        for (node, bindings) in self.motion_bindings.iter() {
+            candidates.insert(*node);
+            if bindings.is_any_animating() {
+                motion_animating.insert(*node);
+            }
+        }
+
+        // Canvases: every `ElementType::Canvas` is always animating
+        // (the closure can produce different output every frame).
+        for (node, render_node) in self.render_nodes.iter() {
+            if matches!(render_node.element_type, crate::renderer::ElementType::Canvas(_)) {
+                candidates.insert(*node);
+                canvas_nodes.insert(*node);
+            }
+        }
+
+        // CSS animations / transitions: keyed by StableNodeId. Map
+        // back to LayoutNodeId via `stable_to_layout`.
+        if let Ok(store) = self.css_anim_store.lock() {
+            for stable in store.animations.keys().chain(store.transitions.keys()) {
+                if let Some(layout) = self.stable_to_layout.get(stable).copied() {
+                    candidates.insert(layout);
+                    css_animating.insert(layout);
+                }
+            }
+        }
+
+        // Step 2: classify each candidate. Precedence:
+        // Canvas > Motion > Css. Hysteresis pushes a node toward
+        // `Animating` if it was animating recently.
+        let mut result: Vec<(LayoutNodeId, AnimationStatus)> = Vec::with_capacity(candidates.len());
+        let mut streak_writer = self.settled_streak.borrow_mut();
+        for node in candidates {
+            let raw_status = if canvas_nodes.contains(&node) {
+                // Canvases are unconditionally animating — no
+                // hysteresis concept (no target to settle against).
+                AnimationStatus::Animating(AnimatedKind::Canvas)
+            } else if motion_animating.contains(&node) {
+                AnimationStatus::Animating(AnimatedKind::Motion)
+            } else if css_animating.contains(&node) {
+                AnimationStatus::Animating(AnimatedKind::Css)
+            } else {
+                AnimationStatus::Static
+            };
+
+            let final_status = match raw_status {
+                AnimationStatus::Animating(_) => {
+                    // Reset the settled-streak counter; we're moving
+                    // again.
+                    streak_writer.insert(node, 0);
+                    raw_status
+                }
+                AnimationStatus::Static => {
+                    // Possibly inside the hysteresis window. Bump
+                    // the counter and decide whether we've waited
+                    // long enough to move back to the static set.
+                    let entry = streak_writer.entry(node).or_insert(0);
+                    *entry = entry.saturating_add(1);
+                    if *entry >= SETTLED_STREAK_THRESHOLD {
+                        streak_writer.remove(&node);
+                        AnimationStatus::Static
+                    } else {
+                        // Still in the cooldown window — keep the
+                        // node in the dynamic set under whatever
+                        // kind it was animating last. Defaults to
+                        // `Motion` if we never saw a prior
+                        // classification (e.g. first frame after a
+                        // structural rebuild).
+                        let prev = self
+                            .previous_animation_status
+                            .borrow()
+                            .get(&node)
+                            .copied()
+                            .unwrap_or(AnimationStatus::Animating(AnimatedKind::Motion));
+                        match prev {
+                            AnimationStatus::Animating(_) => prev,
+                            AnimationStatus::Static => {
+                                AnimationStatus::Animating(AnimatedKind::Motion)
+                            }
+                        }
+                    }
+                }
+            };
+
+            result.push((node, final_status));
+        }
+        drop(streak_writer);
+        result
+    }
+
+    /// Borrow the previous frame's animation status map. Used by
+    /// the compositor to detect transitions (Static ↔ Animating)
+    /// for damage-rect cache invalidation.
+    pub fn previous_animation_status(
+        &self,
+    ) -> std::cell::Ref<'_, HashMap<LayoutNodeId, AnimationStatus>> {
+        self.previous_animation_status.borrow()
+    }
+
+    /// Replace the stored previous-status map with the supplied
+    /// current-frame statuses. Call after a frame's compositor
+    /// pass finishes, before the next frame's
+    /// `compute_animation_status`.
+    pub fn commit_animation_status(&self, statuses: &[(LayoutNodeId, AnimationStatus)]) {
+        let mut prev = self.previous_animation_status.borrow_mut();
+        prev.clear();
+        prev.reserve(statuses.len());
+        for (node, status) in statuses {
+            prev.insert(*node, *status);
+        }
     }
 
     /// `painted_node_ids()` projected through `layout_to_stable`.
