@@ -174,6 +174,21 @@ struct SchedulerInner {
 /// integration step" shouldn't be dirtying GPU buffers either.
 const DIRTY_EPSILON: f32 = 0.01;
 
+/// Maximum dt (seconds) a single tick will advance animations by.
+/// When the time between ticks exceeds this — first-frame shader
+/// pipeline compile, GC pause, background-thread oversleep,
+/// debugger stop — the excess is dropped. Without the cap, a slow
+/// first paint substeps the spring through hundreds of iterations
+/// in one tick and the animation teleports to its target; with
+/// the cap, the spring pauses-and-resumes cleanly instead of
+/// fast-forwarding through wall-clock time the user didn't see.
+///
+/// 32 ms ≈ 2 vsync intervals at 60 Hz. Tight enough that natural
+/// frame jitter never hits it, loose enough that "skip a frame"
+/// pacing (`animation_fps_cap = 30`) doesn't truncate normal
+/// integration.
+const MAX_TICK_DT: f32 = 0.032;
+
 /// Callback type for waking up the main thread from the animation thread.
 ///
 /// This is called when there are active animations that need to be rendered.
@@ -367,7 +382,18 @@ impl AnimationScheduler {
         let (has_active, tick_callbacks_to_call, dt) = {
             let mut inner = inner.lock().unwrap();
             let now = Instant::now();
-            let dt = (now - inner.last_frame).as_secs_f32();
+            // Cap the per-tick dt to avoid spring/keyframe/timeline
+            // teleports when a frame stalls — first-frame shader
+            // pipeline compile, GC pause, background-thread oversleep,
+            // anything that produces a >100 ms gap. Without the cap,
+            // a 280 ms first-paint causes the spring's RK4 substepping
+            // to run ~35 iterations in one tick, settling a 600 ms
+            // animation in a single frame (the user sees the bar jump
+            // straight to its target). Capping to 32 ms (≈ 2 vsync
+            // intervals) makes the animation pause-and-resume cleanly
+            // instead of fast-forwarding through real time the user
+            // didn't see.
+            let dt = (now - inner.last_frame).as_secs_f32().min(MAX_TICK_DT);
             let dt_ms = dt * 1000.0;
             inner.last_frame = now;
 
@@ -796,7 +822,10 @@ impl AnimationScheduler {
         let (has_active, tick_callbacks_to_call, dt) = {
             let mut inner = self.inner.lock().unwrap();
             let now = Instant::now();
-            let dt = (now - inner.last_frame).as_secs_f32();
+            // Same per-tick dt cap as `tick_frame_inner` — prevents
+            // spring/keyframe/timeline teleports on slow frames.
+            // See `MAX_TICK_DT` doc above.
+            let dt = (now - inner.last_frame).as_secs_f32().min(MAX_TICK_DT);
             let dt_ms = dt * 1000.0;
             inner.last_frame = now;
 
