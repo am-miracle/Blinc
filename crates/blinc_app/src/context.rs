@@ -4788,7 +4788,23 @@ impl RenderContext {
                     .and_then(|t| t.timeline.lock().ok())
                     .is_some_and(|g| g.is_playing())
         });
-        if bindings_animating {
+        // FSM-driven motion (motion()'s enter / exit, e.g.
+        // PageTransition::scale() on a router page) advances motion
+        // values per frame via render_state.motion_values, but
+        // apply_binding_deltas only patches motion_bindings — FSM
+        // motion has no representation in the cached primitive
+        // buffer's delta-patch path. Without forcing a cache rebuild
+        // each frame the FSM is alive, the walker only runs at the
+        // first paint with the FSM's INITIAL motion_values (scale=0
+        // for `scale()`, opacity=0 for `fade_in()`, etc.) and the
+        // motion container stays frozen at its entry state — pages
+        // invisible, motion-wrapped overlays never appearing.
+        //
+        // Same cache-invalidation posture as `bindings_animating`:
+        // mid-flight = stale cache; settle = next frame goes
+        // through the full walker once, then steady-state.
+        let fsm_motion_active = render_state.has_active_motions();
+        if bindings_animating || fsm_motion_active {
             self.renderer.invalidate_static_layer();
         }
 
