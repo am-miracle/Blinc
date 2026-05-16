@@ -4659,6 +4659,32 @@ impl RenderContext {
             let canvas_prims = self.collect_canvas_overlay_primitives(tree, width, height);
             self.renderer
                 .composite_frame(target_view, target_texture, &canvas_prims);
+
+            // The walker normally writes `visible_anim_active` from
+            // its per-frame observations (canvas paints, active
+            // motion bindings, active motion FSM). On the compositor
+            // fast path the walker doesn't run, so the flag would
+            // stay latched at whatever the last full paint left it
+            // at — typically `true` after any binding animation,
+            // which then pins Phase 5's redraw chain at vsync
+            // forever even when the bar's spring has long since
+            // settled. (Symptom: "after the animation plays, CPU
+            // never drops.") Restate the flag authoritatively from
+            // the two signals we can observe here:
+            //
+            //   - Any canvas is on screen → its draw closure may
+            //     produce new output every frame, keep the chain
+            //     alive.
+            //   - Any motion binding is mid-flight → its spring is
+            //     advancing, keep the chain alive.
+            //
+            // Motion-FSM-driven elements (enter/exit) live in a
+            // separate signal (`render_state.has_active_motions()`)
+            // that the windowed runner ORs in alongside this flag,
+            // so we don't need to mirror them here.
+            let has_visible_canvas = !tree.canvas_paint_records().is_empty();
+            tree.set_visible_anim_active(bindings_animating || has_visible_canvas);
+
             return Ok(());
         }
 
