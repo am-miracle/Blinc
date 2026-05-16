@@ -4855,6 +4855,21 @@ impl RenderContext {
             || tree.has_active_layout_animations();
         if bindings_animating || fsm_motion_active || visual_animations_active {
             self.renderer.invalidate_static_layer();
+            // Also invalidate the cached text / SVG / image vectors
+            // up-front. Without this clear, the downstream
+            // `cache_hit` check in render_tree_with_motion_opt
+            // runs AFTER apply_binding_deltas has just updated
+            // composite_bindings.last_translate to the current
+            // value — so its `direct_write_drift` re-check returns
+            // false on the same frame that we already KNEW the
+            // cache was stale, and the stale text gets re-used.
+            // Symptom: only the first drag updates text correctly,
+            // subsequent drags shift primitives but leave the text
+            // labels at the previous translate.
+            self.cached_texts = None;
+            self.cached_svgs = None;
+            self.cached_images = None;
+            self.cached_flows = None;
         }
 
         // Fast path: cache valid AND caller is fine with reusing it.
