@@ -100,6 +100,37 @@ fn effective_single_clip(primary: Option<[f32; 4]>, scroll: Option<[f32; 4]>) ->
 
 // Rasterized SVG textures are now packed into SvgAtlas (single shared GPU texture)
 
+/// Everything a canvas overlay pass needs to dispatch in one frame.
+///
+/// Compositor-mode rendering skips the canvas's `render_fn` during
+/// the static-cache paint (the walker's `skip_canvas_drawing` flag)
+/// and re-invokes the closure into a scratch
+/// `GpuPaintContext` each frame inside `collect_canvas_overlay`.
+/// A canvas closure can emit three different kinds of draw output,
+/// and ALL of them need to reach the GPU for the canvas to render
+/// correctly:
+///
+/// - **`primitives`** — SDF / glass / text primitives, the
+///   common case (drawn rounded boxes, gradients, glyphs).
+/// - **`dynamic_images`** — raw-RGBA blits via
+///   `ctx.draw_rgba_pixels(...)`. Used by video players (one
+///   blit per video frame) and the camera-preview demos.
+/// - **`meshes`** — 3D mesh draws via `ctx.draw_mesh_data(...)`.
+///   `blinc_canvas_kit::SceneKit3D` and `mesh_3d_demo.rs` go
+///   through this path.
+///
+/// Before this struct existed, the overlay collection only drained
+/// `primitives` from the scratch batch; the other two channels
+/// were dropped on the floor when the scratch context dropped at
+/// end-of-frame, so video frames and 3D content never reached the
+/// GPU under compositor mode.
+#[derive(Default)]
+pub struct CanvasOverlay {
+    pub primitives: Vec<blinc_gpu::primitives::GpuPrimitive>,
+    pub dynamic_images: Vec<blinc_gpu::primitives::DynamicImage>,
+    pub meshes: Vec<blinc_gpu::PendingMesh>,
+}
+
 /// Internal render context that manages GPU resources and rendering
 pub struct RenderContext {
     renderer: GpuRenderer,
@@ -619,16 +650,53 @@ impl RenderContext {
         width: u32,
         height: u32,
     ) -> Vec<blinc_gpu::primitives::GpuPrimitive> {
+        self.collect_canvas_overlay(tree, width, height).primitives
+    }
+
+    /// Full canvas overlay collection: re-invokes every recorded
+    /// canvas's `render_fn` into a scratch context and returns
+    /// every kind of draw output the closure produced:
+    ///
+    /// - `primitives`: SDF / mesh / text primitives (the main batch)
+    /// - `dynamic_images`: raw-RGBA blits like video frames
+    ///   (`ctx.draw_rgba_pixels(...)`)
+    /// - `meshes`: 3D mesh draws (`ctx.draw_mesh_data(...)`) from
+    ///   `blinc_canvas_kit::SceneKit3D` or direct API users
+    ///
+    /// The legacy `collect_canvas_overlay_primitives` is preserved
+    /// as a thin shim that returns only `.primitives` — callers
+    /// that need the full overlay state (video, 3D) should call
+    /// this method instead.
+    ///
+    /// Canvas paint records are sorted by `z_layer` before
+    /// invocation so canvases at higher z-indexes render on top
+    /// of canvases at lower z-indexes within the overlay batch.
+    pub fn collect_canvas_overlay(
+        &self,
+        tree: &blinc_layout::RenderTree,
+        width: u32,
+        height: u32,
+    ) -> CanvasOverlay {
         use blinc_core::{layer::Affine2D, DrawContext, Rect, Transform};
         use blinc_gpu::GpuPaintContext;
 
         let records_ref = tree.canvas_paint_records();
         if records_ref.is_empty() {
-            return Vec::new();
+            return CanvasOverlay::default();
         }
-        let records: Vec<blinc_layout::renderer::CanvasPaintRecord> =
+        let mut records: Vec<blinc_layout::renderer::CanvasPaintRecord> =
             records_ref.values().cloned().collect();
         drop(records_ref);
+
+        // Sort by z_layer so overlays render bottom-up. Stable
+        // sort on (z_layer, primitive_range.start) keeps siblings
+        // at the same z in tree-emit order (the order the walker
+        // recorded them).
+        records.sort_by(|a, b| {
+            a.z_layer
+                .cmp(&b.z_layer)
+                .then_with(|| a.primitive_range.start.cmp(&b.primitive_range.start))
+        });
 
         // Reuse a single scratch `GpuPaintContext` across every
         // canvas in the frame. `GpuPaintContext::new` allocates a
@@ -641,7 +709,7 @@ impl RenderContext {
         // canvas so the scratch ends every loop iteration in the
         // same fresh state.
         let mut scratch = GpuPaintContext::new(width as f32, height as f32);
-        let mut prims = Vec::new();
+        let mut overlay = CanvasOverlay::default();
         for record in records {
 
             // Replay the ancestor clip stack BEFORE pushing the
@@ -711,10 +779,22 @@ impl RenderContext {
             if pushed_ancestor_clip {
                 scratch.pop_clip();
             }
+
+            // Drain everything the closure emitted: SDF/text
+            // primitives go to `overlay.primitives`, raw-RGBA
+            // blits (video frames, camera previews) go to
+            // `overlay.dynamic_images`, and 3D mesh draws go to
+            // `overlay.meshes`. Without draining all three, the
+            // compositor-mode overlay path drops video / mesh /
+            // image content while the non-compositor path renders
+            // them correctly — the canonical "video doesn't
+            // render" / "3D helmet missing" bugs.
             let new_batch = scratch.take_batch();
-            prims.extend(new_batch.primitives);
+            overlay.primitives.extend(new_batch.primitives);
+            overlay.dynamic_images.extend(new_batch.dynamic_images);
+            overlay.meshes.extend(scratch.take_pending_meshes());
         }
-        prims
+        overlay
     }
 
     /// frames in a row would double-apply).
@@ -4887,9 +4967,27 @@ impl RenderContext {
             && self.cached_bg_batch.is_some();
 
         if use_fast {
-            let canvas_prims = self.collect_canvas_overlay_primitives(tree, width, height);
+            // Full canvas overlay — drains SDF primitives + raw-
+            // RGBA images (video frames) + 3D meshes from every
+            // canvas closure. composite_frame blits the static
+            // cache + dispatches the SDF prims; we then layer the
+            // dynamic images and meshes onto the same target.
+            let overlay = self.collect_canvas_overlay(tree, width, height);
             self.renderer
-                .composite_frame(target_view, target_texture, &canvas_prims);
+                .composite_frame(target_view, target_texture, &overlay.primitives);
+            if !overlay.dynamic_images.is_empty() {
+                self.renderer
+                    .render_dynamic_images(target_view, &overlay.dynamic_images);
+            }
+            if !overlay.meshes.is_empty() {
+                dispatch_pending_meshes(
+                    &mut self.renderer,
+                    target_view,
+                    width,
+                    height,
+                    &overlay.meshes,
+                );
+            }
 
             // The walker normally writes `visible_anim_active` from
             // its per-frame observations (canvas paints, active
@@ -5050,10 +5148,29 @@ impl RenderContext {
             );
         }
 
-        // Composite static cache + canvas overlay onto the surface.
-        let canvas_prims = self.collect_canvas_overlay_primitives(tree, width, height);
+        // Composite static cache + full canvas overlay onto the
+        // surface. The overlay drain captures SDF primitives, raw
+        // dynamic images (video frames), and 3D meshes — each
+        // dispatched in z-order via its own pipeline so video and
+        // mesh content actually reaches the surface in compositor
+        // mode (it was dropped on the floor by the
+        // primitives-only path).
+        let overlay = self.collect_canvas_overlay(tree, width, height);
         self.renderer
-            .composite_frame(target_view, target_texture, &canvas_prims);
+            .composite_frame(target_view, target_texture, &overlay.primitives);
+        if !overlay.dynamic_images.is_empty() {
+            self.renderer
+                .render_dynamic_images(target_view, &overlay.dynamic_images);
+        }
+        if !overlay.meshes.is_empty() {
+            dispatch_pending_meshes(
+                &mut self.renderer,
+                target_view,
+                width,
+                height,
+                &overlay.meshes,
+            );
+        }
 
         // Site C bookkeeping (slow-path counterpart). The walker
         // ran (or got bypassed by apply_binding_deltas) — either
