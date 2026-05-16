@@ -3248,6 +3248,24 @@ impl WindowedApp {
 
                     // Handle input events
                     Event::Input(_, input_event) => {
+                        // Drop the compositor's primitive cache on any
+                        // input. The cache only knows how to delta-apply
+                        // motion-binding values; everything else an
+                        // input can change — scroll offsets, hover /
+                        // focus / active state, pointer position for
+                        // `@flow` shaders, drag state, IME composition
+                        // — would render stale if reused. Cheaper to
+                        // repopulate the cache on the very next full
+                        // paint than to track every per-input source
+                        // separately. The fast path stays active
+                        // between input events (idle spinner /
+                        // skeleton / progress animations), which is
+                        // where it pays off anyway. Costs ~one cache-
+                        // sized memcpy per input event, well under
+                        // the cost of the input dispatch itself.
+                        if let Some(ref mut app) = ws.app {
+                            app.invalidate_render_cache();
+                        }
                         // Pending event structure for deferred dispatch
                         #[derive(Clone)]
                         struct PendingEvent {
@@ -4919,42 +4937,38 @@ impl WindowedApp {
                                 // the same BlincApp.
                                 blinc_app.set_clear_alpha(if ws.transparent { 0.0 } else { 1.0 });
 
-                                // Compositor fast-path is currently disabled.
+                                // Compositor fast-path eligibility.
                                 //
-                                // The cache + delta-apply path works for
-                                // strictly motion-only frames, but several
-                                // sources of state change don't flow through
-                                // the current gate (`did_rebuild`,
-                                // `needs_relayout`, `css_active`,
-                                // `scroll_animating`):
+                                // Cache invalidation is now wired through
+                                // `Event::Input` (any input event clears
+                                // the cache), so scroll / hover / focus /
+                                // IME changes can't smuggle stale state
+                                // into the fast path — the very next
+                                // paint after any input takes the full
+                                // walker route and repopulates the cache.
+                                // The fast path engages between input
+                                // events, which is exactly when idle
+                                // animations (spinner / skeleton /
+                                // progress fill) need it.
                                 //
-                                //  - User-driven scroll (wheel / trackpad)
-                                //    changes scroll offsets without setting
-                                //    `scroll_animating` (that flag is just
-                                //    for physics decay). The fast path
-                                //    reuses the cached batch with stale
-                                //    child positions, the redraw chain
-                                //    stalls, and scroll appears frozen.
-                                //  - Hover / focus / IME state changes
-                                //    aren't tracked here either.
-                                //
-                                // Until the cache invalidation is plumbed
-                                // through every input source (or the cache
-                                // is reframed to patch scroll offsets the
-                                // same way it patches motion translates),
-                                // route through the full paint path. The
-                                // upstream pieces (`apply_binding_deltas`,
-                                // `write_primitives_partial`, the cache
-                                // itself, the binding metadata) stay in
-                                // place for the follow-up that wires it
-                                // properly.
-                                let try_fast_paint = false;
-                                let _ = (
-                                    did_rebuild,
-                                    css_active,
-                                    scroll_animating,
-                                    blinc_app.has_render_cache(),
-                                );
+                                // Per-frame gate stays conservative — any
+                                // frame-loop signal that the fast path's
+                                // delta-apply can't reproduce trips the
+                                // full path:
+                                //  - structural change (`did_rebuild`,
+                                //    `ws.needs_relayout`)
+                                //  - CSS animation / transition tick
+                                //    (`css_active`)
+                                //  - scroll physics decay
+                                //    (`scroll_animating`)
+                                //  - cold start (no cache yet,
+                                //    `last_paint_time_ms == 0`)
+                                let try_fast_paint = !did_rebuild
+                                    && !ws.needs_relayout
+                                    && !css_active
+                                    && !scroll_animating
+                                    && ws.last_paint_time_ms != 0
+                                    && blinc_app.has_render_cache();
 
                                 // Render with motion animations
                                 // Use physical pixel dimensions for the render surface
