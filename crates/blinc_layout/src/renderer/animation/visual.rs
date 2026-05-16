@@ -487,11 +487,7 @@ impl RenderTree {
         render_state: &crate::render_state::RenderState,
     ) -> bool {
         // MotionBindings (springs + always-playing rotation_timelines).
-        if self
-            .motion_bindings
-            .values()
-            .any(|b| b.is_any_animating())
-        {
+        if self.motion_bindings.values().any(|b| b.is_any_animating()) {
             return true;
         }
         // motion() FSM enter / exit.

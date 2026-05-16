@@ -4461,10 +4461,7 @@ impl GpuRenderer {
     /// blits the cache when this is true; otherwise it falls back to
     /// rendering the cache afresh.
     pub fn static_layer_valid(&self) -> bool {
-        self.static_layer
-            .as_ref()
-            .map(|l| l.valid)
-            .unwrap_or(false)
+        self.static_layer.as_ref().map(|l| l.valid).unwrap_or(false)
     }
 
     /// Borrow the static-layer view, if the cache has been

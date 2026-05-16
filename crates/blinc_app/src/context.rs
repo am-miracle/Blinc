@@ -721,7 +721,6 @@ impl RenderContext {
         let mut scratch = GpuPaintContext::new(width as f32, height as f32);
         let mut overlay = CanvasOverlay::default();
         for record in records {
-
             // Replay the ancestor clip stack BEFORE pushing the
             // canvas's affine. `push_clip` transforms the supplied
             // rect by the current affine, so pushing a screen-coord
@@ -4891,14 +4890,13 @@ impl RenderContext {
         // because they have no notion of "target settled".
         const VISIBLE_PIXEL_EPS: f32 = 0.5;
         const VISIBLE_DEG_EPS: f32 = 0.5;
-        let value_far_from_target = |v: &Option<blinc_animation::SharedAnimatedValue>,
-                                     eps: f32|
-         -> bool {
-            v.as_ref()
-                .and_then(|s| s.lock().ok())
-                .map(|g| (g.get() - g.target()).abs() > eps)
-                .unwrap_or(false)
-        };
+        let value_far_from_target =
+            |v: &Option<blinc_animation::SharedAnimatedValue>, eps: f32| -> bool {
+                v.as_ref()
+                    .and_then(|s| s.lock().ok())
+                    .map(|g| (g.get() - g.target()).abs() > eps)
+                    .unwrap_or(false)
+            };
         // Detect direct-write motion (`set_immediate`): the binding
         // is at its target (so `is_any_animating` returns false and
         // value_far_from_target won't fire) but its CURRENT value
@@ -5006,9 +5004,8 @@ impl RenderContext {
 
         // Fast path: cache valid AND caller is fine with reusing it.
         // Skip the entire walker / dispatch chain — just composite.
-        let use_fast = try_fast_paint
-            && self.renderer.static_layer_valid()
-            && self.cached_bg_batch.is_some();
+        let use_fast =
+            try_fast_paint && self.renderer.static_layer_valid() && self.cached_bg_batch.is_some();
 
         if use_fast {
             // Full canvas overlay — drains SDF primitives + raw-
@@ -5067,11 +5064,7 @@ impl RenderContext {
             let any_visible_anim = {
                 let painted_set = tree.painted_node_ids().clone();
                 let painted_stable = tree.painted_stable_ids();
-                tree.has_any_active_animation_visible(
-                    render_state,
-                    &painted_set,
-                    &painted_stable,
-                )
+                tree.has_any_active_animation_visible(render_state, &painted_set, &painted_stable)
             };
             tree.set_visible_anim_active(any_visible_anim || has_visible_canvas);
 
@@ -5168,30 +5161,15 @@ impl RenderContext {
             let regions = tree.dynamic_regions();
             let canvas_count = regions
                 .values()
-                .filter(|r| {
-                    matches!(
-                        r.kind,
-                        blinc_layout::renderer::DynamicKind::Canvas { .. }
-                    )
-                })
+                .filter(|r| matches!(r.kind, blinc_layout::renderer::DynamicKind::Canvas { .. }))
                 .count();
             let motion_count = regions
                 .values()
-                .filter(|r| {
-                    matches!(
-                        r.kind,
-                        blinc_layout::renderer::DynamicKind::MotionSubtree
-                    )
-                })
+                .filter(|r| matches!(r.kind, blinc_layout::renderer::DynamicKind::MotionSubtree))
                 .count();
             let css_count = regions
                 .values()
-                .filter(|r| {
-                    matches!(
-                        r.kind,
-                        blinc_layout::renderer::DynamicKind::CssAnimated
-                    )
-                })
+                .filter(|r| matches!(r.kind, blinc_layout::renderer::DynamicKind::CssAnimated))
                 .count();
             let legacy_canvas = tree.canvas_paint_records().len();
             let legacy_motion = tree.composite_bindings().len();
@@ -5242,11 +5220,7 @@ impl RenderContext {
         let any_visible_anim = {
             let painted_set = tree.painted_node_ids().clone();
             let painted_stable = tree.painted_stable_ids();
-            tree.has_any_active_animation_visible(
-                render_state,
-                &painted_set,
-                &painted_stable,
-            )
+            tree.has_any_active_animation_visible(render_state, &painted_set, &painted_stable)
         };
         tree.set_visible_anim_active(any_visible_anim || has_visible_canvas);
 
@@ -5395,7 +5369,10 @@ impl RenderContext {
         let any_motion_active = render_state.has_active_motions()
             || tree.has_active_visual_animations()
             || tree.has_active_layout_animations()
-            || tree.motion_bindings_map().values().any(|b| b.is_any_animating())
+            || tree
+                .motion_bindings_map()
+                .values()
+                .any(|b| b.is_any_animating())
             || {
                 let bindings_table = tree.motion_bindings_map();
                 tree.composite_bindings().iter().any(|(node, meta)| {

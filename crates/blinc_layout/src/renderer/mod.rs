@@ -1173,7 +1173,10 @@ impl RenderTree {
         // Canvases: every `ElementType::Canvas` is always animating
         // (the closure can produce different output every frame).
         for (node, render_node) in self.render_nodes.iter() {
-            if matches!(render_node.element_type, crate::renderer::ElementType::Canvas(_)) {
+            if matches!(
+                render_node.element_type,
+                crate::renderer::ElementType::Canvas(_)
+            ) {
                 candidates.insert(*node);
                 canvas_nodes.insert(*node);
             }

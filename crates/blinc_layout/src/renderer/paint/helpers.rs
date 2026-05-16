@@ -64,12 +64,7 @@ impl RenderTree {
         dpi: f32,
     ) -> [f32; 4] {
         let [a, b, c, d, tx, ty] = *affine;
-        let corners = [
-            (0.0, 0.0),
-            (width, 0.0),
-            (0.0, height),
-            (width, height),
-        ];
+        let corners = [(0.0, 0.0), (width, 0.0), (0.0, height), (width, height)];
         let mut min_x = f32::INFINITY;
         let mut min_y = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;

@@ -165,7 +165,6 @@ impl RenderTree {
         // Debug: uncomment to trace all nodes
         // eprintln!("render_layer_with_motion: visiting node {:?}, target_layer={:?}", node, target_layer);
 
-
         // Use animated bounds if a layout animation is active, otherwise use layout bounds
         let Some(bounds) = self.get_render_bounds(node, parent_offset) else {
             return;
@@ -354,12 +353,12 @@ impl RenderTree {
                 // the value is now constant — including it here pinned
                 // the chain at vsync forever.
                 let has_active_binding = motion_bindings_ref.is_some_and(|b| b.is_any_animating());
-                let has_active_motion = if let Some(ref stable_key) = render_node.props.motion_stable_id
-                {
-                    render_state.is_stable_motion_active(stable_key)
-                } else {
-                    render_state.is_motion_active(node)
-                };
+                let has_active_motion =
+                    if let Some(ref stable_key) = render_node.props.motion_stable_id {
+                        render_state.is_stable_motion_active(stable_key)
+                    } else {
+                        render_state.is_motion_active(node)
+                    };
                 if canvas_paints || has_active_binding || has_active_motion {
                     self.visible_anim_active.set(true);
                 }
@@ -1538,9 +1537,7 @@ impl RenderTree {
         // gets clobbered by Glass / Foreground's empty range when
         // `insert` overwrites — the fast path then iterates zero
         // primitives, patches nothing, and the bar appears frozen.
-        if let Some(start) = composite_bg_start
-            .filter(|_| effective_layer == target_layer)
-        {
+        if let Some(start) = composite_bg_start.filter(|_| effective_layer == target_layer) {
             let end = ctx.bg_primitive_count();
             if end > start {
                 let (binding_tx, binding_ty) = motion_bindings_ref
@@ -1622,11 +1619,7 @@ impl RenderTree {
                 // entry above stays in place either way because the
                 // fast-path delta-patcher needs the primitive range
                 // for any bound node (settled or not).
-                let status = self
-                    .current_animation_status
-                    .borrow()
-                    .get(&node)
-                    .copied();
+                let status = self.current_animation_status.borrow().get(&node).copied();
                 let kind_match = match status {
                     Some(super::super::AnimationStatus::Animating(
                         super::super::AnimatedKind::Motion,
