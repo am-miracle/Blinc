@@ -2310,15 +2310,11 @@ impl RenderContext {
             } else {
                 1.0
             };
-            if fade_factor < 1.0 {
-                // Force continuous redraw while fade is in progress.
-                // Uses the dedicated `has_pending_image_fade` flag
-                // because `has_active_flows` is authoritatively
-                // reset at the end of dispatch from the flow_elements
-                // count — setting it here would be silently
-                // overwritten by that reset.
-                self.has_pending_image_fade = true;
-            }
+            // `has_pending_image_fade` is now set at the top of
+            // `try_render_with_compositor` from `image_load_times`
+            // — it has to be known BEFORE the cache decision so
+            // the slow path is forced; the per-image dispatch
+            // here doesn't need to set anything.
 
             // If image is not loaded and has a placeholder, render placeholder
             if gpu_image.is_none() && image.placeholder_type != 0 {
@@ -2564,11 +2560,9 @@ impl RenderContext {
             } else {
                 1.0
             };
-            if fade_factor < 1.0 {
-                // See sibling dispatch site for rationale: use the
-                // dedicated image-fade flag, not the flows flag.
-                self.has_pending_image_fade = true;
-            }
+            // Fade signal lives on `has_pending_image_fade`, set
+            // at the top of `try_render_with_compositor` from
+            // `image_load_times`. No per-dispatch set needed here.
 
             // Convert object_fit byte to ObjectFit enum
             let object_fit = match image.object_fit {
@@ -4788,11 +4782,30 @@ impl RenderContext {
     ) -> Result<()> {
         self.renderer.ensure_static_layer(width, height);
 
-        // Reset the image-fade flag each frame. Re-armed below by
-        // any image dispatch where `fade_factor < 1.0`. Without
-        // the reset the flag latches once an image starts fading
-        // and the windowed redraw chain stays alive forever.
-        self.has_pending_image_fade = false;
+        // Image fade-in detection at frame boundary — independent
+        // of whether the fast or slow path runs this frame. The
+        // image dispatch only runs on the slow path; once the
+        // cache is warm we'd never re-set this flag mid-fade, so
+        // we compute it from `image_load_times` directly here.
+        //
+        // Conservative upper bound: any image loaded within the
+        // last 2 s might still be fading (typical fade durations
+        // are 100-500 ms, but accept some over-firing in exchange
+        // for not needing per-source duration tracking).
+        const MAX_FADE_MS: u128 = 2000;
+        let now = web_time::Instant::now();
+        self.has_pending_image_fade = self
+            .image_load_times
+            .values()
+            .any(|t| now.duration_since(*t).as_millis() < MAX_FADE_MS);
+
+        if self.has_pending_image_fade {
+            // Force the slow path so the image dispatch actually
+            // runs with the latest fade_factor — fast path would
+            // just blit the previous frame's static cache and the
+            // image stays frozen at mid-fade.
+            self.renderer.invalidate_static_layer();
+        }
 
         // ----- Compositor v2 Phase 1 verification trace -----
         // Compute the per-node animation status from the new model
