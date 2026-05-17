@@ -895,10 +895,14 @@ impl<'a> GpuPaintContext<'a> {
                 ClipShape::Path(path)
             }
             ClipShape::Polygon(pts) => {
-                // Transform each polygon vertex
-                let transformed: Vec<Point> =
-                    pts.iter().map(|p| self.transform_point(*p)).collect();
-                ClipShape::Polygon(transformed)
+                // Polygon vertices stay in element-local coords. The
+                // fragment shader tests them against `sp - prim.bounds.xy`
+                // (the primitive's local frame), so the polygon naturally
+                // rotates with the element — including motion-binding
+                // rotations updated per-frame by `apply_binding_deltas`.
+                // Pre-transforming to screen space would freeze the
+                // polygon at the walker-time rotation.
+                ClipShape::Polygon(pts)
             }
         }
     }

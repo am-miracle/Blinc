@@ -481,12 +481,12 @@ fn calculate_clip_alpha(p: vec2<f32>, clip_bounds: vec4<f32>, clip_radius: vec4<
                 alpha = scissor_alpha * shape_alpha;
             }
             case 4u /* CLIP_POLYGON */: {
+                // Scissor-only for early discard. The polygon shape test
+                // is deferred to fs_main after `sp` is computed, so it
+                // can run against element-local coords (`sp - prim.bounds.xy`)
+                // and rotate with motion bindings / CSS transforms.
                 let scissor_d = sd_rounded_rect(p, clip_bounds.xy, clip_bounds.zw, vec4<f32>(0.0));
-                let scissor_alpha = 1.0 - smoothstep(-aa_width, aa_width, scissor_d);
-                let vertex_count = u32(clip_radius.z);
-                let aux_offset = u32(clip_radius.w);
-                let shape_alpha = calculate_polygon_clip_alpha(p, vertex_count, aux_offset);
-                alpha = scissor_alpha * shape_alpha;
+                alpha = 1.0 - smoothstep(-aa_width, aa_width, scissor_d);
             }
             default: {}
         }
@@ -706,8 +706,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // text in the same draw dispatch.
     if prim_type > 2u && prim_type != 7u && prim_type != 9u { discard; }
 
-    // Early clip test - discard if completely outside clip region (screen space)
-    let clip_alpha = calculate_clip_alpha(p, prim.clip_bounds, prim.clip_radius, clip_type, prim.clip_fade);
+    // Early clip test - discard if completely outside clip region (screen space).
+    // For CLIP_POLYGON the scissor-AABB portion runs here; the polygon's
+    // winding-number shape test is deferred to after `sp` is computed
+    // below so the polygon vertices (stored in element-local coords) can
+    // be tested in the same frame the SDF evaluates — which means clips
+    // rotate with motion-binding / CSS rotation automatically.
+    var clip_alpha = calculate_clip_alpha(p, prim.clip_bounds, prim.clip_radius, clip_type, prim.clip_fade);
     if clip_alpha < 0.001 {
         discard;
     }
@@ -762,6 +767,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let inv_c = -la.z * inv_det;
             let inv_d = la.x * inv_det;
             sp = vec2<f32>(inv_a * rel.x + inv_c * rel.y, inv_b * rel.x + inv_d * rel.y) + center;
+        }
+    }
+
+    // CLIP_POLYGON shape test in element-local coords. Polygon vertices
+    // are stored in aux_data as supplied by the user (0..size range); the
+    // walker no longer pre-transforms them to screen space. Using
+    // `sp - prim.bounds.xy` puts the sample point in the same frame, so
+    // any rotation (CSS, motion-binding timeline, motion-binding rotation
+    // updated via apply_binding_deltas) naturally rotates the polygon.
+    if clip_type == 4u {
+        let vertex_count = u32(prim.clip_radius.z);
+        let aux_offset = u32(prim.clip_radius.w);
+        let local_p = sp - prim.bounds.xy;
+        let shape_alpha = calculate_polygon_clip_alpha(local_p, vertex_count, aux_offset);
+        clip_alpha = clip_alpha * shape_alpha;
+        if clip_alpha < 0.001 {
+            discard;
         }
     }
 
