@@ -5475,24 +5475,23 @@ impl RenderContext {
                 // canvas closure. composite_frame blits the static
                 // cache + dispatches the SDF prims; we then layer the
                 // dynamic images and meshes onto the same target.
-                let overlay = self.collect_canvas_overlay(tree, width, height);
-                self.renderer
-                    .composite_frame(target_view, target_texture, &overlay.primitives);
+                let mut overlay = self.collect_canvas_overlay(tree, width, height);
                 // Compositor v2: motion-bound subtree primitives go
                 // into a separate `cached_dynamic_batch` (walker
                 // pushed motion subtree depth around them so they
-                // bypassed the static cache). Dispatch them per-
-                // frame on top of the just-blitted cache so motion
-                // bindings can patch positions in place without
-                // ever invalidating the cache.
+                // bypassed the static cache). Append them to the
+                // canvas overlay so composite_frame's single encoder
+                // can dispatch both cache blit + canvas SDF +
+                // motion-bound prims in one queue.submit — separate
+                // submits per frame doubled GPU driver overhead in
+                // the mouse-wiggle steady state.
                 if let Some(ref dyn_batch) = self.cached_dynamic_batch {
                     if !dyn_batch.primitives.is_empty() {
-                        self.renderer.render_primitives_overlay(
-                            target_view,
-                            &dyn_batch.primitives,
-                        );
+                        overlay.primitives.extend_from_slice(&dyn_batch.primitives);
                     }
                 }
+                self.renderer
+                    .composite_frame(target_view, target_texture, &overlay.primitives);
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
                         .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -5674,18 +5673,18 @@ impl RenderContext {
         // mesh content actually reaches the surface in compositor
         // mode (it was dropped on the floor by the
         // primitives-only path).
-        let overlay = self.collect_canvas_overlay(tree, width, height);
-        self.renderer
-            .composite_frame(target_view, target_texture, &overlay.primitives);
-        // Compositor v2: dispatch motion-bound subtree primitives
-        // on top of the blitted cache. See the matching block in the
-        // use_fast branch above for the full rationale.
+        let mut overlay = self.collect_canvas_overlay(tree, width, height);
+        // Compositor v2: append motion-bound subtree primitives to the
+        // canvas overlay so cache blit + canvas SDF + motion-bound
+        // dispatch all share a single command encoder / submit. See
+        // the matching block in the use_fast branch above.
         if let Some(ref dyn_batch) = self.cached_dynamic_batch {
             if !dyn_batch.primitives.is_empty() {
-                self.renderer
-                    .render_primitives_overlay(target_view, &dyn_batch.primitives);
+                overlay.primitives.extend_from_slice(&dyn_batch.primitives);
             }
         }
+        self.renderer
+            .composite_frame(target_view, target_texture, &overlay.primitives);
         if !overlay.dynamic_images.is_empty() {
             self.renderer
                 .render_dynamic_images(target_view, &overlay.dynamic_images);
