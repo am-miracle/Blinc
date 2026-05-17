@@ -4738,46 +4738,29 @@ impl GpuRenderer {
                 label: Some("blinc-damage-rect-encoder"),
             });
 
-        // Two-pass damage-rect re-render. wgpu's `LoadOp::Clear`
+        // Single-pass damage-rect re-render. wgpu's `LoadOp::Clear`
         // ignores `set_scissor_rect`, so we can't clear-inside-
-        // scissor in one pass. Instead:
+        // scissor via attachment ops. Instead we open ONE render
+        // pass with `LoadOp::Load` and issue two draws inside it:
         //
-        //   Pass 1: `LoadOp::Load` + scissor + clear-quad pipeline.
-        //           The clear-quad shader generates a fullscreen
-        //           triangle that writes `(0,0,0,0)` with REPLACE
-        //           blend, but the active scissor confines the
-        //           writes to the damaged region. Result: the
-        //           damaged region is genuinely zeroed; pixels
-        //           outside the scissor are untouched.
+        //   1. clear-quad pipeline (REPLACE blend, writes opaque
+        //      black) → with the active scissor, zeros the damaged
+        //      region.
+        //   2. SDF pipeline → re-paints the cleared region in
+        //      z-order from every primitive whose AABB intersects
+        //      the union damage rect.
         //
-        //   Pass 2: `LoadOp::Load` + scissor + SDF dispatch. All
-        //           primitives whose AABB intersects the union of
-        //           damage rects re-paint into the now-cleared
-        //           region in z-order. Outside-scissor pixels stay
-        //           as they were.
-        {
-            let mut clear_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("blinc-damage-rect-clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            clear_pass.set_scissor_rect(scissor_x, scissor_y, scissor_w, scissor_h);
-            clear_pass.set_pipeline(&self.pipelines.clear_quad);
-            clear_pass.draw(0..3, 0..1);
-        }
+        // Two passes was the original cut but every render-pass
+        // begin/end forces a tile-memory load + store on Metal
+        // (the static cache is a multi-MB texture). Folding both
+        // draws into a single pass means one load + one store per
+        // damage frame instead of two — measurable on cn_demo's
+        // switch / progress / slider animations where the slow
+        // path's single-pass full-clear was visibly smoother than
+        // the two-pass damage path despite doing more total work.
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("blinc-damage-rect-draw"),
+                label: Some("blinc-damage-rect-combined"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -4792,6 +4775,10 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
             render_pass.set_scissor_rect(scissor_x, scissor_y, scissor_w, scissor_h);
+            // First draw: scissored clear via the clear-quad pipeline.
+            render_pass.set_pipeline(&self.pipelines.clear_quad);
+            render_pass.draw(0..3, 0..1);
+            // Second draw: SDF re-paint inside the just-cleared scissor.
             if !visible.is_empty() {
                 render_pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
                 Self::draw_split_sdf(
