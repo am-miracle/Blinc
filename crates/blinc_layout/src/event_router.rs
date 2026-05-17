@@ -78,6 +78,14 @@ pub struct HitTestResult {
     /// Whether this hit is within a foreground-layer subtree.
     /// Used to prioritize foreground elements over normal elements.
     pub is_foreground: bool,
+    /// Absolute bounds of every direct child of `node`, captured at
+    /// hit-test time. `node` is the topmost (deepest) hit, so by
+    /// construction none of these children contained the cursor at
+    /// hit time. Used by the cursor-inside-last-leaf short-circuit
+    /// to detect when the cursor moves into one of them — at which
+    /// point the deepest hit would change and a full re-test is
+    /// needed.
+    pub leaf_children_bounds: Vec<(f32, f32, f32, f32)>,
 }
 
 /// Callback for element events
@@ -155,6 +163,20 @@ pub struct EventRouter {
     /// twice (once for hover dispatch + once for cursor resolution
     /// on a UI with `cursor:` styles set).
     last_hit_chain: Vec<LayoutNodeId>,
+    /// `true` iff the deepest hit from the last test has no children
+    /// in the layout tree. Gates `cursor_inside_last_leaf` — a leaf
+    /// with children could see the cursor cross into a child without
+    /// the parent's bounds being exited, which would change the
+    /// hover set without our short-circuit detecting it.
+    last_leaf_has_no_children: bool,
+    /// Absolute bounds of every direct child of the last hit's leaf
+    /// node. Used by `cursor_inside_last_leaf` to detect when the
+    /// cursor moves into a child (which would change the deepest
+    /// hit and require a full re-test) while staying inside the
+    /// parent's bounds. Empty when the leaf is childless; in that
+    /// case `last_leaf_has_no_children = true` and this check is
+    /// vacuous.
+    last_leaf_children_bounds: Vec<(f32, f32, f32, f32)>,
 }
 
 impl Default for EventRouter {
@@ -190,6 +212,8 @@ impl EventRouter {
             drag_delta_y: 0.0,
             last_hit_ancestor_bounds: std::collections::HashMap::new(),
             last_hit_chain: Vec::new(),
+            last_leaf_has_no_children: false,
+            last_leaf_children_bounds: Vec::new(),
         }
     }
 
@@ -246,10 +270,32 @@ impl EventRouter {
         if self.last_hit_bounds_width <= 0.0 || self.last_hit_bounds_height <= 0.0 {
             return false;
         }
-        x >= self.last_hit_bounds_x
+        let inside_leaf = x >= self.last_hit_bounds_x
             && x < self.last_hit_bounds_x + self.last_hit_bounds_width
             && y >= self.last_hit_bounds_y
-            && y < self.last_hit_bounds_y + self.last_hit_bounds_height
+            && y < self.last_hit_bounds_y + self.last_hit_bounds_height;
+        if !inside_leaf {
+            return false;
+        }
+        // Cursor is inside the previous leaf. The hover set is
+        // unchanged ONLY if no direct child of the leaf now contains
+        // the cursor — otherwise the child would become the new
+        // deepest hit and a POINTER_ENTER would be due.
+        //
+        // Leaves with no children (`last_leaf_has_no_children`) skip
+        // this loop entirely. Leaves with children pay an O(children)
+        // bounds check per move; in cn_demo's deepest leaves that's
+        // a handful of containers — orders of magnitude cheaper than
+        // the recursive hit_test we'd otherwise run.
+        if self.last_leaf_has_no_children {
+            return true;
+        }
+        for (cx, cy, cw, ch) in self.last_leaf_children_bounds.iter().copied() {
+            if x >= cx && x < cx + cw && y >= cy && y < cy + ch {
+                return false;
+            }
+        }
+        true
     }
 
     /// Update stored cursor coordinates without running the hit-
@@ -600,8 +646,23 @@ impl EventRouter {
             // the tree.
             self.last_hit_chain.clear();
             self.last_hit_chain.extend_from_slice(&topmost.ancestors);
+            // Whether the deepest hit truly has no children — only
+            // then is the cursor-inside-last-leaf short-circuit safe.
+            // A leaf with children (e.g. button-div with a text
+            // child) could see the cursor cross into a child without
+            // leaving the parent's bounds; the child would become a
+            // new deepest hit needing POINTER_ENTER. We capture each
+            // child's absolute bounds (populated by hit_test_node at
+            // the leaf level) so the short-circuit can additionally
+            // require the cursor not be in any child.
+            self.last_leaf_has_no_children = topmost.leaf_children_bounds.is_empty();
+            self.last_leaf_children_bounds.clear();
+            self.last_leaf_children_bounds
+                .extend_from_slice(&topmost.leaf_children_bounds);
         } else {
             self.last_hit_chain.clear();
+            self.last_leaf_has_no_children = false;
+            self.last_leaf_children_bounds.clear();
         }
 
         // Elements that were hovered but no longer are -> POINTER_LEAVE
@@ -1566,6 +1627,24 @@ impl EventRouter {
                 // This node is the target. Clone the traversal state only
                 // once, when we actually have a hit to return; the old code
                 // cloned it for every sibling probe during mouse movement.
+                // Capture direct children's absolute bounds. By
+                // construction (this branch fires only when no
+                // child's recursion returned `Some`), none of them
+                // contained the cursor at hit time. The router uses
+                // these for the cursor-inside-last-leaf short-circuit
+                // — a wiggle that stays inside this node AND outside
+                // every child bound can't have changed the hover
+                // set, so the entire dispatch pipeline is safe to
+                // skip.
+                let mut leaf_children_bounds = Vec::new();
+                for child in tree.layout().children(node) {
+                    if let Some(cb) =
+                        tree.layout().get_bounds(child, base_child_offset)
+                    {
+                        leaf_children_bounds
+                            .push((cb.x, cb.y, cb.width, cb.height));
+                    }
+                }
                 Some(HitTestResult {
                     node,
                     local_x: x - bounds.x,
@@ -1577,6 +1656,7 @@ impl EventRouter {
                     bounds_height: bounds.height,
                     ancestor_bounds: ancestor_bounds.clone(),
                     is_foreground: false,
+                    leaf_children_bounds,
                 })
             }
         };
@@ -1647,6 +1727,10 @@ impl EventRouter {
                 bounds_height: bounds.height,
                 ancestor_bounds: ancestor_bounds.clone(),
                 is_foreground: false,
+                // `hit_test_all` collects every container in the
+                // chain, not just the leaf — short-circuit lives on
+                // the single-hit path, so the empty Vec is fine.
+                leaf_children_bounds: Vec::new(),
             });
         }
 
