@@ -3487,14 +3487,28 @@ impl WindowedApp {
                                             blinc_layout::widgets::overlay::OVERLAY_LAYER_ID
                                         );
 
-                                        // Route mouse move through main tree with overlay occlusion awareness
-                                        router.on_mouse_move_with_occlusion(
-                                            tree,
-                                            lx,
-                                            ly,
-                                            &overlay_bounds,
-                                            overlay_layer_id,
-                                        );
+                                        // Drag fast path: while a press is in flight the
+                                        // pressed target is fixed at mouse-down, so hover
+                                        // diff / ENTER / LEAVE / cursor lookup are all
+                                        // unnecessary. Just emit DRAG to the pressed
+                                        // target + ancestors. Skips the full tree walk
+                                        // that `on_mouse_move_with_occlusion` does — at
+                                        // 100+ Hz move rates × cn_demo's tree depth, that
+                                        // walk was the dominant remaining cost during a
+                                        // drag (the gap between hello_blinc's 11 % drag
+                                        // CPU and cn_demo's 25 %).
+                                        if router.is_press_in_flight() {
+                                            router.on_mouse_drag_fast(tree, lx, ly);
+                                        } else {
+                                            // Route mouse move through main tree with overlay occlusion awareness
+                                            router.on_mouse_move_with_occlusion(
+                                                tree,
+                                                lx,
+                                                ly,
+                                                &overlay_bounds,
+                                                overlay_layer_id,
+                                            );
+                                        }
 
                                         // Crossing an element boundary changes CSS `:hover`
                                         // styling and may switch which Stateful is in

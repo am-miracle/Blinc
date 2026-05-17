@@ -441,6 +441,66 @@ impl EventRouter {
 
     /// Handle mouse move event with overlay occlusion awareness
     ///
+    /// Drag-only fast path: emit DRAG events to the pressed target +
+    /// its ancestors without running the hit-test pipeline. While a
+    /// press is in flight the pressed target is fixed (set at
+    /// mouse-down), so hover-set updates / ENTER / LEAVE / cursor
+    /// lookup don't apply — those all care about which node is
+    /// currently under the cursor, but during a drag the user is
+    /// interacting with the pressed element regardless of cursor
+    /// position. Returns the emitted events for the dispatch loop.
+    ///
+    /// Caller MUST verify `is_press_in_flight()` before invoking.
+    /// Mouse-move events without a press should still go through
+    /// `on_mouse_move_with_occlusion` for the full hover pipeline.
+    pub fn on_mouse_drag_fast(
+        &mut self,
+        tree: &RenderTree,
+        x: f32,
+        y: f32,
+    ) -> Vec<(LayoutNodeId, u32)> {
+        self.mouse_x = x;
+        self.mouse_y = y;
+        let mut events = Vec::new();
+        let Some(stable_target) = self.pressed_target else {
+            return events;
+        };
+
+        self.drag_delta_x = x - self.drag_start_x;
+        self.drag_delta_y = y - self.drag_start_y;
+
+        const DRAG_THRESHOLD: f32 = 3.0;
+        let delta_exceeds = self.drag_delta_x.abs() > DRAG_THRESHOLD
+            || self.drag_delta_y.abs() > DRAG_THRESHOLD;
+
+        if !self.is_dragging && delta_exceeds {
+            self.is_dragging = true;
+        }
+
+        if self.is_dragging {
+            if let Some(target) = tree.layout_id(stable_target) {
+                self.emit_event(target, event_types::DRAG);
+                events.push((target, event_types::DRAG));
+            }
+            // Bubble to ancestors of the pressed target. Collect first
+            // to avoid borrow conflict with `emit_event`.
+            let ancestors: Vec<_> = self
+                .pressed_ancestors
+                .iter()
+                .rev()
+                .skip(1)
+                .copied()
+                .collect();
+            for stable_ancestor in ancestors {
+                if let Some(ancestor) = tree.layout_id(stable_ancestor) {
+                    self.emit_event(ancestor, event_types::DRAG);
+                    events.push((ancestor, event_types::DRAG));
+                }
+            }
+        }
+        events
+    }
+
     /// Same as `on_mouse_move`, but also checks for overlay occlusion.
     /// Elements that are visually occluded by overlays will not receive hover events.
     ///
