@@ -375,8 +375,29 @@ impl RenderTree {
         // This ensures children fade together with their parent motion container
         let motion_opacity = inherited_opacity * node_motion_opacity;
 
-        // Skip rendering if completely transparent
-        if motion_opacity <= 0.001 {
+        // Skip rendering if completely transparent — UNLESS this
+        // node has an active motion binding or motion FSM that
+        // could ramp the opacity back up. Bailing on a node whose
+        // opacity-binding spring is mid-flight from 0 → 1 leaves
+        // its subtree's primitives out of the cached batch
+        // entirely; the fast-path delta patcher then has nothing
+        // to patch when the spring climbs above 0.001, and the
+        // subtree stays invisible until a slow-path repaint
+        // catches up (typically triggered by mouse move via the
+        // render-cache invalidation). Symptom: cn_demo switch
+        // background color doesn't fade in on click — the thumb
+        // moves but the colored track stays hidden.
+        //
+        // Keep the early-return for static transparency (a div
+        // with `opacity: 0` and no animation) so we don't waste
+        // cycles emitting primitives no one will see.
+        let has_pending_motion = motion_bindings_ref.is_some_and(|b| b.is_any_animating())
+            || if let Some(ref stable_key) = render_node.props.motion_stable_id {
+                render_state.is_stable_motion_active(stable_key)
+            } else {
+                render_state.is_motion_active(node)
+            };
+        if motion_opacity <= 0.001 && !has_pending_motion {
             return;
         }
 
