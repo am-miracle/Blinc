@@ -765,6 +765,14 @@ impl<'a> GpuPaintContext<'a> {
             return shape;
         }
 
+        // Uniform scale factor extracted from the affine — captures DPI
+        // scaling (Retina = ~2.0) plus any uniform element scale. Used
+        // by the polygon branch below to bring element-local vertices
+        // into physical pixels without applying rotation.
+        let [a, b, c, d, ..] = affine.elements;
+        let det = a * d - b * c;
+        let uniform_scale = det.abs().sqrt().max(1e-6);
+
         match shape {
             ClipShape::Rect(rect) => {
                 // Transform all four corners and compute AABB
@@ -895,14 +903,26 @@ impl<'a> GpuPaintContext<'a> {
                 ClipShape::Path(path)
             }
             ClipShape::Polygon(pts) => {
-                // Polygon vertices stay in element-local coords. The
-                // fragment shader tests them against `sp - prim.bounds.xy`
-                // (the primitive's local frame), so the polygon naturally
-                // rotates with the element — including motion-binding
-                // rotations updated per-frame by `apply_binding_deltas`.
-                // Pre-transforming to screen space would freeze the
-                // polygon at the walker-time rotation.
-                ClipShape::Polygon(pts)
+                // Polygon vertices stay in element-local coords (no
+                // rotation / translation) so the fragment shader's
+                // `sp - prim.bounds.xy` test rotates with the element —
+                // any rotation reflected in prim.rotation / local_affine
+                // (CSS, motion-binding spring, timeline updated by
+                // apply_binding_deltas) naturally rotates the polygon.
+                //
+                // BUT prim.bounds.xy is in physical pixels (DPI-scaled),
+                // so element-local coords need to be in physical pixels
+                // too — otherwise on Retina (2x) a 24-px logical element
+                // would have local_p ranging 0..48 but vertices 0..24,
+                // clipping the arc to the top-left quarter and making
+                // most of the ring invisible. Apply only the uniform
+                // (DPI) scale; skip the rotation portion of the affine.
+                let scale = uniform_scale;
+                let scaled: Vec<Point> = pts
+                    .iter()
+                    .map(|p| Point::new(p.x * scale, p.y * scale))
+                    .collect();
+                ClipShape::Polygon(scaled)
             }
         }
     }
