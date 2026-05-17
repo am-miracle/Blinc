@@ -1632,10 +1632,24 @@ impl RenderTree {
                     .map(|deg| deg.to_radians())
                     .unwrap_or(0.0);
                 let last_opacity = node_motion_opacity;
-                let centre = (
-                    bounds.x + bounds.width / 2.0,
-                    bounds.y + bounds.height / 2.0,
-                );
+                // Centre MUST be in absolute logical-pixel coords (the
+                // consumer in `apply_binding_deltas` multiplies by DPI
+                // to get a physical-pixel pivot for rotating primitive
+                // centres). `bounds` here is parent-relative, so for any
+                // nested motion (e.g. cn::spinner where motion sits
+                // inside arc_layer inside spinner container) `bounds.x`
+                // is 0 and we'd rotate the primitives around the screen
+                // origin instead of the element's centre. Walk the
+                // parent chain via `get_absolute_bounds` so the centre
+                // tracks the element's actual on-screen midpoint.
+                let centre = self
+                    .layout_tree
+                    .get_absolute_bounds(node)
+                    .map(|abs| (abs.x + abs.width / 2.0, abs.y + abs.height / 2.0))
+                    .unwrap_or((
+                        bounds.x + bounds.width / 2.0,
+                        bounds.y + bounds.height / 2.0,
+                    ));
                 let last_screen_aabb = ctx.bg_primitive_aabb(start, end);
                 self.composite_bindings.borrow_mut().insert(
                     node,

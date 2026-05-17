@@ -196,8 +196,8 @@ impl Spinner {
             .rounded(half)
             .border(border_width, track_color);
 
-        // Arc ring — motion-bound, lives in the dynamic batch and rotates
-        // via the timeline. The polygon clip masks 1/4 of the ring.
+        // Arc ring — motion-bound, rotates via timeline. Polygon clip
+        // masks the top-right quadrant to leave a 270° visible arc.
         let arc = motion()
             .rotate_timeline(self.timeline.clone(), entry_id)
             .child(
@@ -212,7 +212,7 @@ impl Spinner {
 
         let arc_layer = div().absolute().inset(0.0).w(diameter).h(diameter).child(arc);
 
-        // Container. Total size includes a half-border-width pad on each
+        // Container. Total size includes border-width padding on each
         // side so the ring's stroke isn't clipped by the parent layout.
         let total = diameter + border_width;
         let mut spinner = div()
