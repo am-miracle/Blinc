@@ -294,6 +294,18 @@ impl RenderTree {
         // node (cn_demo has ~13). Bindings whose values match
         // `last_*` are early-out'd inside `apply_binding_deltas` so
         // no GPU work happens for them.
+        // Tell the context this subtree is motion-bound so all
+        // primitive emissions route into the dynamic batch instead
+        // of the static cache batch. Paired with a `pop` at the end
+        // of this fn (any return path) via the
+        // `_motion_subtree_guard` below. The `composite_bg_start`
+        // captured immediately after now indexes into the dynamic
+        // batch, which is exactly what `apply_binding_deltas` and
+        // the per-frame overlay dispatch read.
+        let in_motion_subtree = motion_bindings_ref.is_some();
+        if in_motion_subtree {
+            ctx.push_motion_subtree();
+        }
         let composite_bg_start = motion_bindings_ref.map(|_| ctx.bg_primitive_count());
 
         // Compositor v2 ambient snapshot for motion-bound subtrees.
@@ -398,6 +410,12 @@ impl RenderTree {
                 render_state.is_motion_active(node)
             };
         if motion_opacity <= 0.001 && !has_pending_motion {
+            // Pop the motion-subtree push from above if we set it,
+            // so the dynamic batch's emit gate stays balanced even
+            // when this early-out fires.
+            if in_motion_subtree {
+                ctx.pop_motion_subtree();
+            }
             return;
         }
 
@@ -1789,5 +1807,12 @@ impl RenderTree {
 
         // Pop position transform
         ctx.pop_transform();
+
+        // Balance the motion-subtree push from earlier so the
+        // dynamic-batch emit gate returns to depth-0 at this node's
+        // exit. Earlier early-return paths handle their own pop.
+        if in_motion_subtree {
+            ctx.pop_motion_subtree();
+        }
     }
 }

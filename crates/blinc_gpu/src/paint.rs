@@ -164,8 +164,24 @@ pub struct PendingMesh {
 /// This translates high-level drawing commands into GPU primitives that can
 /// be efficiently rendered by the `GpuRenderer`.
 pub struct GpuPaintContext<'a> {
-    /// Batched primitives ready for GPU rendering
+    /// Batched primitives ready for GPU rendering. Holds the STATIC
+    /// content of the scene — everything not inside a motion-bound
+    /// subtree. Painted into the compositor's static cache; survives
+    /// across motion-binding frames untouched.
     batch: PrimitiveBatch,
+    /// Batched primitives for motion-bound subtrees. Emit destination
+    /// switches to this batch when `motion_subtree_depth > 0`. Not
+    /// painted into the static cache — dispatched per-frame as an
+    /// overlay after the cache blit so apply_binding_deltas can patch
+    /// it in-place without invalidating the cache.
+    dynamic_batch: PrimitiveBatch,
+    /// How deep the walker currently is inside motion-bound subtrees.
+    /// Incremented on `push_motion_subtree`, decremented on
+    /// `pop_motion_subtree`. While > 0, emit methods route to
+    /// `dynamic_batch` instead of `batch`. Counter rather than bool
+    /// so nested motion bindings (rare but possible) still route
+    /// correctly.
+    motion_subtree_depth: u32,
     /// Transform stack
     transform_stack: Vec<Affine2D>,
     /// Opacity stack
@@ -265,6 +281,8 @@ impl<'a> GpuPaintContext<'a> {
             pending_meshes: Vec::new(),
             mesh_viewport_bounds: None,
             pending_env: None,
+            dynamic_batch: PrimitiveBatch::new(),
+            motion_subtree_depth: 0,
         }
     }
 
@@ -317,12 +335,72 @@ impl<'a> GpuPaintContext<'a> {
             pending_meshes: Vec::new(),
             mesh_viewport_bounds: None,
             pending_env: None,
+            dynamic_batch: PrimitiveBatch::new(),
+            motion_subtree_depth: 0,
         }
     }
 
     /// Set the text rendering context
     pub fn set_text_context(&mut self, text_ctx: &'a mut TextRenderingContext) {
         self.text_ctx = Some(text_ctx);
+    }
+
+    /// Mark that the walker has entered a motion-bound subtree.
+    /// All subsequent emit calls (primitives, paths, glass, etc.)
+    /// route into `dynamic_batch` instead of `batch` until the
+    /// matching `pop_motion_subtree`. Nested motion subtrees track
+    /// via a depth counter — only the outermost pop returns to
+    /// static-batch emission.
+    pub fn push_motion_subtree(&mut self) {
+        self.motion_subtree_depth = self.motion_subtree_depth.saturating_add(1);
+    }
+
+    /// Pair with [`Self::push_motion_subtree`]. No-op when depth
+    /// is already zero (defensive — should never happen in
+    /// well-formed walker traversal but avoids underflow if a
+    /// future caller forgets balance).
+    pub fn pop_motion_subtree(&mut self) {
+        self.motion_subtree_depth = self.motion_subtree_depth.saturating_sub(1);
+    }
+
+    /// `true` if the walker is currently inside one or more motion-
+    /// bound subtrees. Read by the emit helpers to choose between
+    /// `batch` (static) and `dynamic_batch`.
+    #[inline]
+    pub fn in_motion_subtree(&self) -> bool {
+        self.motion_subtree_depth > 0
+    }
+
+    /// The active batch for emission. While inside a motion-bound
+    /// subtree, points at `dynamic_batch`; otherwise at `batch`.
+    /// Internal helper used by every primitive / path / glass emit
+    /// site so the routing is centralised.
+    #[inline]
+    fn active_batch_mut(&mut self) -> &mut PrimitiveBatch {
+        if self.motion_subtree_depth > 0 {
+            &mut self.dynamic_batch
+        } else {
+            &mut self.batch
+        }
+    }
+
+    /// Immutable counterpart to [`Self::active_batch_mut`] — used
+    /// by readers like `bg_primitive_count` and `bg_primitive_aabb`
+    /// so they bracket the right batch.
+    #[inline]
+    fn active_batch(&self) -> &PrimitiveBatch {
+        if self.motion_subtree_depth > 0 {
+            &self.dynamic_batch
+        } else {
+            &self.batch
+        }
+    }
+
+    /// Drain the dynamic batch and return it. The caller (compositor
+    /// fast path) dispatches it per frame on top of the static cache
+    /// blit. Leaves `dynamic_batch` empty for the next paint pass.
+    pub fn take_dynamic_batch(&mut self) -> PrimitiveBatch {
+        std::mem::take(&mut self.dynamic_batch)
     }
 
     /// Get the current transform
@@ -1527,18 +1605,34 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
     }
 
     fn bg_primitive_count(&self) -> usize {
-        self.batch.primitives.len()
+        // Reads the ACTIVE batch's count so primitive-range bracketing
+        // (e.g. `composite_bg_start` / `composite_bg_end` in the
+        // walker) lands in the same batch the emit calls wrote into.
+        // While inside a motion-bound subtree, that's `dynamic_batch`;
+        // otherwise `batch`.
+        self.active_batch().primitives.len()
+    }
+
+    fn push_motion_subtree(&mut self) {
+        // Override the no-op trait default with our depth-counter
+        // tracker so emit sites route to `dynamic_batch`.
+        GpuPaintContext::push_motion_subtree(self)
+    }
+
+    fn pop_motion_subtree(&mut self) {
+        GpuPaintContext::pop_motion_subtree(self)
     }
 
     fn bg_primitive_aabb(&self, start: usize, end: usize) -> Option<[f32; 4]> {
-        if start >= end || end > self.batch.primitives.len() {
+        let prims = &self.active_batch().primitives;
+        if start >= end || end > prims.len() {
             return None;
         }
         let mut min_x = f32::INFINITY;
         let mut min_y = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;
         let mut max_y = f32::NEG_INFINITY;
-        for p in &self.batch.primitives[start..end] {
+        for p in &prims[start..end] {
             let [x, y, w, h] = p.bounds;
             if w <= 0.0 || h <= 0.0 {
                 continue;
@@ -1801,7 +1895,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
 
             if self.is_foreground {
-                self.batch.push_foreground_path_with_brush_info(
+                self.active_batch_mut().push_foreground_path_with_brush_info(
                     tessellated,
                     clip_bounds,
                     clip_radius,
@@ -1809,7 +1903,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                     &brush_info,
                 );
             } else {
-                self.batch.push_path_with_brush_info(
+                self.active_batch_mut().push_path_with_brush_info(
                     tessellated,
                     clip_bounds,
                     clip_radius,
@@ -1873,7 +1967,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
 
             if self.is_foreground {
-                self.batch.push_foreground_path_with_brush_info(
+                self.active_batch_mut().push_foreground_path_with_brush_info(
                     tessellated,
                     clip_bounds,
                     clip_radius,
@@ -1881,7 +1975,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                     &brush_info,
                 );
             } else {
-                self.batch.push_path_with_brush_info(
+                self.active_batch_mut().push_path_with_brush_info(
                     tessellated,
                     clip_bounds,
                     clip_radius,
@@ -1981,9 +2075,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             }
 
             if style.depth > 0 {
-                self.batch.push_nested_glass(glass);
+                self.active_batch_mut().push_nested_glass(glass);
             } else {
-                self.batch.push_glass(glass);
+                self.active_batch_mut().push_glass(glass);
             }
             return;
         }
@@ -2050,7 +2144,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                 }
             }
 
-            self.batch.push_glass(glass);
+            self.active_batch_mut().push_glass(glass);
             return;
         }
 
@@ -2137,9 +2231,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         };
 
         if self.is_foreground {
-            self.batch.push_foreground(primitive);
+            self.active_batch_mut().push_foreground(primitive);
         } else {
-            self.batch.push(primitive);
+            self.active_batch_mut().push(primitive);
         }
     }
 
@@ -2267,9 +2361,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         };
 
         if self.is_foreground {
-            self.batch.push_foreground(primitive);
+            self.active_batch_mut().push_foreground(primitive);
         } else {
-            self.batch.push(primitive);
+            self.active_batch_mut().push(primitive);
         }
     }
 
@@ -2361,9 +2455,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         };
 
         if self.is_foreground {
-            self.batch.push_foreground(primitive);
+            self.active_batch_mut().push_foreground(primitive);
         } else {
-            self.batch.push(primitive);
+            self.active_batch_mut().push(primitive);
         }
     }
 
@@ -2424,9 +2518,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         };
 
         if self.is_foreground {
-            self.batch.push_foreground(primitive);
+            self.active_batch_mut().push_foreground(primitive);
         } else {
-            self.batch.push(primitive);
+            self.active_batch_mut().push(primitive);
         }
     }
 
@@ -2457,9 +2551,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                 glass = glass.with_border_color(bc.r, bc.g, bc.b, bc.a);
             }
             if style.depth > 0 {
-                self.batch.push_nested_glass(glass);
+                self.active_batch_mut().push_nested_glass(glass);
             } else {
-                self.batch.push_glass(glass);
+                self.active_batch_mut().push_glass(glass);
             }
             return;
         }
@@ -2522,9 +2616,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         };
 
         if self.is_foreground {
-            self.batch.push_foreground(primitive);
+            self.active_batch_mut().push_foreground(primitive);
         } else {
-            self.batch.push(primitive);
+            self.active_batch_mut().push(primitive);
         }
     }
 
@@ -2596,9 +2690,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         };
 
         if self.is_foreground {
-            self.batch.push_foreground(primitive);
+            self.active_batch_mut().push_foreground(primitive);
         } else {
-            self.batch.push(primitive);
+            self.active_batch_mut().push(primitive);
         }
     }
 
@@ -2729,9 +2823,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                 prim.clip_bounds = clip_bounds;
                 prim.clip_radius = clip_radius;
                 if self.is_foreground {
-                    self.batch.push_foreground(prim);
+                    self.active_batch_mut().push_foreground(prim);
                 } else {
-                    self.batch.push(prim);
+                    self.active_batch_mut().push(prim);
                 }
             }
         }
@@ -2822,9 +2916,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         };
 
         if self.is_foreground {
-            self.batch.push_foreground(primitive);
+            self.active_batch_mut().push_foreground(primitive);
         } else {
-            self.batch.push(primitive);
+            self.active_batch_mut().push(primitive);
         }
     }
 
@@ -2889,9 +2983,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         };
 
         if self.is_foreground {
-            self.batch.push_foreground(primitive);
+            self.active_batch_mut().push_foreground(primitive);
         } else {
-            self.batch.push(primitive);
+            self.active_batch_mut().push(primitive);
         }
     }
 
@@ -2944,9 +3038,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         };
 
         if self.is_foreground {
-            self.batch.push_foreground(primitive);
+            self.active_batch_mut().push_foreground(primitive);
         } else {
-            self.batch.push(primitive);
+            self.active_batch_mut().push(primitive);
         }
     }
 
@@ -2998,9 +3092,9 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         };
 
         if self.is_foreground {
-            self.batch.push_foreground(primitive);
+            self.active_batch_mut().push_foreground(primitive);
         } else {
-            self.batch.push(primitive);
+            self.active_batch_mut().push(primitive);
         }
     }
 
@@ -3687,9 +3781,9 @@ impl<'a> GpuPaintContext<'a> {
             prim.local_affine = [1.0, 0.0, 0.0, 1.0];
 
             if self.is_foreground {
-                self.batch.push_foreground(prim);
+                self.active_batch_mut().push_foreground(prim);
             } else {
-                self.batch.push(prim);
+                self.active_batch_mut().push(prim);
             }
         }
     }
