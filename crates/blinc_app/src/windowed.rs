@@ -4228,14 +4228,33 @@ impl WindowedApp {
                             // already uses: pointer_query elements or
                             // any node with an attached pointer handler.
                             if !state_changed && !had_scroll {
-                                let has_pointer_subscribers = ws
+                                // `has_pointer_move_subscribers` only counts
+                                // handlers that consume continuous motion
+                                // (POINTER_MOVE / DRAG / FILE_DRAG_OVER) plus
+                                // pointer_query elements. The previous
+                                // `has_any_pointer_handler` predicate also
+                                // counted POINTER_DOWN / POINTER_UP, which a
+                                // typical UI loaded with click handlers
+                                // (cn_demo) — making the gate
+                                // effectively unconditional and forcing a
+                                // full cache invalidation on every cursor
+                                // wiggle. CPU pinned to 50 % whenever the
+                                // user moved the mouse over empty space.
+                                //
+                                // Click handlers don't need a redraw between
+                                // the move and the click event itself —
+                                // POINTER_DOWN dispatches its own
+                                // invalidation when it fires.
+                                let has_pointer_move_subscribers = ws
                                     .ctx
                                     .as_ref()
                                     .is_some_and(|c| !c.pointer_query.is_empty())
                                     || ws.render_tree.as_ref().is_some_and(|t| {
-                                        t.handler_registry().has_any_pointer_handler()
+                                        t.handler_registry().has_any_pointer_move_subscriber()
                                     });
-                                if is_button_event || (is_move_event && has_pointer_subscribers) {
+                                if is_button_event
+                                    || (is_move_event && has_pointer_move_subscribers)
+                                {
                                     frame_dirty.store(true, Ordering::Release);
                                     window.request_redraw();
                                     if let Some(ref mut app) = ws.app {

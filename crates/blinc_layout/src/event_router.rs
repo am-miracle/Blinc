@@ -519,10 +519,28 @@ impl EventRouter {
             }
         }
 
-        // All currently hovered elements get POINTER_MOVE
+        // POINTER_MOVE on every hovered node — but only emit to
+        // nodes that actually have a `POINTER_MOVE` handler. The
+        // previous unconditional emit pushed ~5-10 events per
+        // mouse-move (one per ancestor in the hover chain), each
+        // round-tripping through `pending_events` and
+        // `dispatch_event_full` to ultimately find no handler.
+        // At a Magic Mouse's ~120 Hz move rate × cn_demo's hover
+        // chain, that ate ~20 % CPU during cursor wiggles for no
+        // visible work — `state_changed` and pointer_query handle
+        // the legitimate cases.
+        //
+        // Per-node check is cheap: `has_handler` is a single
+        // HashMap probe per node, and we already walked the
+        // hover chain to compute the set.
+        let registry = tree.handler_registry();
         for node in &current_hovered {
-            self.emit_event(*node, event_types::POINTER_MOVE);
-            events.push((*node, event_types::POINTER_MOVE));
+            if let Some(stable) = tree.stable_id(*node) {
+                if registry.has_handler(stable, event_types::POINTER_MOVE) {
+                    self.emit_event(*node, event_types::POINTER_MOVE);
+                    events.push((*node, event_types::POINTER_MOVE));
+                }
+            }
         }
 
         // Record mouse move event (only if recording is enabled)

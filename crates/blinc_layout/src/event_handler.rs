@@ -560,6 +560,47 @@ impl HandlerRegistry {
             .any(|h| POINTER_EVENTS.iter().any(|t| h.has_handler(*t)))
     }
 
+    /// `true` when any node listens for handlers that consume
+    /// **bare** pointer motion (cursor moves with no button held):
+    /// `POINTER_MOVE` and `FILE_DRAG_OVER`. Used by the windowed
+    /// runner to decide whether a bare mouse-move should drive a
+    /// redraw + cache invalidation.
+    ///
+    /// Intentionally **excludes** `DRAG` / `DRAG_END` — those only
+    /// fire while a button is pressed, so a separate gate
+    /// (`pressed_target_stable().is_some()` + `has_any_drag_subscriber()`)
+    /// covers the drag-in-flight case without invalidating on every
+    /// cursor wiggle over a slider thumb.
+    ///
+    /// Also excludes `POINTER_DOWN` / `POINTER_UP` / `POINTER_ENTER`
+    /// / `POINTER_LEAVE` / click handlers — those fire on discrete
+    /// events that dispatch their own redraws, and the hover-state
+    /// change from ENTER/LEAVE flows through the stateful redraw
+    /// flag (`peek_needs_redraw`) which the runner checks
+    /// separately. Including them would make the gate fire for any
+    /// UI with click handlers or `:hover` styles (i.e. nearly
+    /// every UI), defeating the purpose.
+    pub fn has_any_pointer_move_subscriber(&self) -> bool {
+        use blinc_core::events::event_types::*;
+        const MOVE_EVENTS: &[EventType] = &[POINTER_MOVE, FILE_DRAG_OVER];
+        self.nodes
+            .values()
+            .any(|h| MOVE_EVENTS.iter().any(|t| h.has_handler(*t)))
+    }
+
+    /// `true` when any node listens for `DRAG` / `DRAG_END`. The
+    /// drag callback only meaningfully fires when a press is
+    /// already in flight, so callers should AND this with a
+    /// "pressed_target_is_some" check before invalidating on every
+    /// move.
+    pub fn has_any_drag_subscriber(&self) -> bool {
+        use blinc_core::events::event_types::*;
+        const DRAG_EVENTS: &[EventType] = &[DRAG, DRAG_END];
+        self.nodes
+            .values()
+            .any(|h| DRAG_EVENTS.iter().any(|t| h.has_handler(*t)))
+    }
+
     /// Broadcast an event to ALL nodes that have handlers for the given event type
     ///
     /// This is used for keyboard events (TEXT_INPUT, KEY_DOWN) after a tree rebuild,
