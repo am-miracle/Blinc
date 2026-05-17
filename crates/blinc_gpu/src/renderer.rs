@@ -1122,6 +1122,14 @@ pub struct GpuRenderer {
     pub(crate) viewport_size: (u32, u32),
     /// Saved viewport size during offscreen rendering (for restore_viewport)
     saved_viewport_size: Option<(u32, u32)>,
+    /// Optional scissor rect applied to subsequent text/image render
+    /// passes. Set via `set_pending_scissor` / cleared via
+    /// `clear_pending_scissor`. Used by the compositor v2 damage-rect
+    /// path to confine text / SVG / image dispatches to the same
+    /// scissor region as `render_static_layer_damaged`'s SDF clear
+    /// + redraw. `None` = no scissor (default; full-attachment
+    /// dispatch).
+    pending_scissor: Option<(u32, u32, u32, u32)>,
     /// Renderer configuration
     config: RendererConfig,
     /// Current frame time (for animations)
@@ -2378,6 +2386,7 @@ impl GpuRenderer {
             bind_group_layouts,
             viewport_size,
             saved_viewport_size: None,
+            pending_scissor: None,
             memory_budget: GpuMemoryBudget::new(config.gpu_memory_budget),
             config,
             time: 0.0,
@@ -4165,6 +4174,28 @@ impl GpuRenderer {
     /// Resize the viewport
     pub fn resize(&mut self, width: u32, height: u32) {
         self.viewport_size = (width, height);
+    }
+
+    /// Current viewport dimensions in physical pixels — width, height.
+    /// Used by the compositor v2 damage-rect path on the app side to
+    /// clamp scissor rects to the static-layer extent before staging.
+    pub fn viewport_size(&self) -> (u32, u32) {
+        self.viewport_size
+    }
+
+    /// Stage a scissor rect that subsequent text / image dispatches
+    /// will apply via `set_scissor_rect`. Used by the compositor v2
+    /// damage-rect path to confine text/SVG/image re-dispatches to
+    /// the same region the SDF clear + redraw covered. Stays in
+    /// effect until [`Self::clear_pending_scissor`] is called.
+    pub fn set_pending_scissor(&mut self, rect: (u32, u32, u32, u32)) {
+        self.pending_scissor = Some(rect);
+    }
+
+    /// Drop the staged scissor so subsequent dispatches paint to the
+    /// full attachment again. Paired with `set_pending_scissor`.
+    pub fn clear_pending_scissor(&mut self) {
+        self.pending_scissor = None;
     }
 
     /// Set the current render target texture for blend mode two-pass compositing.
@@ -8196,6 +8227,15 @@ impl GpuRenderer {
             // Use text_overlay pipeline since we're rendering to 1x sampled texture
             render_pass.set_pipeline(&self.pipelines.text_overlay);
             render_pass.set_bind_group(0, text_bind_group, &[]);
+            // Apply staged scissor (compositor v2 damage-rect path)
+            // so this dispatch only paints into the same rect that
+            // the SDF clear + redraw covered. Without this guard a
+            // text glyph emitted into a motion-bound subtree would
+            // paint outside the damaged region and stick on top of
+            // the static cache's previous-frame pixels.
+            if let Some((sx, sy, sw, sh)) = self.pending_scissor {
+                render_pass.set_scissor_rect(sx, sy, sw, sh);
+            }
             render_pass.draw(0..6, 0..glyphs.len() as u32);
         }
 
@@ -8960,6 +9000,9 @@ impl GpuRenderer {
             render_pass.set_pipeline(&image_pipeline.pipeline);
             render_pass.set_bind_group(0, &bind_group, &[]);
             render_pass.set_vertex_buffer(0, image_pipeline.instance_buffer.slice(..));
+            if let Some((sx, sy, sw, sh)) = self.pending_scissor {
+                render_pass.set_scissor_rect(sx, sy, sw, sh);
+            }
             render_pass.draw(0..6, 0..instances.len() as u32);
         }
 

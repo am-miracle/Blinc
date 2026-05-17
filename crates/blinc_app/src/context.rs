@@ -122,6 +122,71 @@ fn union_aabbs(a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> Option<[f32; 4]> {
     }
 }
 
+/// Union AABB of a slice of damage rects. Returns `None` for empty
+/// or all-degenerate input.
+fn damage_union(rects: &[[f32; 4]]) -> Option<[f32; 4]> {
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for [x, y, w, h] in rects.iter().copied() {
+        if w <= 0.0 || h <= 0.0 {
+            continue;
+        }
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x + w);
+        max_y = max_y.max(y + h);
+    }
+    if min_x.is_finite() && max_x > min_x && max_y > min_y {
+        Some([min_x, min_y, max_x - min_x, max_y - min_y])
+    } else {
+        None
+    }
+}
+
+/// Convert a union AABB into a `set_scissor_rect`-ready
+/// `(x, y, w, h)` tuple, clamped to the renderer's static layer
+/// extent. Returns `None` if the rect is empty after clamping.
+fn damage_scissor_from_union(
+    rect: Option<[f32; 4]>,
+    renderer: &blinc_gpu::GpuRenderer,
+) -> Option<(u32, u32, u32, u32)> {
+    let [x, y, w, h] = rect?;
+    let (lw, lh) = renderer.viewport_size();
+    let layer_width = lw as f32;
+    let layer_height = lh as f32;
+    let scissor_x = x.max(0.0).floor() as u32;
+    let scissor_y = y.max(0.0).floor() as u32;
+    let scissor_right = (x + w).min(layer_width).ceil() as u32;
+    let scissor_bottom = (y + h).min(layer_height).ceil() as u32;
+    if scissor_right <= scissor_x || scissor_bottom <= scissor_y {
+        return None;
+    }
+    Some((
+        scissor_x,
+        scissor_y,
+        scissor_right - scissor_x,
+        scissor_bottom - scissor_y,
+    ))
+}
+
+/// `true` when `bounds` (x, y, w, h) intersects any rect in `rects`.
+/// Used to filter cached glyphs / SVGs / images down to those that
+/// fall inside the damage region before scissored re-dispatch.
+fn aabb_intersects_any(bounds: [f32; 4], rects: &[[f32; 4]]) -> bool {
+    let [bx, by, bw, bh] = bounds;
+    if bw <= 0.0 || bh <= 0.0 {
+        return false;
+    }
+    rects.iter().any(|[rx, ry, rw, rh]| {
+        if *rw <= 0.0 || *rh <= 0.0 {
+            return false;
+        }
+        bx + bw > *rx && rx + rw > bx && by + bh > *ry && ry + rh > by
+    })
+}
+
 fn intersect_clip_rects(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     let x1 = a[0].max(b[0]);
     let y1 = a[1].max(b[1]);
@@ -206,6 +271,22 @@ pub struct RenderContext {
     /// cache (with scissor + `LoadOp::Load`) instead of invalidating
     /// the whole layer.
     last_binding_damage_rects: Vec<[f32; 4]>,
+    /// Prepared text glyphs from the most recent full paint, keyed
+    /// by `z_index`. Populated by `render_tree_with_motion_opt`'s
+    /// body right after the text-shaping loop, drained by the
+    /// damage-rect fast path so text inside the damaged region can
+    /// be re-dispatched (the scissored clear in
+    /// `render_static_layer_damaged` would otherwise wipe those
+    /// pixels). Invalidated alongside `cached_texts`.
+    cached_glyphs_by_layer: Option<std::collections::BTreeMap<u32, Vec<GpuGlyph>>>,
+    /// Same as `cached_glyphs_by_layer` but for the foreground-text
+    /// pass — glyphs inside `.foreground()` elements, dispatched
+    /// after the rest of the scene.
+    cached_fg_glyphs: Option<Vec<GpuGlyph>>,
+    /// Same as `cached_glyphs_by_layer` but for CSS-transformed text
+    /// primitives (text with a `transform:` style — routed through
+    /// the SDF pipeline, not the glyph pipeline).
+    cached_css_transformed_text_prims: Option<Vec<GpuPrimitive>>,
     /// Per-source fade end deadline (`loaded_at + fade_duration_ms`).
     /// Populated only when the element that triggered the load specified
     /// `fade_duration_ms > 0`. Used at the frame boundary to decide
@@ -509,6 +590,9 @@ impl RenderContext {
             image_load_times: std::collections::HashMap::new(),
             image_fade_deadlines: std::collections::HashMap::new(),
             last_binding_damage_rects: Vec::new(),
+            cached_glyphs_by_layer: None,
+            cached_fg_glyphs: None,
+            cached_css_transformed_text_prims: None,
             svg_cache: LruCache::new(NonZeroUsize::new(SVG_CACHE_CAPACITY).unwrap()),
             svg_atlas,
             scratch_glyphs: Vec::with_capacity(1024), // Pre-allocate for typical text
@@ -554,6 +638,9 @@ impl RenderContext {
         self.cached_svgs = None;
         self.cached_images = None;
         self.cached_flows = None;
+        self.cached_glyphs_by_layer = None;
+        self.cached_fg_glyphs = None;
+        self.cached_css_transformed_text_prims = None;
         // Compositor static cache rides on the same lifecycle as the
         // primitive-batch cache — anything that would invalidate the
         // batch (rebuild, layout change, scroll, hover state change,
@@ -5211,6 +5298,9 @@ impl RenderContext {
             self.cached_svgs = None;
             self.cached_images = None;
             self.cached_flows = None;
+            self.cached_glyphs_by_layer = None;
+            self.cached_fg_glyphs = None;
+            self.cached_css_transformed_text_prims = None;
         }
 
         // Fast path: cache valid AND caller is fine with reusing it.
@@ -5229,10 +5319,30 @@ impl RenderContext {
             // scissor; `LoadOp::Load` preserves the surrounding
             // pixels). Falls back to invalidation + slow path on any
             // condition the damage-rect path can't handle.
+            let mut damage_rect_failed = false;
             if damage_rect_eligible && self.cached_bg_batch.is_some() {
                 let scale_factor = tree.scale_factor();
                 let patched = self.apply_binding_deltas(tree, scale_factor);
-                if patched && !self.last_binding_damage_rects.is_empty() {
+                if !patched {
+                    // `apply_binding_deltas` bailed (typically the
+                    // last-opacity-is-zero guard — opacity binding
+                    // going `0 → 1` can't be ratio-scaled). The cache
+                    // is now stale; falling through to composite_frame
+                    // would blit the previous frame's pixels and the
+                    // animation would visibly freeze until something
+                    // else (mouse move, scroll) forced a slow-path
+                    // paint. Symptom: switch toggle starts the spring
+                    // but the colored track stays at off-state alpha.
+                    self.renderer.invalidate_static_layer();
+                    self.cached_texts = None;
+                    self.cached_svgs = None;
+                    self.cached_images = None;
+                    self.cached_flows = None;
+                    self.cached_glyphs_by_layer = None;
+                    self.cached_fg_glyphs = None;
+                    self.cached_css_transformed_text_prims = None;
+                    damage_rect_failed = true;
+                } else if !self.last_binding_damage_rects.is_empty() {
                     let damaged = self.last_binding_damage_rects.clone();
                     let batch_ref = self
                         .cached_bg_batch
@@ -5251,9 +5361,87 @@ impl RenderContext {
                         self.cached_svgs = None;
                         self.cached_images = None;
                         self.cached_flows = None;
+                        self.cached_glyphs_by_layer = None;
+                        self.cached_fg_glyphs = None;
+                        self.cached_css_transformed_text_prims = None;
+                    } else {
+                        // Re-dispatch text glyphs whose bounds
+                        // intersect the union damage rect into the
+                        // static layer, with `pending_scissor` set
+                        // to confine the writes to the just-cleared
+                        // region. Without this, any text painted on
+                        // the previous slow paint inside the damage
+                        // rect would be wiped by the scissored
+                        // clear in `render_static_layer_damaged` and
+                        // not restored — the "vibrating text" bug
+                        // the env-var was guarding against.
+                        let static_view_opt =
+                            self.renderer.static_layer_view().cloned();
+                        if let Some(static_view) = static_view_opt {
+                            let union = damage_union(&damaged);
+                            if let Some(scissor) =
+                                damage_scissor_from_union(union, &self.renderer)
+                            {
+                                self.renderer.set_pending_scissor(scissor);
+                                if let Some(glyphs_by_layer) =
+                                    self.cached_glyphs_by_layer.clone()
+                                {
+                                    for (_z, glyphs) in glyphs_by_layer.iter()
+                                    {
+                                        let filtered: Vec<_> = glyphs
+                                            .iter()
+                                            .filter(|g| {
+                                                aabb_intersects_any(
+                                                    g.bounds, &damaged,
+                                                )
+                                            })
+                                            .copied()
+                                            .collect();
+                                        if !filtered.is_empty() {
+                                            self.render_text(
+                                                &static_view,
+                                                &filtered,
+                                            );
+                                        }
+                                    }
+                                }
+                                if let Some(fg_glyphs) =
+                                    self.cached_fg_glyphs.clone()
+                                {
+                                    let filtered: Vec<_> = fg_glyphs
+                                        .iter()
+                                        .filter(|g| {
+                                            aabb_intersects_any(
+                                                g.bounds, &damaged,
+                                            )
+                                        })
+                                        .copied()
+                                        .collect();
+                                    if !filtered.is_empty() {
+                                        self.render_text(
+                                            &static_view,
+                                            &filtered,
+                                        );
+                                    }
+                                }
+                                self.renderer.clear_pending_scissor();
+                            }
+                        }
                     }
                 }
             }
+
+            // Damage-rect path bailed (apply_binding_deltas couldn't
+            // patch — e.g. opacity-from-zero divide-by-zero guard).
+            // Cache was invalidated above; falling through to the
+            // slow path below will re-walk and emit fresh primitives
+            // at the current binding values, so the animation
+            // progresses on this same frame instead of freezing
+            // until a mouse move forces a paint.
+            if damage_rect_failed {
+                // Note: do NOT `return Ok(())` — proceed past the
+                // `if use_fast` block to the slow path.
+            } else {
 
             // Full canvas overlay — drains SDF primitives + raw-
             // RGBA images (video frames) + 3D meshes from every
@@ -5316,6 +5504,7 @@ impl RenderContext {
             tree.set_visible_anim_active(any_visible_anim || has_visible_canvas);
 
             return Ok(());
+            } // close else { ... } for !damage_rect_failed
         }
 
         // Full paint into the static layer. The existing
@@ -6035,6 +6224,24 @@ impl RenderContext {
                 fg_glyphs.extend(glyphs);
             }
         }
+
+        // Cache the prepared glyph + CSS-transformed-prim vecs for
+        // the compositor v2 damage-rect path. When motion bindings
+        // patch the cached batch on a subsequent frame, the damage-
+        // rect re-render needs to scissor-redraw any text glyphs
+        // that fall inside the cleared region — without these
+        // caches we'd have to re-run the entire text-shaping
+        // pipeline on the fast path.
+        //
+        // Cloned because the dispatch loop below consumes the
+        // originals; on cn_demo's typical text density (~30-100
+        // glyphs total) the clone is well under 100 µs and pays
+        // off the first time a damage-rect frame would otherwise
+        // wipe text.
+        self.cached_glyphs_by_layer = Some(glyphs_by_layer.clone());
+        self.cached_fg_glyphs = Some(fg_glyphs.clone());
+        self.cached_css_transformed_text_prims =
+            Some(css_transformed_text_prims.clone());
 
         // Generate decoration primitives for foreground text once so the
         // three render paths below can each render them after their
