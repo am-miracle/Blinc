@@ -1640,12 +1640,21 @@ impl RenderTree {
                 // inside arc_layer inside spinner container) `bounds.x`
                 // is 0 and we'd rotate the primitives around the screen
                 // origin instead of the element's centre. Walk the
-                // parent chain via `get_absolute_bounds` so the centre
-                // tracks the element's actual on-screen midpoint.
+                // parent chain via `get_absolute_bounds` and ADD
+                // `cumulative_scroll` so the centre tracks the element's
+                // actual on-screen midpoint (cn_demo's spinners sit
+                // inside a scroll container — without the scroll term
+                // the arc orbits the un-scrolled layout position
+                // instead of where the gray ring is currently drawn).
                 let centre = self
                     .layout_tree
                     .get_absolute_bounds(node)
-                    .map(|abs| (abs.x + abs.width / 2.0, abs.y + abs.height / 2.0))
+                    .map(|abs| {
+                        (
+                            abs.x + abs.width / 2.0 + cumulative_scroll.0,
+                            abs.y + abs.height / 2.0 + cumulative_scroll.1,
+                        )
+                    })
                     .unwrap_or((
                         bounds.x + bounds.width / 2.0,
                         bounds.y + bounds.height / 2.0,
