@@ -466,6 +466,12 @@ pub struct HandlerRegistry {
     /// rebuilds as long as the element's source location +
     /// tree position (and any `.id(...)` widget key) stay the same.
     nodes: HashMap<crate::tree::StableNodeId, EventHandlers>,
+    /// Cached `has_any_pointer_move_subscriber()` result. Invalidated
+    /// (set to `None`) on every mutation; recomputed on first read.
+    /// Mouse-move events fire at hundreds of Hz; without the cache
+    /// each event re-iterated every handler entry to answer the same
+    /// invariant question.
+    cached_has_move_subscriber: std::cell::Cell<Option<bool>>,
 }
 
 impl HandlerRegistry {
@@ -483,6 +489,7 @@ impl HandlerRegistry {
     pub fn register(&mut self, stable: crate::tree::StableNodeId, handlers: EventHandlers) {
         if !handlers.is_empty() {
             self.nodes.insert(stable, handlers);
+            self.cached_has_move_subscriber.set(None);
         }
     }
 
@@ -515,11 +522,13 @@ impl HandlerRegistry {
     /// rebuild — rebuilt nodes preserve their stable id).
     pub fn remove(&mut self, stable: crate::tree::StableNodeId) {
         self.nodes.remove(&stable);
+        self.cached_has_move_subscriber.set(None);
     }
 
     /// Clear all handlers
     pub fn clear(&mut self) {
         self.nodes.clear();
+        self.cached_has_move_subscriber.set(None);
     }
 
     /// Drop handler entries whose stable id is no longer in the live
@@ -528,6 +537,7 @@ impl HandlerRegistry {
     /// closures.
     pub fn retain<F: Fn(crate::tree::StableNodeId) -> bool>(&mut self, keep: F) {
         self.nodes.retain(|stable, _| keep(*stable));
+        self.cached_has_move_subscriber.set(None);
     }
 
     /// Check whether any node has a pointer-related handler registered.
@@ -581,11 +591,17 @@ impl HandlerRegistry {
     /// UI with click handlers or `:hover` styles (i.e. nearly
     /// every UI), defeating the purpose.
     pub fn has_any_pointer_move_subscriber(&self) -> bool {
+        if let Some(cached) = self.cached_has_move_subscriber.get() {
+            return cached;
+        }
         use blinc_core::events::event_types::*;
         const MOVE_EVENTS: &[EventType] = &[POINTER_MOVE, FILE_DRAG_OVER];
-        self.nodes
+        let result = self
+            .nodes
             .values()
-            .any(|h| MOVE_EVENTS.iter().any(|t| h.has_handler(*t)))
+            .any(|h| MOVE_EVENTS.iter().any(|t| h.has_handler(*t)));
+        self.cached_has_move_subscriber.set(Some(result));
+        result
     }
 
     /// `true` when any node listens for `DRAG` / `DRAG_END`. The

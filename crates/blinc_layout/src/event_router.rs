@@ -225,6 +225,42 @@ impl EventRouter {
         self.last_hit_ancestor_bounds.get(&node.to_raw()).copied()
     }
 
+    /// `true` if a mouse-button press is currently in flight. Drag
+    /// detection needs every move event, so the
+    /// cursor-still-inside-last-leaf short-circuit defers to this.
+    pub fn is_press_in_flight(&self) -> bool {
+        self.pressed_target.is_some()
+    }
+
+    /// `true` when `(x, y)` lies within the AABB of the deepest hit
+    /// node from the most recent hit test. When this returns true,
+    /// the hover set can't have changed and the entire dispatch
+    /// pipeline (hit_test, hover-set diff, ENTER/LEAVE/MOVE emit,
+    /// cursor lookup) is safe to skip — only the stored cursor
+    /// position needs updating.
+    ///
+    /// Returns `false` when no prior hit is recorded (zero bounds)
+    /// so the very first mouse-move after window init always runs
+    /// the full pipeline.
+    pub fn cursor_inside_last_leaf(&self, x: f32, y: f32) -> bool {
+        if self.last_hit_bounds_width <= 0.0 || self.last_hit_bounds_height <= 0.0 {
+            return false;
+        }
+        x >= self.last_hit_bounds_x
+            && x < self.last_hit_bounds_x + self.last_hit_bounds_width
+            && y >= self.last_hit_bounds_y
+            && y < self.last_hit_bounds_y + self.last_hit_bounds_height
+    }
+
+    /// Update stored cursor coordinates without running the hit-
+    /// test pipeline. Paired with `cursor_inside_last_leaf` so the
+    /// short-circuit path still keeps `mouse_position()` current
+    /// for any handler / shader reading it.
+    pub fn set_mouse_position(&mut self, x: f32, y: f32) {
+        self.mouse_x = x;
+        self.mouse_y = y;
+    }
+
     /// Get the current drag delta (offset from drag start position)
     ///
     /// Returns (delta_x, delta_y) - the distance dragged from the initial mouse_down position.

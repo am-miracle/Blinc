@@ -3396,6 +3396,39 @@ impl WindowedApp {
                                         let lx = x / scale;
                                         let ly = y / scale;
 
+                                        // Short-circuit: cursor stayed inside the deepest
+                                        // hit node's AABB from the previous move → the
+                                        // hover set can't have changed, so the entire
+                                        // dispatch pipeline (hit_test, hover diff, emit,
+                                        // cursor lookup) is wasted work. macOS / Linux
+                                        // gaming mice fire at hundreds of Hz; without
+                                        // this gate cn_demo's tree-walk per event ate
+                                        // ~20 % CPU on cursor wiggles.
+                                        //
+                                        // Conditions to take the short-circuit:
+                                        //  - No press in flight (drag handlers need
+                                        //    every move).
+                                        //  - No `pointer_query` (continuous coord
+                                        //    consumers — flow shaders, calc(env(...))).
+                                        //  - No POINTER_MOVE handler on the tree (real
+                                        //    continuous-tracking subscribers).
+                                        //  - Cursor still inside last leaf bounds.
+                                        let pressed = router.is_press_in_flight();
+                                        let pointer_query_active = !windowed_ctx
+                                            .pointer_query
+                                            .is_empty();
+                                        let has_move_subscriber = tree
+                                            .handler_registry()
+                                            .has_any_pointer_move_subscriber();
+                                        if !pressed
+                                            && !pointer_query_active
+                                            && !has_move_subscriber
+                                            && router.cursor_inside_last_leaf(lx, ly)
+                                        {
+                                            router.set_mouse_position(lx, ly);
+                                            return ControlFlow::Continue;
+                                        }
+
                                         // Skip the heavy mouse-move pipeline (hit_test_all,
                                         // hover-set diff, POINTER_ENTER / LEAVE emission,
                                         // drag-delta tracking) if nothing in the tree could
