@@ -1142,13 +1142,13 @@ impl RenderTree {
     /// known animation source.
     ///
     /// Inputs consulted:
-    /// - [`Self::motion_bindings`] (`is_any_animating` on each)
-    /// - [`Self::render_nodes`] for `ElementType::Canvas` presence
+    /// - `motion_bindings` (`is_any_animating` on each)
+    /// - `render_nodes` for `ElementType::Canvas` presence
     /// - [`Self::css_anim_store`] for active CSS keyframes /
     ///   transitions, looked up by `StableNodeId`
     ///
-    /// Applies hysteresis via [`Self::settled_streak`]: once a node
-    /// is `Animating`, it must spend
+    /// Applies hysteresis via the internal `settled_streak` map:
+    /// once a node is `Animating`, it must spend
     /// [`SETTLED_STREAK_THRESHOLD`] consecutive frames classified
     /// as `Static` before it's allowed to leave the dynamic set.
     /// This is what prevents under-damped springs from flapping a
