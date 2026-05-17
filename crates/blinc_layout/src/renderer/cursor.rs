@@ -59,4 +59,30 @@ impl RenderTree {
 
         None
     }
+
+    /// Cursor resolution that reuses the ancestor chain cached by
+    /// the most recent `on_mouse_move`. Identical semantics to
+    /// [`Self::get_cursor_at`] (leaf-wins via reverse walk) but
+    /// skips the second hit_test, which was the dominant cost in
+    /// the mouse-move pipeline once primitive emission was gated
+    /// elsewhere — a Magic Mouse's ~120 Hz move rate × cn_demo's
+    /// tree depth × HashMap-allocating recursion ate ~10 % CPU on
+    /// its own.
+    ///
+    /// Returns `None` when the last hit test missed (cursor outside
+    /// any node) or no ancestor in the chain carries a `cursor:`
+    /// style.
+    pub fn get_cursor_for_last_hit(
+        &self,
+        router: &crate::event_router::EventRouter,
+    ) -> Option<crate::element::CursorStyle> {
+        // Chain is stored root → leaf. Iterate in reverse so the
+        // deepest hovered node wins — child overrides parent.
+        for &node in router.last_hit_chain().iter().rev() {
+            if let Some(cursor) = self.get_cursor(node) {
+                return Some(cursor);
+            }
+        }
+        None
+    }
 }

@@ -148,6 +148,13 @@ pub struct EventRouter {
     /// Bounds for each ancestor from the last hit test
     /// Maps node_id.to_raw() to (x, y, width, height)
     last_hit_ancestor_bounds: std::collections::HashMap<u64, (f32, f32, f32, f32)>,
+
+    /// Ancestor chain (root → leaf) from the last successful hit
+    /// test. Reused by `RenderTree::get_cursor_for_last_hit` so a
+    /// mouse-move only walks the tree once per event instead of
+    /// twice (once for hover dispatch + once for cursor resolution
+    /// on a UI with `cursor:` styles set).
+    last_hit_chain: Vec<LayoutNodeId>,
 }
 
 impl Default for EventRouter {
@@ -182,6 +189,7 @@ impl EventRouter {
             drag_delta_x: 0.0,
             drag_delta_y: 0.0,
             last_hit_ancestor_bounds: std::collections::HashMap::new(),
+            last_hit_chain: Vec::new(),
         }
     }
 
@@ -251,6 +259,14 @@ impl EventRouter {
     /// Get all currently hovered node IDs
     pub fn hovered_nodes(&self) -> impl Iterator<Item = LayoutNodeId> + '_ {
         self.hovered.iter().copied()
+    }
+
+    /// Root → leaf ancestor chain from the most recent hit test.
+    /// Empty when the last test missed (cursor outside any node).
+    /// Used by `RenderTree::get_cursor_for_last_hit` to resolve
+    /// `cursor:` styles without a second tree walk.
+    pub fn last_hit_chain(&self) -> &[LayoutNodeId] {
+        &self.last_hit_chain
     }
 
     /// Get the pressed target as a `StableNodeId`, if any.
@@ -483,6 +499,13 @@ impl EventRouter {
             self.last_hit_bounds_y = topmost.bounds_y;
             self.last_hit_bounds_width = topmost.bounds_width;
             self.last_hit_bounds_height = topmost.bounds_height;
+            // Cache the root → leaf ancestor chain so a subsequent
+            // cursor-style lookup can reuse it instead of re-walking
+            // the tree.
+            self.last_hit_chain.clear();
+            self.last_hit_chain.extend_from_slice(&topmost.ancestors);
+        } else {
+            self.last_hit_chain.clear();
         }
 
         // Elements that were hovered but no longer are -> POINTER_LEAVE

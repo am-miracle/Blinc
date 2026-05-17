@@ -3497,6 +3497,20 @@ impl WindowedApp {
                                             // to render anyway because Poll's auto-redraw was
                                             // there; on Linux this is the only path.
                                             window.request_redraw();
+                                            // Hover state changed → the next paint needs to
+                                            // run the walker to apply the new CSS state
+                                            // styles (`:hover` background, etc.) and start
+                                            // any property transitions. Without invalidating
+                                            // here the fast path just blits the previous
+                                            // frame's static cache — so a pure-CSS hover
+                                            // (no Stateful widget self-flagging
+                                            // NEEDS_REDRAW) wouldn't visibly trigger until
+                                            // some other animation forced a slow-path paint.
+                                            // Symptom: cn_demo accordion hover lagged
+                                            // visibly behind the cursor enter.
+                                            if let Some(ref mut app) = ws.app {
+                                                app.invalidate_render_cache();
+                                            }
                                         }
 
                                         // Get drag delta from router (for DRAG events)
@@ -3525,12 +3539,17 @@ impl WindowedApp {
                                             }
                                         }
 
-                                        // Update cursor based on hovered element. Cached
-                                        // against `last_cursor` so a long drag over an
-                                        // element with a stable cursor doesn't syscall
-                                        // every move.
+                                        // Update cursor based on hovered element. Reuse
+                                        // the ancestor chain just cached by
+                                        // `on_mouse_move_with_occlusion` instead of
+                                        // running a fresh hit_test — at a Magic Mouse's
+                                        // 120 Hz move rate × cn_demo's tree depth, the
+                                        // second tree walk + HashMap allocation was ~10 %
+                                        // CPU on its own. Cached against `last_cursor`
+                                        // so a long stable hover doesn't syscall every
+                                        // move.
                                         let cursor = tree
-                                            .get_cursor_at(router, lx, ly)
+                                            .get_cursor_for_last_hit(router)
                                             .unwrap_or(CursorStyle::Default);
                                         let want = convert_cursor_style(cursor);
                                         if ws.last_cursor != Some(want) {
