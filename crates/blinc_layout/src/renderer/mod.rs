@@ -65,11 +65,11 @@ pub use types::{
     RenderTreeDebugStats, StyledTextData, StyledTextSpan, SvgData, TextData,
 };
 
-/// Compositor-path metadata recorded for one motion-bound node during
-/// paint. Lets a follow-up "animation-only" frame patch the cached
-/// `GpuPrimitive` buffer in place — without re-walking the tree —
-/// by knowing which primitives the binding's subtree owns and what
-/// motion values were baked into them at last paint.
+// Compositor-path metadata recorded for one motion-bound node during
+// paint. Lets a follow-up "animation-only" frame patch the cached
+// `GpuPrimitive` buffer in place — without re-walking the tree —
+// by knowing which primitives the binding's subtree owns and what
+// motion values were baked into them at last paint.
 // =============================================================
 // Compositor v2 — DynamicRegion / AnimationStatus
 // =============================================================

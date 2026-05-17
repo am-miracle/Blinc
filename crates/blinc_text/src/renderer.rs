@@ -430,10 +430,7 @@ impl TextRenderer {
             text: text.to_string(),
             font_id,
             font_size_bits: font_size.to_bits(),
-            max_width_bits: options
-                .max_width
-                .map(|w| w.to_bits())
-                .unwrap_or(u32::MAX),
+            max_width_bits: options.max_width.map(|w| w.to_bits()).unwrap_or(u32::MAX),
             alignment: options.alignment,
             anchor: options.anchor,
             line_break: options.line_break,
@@ -721,10 +718,7 @@ impl TextRenderer {
             text: text.to_string(),
             font_id,
             font_size_bits: font_size.to_bits(),
-            max_width_bits: options
-                .max_width
-                .map(|w| w.to_bits())
-                .unwrap_or(u32::MAX),
+            max_width_bits: options.max_width.map(|w| w.to_bits()).unwrap_or(u32::MAX),
             alignment: options.alignment,
             anchor: options.anchor,
             line_break: options.line_break,

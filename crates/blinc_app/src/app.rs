@@ -239,6 +239,7 @@ impl BlincApp {
     /// when only motion bindings changed this frame and the cached
     /// `PrimitiveBatch` from the last full paint can be patched in
     /// place.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_tree_with_motion_opt(
         &mut self,
         tree: &RenderTree,

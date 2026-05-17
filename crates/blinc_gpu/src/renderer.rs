@@ -1126,9 +1126,9 @@ pub struct GpuRenderer {
     /// passes. Set via `set_pending_scissor` / cleared via
     /// `clear_pending_scissor`. Used by the compositor v2 damage-rect
     /// path to confine text / SVG / image dispatches to the same
-    /// scissor region as `render_static_layer_damaged`'s SDF clear
-    /// + redraw. `None` = no scissor (default; full-attachment
-    /// dispatch).
+    /// scissor region as the SDF clear-and-redraw run by
+    /// `render_static_layer_damaged`. `None` = no scissor (default;
+    /// full-attachment dispatch).
     pending_scissor: Option<(u32, u32, u32, u32)>,
     /// Renderer configuration
     config: RendererConfig,

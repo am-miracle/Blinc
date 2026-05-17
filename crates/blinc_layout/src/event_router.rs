@@ -516,8 +516,8 @@ impl EventRouter {
         self.drag_delta_y = y - self.drag_start_y;
 
         const DRAG_THRESHOLD: f32 = 3.0;
-        let delta_exceeds = self.drag_delta_x.abs() > DRAG_THRESHOLD
-            || self.drag_delta_y.abs() > DRAG_THRESHOLD;
+        let delta_exceeds =
+            self.drag_delta_x.abs() > DRAG_THRESHOLD || self.drag_delta_y.abs() > DRAG_THRESHOLD;
 
         if !self.is_dragging && delta_exceeds {
             self.is_dragging = true;
@@ -1638,11 +1638,8 @@ impl EventRouter {
                 // skip.
                 let mut leaf_children_bounds = Vec::new();
                 for child in tree.layout().children(node) {
-                    if let Some(cb) =
-                        tree.layout().get_bounds(child, base_child_offset)
-                    {
-                        leaf_children_bounds
-                            .push((cb.x, cb.y, cb.width, cb.height));
+                    if let Some(cb) = tree.layout().get_bounds(child, base_child_offset) {
+                        leaf_children_bounds.push((cb.x, cb.y, cb.width, cb.height));
                     }
                 }
                 Some(HitTestResult {

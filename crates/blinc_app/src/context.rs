@@ -2335,18 +2335,18 @@ impl RenderContext {
             self.image_cache.put(image.source.clone(), gpu_image);
             // Record load time for fade-in animation
             let now = web_time::Instant::now();
-            self.image_load_times
-                .insert(image.source.clone(), now);
+            self.image_load_times.insert(image.source.clone(), now);
             // Record the exact fade-end deadline so the frame-boundary
             // redraw gate can stop firing as soon as the fade settles,
             // instead of a conservative 2 s upper bound that pinned
             // CPU for ~1.5 s of doing-nothing redraws after the fade
             // was visually done. Skip when no fade requested.
             if image.fade_duration_ms > 0 {
-                if let Some(deadline) =
-                    now.checked_add(std::time::Duration::from_millis(image.fade_duration_ms as u64))
-                {
-                    self.image_fade_deadlines.insert(image.source.clone(), deadline);
+                if let Some(deadline) = now.checked_add(std::time::Duration::from_millis(
+                    image.fade_duration_ms as u64,
+                )) {
+                    self.image_fade_deadlines
+                        .insert(image.source.clone(), deadline);
                 }
             }
         }
@@ -4975,6 +4975,7 @@ impl RenderContext {
     /// path when `target_texture` is `None` (no surface texture
     /// reference available — e.g. offscreen render-to-view callers)
     /// or any compositor invariant is violated.
+    #[allow(clippy::too_many_arguments)]
     fn try_render_with_compositor(
         &mut self,
         tree: &RenderTree,
@@ -5000,7 +5001,8 @@ impl RenderContext {
         // pinned the chain for ~1.5 s of nothing-changing frames
         // (the actual fade was 250-500 ms).
         let now = web_time::Instant::now();
-        self.image_fade_deadlines.retain(|_, deadline| now < *deadline);
+        self.image_fade_deadlines
+            .retain(|_, deadline| now < *deadline);
         self.has_pending_image_fade = !self.image_fade_deadlines.is_empty();
 
         if self.has_pending_image_fade {
@@ -5375,53 +5377,32 @@ impl RenderContext {
                         // clear in `render_static_layer_damaged` and
                         // not restored — the "vibrating text" bug
                         // the env-var was guarding against.
-                        let static_view_opt =
-                            self.renderer.static_layer_view().cloned();
+                        let static_view_opt = self.renderer.static_layer_view().cloned();
                         if let Some(static_view) = static_view_opt {
                             let union = damage_union(&damaged);
-                            if let Some(scissor) =
-                                damage_scissor_from_union(union, &self.renderer)
+                            if let Some(scissor) = damage_scissor_from_union(union, &self.renderer)
                             {
                                 self.renderer.set_pending_scissor(scissor);
-                                if let Some(glyphs_by_layer) =
-                                    self.cached_glyphs_by_layer.clone()
-                                {
-                                    for (_z, glyphs) in glyphs_by_layer.iter()
-                                    {
+                                if let Some(glyphs_by_layer) = self.cached_glyphs_by_layer.clone() {
+                                    for (_z, glyphs) in glyphs_by_layer.iter() {
                                         let filtered: Vec<_> = glyphs
                                             .iter()
-                                            .filter(|g| {
-                                                aabb_intersects_any(
-                                                    g.bounds, &damaged,
-                                                )
-                                            })
+                                            .filter(|g| aabb_intersects_any(g.bounds, &damaged))
                                             .copied()
                                             .collect();
                                         if !filtered.is_empty() {
-                                            self.render_text(
-                                                &static_view,
-                                                &filtered,
-                                            );
+                                            self.render_text(&static_view, &filtered);
                                         }
                                     }
                                 }
-                                if let Some(fg_glyphs) =
-                                    self.cached_fg_glyphs.clone()
-                                {
+                                if let Some(fg_glyphs) = self.cached_fg_glyphs.clone() {
                                     let filtered: Vec<_> = fg_glyphs
                                         .iter()
-                                        .filter(|g| {
-                                            aabb_intersects_any(
-                                                g.bounds, &damaged,
-                                            )
-                                        })
+                                        .filter(|g| aabb_intersects_any(g.bounds, &damaged))
                                         .copied()
                                         .collect();
                                     if !filtered.is_empty() {
-                                        self.render_text(
-                                            &static_view,
-                                            &filtered,
-                                        );
+                                        self.render_text(&static_view, &filtered);
                                     }
                                 }
                                 self.renderer.clear_pending_scissor();
@@ -5442,68 +5423,71 @@ impl RenderContext {
                 // Note: do NOT `return Ok(())` — proceed past the
                 // `if use_fast` block to the slow path.
             } else {
-
-            // Full canvas overlay — drains SDF primitives + raw-
-            // RGBA images (video frames) + 3D meshes from every
-            // canvas closure. composite_frame blits the static
-            // cache + dispatches the SDF prims; we then layer the
-            // dynamic images and meshes onto the same target.
-            let overlay = self.collect_canvas_overlay(tree, width, height);
-            self.renderer
-                .composite_frame(target_view, target_texture, &overlay.primitives);
-            if !overlay.dynamic_images.is_empty() {
+                // Full canvas overlay — drains SDF primitives + raw-
+                // RGBA images (video frames) + 3D meshes from every
+                // canvas closure. composite_frame blits the static
+                // cache + dispatches the SDF prims; we then layer the
+                // dynamic images and meshes onto the same target.
+                let overlay = self.collect_canvas_overlay(tree, width, height);
                 self.renderer
-                    .render_dynamic_images(target_view, &overlay.dynamic_images);
-            }
-            if !overlay.meshes.is_empty() {
-                dispatch_pending_meshes(
-                    &mut self.renderer,
-                    target_view,
-                    width,
-                    height,
-                    &overlay.meshes,
-                );
-            }
+                    .composite_frame(target_view, target_texture, &overlay.primitives);
+                if !overlay.dynamic_images.is_empty() {
+                    self.renderer
+                        .render_dynamic_images(target_view, &overlay.dynamic_images);
+                }
+                if !overlay.meshes.is_empty() {
+                    dispatch_pending_meshes(
+                        &mut self.renderer,
+                        target_view,
+                        width,
+                        height,
+                        &overlay.meshes,
+                    );
+                }
 
-            // The walker normally writes `visible_anim_active` from
-            // its per-frame observations (canvas paints, active
-            // motion bindings, active motion FSM). On the compositor
-            // fast path the walker doesn't run, so the flag would
-            // stay latched at whatever the last full paint left it
-            // at — typically `true` after any binding animation,
-            // which then pins Phase 5's redraw chain at vsync
-            // forever even when the bar's spring has long since
-            // settled. (Symptom: "after the animation plays, CPU
-            // never drops.") Restate the flag authoritatively from
-            // the two signals we can observe here:
-            //
-            //   - Any canvas is on screen → its draw closure may
-            //     produce new output every frame, keep the chain
-            //     alive.
-            //   - Any motion binding is mid-flight → its spring is
-            //     advancing, keep the chain alive.
-            //
-            // Motion-FSM-driven elements (enter/exit) live in a
-            // separate signal (`render_state.has_active_motions()`)
-            // that the windowed runner ORs in alongside this flag,
-            // so we don't need to mirror them here.
-            // Site C in the animation-driver map. Mirror the
-            // unified predicate the cache-invalidation gate uses,
-            // visibility-filtered so a CSS keyframe on a node
-            // scrolled out of view doesn't pin the chain forever.
-            // The fast path doesn't have a fresh painted set
-            // (walker didn't run this frame); use the last walker
-            // pass's set, which the windowed runner's redraw gate
-            // also relies on.
-            let has_visible_canvas = !tree.canvas_paint_records().is_empty();
-            let any_visible_anim = {
-                let painted_set = tree.painted_node_ids().clone();
-                let painted_stable = tree.painted_stable_ids();
-                tree.has_any_active_animation_visible(render_state, &painted_set, &painted_stable)
-            };
-            tree.set_visible_anim_active(any_visible_anim || has_visible_canvas);
+                // The walker normally writes `visible_anim_active` from
+                // its per-frame observations (canvas paints, active
+                // motion bindings, active motion FSM). On the compositor
+                // fast path the walker doesn't run, so the flag would
+                // stay latched at whatever the last full paint left it
+                // at — typically `true` after any binding animation,
+                // which then pins Phase 5's redraw chain at vsync
+                // forever even when the bar's spring has long since
+                // settled. (Symptom: "after the animation plays, CPU
+                // never drops.") Restate the flag authoritatively from
+                // the two signals we can observe here:
+                //
+                //   - Any canvas is on screen → its draw closure may
+                //     produce new output every frame, keep the chain
+                //     alive.
+                //   - Any motion binding is mid-flight → its spring is
+                //     advancing, keep the chain alive.
+                //
+                // Motion-FSM-driven elements (enter/exit) live in a
+                // separate signal (`render_state.has_active_motions()`)
+                // that the windowed runner ORs in alongside this flag,
+                // so we don't need to mirror them here.
+                // Site C in the animation-driver map. Mirror the
+                // unified predicate the cache-invalidation gate uses,
+                // visibility-filtered so a CSS keyframe on a node
+                // scrolled out of view doesn't pin the chain forever.
+                // The fast path doesn't have a fresh painted set
+                // (walker didn't run this frame); use the last walker
+                // pass's set, which the windowed runner's redraw gate
+                // also relies on.
+                let has_visible_canvas = !tree.canvas_paint_records().is_empty();
+                let any_visible_anim = {
+                    let painted_set = tree.painted_node_ids().clone();
+                    let painted_stable = tree.painted_stable_ids();
+                    tree.has_any_active_animation_visible(
+                        render_state,
+                        &painted_set,
+                        &painted_stable,
+                    )
+                };
+                tree.set_visible_anim_active(any_visible_anim || has_visible_canvas);
 
-            return Ok(());
+                return Ok(());
             } // close else { ... } for !damage_rect_failed
         }
 
@@ -5663,6 +5647,7 @@ impl RenderContext {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render_tree_with_motion_opt(
         &mut self,
         tree: &RenderTree,
@@ -6240,8 +6225,7 @@ impl RenderContext {
         // wipe text.
         self.cached_glyphs_by_layer = Some(glyphs_by_layer.clone());
         self.cached_fg_glyphs = Some(fg_glyphs.clone());
-        self.cached_css_transformed_text_prims =
-            Some(css_transformed_text_prims.clone());
+        self.cached_css_transformed_text_prims = Some(css_transformed_text_prims.clone());
 
         // Generate decoration primitives for foreground text once so the
         // three render paths below can each render them after their
