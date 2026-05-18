@@ -1646,6 +1646,15 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         self.active_batch().primitives.len()
     }
 
+    fn bg_layer_command_count(&self) -> usize {
+        // Layer commands always live on the BG batch (push_layer
+        // routes to `batch.layer_commands` regardless of motion-
+        // subtree depth). Match that routing so the index the
+        // walker captures lines up with what Phase 4's CSS patch
+        // path reads from `cached_bg_batch.layer_commands`.
+        self.batch.layer_commands.len()
+    }
+
     fn push_motion_subtree(&mut self) {
         // Override the no-op trait default with our depth-counter
         // tracker so emit sites route to `dynamic_batch`.

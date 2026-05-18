@@ -1725,6 +1725,17 @@ pub trait DrawContext {
         0
     }
 
+    /// Number of layer commands the context has recorded so far this
+    /// frame. Read by the walker right after `push_layer` so the
+    /// Phase 4 CSS-anim recording can capture the just-pushed
+    /// layer's index. The fast-path patcher uses that index to
+    /// update `LayerConfig.opacity` in place when a CSS opacity
+    /// animation took the layered (non-flattened) path. Default `0`
+    /// for contexts that don't track layer commands (mock tests).
+    fn bg_layer_command_count(&self) -> usize {
+        0
+    }
+
     /// Notify the context that the walker is entering a motion-bound
     /// subtree. Subsequent primitive / path / glass emissions route
     /// to a separate "dynamic batch" instead of the main batch, so

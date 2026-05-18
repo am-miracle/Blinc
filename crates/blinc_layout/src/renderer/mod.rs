@@ -315,6 +315,86 @@ impl std::fmt::Debug for CanvasPaintRecord {
     }
 }
 
+/// Per-CSS-animated-node paint state captured during full paint
+/// so the Phase 4 fast path can patch the affected primitives /
+/// layer-command configs from current `css_anim_store` values
+/// without re-walking the tree.
+///
+/// Same lifecycle as [`CompositeBindingMeta`]:
+/// 1. Walker clears the map at the top of every full paint.
+/// 2. Walker inserts an entry for each node whose
+///    `current_animation_status` is `Animating(AnimatedKind::Css)`,
+///    capturing the values baked into the emitted primitives.
+/// 3. The fast path's `apply_css_deltas` reads current animation
+///    values out of the `css_anim_store`, compares against the
+///    `last_*` snapshots here, and patches every primitive in
+///    `primitive_range` (and the `LayerConfig` at `layer_push_index`
+///    when present) in place.
+///
+/// Stale entries are ignored after a cache invalidation — the next
+/// full paint clears and repopulates.
+#[derive(Clone, Debug)]
+pub struct CssAnimPaintMeta {
+    /// Stable id of the animated node. The fast path looks up
+    /// `css_anim_store.animations[stable_id]` /
+    /// `transitions[stable_id]` to read current animated values.
+    /// `LayoutNodeId` is rebuild-fragile; stable id survives.
+    pub stable_id: crate::tree::StableNodeId,
+    /// Inclusive-exclusive range into the cached primitive buffer
+    /// covering every primitive this node's subtree emitted.
+    pub primitive_range: std::ops::Range<usize>,
+    /// Index of this node's `LayerCommand::Push` in the cached
+    /// batch's `layer_commands`, if the walker pushed one. Phase 4a
+    /// flattens simple opacity layers — for the un-flattened case
+    /// `apply_css_deltas` patches `config.opacity` directly here so
+    /// the composite blit picks up the new value.
+    pub layer_push_index: Option<usize>,
+    /// Opacity baked into either the layer config (when
+    /// `layer_push_index.is_some()`) or every primitive's
+    /// `color.a` / `border_color.a` / `shadow_color.a` (when
+    /// flattened) at last paint. Fast path uses `new / last` ratio.
+    pub last_opacity: f32,
+    /// Translate baked into primitive `bounds.xy` (logical pixels,
+    /// pre-DPI). Fast path shifts by `new - last` × scale.
+    pub last_translate: (f32, f32),
+    /// Scale baked into primitive `local_affine` + `bounds`-around-
+    /// centre at last paint. Identity = `(1.0, 1.0)`.
+    pub last_scale: (f32, f32),
+    /// Z-rotation in radians baked at last paint.
+    pub last_rotation_rad: f32,
+    /// X-axis rotation (3D tilt) in radians.
+    pub last_rotate_x_rad: f32,
+    /// Y-axis rotation (3D turn) in radians.
+    pub last_rotate_y_rad: f32,
+    /// Background colour baked into primitives' `color` channel.
+    /// `None` when the node uses a non-solid brush (gradient,
+    /// image) — those animate via gradient_start/end_color which
+    /// are out of first-cut scope.
+    pub last_background_color: Option<[f32; 4]>,
+    /// Border colour baked into primitives' `border_color`.
+    pub last_border_color: Option<[f32; 4]>,
+    /// Corner radius (top_left, top_right, bottom_right, bottom_left).
+    pub last_corner_radius: [f32; 4],
+    /// Border width in pixels.
+    pub last_border_width: f32,
+    /// Shadow params: (offset_x, offset_y, blur, spread).
+    pub last_shadow_params: [f32; 4],
+    /// Shadow colour RGBA.
+    pub last_shadow_color: [f32; 4],
+    /// CSS filter packed A: (grayscale, invert, sepia, hue_rotate_rad).
+    pub last_filter_a: [f32; 4],
+    /// CSS filter packed B: (brightness, contrast, saturate, 0).
+    pub last_filter_b: [f32; 4],
+    /// Centre point (logical pixels, absolute) used for scale /
+    /// rotation math. Same convention as `CompositeBindingMeta`.
+    pub centre: (f32, f32),
+    /// Union AABB of `primitive_range` at last paint (screen
+    /// pixels, post-DPI). Used by the damage-rect cache rebuild
+    /// (Phase 4d) to scope the re-render to just the regions whose
+    /// pixels changed.
+    pub last_screen_aabb: Option<[f32; 4]>,
+}
+
 /// expensive paint pass runs once, and per-vsync we just delta the
 /// transform/opacity on the affected primitives.
 #[derive(Clone, Debug)]
@@ -454,6 +534,12 @@ pub struct RenderTree {
     /// stays alive but its entries are ignored — the next full paint
     /// clears and repopulates.
     composite_bindings: RefCell<HashMap<LayoutNodeId, CompositeBindingMeta>>,
+    /// Per-CSS-animated-node paint state. Populated by the walker
+    /// for every node whose `current_animation_status` is
+    /// `Animating(AnimatedKind::Css)`; consumed by Phase 4's
+    /// `apply_css_deltas` to patch primitives + layer configs from
+    /// current `css_anim_store` values without re-walking.
+    css_anim_paint_records: RefCell<HashMap<LayoutNodeId, CssAnimPaintMeta>>,
     /// Per-canvas paint state captured during full paint so the
     /// fast path can re-invoke each canvas's `render_fn` next frame
     /// without re-walking the rest of the tree. Same lifecycle as
@@ -692,6 +778,7 @@ impl RenderTree {
             painted_node_ids: RefCell::new(HashSet::new()),
             motion_bindings: HashMap::new(),
             composite_bindings: RefCell::new(HashMap::new()),
+            css_anim_paint_records: RefCell::new(HashMap::new()),
             canvas_paint_records: RefCell::new(HashMap::new()),
             dynamic_regions: RefCell::new(HashMap::new()),
             previous_animation_status: RefCell::new(HashMap::new()),
@@ -1101,6 +1188,27 @@ impl RenderTree {
         &self,
     ) -> std::cell::RefMut<'_, HashMap<LayoutNodeId, CompositeBindingMeta>> {
         self.composite_bindings.borrow_mut()
+    }
+
+    /// Borrow the map of CSS-animated nodes the walker recorded on
+    /// the most recent full paint. Phase 4's `apply_css_deltas`
+    /// iterates this to patch primitives + layer configs from
+    /// current `css_anim_store` values without re-walking.
+    pub fn css_anim_paint_records(
+        &self,
+    ) -> std::cell::Ref<'_, HashMap<LayoutNodeId, CssAnimPaintMeta>> {
+        self.css_anim_paint_records.borrow()
+    }
+
+    /// Mutable accessor for the same map. Used by the walker during
+    /// the paint walk to insert entries, and by `apply_css_deltas`
+    /// to write `last_*` values back after a successful patch so
+    /// the next frame's delta is computed against what's actually
+    /// in the GPU batch.
+    pub fn css_anim_paint_records_mut(
+        &self,
+    ) -> std::cell::RefMut<'_, HashMap<LayoutNodeId, CssAnimPaintMeta>> {
+        self.css_anim_paint_records.borrow_mut()
     }
 
     /// Borrow the map of canvases the walker captured on the most

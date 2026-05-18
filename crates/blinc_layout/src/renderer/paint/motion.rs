@@ -68,6 +68,11 @@ impl RenderTree {
         // reads this between full paints to patch the cached
         // primitive buffer in place.
         self.composite_bindings.borrow_mut().clear();
+        // Phase 4b: per-CSS-animated-node paint metadata. Same
+        // lifecycle as composite_bindings — cleared every full
+        // paint, repopulated below for every node whose
+        // `current_animation_status` is `Animating(Css)`.
+        self.css_anim_paint_records.borrow_mut().clear();
         // Canvas paint records have the same lifecycle: the walker
         // rebuilds them on every full paint, the fast path consumes
         // them between full paints.
@@ -481,6 +486,25 @@ impl RenderTree {
             ctx.push_motion_subtree();
         }
         let composite_bg_start = in_motion_subtree.then(|| ctx.bg_primitive_count());
+        // Phase 4b: bracket CSS-animated subtrees the same way
+        // `composite_bg_start` brackets motion-bound subtrees, so
+        // the post-walk recording at the bottom of this fn can
+        // emit a `CssAnimPaintMeta { primitive_range: start..end,
+        // ... }` for `apply_css_deltas` to patch. Gated on
+        // `Animating(Css)` so settled CSS store entries (kept for
+        // the same-target restart guard in
+        // `detect_and_start_transitions`) don't get recorded.
+        // Motion-bound nodes that also have a CSS animation are
+        // handled by `composite_bindings` / `apply_binding_deltas`
+        // (motion takes precedence in `compute_animation_status`)
+        // and skip this CSS bookkeeping.
+        let in_css_subtree = matches!(
+            self.current_animation_status.borrow().get(&node).copied(),
+            Some(super::super::AnimationStatus::Animating(
+                super::super::AnimatedKind::Css
+            ))
+        );
+        let css_anim_bg_start = in_css_subtree.then(|| ctx.bg_primitive_count());
 
         // Compositor v2 ambient snapshot for motion-bound subtrees.
         // Captured BEFORE this node pushes any of its own transforms
@@ -814,6 +838,23 @@ impl RenderTree {
                 transform_3d,
             });
         }
+        // Phase 4b: capture the layer-command index of the push we
+        // just made, so the CSS post-walk recording can drop it
+        // into `CssAnimPaintMeta`. `apply_css_deltas` patches
+        // `LayerConfig.opacity` at this index for opacity
+        // animations that took the layered (non-flattened) path.
+        // `bg_layer_command_count` returns the count AFTER the
+        // push, so the push's own index is `count - 1`.
+        let css_anim_layer_push_index = if in_css_subtree && should_push_layer {
+            let n = ctx.bg_layer_command_count();
+            if n > 0 {
+                Some(n - 1)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Corner shape setup (superellipse per-corner) — MUST be set before draw_shadow
         // so shadows use the same corner_shape as the fill+border SDF.
@@ -1949,6 +1990,121 @@ impl RenderTree {
                                 z_layer: amb_z,
                             },
                             kind,
+                        },
+                    );
+                }
+            }
+        }
+
+        // Phase 4b: CSS-animated paint record. Same `effective_layer
+        // == target_layer` gate as the `composite_bindings` block
+        // above — only the pass that actually emits this node's
+        // primitives gets to record, otherwise the BG-pass entry
+        // would be clobbered by Glass / Foreground's empty range.
+        // `apply_css_deltas` reads this map to patch the cached
+        // batch from current `css_anim_store` values.
+        //
+        // First cut populates the fields the walker has easy access
+        // to here (opacity from `node_motion_opacity`, colours /
+        // corner radius / border / shadow / filter / 3D rotations
+        // from `render_node.props`). The transform-decomposition
+        // fields (`last_translate` / `last_scale` /
+        // `last_rotation_rad`) default to identity; Phase 4c can
+        // extend the recording to populate them when patching 2D
+        // transforms becomes a target case.
+        if let Some(start) = css_anim_bg_start.filter(|_| effective_layer == target_layer) {
+            let end = ctx.bg_primitive_count();
+            if end > start {
+                if let Some(stable_id) = self.stable_id(node) {
+                    let centre = self
+                        .layout_tree
+                        .get_absolute_bounds(node)
+                        .map(|abs| {
+                            (
+                                abs.x + abs.width / 2.0 + cumulative_scroll.0,
+                                abs.y + abs.height / 2.0 + cumulative_scroll.1,
+                            )
+                        })
+                        .unwrap_or((
+                            bounds.x + bounds.width / 2.0,
+                            bounds.y + bounds.height / 2.0,
+                        ));
+                    let last_screen_aabb = ctx.bg_primitive_aabb(start, end);
+
+                    // Extract solid background colour if present
+                    // (gradient / image brushes return None — those
+                    // animate via gradient_start/end_color which
+                    // are out of first-cut scope).
+                    let last_background_color =
+                        render_node.props.background.as_ref().and_then(|brush| {
+                            if let Brush::Solid(c) = brush {
+                                Some([c.r, c.g, c.b, c.a])
+                            } else {
+                                None
+                            }
+                        });
+                    let last_border_color = render_node
+                        .props
+                        .border_color
+                        .map(|c| [c.r, c.g, c.b, c.a]);
+                    let cr = &render_node.props.border_radius;
+                    let last_corner_radius = [
+                        cr.top_left,
+                        cr.top_right,
+                        cr.bottom_right,
+                        cr.bottom_left,
+                    ];
+                    let last_border_width = render_node.props.border_width;
+                    let (last_shadow_params, last_shadow_color) = match &render_node
+                        .props
+                        .shadow
+                    {
+                        Some(s) => (
+                            [s.offset_x, s.offset_y, s.blur, s.spread],
+                            [s.color.r, s.color.g, s.color.b, s.color.a],
+                        ),
+                        None => ([0.0; 4], [0.0; 4]),
+                    };
+                    let (last_filter_a, last_filter_b) = match &render_node.props.filter
+                    {
+                        Some(f) => (
+                            [
+                                f.grayscale,
+                                f.invert,
+                                f.sepia,
+                                f.hue_rotate.to_radians(),
+                            ],
+                            [f.brightness, f.contrast, f.saturate, 0.0],
+                        ),
+                        None => ([0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.0]),
+                    };
+                    let last_rotate_x_rad =
+                        render_node.props.rotate_x.unwrap_or(0.0).to_radians();
+                    let last_rotate_y_rad =
+                        render_node.props.rotate_y.unwrap_or(0.0).to_radians();
+
+                    self.css_anim_paint_records.borrow_mut().insert(
+                        node,
+                        super::super::CssAnimPaintMeta {
+                            stable_id,
+                            primitive_range: start..end,
+                            layer_push_index: css_anim_layer_push_index,
+                            last_opacity: node_motion_opacity,
+                            last_translate: (0.0, 0.0),
+                            last_scale: (1.0, 1.0),
+                            last_rotation_rad: 0.0,
+                            last_rotate_x_rad,
+                            last_rotate_y_rad,
+                            last_background_color,
+                            last_border_color,
+                            last_corner_radius,
+                            last_border_width,
+                            last_shadow_params,
+                            last_shadow_color,
+                            last_filter_a,
+                            last_filter_b,
+                            centre,
+                            last_screen_aabb,
                         },
                     );
                 }
