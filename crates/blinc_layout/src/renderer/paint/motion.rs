@@ -799,8 +799,7 @@ impl RenderTree {
         // primitives regardless of the binding's current value.
         // `apply_binding_deltas` patches `LayerConfig.opacity` at
         // the recorded push index so the spring becomes visible.
-        let has_motion_opacity_binding =
-            motion_bindings_ref.is_some_and(|b| b.opacity.is_some());
+        let has_motion_opacity_binding = motion_bindings_ref.is_some_and(|b| b.opacity.is_some());
         let safe_to_flatten =
             !has_motion_opacity_binding && self.layout_tree.children(node).len() <= 1;
         let can_flatten_opacity = only_opacity_drives_layer && safe_to_flatten;
@@ -869,7 +868,11 @@ impl RenderTree {
         // push, so the push's own index is `count - 1`.
         let css_anim_layer_push_index = if in_css_subtree && should_push_layer {
             let n = ctx.bg_layer_command_count();
-            if n > 0 { Some(n - 1) } else { None }
+            if n > 0 {
+                Some(n - 1)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -879,13 +882,17 @@ impl RenderTree {
         // disabled for motion bindings (above), opacity bindings
         // always take the layered path and need this index to
         // animate visibly.
-        let motion_binding_layer_push_index =
-            if motion_bindings_ref.is_some() && should_push_layer {
-                let n = ctx.bg_layer_command_count();
-                if n > 0 { Some(n - 1) } else { None }
+        let motion_binding_layer_push_index = if motion_bindings_ref.is_some() && should_push_layer
+        {
+            let n = ctx.bg_layer_command_count();
+            if n > 0 {
+                Some(n - 1)
             } else {
                 None
-            };
+            }
+        } else {
+            None
+        };
 
         // Corner shape setup (superellipse per-corner) — MUST be set before draw_shadow
         // so shadows use the same corner_shape as the fill+border SDF.
