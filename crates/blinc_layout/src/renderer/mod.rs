@@ -2215,6 +2215,33 @@ impl RenderTree {
         self.stylesheet.as_ref().map(|s| s.as_ref())
     }
 
+    /// Whether the given node has any `:hover` styling — either its
+    /// own `#id:hover` / `.class:hover` rule, or appears in a complex
+    /// selector that contains `:hover` on that compound.
+    ///
+    /// Used by the windowed runner to gate cache invalidation on
+    /// POINTER_ENTER / POINTER_LEAVE: hovering over an element with
+    /// no `:hover` styling produces no visible change, so wiping the
+    /// static cache for it just forces a needless slow-path repaint.
+    pub fn node_participates_in_hover(&self, node_id: LayoutNodeId) -> bool {
+        let Some(stylesheet) = self.stylesheet() else {
+            return false;
+        };
+        if let Some(id) = self.element_registry.get_id(node_id) {
+            if stylesheet.participates_in_hover(&id) {
+                return true;
+            }
+        }
+        if let Some(classes) = self.element_registry.get_classes(node_id) {
+            for class in classes {
+                if stylesheet.participates_in_hover(&class) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // ========================================================================
     // FLIP Animation for Subtree Rebuilds
     // ========================================================================

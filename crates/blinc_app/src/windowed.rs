@@ -3782,14 +3782,40 @@ impl WindowedApp {
                                         // peek-needs-redraw check below — the drag
                                         // handler mutates `State`/`Stateful`, that
                                         // sets `NEEDS_REDRAW`, and we honour it.
-                                        let hover_changed = pending_events.iter().any(|e| {
-                                            matches!(
-                                                e.event_type,
+                                        // Pre-fix: every POINTER_ENTER / POINTER_LEAVE
+                                        // unconditionally invalidated the cache, even when
+                                        // the entering / leaving element had no `:hover`
+                                        // styling at all — every mouse move that crossed
+                                        // any element boundary forced a full slow-path
+                                        // repaint. styling_demo logs showed 142 of these
+                                        // hover invalidations during a 13-second run.
+                                        //
+                                        // Now we walk the pending events and ask the tree
+                                        // whether each target participates in `:hover`
+                                        // styling (its id or one of its classes appears
+                                        // in a `:hover`-bearing rule). frame_dirty +
+                                        // request_redraw still fire unconditionally so
+                                        // pointer handlers and the cursor-style path see
+                                        // every move; only the cache-invalidation step
+                                        // is per-target.
+                                        let mut any_hover_changed = false;
+                                        let mut hoverable_changed = false;
+                                        for event in &pending_events {
+                                            let is_hover_event = matches!(
+                                                event.event_type,
                                                 blinc_core::events::event_types::POINTER_ENTER
                                                     | blinc_core::events::event_types::POINTER_LEAVE
-                                            )
-                                        });
-                                        if hover_changed {
+                                            );
+                                            if !is_hover_event {
+                                                continue;
+                                            }
+                                            any_hover_changed = true;
+                                            if tree.node_participates_in_hover(event.node_id) {
+                                                hoverable_changed = true;
+                                                break;
+                                            }
+                                        }
+                                        if any_hover_changed {
                                             frame_dirty.store(true, Ordering::Release);
                                             // Under `ControlFlow::Wait` (Linux/Wayland/X11)
                                             // flipping `frame_dirty` alone doesn't schedule
@@ -3798,19 +3824,24 @@ impl WindowedApp {
                                             // to render anyway because Poll's auto-redraw was
                                             // there; on Linux this is the only path.
                                             window.request_redraw();
-                                            // Hover state changed → the next paint needs to
-                                            // run the walker to apply the new CSS state
-                                            // styles (`:hover` background, etc.) and start
-                                            // any property transitions. Without invalidating
-                                            // here the fast path just blits the previous
-                                            // frame's static cache — so a pure-CSS hover
-                                            // (no Stateful widget self-flagging
-                                            // NEEDS_REDRAW) wouldn't visibly trigger until
-                                            // some other animation forced a slow-path paint.
-                                            // Symptom: cn_demo accordion hover lagged
-                                            // visibly behind the cursor enter.
-                                            if let Some(ref mut app) = ws.app {
-                                                app.invalidate_render_cache_tagged("hover_state_changed");
+                                            // Cache invalidation is the expensive step —
+                                            // gate it on the target actually having
+                                            // pointer-state styling. Hovering over an
+                                            // unstyled element produces no visual change
+                                            // to invalidate for.
+                                            //
+                                            // Symptom this gate originally fixed: cn_demo
+                                            // accordion hover lagged visibly behind the
+                                            // cursor enter because the fast path just
+                                            // blitted the pre-hover cache. We preserve
+                                            // that fix by still invalidating when the
+                                            // hovered element actually has hover styling.
+                                            if hoverable_changed {
+                                                if let Some(ref mut app) = ws.app {
+                                                    app.invalidate_render_cache_tagged(
+                                                        "hover_state_changed",
+                                                    );
+                                                }
                                             }
                                         }
 
