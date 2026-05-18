@@ -1841,9 +1841,9 @@ impl Stylesheet {
     }
 
     /// Does an element with this id / class identifier participate in
-    /// any `:hover` styling? Cheap HashSet lookup against the set
-    /// precomputed by [`Self::index_hover_participants`] at parse
-    /// time.
+    /// any `:hover` styling? Cheap HashSet lookup against a set
+    /// precomputed at parse time (see the internal
+    /// `index_hover_participants` helper).
     pub fn participates_in_hover(&self, ident: &str) -> bool {
         self.hover_participants.contains(ident)
     }
@@ -12464,11 +12464,7 @@ mod tests {
         assert!(sheet.participates_in_hover("dynamic"));
         // A non-hover state insertion shouldn't register the
         // identifier as a hover participant.
-        sheet.insert_with_state(
-            "active-only",
-            ElementState::Active,
-            ElementStyle::default(),
-        );
+        sheet.insert_with_state("active-only", ElementState::Active, ElementStyle::default());
         assert!(!sheet.participates_in_hover("active-only"));
     }
 }
