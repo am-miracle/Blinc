@@ -1130,6 +1130,18 @@ pub struct GpuRenderer {
     /// `render_static_layer_damaged`. `None` = no scissor (default;
     /// full-attachment dispatch).
     pending_scissor: Option<(u32, u32, u32, u32)>,
+    /// Damage scissor applied to subsequent layer-composite blits
+    /// inside `blit_tight_texture_to_target`. Unlike
+    /// [`Self::pending_scissor`] (a hard replacement used by text /
+    /// SVG / image overlays), this scissor is *intersected* with
+    /// the blit's own visible-bounds scissor so layer composites
+    /// can only paint inside the union of damage rect AND the
+    /// layer's content area. Phase 4d Opt 2 sets this on the
+    /// damage path so re-rendering a scissored cache region keeps
+    /// effect-layer composites confined to the damage rect.
+    /// `None` = no damage scissor (default; blit uses its own
+    /// visible-bounds scissor only).
+    pending_damage_scissor: Option<(u32, u32, u32, u32)>,
     /// Renderer configuration
     config: RendererConfig,
     /// Current frame time (for animations)
@@ -2387,6 +2399,7 @@ impl GpuRenderer {
             viewport_size,
             saved_viewport_size: None,
             pending_scissor: None,
+            pending_damage_scissor: None,
             memory_budget: GpuMemoryBudget::new(config.gpu_memory_budget),
             config,
             time: 0.0,
@@ -4190,6 +4203,24 @@ impl GpuRenderer {
     /// effect until [`Self::clear_pending_scissor`] is called.
     pub fn set_pending_scissor(&mut self, rect: (u32, u32, u32, u32)) {
         self.pending_scissor = Some(rect);
+    }
+
+    /// Damage-scissor variant of [`Self::set_pending_scissor`]: the
+    /// rect is *intersected* with `blit_tight_texture_to_target`'s
+    /// own visible-bounds scissor instead of replacing it. Phase 4d
+    /// Opt 2 sets this before re-rendering a CSS-animated cache
+    /// region so layer-effect composites paint only inside the
+    /// damage rect, leaving the rest of the cache from last paint
+    /// untouched. Call [`Self::clear_pending_damage_scissor`] when
+    /// done.
+    pub fn set_pending_damage_scissor(&mut self, rect: (u32, u32, u32, u32)) {
+        self.pending_damage_scissor = Some(rect);
+    }
+
+    /// Clear the damage scissor — subsequent layer composites use
+    /// their own visible-bounds scissor only.
+    pub fn clear_pending_damage_scissor(&mut self) {
+        self.pending_damage_scissor = None;
     }
 
     /// Drop the staged scissor so subsequent dispatches paint to the
@@ -11076,10 +11107,47 @@ impl GpuRenderer {
             let scissor_w = vis_w.max(1.0) as u32;
             let scissor_h = vis_h.max(1.0) as u32;
 
-            render_pass.set_scissor_rect(scissor_x, scissor_y, scissor_w, scissor_h);
-            render_pass.set_pipeline(&self.pipelines.layer_composite);
-            render_pass.set_bind_group(0, &bind_group, &[]);
-            render_pass.draw(0..6, 0..1);
+            // Phase 4d Opt 2: when a damage scissor is set,
+            // intersect it with the layer's visible bounds. The
+            // composite paints only in the overlap of (layer
+            // content area) ∩ (damage rect). Pixels outside the
+            // damage rect stay from the previous frame's render —
+            // which is what makes a scissored cache repaint
+            // correct for CSS-animated layer effects.
+            //
+            // Empty intersection ⇒ skip the draw entirely (layer
+            // doesn't touch the damage region this frame). Still
+            // submit the otherwise-empty render pass so the encoder
+            // doesn't leak — `LoadOp::Load` + no draw is a no-op
+            // on the GPU.
+            let scissor_and_draw = if let Some((dx, dy, dw, dh)) =
+                self.pending_damage_scissor
+            {
+                let lx0 = scissor_x;
+                let ly0 = scissor_y;
+                let lx1 = lx0 + scissor_w;
+                let ly1 = ly0 + scissor_h;
+                let dx1 = dx + dw;
+                let dy1 = dy + dh;
+                let ix0 = lx0.max(dx);
+                let iy0 = ly0.max(dy);
+                let ix1 = lx1.min(dx1);
+                let iy1 = ly1.min(dy1);
+                if ix1 <= ix0 || iy1 <= iy0 {
+                    None
+                } else {
+                    Some((ix0, iy0, ix1 - ix0, iy1 - iy0))
+                }
+            } else {
+                Some((scissor_x, scissor_y, scissor_w, scissor_h))
+            };
+
+            if let Some((sx, sy, sw, sh)) = scissor_and_draw {
+                render_pass.set_scissor_rect(sx, sy, sw, sh);
+                render_pass.set_pipeline(&self.pipelines.layer_composite);
+                render_pass.set_bind_group(0, &bind_group, &[]);
+                render_pass.draw(0..6, 0..1);
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
