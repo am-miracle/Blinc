@@ -5990,27 +5990,42 @@ impl RenderContext {
             } else {
                 true
             };
-            if damage_rect_eligible && self.cached_bg_batch.is_some() {
-                if !patched {
-                    // `apply_binding_deltas` bailed (typically the
-                    // last-opacity-is-zero guard — opacity binding
-                    // going `0 → 1` can't be ratio-scaled). The cache
-                    // is now stale; falling through to composite_frame
-                    // would blit the previous frame's pixels and the
-                    // animation would visibly freeze until something
-                    // else (mouse move, scroll) forced a slow-path
-                    // paint. Symptom: switch toggle starts the spring
-                    // but the colored track stays at off-state alpha.
-                    self.renderer.invalidate_static_layer();
-                    self.cached_texts = None;
-                    self.cached_svgs = None;
-                    self.cached_images = None;
-                    self.cached_flows = None;
-                    self.cached_glyphs_by_layer = None;
-                    self.cached_fg_glyphs = None;
-                    self.cached_css_transformed_text_prims = None;
-                    damage_rect_failed = true;
-                } else if !self.last_binding_damage_rects.is_empty() {
+            // Bail handling MUST run regardless of
+            // `damage_rect_eligible`. `apply_binding_deltas` returns
+            // false on the last-opacity-is-zero guard (opacity
+            // binding going `0 → 1` can't be ratio-scaled) and on
+            // degenerate scale (last_scale ~ 0). In either case the
+            // cache is stale this frame; `composite_frame` would
+            // blit the previous frame's pixels and the animation
+            // visibly freezes until something else (mouse move,
+            // scroll) forced a slow-path paint. Symptom: switch
+            // toggle's color fade (`motion().opacity(color_anim)`
+            // 0 → 1) starts the spring but the colored track stays
+            // at off-state alpha until you wiggle the mouse.
+            //
+            // Pre-fix this branch was gated on `damage_rect_eligible`
+            // which itself required `BLINC_DAMAGE_RECT=1`, so the
+            // bail handling never fired in the default build. Move
+            // it out of that gate — invalidate + `damage_rect_failed`
+            // marker so the slow path below picks up and re-walks
+            // with current binding values.
+            if !patched {
+                self.renderer.invalidate_static_layer();
+                self.cached_texts = None;
+                self.cached_svgs = None;
+                self.cached_images = None;
+                self.cached_flows = None;
+                self.cached_glyphs_by_layer = None;
+                self.cached_fg_glyphs = None;
+                self.cached_css_transformed_text_prims = None;
+                damage_rect_failed = true;
+            }
+            if damage_rect_eligible
+                && self.cached_bg_batch.is_some()
+                && patched
+                && !self.last_binding_damage_rects.is_empty()
+            {
+                {
                     let damaged = self.last_binding_damage_rects.clone();
                     let batch_ref = self
                         .cached_bg_batch
