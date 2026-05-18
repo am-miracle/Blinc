@@ -251,6 +251,34 @@ pub struct CanvasOverlay {
     pub aux_data: Vec<[f32; 4]>,
 }
 
+/// Outcome of [`RenderContext::apply_css_deltas`]. Tells the caller
+/// which follow-up work the CSS-only fast path needs this frame.
+///
+/// The `last_css_damage_rects` slot is written before the function
+/// returns regardless of variant — callers can read it for both
+/// [`Self::Patched`] and [`Self::PatchedWithReemits`]. On
+/// [`Self::Bail`] the field is cleared (caller must take the slow
+/// path anyway, so damage rects are irrelevant).
+#[derive(Debug, Clone)]
+pub enum CssDeltaResult {
+    /// Every record was patched in place. Caller dispatches the
+    /// damaged-cache repaint and the cached text / SVG / image
+    /// re-dispatch.
+    Patched,
+    /// In-scope records were patched, but one or more records carried
+    /// an out-of-scope property (width / height / padding / margin /
+    /// gap / clip-path geometry / filter blur / backdrop blur). The
+    /// listed subtrees still hold stale primitives in
+    /// `cached_bg_batch`; the caller must re-emit them via a scratch
+    /// walker pass and splice the new primitives back into the cache
+    /// before dispatching the damaged-cache repaint.
+    PatchedWithReemits { reemit_nodes: Vec<LayoutNodeId> },
+    /// The patch path couldn't proceed (cache missing, lock poisoned,
+    /// opacity-zero ratio, layer-push-index drift). Caller takes the
+    /// full slow path.
+    Bail,
+}
+
 /// Internal render context that manages GPU resources and rendering
 pub struct RenderContext {
     renderer: GpuRenderer,
@@ -1506,6 +1534,25 @@ impl RenderContext {
     /// re-walking the tree. Mirror of [`Self::apply_binding_deltas`]
     /// for the CSS keyframe / transition path.
     ///
+    /// Returns a `CssDeltaResult` indicating what the caller must
+    /// do next:
+    ///
+    /// - `Patched`: all records handled in place; caller dispatches
+    ///   the damaged-cache repaint and the text / SVG / image
+    ///   re-dispatch step. No walker work needed.
+    /// - `PatchedWithReemits { reemit_nodes }`: in-scope records were
+    ///   patched, but one or more records carried out-of-scope
+    ///   properties (width / height / padding / margin / gap /
+    ///   clip-path geometry / filter blur / backdrop blur). Caller
+    ///   must re-emit the listed subtrees via a scratch walker pass
+    ///   into `cached_bg_batch` before the cache repaint, then run
+    ///   the normal damaged-cache repaint. The corresponding damage
+    ///   rects are already in `last_css_damage_rects`.
+    /// - `Bail`: the patch path couldn't reach a coherent state
+    ///   (cache missing, lock poisoned, opacity-zero divide-by-zero,
+    ///   layer push index out of bounds, etc.). Caller must take
+    ///   the full slow path.
+    ///
     /// Returns `false` (caller falls back to slow path) when:
     /// - No cached batch exists yet (cold start; slow path will
     ///   populate it).
@@ -1544,25 +1591,36 @@ impl RenderContext {
     /// - width / height / min_* / max_* / padding / margin / gap
     ///   (layout — needs `compute_layout`)
     /// - backdrop_* (glass material; separate dispatch path)
-    pub fn apply_css_deltas(&mut self, tree: &blinc_layout::RenderTree, _scale: f32) -> bool {
+    pub fn apply_css_deltas(
+        &mut self,
+        tree: &blinc_layout::RenderTree,
+        _scale: f32,
+    ) -> CssDeltaResult {
         // CSS-animated primitives live on `cached_bg_batch` (the
         // walker doesn't push a `motion_subtree` for CSS animations
         // — that routing is motion-binding only). Patch through the
         // bg batch.
         let batch = match self.cached_bg_batch.as_mut() {
             Some(b) => b,
-            None => return false,
+            None => {
+                self.last_css_damage_rects.clear();
+                return CssDeltaResult::Bail;
+            }
         };
         let mut records = tree.css_anim_paint_records_mut();
         if records.is_empty() {
             // No CSS-animated nodes recorded at last paint. Nothing
             // to patch — caller re-uses the cache as-is.
-            return true;
+            self.last_css_damage_rects.clear();
+            return CssDeltaResult::Patched;
         }
         let store_arc = tree.css_anim_store();
         let store = match store_arc.lock() {
             Ok(g) => g,
-            Err(_) => return false,
+            Err(_) => {
+                self.last_css_damage_rects.clear();
+                return CssDeltaResult::Bail;
+            }
         };
 
         // Tracks whether anything changed this frame. Always true
@@ -1575,8 +1633,26 @@ impl RenderContext {
         // caller falls back to the slow path and ignores rects.
         // One entry per record whose patch actually moved a pixel.
         let mut damage_rects: Vec<[f32; 4]> = Vec::new();
+        // Bail sentinel — set inside the per-record loop when a
+        // record can't be patched coherently (opacity-zero ratio,
+        // layer push index out of bounds, layer command shape
+        // mismatch). We can't `return CssDeltaResult::Bail` directly
+        // from inside the loop because the live `&mut self` borrow
+        // (through `batch`) plus the `records` / `store` borrows on
+        // `tree` block the post-return `self.last_css_damage_rects`
+        // write. Setting the flag + breaking out lets the borrows
+        // drop naturally before we touch `self`.
+        let mut bail = false;
+        // Phase 2 of the per-element slow path: records whose active
+        // animation / transition touches an out-of-scope property
+        // (layout, clip-path geometry, blur) get marked for walker
+        // re-emission instead of bailing the whole frame. The
+        // record's screen AABB still goes into `damage_rects` so the
+        // cache repaint clears that area before Phase 3 splices in
+        // the fresh primitives.
+        let mut reemit_nodes: Vec<LayoutNodeId> = Vec::new();
 
-        for (_node, meta) in records.iter_mut() {
+        for (&node, meta) in records.iter_mut() {
             // Per-record patch tracking — distinct from `any_changed`
             // which spans the whole loop. Only push a damage rect
             // when at least one property on THIS record moved.
@@ -1623,11 +1699,26 @@ impl RenderContext {
             if props_anim.is_some_and(touches_out_of_scope)
                 || props_trans.is_some_and(touches_out_of_scope)
             {
-                tracing::trace!(
-                    target: "blinc_app::frame_timing",
-                    "apply_css_deltas_bail_out_of_scope",
-                );
-                return false;
+                // Mark this node for walker re-emission. Push its
+                // AABB so the cache repaint clears that area before
+                // Phase 3 splices fresh primitives. Skip the rest of
+                // this record's property branches — the walker will
+                // re-emit with all current animated values applied
+                // together (including in-scope properties like
+                // opacity that we'd otherwise patch here), so
+                // patching now would just be overwritten.
+                //
+                // Replaces the previous `return false` +
+                // `apply_css_deltas_bail_out_of_scope` trace from
+                // PR #46 — the bail-on-first-out-of-scope behaviour
+                // is gone; the equivalent diagnostic is
+                // `apply_css_deltas_reemit_pending` emitted once
+                // after the loop with the total count.
+                reemit_nodes.push(node);
+                if let Some(rect) = meta.last_screen_aabb {
+                    damage_rects.push(rect);
+                }
+                continue;
             }
 
             // Helper: read a property from animation first, else
@@ -1650,7 +1741,8 @@ impl RenderContext {
                         // Divide-by-zero — primitives were emitted
                         // at zero alpha last paint; can't recover
                         // the original color via ratio. Slow path.
-                        return false;
+                        bail = true;
+                        break;
                     }
                     if let Some(push_idx) = meta.layer_push_index {
                         use blinc_gpu::primitives::LayerCommand;
@@ -1659,10 +1751,14 @@ impl RenderContext {
                                 if let LayerCommand::Push { config } = &mut entry.command {
                                     config.opacity = new_opacity;
                                 } else {
-                                    return false;
+                                    bail = true;
+                                    break;
                                 }
                             }
-                            None => return false,
+                            None => {
+                                bail = true;
+                                break;
+                            }
                         }
                     } else if let Some(prims) =
                         batch.primitives.get_mut(meta.primitive_range.clone())
@@ -1874,8 +1970,26 @@ impl RenderContext {
         let _ = any_changed;
         drop(store);
         drop(records);
+        if bail {
+            // Partial-patch state may have landed in cached_bg_batch
+            // — the loop ran some property branches before hitting
+            // the bail condition. Damage rects are unreliable, the
+            // slow path will repaint the whole cache anyway, so
+            // clear and signal Bail.
+            self.last_css_damage_rects.clear();
+            return CssDeltaResult::Bail;
+        }
         self.last_css_damage_rects = damage_rects;
-        true
+        if reemit_nodes.is_empty() {
+            CssDeltaResult::Patched
+        } else {
+            tracing::trace!(
+                target: "blinc_app::frame_timing",
+                count = reemit_nodes.len(),
+                "apply_css_deltas_reemit_pending",
+            );
+            CssDeltaResult::PatchedWithReemits { reemit_nodes }
+        }
     }
 
     /// Update the current cursor position in physical pixels (for @flow pointer input)
@@ -5981,7 +6095,18 @@ impl RenderContext {
         if css_patch_eligible {
             let scale_factor = tree.scale_factor();
             let css_path_start = web_time::Instant::now();
-            if self.apply_css_deltas(tree, scale_factor) {
+            // CssDeltaResult drives the next step:
+            //   - Patched: in-scope patches landed, run the damaged
+            //     repaint as before.
+            //   - PatchedWithReemits: in-scope patches landed AND
+            //     out-of-scope records (layout / clip-geom / blur)
+            //     need walker re-emission. Phase 3 (next commit)
+            //     wires the re-emit + splice path; for now we treat
+            //     it as a Bail so behaviour is unchanged.
+            //   - Bail: fall through to the slow path entirely.
+            let delta_result = self.apply_css_deltas(tree, scale_factor);
+            let took_fast_path = matches!(delta_result, CssDeltaResult::Patched);
+            if took_fast_path {
                 let batch_clone = self
                     .cached_bg_batch
                     .as_ref()
