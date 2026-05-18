@@ -1350,6 +1350,16 @@ pub struct Stylesheet {
     keyframes: HashMap<String, CssKeyframes>,
     /// Flow DAGs defined with @flow
     flows: HashMap<String, FlowGraph>,
+    /// Identifiers (ids without `#`, classes without `.`) that appear in
+    /// a compound containing `:hover`. Computed at parse time by
+    /// [`Self::index_hover_participants`]; consulted by the windowed
+    /// runner to gate `invalidate_render_cache` on POINTER_ENTER /
+    /// POINTER_LEAVE events. Pre-fix every hover-changing pointer move
+    /// invalidated the compositor's static cache regardless of whether
+    /// the entering / leaving element had any `:hover` styling, which
+    /// made mouse-over-non-hoverable-content drop the fast path on
+    /// every frame.
+    hover_participants: std::collections::HashSet<String>,
 }
 
 impl Stylesheet {
@@ -1405,6 +1415,7 @@ impl Stylesheet {
                 }
                 stylesheet.complex_rules = parsed.complex_rules;
                 stylesheet.index_class_styles();
+                stylesheet.index_hover_participants();
                 for keyframes in parsed.keyframes {
                     stylesheet
                         .keyframes
@@ -1482,6 +1493,7 @@ impl Stylesheet {
                 }
                 stylesheet.complex_rules = parsed.complex_rules;
                 stylesheet.index_class_styles();
+                stylesheet.index_hover_participants();
                 for keyframes in parsed.keyframes {
                     stylesheet
                         .keyframes
@@ -1563,8 +1575,17 @@ impl Stylesheet {
         state: ElementState,
         style: ElementStyle,
     ) {
-        let key = format!("{}:{}", id.into(), state);
+        let id_str: String = id.into();
+        let key = format!("{}:{}", id_str, state);
         self.styles.insert(key, style);
+        // Keep the hover-participants index live with programmatic
+        // inserts — without this, a runtime-added `#id:hover` style
+        // wouldn't register as a hover-invalidation target and the
+        // first pointer-enter on the element would silently skip the
+        // cache invalidation we need.
+        if state == ElementState::Hover {
+            self.hover_participants.insert(id_str);
+        }
     }
 
     /// Get a style by element ID (without the # prefix)
@@ -1762,6 +1783,71 @@ impl Stylesheet {
         results
     }
 
+    /// Build the [`Self::hover_participants`] set so the windowed runner
+    /// can cheaply decide whether a POINTER_ENTER / POINTER_LEAVE event
+    /// needs to invalidate the compositor cache.
+    ///
+    /// Records every id and class that appears in a compound selector
+    /// containing `State(Hover)` — that is, any rule whose evaluation
+    /// depends on the hover state of that identifier. Walks all three
+    /// rule stores so simple `#id:hover` rules in `styles`, simple
+    /// `.class:hover` rules in `class_styles`, and complex multi-segment
+    /// selectors in `complex_rules` are all covered. Identifiers stripped
+    /// of the leading `#`/`.` so they match what the registry returns.
+    fn index_hover_participants(&mut self) {
+        self.hover_participants.clear();
+
+        // Simple `#id:hover` rules are stored in `styles` with the
+        // composite key `"id:hover"`. Match by suffix and pull out
+        // the id half.
+        for key in self.styles.keys() {
+            if let Some(id) = key.strip_suffix(":hover") {
+                self.hover_participants.insert(id.to_string());
+            }
+        }
+        // Simple `.class:hover` rules are stored in `class_styles` the
+        // same way.
+        for key in self.class_styles.keys() {
+            if let Some(class) = key.strip_suffix(":hover") {
+                self.hover_participants.insert(class.to_string());
+            }
+        }
+        // Complex rules: for each compound containing `State(Hover)`,
+        // record every id / class in that compound. The hover applies
+        // to that segment's identifier, so any pointer-enter / leave
+        // on that element triggers the rule's evaluation.
+        for (selector, _) in &self.complex_rules {
+            for (compound, _) in &selector.segments {
+                let has_hover = compound
+                    .parts
+                    .iter()
+                    .any(|p| matches!(p, SelectorPart::State(ElementState::Hover)));
+                if !has_hover {
+                    continue;
+                }
+                for part in &compound.parts {
+                    match part {
+                        SelectorPart::Id(id) => {
+                            self.hover_participants.insert(id.clone());
+                        }
+                        SelectorPart::Class(class) => {
+                            self.hover_participants.insert(class.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Does an element with this id / class identifier participate in
+    /// any `:hover` styling? Cheap HashSet lookup against a set
+    /// precomputed at parse time (see the internal
+    /// `index_hover_participants` helper).
+    pub fn participates_in_hover(&self, ident: &str) -> bool {
+        self.hover_participants.contains(ident)
+    }
+
     /// Index simple class selectors from complex_rules into class_styles for O(1) lookup.
     ///
     /// A "simple class selector" is a ComplexSelector with exactly one segment
@@ -1814,6 +1900,12 @@ impl Stylesheet {
         for (key, style) in other.class_styles {
             self.class_styles.insert(key, style);
         }
+        // Re-index now that simple + class + complex stores have the
+        // merged content. `other.hover_participants` is dropped — the
+        // re-index walks the merged stores directly so we don't have
+        // to reason about whether an `id:hover` key in one stylesheet
+        // got cascade-overridden by an `id` key in the other.
+        self.index_hover_participants();
     }
 
     /// Load and parse a `.css` file from disk
@@ -12340,5 +12432,39 @@ mod tests {
             }
             _ => panic!("expected Mul, got {:?}", expr),
         }
+    }
+
+    #[test]
+    fn participates_in_hover_recognizes_simple_id_class_and_complex() {
+        let css = r#"
+            #button:hover { background: red; }
+            .card:hover { opacity: 0.8; }
+            #parent:hover > .child { color: blue; }
+            #plain { background: blue; }
+            .untouched { color: white; }
+        "#;
+        let sheet = Stylesheet::parse(css).unwrap();
+
+        assert!(sheet.participates_in_hover("button"));
+        assert!(sheet.participates_in_hover("card"));
+        // `#parent:hover > .child` — the hover is on #parent, so
+        // #parent is a participant; .child is not (its segment has
+        // no :hover).
+        assert!(sheet.participates_in_hover("parent"));
+        assert!(!sheet.participates_in_hover("child"));
+        assert!(!sheet.participates_in_hover("plain"));
+        assert!(!sheet.participates_in_hover("untouched"));
+    }
+
+    #[test]
+    fn insert_with_state_updates_hover_participants() {
+        let mut sheet = Stylesheet::new();
+        assert!(!sheet.participates_in_hover("dynamic"));
+        sheet.insert_with_state("dynamic", ElementState::Hover, ElementStyle::default());
+        assert!(sheet.participates_in_hover("dynamic"));
+        // A non-hover state insertion shouldn't register the
+        // identifier as a hover participant.
+        sheet.insert_with_state("active-only", ElementState::Active, ElementStyle::default());
+        assert!(!sheet.participates_in_hover("active-only"));
     }
 }
