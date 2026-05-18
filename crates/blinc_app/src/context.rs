@@ -1443,6 +1443,37 @@ impl RenderContext {
         true
     }
 
+    /// Re-bind the latest glyph atlas views onto the SDF pipeline.
+    /// Called right before `composite_frame` (and before any other
+    /// `PRIM_TEXT`-dispatching pass) on the compositor path so
+    /// canvas-emitted `draw_text` primitives — whose glyphs are
+    /// added to `text_ctx`'s atlas *after* the slow-path's
+    /// `set_glyph_atlas` call inside `render_tree_with_motion_opt` —
+    /// reach the GPU through a bind group that points at the
+    /// post-growth atlas texture rather than the stale pre-growth
+    /// view.
+    ///
+    /// Pre-fix the SDF bind group was set once per slow-path frame
+    /// (line ~7110), then `collect_canvas_overlay` ran canvas
+    /// closures whose `draw_text` calls could grow the atlas
+    /// texture (capacity exceeded). When the atlas re-allocated,
+    /// the view pointer changed but the bind group still
+    /// referenced the old view. Canvas-text PRIM_TEXT primitives
+    /// then sampled blank UVs and rendered invisibly — symptom:
+    /// canvas_demo's "Canvas Text" sample shows the background
+    /// plate but none of the headings.
+    ///
+    /// `set_glyph_atlas` no-ops on pointer equality so calling
+    /// before every `composite_frame` is cheap when the atlas
+    /// didn't grow.
+    fn rebind_glyph_atlas_for_overlay(&mut self) {
+        if let (Some(atlas), Some(color_atlas)) =
+            (self.text_ctx.atlas_view(), self.text_ctx.color_atlas_view())
+        {
+            self.renderer.set_glyph_atlas(atlas, color_atlas);
+        }
+    }
+
     /// Patch the cached background batch's CSS-animated regions in
     /// place from current `css_anim_store` values, without
     /// re-walking the tree. Mirror of [`Self::apply_binding_deltas`]
@@ -5935,11 +5966,18 @@ impl RenderContext {
                 if !dyn_prims.is_empty() {
                     overlay.primitives.extend_from_slice(dyn_prims);
                 }
+                // Rebind needs `&mut self` so we have to release the
+                // immutable borrow `dyn_aux` is holding on
+                // `cached_dynamic_batch`. Clone the aux slice into a
+                // local Vec — at most a few hundred entries on a
+                // motion-heavy frame, well under 1 µs to copy.
+                let dyn_aux_owned: Vec<[f32; 4]> = dyn_aux.to_vec();
+                self.rebind_glyph_atlas_for_overlay();
                 self.renderer.composite_frame(
                     target_view,
                     target_texture,
                     &overlay.primitives,
-                    dyn_aux,
+                    &dyn_aux_owned,
                 );
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
@@ -6235,11 +6273,14 @@ impl RenderContext {
                 if !dyn_prims.is_empty() {
                     overlay.primitives.extend_from_slice(dyn_prims);
                 }
+                // See sibling site above — same borrow workaround.
+                let dyn_aux_owned: Vec<[f32; 4]> = dyn_aux.to_vec();
+                self.rebind_glyph_atlas_for_overlay();
                 self.renderer.composite_frame(
                     target_view,
                     target_texture,
                     &overlay.primitives,
-                    dyn_aux,
+                    &dyn_aux_owned,
                 );
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
@@ -6440,6 +6481,7 @@ impl RenderContext {
                 overlay.primitives.extend_from_slice(&dyn_batch.primitives);
             }
         }
+        self.rebind_glyph_atlas_for_overlay();
         self.renderer.composite_frame(
             target_view,
             target_texture,
