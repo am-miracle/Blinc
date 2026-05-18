@@ -1928,13 +1928,14 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
 
             if self.is_foreground {
-                self.active_batch_mut().push_foreground_path_with_brush_info(
-                    tessellated,
-                    clip_bounds,
-                    clip_radius,
-                    clip_type,
-                    &brush_info,
-                );
+                self.active_batch_mut()
+                    .push_foreground_path_with_brush_info(
+                        tessellated,
+                        clip_bounds,
+                        clip_radius,
+                        clip_type,
+                        &brush_info,
+                    );
             } else {
                 self.active_batch_mut().push_path_with_brush_info(
                     tessellated,
@@ -2000,13 +2001,14 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
 
             if self.is_foreground {
-                self.active_batch_mut().push_foreground_path_with_brush_info(
-                    tessellated,
-                    clip_bounds,
-                    clip_radius,
-                    clip_type,
-                    &brush_info,
-                );
+                self.active_batch_mut()
+                    .push_foreground_path_with_brush_info(
+                        tessellated,
+                        clip_bounds,
+                        clip_radius,
+                        clip_type,
+                        &brush_info,
+                    );
             } else {
                 self.active_batch_mut().push_path_with_brush_info(
                     tessellated,

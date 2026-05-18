@@ -208,7 +208,12 @@ impl Spinner {
                     .clip_path(polygon),
             );
 
-        let arc_layer = div().absolute().inset(0.0).w(diameter).h(diameter).child(arc);
+        let arc_layer = div()
+            .absolute()
+            .inset(0.0)
+            .w(diameter)
+            .h(diameter)
+            .child(arc);
 
         // Container. Total size includes border-width padding on each
         // side so the ring's stroke isn't clipped by the parent layout.

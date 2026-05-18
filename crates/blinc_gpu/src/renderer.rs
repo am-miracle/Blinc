@@ -5621,11 +5621,8 @@ impl GpuRenderer {
             self.rebind_path_bind_group();
         }
 
-        self.queue.write_buffer(
-            &self.buffers.aux_data,
-            0,
-            bytemuck::cast_slice(aux_data),
-        );
+        self.queue
+            .write_buffer(&self.buffers.aux_data, 0, bytemuck::cast_slice(aux_data));
     }
 
     /// Upload auxiliary data to the DT fallback texture (Tier 3 / WebGL2).

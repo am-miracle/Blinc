@@ -407,8 +407,8 @@ impl EventRouter {
     /// want — `apply_stylesheet_state_styles` is itself
     /// order-insensitive.
     pub fn state_fingerprint(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
 
         let mut hovered_xor: u64 = 0;
         for n in self.hovered.iter() {
