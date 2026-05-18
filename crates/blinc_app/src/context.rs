@@ -5950,6 +5950,7 @@ impl RenderContext {
             && !tree.css_anim_paint_records().is_empty();
         if css_patch_eligible {
             let scale_factor = tree.scale_factor();
+            let css_path_start = web_time::Instant::now();
             if self.apply_css_deltas(tree, scale_factor) {
                 let batch_clone = self
                     .cached_bg_batch
@@ -6163,6 +6164,14 @@ impl RenderContext {
                     )
                 };
                 tree.set_visible_anim_active(any_visible_anim || has_visible_canvas);
+                tracing::trace!(
+                    target: "blinc_app::frame_timing",
+                    path = "css_patch",
+                    damaged = damaged_ok,
+                    damage_rect_count = damaged.len(),
+                    gpu_us = css_path_start.elapsed().as_micros() as u64,
+                    "fast_path",
+                );
                 return Ok(());
             }
             // apply_css_deltas returned false — out-of-scope
@@ -6176,6 +6185,7 @@ impl RenderContext {
             try_fast_paint && self.renderer.static_layer_valid() && self.cached_bg_batch.is_some();
 
         if use_fast {
+            let fast_path_start = web_time::Instant::now();
             // Compositor v2 damage-rect step: when motion bindings
             // are animating, patch the cached batch in-place and
             // repaint the affected regions of the static cache.
@@ -6494,6 +6504,18 @@ impl RenderContext {
                 };
                 tree.set_visible_anim_active(any_visible_anim || has_visible_canvas);
 
+                let path_label = if bindings_animating {
+                    "binding_damage"
+                } else {
+                    "cache_blit"
+                };
+                tracing::trace!(
+                    target: "blinc_app::frame_timing",
+                    path = path_label,
+                    damage_rect_count = self.last_binding_damage_rects.len(),
+                    gpu_us = fast_path_start.elapsed().as_micros() as u64,
+                    "fast_path",
+                );
                 return Ok(());
             } // close else { ... } for !damage_rect_failed
         }
