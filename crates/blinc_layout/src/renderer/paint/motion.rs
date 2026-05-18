@@ -506,6 +506,32 @@ impl RenderTree {
         );
         let css_anim_bg_start = in_css_subtree.then(|| ctx.bg_primitive_count());
 
+        // Composite-layer promotion: if the node is CSS-animated AND
+        // its current properties are composite-promotable (only
+        // opacity / 2D transform), route its emit into a per-node
+        // scratch batch. The compositor rasterizes the scratch
+        // batch into a `LayerTexture` at end of paint and blits the
+        // texture per frame with the active CSS animation transform
+        // applied — no walker re-entry on animation ticks.
+        //
+        // The scope ends when this node finishes walking; we pop at
+        // the bottom of the function alongside the other balanced
+        // pushes. Nested promotions are routed to the outermost
+        // (see `GpuPaintContext::push_composite_layer`).
+        let pushed_composite_layer =
+            if in_css_subtree && self.composite_promotion.borrow().contains(&node) {
+                // Use the slotmap key bits as the routing key — stable
+                // for the duration of the paint (slotmap version doesn't
+                // bump within a single paint pass). `Key::data().as_ffi()`
+                // packs (index, version) into a single u64.
+                use slotmap::Key as _;
+                let key = node.data().as_ffi();
+                ctx.push_composite_layer(key);
+                true
+            } else {
+                false
+            };
+
         // Compositor v2 ambient snapshot for motion-bound subtrees.
         // Captured BEFORE this node pushes any of its own transforms
         // so the saved affine represents the parent environment —
@@ -613,6 +639,10 @@ impl RenderTree {
             // when this early-out fires.
             if in_motion_subtree {
                 ctx.pop_motion_subtree();
+            }
+            // Same balancing for the composite-layer push.
+            if pushed_composite_layer {
+                ctx.pop_composite_layer();
             }
             return;
         }
@@ -2140,6 +2170,48 @@ impl RenderTree {
                             last_screen_aabb,
                         },
                     );
+
+                    // Composite-layer DynamicRegion. Only emit for
+                    // CSS-animated nodes that the promotion predicate
+                    // selected — the walker routed their emit into
+                    // a per-node scratch batch (see the
+                    // `pushed_composite_layer` branch earlier in
+                    // this fn). `natural_size` is the screen-pixel
+                    // dimensions of the emitted primitives' AABB
+                    // (physical pixels — `last_screen_aabb` is post-
+                    // DPI). The compositor reads this region's
+                    // scratch batch via
+                    // `GpuPaintContext::take_composite_layer_batches`,
+                    // rasterizes it into a `LayerTexture` of size
+                    // `natural_size`, and blits it per frame with
+                    // the active animation transform applied.
+                    //
+                    // Captured at the CSS bracket (not the motion
+                    // bracket above) so we don't need
+                    // `v2_motion_ambient` to be Some — pure-CSS
+                    // animated nodes have no motion bindings.
+                    if pushed_composite_layer {
+                        let aabb = last_screen_aabb.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+                        let natural_w = aabb[2].max(1.0).ceil() as u32;
+                        let natural_h = aabb[3].max(1.0).ceil() as u32;
+                        let ambient = super::super::AmbientPaintState {
+                            affine: ctx.current_affine_elements(),
+                            opacity: ctx.current_opacity(),
+                            clip_aabb: ctx.current_clip_aabb(),
+                            z_layer: ctx.z_layer(),
+                        };
+                        self.dynamic_regions.borrow_mut().insert(
+                            node,
+                            super::super::DynamicRegion {
+                                root: node,
+                                screen_aabb: aabb,
+                                ambient,
+                                kind: super::super::DynamicKind::CssAnimated {
+                                    natural_size: (natural_w, natural_h),
+                                },
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -2238,6 +2310,13 @@ impl RenderTree {
         // exit. Earlier early-return paths handle their own pop.
         if in_motion_subtree {
             ctx.pop_motion_subtree();
+        }
+        // Balance the composite-layer push (same reasoning — the
+        // walker emits this node's primitives into the per-node
+        // scratch batch; once we exit, route emits back to the
+        // surrounding scope).
+        if pushed_composite_layer {
+            ctx.pop_composite_layer();
         }
     }
 }

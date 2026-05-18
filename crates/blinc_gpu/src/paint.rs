@@ -182,6 +182,26 @@ pub struct GpuPaintContext<'a> {
     /// so nested motion bindings (rare but possible) still route
     /// correctly.
     motion_subtree_depth: u32,
+    /// Per-node scratch batches for composite-promotable CSS-animated
+    /// subtrees. When [`Self::push_composite_layer`] sets
+    /// `active_composite_layer = Some(node)`, every subsequent emit
+    /// (until the matching `pop`) routes into
+    /// `composite_layer_batches[node]` instead of the bg batch.
+    ///
+    /// Each batch is rasterized at full paint into its own
+    /// `LayerTexture` (Phase 3) and composited per frame with the
+    /// active CSS animation transform (Phase 4) — the texture is
+    /// the cached pixel-form of the subtree at scale=1, no animation
+    /// transform applied.
+    composite_layer_batches: std::collections::HashMap<u64, PrimitiveBatch>,
+    /// Active composite-layer routing target. `Some(node_id)` while
+    /// the walker is inside a composite-promoted CSS subtree;
+    /// `None` outside. For now, nesting is not supported — we treat
+    /// the outermost promoted subtree as authoritative and any
+    /// nested promotion's emits also route there (acceptable for
+    /// first cut because the CSS animation values are evaluated
+    /// at each visit during full paint regardless).
+    active_composite_layer: Option<u64>,
     /// Transform stack
     transform_stack: Vec<Affine2D>,
     /// Opacity stack
@@ -283,6 +303,8 @@ impl<'a> GpuPaintContext<'a> {
             pending_env: None,
             dynamic_batch: PrimitiveBatch::new(),
             motion_subtree_depth: 0,
+            composite_layer_batches: std::collections::HashMap::new(),
+            active_composite_layer: None,
         }
     }
 
@@ -337,6 +359,8 @@ impl<'a> GpuPaintContext<'a> {
             pending_env: None,
             dynamic_batch: PrimitiveBatch::new(),
             motion_subtree_depth: 0,
+            composite_layer_batches: std::collections::HashMap::new(),
+            active_composite_layer: None,
         }
     }
 
@@ -371,13 +395,55 @@ impl<'a> GpuPaintContext<'a> {
         self.motion_subtree_depth > 0
     }
 
-    /// The active batch for emission. While inside a motion-bound
-    /// subtree, points at `dynamic_batch`; otherwise at `batch`.
-    /// Internal helper used by every primitive / path / glass emit
-    /// site so the routing is centralised.
+    /// Begin routing subsequent emit calls into the per-node scratch
+    /// batch for `node_id` instead of the bg batch.
+    ///
+    /// Used by the walker to capture a composite-promotable CSS
+    /// subtree's primitives into its own buffer — at end of paint
+    /// the buffer is rasterized into a `LayerTexture` and the
+    /// per-frame composite blits that texture with the current
+    /// animation transform applied. The bg batch never sees these
+    /// primitives, so the static cache stays unchanged across
+    /// animation ticks.
+    ///
+    /// Nested composite layers are not supported; the second push
+    /// silently keeps routing to the outermost layer. Callers must
+    /// pair each push with [`Self::pop_composite_layer`].
+    pub fn push_composite_layer(&mut self, node_id: u64) {
+        if self.active_composite_layer.is_none() {
+            self.active_composite_layer = Some(node_id);
+            // Pre-create the entry so emit sites see a stable
+            // mutable handle and don't pay a hashmap lookup on
+            // every primitive.
+            self.composite_layer_batches.entry(node_id).or_default();
+        }
+    }
+
+    /// Pair with [`Self::push_composite_layer`]. No-op when no
+    /// composite layer is active.
+    pub fn pop_composite_layer(&mut self) {
+        self.active_composite_layer = None;
+    }
+
+    /// Drain the per-node composite-layer scratch batches. Called
+    /// after the walker finishes; the compositor reads each batch's
+    /// primitives + AABB to rasterize it into a `LayerTexture`.
+    pub fn take_composite_layer_batches(
+        &mut self,
+    ) -> std::collections::HashMap<u64, PrimitiveBatch> {
+        std::mem::take(&mut self.composite_layer_batches)
+    }
+
+    /// The active batch for emission. While inside a composite-
+    /// layer scope, points at the per-node scratch batch; otherwise
+    /// while inside a motion-bound subtree, points at `dynamic_batch`;
+    /// otherwise at `batch`. Internal helper used by every primitive /
+    /// path / glass emit site so the routing is centralised.
     #[inline]
     fn active_batch_mut(&mut self) -> &mut PrimitiveBatch {
-        if self.motion_subtree_depth > 0 {
+        if let Some(node_id) = self.active_composite_layer {
+            self.composite_layer_batches.entry(node_id).or_default()
+        } else if self.motion_subtree_depth > 0 {
             &mut self.dynamic_batch
         } else {
             &mut self.batch
@@ -389,7 +455,14 @@ impl<'a> GpuPaintContext<'a> {
     /// so they bracket the right batch.
     #[inline]
     fn active_batch(&self) -> &PrimitiveBatch {
-        if self.motion_subtree_depth > 0 {
+        if let Some(node_id) = self.active_composite_layer {
+            // If push happened, the entry must exist; fall back to
+            // `batch` defensively so reads don't panic on an
+            // unbalanced API call.
+            self.composite_layer_batches
+                .get(&node_id)
+                .unwrap_or(&self.batch)
+        } else if self.motion_subtree_depth > 0 {
             &self.dynamic_batch
         } else {
             &self.batch
@@ -1663,6 +1736,17 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
 
     fn pop_motion_subtree(&mut self) {
         GpuPaintContext::pop_motion_subtree(self)
+    }
+
+    fn push_composite_layer(&mut self, node_id: u64) {
+        // Override the no-op trait default with the per-node scratch
+        // routing so the promoted CSS subtree's emits land in
+        // `composite_layer_batches[node_id]`.
+        GpuPaintContext::push_composite_layer(self, node_id)
+    }
+
+    fn pop_composite_layer(&mut self) {
+        GpuPaintContext::pop_composite_layer(self)
     }
 
     fn bg_primitive_aabb(&self, start: usize, end: usize) -> Option<[f32; 4]> {
