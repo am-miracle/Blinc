@@ -4656,12 +4656,18 @@ impl GpuRenderer {
     /// re-drawn from every primitive in `batch` whose AABB intersects
     /// the union. The static layer stays `valid` afterwards.
     ///
-    /// Returns `false` when the cache isn't valid or layer effects /
-    /// non-SDF content is present in the batch — caller should fall
-    /// back to a full repaint. Damage-rect re-render currently only
-    /// supports the plain SDF pipeline (no layer commands, no paths,
-    /// no 3D viewports). Adding those is straightforward but out of
-    /// scope for the first Phase-3 cut.
+    /// Returns `false` when the cache isn't valid or non-SDF content
+    /// the damage path doesn't yet support (paths, 3D viewports,
+    /// particles) is present in the batch — caller falls back to a
+    /// full repaint.
+    ///
+    /// Layer commands ARE supported (Phase 4d Opt 2): batches with
+    /// push / pop pairs walk the same effect-layer logic that
+    /// `render_with_layer_effects` uses, then composite each effect
+    /// layer back into the static cache with `pending_damage_scissor`
+    /// set so the blit lands only inside the damage union. Layers
+    /// whose bounds don't intersect the damage union are skipped
+    /// entirely.
     pub fn render_static_layer_damaged(
         &mut self,
         damage_rects: &[[f32; 4]],
@@ -4674,11 +4680,11 @@ impl GpuRenderer {
             return false;
         }
         // Bail to full repaint when the batch has anything the
-        // simple SDF path can't handle inside a scissor. The slow
-        // path will still produce the correct output; we just lose
-        // the damage-rect speedup for this frame.
-        if !batch.layer_commands.is_empty()
-            || !batch.paths.vertices.is_empty()
+        // damage path doesn't yet support. Paths / 3D viewports /
+        // particles need their own scissored dispatch routines and
+        // are out of scope for this commit; layer_commands are
+        // handled below.
+        if !batch.paths.vertices.is_empty()
             || !batch.viewports_3d.is_empty()
             || !batch.particle_viewports.is_empty()
         {
@@ -4734,11 +4740,67 @@ impl GpuRenderer {
         let scissor_w = scissor_right - scissor_x;
         let scissor_h = scissor_bottom - scissor_y;
 
-        // Cull primitives to only those intersecting the union rect.
-        // The static cache outside the scissor is preserved by
-        // `LoadOp::Load`, so we skip every prim whose AABB doesn't
-        // touch the damaged region. Keeps the upload + draw cost
-        // proportional to the damage, not the whole scene.
+        // Phase 4d Opt 2: build the effect-layer list from
+        // `batch.layer_commands` (mirrors `render_with_layer_effects`
+        // exactly, including the Phase 4a relax that lets pure-
+        // opacity layers reach the offscreen-composite path). Each
+        // entry's primitive range gets excluded from the SDF pass
+        // below — those primitives render into their layer's tight
+        // texture instead. The layer-composite blit lands inside
+        // the damage scissor via `pending_damage_scissor`.
+        let mut effect_layers: Vec<EffectLayerRange> = Vec::new();
+        let mut effect_primitive_indices: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        if !batch.layer_commands.is_empty() {
+            use crate::primitives::LayerCommand;
+            let mut layer_stack: Vec<(LayerStackFrame, blinc_core::LayerConfig)> = Vec::new();
+            for entry in &batch.layer_commands {
+                match &entry.command {
+                    LayerCommand::Push { config } => {
+                        layer_stack.push((
+                            LayerStackFrame {
+                                primitive_start: entry.primitive_index,
+                                path_index_start: entry.path_index_count,
+                                path_vertex_start: entry.path_vertex_index,
+                            },
+                            config.clone(),
+                        ));
+                    }
+                    LayerCommand::Pop => {
+                        if let Some((start, config)) = layer_stack.pop() {
+                            let has_effect_or_blend_or_3d = !config.effects.is_empty()
+                                || config.blend_mode != blinc_core::BlendMode::Normal
+                                || config.transform_3d.is_some();
+                            let has_pure_opacity = config.opacity < 1.0;
+                            if has_effect_or_blend_or_3d || has_pure_opacity {
+                                effect_layers.push(EffectLayerRange {
+                                    primitive_start: start.primitive_start,
+                                    primitive_end: entry.primitive_index,
+                                    path_index_start: start.path_index_start,
+                                    path_index_end: entry.path_index_count,
+                                    path_vertex_start: start.path_vertex_start,
+                                    path_vertex_end: entry.path_vertex_index,
+                                    config,
+                                });
+                            }
+                        }
+                    }
+                    LayerCommand::Sample { .. } => {}
+                }
+            }
+            for layer in &effect_layers {
+                for i in layer.primitive_start..layer.primitive_end {
+                    effect_primitive_indices.insert(i);
+                }
+            }
+        }
+
+        // Cull primitives to only those intersecting the union rect
+        // AND not inside an effect layer. The static cache outside
+        // the scissor is preserved by `LoadOp::Load`, so we skip
+        // every prim whose AABB doesn't touch the damaged region.
+        // Effect-layer prims render separately into their layer's
+        // offscreen texture below.
         let scissor_rect = [
             scissor_x as f32,
             scissor_y as f32,
@@ -4748,13 +4810,18 @@ impl GpuRenderer {
         let visible: Vec<GpuPrimitive> = batch
             .primitives
             .iter()
-            .filter(|p| {
+            .enumerate()
+            .filter(|(i, p)| {
+                if effect_primitive_indices.contains(i) {
+                    return false;
+                }
                 let [x, y, w, h] = p.bounds;
                 if w <= 0.0 || h <= 0.0 {
                     return false;
                 }
                 aabb_intersects(scissor_rect, [x, y, w, h])
             })
+            .map(|(_, p)| p)
             .copied()
             .collect();
 
@@ -4834,6 +4901,167 @@ impl GpuRenderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Phase 4d Opt 2: composite each effect layer back into the
+        // static cache with `pending_damage_scissor` set so the blit
+        // lands only inside the damage union. Layers whose bounds
+        // don't intersect the damage rect are skipped entirely —
+        // their previous-frame pixels stay in the cache (preserved
+        // by `LoadOp::Load` in the SDF pass above).
+        //
+        // The blit's own visible-bounds scissor intersects with
+        // `pending_damage_scissor` inside `blit_tight_texture_to_target`
+        // (commit e0286ef0). Empty intersection ⇒ the blit's render
+        // pass submits as a no-op.
+        if !effect_layers.is_empty() {
+            let damage_scissor = (scissor_x, scissor_y, scissor_w, scissor_h);
+            let damage_rect_f = [
+                scissor_x as f32,
+                scissor_y as f32,
+                (scissor_x + scissor_w) as f32,
+                (scissor_y + scissor_h) as f32,
+            ];
+            for layer in effect_layers {
+                let primitives = &batch.primitives[layer.primitive_start..layer.primitive_end];
+                let path_verts: &[PathVertex] = if layer.path_vertex_end > layer.path_vertex_start {
+                    &batch.paths.vertices[layer.path_vertex_start..layer.path_vertex_end]
+                } else {
+                    &[]
+                };
+                if primitives.is_empty() && path_verts.is_empty() {
+                    continue;
+                }
+
+                // Compute layer's screen-space bounding box (same
+                // logic as `render_with_layer_effects`). Path vertex
+                // positions matter for Lottie-style content; SDF
+                // primitives carry their bbox in `bounds`.
+                let mut min_x = f32::MAX;
+                let mut min_y = f32::MAX;
+                let mut max_x = f32::MIN;
+                let mut max_y = f32::MIN;
+                let mut clip: Option<([f32; 4], [f32; 4])> = None;
+                for p in primitives {
+                    let (px, py, pw, ph) = (p.bounds[0], p.bounds[1], p.bounds[2], p.bounds[3]);
+                    min_x = min_x.min(px);
+                    min_y = min_y.min(py);
+                    max_x = max_x.max(px + pw);
+                    max_y = max_y.max(py + ph);
+                    if clip.is_none() && p.clip_bounds[0] > -5000.0 && p.clip_bounds[2] < 90000.0 {
+                        clip = Some((p.clip_bounds, p.clip_radius));
+                    }
+                }
+                for v in path_verts {
+                    min_x = min_x.min(v.position[0]);
+                    min_y = min_y.min(v.position[1]);
+                    max_x = max_x.max(v.position[0]);
+                    max_y = max_y.max(v.position[1]);
+                    if clip.is_none() && v.clip_bounds[0] > -5000.0 && v.clip_bounds[2] < 90000.0 {
+                        clip = Some((v.clip_bounds, v.clip_radius));
+                    }
+                }
+                let layer_width = (max_x - min_x).max(1.0);
+                let layer_height = (max_y - min_y).max(1.0);
+                let layer_pos = (min_x, min_y);
+                let layer_size = (layer_width, layer_height);
+                let layer_clip = clip;
+
+                // Layer ∩ damage check — skip if disjoint. Compare
+                // pre-effect-expansion bounds (post-expansion bounds
+                // get computed below for the blit destination, but
+                // the *content* lives inside the raw bounds and an
+                // empty raw ∩ damage means no work needed).
+                if layer_pos.0 + layer_size.0 <= damage_rect_f[0]
+                    || layer_pos.1 + layer_size.1 <= damage_rect_f[1]
+                    || layer_pos.0 >= damage_rect_f[2]
+                    || layer_pos.1 >= damage_rect_f[3]
+                {
+                    continue;
+                }
+
+                // Skip if entirely outside viewport (same as
+                // `render_with_layer_effects`).
+                let vp_w = self.viewport_size.0 as f32;
+                let vp_h = self.viewport_size.1 as f32;
+                let is_visible = layer_pos.0 < vp_w
+                    && layer_pos.1 < vp_h
+                    && layer_pos.0 + layer_size.0 > 0.0
+                    && layer_pos.1 + layer_size.1 > 0.0
+                    && layer_size.0 > 0.0
+                    && layer_size.1 > 0.0;
+                if !is_visible {
+                    continue;
+                }
+
+                let config = layer.config.clone();
+                let effect_expansion = Self::calculate_effect_expansion(&config.effects);
+
+                // Render layer to tight offscreen texture (helper
+                // already exists; same call shape as
+                // `render_with_layer_effects`).
+                let (layer_texture, content_size) = self.render_layer_range_tight(
+                    batch,
+                    layer.primitive_start,
+                    layer.primitive_end,
+                    layer.path_vertex_start,
+                    layer.path_vertex_end,
+                    layer.path_index_start,
+                    layer.path_index_end,
+                    layer_pos,
+                    layer_size,
+                    effect_expansion,
+                );
+                let tight_size = content_size;
+                let expanded_pos = (
+                    layer_pos.0 - effect_expansion.0,
+                    layer_pos.1 - effect_expansion.1,
+                );
+                let expanded_size = (
+                    layer_size.0 + effect_expansion.0 + effect_expansion.2,
+                    layer_size.1 + effect_expansion.1 + effect_expansion.3,
+                );
+
+                // The damage scissor is the intersection rule:
+                // `blit_tight_texture_to_target` intersects its own
+                // visible-bounds scissor with this, so the blit
+                // paints only inside (layer content area) ∩ (damage
+                // rect). Empty intersection ⇒ the blit is a no-op.
+                self.set_pending_damage_scissor(damage_scissor);
+
+                if config.effects.is_empty() {
+                    self.blit_tight_texture_to_target(
+                        &layer_texture.view,
+                        tight_size,
+                        &view,
+                        expanded_pos,
+                        expanded_size,
+                        config.opacity,
+                        config.blend_mode,
+                        layer_clip,
+                        config.transform_3d,
+                    );
+                    self.layer_texture_cache.release(layer_texture);
+                } else {
+                    let effected = self.apply_layer_effects(&layer_texture, &config.effects);
+                    self.layer_texture_cache.release(layer_texture);
+                    self.blit_tight_texture_to_target(
+                        &effected.view,
+                        tight_size,
+                        &view,
+                        expanded_pos,
+                        expanded_size,
+                        config.opacity,
+                        config.blend_mode,
+                        layer_clip,
+                        config.transform_3d,
+                    );
+                    self.layer_texture_cache.release(effected);
+                }
+
+                self.clear_pending_damage_scissor();
+            }
+        }
+
         true
     }
 

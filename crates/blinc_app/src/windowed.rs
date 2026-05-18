@@ -3810,7 +3810,7 @@ impl WindowedApp {
                                             // Symptom: cn_demo accordion hover lagged
                                             // visibly behind the cursor enter.
                                             if let Some(ref mut app) = ws.app {
-                                                app.invalidate_render_cache();
+                                                app.invalidate_render_cache_tagged("hover_state_changed");
                                             }
                                         }
 
@@ -4509,7 +4509,7 @@ impl WindowedApp {
                                 // paint repopulates it with the new
                                 // hover / focus / scroll / state.
                                 if let Some(ref mut app) = ws.app {
-                                    app.invalidate_render_cache();
+                                    app.invalidate_render_cache_tagged("state_changed");
                                 }
                             }
                             // Scroll events update `tree.scroll_offsets`
@@ -4520,7 +4520,7 @@ impl WindowedApp {
                             let had_scroll = scroll_info.is_some() || scroll_ended;
                             if had_scroll {
                                 if let Some(ref mut app) = ws.app {
-                                    app.invalidate_render_cache();
+                                    app.invalidate_render_cache_tagged("had_scroll");
                                 }
                             }
                             // Interactive elements that don't route through
@@ -4578,7 +4578,7 @@ impl WindowedApp {
                                     frame_dirty.store(true, Ordering::Release);
                                     window.request_redraw();
                                     if let Some(ref mut app) = ws.app {
-                                        app.invalidate_render_cache();
+                                        app.invalidate_render_cache_tagged("pointer_event_with_subscribers");
                                     }
                                 }
                             }

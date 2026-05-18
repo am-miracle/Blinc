@@ -277,6 +277,21 @@ pub struct RenderContext {
     /// cache (with scissor + `LoadOp::Load`) instead of invalidating
     /// the whole layer.
     last_binding_damage_rects: Vec<[f32; 4]>,
+    /// Damage rectangles populated by the most recent
+    /// `apply_css_deltas` call. One entry per `CssAnimPaintMeta`
+    /// whose properties actually changed this frame; each is the
+    /// node's `last_screen_aabb` (screen pixels, post-DPI) captured
+    /// by the walker. The Phase 4d Opt 2 CSS-damage-rect path
+    /// passes these to `render_static_layer_damaged` so the cache
+    /// repaint is scissored to just the animated regions instead of
+    /// re-rendering the whole layer.
+    ///
+    /// Visual-only Phase 4c properties (opacity / colour /
+    /// corner_radius / shadow / filter / rotate_x / rotate_y) keep
+    /// the AABB stable, so the walker's recorded last_screen_aabb
+    /// covers both the pre- and post-patch pixel footprints — no
+    /// union with a new AABB needed.
+    last_css_damage_rects: Vec<[f32; 4]>,
     /// Prepared text glyphs from the most recent full paint, keyed
     /// by `z_index`. Populated by `render_tree_with_motion_opt`'s
     /// body right after the text-shaping loop, drained by the
@@ -605,6 +620,7 @@ impl RenderContext {
             image_load_times: std::collections::HashMap::new(),
             image_fade_deadlines: std::collections::HashMap::new(),
             last_binding_damage_rects: Vec::new(),
+            last_css_damage_rects: Vec::new(),
             cached_glyphs_by_layer: None,
             cached_fg_glyphs: None,
             cached_css_transformed_text_prims: None,
@@ -649,6 +665,17 @@ impl RenderContext {
     /// Safe to call even when no cache is set (clears the companion
     /// vecs unconditionally for symmetry).
     pub fn invalidate_render_cache(&mut self) {
+        self.invalidate_render_cache_tagged("unspecified");
+    }
+
+    pub fn invalidate_render_cache_tagged(&mut self, source: &'static str) {
+        if self.cached_bg_batch.is_some() {
+            tracing::trace!(
+                target: "blinc_app::frame_timing",
+                source,
+                "invalidate_render_cache",
+            );
+        }
         self.cached_bg_batch = None;
         self.cached_dynamic_batch = None;
         self.cached_texts = None;
@@ -1542,8 +1569,18 @@ impl RenderContext {
         // for now (we always return `true` on no-op patches), but
         // kept for future damage-rect collection (Phase 4d).
         let mut any_changed = false;
+        // Phase 4d Opt 2: collect per-record damage rects. The
+        // caller's `last_css_damage_rects` slot is overwritten at
+        // the end of the function; if `apply_css_deltas` bails the
+        // caller falls back to the slow path and ignores rects.
+        // One entry per record whose patch actually moved a pixel.
+        let mut damage_rects: Vec<[f32; 4]> = Vec::new();
 
         for (_node, meta) in records.iter_mut() {
+            // Per-record patch tracking — distinct from `any_changed`
+            // which spans the whole loop. Only push a damage rect
+            // when at least one property on THIS record moved.
+            let mut record_changed = false;
             // Look up the active animation / transition for this
             // node. Prefer animations (CSS `animation: ...`); fall
             // back to transitions (CSS `transition: ...`). Both can
@@ -1636,6 +1673,7 @@ impl RenderContext {
                     }
                     meta.last_opacity = new_opacity;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1656,6 +1694,7 @@ impl RenderContext {
                         }
                         meta.last_background_color = Some(new_bg);
                         any_changed = true;
+                        record_changed = true;
                     }
                 }
             }
@@ -1674,6 +1713,7 @@ impl RenderContext {
                         }
                         meta.last_border_color = Some(new_bc);
                         any_changed = true;
+                        record_changed = true;
                     }
                 }
             }
@@ -1690,6 +1730,7 @@ impl RenderContext {
                     }
                     meta.last_border_width = new_bw;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1705,6 +1746,7 @@ impl RenderContext {
                     }
                     meta.last_corner_radius = new_cr;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1720,6 +1762,7 @@ impl RenderContext {
                     }
                     meta.last_shadow_params = new_sp;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1735,6 +1778,7 @@ impl RenderContext {
                     }
                     meta.last_shadow_color = new_sc;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1753,6 +1797,7 @@ impl RenderContext {
                     }
                     meta.last_rotate_x_rad = new_rx_rad;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1771,6 +1816,7 @@ impl RenderContext {
                     }
                     meta.last_rotate_y_rad = new_ry_rad;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1801,6 +1847,21 @@ impl RenderContext {
                 meta.last_filter_a = new_fa;
                 meta.last_filter_b = new_fb;
                 any_changed = true;
+                record_changed = true;
+            }
+
+            // Phase 4d Opt 2: if any property on this record moved,
+            // its `last_screen_aabb` is the damage rect for the
+            // cache repaint. Visual-only properties (opacity / colour
+            // / corner / shadow / filter / rotate_x / rotate_y) keep
+            // the AABB stable, so the walker's captured rect covers
+            // both pre- and post-patch pixel footprints. Records
+            // with no AABB (empty primitive range — text-only
+            // subtrees, off-screen) contribute nothing.
+            if record_changed {
+                if let Some(rect) = meta.last_screen_aabb {
+                    damage_rects.push(rect);
+                }
             }
         }
 
@@ -1809,6 +1870,7 @@ impl RenderContext {
         let _ = any_changed;
         drop(store);
         drop(records);
+        self.last_css_damage_rects = damage_rects;
         true
     }
 
@@ -5897,28 +5959,71 @@ impl RenderContext {
             && self.cached_bg_batch.is_some()
             && self.renderer.static_layer_valid()
             && !tree.css_anim_paint_records().is_empty();
+        if css_anim_active
+            && !css_patch_eligible
+            && tracing::enabled!(target: "blinc_app::frame_timing", tracing::Level::TRACE)
+        {
+            tracing::trace!(
+                target: "blinc_app::frame_timing",
+                css_only_active,
+                bindings_animating,
+                has_cached_batch = self.cached_bg_batch.is_some(),
+                static_layer_valid = self.renderer.static_layer_valid(),
+                css_records_present = !tree.css_anim_paint_records().is_empty(),
+                "css_patch_gate_failed",
+            );
+        }
         if css_patch_eligible {
             let scale_factor = tree.scale_factor();
+            let css_path_start = web_time::Instant::now();
             if self.apply_css_deltas(tree, scale_factor) {
-                // Re-render the static cache from the patched batch.
-                // Without this, `composite_frame` blits the stale
-                // texture from the last slow-path frame and the
-                // patched primitive values never reach pixels.
                 let batch_clone = self
                     .cached_bg_batch
                     .as_ref()
                     .expect("css_patch_eligible implies cached_bg_batch is Some")
                     .clone();
-                self.renderer
-                    .render_static_layer(&batch_clone, [0.0, 0.0, 0.0, self.clear_alpha as f64]);
-                // Re-dispatch text / SVG / image on top of the
-                // freshly-rendered cache. `render_static_layer`
-                // clears the cache before re-rendering SDF, so
-                // glyphs / SVGs / images that were composited on
-                // top last paint need to land again.
+
+                // Phase 4d Opt 2: try the scissored cache repaint
+                // first. `render_static_layer_damaged` re-renders
+                // only the union of `last_css_damage_rects`,
+                // preserving the rest of the cache via LoadOp::Load.
+                // Falls back to false today on any batch with
+                // `layer_commands` / paths / 3D viewports / particles
+                // — Task 3 extends it to handle layer_commands so
+                // CSS animations whose walker emitted opacity / blur
+                // / 3D layers stay on the damaged path. Batches
+                // without layer commands engage already.
+                let damaged = self.last_css_damage_rects.clone();
+                let damaged_ok = !damaged.is_empty()
+                    && self
+                        .renderer
+                        .render_static_layer_damaged(&damaged, &batch_clone);
+
+                if !damaged_ok {
+                    // Full-cache re-render fallback (Phase 4d Opt 1
+                    // behaviour). Used when the damaged path bailed
+                    // — e.g., batch has layer_commands the
+                    // damage-rect code can't replay yet, or no
+                    // records moved this frame so there's nothing
+                    // to scissor.
+                    self.renderer.render_static_layer(
+                        &batch_clone,
+                        [0.0, 0.0, 0.0, self.clear_alpha as f64],
+                    );
+                }
+
+                // Re-dispatch text / SVG / image. When the damaged
+                // path engaged, only the cache region inside the
+                // damage union was cleared + repainted; we filter
+                // cached vectors to those intersecting the damage
+                // and dispatch through `pending_scissor` so the
+                // writes stay inside the cleared region. When the
+                // full-cache fallback ran, dispatch every cached
+                // vector unfiltered — the whole cache needs
+                // re-stamping.
                 //
                 // Cached vectors are from the last slow-path frame.
-                // For pure visual / 3D-transform / color CSS
+                // For pure visual / 3D-transform / colour CSS
                 // animations they stay valid (positions don't
                 // shift). Layout animations would invalidate them,
                 // but layout properties trigger an
@@ -5926,27 +6031,85 @@ impl RenderContext {
                 // here with stale positions.
                 let static_view_opt = self.renderer.static_layer_view().cloned();
                 if let Some(static_view) = static_view_opt {
-                    if let Some(glyphs_by_layer) = self.cached_glyphs_by_layer.clone() {
-                        for (_z, glyphs) in glyphs_by_layer.iter() {
-                            if !glyphs.is_empty() {
-                                self.render_text(&static_view, glyphs);
+                    if damaged_ok {
+                        let union = damage_union(&damaged);
+                        if let Some(scissor) = damage_scissor_from_union(union, &self.renderer) {
+                            self.renderer.set_pending_scissor(scissor);
+                            if let Some(glyphs_by_layer) = self.cached_glyphs_by_layer.clone() {
+                                for (_z, glyphs) in glyphs_by_layer.iter() {
+                                    let filtered: Vec<_> = glyphs
+                                        .iter()
+                                        .filter(|g| aabb_intersects_any(g.bounds, &damaged))
+                                        .copied()
+                                        .collect();
+                                    if !filtered.is_empty() {
+                                        self.render_text(&static_view, &filtered);
+                                    }
+                                }
+                            }
+                            if let Some(fg_glyphs) = self.cached_fg_glyphs.clone() {
+                                let filtered: Vec<_> = fg_glyphs
+                                    .iter()
+                                    .filter(|g| aabb_intersects_any(g.bounds, &damaged))
+                                    .copied()
+                                    .collect();
+                                if !filtered.is_empty() {
+                                    self.render_text(&static_view, &filtered);
+                                }
+                            }
+                            if let Some(svgs) = self.cached_svgs.clone() {
+                                let filtered: Vec<_> = svgs
+                                    .into_iter()
+                                    .filter(|s| {
+                                        aabb_intersects_any([s.x, s.y, s.width, s.height], &damaged)
+                                    })
+                                    .collect();
+                                if !filtered.is_empty() {
+                                    self.render_rasterized_svgs(
+                                        &static_view,
+                                        &filtered,
+                                        scale_factor,
+                                    );
+                                }
+                            }
+                            if let Some(images) = self.cached_images.clone() {
+                                let filtered_refs: Vec<&ImageElement> = images
+                                    .iter()
+                                    .filter(|i| {
+                                        aabb_intersects_any([i.x, i.y, i.width, i.height], &damaged)
+                                    })
+                                    .collect();
+                                if !filtered_refs.is_empty() {
+                                    self.render_images_ref(&static_view, &filtered_refs);
+                                }
+                            }
+                            self.renderer.clear_pending_scissor();
+                        }
+                    } else {
+                        // Full re-dispatch (no scissor) — cache was
+                        // fully cleared by `render_static_layer`.
+                        if let Some(glyphs_by_layer) = self.cached_glyphs_by_layer.clone() {
+                            for (_z, glyphs) in glyphs_by_layer.iter() {
+                                if !glyphs.is_empty() {
+                                    self.render_text(&static_view, glyphs);
+                                }
                             }
                         }
-                    }
-                    if let Some(fg_glyphs) = self.cached_fg_glyphs.clone() {
-                        if !fg_glyphs.is_empty() {
-                            self.render_text(&static_view, &fg_glyphs);
+                        if let Some(fg_glyphs) = self.cached_fg_glyphs.clone() {
+                            if !fg_glyphs.is_empty() {
+                                self.render_text(&static_view, &fg_glyphs);
+                            }
                         }
-                    }
-                    if let Some(svgs) = self.cached_svgs.clone() {
-                        if !svgs.is_empty() {
-                            self.render_rasterized_svgs(&static_view, &svgs, scale_factor);
+                        if let Some(svgs) = self.cached_svgs.clone() {
+                            if !svgs.is_empty() {
+                                self.render_rasterized_svgs(&static_view, &svgs, scale_factor);
+                            }
                         }
-                    }
-                    if let Some(images) = self.cached_images.clone() {
-                        if !images.is_empty() {
-                            let refs: Vec<&ImageElement> = images.iter().collect();
-                            self.render_images_ref(&static_view, &refs);
+                        if let Some(images) = self.cached_images.clone() {
+                            if !images.is_empty() {
+                                let refs: Vec<&ImageElement> = images.iter().collect();
+                                self.render_images_ref(&static_view, &refs);
+                            }
                         }
                     }
                 }
@@ -6007,6 +6170,14 @@ impl RenderContext {
                     )
                 };
                 tree.set_visible_anim_active(any_visible_anim || has_visible_canvas);
+                tracing::trace!(
+                    target: "blinc_app::frame_timing",
+                    path = "css_patch",
+                    damaged = damaged_ok,
+                    damage_rect_count = damaged.len(),
+                    gpu_us = css_path_start.elapsed().as_micros() as u64,
+                    "fast_path",
+                );
                 return Ok(());
             }
             // apply_css_deltas returned false — out-of-scope
@@ -6020,6 +6191,7 @@ impl RenderContext {
             try_fast_paint && self.renderer.static_layer_valid() && self.cached_bg_batch.is_some();
 
         if use_fast {
+            let fast_path_start = web_time::Instant::now();
             // Compositor v2 damage-rect step: when motion bindings
             // are animating, patch the cached batch in-place and
             // repaint the affected regions of the static cache.
@@ -6338,6 +6510,18 @@ impl RenderContext {
                 };
                 tree.set_visible_anim_active(any_visible_anim || has_visible_canvas);
 
+                let path_label = if bindings_animating {
+                    "binding_damage"
+                } else {
+                    "cache_blit"
+                };
+                tracing::trace!(
+                    target: "blinc_app::frame_timing",
+                    path = path_label,
+                    damage_rect_count = self.last_binding_damage_rects.len(),
+                    gpu_us = fast_path_start.elapsed().as_micros() as u64,
+                    "fast_path",
+                );
                 return Ok(());
             } // close else { ... } for !damage_rect_failed
         }
@@ -7171,6 +7355,11 @@ impl RenderContext {
         // For cn_demo with ~400 primitives that's ~110 KB / frame
         // memcpy — ~30 µs on M-series silicon — in exchange for
         // skipping the full paint walker on follow-up frames.
+        tracing::trace!(
+            target: "blinc_app::frame_timing",
+            primitives = batch.primitives.len(),
+            "cached_bg_batch_set",
+        );
         self.cached_bg_batch = Some(batch.clone());
 
         let has_glass = batch.glass_count() > 0;
