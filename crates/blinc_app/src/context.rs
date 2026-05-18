@@ -1460,11 +1460,7 @@ impl RenderContext {
     /// - width / height / min_* / max_* / padding / margin / gap
     ///   (layout — needs `compute_layout`)
     /// - backdrop_* (glass material; separate dispatch path)
-    pub fn apply_css_deltas(
-        &mut self,
-        tree: &blinc_layout::RenderTree,
-        _scale: f32,
-    ) -> bool {
+    pub fn apply_css_deltas(&mut self, tree: &blinc_layout::RenderTree, _scale: f32) -> bool {
         // CSS-animated primitives live on `cached_bg_batch` (the
         // walker doesn't push a `motion_subtree` for CSS animations
         // — that routing is motion-binding only). Patch through the
@@ -1593,8 +1589,7 @@ impl RenderContext {
             if let Some(new_bg) = read_arr(|p| p.background_color) {
                 if let Some(last_bg) = meta.last_background_color {
                     if new_bg != last_bg {
-                        if let Some(prims) =
-                            batch.primitives.get_mut(meta.primitive_range.clone())
+                        if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone())
                         {
                             for p in prims.iter_mut() {
                                 if p.color == last_bg {
@@ -1612,8 +1607,7 @@ impl RenderContext {
             if let Some(new_bc) = read_arr(|p| p.border_color) {
                 if let Some(last_bc) = meta.last_border_color {
                     if new_bc != last_bc {
-                        if let Some(prims) =
-                            batch.primitives.get_mut(meta.primitive_range.clone())
+                        if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone())
                         {
                             for p in prims.iter_mut() {
                                 if p.border_color == last_bc {
@@ -1630,9 +1624,7 @@ impl RenderContext {
             // ---- border_width ----
             if let Some(new_bw) = read_f32(|p| p.border_width) {
                 if (new_bw - meta.last_border_width).abs() > f32::EPSILON {
-                    if let Some(prims) =
-                        batch.primitives.get_mut(meta.primitive_range.clone())
-                    {
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
                         for p in prims.iter_mut() {
                             if (p.border[0] - meta.last_border_width).abs() < f32::EPSILON {
                                 p.border[0] = new_bw;
@@ -1647,9 +1639,7 @@ impl RenderContext {
             // ---- corner_radius ----
             if let Some(new_cr) = read_arr(|p| p.corner_radius) {
                 if new_cr != meta.last_corner_radius {
-                    if let Some(prims) =
-                        batch.primitives.get_mut(meta.primitive_range.clone())
-                    {
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
                         for p in prims.iter_mut() {
                             if p.corner_radius == meta.last_corner_radius {
                                 p.corner_radius = new_cr;
@@ -1664,9 +1654,7 @@ impl RenderContext {
             // ---- shadow_params ----
             if let Some(new_sp) = read_arr(|p| p.shadow_params) {
                 if new_sp != meta.last_shadow_params {
-                    if let Some(prims) =
-                        batch.primitives.get_mut(meta.primitive_range.clone())
-                    {
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
                         for p in prims.iter_mut() {
                             if p.shadow == meta.last_shadow_params {
                                 p.shadow = new_sp;
@@ -1681,9 +1669,7 @@ impl RenderContext {
             // ---- shadow_color ----
             if let Some(new_sc) = read_arr(|p| p.shadow_color) {
                 if new_sc != meta.last_shadow_color {
-                    if let Some(prims) =
-                        batch.primitives.get_mut(meta.primitive_range.clone())
-                    {
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
                         for p in prims.iter_mut() {
                             if p.shadow_color == meta.last_shadow_color {
                                 p.shadow_color = new_sc;
@@ -1702,9 +1688,7 @@ impl RenderContext {
                 if (new_rx_rad - meta.last_rotate_x_rad).abs() > f32::EPSILON {
                     let sin_rx = new_rx_rad.sin();
                     let cos_rx = new_rx_rad.cos();
-                    if let Some(prims) =
-                        batch.primitives.get_mut(meta.primitive_range.clone())
-                    {
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
                         for p in prims.iter_mut() {
                             p.perspective[0] = sin_rx;
                             p.perspective[1] = cos_rx;
@@ -1722,9 +1706,7 @@ impl RenderContext {
                 if (new_ry_rad - meta.last_rotate_y_rad).abs() > f32::EPSILON {
                     let sin_ry = new_ry_rad.sin();
                     let cos_ry = new_ry_rad.cos();
-                    if let Some(prims) =
-                        batch.primitives.get_mut(meta.primitive_range.clone())
-                    {
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
                         for p in prims.iter_mut() {
                             p.rotation[2] = sin_ry;
                             p.rotation[3] = cos_ry;
@@ -5870,10 +5852,8 @@ impl RenderContext {
                     .as_ref()
                     .expect("css_patch_eligible implies cached_bg_batch is Some")
                     .clone();
-                self.renderer.render_static_layer(
-                    &batch_clone,
-                    [0.0, 0.0, 0.0, self.clear_alpha as f64],
-                );
+                self.renderer
+                    .render_static_layer(&batch_clone, [0.0, 0.0, 0.0, self.clear_alpha as f64]);
                 // Re-dispatch text / SVG / image on top of the
                 // freshly-rendered cache. `render_static_layer`
                 // clears the cache before re-rendering SDF, so
@@ -5903,11 +5883,7 @@ impl RenderContext {
                     }
                     if let Some(svgs) = self.cached_svgs.clone() {
                         if !svgs.is_empty() {
-                            self.render_rasterized_svgs(
-                                &static_view,
-                                &svgs,
-                                scale_factor,
-                            );
+                            self.render_rasterized_svgs(&static_view, &svgs, scale_factor);
                         }
                     }
                     if let Some(images) = self.cached_images.clone() {
@@ -5922,12 +5898,8 @@ impl RenderContext {
                 // damage path uses.
                 let mut overlay = self.collect_canvas_overlay(tree, width, height);
                 if !tree.dynamic_regions().is_empty() {
-                    let walked = self.collect_dynamic_region_primitives(
-                        tree,
-                        render_state,
-                        width,
-                        height,
-                    );
+                    let walked =
+                        self.collect_dynamic_region_primitives(tree, render_state, width, height);
                     self.cached_dynamic_batch = Some(walked);
                 }
                 let (dyn_prims, dyn_aux) = match self.cached_dynamic_batch.as_ref() {

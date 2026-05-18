@@ -776,10 +776,8 @@ impl RenderTree {
         // nested opacity) takes the push_layer path, which the
         // renderer now processes correctly via the relaxed
         // `effect_layers` gate in `render_with_layer_effects`.
-        let only_opacity_drives_layer = node_motion_opacity < 1.0
-            && !has_layer_effects
-            && !has_blend_mode
-            && !use_3d_layer;
+        let only_opacity_drives_layer =
+            node_motion_opacity < 1.0 && !has_layer_effects && !has_blend_mode && !use_3d_layer;
         let safe_to_flatten = self.layout_tree.children(node).len() <= 1;
         let can_flatten_opacity = only_opacity_drives_layer && safe_to_flatten;
         let has_opacity_layer = !can_flatten_opacity
@@ -2043,45 +2041,28 @@ impl RenderTree {
                                 None
                             }
                         });
-                    let last_border_color = render_node
-                        .props
-                        .border_color
-                        .map(|c| [c.r, c.g, c.b, c.a]);
+                    let last_border_color =
+                        render_node.props.border_color.map(|c| [c.r, c.g, c.b, c.a]);
                     let cr = &render_node.props.border_radius;
-                    let last_corner_radius = [
-                        cr.top_left,
-                        cr.top_right,
-                        cr.bottom_right,
-                        cr.bottom_left,
-                    ];
+                    let last_corner_radius =
+                        [cr.top_left, cr.top_right, cr.bottom_right, cr.bottom_left];
                     let last_border_width = render_node.props.border_width;
-                    let (last_shadow_params, last_shadow_color) = match &render_node
-                        .props
-                        .shadow
-                    {
+                    let (last_shadow_params, last_shadow_color) = match &render_node.props.shadow {
                         Some(s) => (
                             [s.offset_x, s.offset_y, s.blur, s.spread],
                             [s.color.r, s.color.g, s.color.b, s.color.a],
                         ),
                         None => ([0.0; 4], [0.0; 4]),
                     };
-                    let (last_filter_a, last_filter_b) = match &render_node.props.filter
-                    {
+                    let (last_filter_a, last_filter_b) = match &render_node.props.filter {
                         Some(f) => (
-                            [
-                                f.grayscale,
-                                f.invert,
-                                f.sepia,
-                                f.hue_rotate.to_radians(),
-                            ],
+                            [f.grayscale, f.invert, f.sepia, f.hue_rotate.to_radians()],
                             [f.brightness, f.contrast, f.saturate, 0.0],
                         ),
                         None => ([0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.0]),
                     };
-                    let last_rotate_x_rad =
-                        render_node.props.rotate_x.unwrap_or(0.0).to_radians();
-                    let last_rotate_y_rad =
-                        render_node.props.rotate_y.unwrap_or(0.0).to_radians();
+                    let last_rotate_x_rad = render_node.props.rotate_x.unwrap_or(0.0).to_radians();
+                    let last_rotate_y_rad = render_node.props.rotate_y.unwrap_or(0.0).to_radians();
 
                     self.css_anim_paint_records.borrow_mut().insert(
                         node,

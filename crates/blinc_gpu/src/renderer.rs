@@ -11120,9 +11120,7 @@ impl GpuRenderer {
             // submit the otherwise-empty render pass so the encoder
             // doesn't leak — `LoadOp::Load` + no draw is a no-op
             // on the GPU.
-            let scissor_and_draw = if let Some((dx, dy, dw, dh)) =
-                self.pending_damage_scissor
-            {
+            let scissor_and_draw = if let Some((dx, dy, dw, dh)) = self.pending_damage_scissor {
                 let lx0 = scissor_x;
                 let ly0 = scissor_y;
                 let lx1 = lx0 + scissor_w;
