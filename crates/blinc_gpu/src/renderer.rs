@@ -5602,7 +5602,7 @@ impl GpuRenderer {
             return;
         }
 
-        let data_size = (aux_data.len() * std::mem::size_of::<[f32; 4]>()) as u64;
+        let data_size = std::mem::size_of_val(aux_data) as u64;
         let buffer_size = self.buffers.aux_data.size();
 
         // Recreate buffer if too small
