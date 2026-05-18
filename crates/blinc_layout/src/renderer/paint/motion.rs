@@ -294,19 +294,52 @@ impl RenderTree {
         // node (cn_demo has ~13). Bindings whose values match
         // `last_*` are early-out'd inside `apply_binding_deltas` so
         // no GPU work happens for them.
-        // Tell the context this subtree is motion-bound so all
-        // primitive emissions route into the dynamic batch instead
-        // of the static cache batch. Paired with a `pop` at the end
-        // of this fn (any return path) via the
-        // `_motion_subtree_guard` below. The `composite_bg_start`
-        // captured immediately after now indexes into the dynamic
-        // batch, which is exactly what `apply_binding_deltas` and
-        // the per-frame overlay dispatch read.
-        let in_motion_subtree = motion_bindings_ref.is_some();
+        // Tell the context this subtree is dynamic so all primitive
+        // emissions route into the dynamic batch instead of the
+        // static cache batch. Three sources qualify a subtree as
+        // dynamic:
+        //
+        // 1. `MotionBindings` on this node (spring or
+        //    `rotation_timeline` driven) — `motion_bindings_ref` is
+        //    Some.
+        // 2. CSS keyframe animation or property transition that
+        //    `compute_animation_status` flagged as `Animating(Css)`.
+        // 3. (Canvas handled separately at the Canvas emission site.)
+        //
+        // Routing CSS-animated content through `dynamic_batch` lets
+        // the compositor keep the static cache valid across CSS
+        // transition frames — cn_demo's hover transitions on buttons
+        // and switches no longer invalidate the entire cache 60×/s
+        // while a transition is in flight. The `apply_binding_deltas`
+        // fast path doesn't apply to CSS animations directly, but
+        // the slow path stays cheap because the static-cache content
+        // is the same frame-to-frame: the walker overwrites
+        // `cached_bg_batch` with identical static primitives, and
+        // the inner render skips the cache re-dispatch via the
+        // primitive-identity check (Phase 3b).
+        //
+        // Paired with a `pop` at the end of this fn (any return
+        // path). The `composite_bg_start` captured immediately after
+        // now indexes into the dynamic batch — read by
+        // `apply_binding_deltas` (motion bindings only) and the
+        // per-frame overlay dispatch.
+        let css_animated = matches!(
+            self.current_animation_status.borrow().get(&node).copied(),
+            Some(super::super::AnimationStatus::Animating(
+                super::super::AnimatedKind::Css
+            ))
+        );
+        let in_motion_subtree = motion_bindings_ref.is_some() || css_animated;
         if in_motion_subtree {
             ctx.push_motion_subtree();
         }
-        let composite_bg_start = motion_bindings_ref.map(|_| ctx.bg_primitive_count());
+        // Capture the dynamic-batch primitive cursor whenever we enter
+        // a dynamic subtree (motion-bound OR CSS-animated). The motion
+        // path uses it for `composite_bindings` range bookkeeping; the
+        // CSS path uses the same range to populate
+        // `dynamic_regions` so the compositor can scissor / re-walk
+        // the CSS-animated subtree on subsequent frames.
+        let composite_bg_start = in_motion_subtree.then(|| ctx.bg_primitive_count());
 
         // Compositor v2 ambient snapshot for motion-bound subtrees.
         // Captured BEFORE this node pushes any of its own transforms
@@ -323,7 +356,7 @@ impl RenderTree {
         // The actual `DynamicRegion` insert happens at the bottom of
         // this fn alongside the legacy `composite_bindings` insert,
         // gated on the node's `AnimationStatus` being `Animating`.
-        let v2_motion_ambient = motion_bindings_ref.map(|_| {
+        let v2_motion_ambient = in_motion_subtree.then(|| {
             (
                 ctx.current_affine_elements(),
                 ctx.current_opacity(),
@@ -1660,18 +1693,30 @@ impl RenderTree {
                         bounds.y + bounds.height / 2.0,
                     ));
                 let last_screen_aabb = ctx.bg_primitive_aabb(start, end);
-                self.composite_bindings.borrow_mut().insert(
-                    node,
-                    super::super::CompositeBindingMeta {
-                        primitive_range: start..end,
-                        last_translate,
-                        last_scale,
-                        last_rotation_rad,
-                        last_opacity,
-                        centre,
-                        last_screen_aabb,
-                    },
-                );
+                // CSS-only nodes (no `MotionBindings`) reach this block
+                // because they pushed `motion_subtree` to route their
+                // primitives into the dynamic batch, but they have no
+                // motion state for `apply_binding_deltas` to patch.
+                // Skip `composite_bindings` for them — the fast-path
+                // delta patcher would read default translate/scale/
+                // rotation/opacity and corrupt the cached primitives
+                // on every frame. The Compositor v2 dynamic-regions
+                // path below still records them so they're visible to
+                // the per-region dispatch.
+                if motion_bindings_ref.is_some() {
+                    self.composite_bindings.borrow_mut().insert(
+                        node,
+                        super::super::CompositeBindingMeta {
+                            primitive_range: start..end,
+                            last_translate,
+                            last_scale,
+                            last_rotation_rad,
+                            last_opacity,
+                            centre,
+                            last_screen_aabb,
+                        },
+                    );
+                }
 
                 // Compositor v2 parallel-populate for motion-bound
                 // subtrees. Gated on the node's status being
