@@ -1567,9 +1567,18 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         // Note: This only works correctly for translate + uniform scale transforms.
         // Rotation transforms are approximated (the bounding box is used).
         let transformed_shape = self.transform_clip_shape(shape);
-        // For polygon clips, pack vertices into aux_data and store metadata
+        // For polygon clips, pack vertices into the ACTIVE batch's aux_data
+        // and store metadata. The active batch is `dynamic_batch` when
+        // emitting inside a motion-bound subtree — primitives there carry
+        // `clip_radius.w = aux_offset` indexing into the dispatched batch's
+        // own aux_data buffer, so vertices written to `self.batch.aux_data`
+        // wouldn't be reachable at draw time. The matching pop is in
+        // `pop_clip`; the aux_data entries stay around for the rest of the
+        // paint pass (every later primitive emitted under this clip needs
+        // them in place when its render-pass dispatches).
         let poly_meta = if let ClipShape::Polygon(ref pts) = transformed_shape {
-            let aux_offset = self.batch.aux_data.len() as u32;
+            let active = self.active_batch_mut();
+            let aux_offset = active.aux_data.len() as u32;
             let vertex_count = pts.len() as u32;
             // Pack vertices as vec4s: (x0, y0, x1, y1) — 2 vertices per vec4
             let mut i = 0;
@@ -1581,7 +1590,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                 } else {
                     (0.0, 0.0) // padding
                 };
-                self.batch.aux_data.push([x0, y0, x1, y1]);
+                active.aux_data.push([x0, y0, x1, y1]);
                 i += 2;
             }
             Some((aux_offset, vertex_count))

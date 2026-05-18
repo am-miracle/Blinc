@@ -4841,6 +4841,7 @@ impl GpuRenderer {
         target_view: &wgpu::TextureView,
         target_texture: &wgpu::Texture,
         overlay_primitives: &[GpuPrimitive],
+        overlay_aux_data: &[[f32; 4]],
     ) -> bool {
         // First, validate the cache and capture the extent. We can't
         // hold a borrow into `self.static_layer` across the upload
@@ -4867,6 +4868,14 @@ impl GpuRenderer {
         };
         self.queue
             .write_buffer(&self.buffers.uniforms, 0, bytemuck::bytes_of(&uniforms));
+
+        // Upload the overlay's aux_data so polygon-clip / 3D-group
+        // offsets carried on overlay primitives index into valid GPU
+        // data. The static layer's aux_data was written earlier this
+        // frame but has already been consumed into the cache texture;
+        // overwriting the buffer here is safe and ensures the overlay
+        // SDF dispatch reads the right vertex / shape descriptors.
+        self.update_aux_data_slice(overlay_aux_data);
 
         let visible_overlay: Vec<GpuPrimitive> = overlay_primitives
             .iter()
@@ -5574,17 +5583,26 @@ impl GpuRenderer {
     /// If the batch has aux_data, writes it to the GPU buffer, recreating the buffer
     /// and rebinding if it's too small.
     fn update_aux_data_buffer(&mut self, batch: &PrimitiveBatch) {
-        if batch.aux_data.is_empty() {
+        self.update_aux_data_slice(&batch.aux_data);
+    }
+
+    /// Slice-variant of [`Self::update_aux_data_buffer`] for callers that
+    /// only have an `&[[f32; 4]]` (e.g. the compositor overlay path
+    /// which carries the dynamic batch's aux_data separately from a
+    /// `PrimitiveBatch`). Avoids constructing a throwaway batch just
+    /// to satisfy the buffer-variant signature.
+    fn update_aux_data_slice(&mut self, aux_data: &[[f32; 4]]) {
+        if aux_data.is_empty() {
             return;
         }
 
         if !self.has_storage_buffers {
             // DT mode: upload aux data to texture instead of storage buffer
-            self.update_aux_data_texture(&batch.aux_data);
+            self.update_aux_data_texture(aux_data);
             return;
         }
 
-        let data_size = (batch.aux_data.len() * std::mem::size_of::<[f32; 4]>()) as u64;
+        let data_size = (aux_data.len() * std::mem::size_of::<[f32; 4]>()) as u64;
         let buffer_size = self.buffers.aux_data.size();
 
         // Recreate buffer if too small
@@ -5606,7 +5624,7 @@ impl GpuRenderer {
         self.queue.write_buffer(
             &self.buffers.aux_data,
             0,
-            bytemuck::cast_slice(&batch.aux_data),
+            bytemuck::cast_slice(aux_data),
         );
     }
 

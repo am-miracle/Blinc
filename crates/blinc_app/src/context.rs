@@ -243,6 +243,12 @@ pub struct CanvasOverlay {
     pub primitives: Vec<blinc_gpu::primitives::GpuPrimitive>,
     pub dynamic_images: Vec<blinc_gpu::primitives::DynamicImage>,
     pub meshes: Vec<blinc_gpu::PendingMesh>,
+    /// Aux-data emitted by canvas closures (polygon-clip vertices, 3D
+    /// group shape descriptors). Concatenated across closures; per-
+    /// primitive offsets that referenced the closure's own
+    /// `PrimitiveBatch::aux_data` are shifted by the accumulated
+    /// length so they index into the merged buffer.
+    pub aux_data: Vec<[f32; 4]>,
 }
 
 /// Internal render context that manages GPU resources and rendering
@@ -5485,13 +5491,31 @@ impl RenderContext {
                 // motion-bound prims in one queue.submit — separate
                 // submits per frame doubled GPU driver overhead in
                 // the mouse-wiggle steady state.
-                if let Some(ref dyn_batch) = self.cached_dynamic_batch {
-                    if !dyn_batch.primitives.is_empty() {
-                        overlay.primitives.extend_from_slice(&dyn_batch.primitives);
-                    }
+                //
+                // The dynamic batch carries its own `aux_data`
+                // (polygon-clip vertices for the spinner arc, 3D
+                // group descriptors, etc.). The GPU's storage buffer
+                // is shared with the static-cache pass, so we forward
+                // the dynamic batch's `aux_data` into `composite_frame`
+                // — without that, primitives whose `clip_radius.w`
+                // indexes the dynamic batch's vertex array would read
+                // stale data uploaded for the static pass and miss
+                // the polygon discard, producing the cn_demo "all
+                // grey rings, no rotating arc" symptom. Borrow the
+                // aux_data slice in place — no per-frame allocation.
+                let (dyn_prims, dyn_aux) = match self.cached_dynamic_batch.as_ref() {
+                    Some(b) => (b.primitives.as_slice(), b.aux_data.as_slice()),
+                    None => (&[][..], &[][..]),
+                };
+                if !dyn_prims.is_empty() {
+                    overlay.primitives.extend_from_slice(dyn_prims);
                 }
-                self.renderer
-                    .composite_frame(target_view, target_texture, &overlay.primitives);
+                self.renderer.composite_frame(
+                    target_view,
+                    target_texture,
+                    &overlay.primitives,
+                    dyn_aux,
+                );
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
                         .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -5677,14 +5701,26 @@ impl RenderContext {
         // Compositor v2: append motion-bound subtree primitives to the
         // canvas overlay so cache blit + canvas SDF + motion-bound
         // dispatch all share a single command encoder / submit. See
-        // the matching block in the use_fast branch above.
+        // the matching block in the use_fast branch above. The
+        // dynamic batch's `aux_data` (polygon-clip vertices, etc.)
+        // is forwarded into composite_frame for the same reason
+        // documented there.
+        let overlay_aux: Vec<[f32; 4]> = self
+            .cached_dynamic_batch
+            .as_ref()
+            .map(|b| b.aux_data.clone())
+            .unwrap_or_default();
         if let Some(ref dyn_batch) = self.cached_dynamic_batch {
             if !dyn_batch.primitives.is_empty() {
                 overlay.primitives.extend_from_slice(&dyn_batch.primitives);
             }
         }
-        self.renderer
-            .composite_frame(target_view, target_texture, &overlay.primitives);
+        self.renderer.composite_frame(
+            target_view,
+            target_texture,
+            &overlay.primitives,
+            &overlay_aux,
+        );
         if !overlay.dynamic_images.is_empty() {
             self.renderer
                 .render_dynamic_images(target_view, &overlay.dynamic_images);
