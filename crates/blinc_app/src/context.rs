@@ -243,6 +243,12 @@ pub struct CanvasOverlay {
     pub primitives: Vec<blinc_gpu::primitives::GpuPrimitive>,
     pub dynamic_images: Vec<blinc_gpu::primitives::DynamicImage>,
     pub meshes: Vec<blinc_gpu::PendingMesh>,
+    /// Aux-data emitted by canvas closures (polygon-clip vertices, 3D
+    /// group shape descriptors). Concatenated across closures; per-
+    /// primitive offsets that referenced the closure's own
+    /// `PrimitiveBatch::aux_data` are shifted by the accumulated
+    /// length so they index into the merged buffer.
+    pub aux_data: Vec<[f32; 4]>,
 }
 
 /// Internal render context that manages GPU resources and rendering
@@ -346,6 +352,15 @@ pub struct RenderContext {
     // is a small fixed cost in exchange for skipping a 1 ms paint
     // walker + 1 ms collect every frame.
     cached_bg_batch: Option<blinc_gpu::PrimitiveBatch>,
+    /// Compositor v2 dynamic batch — primitives emitted inside
+    /// motion-bound subtrees, separated by the walker via
+    /// `push_motion_subtree`/`pop_motion_subtree`. Stays out of the
+    /// static cache so motion-binding animations don't have to
+    /// invalidate it; dispatched per-frame as an overlay after the
+    /// cache blit. `apply_binding_deltas` patches its primitives in
+    /// place, so subsequent frames show the new positions without
+    /// re-running the walker.
+    cached_dynamic_batch: Option<blinc_gpu::PrimitiveBatch>,
     // Collected text / SVG / image elements from the most recent
     // full paint. Lives alongside `cached_bg_batch` so the
     // compositor fast path can skip `collect_render_elements_with_state`
@@ -605,6 +620,7 @@ impl RenderContext {
             frame_count: 0,
             clear_alpha: 1.0,
             cached_bg_batch: None,
+            cached_dynamic_batch: None,
             cached_texts: None,
             cached_svgs: None,
             cached_images: None,
@@ -634,6 +650,7 @@ impl RenderContext {
     /// vecs unconditionally for symmetry).
     pub fn invalidate_render_cache(&mut self) {
         self.cached_bg_batch = None;
+        self.cached_dynamic_batch = None;
         self.cached_texts = None;
         self.cached_svgs = None;
         self.cached_images = None;
@@ -967,7 +984,13 @@ impl RenderContext {
     /// frames in a row would double-apply).
     pub fn apply_binding_deltas(&mut self, tree: &blinc_layout::RenderTree, scale: f32) -> bool {
         self.last_binding_damage_rects.clear();
-        let batch = match self.cached_bg_batch.as_mut() {
+        // Compositor v2: motion-bound subtree primitives live in
+        // `cached_dynamic_batch`, not `cached_bg_batch`. The walker
+        // routes them there via `push_motion_subtree`, and
+        // `composite_bindings[node].primitive_range` indexes into
+        // the dynamic batch. Patching `cached_bg_batch` here would
+        // corrupt unrelated static primitives at those indices.
+        let batch = match self.cached_dynamic_batch.as_mut() {
             Some(b) => b,
             None => return false,
         };
@@ -5280,10 +5303,27 @@ impl RenderContext {
         // implementation. Useful for experimentation / when only
         // pure-SDF subtrees are animating. Default off so visuals
         // stay correct.
+        // Compositor v2 Phase 4: motion-binding-only animation frames
+        // never invalidate the static cache. Motion-bound subtree
+        // primitives live in `cached_dynamic_batch` (the walker
+        // routed them out of the static batch via
+        // `push_motion_subtree`), so the cache contains zero
+        // motion content. `apply_binding_deltas` patches the
+        // dynamic batch in place each frame; the per-frame overlay
+        // dispatch (after `composite_frame`) shows the new
+        // positions. The cache only needs invalidation when a
+        // NON-motion-binding animation is active (CSS, FLIP,
+        // layout, motion() FSM, visual) — those mutate static-
+        // batch primitives the delta patcher can't represent.
+        //
+        // Drops the cn_demo switch / progress / slider / accordion
+        // animations from per-frame slow path to one full paint
+        // (entry frame) + per-frame fast path. Cache reused for
+        // the entire spring duration.
         let damage_rect_enabled = std::env::var("BLINC_DAMAGE_RECT").as_deref() == Ok("1");
         let damage_rect_eligible =
             damage_rect_enabled && bindings_animating && !other_animations_active;
-        if !damage_rect_eligible && (bindings_animating || other_animations_active) {
+        if !damage_rect_eligible && other_animations_active {
             self.renderer.invalidate_static_layer();
             // Also invalidate the cached text / SVG / image vectors
             // up-front. Without this clear, the downstream
@@ -5321,6 +5361,19 @@ impl RenderContext {
             // scissor; `LoadOp::Load` preserves the surrounding
             // pixels). Falls back to invalidation + slow path on any
             // condition the damage-rect path can't handle.
+            // Compositor v2 Phase 4: when any motion binding moved
+            // this frame, patch its primitives in `cached_dynamic_batch`
+            // (where the walker routed them via `push_motion_subtree`)
+            // so the per-frame overlay dispatch below paints them at
+            // the current spring values. The static cache stays
+            // untouched. Used by all the cn motion widgets — switch
+            // thumb, progress indicator, slider thumb, sortable drag
+            // preview, etc.
+            if bindings_animating && self.cached_dynamic_batch.is_some() {
+                let scale_factor = tree.scale_factor();
+                let _ = self.apply_binding_deltas(tree, scale_factor);
+            }
+
             let mut damage_rect_failed = false;
             if damage_rect_eligible && self.cached_bg_batch.is_some() {
                 let scale_factor = tree.scale_factor();
@@ -5428,9 +5481,41 @@ impl RenderContext {
                 // canvas closure. composite_frame blits the static
                 // cache + dispatches the SDF prims; we then layer the
                 // dynamic images and meshes onto the same target.
-                let overlay = self.collect_canvas_overlay(tree, width, height);
-                self.renderer
-                    .composite_frame(target_view, target_texture, &overlay.primitives);
+                let mut overlay = self.collect_canvas_overlay(tree, width, height);
+                // Compositor v2: motion-bound subtree primitives go
+                // into a separate `cached_dynamic_batch` (walker
+                // pushed motion subtree depth around them so they
+                // bypassed the static cache). Append them to the
+                // canvas overlay so composite_frame's single encoder
+                // can dispatch both cache blit + canvas SDF +
+                // motion-bound prims in one queue.submit — separate
+                // submits per frame doubled GPU driver overhead in
+                // the mouse-wiggle steady state.
+                //
+                // The dynamic batch carries its own `aux_data`
+                // (polygon-clip vertices for the spinner arc, 3D
+                // group descriptors, etc.). The GPU's storage buffer
+                // is shared with the static-cache pass, so we forward
+                // the dynamic batch's `aux_data` into `composite_frame`
+                // — without that, primitives whose `clip_radius.w`
+                // indexes the dynamic batch's vertex array would read
+                // stale data uploaded for the static pass and miss
+                // the polygon discard, producing the cn_demo "all
+                // grey rings, no rotating arc" symptom. Borrow the
+                // aux_data slice in place — no per-frame allocation.
+                let (dyn_prims, dyn_aux) = match self.cached_dynamic_batch.as_ref() {
+                    Some(b) => (b.primitives.as_slice(), b.aux_data.as_slice()),
+                    None => (&[][..], &[][..]),
+                };
+                if !dyn_prims.is_empty() {
+                    overlay.primitives.extend_from_slice(dyn_prims);
+                }
+                self.renderer.composite_frame(
+                    target_view,
+                    target_texture,
+                    &overlay.primitives,
+                    dyn_aux,
+                );
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
                         .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -5612,9 +5697,30 @@ impl RenderContext {
         // mesh content actually reaches the surface in compositor
         // mode (it was dropped on the floor by the
         // primitives-only path).
-        let overlay = self.collect_canvas_overlay(tree, width, height);
-        self.renderer
-            .composite_frame(target_view, target_texture, &overlay.primitives);
+        let mut overlay = self.collect_canvas_overlay(tree, width, height);
+        // Compositor v2: append motion-bound subtree primitives to the
+        // canvas overlay so cache blit + canvas SDF + motion-bound
+        // dispatch all share a single command encoder / submit. See
+        // the matching block in the use_fast branch above. The
+        // dynamic batch's `aux_data` (polygon-clip vertices, etc.)
+        // is forwarded into composite_frame for the same reason
+        // documented there.
+        let overlay_aux: Vec<[f32; 4]> = self
+            .cached_dynamic_batch
+            .as_ref()
+            .map(|b| b.aux_data.clone())
+            .unwrap_or_default();
+        if let Some(ref dyn_batch) = self.cached_dynamic_batch {
+            if !dyn_batch.primitives.is_empty() {
+                overlay.primitives.extend_from_slice(&dyn_batch.primitives);
+            }
+        }
+        self.renderer.composite_frame(
+            target_view,
+            target_texture,
+            &overlay.primitives,
+            &overlay_aux,
+        );
         if !overlay.dynamic_images.is_empty() {
             self.renderer
                 .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -5685,7 +5791,7 @@ impl RenderContext {
         // the 18 ms Phase 4 cost is the paint walker, the
         // text/SVG/image collector, or the GPU pipeline — three very
         // different optimization targets.
-        let p4_start = std::time::Instant::now();
+        let p4_start = web_time::Instant::now();
 
         // Get scale factor for HiDPI rendering
         let scale_factor = tree.scale_factor();
@@ -5733,6 +5839,17 @@ impl RenderContext {
             ctx.take_batch()
         };
 
+        // Compositor v2: drain the motion-bound subtree primitives.
+        // On the fast path nothing was emitted (walker skipped), so
+        // `take_dynamic_batch` returns an empty batch and we keep
+        // the previous full paint's cached one — which
+        // `apply_binding_deltas` has been patching in place each
+        // motion-binding frame. On the full path we replace it with
+        // the freshly-emitted batch.
+        if !used_fast_paint {
+            self.cached_dynamic_batch = Some(ctx.take_dynamic_batch());
+        }
+
         // Take any 3D mesh draws captured via `ctx.draw_mesh_data(...)`
         // inside canvas callbacks. These are dispatched after all 2D
         // content lands so the mesh composites on top of the UI — see
@@ -5763,7 +5880,7 @@ impl RenderContext {
         // would visibly mis-render via the existing
         // `apply_binding_deltas` checks (which also guard against
         // scale/rotation).
-        let collect_start = std::time::Instant::now();
+        let collect_start = web_time::Instant::now();
         // Mid-flight motion (either a `MotionBindings` spring or a
         // `motion()` wrapper's enter / exit FSM) shifts the
         // text/SVG/image positions of every element underneath it.
@@ -5787,13 +5904,23 @@ impl RenderContext {
         // `last_scale` / `last_rotation` / `last_opacity` catches
         // pull-to-refresh-style drag flows that wouldn't otherwise
         // trip `is_any_animating`.
+        // Only consider motion sources that can move text / SVG / image
+        // positions. Pure timeline-driven rotation (the cn::spinner
+        // case) is excluded — its subtree is a single motion-bound
+        // SDF primitive with no text/SVG/image children, and surrounding
+        // tree elements aren't affected by an in-flight rotation
+        // timeline. Keeping the spinner in this predicate pinned 60 %
+        // of cn_demo's frame budget on re-collecting text positions
+        // for hundreds of unrelated elements 60×/s; the rotation only
+        // touches a single primitive in `cached_dynamic_batch` which
+        // `apply_binding_deltas` patches in place.
         let any_motion_active = render_state.has_active_motions()
             || tree.has_active_visual_animations()
             || tree.has_active_layout_animations()
             || tree
                 .motion_bindings_map()
                 .values()
-                .any(|b| b.is_any_animating())
+                .any(|b| b.is_any_position_animating())
             || {
                 let bindings_table = tree.motion_bindings_map();
                 tree.composite_bindings().iter().any(|(node, meta)| {

@@ -1725,6 +1725,18 @@ pub trait DrawContext {
         0
     }
 
+    /// Notify the context that the walker is entering a motion-bound
+    /// subtree. Subsequent primitive / path / glass emissions route
+    /// to a separate "dynamic batch" instead of the main batch, so
+    /// the compositor v2 fast path can dispatch them per-frame as an
+    /// overlay rather than baking them into the static cache. Pair
+    /// with [`Self::pop_motion_subtree`]. Default no-op for contexts
+    /// without this distinction (mock tests, future backends).
+    fn push_motion_subtree(&mut self) {}
+
+    /// Pair with [`Self::push_motion_subtree`]. Default no-op.
+    fn pop_motion_subtree(&mut self) {}
+
     /// Union AABB (`[x, y, w, h]` in screen pixels, post-DPI) of every
     /// background-batch primitive in `start..end`. Used by the
     /// compositor v2 damage-rect path: it captures the on-screen

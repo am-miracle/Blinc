@@ -374,12 +374,10 @@ fn calculate_clip_alpha(p: vec2<f32>, clip_bounds: vec4<f32>, clip_radius: vec4<
                 alpha = scissor_alpha * shape_alpha;
             }
             case 4u /* CLIP_POLYGON */: {
+                // Scissor-only here; polygon shape test deferred to fs_main
+                // after sp is available (in shadow, sp == p). See sdf_core.wgsl.
                 let scissor_d = sd_rounded_rect(p, clip_bounds.xy, clip_bounds.zw, vec4<f32>(0.0));
-                let scissor_alpha = 1.0 - smoothstep(-aa_width, aa_width, scissor_d);
-                let vertex_count = u32(clip_radius.z);
-                let aux_offset = u32(clip_radius.w);
-                let shape_alpha = calculate_polygon_clip_alpha(p, vertex_count, aux_offset);
-                alpha = scissor_alpha * shape_alpha;
+                alpha = 1.0 - smoothstep(-aa_width, aa_width, scissor_d);
             }
             default: {}
         }
@@ -498,8 +496,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Early type filter — discard primitives handled by other split pipelines
     if prim_type < 3u || prim_type > 6u { discard; }
 
-    // Early clip test - discard if completely outside clip region (screen space)
-    let clip_alpha = calculate_clip_alpha(p, prim.clip_bounds, prim.clip_radius, clip_type, prim.clip_fade);
+    // Early clip test - discard if completely outside clip region (screen space).
+    // Polygon shape test deferred until sp is known — see sdf_core.wgsl.
+    var clip_alpha = calculate_clip_alpha(p, prim.clip_bounds, prim.clip_radius, clip_type, prim.clip_fade);
     if clip_alpha < 0.001 {
         discard;
     }
@@ -510,6 +509,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Shadow primitives use screen-space position directly (no perspective unprojection)
     let sp = p;
+
+    // CLIP_POLYGON shape test in element-local coords (vertices stored in
+    // aux_data as user-supplied 0..size). See sdf_core.wgsl.
+    if clip_type == 4u {
+        let vertex_count = u32(prim.clip_radius.z);
+        let aux_offset = u32(prim.clip_radius.w);
+        let local_p = sp - prim.bounds.xy;
+        let shape_alpha = calculate_polygon_clip_alpha(local_p, vertex_count, aux_offset);
+        clip_alpha = clip_alpha * shape_alpha;
+        if clip_alpha < 0.001 {
+            discard;
+        }
+    }
 
     var result = vec4<f32>(0.0);
 

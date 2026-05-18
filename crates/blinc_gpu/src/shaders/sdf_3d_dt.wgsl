@@ -348,12 +348,13 @@ fn calculate_clip_alpha(p: vec2<f32>, clip_bounds: vec4<f32>, clip_radius: vec4<
                 alpha = scissor_alpha * shape_alpha;
             }
             case 4u /* CLIP_POLYGON */: {
+                // Scissor-only for 3D pipeline. The polygon shape test
+                // is done in 2D variants where sp is available; 3D
+                // raymarches its own surface, so polygon shape on a 3D
+                // shape would have to project through perspective —
+                // out of scope. See sdf_core.wgsl for context.
                 let scissor_d = sd_rounded_rect(p, clip_bounds.xy, clip_bounds.zw, vec4<f32>(0.0));
-                let scissor_alpha = 1.0 - smoothstep(-aa_width, aa_width, scissor_d);
-                let vertex_count = u32(clip_radius.z);
-                let aux_offset = u32(clip_radius.w);
-                let shape_alpha = calculate_polygon_clip_alpha(p, vertex_count, aux_offset);
-                alpha = scissor_alpha * shape_alpha;
+                alpha = 1.0 - smoothstep(-aa_width, aa_width, scissor_d);
             }
             default: {}
         }
