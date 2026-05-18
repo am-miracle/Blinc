@@ -5818,6 +5818,166 @@ impl RenderContext {
             self.cached_css_transformed_text_prims = None;
         }
 
+        // Phase 4d Opt 1: CSS-only patch fast path. When CSS
+        // animations / transitions are the *only* animation signal
+        // (no motion bindings, no visual / layout / FLIP), patch
+        // the cached batch in place via `apply_css_deltas` and
+        // re-render the static cache from the patched batch. Skips
+        // the walker and `collect_elements_recursive` — the two
+        // biggest CPU costs on a CSS-only frame.
+        //
+        // Gated on `BLINC_CSS_PATCH=1` until validated across the
+        // demo set. Phase 4f relaxes windowed's `!css_active` gate
+        // so this fires by default once we're confident.
+        //
+        // Bails (falls through to slow path) on:
+        //   - Motion bindings or other animations active (motion
+        //     damage path takes precedence; mixing the two would
+        //     race their respective last_* bookkeeping).
+        //   - Empty `css_anim_paint_records` (walker hasn't seen
+        //     the CSS-animated node yet — first frame of a newly-
+        //     started animation; slow path populates the records).
+        //   - `apply_css_deltas` reports an out-of-scope property
+        //     (clip-path geometry, blur, layout) or cache shape
+        //     mismatch.
+        //
+        // Cost vs slow path on a CSS-only frame:
+        //   - Skipped: paint walker (~0.5 ms), text shaping +
+        //     SVG/image collect (~0.5 ms), per-frame State updates.
+        //   - Paid: apply_css_deltas (~50 µs), batch clone for
+        //     re-render (~50 µs), full SDF dispatch (same as slow
+        //     path), text / SVG / image dispatch from cached
+        //     vectors (same as slow path).
+        //   - Net ≈ 1 ms saved per CSS-only frame, ~6 % at 60 fps.
+        //   - Phase 4d Opt 2 (scissored damage rect) shrinks the
+        //     GPU dispatch cost too; this is the staging step.
+        let css_patch_enabled = std::env::var("BLINC_CSS_PATCH").as_deref() == Ok("1");
+        let css_patch_eligible = css_patch_enabled
+            && css_only_active
+            && !bindings_animating
+            && self.cached_bg_batch.is_some()
+            && self.renderer.static_layer_valid()
+            && !tree.css_anim_paint_records().is_empty();
+        if css_patch_eligible {
+            let scale_factor = tree.scale_factor();
+            if self.apply_css_deltas(tree, scale_factor) {
+                // Re-render the static cache from the patched batch.
+                // Without this, `composite_frame` blits the stale
+                // texture from the last slow-path frame and the
+                // patched primitive values never reach pixels.
+                let batch_clone = self
+                    .cached_bg_batch
+                    .as_ref()
+                    .expect("css_patch_eligible implies cached_bg_batch is Some")
+                    .clone();
+                self.renderer.render_static_layer(
+                    &batch_clone,
+                    [0.0, 0.0, 0.0, self.clear_alpha as f64],
+                );
+                // Re-dispatch text / SVG / image on top of the
+                // freshly-rendered cache. `render_static_layer`
+                // clears the cache before re-rendering SDF, so
+                // glyphs / SVGs / images that were composited on
+                // top last paint need to land again.
+                //
+                // Cached vectors are from the last slow-path frame.
+                // For pure visual / 3D-transform / color CSS
+                // animations they stay valid (positions don't
+                // shift). Layout animations would invalidate them,
+                // but layout properties trigger an
+                // `apply_css_deltas` bail above so we never reach
+                // here with stale positions.
+                let static_view_opt = self.renderer.static_layer_view().cloned();
+                if let Some(static_view) = static_view_opt {
+                    if let Some(glyphs_by_layer) = self.cached_glyphs_by_layer.clone() {
+                        for (_z, glyphs) in glyphs_by_layer.iter() {
+                            if !glyphs.is_empty() {
+                                self.render_text(&static_view, glyphs);
+                            }
+                        }
+                    }
+                    if let Some(fg_glyphs) = self.cached_fg_glyphs.clone() {
+                        if !fg_glyphs.is_empty() {
+                            self.render_text(&static_view, &fg_glyphs);
+                        }
+                    }
+                    if let Some(svgs) = self.cached_svgs.clone() {
+                        if !svgs.is_empty() {
+                            self.render_rasterized_svgs(
+                                &static_view,
+                                &svgs,
+                                scale_factor,
+                            );
+                        }
+                    }
+                    if let Some(images) = self.cached_images.clone() {
+                        if !images.is_empty() {
+                            let refs: Vec<&ImageElement> = images.iter().collect();
+                            self.render_images_ref(&static_view, &refs);
+                        }
+                    }
+                }
+                // Composite cache + canvas overlay + dynamic batch
+                // to the surface. Same final-blit shape the motion
+                // damage path uses.
+                let mut overlay = self.collect_canvas_overlay(tree, width, height);
+                if !tree.dynamic_regions().is_empty() {
+                    let walked = self.collect_dynamic_region_primitives(
+                        tree,
+                        render_state,
+                        width,
+                        height,
+                    );
+                    self.cached_dynamic_batch = Some(walked);
+                }
+                let (dyn_prims, dyn_aux) = match self.cached_dynamic_batch.as_ref() {
+                    Some(b) => (b.primitives.as_slice(), b.aux_data.as_slice()),
+                    None => (&[][..], &[][..]),
+                };
+                if !dyn_prims.is_empty() {
+                    overlay.primitives.extend_from_slice(dyn_prims);
+                }
+                self.renderer.composite_frame(
+                    target_view,
+                    target_texture,
+                    &overlay.primitives,
+                    dyn_aux,
+                );
+                if !overlay.dynamic_images.is_empty() {
+                    self.renderer
+                        .render_dynamic_images(target_view, &overlay.dynamic_images);
+                }
+                if !overlay.meshes.is_empty() {
+                    dispatch_pending_meshes(
+                        &mut self.renderer,
+                        target_view,
+                        width,
+                        height,
+                        &overlay.meshes,
+                    );
+                }
+                // Authoritative `visible_anim_active` update —
+                // walker didn't run this frame, so reset the flag
+                // from current animation state. Mirrors the motion
+                // damage path's end-of-frame restate.
+                let has_visible_canvas = !tree.canvas_paint_records().is_empty();
+                let any_visible_anim = {
+                    let painted_set = tree.painted_node_ids().clone();
+                    let painted_stable = tree.painted_stable_ids();
+                    tree.has_any_active_animation_visible(
+                        render_state,
+                        &painted_set,
+                        &painted_stable,
+                    )
+                };
+                tree.set_visible_anim_active(any_visible_anim || has_visible_canvas);
+                return Ok(());
+            }
+            // apply_css_deltas returned false — out-of-scope
+            // property, cache shape mismatch, or divide-by-zero.
+            // Fall through to slow path.
+        }
+
         // Fast path: cache valid AND caller is fine with reusing it.
         // Skip the entire walker / dispatch chain — just composite.
         let use_fast =
