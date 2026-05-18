@@ -5948,6 +5948,20 @@ impl RenderContext {
             && self.cached_bg_batch.is_some()
             && self.renderer.static_layer_valid()
             && !tree.css_anim_paint_records().is_empty();
+        if css_anim_active
+            && !css_patch_eligible
+            && tracing::enabled!(target: "blinc_app::frame_timing", tracing::Level::TRACE)
+        {
+            tracing::trace!(
+                target: "blinc_app::frame_timing",
+                css_only_active,
+                bindings_animating,
+                has_cached_batch = self.cached_bg_batch.is_some(),
+                static_layer_valid = self.renderer.static_layer_valid(),
+                css_records_present = !tree.css_anim_paint_records().is_empty(),
+                "css_patch_gate_failed",
+            );
+        }
         if css_patch_eligible {
             let scale_factor = tree.scale_factor();
             let css_path_start = web_time::Instant::now();
