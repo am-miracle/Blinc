@@ -4923,12 +4923,11 @@ impl GpuRenderer {
             ];
             for layer in effect_layers {
                 let primitives = &batch.primitives[layer.primitive_start..layer.primitive_end];
-                let path_verts: &[PathVertex] =
-                    if layer.path_vertex_end > layer.path_vertex_start {
-                        &batch.paths.vertices[layer.path_vertex_start..layer.path_vertex_end]
-                    } else {
-                        &[]
-                    };
+                let path_verts: &[PathVertex] = if layer.path_vertex_end > layer.path_vertex_start {
+                    &batch.paths.vertices[layer.path_vertex_start..layer.path_vertex_end]
+                } else {
+                    &[]
+                };
                 if primitives.is_empty() && path_verts.is_empty() {
                     continue;
                 }
@@ -4943,16 +4942,12 @@ impl GpuRenderer {
                 let mut max_y = f32::MIN;
                 let mut clip: Option<([f32; 4], [f32; 4])> = None;
                 for p in primitives {
-                    let (px, py, pw, ph) =
-                        (p.bounds[0], p.bounds[1], p.bounds[2], p.bounds[3]);
+                    let (px, py, pw, ph) = (p.bounds[0], p.bounds[1], p.bounds[2], p.bounds[3]);
                     min_x = min_x.min(px);
                     min_y = min_y.min(py);
                     max_x = max_x.max(px + pw);
                     max_y = max_y.max(py + ph);
-                    if clip.is_none()
-                        && p.clip_bounds[0] > -5000.0
-                        && p.clip_bounds[2] < 90000.0
-                    {
+                    if clip.is_none() && p.clip_bounds[0] > -5000.0 && p.clip_bounds[2] < 90000.0 {
                         clip = Some((p.clip_bounds, p.clip_radius));
                     }
                 }
@@ -4961,10 +4956,7 @@ impl GpuRenderer {
                     min_y = min_y.min(v.position[1]);
                     max_x = max_x.max(v.position[0]);
                     max_y = max_y.max(v.position[1]);
-                    if clip.is_none()
-                        && v.clip_bounds[0] > -5000.0
-                        && v.clip_bounds[2] < 90000.0
-                    {
+                    if clip.is_none() && v.clip_bounds[0] > -5000.0 && v.clip_bounds[2] < 90000.0 {
                         clip = Some((v.clip_bounds, v.clip_radius));
                     }
                 }

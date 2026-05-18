@@ -6033,13 +6033,9 @@ impl RenderContext {
                 if let Some(static_view) = static_view_opt {
                     if damaged_ok {
                         let union = damage_union(&damaged);
-                        if let Some(scissor) =
-                            damage_scissor_from_union(union, &self.renderer)
-                        {
+                        if let Some(scissor) = damage_scissor_from_union(union, &self.renderer) {
                             self.renderer.set_pending_scissor(scissor);
-                            if let Some(glyphs_by_layer) =
-                                self.cached_glyphs_by_layer.clone()
-                            {
+                            if let Some(glyphs_by_layer) = self.cached_glyphs_by_layer.clone() {
                                 for (_z, glyphs) in glyphs_by_layer.iter() {
                                     let filtered: Vec<_> = glyphs
                                         .iter()
@@ -6065,10 +6061,7 @@ impl RenderContext {
                                 let filtered: Vec<_> = svgs
                                     .into_iter()
                                     .filter(|s| {
-                                        aabb_intersects_any(
-                                            [s.x, s.y, s.width, s.height],
-                                            &damaged,
-                                        )
+                                        aabb_intersects_any([s.x, s.y, s.width, s.height], &damaged)
                                     })
                                     .collect();
                                 if !filtered.is_empty() {
@@ -6083,17 +6076,11 @@ impl RenderContext {
                                 let filtered_refs: Vec<&ImageElement> = images
                                     .iter()
                                     .filter(|i| {
-                                        aabb_intersects_any(
-                                            [i.x, i.y, i.width, i.height],
-                                            &damaged,
-                                        )
+                                        aabb_intersects_any([i.x, i.y, i.width, i.height], &damaged)
                                     })
                                     .collect();
                                 if !filtered_refs.is_empty() {
-                                    self.render_images_ref(
-                                        &static_view,
-                                        &filtered_refs,
-                                    );
+                                    self.render_images_ref(&static_view, &filtered_refs);
                                 }
                             }
                             self.renderer.clear_pending_scissor();
@@ -6101,9 +6088,7 @@ impl RenderContext {
                     } else {
                         // Full re-dispatch (no scissor) — cache was
                         // fully cleared by `render_static_layer`.
-                        if let Some(glyphs_by_layer) =
-                            self.cached_glyphs_by_layer.clone()
-                        {
+                        if let Some(glyphs_by_layer) = self.cached_glyphs_by_layer.clone() {
                             for (_z, glyphs) in glyphs_by_layer.iter() {
                                 if !glyphs.is_empty() {
                                     self.render_text(&static_view, glyphs);
@@ -6117,11 +6102,7 @@ impl RenderContext {
                         }
                         if let Some(svgs) = self.cached_svgs.clone() {
                             if !svgs.is_empty() {
-                                self.render_rasterized_svgs(
-                                    &static_view,
-                                    &svgs,
-                                    scale_factor,
-                                );
+                                self.render_rasterized_svgs(&static_view, &svgs, scale_factor);
                             }
                         }
                         if let Some(images) = self.cached_images.clone() {
