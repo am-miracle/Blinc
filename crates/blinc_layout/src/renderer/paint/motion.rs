@@ -778,7 +778,31 @@ impl RenderTree {
         // `effect_layers` gate in `render_with_layer_effects`.
         let only_opacity_drives_layer =
             node_motion_opacity < 1.0 && !has_layer_effects && !has_blend_mode && !use_3d_layer;
-        let safe_to_flatten = self.layout_tree.children(node).len() <= 1;
+        // Don't flatten when a motion-binding opacity is in play.
+        // Flattening makes children inherit the parent's current
+        // motion_opacity — and when that opacity is at / near 0 on
+        // the slow-path frame (e.g. cn::switch's
+        // `motion().opacity(color_anim)` animating off → on with
+        // the spring just starting from 0.0), descendants hit the
+        // transparency guard above (their own `has_pending_motion`
+        // is false because the binding is on the ancestor, not on
+        // them) and get skipped entirely. Their primitives never
+        // land in `cached_dynamic_batch`; `apply_binding_deltas`
+        // has nothing to multiply when the spring climbs above
+        // 0.001, and the subtree stays invisible until a slow-path
+        // repaint forced by something else (mouse motion via
+        // state-style apply). Symptom: switch toggle off → on
+        // shows no bg fade.
+        //
+        // Pushing a layer is correct here: children inherit 1.0
+        // (layer composite owns the opacity), so they emit
+        // primitives regardless of the binding's current value.
+        // `apply_binding_deltas` patches `LayerConfig.opacity` at
+        // the recorded push index so the spring becomes visible.
+        let has_motion_opacity_binding =
+            motion_bindings_ref.is_some_and(|b| b.opacity.is_some());
+        let safe_to_flatten =
+            !has_motion_opacity_binding && self.layout_tree.children(node).len() <= 1;
         let can_flatten_opacity = only_opacity_drives_layer && safe_to_flatten;
         let has_opacity_layer = !can_flatten_opacity
             && (node_motion_opacity < 1.0 || has_layer_effects || has_blend_mode || use_3d_layer);
@@ -845,14 +869,23 @@ impl RenderTree {
         // push, so the push's own index is `count - 1`.
         let css_anim_layer_push_index = if in_css_subtree && should_push_layer {
             let n = ctx.bg_layer_command_count();
-            if n > 0 {
-                Some(n - 1)
-            } else {
-                None
-            }
+            if n > 0 { Some(n - 1) } else { None }
         } else {
             None
         };
+        // Same index, captured for the motion-binding case so
+        // `apply_binding_deltas` can patch `LayerConfig.opacity` at
+        // the binding's owning node. With the Phase 4a flatten
+        // disabled for motion bindings (above), opacity bindings
+        // always take the layered path and need this index to
+        // animate visibly.
+        let motion_binding_layer_push_index =
+            if motion_bindings_ref.is_some() && should_push_layer {
+                let n = ctx.bg_layer_command_count();
+                if n > 0 { Some(n - 1) } else { None }
+            } else {
+                None
+            };
 
         // Corner shape setup (superellipse per-corner) — MUST be set before draw_shadow
         // so shadows use the same corner_shape as the fill+border SDF.
@@ -1919,6 +1952,7 @@ impl RenderTree {
                             last_scale,
                             last_rotation_rad,
                             last_opacity,
+                            layer_push_index: motion_binding_layer_push_index,
                             centre,
                             last_screen_aabb,
                         },

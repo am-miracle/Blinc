@@ -417,10 +417,23 @@ pub struct CompositeBindingMeta {
     pub last_scale: (f32, f32),
     /// Motion rotation in radians baked at last paint.
     pub last_rotation_rad: f32,
-    /// Motion opacity baked at last paint. Each primitive's
-    /// `color.a` / `border_color.a` / `shadow_color.a` was multiplied
-    /// by this; the fast path scales by `new_opacity / last_opacity`.
+    /// Motion opacity baked at last paint. When
+    /// `layer_push_index.is_some()` this matches the
+    /// `LayerConfig.opacity` the walker pushed; otherwise it's the
+    /// alpha multiplier the walker baked into every primitive in
+    /// `primitive_range`. The fast path scales by
+    /// `new_opacity / last_opacity` and routes the patch to the
+    /// correct location.
     pub last_opacity: f32,
+    /// Index of the `LayerCommand::Push` for this motion-bound
+    /// subtree in the cached batch's `layer_commands`, if any. The
+    /// walker pushes a layer whenever
+    /// `motion_bindings.opacity.is_some()` (the no-flatten branch
+    /// added with Phase 4a so the off → 0 → on case doesn't skip
+    /// children at the transparency guard). The fast path patches
+    /// `config.opacity` at this index so the layer composite picks
+    /// up the new spring value each frame.
+    pub layer_push_index: Option<usize>,
     /// Centre point (logical pixels, absolute) used for scale and
     /// rotation. Same coordinate frame as `last_translate`.
     pub centre: (f32, f32),

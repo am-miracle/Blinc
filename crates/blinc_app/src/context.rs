@@ -1194,19 +1194,45 @@ impl RenderContext {
                 .and_then(|v| v.lock().ok().map(|g| g.get()))
                 .unwrap_or(meta.last_opacity);
             if (new_opacity - meta.last_opacity).abs() > f32::EPSILON {
-                if meta.last_opacity.abs() < f32::EPSILON {
-                    return false;
-                }
-                let ratio = new_opacity / meta.last_opacity;
-                if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
-                    for p in prims.iter_mut() {
-                        p.color[3] *= ratio;
-                        p.border_color[3] *= ratio;
-                        p.shadow_color[3] *= ratio;
+                if let Some(push_idx) = meta.layer_push_index {
+                    // Layered path (motion-binding opacity always
+                    // takes this path post-Phase 4a): patch
+                    // `LayerConfig.opacity` at the push command's
+                    // index. The renderer's layer-composite blit
+                    // reads `config.opacity` and the new spring
+                    // value becomes visible the next composite.
+                    //
+                    // No divide-by-zero hazard here because we're
+                    // writing an absolute value, not computing a
+                    // ratio against `last_opacity`.
+                    use blinc_gpu::primitives::LayerCommand;
+                    match batch.layer_commands.get_mut(push_idx) {
+                        Some(entry) => {
+                            if let LayerCommand::Push { config } = &mut entry.command {
+                                config.opacity = new_opacity;
+                            } else {
+                                return false;
+                            }
+                        }
+                        None => return false,
                     }
+                    meta.last_opacity = new_opacity;
+                    any_binding_active = true;
+                } else {
+                    if meta.last_opacity.abs() < f32::EPSILON {
+                        return false;
+                    }
+                    let ratio = new_opacity / meta.last_opacity;
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                        for p in prims.iter_mut() {
+                            p.color[3] *= ratio;
+                            p.border_color[3] *= ratio;
+                            p.shadow_color[3] *= ratio;
+                        }
+                    }
+                    meta.last_opacity = new_opacity;
+                    any_binding_active = true;
                 }
-                meta.last_opacity = new_opacity;
-                any_binding_active = true;
                 binding_moved = true;
             }
 
