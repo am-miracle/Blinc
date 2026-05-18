@@ -65,7 +65,7 @@ pub enum AnimationThreadMode {
 ///
 /// Controls how the framework chooses the cadence at which animation
 /// frames are scheduled. Default is [`AnimationFps::Adaptive`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum AnimationFps {
     /// Framework picks an initial target FPS at window creation
     /// based on a static heuristic (GPU device class, CPU core count)
@@ -78,6 +78,7 @@ pub enum AnimationFps {
     /// as 8 GB Linux laptops without per-app tuning.
     ///
     /// **Default.**
+    #[default]
     Adaptive,
 
     /// Cap animation frames at exactly `N` per second. The framework
@@ -91,12 +92,6 @@ pub enum AnimationFps {
     /// cost scale with refresh rate; on a 120 Hz monitor a complex
     /// page is roughly 2× the cost vs 60 Hz.
     Refresh,
-}
-
-impl Default for AnimationFps {
-    fn default() -> Self {
-        Self::Adaptive
-    }
 }
 
 /// Window configuration

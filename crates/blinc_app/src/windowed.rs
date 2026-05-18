@@ -64,7 +64,7 @@ pub type SharedAnimationScheduler = Arc<Mutex<AnimationScheduler>>;
 ///
 /// Returns:
 /// * `<= 4` cores  → 30 fps  (typical low-end laptops, older
-///                            Chromebooks, single-board computers)
+///   Chromebooks, single-board computers)
 /// * `<= 8` cores  → 60 fps  (mainstream desktops, recent laptops)
 /// * `>  8` cores  → 60 fps  (high-end; could be 120 but conservative)
 ///
