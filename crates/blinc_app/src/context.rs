@@ -5791,7 +5791,7 @@ impl RenderContext {
         // the 18 ms Phase 4 cost is the paint walker, the
         // text/SVG/image collector, or the GPU pipeline — three very
         // different optimization targets.
-        let p4_start = std::time::Instant::now();
+        let p4_start = web_time::Instant::now();
 
         // Get scale factor for HiDPI rendering
         let scale_factor = tree.scale_factor();
@@ -5880,7 +5880,7 @@ impl RenderContext {
         // would visibly mis-render via the existing
         // `apply_binding_deltas` checks (which also guard against
         // scale/rotation).
-        let collect_start = std::time::Instant::now();
+        let collect_start = web_time::Instant::now();
         // Mid-flight motion (either a `MotionBindings` spring or a
         // `motion()` wrapper's enter / exit FSM) shifts the
         // text/SVG/image positions of every element underneath it.
