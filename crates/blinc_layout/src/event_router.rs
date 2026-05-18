@@ -391,6 +391,51 @@ impl EventRouter {
     }
 
     /// Get the currently focused element
+    /// Compute a small fingerprint of the routing state that
+    /// `apply_stylesheet_state_styles` actually consults: the set of
+    /// currently-hovered nodes, the pressed target, and the focused
+    /// node. Callers cache the previous-frame fingerprint and skip
+    /// the state-style application entirely when it's unchanged — a
+    /// noticeable CPU drop on `cn_demo` where the steady-state
+    /// (spinners rotating, no input) was iterating all ~hundreds of
+    /// registered IDs every frame to detect zero state changes.
+    ///
+    /// The encoding XOR-folds the hovered set into a single `u64`
+    /// (order-independent, cheap), then mixes in the pressed /
+    /// focused identities. Different orderings of the same hovered
+    /// set produce the same fingerprint, which is exactly what we
+    /// want — `apply_stylesheet_state_styles` is itself
+    /// order-insensitive.
+    pub fn state_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+
+        let mut hovered_xor: u64 = 0;
+        for n in self.hovered.iter() {
+            let mut h = DefaultHasher::new();
+            n.hash(&mut h);
+            hovered_xor ^= h.finish();
+        }
+
+        let mut h = DefaultHasher::new();
+        hovered_xor.hash(&mut h);
+        match self.pressed_target {
+            Some(s) => {
+                1u8.hash(&mut h);
+                s.hash(&mut h);
+            }
+            None => 0u8.hash(&mut h),
+        }
+        match self.focused {
+            Some(n) => {
+                1u8.hash(&mut h);
+                n.hash(&mut h);
+            }
+            None => 0u8.hash(&mut h),
+        }
+        h.finish()
+    }
+
     pub fn focused(&self) -> Option<LayoutNodeId> {
         self.focused
     }

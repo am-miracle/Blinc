@@ -329,6 +329,37 @@ impl MotionBindings {
                 .is_some_and(|g| g.is_playing())
     }
 
+    /// Like [`Self::is_any_animating`] but ignores
+    /// [`Self::rotation_timeline`]. Used by the compositor fast path's
+    /// text/SVG/image cache-hit predicate: pure timeline-driven
+    /// rotation (cn::spinner) doesn't move text or SVG glyph
+    /// positions outside the motion-bound subtree, and the spinner's
+    /// own subtree contains no text/SVG/image elements. Treating it
+    /// as "non-position-affecting" lets the cache stay warm and drops
+    /// the per-frame collect pass — a major CPU win on `cn_demo`
+    /// (60 % → ~30 % with three visible spinners) because the collect
+    /// pass walks the entire element tree even though only one
+    /// rotating arc is changing.
+    ///
+    /// Spring rotation IS counted because spring rotations are
+    /// typically applied to UI elements with text content (a card
+    /// flip, a knob with label, etc.) where stale text positions
+    /// would visibly drift mid-animation.
+    pub fn is_any_position_animating(&self) -> bool {
+        let spring_animating = |v: &Option<SharedAnimatedValue>| {
+            v.as_ref()
+                .and_then(|s| s.lock().ok())
+                .is_some_and(|g| g.is_animating())
+        };
+        spring_animating(&self.translate_x)
+            || spring_animating(&self.translate_y)
+            || spring_animating(&self.scale)
+            || spring_animating(&self.scale_x)
+            || spring_animating(&self.scale_y)
+            || spring_animating(&self.rotation)
+            || spring_animating(&self.opacity)
+    }
+
     /// Get the current translation from animated values
     ///
     /// Returns a translation transform for the tx/ty bindings.

@@ -5904,13 +5904,23 @@ impl RenderContext {
         // `last_scale` / `last_rotation` / `last_opacity` catches
         // pull-to-refresh-style drag flows that wouldn't otherwise
         // trip `is_any_animating`.
+        // Only consider motion sources that can move text / SVG / image
+        // positions. Pure timeline-driven rotation (the cn::spinner
+        // case) is excluded — its subtree is a single motion-bound
+        // SDF primitive with no text/SVG/image children, and surrounding
+        // tree elements aren't affected by an in-flight rotation
+        // timeline. Keeping the spinner in this predicate pinned 60 %
+        // of cn_demo's frame budget on re-collecting text positions
+        // for hundreds of unrelated elements 60×/s; the rotation only
+        // touches a single primitive in `cached_dynamic_batch` which
+        // `apply_binding_deltas` patches in place.
         let any_motion_active = render_state.has_active_motions()
             || tree.has_active_visual_animations()
             || tree.has_active_layout_animations()
             || tree
                 .motion_bindings_map()
                 .values()
-                .any(|b| b.is_any_animating())
+                .any(|b| b.is_any_position_animating())
             || {
                 let bindings_table = tree.motion_bindings_map();
                 tree.composite_bindings().iter().any(|(node, meta)| {

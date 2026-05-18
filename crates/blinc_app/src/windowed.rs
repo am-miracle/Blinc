@@ -217,6 +217,15 @@ pub(crate) struct WindowState {
     /// changed (the mouse-move handler may run hundreds of times a
     /// second during a drag — we don't want to syscall every iteration).
     pub last_cursor: Option<blinc_platform::Cursor>,
+    /// Last event-router state fingerprint (hovered + pressed + focused).
+    /// Phase 4 skips `apply_stylesheet_state_styles` whenever the
+    /// router state is identical to the previous frame — a major win
+    /// on `cn_demo` and similar pages with hundreds of CSS-state-styled
+    /// elements where the steady-state animation tick would otherwise
+    /// iterate every registered id 60×/s to apply zero changes.
+    /// `None` until the first state-style pass runs (forces the first
+    /// frame to execute).
+    pub last_router_state_fp: Option<u64>,
 }
 
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
@@ -245,6 +254,7 @@ impl WindowState {
             ui_builder: None,
             transparent: false,
             last_cursor: None,
+            last_router_state_fp: None,
         }
     }
 }
@@ -5018,15 +5028,28 @@ impl WindowedApp {
                             }
 
                             // Apply CSS state styles (:hover, :active, :focus) from stylesheet
-                            // This also detects property changes and starts new transitions
+                            // This also detects property changes and starts new transitions.
+                            //
+                            // Gate on event-router state fingerprint: only run the
+                            // O(N) pass when the set of hovered / pressed / focused
+                            // nodes actually differs from the previous frame.
+                            // Animation-only ticks (the spinner-only steady state)
+                            // share the previous frame's router state, so we skip
+                            // the entire registered-IDs walk. First frame's
+                            // `last_router_state_fp = None` forces the pass.
                             if let Some(ref mut tree) = ws.render_tree {
                                 if tree.stylesheet().is_some() {
-                                    let state_changed = tree.apply_stylesheet_state_styles(&windowed_ctx.event_router);
-                                    // Recompute layout if state styles affected layout properties
-                                    // (e.g. visibility: hidden → display: none, or height changes on hover)
-                                    if state_changed {
-                                        tree.compute_layout(windowed_ctx.width, windowed_ctx.height);
-                                        tree.update_flip_bounds();
+                                    let current_fp = windowed_ctx.event_router.state_fingerprint();
+                                    let should_apply = ws.last_router_state_fp != Some(current_fp);
+                                    if should_apply {
+                                        let state_changed = tree.apply_stylesheet_state_styles(&windowed_ctx.event_router);
+                                        ws.last_router_state_fp = Some(current_fp);
+                                        // Recompute layout if state styles affected layout properties
+                                        // (e.g. visibility: hidden → display: none, or height changes on hover)
+                                        if state_changed {
+                                            tree.compute_layout(windowed_ctx.width, windowed_ctx.height);
+                                            tree.update_flip_bounds();
+                                        }
                                     }
                                 }
                             }
