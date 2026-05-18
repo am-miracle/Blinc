@@ -158,8 +158,7 @@ impl FpsAdapter {
                 }
             }
         } else if median < raise_thresh {
-            self.consecutive_headroom_windows =
-                self.consecutive_headroom_windows.saturating_add(1);
+            self.consecutive_headroom_windows = self.consecutive_headroom_windows.saturating_add(1);
             self.consecutive_overshoot_windows = 0;
             if self.consecutive_headroom_windows >= FPS_WINDOWS_TO_RAISE {
                 let new_cap = ladder_step_up(self.current_cap);
@@ -2439,11 +2438,11 @@ impl WindowedApp {
         } else {
             None
         };
-                                           // Capture animation_thread_mode pre-move (config gets moved
-                                           // into `create_event_loop_with_config` below). Drives whether
-                                           // the AnimationScheduler spawns its bg thread or relies on
-                                           // the main thread's per-frame `tick()` call (Phase 3) to
-                                           // advance springs / keyframes / timelines / tick_callbacks.
+        // Capture animation_thread_mode pre-move (config gets moved
+        // into `create_event_loop_with_config` below). Drives whether
+        // the AnimationScheduler spawns its bg thread or relies on
+        // the main thread's per-frame `tick()` call (Phase 3) to
+        // advance springs / keyframes / timelines / tick_callbacks.
         let animation_thread_mode = config.animation_thread_mode;
         let event_loop = platform
             .create_event_loop_with_config(config)
