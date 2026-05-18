@@ -5537,21 +5537,31 @@ impl RenderContext {
                         self.cached_fg_glyphs = None;
                         self.cached_css_transformed_text_prims = None;
                     } else {
-                        // Re-dispatch text glyphs whose bounds
-                        // intersect the union damage rect into the
-                        // static layer, with `pending_scissor` set
-                        // to confine the writes to the just-cleared
-                        // region. Without this, any text painted on
-                        // the previous slow paint inside the damage
-                        // rect would be wiped by the scissored
-                        // clear in `render_static_layer_damaged` and
-                        // not restored — the "vibrating text" bug
-                        // the env-var was guarding against.
+                        // Re-dispatch any glyph / SVG / image that
+                        // intersects the damage rect, with
+                        // `pending_scissor` set so the writes are
+                        // confined to the just-cleared region.
+                        // `render_static_layer_damaged` only re-paints
+                        // SDF primitives; without this re-dispatch the
+                        // scissored clear wipes everything else that
+                        // was previously painted in the same pixels
+                        // — text, SVG icons, raster images — and
+                        // they wouldn't reappear until the next full
+                        // slow-path paint. Phase 4 of the compositor
+                        // plan, finally making `BLINC_DAMAGE_RECT=1`
+                        // safe.
+                        //
+                        // Each render method (`render_text`,
+                        // `render_rasterized_svgs`, `render_images_ref`)
+                        // honours `pending_scissor` internally — it
+                        // gets applied to the underlying render pass
+                        // via `wgpu::RenderPass::set_scissor_rect`.
                         let static_view_opt = self.renderer.static_layer_view().cloned();
                         if let Some(static_view) = static_view_opt {
                             let union = damage_union(&damaged);
                             if let Some(scissor) = damage_scissor_from_union(union, &self.renderer)
                             {
+                                let scale_factor = tree.scale_factor();
                                 self.renderer.set_pending_scissor(scissor);
                                 if let Some(glyphs_by_layer) = self.cached_glyphs_by_layer.clone() {
                                     for (_z, glyphs) in glyphs_by_layer.iter() {
@@ -5573,6 +5583,50 @@ impl RenderContext {
                                         .collect();
                                     if !filtered.is_empty() {
                                         self.render_text(&static_view, &filtered);
+                                    }
+                                }
+                                // SVG re-dispatch. `SvgElement` x/y/w/h
+                                // are stored in physical pixels (the
+                                // collect path multiplies by
+                                // `scale_factor`), so they share the
+                                // damage rects' coordinate space.
+                                if let Some(svgs) = self.cached_svgs.clone() {
+                                    let filtered: Vec<_> = svgs
+                                        .into_iter()
+                                        .filter(|s| {
+                                            aabb_intersects_any(
+                                                [s.x, s.y, s.width, s.height],
+                                                &damaged,
+                                            )
+                                        })
+                                        .collect();
+                                    if !filtered.is_empty() {
+                                        self.render_rasterized_svgs(
+                                            &static_view,
+                                            &filtered,
+                                            scale_factor,
+                                        );
+                                    }
+                                }
+                                // Image re-dispatch — same coordinate
+                                // convention. Filter cached images by
+                                // damage intersection then dispatch
+                                // through the standard image path,
+                                // which routes through `render_images`
+                                // whose render pass honours
+                                // `pending_scissor`.
+                                if let Some(images) = self.cached_images.clone() {
+                                    let filtered_refs: Vec<&ImageElement> = images
+                                        .iter()
+                                        .filter(|i| {
+                                            aabb_intersects_any(
+                                                [i.x, i.y, i.width, i.height],
+                                                &damaged,
+                                            )
+                                        })
+                                        .collect();
+                                    if !filtered_refs.is_empty() {
+                                        self.render_images_ref(&static_view, &filtered_refs);
                                     }
                                 }
                                 self.renderer.clear_pending_scissor();
