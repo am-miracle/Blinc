@@ -4329,12 +4329,33 @@ impl GpuRenderer {
     /// `self.bind_groups.sdf`, so ALL render paths automatically get the atlas
     /// without needing to thread it through every method.
     ///
-    /// Uses pointer comparison to avoid recreating the bind group when the atlas
-    /// hasn't changed between frames.
+    /// Always rebuilds the bind group. The previous pointer-equality
+    /// optimisation was a false-negative trap: `text_ctx` replaces
+    /// the `atlas_view` field *in place* (same `Option<TextureView>`
+    /// memory address, different inner `Arc`) when the atlas grows.
+    /// The borrowed reference `atlas_view as *const TextureView`
+    /// returned the same pointer before and after growth, so the
+    /// check thought "no change" while the underlying view was a
+    /// different texture — the bind group kept the OLD view's Arc
+    /// and subsequent glyph samples landed in the old atlas.
     ///
-    /// SAFETY: The raw pointers stored in `active_glyph_atlas` must remain valid
-    /// for the duration of the frame. This is guaranteed because they point to
-    /// TextureViews owned by the text context, which outlives all render calls.
+    /// Symptom: canvas_demo `ctx.draw_text` rendered blank because
+    /// `collect_canvas_overlay` grew the atlas after the slow
+    /// path's `set_glyph_atlas` call, the bind group stayed on the
+    /// pre-growth view, and the new glyph UVs (referring to the
+    /// post-growth atlas) sampled from the wrong texture.
+    ///
+    /// Cost of always rebuilding: one `create_bind_group` call
+    /// (~50 µs) per `set_glyph_atlas` invocation. Per frame on the
+    /// slow path that's negligible; the overlay-rebind helper
+    /// `BlincApp::rebind_glyph_atlas_for_overlay` calls this once
+    /// per `composite_frame` site, so total cost is one extra
+    /// rebuild per frame at most.
+    ///
+    /// SAFETY: The raw pointers stored in `active_glyph_atlas` must
+    /// remain valid for the duration of the frame — guaranteed
+    /// because they point to TextureViews owned by the text
+    /// context, which outlives all render calls.
     pub fn set_glyph_atlas(
         &mut self,
         atlas_view: &wgpu::TextureView,
@@ -4342,21 +4363,11 @@ impl GpuRenderer {
     ) {
         let atlas_ptr = atlas_view as *const wgpu::TextureView;
         let color_ptr = color_atlas_view as *const wgpu::TextureView;
-
-        let need_rebuild = match &self.active_glyph_atlas {
-            Some(active) => {
-                active.atlas_view_ptr != atlas_ptr || active.color_atlas_view_ptr != color_ptr
-            }
-            None => true,
-        };
-
-        if need_rebuild {
-            self.active_glyph_atlas = Some(ActiveGlyphAtlas {
-                atlas_view_ptr: atlas_ptr,
-                color_atlas_view_ptr: color_ptr,
-            });
-            self.rebind_sdf_bind_group();
-        }
+        self.active_glyph_atlas = Some(ActiveGlyphAtlas {
+            atlas_view_ptr: atlas_ptr,
+            color_atlas_view_ptr: color_ptr,
+        });
+        self.rebind_sdf_bind_group();
     }
 
     /// Get a mutable reference to the @flow pipeline cache
