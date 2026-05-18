@@ -5818,17 +5818,21 @@ impl RenderContext {
             self.cached_css_transformed_text_prims = None;
         }
 
-        // Phase 4d Opt 1: CSS-only patch fast path. When CSS
-        // animations / transitions are the *only* animation signal
-        // (no motion bindings, no visual / layout / FLIP), patch
-        // the cached batch in place via `apply_css_deltas` and
-        // re-render the static cache from the patched batch. Skips
-        // the walker and `collect_elements_recursive` — the two
-        // biggest CPU costs on a CSS-only frame.
+        // Phase 4d/f: CSS-only patch fast path. When CSS animations
+        // / transitions are the *only* animation signal (no motion
+        // bindings, no visual / layout / FLIP), patch the cached
+        // batch in place via `apply_css_deltas` and re-render the
+        // static cache from the patched batch. Skips the walker and
+        // `collect_elements_recursive` — the two biggest CPU costs
+        // on a CSS-only frame.
         //
-        // Gated on `BLINC_CSS_PATCH=1` until validated across the
-        // demo set. Phase 4f relaxes windowed's `!css_active` gate
-        // so this fires by default once we're confident.
+        // Phase 4f relaxed the previous `BLINC_CSS_PATCH=1` opt-in:
+        // the path now engages by default. The per-record eligibility
+        // checks below (cached batch present + static layer valid +
+        // walker has populated records) keep the path correct for
+        // cold-start frames — first CSS frame after a structural
+        // change falls through to slow path, which repopulates the
+        // records; subsequent frames take the fast path.
         //
         // Bails (falls through to slow path) on:
         //   - Motion bindings or other animations active (motion
@@ -5849,11 +5853,7 @@ impl RenderContext {
         //     path), text / SVG / image dispatch from cached
         //     vectors (same as slow path).
         //   - Net ≈ 1 ms saved per CSS-only frame, ~6 % at 60 fps.
-        //   - Phase 4d Opt 2 (scissored damage rect) shrinks the
-        //     GPU dispatch cost too; this is the staging step.
-        let css_patch_enabled = std::env::var("BLINC_CSS_PATCH").as_deref() == Ok("1");
-        let css_patch_eligible = css_patch_enabled
-            && css_only_active
+        let css_patch_eligible = css_only_active
             && !bindings_animating
             && self.cached_bg_batch.is_some()
             && self.renderer.static_layer_valid()
