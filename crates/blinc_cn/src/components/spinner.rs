@@ -1,7 +1,7 @@
 //! Spinner component for loading indicators
 //!
 //! A circular loading indicator that uses motion + clip-path to render a
-//! rotating 270° arc on top of a static track ring. Two primitives total
+//! rotating 180° arc on top of a static track ring. Two primitives total
 //! (track + arc), so the static cache holds the track and only the arc's
 //! single motion-bound primitive is dispatched per frame.
 //!
@@ -75,7 +75,7 @@ impl SpinnerSize {
 /// Animated spinner component for loading indicators
 ///
 /// Renders as a static track ring + a motion-bound arc div whose visible
-/// region is masked by a clip-path polygon to 270°. The arc's rotation
+/// region is masked by a clip-path polygon to 180°. The arc's rotation
 /// comes from a timeline-driven `motion().rotate_timeline()`; under the
 /// compositor's dynamic-batch routing the static cache never invalidates
 /// while the spinner spins.
@@ -170,18 +170,16 @@ impl Spinner {
             id
         });
 
-        // Polygon mask: L-shape covering the bottom-left + bottom-right +
-        // top-left quadrants. Top-right quadrant is masked out, leaving a
-        // 270° visible arc on the ring. Vertices in element-local coords;
-        // they rotate with motion's timeline rotation thanks to the
-        // shader's `sp - bounds.xy` polygon test.
+        // Polygon mask: rectangle covering the left half. The right half
+        // of the ring is masked out, leaving a 180° visible arc.
+        // Vertices in element-local coords; they rotate with motion's
+        // timeline rotation thanks to the shader's `sp - bounds.xy`
+        // polygon test.
         let polygon = ClipPath::Polygon {
             points: vec![
                 (ClipLength::Px(0.0), ClipLength::Px(0.0)),
                 (ClipLength::Px(half), ClipLength::Px(0.0)),
-                (ClipLength::Px(half), ClipLength::Px(half)),
-                (ClipLength::Px(diameter), ClipLength::Px(half)),
-                (ClipLength::Px(diameter), ClipLength::Px(diameter)),
+                (ClipLength::Px(half), ClipLength::Px(diameter)),
                 (ClipLength::Px(0.0), ClipLength::Px(diameter)),
             ],
         };
