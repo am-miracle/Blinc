@@ -178,6 +178,124 @@ impl RenderTree {
         }
     }
 
+    /// Re-walk a single dynamic region's subtree onto `ctx`, replaying
+    /// the saved ambient state captured during the last full paint.
+    ///
+    /// Used by the compositor's fast path on frames where the only
+    /// thing that changed is a CSS animation / transition: instead of
+    /// running the full walker against the whole tree (which is what
+    /// `try_render_with_compositor` does today when `css_anim_active`
+    /// flips the cache-invalidation gate), the compositor iterates
+    /// `dynamic_regions` and calls this for each `CssAnimated` /
+    /// `MotionSubtree` region. The static-cache texture is left
+    /// untouched and only the dynamic batch is refreshed with fresh
+    /// primitive values.
+    ///
+    /// The walker emits the region's primitives into `ctx`'s active
+    /// batch — when caller pre-pushes `push_motion_subtree` the emit
+    /// routes into `dynamic_batch`, exactly mirroring the main
+    /// walker's behaviour at the same subtree root.
+    ///
+    /// Side-effect HashMaps on `RenderTree` (`composite_bindings`,
+    /// `canvas_paint_records`, `painted_node_ids`, `dynamic_regions`)
+    /// are re-written by the recursive walk. Each entry is idempotent
+    /// — same key, same content modulo the freshened animation values
+    /// — so re-invocation produces the same map state plus updated
+    /// per-binding deltas. The compositor doesn't `clear()` these
+    /// before re-walking; it relies on overwrite semantics.
+    ///
+    /// All three render layers (Background / Glass / Foreground) are
+    /// walked in sequence; the caller's `ctx.set_foreground_layer`
+    /// toggle is restored on return.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_dynamic_region(
+        &self,
+        ctx: &mut dyn DrawContext,
+        region: &super::super::DynamicRegion,
+        render_state: &crate::render_state::RenderState,
+    ) {
+        let ambient = &region.ambient;
+
+        // Replay the ancestor clip stack BEFORE the affine — the same
+        // ordering `collect_canvas_overlay` uses, so the clip rect
+        // is kept in screen coords by pushing on the identity affine.
+        let mut pushed_clip = false;
+        if let Some([cx, cy, cw, ch]) = ambient.clip_aabb {
+            if cw > 0.0 && ch > 0.0 {
+                ctx.push_clip(blinc_core::layer::ClipShape::rect(blinc_core::Rect::new(
+                    cx, cy, cw, ch,
+                )));
+                pushed_clip = true;
+            } else {
+                // Empty intersection — region is fully clipped out
+                // this frame. Skip emission.
+                return;
+            }
+        }
+
+        // Push the parent-environment affine that was active when the
+        // walker reached the region's root last full paint.
+        let parent_affine = blinc_core::layer::Affine2D {
+            elements: ambient.affine,
+        };
+        ctx.push_transform(blinc_core::Transform::Affine2D(parent_affine));
+        ctx.push_opacity(ambient.opacity);
+        let saved_z = ctx.z_layer();
+        ctx.set_z_layer(ambient.z_layer);
+
+        // Background pass.
+        ctx.set_foreground_layer(false);
+        self.render_layer_with_motion(
+            ctx,
+            region.root,
+            (0.0, 0.0),
+            crate::element::RenderLayer::Background,
+            0,
+            false,
+            render_state,
+            1.0,
+            (0.0, 0.0),
+        );
+        // Glass pass.
+        self.render_layer_with_motion(
+            ctx,
+            region.root,
+            (0.0, 0.0),
+            crate::element::RenderLayer::Glass,
+            0,
+            false,
+            render_state,
+            1.0,
+            (0.0, 0.0),
+        );
+        // Foreground pass.
+        ctx.set_foreground_layer(true);
+        self.render_layer_with_motion(
+            ctx,
+            region.root,
+            (0.0, 0.0),
+            crate::element::RenderLayer::Foreground,
+            0,
+            false,
+            render_state,
+            1.0,
+            (0.0, 0.0),
+        );
+
+        // Tear down: leave the foreground flag in the same state we
+        // entered with (the foreground pass set it true on the last
+        // call). z-layer, opacity, transform, optional clip restored
+        // in reverse order so the caller's paint context returns to
+        // its pre-call state.
+        ctx.set_foreground_layer(false);
+        ctx.set_z_layer(saved_z);
+        ctx.pop_opacity();
+        ctx.pop_transform();
+        if pushed_clip {
+            ctx.pop_clip();
+        }
+    }
+
     /// Render a layer with motion animation support
     ///
     /// The `inherited_opacity` parameter allows parent motion containers to pass
