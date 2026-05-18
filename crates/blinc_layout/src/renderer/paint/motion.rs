@@ -731,8 +731,35 @@ impl RenderTree {
         let has_3d_shape =
             render_node.props.depth.unwrap_or(0.0) > 0.0 || render_node.props.shape_3d.is_some();
         let use_3d_layer = has_3d_css_transform && !has_3d_shape;
-        let has_opacity_layer =
-            node_motion_opacity < 1.0 || has_layer_effects || has_blend_mode || use_3d_layer;
+        // Hybrid opacity flatten (Phase 4a): if `opacity < 1.0` is
+        // the *only* reason we'd push a layer (no blur / drop-shadow /
+        // blend / 3D), and the element is structurally simple enough
+        // that per-primitive alpha gives the correct result, skip the
+        // layer push entirely and multiply opacity into descendants'
+        // primitive colours instead. Same model `apply_binding_deltas`
+        // uses for motion-bound opacity.
+        //
+        // Pre-fix, pure-opacity layers were pushed but then silently
+        // dropped by `render_with_clear_simple` / `render_with_layer_effects`
+        // (their `effect_layers` gate only matched layers with
+        // effects / blend / 3D), so the configured opacity went
+        // nowhere — CSS `@keyframes` like pulse / glow that animate
+        // only `opacity` never actually rendered the keyframed alpha.
+        //
+        // The `safe_to_flatten` check is conservative for first cut:
+        // we flatten only when the element has at most one child.
+        // Anything more complex (multiple children, possible overlap,
+        // nested opacity) takes the push_layer path, which the
+        // renderer now processes correctly via the relaxed
+        // `effect_layers` gate in `render_with_layer_effects`.
+        let only_opacity_drives_layer = node_motion_opacity < 1.0
+            && !has_layer_effects
+            && !has_blend_mode
+            && !use_3d_layer;
+        let safe_to_flatten = self.layout_tree.children(node).len() <= 1;
+        let can_flatten_opacity = only_opacity_drives_layer && safe_to_flatten;
+        let has_opacity_layer = !can_flatten_opacity
+            && (node_motion_opacity < 1.0 || has_layer_effects || has_blend_mode || use_3d_layer);
         let should_push_layer = has_opacity_layer && effective_layer == target_layer;
         if should_push_layer {
             // Scale layer effect radii by DPI factor (CSS px → physical px)

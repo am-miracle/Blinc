@@ -4946,12 +4946,17 @@ impl GpuRenderer {
         // This prevents memory bloat from accumulated large textures
         self.layer_texture_cache.evict_oversized();
 
-        // Check if we have layer commands with effects, blend modes, or 3D transforms
+        // Check whether any layer command needs the layer-aware path.
+        // Phase 4a: include pure-opacity layers so `config.opacity`
+        // actually reaches the composite blit. Without this, opacity-
+        // only `@keyframes` rendered at full alpha (the simple path
+        // ignores layer commands entirely).
         let has_layer_effects = batch.layer_commands.iter().any(|entry| {
             if let crate::primitives::LayerCommand::Push { config } = &entry.command {
                 !config.effects.is_empty()
                     || config.blend_mode != blinc_core::BlendMode::Normal
                     || config.transform_3d.is_some()
+                    || config.opacity < 1.0
             } else {
                 false
             }
@@ -5200,10 +5205,27 @@ impl GpuRenderer {
                 }
                 LayerCommand::Pop => {
                     if let Some((start, config)) = layer_stack.pop() {
-                        if !config.effects.is_empty()
+                        // Phase 4a: include pure-opacity layers
+                        // (`config.opacity < 1.0` alone). Pre-fix the
+                        // gate required effects / blend / 3D; pure-
+                        // opacity layers were silently dropped — their
+                        // primitives rendered at full alpha in the
+                        // first pass and `config.opacity` went
+                        // nowhere. The walker's hybrid flatten now
+                        // skips `push_layer` for simple-enough opacity
+                        // subtrees (children.len() <= 1) so those
+                        // don't reach this gate at all; what does
+                        // reach is the cases that genuinely need a
+                        // layer composite (overlapping children,
+                        // nested opacity), and they get correct
+                        // offscreen-then-composite rendering via
+                        // `blit_tight_texture_to_target`, which reads
+                        // `config.opacity`.
+                        let has_effect_or_blend_or_3d = !config.effects.is_empty()
                             || config.blend_mode != blinc_core::BlendMode::Normal
-                            || config.transform_3d.is_some()
-                        {
+                            || config.transform_3d.is_some();
+                        let has_pure_opacity = config.opacity < 1.0;
+                        if has_effect_or_blend_or_3d || has_pure_opacity {
                             effect_layers.push(EffectLayerRange {
                                 primitive_start: start.primitive_start,
                                 primitive_end: entry.primitive_index,
@@ -6708,10 +6730,16 @@ impl GpuRenderer {
     /// * `target` - The single-sampled texture view to render to (existing content is preserved)
     /// * `batch` - The primitive batch to render
     pub fn render_overlay(&mut self, target: &wgpu::TextureView, batch: &PrimitiveBatch) {
-        // Check if we have layer commands with effects or blend modes that need processing
+        // Phase 4a: include pure-opacity layers in the gate so an
+        // overlay containing only opacity-animated content takes the
+        // layer-aware path (which actually composites with the
+        // configured opacity) instead of the simple path (which drops
+        // layer commands entirely).
         let has_layer_processing = batch.layer_commands.iter().any(|entry| {
             if let crate::primitives::LayerCommand::Push { config } = &entry.command {
-                !config.effects.is_empty() || config.blend_mode != blinc_core::BlendMode::Normal
+                !config.effects.is_empty()
+                    || config.blend_mode != blinc_core::BlendMode::Normal
+                    || config.opacity < 1.0
             } else {
                 false
             }
@@ -6823,10 +6851,15 @@ impl GpuRenderer {
                 }
                 LayerCommand::Pop => {
                     if let Some((start_idx, config)) = layer_stack.pop() {
-                        if !config.effects.is_empty()
+                        // Phase 4a: pure-opacity layers also need
+                        // processing so `config.opacity` reaches the
+                        // composite blit instead of being silently
+                        // dropped.
+                        let needs_processing = !config.effects.is_empty()
                             || config.blend_mode != blinc_core::BlendMode::Normal
                             || config.transform_3d.is_some()
-                        {
+                            || config.opacity < 1.0;
+                        if needs_processing {
                             effect_layers.push((start_idx, entry.primitive_index, config));
                         }
                     }
