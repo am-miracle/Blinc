@@ -665,6 +665,17 @@ impl RenderContext {
     /// Safe to call even when no cache is set (clears the companion
     /// vecs unconditionally for symmetry).
     pub fn invalidate_render_cache(&mut self) {
+        self.invalidate_render_cache_tagged("unspecified");
+    }
+
+    pub fn invalidate_render_cache_tagged(&mut self, source: &'static str) {
+        if self.cached_bg_batch.is_some() {
+            tracing::trace!(
+                target: "blinc_app::frame_timing",
+                source,
+                "invalidate_render_cache",
+            );
+        }
         self.cached_bg_batch = None;
         self.cached_dynamic_batch = None;
         self.cached_texts = None;
@@ -7363,6 +7374,11 @@ impl RenderContext {
         // For cn_demo with ~400 primitives that's ~110 KB / frame
         // memcpy — ~30 µs on M-series silicon — in exchange for
         // skipping the full paint walker on follow-up frames.
+        tracing::trace!(
+            target: "blinc_app::frame_timing",
+            primitives = batch.primitives.len(),
+            "cached_bg_batch_set",
+        );
         self.cached_bg_batch = Some(batch.clone());
 
         let has_glass = batch.glass_count() > 0;

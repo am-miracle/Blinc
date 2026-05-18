@@ -273,6 +273,10 @@ impl BlincApp {
         self.ctx.invalidate_render_cache();
     }
 
+    pub fn invalidate_render_cache_tagged(&mut self, source: &'static str) {
+        self.ctx.invalidate_render_cache_tagged(source);
+    }
+
     /// Set the alpha used when clearing the main render target.
     ///
     /// The desktop runner calls this before each window's render so that
