@@ -5951,25 +5951,53 @@ impl RenderContext {
         if css_patch_eligible {
             let scale_factor = tree.scale_factor();
             if self.apply_css_deltas(tree, scale_factor) {
-                // Re-render the static cache from the patched batch.
-                // Without this, `composite_frame` blits the stale
-                // texture from the last slow-path frame and the
-                // patched primitive values never reach pixels.
                 let batch_clone = self
                     .cached_bg_batch
                     .as_ref()
                     .expect("css_patch_eligible implies cached_bg_batch is Some")
                     .clone();
-                self.renderer
-                    .render_static_layer(&batch_clone, [0.0, 0.0, 0.0, self.clear_alpha as f64]);
-                // Re-dispatch text / SVG / image on top of the
-                // freshly-rendered cache. `render_static_layer`
-                // clears the cache before re-rendering SDF, so
-                // glyphs / SVGs / images that were composited on
-                // top last paint need to land again.
+
+                // Phase 4d Opt 2: try the scissored cache repaint
+                // first. `render_static_layer_damaged` re-renders
+                // only the union of `last_css_damage_rects`,
+                // preserving the rest of the cache via LoadOp::Load.
+                // Falls back to false today on any batch with
+                // `layer_commands` / paths / 3D viewports / particles
+                // — Task 3 extends it to handle layer_commands so
+                // CSS animations whose walker emitted opacity / blur
+                // / 3D layers stay on the damaged path. Batches
+                // without layer commands engage already.
+                let damaged = self.last_css_damage_rects.clone();
+                let damaged_ok = !damaged.is_empty()
+                    && self
+                        .renderer
+                        .render_static_layer_damaged(&damaged, &batch_clone);
+
+                if !damaged_ok {
+                    // Full-cache re-render fallback (Phase 4d Opt 1
+                    // behaviour). Used when the damaged path bailed
+                    // — e.g., batch has layer_commands the
+                    // damage-rect code can't replay yet, or no
+                    // records moved this frame so there's nothing
+                    // to scissor.
+                    self.renderer.render_static_layer(
+                        &batch_clone,
+                        [0.0, 0.0, 0.0, self.clear_alpha as f64],
+                    );
+                }
+
+                // Re-dispatch text / SVG / image. When the damaged
+                // path engaged, only the cache region inside the
+                // damage union was cleared + repainted; we filter
+                // cached vectors to those intersecting the damage
+                // and dispatch through `pending_scissor` so the
+                // writes stay inside the cleared region. When the
+                // full-cache fallback ran, dispatch every cached
+                // vector unfiltered — the whole cache needs
+                // re-stamping.
                 //
                 // Cached vectors are from the last slow-path frame.
-                // For pure visual / 3D-transform / color CSS
+                // For pure visual / 3D-transform / colour CSS
                 // animations they stay valid (positions don't
                 // shift). Layout animations would invalidate them,
                 // but layout properties trigger an
@@ -5977,27 +6005,104 @@ impl RenderContext {
                 // here with stale positions.
                 let static_view_opt = self.renderer.static_layer_view().cloned();
                 if let Some(static_view) = static_view_opt {
-                    if let Some(glyphs_by_layer) = self.cached_glyphs_by_layer.clone() {
-                        for (_z, glyphs) in glyphs_by_layer.iter() {
-                            if !glyphs.is_empty() {
-                                self.render_text(&static_view, glyphs);
+                    if damaged_ok {
+                        let union = damage_union(&damaged);
+                        if let Some(scissor) =
+                            damage_scissor_from_union(union, &self.renderer)
+                        {
+                            self.renderer.set_pending_scissor(scissor);
+                            if let Some(glyphs_by_layer) =
+                                self.cached_glyphs_by_layer.clone()
+                            {
+                                for (_z, glyphs) in glyphs_by_layer.iter() {
+                                    let filtered: Vec<_> = glyphs
+                                        .iter()
+                                        .filter(|g| aabb_intersects_any(g.bounds, &damaged))
+                                        .copied()
+                                        .collect();
+                                    if !filtered.is_empty() {
+                                        self.render_text(&static_view, &filtered);
+                                    }
+                                }
+                            }
+                            if let Some(fg_glyphs) = self.cached_fg_glyphs.clone() {
+                                let filtered: Vec<_> = fg_glyphs
+                                    .iter()
+                                    .filter(|g| aabb_intersects_any(g.bounds, &damaged))
+                                    .copied()
+                                    .collect();
+                                if !filtered.is_empty() {
+                                    self.render_text(&static_view, &filtered);
+                                }
+                            }
+                            if let Some(svgs) = self.cached_svgs.clone() {
+                                let filtered: Vec<_> = svgs
+                                    .into_iter()
+                                    .filter(|s| {
+                                        aabb_intersects_any(
+                                            [s.x, s.y, s.width, s.height],
+                                            &damaged,
+                                        )
+                                    })
+                                    .collect();
+                                if !filtered.is_empty() {
+                                    self.render_rasterized_svgs(
+                                        &static_view,
+                                        &filtered,
+                                        scale_factor,
+                                    );
+                                }
+                            }
+                            if let Some(images) = self.cached_images.clone() {
+                                let filtered_refs: Vec<&ImageElement> = images
+                                    .iter()
+                                    .filter(|i| {
+                                        aabb_intersects_any(
+                                            [i.x, i.y, i.width, i.height],
+                                            &damaged,
+                                        )
+                                    })
+                                    .collect();
+                                if !filtered_refs.is_empty() {
+                                    self.render_images_ref(
+                                        &static_view,
+                                        &filtered_refs,
+                                    );
+                                }
+                            }
+                            self.renderer.clear_pending_scissor();
+                        }
+                    } else {
+                        // Full re-dispatch (no scissor) — cache was
+                        // fully cleared by `render_static_layer`.
+                        if let Some(glyphs_by_layer) =
+                            self.cached_glyphs_by_layer.clone()
+                        {
+                            for (_z, glyphs) in glyphs_by_layer.iter() {
+                                if !glyphs.is_empty() {
+                                    self.render_text(&static_view, glyphs);
+                                }
                             }
                         }
-                    }
-                    if let Some(fg_glyphs) = self.cached_fg_glyphs.clone() {
-                        if !fg_glyphs.is_empty() {
-                            self.render_text(&static_view, &fg_glyphs);
+                        if let Some(fg_glyphs) = self.cached_fg_glyphs.clone() {
+                            if !fg_glyphs.is_empty() {
+                                self.render_text(&static_view, &fg_glyphs);
+                            }
                         }
-                    }
-                    if let Some(svgs) = self.cached_svgs.clone() {
-                        if !svgs.is_empty() {
-                            self.render_rasterized_svgs(&static_view, &svgs, scale_factor);
+                        if let Some(svgs) = self.cached_svgs.clone() {
+                            if !svgs.is_empty() {
+                                self.render_rasterized_svgs(
+                                    &static_view,
+                                    &svgs,
+                                    scale_factor,
+                                );
+                            }
                         }
-                    }
-                    if let Some(images) = self.cached_images.clone() {
-                        if !images.is_empty() {
-                            let refs: Vec<&ImageElement> = images.iter().collect();
-                            self.render_images_ref(&static_view, &refs);
+                        if let Some(images) = self.cached_images.clone() {
+                            if !images.is_empty() {
+                                let refs: Vec<&ImageElement> = images.iter().collect();
+                                self.render_images_ref(&static_view, &refs);
+                            }
                         }
                     }
                 }
