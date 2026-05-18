@@ -981,6 +981,102 @@ impl RenderContext {
         overlay
     }
 
+    /// Re-walk every `DynamicRegion` in the tree onto a scratch
+    /// `GpuPaintContext` and return the combined emitted batch.
+    /// Used by the compositor fast path on CSS-only animation frames
+    /// to refresh the per-region primitives without re-walking the
+    /// whole tree (or re-painting the static cache).
+    ///
+    /// The scratch context is pushed into `motion_subtree` for the
+    /// duration of each region's re-walk so primitive emissions go
+    /// to `dynamic_batch`. Both batches (`batch` + `dynamic_batch`)
+    /// are drained at the end and concatenated — content emitted
+    /// outside a nested motion-subtree push still lands in `batch`
+    /// for correctness (e.g. a CSS-animated parent whose primitive
+    /// is emitted before push_motion_subtree fires for a
+    /// motion-bound child).
+    ///
+    /// Aux-data offsets in the returned primitives index into the
+    /// returned `aux_data`; callers forward both to `composite_frame`.
+    fn collect_dynamic_region_primitives(
+        &self,
+        tree: &blinc_layout::RenderTree,
+        render_state: &blinc_layout::RenderState,
+        width: u32,
+        height: u32,
+    ) -> blinc_gpu::PrimitiveBatch {
+        use blinc_core::DrawContext;
+        use blinc_gpu::{GpuPaintContext, PrimitiveBatch};
+
+        let regions = tree.dynamic_regions();
+        if regions.is_empty() {
+            return PrimitiveBatch::new();
+        }
+
+        // One scratch context handles every region — its transform /
+        // opacity / clip stacks return to identity between regions
+        // because `render_dynamic_region` is balanced. `batch` and
+        // `dynamic_batch` accumulate across the iteration; we collect
+        // both at the end and merge into the returned batch.
+        let mut scratch = GpuPaintContext::new(width as f32, height as f32);
+
+        // Order by z_layer so the per-frame overlay paints
+        // higher-layer regions on top of lower-layer ones (stable
+        // sort on (z, root) keeps the walker's tree-order as the
+        // tiebreaker — same convention `collect_canvas_overlay`
+        // uses).
+        let mut ordered: Vec<_> = regions.values().cloned().collect();
+        drop(regions);
+        ordered.sort_by(|a, b| {
+            a.ambient
+                .z_layer
+                .cmp(&b.ambient.z_layer)
+                .then_with(|| a.root.cmp(&b.root))
+        });
+
+        for region in &ordered {
+            // Apply DPI scale just like `render_with_motion` does for
+            // the root pass — the ambient affine was captured in
+            // physical-pixel space already, but the walker's
+            // `Transform::translate(bounds.x, bounds.y)` adds logical
+            // coordinates, so the DPI scale needs to wrap the call.
+            let has_scale = tree.scale_factor() != 1.0;
+            if has_scale {
+                scratch.push_transform(blinc_core::Transform::scale(
+                    tree.scale_factor(),
+                    tree.scale_factor(),
+                ));
+            }
+            // The region's root is dynamic by definition — wrap the
+            // re-walk in `push_motion_subtree` so emit routes into
+            // `dynamic_batch` for consistency with the slow-path
+            // walker's routing.
+            scratch.push_motion_subtree();
+            tree.render_dynamic_region(&mut scratch as &mut dyn DrawContext, region, render_state);
+            scratch.pop_motion_subtree();
+            if has_scale {
+                scratch.pop_transform();
+            }
+        }
+
+        // Drain the dynamic batch. The collect-time `push_motion_subtree`
+        // around each region's re-walk routes every emit into
+        // `dynamic_batch`, so the scratch's `batch` should always
+        // come back empty here. If a future change breaks that
+        // invariant we'd silently drop primitives, so debug-assert
+        // it and ignore the static batch's contents (any primitive
+        // there carries `aux_data` offsets pointing into a different
+        // batch's aux array and can't be safely merged without
+        // re-indexing them).
+        let out = scratch.take_dynamic_batch();
+        debug_assert!(
+            scratch.take_batch().primitives.is_empty(),
+            "collect_dynamic_region_primitives: scratch.batch should be empty — \
+             region re-walk emitted outside its motion-subtree gate"
+        );
+        out
+    }
+
     /// frames in a row would double-apply).
     pub fn apply_binding_deltas(&mut self, tree: &blinc_layout::RenderTree, scale: f32) -> bool {
         self.last_binding_damage_rects.clear();
@@ -5233,11 +5329,32 @@ impl RenderContext {
             };
             active
         };
+        // CSS animations / transitions no longer force a static-cache
+        // invalidation on their own — Phase 3a routed the CSS-animated
+        // subtrees out of the static batch and into `dynamic_batch`
+        // (via `push_motion_subtree`), and the compositor's fast path
+        // refreshes those regions by per-region re-walking
+        // (`tree.render_dynamic_region` for each entry in
+        // `dynamic_regions`). The static cache content is unchanged
+        // across CSS-active frames, so re-painting it is wasted work.
+        //
+        // Other animation systems still go through the slow path
+        // because they mutate properties on nodes the walker emits
+        // into the static batch (visual / layout animations resize
+        // and reposition elements; FLIP / motion FSM enter-exit can
+        // restructure things; spring values that drive both motion
+        // bindings and CSS keyframes on the same node need a
+        // re-walk).
         let other_animations_active = render_state.has_active_motions()
             || tree.has_active_visual_animations()
             || tree.has_active_layout_animations()
-            || tree.has_active_flip_animations()
-            || css_anim_active;
+            || tree.has_active_flip_animations();
+        // The CSS-only frame predicate gates the per-region re-walk
+        // step below: only fire when CSS is the ONLY animation source
+        // touching primitives this frame, so we don't double-paint
+        // motion-bound subtrees that `apply_binding_deltas` is
+        // already updating in place.
+        let css_only_active = css_anim_active && !other_animations_active;
         // Diagnostic: name the predicate that's invalidating the
         // static cache. Pinpoints which animation source keeps the
         // compositor slow path active in steady state. Off unless
@@ -5369,15 +5486,23 @@ impl RenderContext {
             // untouched. Used by all the cn motion widgets — switch
             // thumb, progress indicator, slider thumb, sortable drag
             // preview, etc.
-            if bindings_animating && self.cached_dynamic_batch.is_some() {
-                let scale_factor = tree.scale_factor();
-                let _ = self.apply_binding_deltas(tree, scale_factor);
-            }
-
+            // Single `apply_binding_deltas` per frame. Previously the
+            // damage-rect path called it again after the unconditional
+            // motion-binding update — the second call saw zero deltas
+            // (because the first had already advanced `last_translate`
+            // / `last_rotation_rad` / etc.) so `last_binding_damage_rects`
+            // came back empty and the scissored repaint step never
+            // ran. One call collects damage rects AND patches the
+            // cached dynamic batch in the same pass; the rect set is
+            // then consumed by the damage-rect branch below.
             let mut damage_rect_failed = false;
-            if damage_rect_eligible && self.cached_bg_batch.is_some() {
+            let patched = if bindings_animating && self.cached_dynamic_batch.is_some() {
                 let scale_factor = tree.scale_factor();
-                let patched = self.apply_binding_deltas(tree, scale_factor);
+                self.apply_binding_deltas(tree, scale_factor)
+            } else {
+                true
+            };
+            if damage_rect_eligible && self.cached_bg_batch.is_some() {
                 if !patched {
                     // `apply_binding_deltas` bailed (typically the
                     // last-opacity-is-zero guard — opacity binding
@@ -5420,21 +5545,31 @@ impl RenderContext {
                         self.cached_fg_glyphs = None;
                         self.cached_css_transformed_text_prims = None;
                     } else {
-                        // Re-dispatch text glyphs whose bounds
-                        // intersect the union damage rect into the
-                        // static layer, with `pending_scissor` set
-                        // to confine the writes to the just-cleared
-                        // region. Without this, any text painted on
-                        // the previous slow paint inside the damage
-                        // rect would be wiped by the scissored
-                        // clear in `render_static_layer_damaged` and
-                        // not restored — the "vibrating text" bug
-                        // the env-var was guarding against.
+                        // Re-dispatch any glyph / SVG / image that
+                        // intersects the damage rect, with
+                        // `pending_scissor` set so the writes are
+                        // confined to the just-cleared region.
+                        // `render_static_layer_damaged` only re-paints
+                        // SDF primitives; without this re-dispatch the
+                        // scissored clear wipes everything else that
+                        // was previously painted in the same pixels
+                        // — text, SVG icons, raster images — and
+                        // they wouldn't reappear until the next full
+                        // slow-path paint. Phase 4 of the compositor
+                        // plan, finally making `BLINC_DAMAGE_RECT=1`
+                        // safe.
+                        //
+                        // Each render method (`render_text`,
+                        // `render_rasterized_svgs`, `render_images_ref`)
+                        // honours `pending_scissor` internally — it
+                        // gets applied to the underlying render pass
+                        // via `wgpu::RenderPass::set_scissor_rect`.
                         let static_view_opt = self.renderer.static_layer_view().cloned();
                         if let Some(static_view) = static_view_opt {
                             let union = damage_union(&damaged);
                             if let Some(scissor) = damage_scissor_from_union(union, &self.renderer)
                             {
+                                let scale_factor = tree.scale_factor();
                                 self.renderer.set_pending_scissor(scissor);
                                 if let Some(glyphs_by_layer) = self.cached_glyphs_by_layer.clone() {
                                     for (_z, glyphs) in glyphs_by_layer.iter() {
@@ -5456,6 +5591,50 @@ impl RenderContext {
                                         .collect();
                                     if !filtered.is_empty() {
                                         self.render_text(&static_view, &filtered);
+                                    }
+                                }
+                                // SVG re-dispatch. `SvgElement` x/y/w/h
+                                // are stored in physical pixels (the
+                                // collect path multiplies by
+                                // `scale_factor`), so they share the
+                                // damage rects' coordinate space.
+                                if let Some(svgs) = self.cached_svgs.clone() {
+                                    let filtered: Vec<_> = svgs
+                                        .into_iter()
+                                        .filter(|s| {
+                                            aabb_intersects_any(
+                                                [s.x, s.y, s.width, s.height],
+                                                &damaged,
+                                            )
+                                        })
+                                        .collect();
+                                    if !filtered.is_empty() {
+                                        self.render_rasterized_svgs(
+                                            &static_view,
+                                            &filtered,
+                                            scale_factor,
+                                        );
+                                    }
+                                }
+                                // Image re-dispatch — same coordinate
+                                // convention. Filter cached images by
+                                // damage intersection then dispatch
+                                // through the standard image path,
+                                // which routes through `render_images`
+                                // whose render pass honours
+                                // `pending_scissor`.
+                                if let Some(images) = self.cached_images.clone() {
+                                    let filtered_refs: Vec<&ImageElement> = images
+                                        .iter()
+                                        .filter(|i| {
+                                            aabb_intersects_any(
+                                                [i.x, i.y, i.width, i.height],
+                                                &damaged,
+                                            )
+                                        })
+                                        .collect();
+                                    if !filtered_refs.is_empty() {
+                                        self.render_images_ref(&static_view, &filtered_refs);
                                     }
                                 }
                                 self.renderer.clear_pending_scissor();
@@ -5503,6 +5682,23 @@ impl RenderContext {
                 // the polygon discard, producing the cn_demo "all
                 // grey rings, no rotating arc" symptom. Borrow the
                 // aux_data slice in place — no per-frame allocation.
+                //
+                // CSS-only animation frames: per-region re-walk
+                // refreshes every `DynamicRegion`'s primitives at the
+                // current animation state. We write the walked batch
+                // back into `cached_dynamic_batch` so the next frame
+                // — even if it leaves the CSS-only path (because the
+                // animation just settled, or a motion binding started
+                // alongside it) — picks up the settled-value
+                // primitives instead of falling back to the pre-CSS
+                // slow-path snapshot. Motion-only frames keep using
+                // the cached batch as patched by
+                // `apply_binding_deltas` above.
+                if css_only_active && !tree.dynamic_regions().is_empty() {
+                    let walked =
+                        self.collect_dynamic_region_primitives(tree, render_state, width, height);
+                    self.cached_dynamic_batch = Some(walked);
+                }
                 let (dyn_prims, dyn_aux) = match self.cached_dynamic_batch.as_ref() {
                     Some(b) => (b.primitives.as_slice(), b.aux_data.as_slice()),
                     None => (&[][..], &[][..]),

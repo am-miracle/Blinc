@@ -58,7 +58,9 @@ pub use input::{
     TouchEvent,
 };
 pub use platform::Platform;
-pub use window::{AnimationThreadMode, Cursor, Window, WindowConfig, WindowId, WindowLevel};
+pub use window::{
+    AnimationFps, AnimationThreadMode, Cursor, Window, WindowConfig, WindowId, WindowLevel,
+};
 
 // Re-export commonly used asset types
 pub use assets::{AssetLoader, AssetPath, FilesystemAssetLoader};
@@ -77,6 +79,6 @@ pub mod prelude {
     };
     pub use crate::platform::Platform;
     pub use crate::window::{
-        AnimationThreadMode, Cursor, Window, WindowConfig, WindowId, WindowLevel,
+        AnimationFps, AnimationThreadMode, Cursor, Window, WindowConfig, WindowId, WindowLevel,
     };
 }

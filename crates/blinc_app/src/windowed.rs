@@ -48,6 +48,180 @@ use crate::error::{BlincError, Result};
 /// Shared animation scheduler for the application (thread-safe)
 pub type SharedAnimationScheduler = Arc<Mutex<AnimationScheduler>>;
 
+/// Pick an initial animation-FPS cap for `AnimationFps::Adaptive`
+/// based on coarse system characteristics.
+///
+/// Currently looks at logical-core count via
+/// `std::thread::available_parallelism()`. Future revisions can add
+/// GPU class (via wgpu adapter info), total RAM, and battery /
+/// power-mode signals.
+///
+/// Thresholds are conservative: the dynamic adaptation step (when it
+/// lands) will raise the cap if frames are coming in well under
+/// budget, so we err on the side of starting lower and letting the
+/// adapter climb. The animation_fps_cap field clamping further
+/// enforces sane bounds.
+///
+/// Returns:
+/// * `<= 4` cores  → 30 fps  (typical low-end laptops, older
+///   Chromebooks, single-board computers)
+/// * `<= 8` cores  → 60 fps  (mainstream desktops, recent laptops)
+/// * `>  8` cores  → 60 fps  (high-end; could be 120 but conservative)
+///
+/// Apps that want vsync regardless can set
+/// `WindowConfig::animation_fps = AnimationFps::Refresh`.
+pub(crate) fn detect_initial_fps_cap() -> u32 {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    if cores <= 4 {
+        30
+    } else {
+        60
+    }
+}
+
+/// Allowed cap values for dynamic adaptation, ascending. The adapter
+/// walks one step at a time.
+const FPS_LADDER: &[u32] = &[15, 20, 30, 45, 60, 90, 120];
+/// Multiple of the current per-frame budget (1000/cap ms) above
+/// which the window's median frame time counts as overshooting.
+const FPS_OVERSHOOT_MULT: f32 = 1.2;
+/// Multiple of the budget below which the median counts as headroom.
+const FPS_HEADROOM_MULT: f32 = 0.45;
+/// Consecutive evaluation windows of consistent signal needed before
+/// the cap moves (hysteresis to dampen transient spikes).
+const FPS_WINDOWS_TO_DROP: u32 = 2;
+const FPS_WINDOWS_TO_RAISE: u32 = 6;
+/// Frames per evaluation window (≈ 1 second at 60 fps).
+const FPS_WINDOW_FRAMES: usize = 60;
+
+/// Adapter that adjusts the animation FPS cap based on observed
+/// frame timings. Drops when the window-median frame time
+/// consistently overshoots the budget; raises when frames have
+/// substantial headroom. Only consulted under
+/// [`AnimationFps::Adaptive`]; `Fixed` / `Refresh` skip it.
+pub(crate) struct FpsAdapter {
+    current_cap: u32,
+    window: Vec<u64>,
+    consecutive_overshoot_windows: u32,
+    consecutive_headroom_windows: u32,
+}
+
+impl FpsAdapter {
+    pub(crate) fn new(initial_cap: u32) -> Self {
+        Self {
+            current_cap: clamp_to_ladder(initial_cap),
+            window: Vec::with_capacity(FPS_WINDOW_FRAMES),
+            consecutive_overshoot_windows: 0,
+            consecutive_headroom_windows: 0,
+        }
+    }
+
+    pub(crate) fn current_cap(&self) -> u32 {
+        self.current_cap
+    }
+
+    /// Record a frame's total wall-clock time. Returns the cap to
+    /// use going forward (only changes after a hysteresis tally
+    /// crosses its threshold).
+    pub(crate) fn record(&mut self, total_us: u64) -> u32 {
+        self.window.push(total_us);
+        if self.window.len() >= FPS_WINDOW_FRAMES {
+            self.evaluate();
+            self.window.clear();
+        }
+        self.current_cap
+    }
+
+    fn evaluate(&mut self) {
+        let median = window_median(&mut self.window);
+        let budget_us = (1_000_000.0 / self.current_cap as f32) as u64;
+        let drop_thresh = (budget_us as f32 * FPS_OVERSHOOT_MULT) as u64;
+        let raise_thresh = (budget_us as f32 * FPS_HEADROOM_MULT) as u64;
+        if median > drop_thresh {
+            self.consecutive_overshoot_windows =
+                self.consecutive_overshoot_windows.saturating_add(1);
+            self.consecutive_headroom_windows = 0;
+            if self.consecutive_overshoot_windows >= FPS_WINDOWS_TO_DROP {
+                let new_cap = ladder_step_down(self.current_cap);
+                if new_cap != self.current_cap {
+                    tracing::info!(
+                        "fps_adapter: dropping cap {} -> {} (median={}us budget={}us)",
+                        self.current_cap,
+                        new_cap,
+                        median,
+                        budget_us
+                    );
+                    self.current_cap = new_cap;
+                    self.consecutive_overshoot_windows = 0;
+                }
+            }
+        } else if median < raise_thresh {
+            self.consecutive_headroom_windows = self.consecutive_headroom_windows.saturating_add(1);
+            self.consecutive_overshoot_windows = 0;
+            if self.consecutive_headroom_windows >= FPS_WINDOWS_TO_RAISE {
+                let new_cap = ladder_step_up(self.current_cap);
+                if new_cap != self.current_cap {
+                    tracing::info!(
+                        "fps_adapter: raising cap {} -> {} (median={}us budget={}us)",
+                        self.current_cap,
+                        new_cap,
+                        median,
+                        budget_us
+                    );
+                    self.current_cap = new_cap;
+                    self.consecutive_headroom_windows = 0;
+                }
+            }
+        } else {
+            self.consecutive_overshoot_windows = 0;
+            self.consecutive_headroom_windows = 0;
+        }
+    }
+}
+
+fn clamp_to_ladder(target: u32) -> u32 {
+    let mut best = FPS_LADDER[0];
+    let mut best_diff = (FPS_LADDER[0] as i64 - target as i64).abs();
+    for &rung in FPS_LADDER.iter().skip(1) {
+        let diff = (rung as i64 - target as i64).abs();
+        if diff < best_diff {
+            best = rung;
+            best_diff = diff;
+        }
+    }
+    best
+}
+
+fn ladder_step_down(cap: u32) -> u32 {
+    let mut prev = cap;
+    for &rung in FPS_LADDER {
+        if rung >= cap {
+            return prev;
+        }
+        prev = rung;
+    }
+    prev
+}
+
+fn ladder_step_up(cap: u32) -> u32 {
+    for &rung in FPS_LADDER {
+        if rung > cap {
+            return rung;
+        }
+    }
+    cap
+}
+
+fn window_median(window: &mut [u64]) -> u64 {
+    if window.is_empty() {
+        return 0;
+    }
+    window.sort_unstable();
+    window[window.len() / 2]
+}
+
 // SharedAnimatedValue and SharedAnimatedTimeline are re-exported from blinc_animation
 
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
@@ -2203,13 +2377,67 @@ impl WindowedApp {
         let platform = DesktopPlatform::new().map_err(|e| BlincError::Platform(e.to_string()))?;
         let primary_transparent = config.transparent;
         let primary_max_frame_latency = config.max_frame_latency.clamp(1, 3);
-        // Snapshot the animation FPS cap before `config` moves into the
-        // event loop. `None` keeps every animation frame at native vsync
-        // (the existing behaviour, right for games / video / scrubbing
-        // UIs); `Some(N)` paces animation-only redraws via
-        // `wake_proxy.wake_at(1000/N ms)` so the chain doesn't loop at
-        // full refresh just because a slow CSS keyframe is on screen.
-        let animation_fps_cap = config.animation_fps_cap;
+        // Snapshot the animation FPS policy before `config` moves into
+        // the event loop. Reconcile the two paths:
+        //
+        // * Legacy `animation_fps_cap: Option<u32>` — when set, wins
+        //   unconditionally (treated as `AnimationFps::Fixed(N)`). Lets
+        //   existing apps keep working without code changes.
+        //
+        // * New `animation_fps: AnimationFps`:
+        //   - `Fixed(N)`     → cap at N, framework never overrides.
+        //   - `Refresh`      → no cap, vsync-paced animations.
+        //   - `Adaptive`     → framework picks a starting cap from a
+        //                       static heuristic (GPU class proxy via
+        //                       core count + total RAM) and adjusts at
+        //                       runtime based on observed frame times.
+        //
+        // `animation_fps_cap_atomic` is shared with the Phase 4
+        // adaptation logic below so the adapter can mutate the cap
+        // at runtime; the per-frame paint gate and the scheduler
+        // both read through it.
+        let initial_animation_fps_cap: Option<u32> = match config.animation_fps_cap {
+            Some(n) => Some(n),
+            None => match config.animation_fps {
+                blinc_platform::AnimationFps::Fixed(n) => Some(n),
+                blinc_platform::AnimationFps::Refresh => None,
+                blinc_platform::AnimationFps::Adaptive => Some(detect_initial_fps_cap()),
+            },
+        };
+        let animation_fps_is_adaptive = config.animation_fps_cap.is_none()
+            && matches!(config.animation_fps, blinc_platform::AnimationFps::Adaptive);
+        let animation_fps_cap = initial_animation_fps_cap;
+        tracing::info!(
+            "animation_fps: source={} cap={:?} adaptive={}",
+            if config.animation_fps_cap.is_some() {
+                "legacy_animation_fps_cap"
+            } else {
+                match config.animation_fps {
+                    blinc_platform::AnimationFps::Adaptive => "Adaptive",
+                    blinc_platform::AnimationFps::Fixed(_) => "Fixed",
+                    blinc_platform::AnimationFps::Refresh => "Refresh",
+                }
+            },
+            animation_fps_cap,
+            animation_fps_is_adaptive,
+        );
+        // Atomic cell that all per-frame paths read for the current
+        // effective cap (0 = no cap / refresh-paced). The dynamic
+        // adapter writes through this so changes flow without
+        // recompiling closures.
+        let animation_fps_cap_atomic = Arc::new(std::sync::atomic::AtomicU32::new(
+            animation_fps_cap.unwrap_or(0),
+        ));
+        // Adapter only spun up in Adaptive mode. `Fixed` / `Refresh`
+        // and legacy `Some(n)` skip it — the framework respects what
+        // the app picked.
+        let fps_adapter: Option<Arc<Mutex<FpsAdapter>>> = if animation_fps_is_adaptive {
+            Some(Arc::new(Mutex::new(FpsAdapter::new(
+                animation_fps_cap.unwrap_or(60),
+            ))))
+        } else {
+            None
+        };
         // Capture animation_thread_mode pre-move (config gets moved
         // into `create_event_loop_with_config` below). Drives whether
         // the AnimationScheduler spawns its bg thread or relies on
@@ -2916,10 +3144,20 @@ impl WindowedApp {
                                     );
 
                                     // Adapt the scheduler's tick rate to the display's
-                                    // refresh rate. Winit returns refresh in millihertz;
-                                    // clamp to a sane range so a 240/360 Hz display
-                                    // doesn't pin a CPU and a missing/zero report
-                                    // doesn't drop us to 0 fps.
+                                    // refresh rate, capped further if the app set
+                                    // `animation_fps_cap`. The scheduler ticking
+                                    // faster than the paint cap just produces
+                                    // intermediate values that get overwritten
+                                    // before the next paint reads them — wasted
+                                    // CPU on every spring / keyframe / timeline
+                                    // step. Match the effective paint cadence so
+                                    // each scheduler tick corresponds to one paint
+                                    // attempt.
+                                    //
+                                    // Winit returns refresh in millihertz; clamp to a
+                                    // sane range so a 240/360 Hz display doesn't pin
+                                    // a CPU and a missing/zero report doesn't drop us
+                                    // to 0 fps.
                                     {
                                         let refresh = window
                                             .winit_window()
@@ -2927,11 +3165,17 @@ impl WindowedApp {
                                             .and_then(|m| m.refresh_rate_millihertz())
                                             .map(|mhz| (mhz / 1000).clamp(30, 120))
                                             .unwrap_or(60);
+                                        let effective_fps = match animation_fps_cap {
+                                            Some(cap) => refresh.min(cap),
+                                            None => refresh,
+                                        };
                                         if let Ok(mut sched) = animations.lock() {
-                                            sched.set_target_fps(refresh);
+                                            sched.set_target_fps(effective_fps);
                                             tracing::debug!(
-                                                "Scheduler target_fps adapted to display refresh: {} Hz",
-                                                refresh
+                                                "Scheduler target_fps set to {} Hz (refresh={}, cap={:?})",
+                                                effective_fps,
+                                                refresh,
+                                                animation_fps_cap
                                             );
                                         }
                                     }
@@ -4968,7 +5212,15 @@ impl WindowedApp {
                             // the very first paint, a rebuild ran this
                             // frame, or the cap interval has elapsed. Skip
                             // Phase 4 + present otherwise.
-                            let cap_interval_ms = animation_fps_cap.map(|fps| 1000u64 / fps as u64);
+                            // Read the (possibly dynamic) cap from the atomic so
+                            // the adaptive FPS path can change it at runtime
+                            // without rewriting captured closure state. 0 ⇒ no cap.
+                            let live_cap = animation_fps_cap_atomic.load(Ordering::Relaxed);
+                            let cap_interval_ms = if live_cap == 0 {
+                                None
+                            } else {
+                                Some(1000u64 / live_cap as u64)
+                            };
                             let elapsed_since_paint =
                                 current_time.saturating_sub(ws.last_paint_time_ms);
                             let should_render = match cap_interval_ms {
@@ -5420,37 +5672,70 @@ impl WindowedApp {
                                     let delay = std::time::Duration::from_millis(400);
                                     frame_dirty.store(true, Ordering::Release);
                                     wake_proxy_for_pacing.wake_at(delay);
-                                } else if let Some(fps) = animation_fps_cap {
-                                    // Cap is set → pace the next Frame at
-                                    // exactly the cap interval. Otherwise
-                                    // (`request_redraw`) winit on macOS
-                                    // would deliver Frames back-to-back at
-                                    // microsecond cadence — Phase 4 would
-                                    // skip them via the cap-elapsed check
-                                    // but the loop still spun 3000+ times
-                                    // per second, pinning CPU at 100 % under
-                                    // continuous click + active animation.
-                                    // `wake_at` routes through the platform
-                                    // shim's timer thread so the next Frame
-                                    // arrives at the exact moment Phase 4
-                                    // is allowed to render. Matches the
-                                    // cap-elapsed check in Phase 4 — both
-                                    // paths converge on the same cadence.
-                                    let delay = std::time::Duration::from_millis(1000 / fps as u64);
-                                    frame_dirty.store(true, Ordering::Release);
-                                    wake_proxy_for_pacing.wake_at(delay);
                                 } else {
-                                    // No cap configured → render at vsync.
-                                    // `request_redraw` here is fine because
-                                    // every Frame results in a render
-                                    // (Phase 4's cap branch is None → always
-                                    // renders), so we never spin.
-                                    frame_dirty.store(true, Ordering::Release);
-                                    window.request_redraw();
+                                    // Read the live cap from the atomic (the
+                                    // adaptive FPS adapter may have changed it
+                                    // since startup). 0 ⇒ no cap → vsync pace.
+                                    let live_cap_chain =
+                                        animation_fps_cap_atomic.load(Ordering::Relaxed);
+                                    if live_cap_chain > 0 {
+                                        // Cap is set → pace the next Frame at
+                                        // exactly the cap interval. Otherwise
+                                        // (`request_redraw`) winit on macOS
+                                        // would deliver Frames back-to-back at
+                                        // microsecond cadence — Phase 4 would
+                                        // skip them via the cap-elapsed check
+                                        // but the loop still spun 3000+ times
+                                        // per second, pinning CPU at 100 % under
+                                        // continuous click + active animation.
+                                        // `wake_at` routes through the platform
+                                        // shim's timer thread so the next Frame
+                                        // arrives at the exact moment Phase 4
+                                        // is allowed to render. Matches the
+                                        // cap-elapsed check in Phase 4 — both
+                                        // paths converge on the same cadence.
+                                        let delay = std::time::Duration::from_millis(
+                                            1000 / live_cap_chain as u64,
+                                        );
+                                        frame_dirty.store(true, Ordering::Release);
+                                        wake_proxy_for_pacing.wake_at(delay);
+                                    } else {
+                                        // No cap configured → render at vsync.
+                                        // `request_redraw` here is fine because
+                                        // every Frame results in a render
+                                        // (Phase 4's cap branch is None → always
+                                        // renders), so we never spin.
+                                        frame_dirty.store(true, Ordering::Release);
+                                        window.request_redraw();
+                                    }
                                 }
                             }
                             t_phase5 = phase5_start.elapsed();
                             let t_total = frame_start.elapsed();
+                            // Feed the rendered-frame wall-clock into the
+                            // adaptive FPS adapter. Only runs when an
+                            // `Adaptive` policy was configured; `Fixed` /
+                            // `Refresh` / legacy `animation_fps_cap`
+                            // leave `fps_adapter == None`. The adapter
+                            // returns the cap it wants going forward; if
+                            // it differs from the atomic's current value
+                            // we publish the new cap and notify the
+                            // scheduler so spring / keyframe / timeline
+                            // ticking matches the new paint cadence.
+                            if let Some(adapter_arc) = fps_adapter.as_ref() {
+                                if let Ok(mut adapter) = adapter_arc.lock() {
+                                    let new_cap = adapter.record(t_total.as_micros() as u64);
+                                    let prev_cap =
+                                        animation_fps_cap_atomic.load(Ordering::Relaxed);
+                                    if new_cap != prev_cap {
+                                        animation_fps_cap_atomic
+                                            .store(new_cap, Ordering::Relaxed);
+                                        if let Ok(mut sched) = animations.lock() {
+                                            sched.set_target_fps(new_cap);
+                                        }
+                                    }
+                                }
+                            }
                             // Per-phase breakdown. Disabled by default;
                             // RUST_LOG=blinc_app::frame_timing=trace surfaces it.
                             // The four phase totals will not exactly sum to

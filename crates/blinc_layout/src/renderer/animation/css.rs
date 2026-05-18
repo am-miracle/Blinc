@@ -243,7 +243,17 @@ impl RenderTree {
     pub fn apply_all_css_animation_props(&mut self) {
         // Collect animation data (stable-keyed) under the lock, then
         // release before resolving back to layout ids for the
-        // render_nodes write.
+        // render_nodes write. Filter on `is_playing`: settled
+        // animations sit in the store forever (the same-target
+        // guard keeps them) but their `current_properties` no longer
+        // change frame-to-frame, so re-applying them every frame is
+        // wasted work — and the heavy `KeyframeProperties::clone`
+        // (dozens of `Option<...>` fields) was running for every
+        // ever-played animation on `styling_demo` at idle.
+        // `apply_stylesheet_state_styles` resets base props to base
+        // before this runs, so skipping settled animations here means
+        // the element shows the base style — which matches the CSS
+        // default (no `animation-fill-mode: forwards`).
         let anim_data: Vec<(
             crate::tree::StableNodeId,
             blinc_animation::KeyframeProperties,
@@ -252,6 +262,7 @@ impl RenderTree {
             store
                 .animations
                 .iter()
+                .filter(|(_, a)| a.is_playing)
                 .map(|(sid, a)| (*sid, a.current_properties.clone()))
                 .collect()
         };
@@ -272,7 +283,15 @@ impl RenderTree {
         use taffy::prelude::*;
         let mut needs_layout = false;
 
-        // Collect all stable ids with active animations or transitions that have layout properties
+        // Collect all stable ids with ACTIVE animations or transitions
+        // that have layout properties. Settled entries stay in the
+        // store for the same-target guard but their values don't
+        // change frame-to-frame, and `apply_animated_layout_props` is
+        // the most expensive of the three per-frame applies — it
+        // potentially triggers `compute_layout()` whenever `changed`
+        // flips true, which would happen every frame for any settled
+        // size / padding / margin / inset value reapplied on top of
+        // the base style. Filter on `is_playing` to skip them.
         let anim_nodes: Vec<(
             crate::tree::StableNodeId,
             blinc_animation::KeyframeProperties,
@@ -281,11 +300,13 @@ impl RenderTree {
             store
                 .animations
                 .iter()
+                .filter(|(_, anim)| anim.is_playing)
                 .map(|(sid, anim)| (*sid, anim.current_properties.clone()))
                 .chain(
                     store
                         .transitions
                         .iter()
+                        .filter(|(_, anim)| anim.is_playing)
                         .map(|(sid, anim)| (*sid, anim.current_properties.clone())),
                 )
                 .collect()
@@ -597,7 +618,15 @@ impl RenderTree {
     /// The background thread ticks transitions; this reads the latest values and applies them.
     pub fn apply_all_css_transition_props(&mut self) {
         // Collect transition data (stable-keyed) under the lock,
-        // then release before resolving back to layout ids.
+        // then release before resolving back to layout ids. Filter
+        // on `is_playing`: settled transitions stay in the store for
+        // the same-target restart guard, but their final value also
+        // matches the post-transition base/state-style value that
+        // `apply_stylesheet_state_styles` already set this frame.
+        // Re-applying them every frame is wasted work + a per-entry
+        // `KeyframeProperties::clone` (large struct of Options) for
+        // each ever-hovered widget on cn_demo / styling_demo, which
+        // accumulated linearly with interaction history.
         let trans_data: Vec<(
             crate::tree::StableNodeId,
             blinc_animation::KeyframeProperties,
@@ -606,6 +635,7 @@ impl RenderTree {
             store
                 .transitions
                 .iter()
+                .filter(|(_, a)| a.is_playing)
                 .map(|(sid, a)| (*sid, a.current_properties.clone()))
                 .collect()
         };

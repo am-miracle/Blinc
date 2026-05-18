@@ -691,6 +691,19 @@ pub struct RenderState {
     /// Shared motion state for query API access
     /// Updated after each tick to expose motion states to components
     shared_motion_states: Option<SharedMotionStates>,
+
+    /// Monotonic counter bumped whenever `stable_motions` is mutated
+    /// (insert, remove, tick that changed state, exit start, etc.).
+    /// `sync_shared_motion_states` compares against
+    /// `last_synced_motion_generation` and skips the work when the
+    /// counter hasn't advanced — at idle cn_demo this is the common
+    /// case (motions all in `Visible`) and the bg thread was paying
+    /// hundreds of String clones + HashMap inserts per second to
+    /// re-sync identical state.
+    pub(crate) motion_generation: u64,
+    /// Last value of `motion_generation` written through to
+    /// `shared_motion_states`. Skip sync when equal.
+    pub(crate) last_synced_motion_generation: std::cell::Cell<u64>,
 }
 
 impl RenderState {
@@ -714,7 +727,18 @@ impl RenderState {
             viewport: Rect::new(0.0, 0.0, 0.0, 0.0),
             viewport_set: false,
             shared_motion_states: None,
+            motion_generation: 0,
+            last_synced_motion_generation: std::cell::Cell::new(0),
         }
+    }
+
+    /// Bump the motion generation counter. Public methods that
+    /// mutate `stable_motions` (insert, state-change, remove, clear)
+    /// call this so `sync_shared_motion_states` can skip the write
+    /// when nothing has changed. Cheap (one wrapping_add).
+    #[inline]
+    pub fn bump_motion_generation(&mut self) {
+        self.motion_generation = self.motion_generation.wrapping_add(1);
     }
 
     /// Set the shared motion states for query API access
@@ -729,6 +753,19 @@ impl RenderState {
     /// Call this after tick() to update the shared motion states for query API.
     pub fn sync_shared_motion_states(&self) {
         if let Some(ref shared) = self.shared_motion_states {
+            // Skip when nothing has changed since the last sync.
+            // `motion_generation` advances on any mutation of
+            // `stable_motions` — insert / remove / state transition
+            // inside a tick / explicit exit / replay. At idle every
+            // motion sits in `Visible` and the generation doesn't
+            // move, so the bg-thread path was burning ~50 String
+            // clones + 50 HashMap inserts per frame against the
+            // shared `RwLock` for no observable change. Per-frame
+            // gate matches the same pattern we use elsewhere
+            // (state_fingerprint for stylesheet apply).
+            if self.last_synced_motion_generation.get() == self.motion_generation {
+                return;
+            }
             let mut states = shared.write().unwrap();
             states.clear();
             for (key, motion) in &self.stable_motions {
@@ -746,6 +783,8 @@ impl RenderState {
                 };
                 states.insert(key.clone(), state);
             }
+            self.last_synced_motion_generation
+                .set(self.motion_generation);
         }
     }
 
@@ -1733,6 +1772,22 @@ impl RenderState {
 
     /// Tick stable-keyed motions (called from tick())
     fn tick_stable_motions(&mut self, dt_ms: f32) {
+        // Bump the motion generation when any motion is mid-flight —
+        // its tick advances progress / can transition state, both of
+        // which need to flow to `shared_motion_states`. Cheap check
+        // before the iteration: if every motion is at a settled
+        // terminal state (Visible, Removed, Suspended), tick is a
+        // no-op and `sync_shared_motion_states` doesn't need to
+        // rewrite the shared store. The Settled-fast-path is the
+        // common case at idle.
+        if self.stable_motions.values().any(|m| {
+            !matches!(
+                m.state,
+                MotionState::Visible | MotionState::Removed | MotionState::Suspended
+            )
+        }) {
+            self.motion_generation = self.motion_generation.wrapping_add(1);
+        }
         for motion in self.stable_motions.values_mut() {
             Self::tick_single_motion(motion, dt_ms);
         }
