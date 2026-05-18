@@ -1623,6 +1623,10 @@ impl RenderContext {
             if props_anim.is_some_and(touches_out_of_scope)
                 || props_trans.is_some_and(touches_out_of_scope)
             {
+                tracing::trace!(
+                    target: "blinc_app::frame_timing",
+                    "apply_css_deltas_bail_out_of_scope",
+                );
                 return false;
             }
 
@@ -5959,14 +5963,15 @@ impl RenderContext {
             && self.cached_bg_batch.is_some()
             && self.renderer.static_layer_valid()
             && !tree.css_anim_paint_records().is_empty();
-        if css_anim_active
-            && !css_patch_eligible
+        if !css_patch_eligible
             && tracing::enabled!(target: "blinc_app::frame_timing", tracing::Level::TRACE)
         {
             tracing::trace!(
                 target: "blinc_app::frame_timing",
+                css_anim_active,
                 css_only_active,
                 bindings_animating,
+                try_fast_paint,
                 has_cached_batch = self.cached_bg_batch.is_some(),
                 static_layer_valid = self.renderer.static_layer_valid(),
                 css_records_present = !tree.css_anim_paint_records().is_empty(),
