@@ -1178,7 +1178,7 @@ impl RenderContext {
 
         if !matches!(
             region.kind,
-            blinc_layout::renderer::DynamicKind::CssAnimated
+            blinc_layout::renderer::DynamicKind::CssAnimated { .. }
         ) {
             return None;
         }
@@ -7054,7 +7054,12 @@ impl RenderContext {
                 .count();
             let css_count = regions
                 .values()
-                .filter(|r| matches!(r.kind, blinc_layout::renderer::DynamicKind::CssAnimated))
+                .filter(|r| {
+                    matches!(
+                        r.kind,
+                        blinc_layout::renderer::DynamicKind::CssAnimated { .. }
+                    )
+                })
                 .count();
             let legacy_canvas = tree.canvas_paint_records().len();
             let legacy_motion = tree.composite_bindings().len();

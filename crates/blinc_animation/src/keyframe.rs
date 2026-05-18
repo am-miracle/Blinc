@@ -349,6 +349,125 @@ impl KeyframeProperties {
             || self.clip_ellipse_radii.is_some()
     }
 
+    /// Whether every property tracked here can be implemented by
+    /// transforming + alpha-blending a pre-rasterized texture, with
+    /// no per-frame re-rasterization required.
+    ///
+    /// The composite-promotable set is the four properties whose
+    /// runtime evaluation lives entirely in the GPU compositor — no
+    /// taffy recompute, no walker re-emission, no per-pixel shading
+    /// changes:
+    ///
+    /// - `opacity` (alpha multiplier at composite time)
+    /// - `translate_x` / `translate_y` (dest-rect translation)
+    /// - `scale_x` / `scale_y` (dest-rect size)
+    /// - `rotate` (2D z-rotation around the rect centre)
+    ///
+    /// Used by the compositor's composited-layer path: when a CSS-
+    /// animated node's `current_properties` is composite-promotable,
+    /// the walker rasterizes its subtree once into a `LayerTexture`
+    /// and each animation frame just blits the texture with the
+    /// current transform / opacity applied — bypassing the full
+    /// walker re-emission cost.
+    ///
+    /// Returns `false` if any property outside the set above is set
+    /// (3D rotation, layout sizing, colour, filter, clip, shadow, …).
+    /// Those properties require re-rasterizing the subtree on every
+    /// animation tick, so they take the slow path.
+    pub fn is_composite_promotable(&self) -> bool {
+        // Out-of-scope: any field that changes shading or geometry
+        // beyond a 2D affine + alpha. Inverse of the promotable set
+        // — we list the disqualifiers explicitly to keep this
+        // predicate locked in when new fields are added (better to
+        // omit a new field and force the slow path than silently
+        // promote and produce wrong pixels).
+        let touches_non_compositable = self.translate_z.is_some()
+            || self.rotate_x.is_some()
+            || self.rotate_y.is_some()
+            || self.skew_x.is_some()
+            || self.skew_y.is_some()
+            || self.perspective.is_some()
+            || self.depth.is_some()
+            || self.transform_origin.is_some()
+            // Layout — needs taffy recompute + walker re-emit.
+            || self.width.is_some()
+            || self.height.is_some()
+            || self.min_width.is_some()
+            || self.max_width.is_some()
+            || self.min_height.is_some()
+            || self.max_height.is_some()
+            || self.padding.is_some()
+            || self.margin.is_some()
+            || self.gap.is_some()
+            || self.flex_grow.is_some()
+            || self.flex_shrink.is_some()
+            || self.inset_top.is_some()
+            || self.inset_right.is_some()
+            || self.inset_bottom.is_some()
+            || self.inset_left.is_some()
+            || self.font_size.is_some()
+            || self.z_index.is_some()
+            // Visual / shading — would change the rasterized pixels.
+            || self.background_color.is_some()
+            || self.gradient_start_color.is_some()
+            || self.gradient_end_color.is_some()
+            || self.gradient_angle.is_some()
+            || self.border_color.is_some()
+            || self.border_width.is_some()
+            || self.outline_width.is_some()
+            || self.outline_color.is_some()
+            || self.outline_offset.is_some()
+            || self.text_color.is_some()
+            || self.corner_radius.is_some()
+            || self.corner_shape.is_some()
+            || self.shadow_params.is_some()
+            || self.shadow_color.is_some()
+            || self.text_shadow_params.is_some()
+            || self.text_shadow_color.is_some()
+            || self.overflow_fade.is_some()
+            // Lighting / 3D shading.
+            || self.light_intensity.is_some()
+            || self.ambient.is_some()
+            || self.specular.is_some()
+            || self.light_direction.is_some()
+            // CSS filters.
+            || self.filter_grayscale.is_some()
+            || self.filter_invert.is_some()
+            || self.filter_sepia.is_some()
+            || self.filter_brightness.is_some()
+            || self.filter_contrast.is_some()
+            || self.filter_saturate.is_some()
+            || self.filter_hue_rotate.is_some()
+            || self.filter_blur.is_some()
+            // Backdrop filters.
+            || self.backdrop_blur.is_some()
+            || self.backdrop_saturation.is_some()
+            || self.backdrop_brightness.is_some()
+            // Clip-path geometry.
+            || self.clip_inset.is_some()
+            || self.clip_circle_radius.is_some()
+            || self.clip_ellipse_radii.is_some()
+            // Mask + SVG content.
+            || self.mask_gradient.is_some()
+            || self.svg_fill.is_some()
+            || self.svg_stroke.is_some()
+            || self.svg_stroke_width.is_some()
+            || self.svg_stroke_dashoffset.is_some()
+            || self.svg_path_data.is_some();
+        if touches_non_compositable {
+            return false;
+        }
+        // At least one promotable property must be Some — an empty
+        // properties block means "no animation tick", not "promote
+        // an idle subtree".
+        self.opacity.is_some()
+            || self.translate_x.is_some()
+            || self.translate_y.is_some()
+            || self.scale_x.is_some()
+            || self.scale_y.is_some()
+            || self.rotate.is_some()
+    }
+
     /// Create properties with only opacity set
     pub fn opacity(value: f32) -> Self {
         Self {
@@ -1371,5 +1490,77 @@ impl KeyframeTrack {
     /// Get the duration in milliseconds
     pub fn duration_ms(&self) -> u32 {
         self.duration_ms
+    }
+}
+
+#[cfg(test)]
+mod composite_promotable_tests {
+    use super::*;
+
+    #[test]
+    fn opacity_only_is_promotable() {
+        let mut p = KeyframeProperties::default();
+        p.opacity = Some(0.5);
+        assert!(p.is_composite_promotable());
+    }
+
+    #[test]
+    fn translate_only_is_promotable() {
+        let mut p = KeyframeProperties::default();
+        p.translate_x = Some(10.0);
+        p.translate_y = Some(20.0);
+        assert!(p.is_composite_promotable());
+    }
+
+    #[test]
+    fn scale_rotate_opacity_combination_is_promotable() {
+        let mut p = KeyframeProperties::default();
+        p.scale_x = Some(1.5);
+        p.scale_y = Some(1.5);
+        p.rotate = Some(45.0);
+        p.opacity = Some(0.7);
+        assert!(p.is_composite_promotable());
+    }
+
+    #[test]
+    fn width_disqualifies() {
+        let mut p = KeyframeProperties::default();
+        p.opacity = Some(0.5);
+        p.width = Some(100.0);
+        assert!(!p.is_composite_promotable());
+    }
+
+    #[test]
+    fn background_color_disqualifies() {
+        let mut p = KeyframeProperties::default();
+        p.opacity = Some(0.5);
+        p.background_color = Some([1.0, 0.0, 0.0, 1.0]);
+        assert!(!p.is_composite_promotable());
+    }
+
+    #[test]
+    fn rotate_x_disqualifies() {
+        // 3D rotation is out of scope for first cut (uses 3D
+        // perspective pipeline, requires different math).
+        let mut p = KeyframeProperties::default();
+        p.rotate_x = Some(30.0);
+        assert!(!p.is_composite_promotable());
+    }
+
+    #[test]
+    fn filter_blur_disqualifies() {
+        let mut p = KeyframeProperties::default();
+        p.filter_blur = Some(2.0);
+        assert!(!p.is_composite_promotable());
+    }
+
+    #[test]
+    fn empty_properties_not_promotable() {
+        // An empty properties block means "no animation tick happened",
+        // not "promote this static subtree". Predicate must return
+        // false so we don't allocate layer textures for non-animating
+        // nodes.
+        let p = KeyframeProperties::default();
+        assert!(!p.is_composite_promotable());
     }
 }

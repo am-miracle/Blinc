@@ -1983,7 +1983,18 @@ impl RenderTree {
                     )) => Some(super::super::DynamicKind::MotionSubtree),
                     Some(super::super::AnimationStatus::Animating(
                         super::super::AnimatedKind::Css,
-                    )) => Some(super::super::DynamicKind::CssAnimated),
+                    )) => Some(super::super::DynamicKind::CssAnimated {
+                        // Sentinel — this code path only fires for
+                        // nodes that ALSO have motion bindings
+                        // (v2_motion_ambient is Some), and motion
+                        // takes precedence over Css in
+                        // `compute_animation_status`, so in practice
+                        // this arm is unreachable. The composited-
+                        // layer path populates real `natural_size`
+                        // values from a separate insertion site in
+                        // the CSS bracket below.
+                        natural_size: (0, 0),
+                    }),
                     _ => None,
                 };
                 if let (Some(kind), Some((amb_affine, amb_opacity, amb_clip, amb_z))) =
