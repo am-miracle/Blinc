@@ -251,6 +251,43 @@ pub struct CanvasOverlay {
     pub aux_data: Vec<[f32; 4]>,
 }
 
+/// Outcome of [`RenderContext::apply_css_deltas`]. Tells the caller
+/// which follow-up work the CSS-only fast path needs this frame.
+///
+/// The `last_css_damage_rects` slot is written before the function
+/// returns regardless of variant — callers can read it for both
+/// [`Self::Patched`] and [`Self::PatchedWithReemits`]. On
+/// [`Self::Bail`] the field is cleared (caller must take the slow
+/// path anyway, so damage rects are irrelevant).
+#[derive(Debug, Clone)]
+pub enum CssDeltaResult {
+    /// Every record was patched in place. Caller dispatches the
+    /// damaged-cache repaint and the cached text / SVG / image
+    /// re-dispatch.
+    Patched,
+    /// In-scope records were patched, but one or more records carried
+    /// an out-of-scope property (width / height / padding / margin /
+    /// gap / clip-path geometry / filter blur / backdrop blur). The
+    /// listed subtrees still hold stale primitives in
+    /// `cached_bg_batch`; the caller must re-emit them via a scratch
+    /// walker pass and splice the new primitives back into the cache
+    /// before dispatching the damaged-cache repaint.
+    PatchedWithReemits { reemit_nodes: Vec<LayoutNodeId> },
+    /// The patch path couldn't proceed (cache missing, lock poisoned,
+    /// opacity-zero ratio, layer-push-index drift). Caller takes the
+    /// full slow path.
+    Bail,
+}
+
+/// Captures the cached_bg_batch state of one CSS-animated record at
+/// the moment `try_reemit_and_splice_css_subtrees` starts. The
+/// walker overwrites the live record during the re-walk; we keep
+/// these snapshots to (a) position each splice into the right
+/// `primitive_range` after the walker has clobbered the live values
+/// with scratch-batch indices, and (b) AABB-intersect cached glyphs
+/// for the Phase 4 text-bail check.
+type ReemitSnapshot = (LayoutNodeId, std::ops::Range<usize>, Option<[f32; 4]>);
+
 /// Internal render context that manages GPU resources and rendering
 pub struct RenderContext {
     renderer: GpuRenderer,
@@ -1104,6 +1141,283 @@ impl RenderContext {
         out
     }
 
+    /// Re-walk a CSS-animated subtree and return the resulting bg
+    /// `PrimitiveBatch`. Used by Phase 3 of the per-element slow path:
+    /// when `apply_css_deltas` reports `PatchedWithReemits` for a
+    /// node whose active animation touched an out-of-scope property
+    /// (width / height / padding / etc.), the caller calls this to
+    /// produce fresh primitives at the post-`compute_layout()` bounds,
+    /// then splices them into `cached_bg_batch.primitives` at the
+    /// record's old `primitive_range`.
+    ///
+    /// Returns `None` when:
+    /// - The node has no entry in `dynamic_regions` (walker didn't
+    ///   record one — should not happen for a node that produced a
+    ///   `CssAnimPaintMeta`).
+    /// - The region's kind isn't `CssAnimated` (motion / canvas
+    ///   regions take different code paths).
+    /// - The re-walk emitted complex batch state we can't safely
+    ///   splice yet (layer_commands, paths, glass, foreground prims,
+    ///   3D viewports, aux_data, glyphs). Caller falls back to the
+    ///   full slow path. Documented limitation; future commits can
+    ///   widen the splice surface.
+    fn reemit_css_subtree_bg(
+        &self,
+        tree: &blinc_layout::RenderTree,
+        render_state: &blinc_layout::RenderState,
+        node_id: LayoutNodeId,
+        width: u32,
+        height: u32,
+    ) -> Option<blinc_gpu::PrimitiveBatch> {
+        use blinc_core::DrawContext;
+        use blinc_gpu::GpuPaintContext;
+
+        let regions = tree.dynamic_regions();
+        let region = regions.get(&node_id)?.clone();
+        drop(regions);
+
+        if !matches!(
+            region.kind,
+            blinc_layout::renderer::DynamicKind::CssAnimated
+        ) {
+            return None;
+        }
+
+        let mut scratch = GpuPaintContext::new(width as f32, height as f32);
+
+        // DPI scale mirrors what `collect_dynamic_region_primitives`
+        // does — ambient affine is physical-pixel-space; logical
+        // walker translates need wrapping by the scale.
+        let scale = tree.scale_factor();
+        let has_scale = scale != 1.0;
+        if has_scale {
+            scratch.push_transform(blinc_core::Transform::scale(scale, scale));
+        }
+
+        // Unlike `collect_dynamic_region_primitives`, do NOT
+        // push_motion_subtree — CSS subtrees stay in the bg batch
+        // (the static cache contract; routing them to the overlay
+        // breaks text z-order, see motion.rs:464). The walker's emit
+        // routes into `scratch.batch` (== bg batch).
+        tree.render_dynamic_region(&mut scratch as &mut dyn DrawContext, &region, render_state);
+
+        if has_scale {
+            scratch.pop_transform();
+        }
+
+        let new_batch = scratch.take_batch();
+
+        // Conservative: the splice is only safe today for the
+        // primitive vector. Any other field carrying cross-primitive
+        // indices (paths, layer_commands referencing aux_data
+        // offsets) needs index re-numbering we don't yet do. Bail to
+        // slow path when those are present.
+        if !new_batch.layer_commands.is_empty()
+            || !new_batch.foreground_primitives.is_empty()
+            || !new_batch.glass_primitives.is_empty()
+            || !new_batch.nested_glass_primitives.is_empty()
+            || !new_batch.paths.vertices.is_empty()
+            || !new_batch.foreground_paths.vertices.is_empty()
+            || !new_batch.glyphs.is_empty()
+            || !new_batch.viewports_3d.is_empty()
+            || !new_batch.particle_viewports.is_empty()
+            || !new_batch.aux_data.is_empty()
+            || !new_batch.dynamic_images.is_empty()
+        {
+            tracing::trace!(
+                target: "blinc_app::frame_timing",
+                "reemit_css_subtree_complex_batch_bail",
+            );
+            return None;
+        }
+
+        Some(new_batch)
+    }
+
+    /// Phase 4 helper: scan the cached text glyph vectors for any
+    /// glyph whose bounds intersect any of the supplied reemit
+    /// subtree AABBs. Returns `true` if any glyph falls inside a
+    /// reemit subtree, signalling the caller to bail to the slow
+    /// path. The text-shaping pipeline isn't subtree-aware today
+    /// — re-shaping just the affected subtree would require a
+    /// significant refactor of `collect_elements_recursive` — so
+    /// when the cache contains text inside a layout-animating
+    /// subtree, the safe choice is the full slow path.
+    fn glyphs_intersect_any_aabb(&self, snapshots: &[ReemitSnapshot]) -> bool {
+        let aabbs: Vec<[f32; 4]> = snapshots.iter().filter_map(|(_, _, aabb)| *aabb).collect();
+        if aabbs.is_empty() {
+            return false;
+        }
+        let intersects = |g_bounds: [f32; 4], a: [f32; 4]| -> bool {
+            let (gx, gy, gw, gh) = (g_bounds[0], g_bounds[1], g_bounds[2], g_bounds[3]);
+            let (ax, ay, aw, ah) = (a[0], a[1], a[2], a[3]);
+            !(gx + gw <= ax || gy + gh <= ay || gx >= ax + aw || gy >= ay + ah)
+        };
+        if let Some(by_layer) = self.cached_glyphs_by_layer.as_ref() {
+            for glyphs in by_layer.values() {
+                for g in glyphs {
+                    for a in &aabbs {
+                        if intersects(g.bounds, *a) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(fg) = self.cached_fg_glyphs.as_ref() {
+            for g in fg {
+                for a in &aabbs {
+                    if intersects(g.bounds, *a) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Phase 3 of the per-element slow path: re-emit each listed
+    /// CSS-animated subtree via the walker and splice the resulting
+    /// primitives back into `cached_bg_batch.primitives` at the
+    /// record's original `primitive_range`. Returns `true` if the
+    /// splice succeeded (caller proceeds with the damaged-cache
+    /// repaint) or `false` if any subtree's re-emit produced complex
+    /// batch state we can't safely splice yet (caller falls back to
+    /// the full slow path).
+    ///
+    /// Splice details:
+    /// - Snapshot every reemit node's original `primitive_range`
+    ///   before any walker call; the walker mutates records during
+    ///   the walk and we need the original indices to position the
+    ///   splice into `cached_bg_batch`.
+    /// - Sort splices by `old_range.start` descending. Processing
+    ///   from the highest index first means each splice only shifts
+    ///   elements *after* the splice point, so we don't have to
+    ///   compose deltas across earlier splices.
+    /// - For each splice, `primitives.splice(old_range, new)` does
+    ///   the work. Other records whose `primitive_range.start >=
+    ///   old_range.end` shift by `new_len - old_len`.
+    fn try_reemit_and_splice_css_subtrees(
+        &mut self,
+        tree: &blinc_layout::RenderTree,
+        render_state: &blinc_layout::RenderState,
+        reemit_nodes: &[LayoutNodeId],
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if reemit_nodes.is_empty() {
+            return true;
+        }
+
+        // Step 1: snapshot old primitive_range AND screen AABB for
+        // each reemit node BEFORE any walker call. The walker
+        // overwrites `css_anim_paint_records[node].primitive_range`
+        // with scratch batch indices; we need the cached_bg_batch
+        // indices to position the splice. The AABB lets us check
+        // for cached text inside the subtree (Phase 4 bail below).
+        let snapshots: Vec<ReemitSnapshot> = {
+            let records = tree.css_anim_paint_records();
+            reemit_nodes
+                .iter()
+                .filter_map(|&n| {
+                    records
+                        .get(&n)
+                        .map(|m| (n, m.primitive_range.clone(), m.last_screen_aabb))
+                })
+                .collect()
+        };
+        if snapshots.is_empty() {
+            return true;
+        }
+
+        // Phase 4 conservative bail: if any cached glyph falls
+        // inside a reemit subtree's old AABB, the cache for that
+        // region contains text shaped at the previous layout's
+        // bounds. We can't re-shape it from here (the text-shaping
+        // pipeline isn't subtree-aware), so the post-splice
+        // damaged-cache repaint would land new bg primitives next
+        // to stale text glyphs — text would appear offset relative
+        // to the moved background. Fall back to the full slow path
+        // so taffy + the text collector run end-to-end and produce
+        // a coherent frame.
+        let any_text_in_reemit = self.glyphs_intersect_any_aabb(&snapshots);
+        if any_text_in_reemit {
+            tracing::trace!(
+                target: "blinc_app::frame_timing",
+                "reemit_text_intersect_bail",
+            );
+            return false;
+        }
+
+        // Step 2: re-walk each subtree into a fresh scratch context
+        // and collect the produced primitives. Any subtree whose
+        // re-walk emits complex batch state (layer_commands, paths,
+        // glass, etc. — see `reemit_css_subtree_bg`) returns None
+        // and we bail to the slow path.
+        let mut new_prims: Vec<(
+            LayoutNodeId,
+            std::ops::Range<usize>,
+            Vec<blinc_gpu::primitives::GpuPrimitive>,
+        )> = Vec::with_capacity(snapshots.len());
+        for (node, old_range, _aabb) in snapshots {
+            match self.reemit_css_subtree_bg(tree, render_state, node, width, height) {
+                Some(batch) => new_prims.push((node, old_range, batch.primitives)),
+                None => return false,
+            }
+        }
+
+        // Step 3: splice in reverse order of old_range.start. This
+        // keeps each splice from invalidating earlier (smaller-start)
+        // splices' indices.
+        new_prims.sort_by_key(|entry| std::cmp::Reverse(entry.1.start));
+
+        let Some(batch) = self.cached_bg_batch.as_mut() else {
+            return false;
+        };
+        let mut records = tree.css_anim_paint_records_mut();
+        for (node, old_range, prims) in new_prims {
+            let old_len = old_range.end - old_range.start;
+            let new_len = prims.len();
+            let delta = new_len as isize - old_len as isize;
+            batch.primitives.splice(old_range.clone(), prims);
+
+            // Update THIS reemit's record to point into the patched
+            // cached_bg_batch. The walker already wrote the NEW
+            // screen AABB to `meta.last_screen_aabb` during the
+            // re-walk; carry it into `last_css_damage_rects` so the
+            // damaged-cache repaint scissor covers the new geometry.
+            // Without this, layout animations that grow the element
+            // past its previous AABB leave stale pixels in the
+            // exposed area (the OLD aabb pushed by apply_css_deltas
+            // doesn't extend that far).
+            if let Some(meta) = records.get_mut(&node) {
+                meta.primitive_range = old_range.start..(old_range.start + new_len);
+                if let Some(rect) = meta.last_screen_aabb {
+                    self.last_css_damage_rects.push(rect);
+                }
+            }
+
+            // Shift every other record's range when its start is at
+            // or past `old_range.end` — i.e., it lived in the
+            // cache *after* the spliced region.
+            if delta != 0 {
+                for (other_node, other_meta) in records.iter_mut() {
+                    if *other_node == node {
+                        continue;
+                    }
+                    if other_meta.primitive_range.start >= old_range.end {
+                        let new_start =
+                            (other_meta.primitive_range.start as isize + delta) as usize;
+                        let new_end = (other_meta.primitive_range.end as isize + delta) as usize;
+                        other_meta.primitive_range = new_start..new_end;
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
     /// frames in a row would double-apply).
     pub fn apply_binding_deltas(&mut self, tree: &blinc_layout::RenderTree, scale: f32) -> bool {
         self.last_binding_damage_rects.clear();
@@ -1506,6 +1820,25 @@ impl RenderContext {
     /// re-walking the tree. Mirror of [`Self::apply_binding_deltas`]
     /// for the CSS keyframe / transition path.
     ///
+    /// Returns a `CssDeltaResult` indicating what the caller must
+    /// do next:
+    ///
+    /// - `Patched`: all records handled in place; caller dispatches
+    ///   the damaged-cache repaint and the text / SVG / image
+    ///   re-dispatch step. No walker work needed.
+    /// - `PatchedWithReemits { reemit_nodes }`: in-scope records were
+    ///   patched, but one or more records carried out-of-scope
+    ///   properties (width / height / padding / margin / gap /
+    ///   clip-path geometry / filter blur / backdrop blur). Caller
+    ///   must re-emit the listed subtrees via a scratch walker pass
+    ///   into `cached_bg_batch` before the cache repaint, then run
+    ///   the normal damaged-cache repaint. The corresponding damage
+    ///   rects are already in `last_css_damage_rects`.
+    /// - `Bail`: the patch path couldn't reach a coherent state
+    ///   (cache missing, lock poisoned, opacity-zero divide-by-zero,
+    ///   layer push index out of bounds, etc.). Caller must take
+    ///   the full slow path.
+    ///
     /// Returns `false` (caller falls back to slow path) when:
     /// - No cached batch exists yet (cold start; slow path will
     ///   populate it).
@@ -1544,25 +1877,36 @@ impl RenderContext {
     /// - width / height / min_* / max_* / padding / margin / gap
     ///   (layout — needs `compute_layout`)
     /// - backdrop_* (glass material; separate dispatch path)
-    pub fn apply_css_deltas(&mut self, tree: &blinc_layout::RenderTree, _scale: f32) -> bool {
+    pub fn apply_css_deltas(
+        &mut self,
+        tree: &blinc_layout::RenderTree,
+        _scale: f32,
+    ) -> CssDeltaResult {
         // CSS-animated primitives live on `cached_bg_batch` (the
         // walker doesn't push a `motion_subtree` for CSS animations
         // — that routing is motion-binding only). Patch through the
         // bg batch.
         let batch = match self.cached_bg_batch.as_mut() {
             Some(b) => b,
-            None => return false,
+            None => {
+                self.last_css_damage_rects.clear();
+                return CssDeltaResult::Bail;
+            }
         };
         let mut records = tree.css_anim_paint_records_mut();
         if records.is_empty() {
             // No CSS-animated nodes recorded at last paint. Nothing
             // to patch — caller re-uses the cache as-is.
-            return true;
+            self.last_css_damage_rects.clear();
+            return CssDeltaResult::Patched;
         }
         let store_arc = tree.css_anim_store();
         let store = match store_arc.lock() {
             Ok(g) => g,
-            Err(_) => return false,
+            Err(_) => {
+                self.last_css_damage_rects.clear();
+                return CssDeltaResult::Bail;
+            }
         };
 
         // Tracks whether anything changed this frame. Always true
@@ -1575,8 +1919,26 @@ impl RenderContext {
         // caller falls back to the slow path and ignores rects.
         // One entry per record whose patch actually moved a pixel.
         let mut damage_rects: Vec<[f32; 4]> = Vec::new();
+        // Bail sentinel — set inside the per-record loop when a
+        // record can't be patched coherently (opacity-zero ratio,
+        // layer push index out of bounds, layer command shape
+        // mismatch). We can't `return CssDeltaResult::Bail` directly
+        // from inside the loop because the live `&mut self` borrow
+        // (through `batch`) plus the `records` / `store` borrows on
+        // `tree` block the post-return `self.last_css_damage_rects`
+        // write. Setting the flag + breaking out lets the borrows
+        // drop naturally before we touch `self`.
+        let mut bail = false;
+        // Phase 2 of the per-element slow path: records whose active
+        // animation / transition touches an out-of-scope property
+        // (layout, clip-path geometry, blur) get marked for walker
+        // re-emission instead of bailing the whole frame. The
+        // record's screen AABB still goes into `damage_rects` so the
+        // cache repaint clears that area before Phase 3 splices in
+        // the fresh primitives.
+        let mut reemit_nodes: Vec<LayoutNodeId> = Vec::new();
 
-        for (_node, meta) in records.iter_mut() {
+        for (&node, meta) in records.iter_mut() {
             // Per-record patch tracking — distinct from `any_changed`
             // which spans the whole loop. Only push a damage rect
             // when at least one property on THIS record moved.
@@ -1623,11 +1985,26 @@ impl RenderContext {
             if props_anim.is_some_and(touches_out_of_scope)
                 || props_trans.is_some_and(touches_out_of_scope)
             {
-                tracing::trace!(
-                    target: "blinc_app::frame_timing",
-                    "apply_css_deltas_bail_out_of_scope",
-                );
-                return false;
+                // Mark this node for walker re-emission. Push its
+                // AABB so the cache repaint clears that area before
+                // Phase 3 splices fresh primitives. Skip the rest of
+                // this record's property branches — the walker will
+                // re-emit with all current animated values applied
+                // together (including in-scope properties like
+                // opacity that we'd otherwise patch here), so
+                // patching now would just be overwritten.
+                //
+                // Replaces the previous `return false` +
+                // `apply_css_deltas_bail_out_of_scope` trace from
+                // PR #46 — the bail-on-first-out-of-scope behaviour
+                // is gone; the equivalent diagnostic is
+                // `apply_css_deltas_reemit_pending` emitted once
+                // after the loop with the total count.
+                reemit_nodes.push(node);
+                if let Some(rect) = meta.last_screen_aabb {
+                    damage_rects.push(rect);
+                }
+                continue;
             }
 
             // Helper: read a property from animation first, else
@@ -1650,7 +2027,8 @@ impl RenderContext {
                         // Divide-by-zero — primitives were emitted
                         // at zero alpha last paint; can't recover
                         // the original color via ratio. Slow path.
-                        return false;
+                        bail = true;
+                        break;
                     }
                     if let Some(push_idx) = meta.layer_push_index {
                         use blinc_gpu::primitives::LayerCommand;
@@ -1659,10 +2037,14 @@ impl RenderContext {
                                 if let LayerCommand::Push { config } = &mut entry.command {
                                     config.opacity = new_opacity;
                                 } else {
-                                    return false;
+                                    bail = true;
+                                    break;
                                 }
                             }
-                            None => return false,
+                            None => {
+                                bail = true;
+                                break;
+                            }
                         }
                     } else if let Some(prims) =
                         batch.primitives.get_mut(meta.primitive_range.clone())
@@ -1874,8 +2256,26 @@ impl RenderContext {
         let _ = any_changed;
         drop(store);
         drop(records);
+        if bail {
+            // Partial-patch state may have landed in cached_bg_batch
+            // — the loop ran some property branches before hitting
+            // the bail condition. Damage rects are unreliable, the
+            // slow path will repaint the whole cache anyway, so
+            // clear and signal Bail.
+            self.last_css_damage_rects.clear();
+            return CssDeltaResult::Bail;
+        }
         self.last_css_damage_rects = damage_rects;
-        true
+        if reemit_nodes.is_empty() {
+            CssDeltaResult::Patched
+        } else {
+            tracing::trace!(
+                target: "blinc_app::frame_timing",
+                count = reemit_nodes.len(),
+                "apply_css_deltas_reemit_pending",
+            );
+            CssDeltaResult::PatchedWithReemits { reemit_nodes }
+        }
     }
 
     /// Update the current cursor position in physical pixels (for @flow pointer input)
@@ -5981,7 +6381,32 @@ impl RenderContext {
         if css_patch_eligible {
             let scale_factor = tree.scale_factor();
             let css_path_start = web_time::Instant::now();
-            if self.apply_css_deltas(tree, scale_factor) {
+            // CssDeltaResult drives the next step:
+            //   - Patched: in-scope patches landed, run the damaged
+            //     repaint as before.
+            //   - PatchedWithReemits: in-scope patches landed AND
+            //     out-of-scope records (layout / clip-geom / blur)
+            //     need walker re-emission into `cached_bg_batch`
+            //     before the cache repaint. Try
+            //     `try_reemit_and_splice_css_subtrees`; on success
+            //     we have a fully-up-to-date cache and proceed like
+            //     Patched. On failure (complex subtree batch state
+            //     we can't splice yet) fall through to the slow path.
+            //   - Bail: fall through to the slow path entirely.
+            let delta_result = self.apply_css_deltas(tree, scale_factor);
+            let took_fast_path = match delta_result {
+                CssDeltaResult::Patched => true,
+                CssDeltaResult::PatchedWithReemits { ref reemit_nodes } => self
+                    .try_reemit_and_splice_css_subtrees(
+                        tree,
+                        render_state,
+                        reemit_nodes,
+                        width,
+                        height,
+                    ),
+                CssDeltaResult::Bail => false,
+            };
+            if took_fast_path {
                 let batch_clone = self
                     .cached_bg_batch
                     .as_ref()
