@@ -68,6 +68,11 @@ impl RenderTree {
         // reads this between full paints to patch the cached
         // primitive buffer in place.
         self.composite_bindings.borrow_mut().clear();
+        // Phase 4b: per-CSS-animated-node paint metadata. Same
+        // lifecycle as composite_bindings — cleared every full
+        // paint, repopulated below for every node whose
+        // `current_animation_status` is `Animating(Css)`.
+        self.css_anim_paint_records.borrow_mut().clear();
         // Canvas paint records have the same lifecycle: the walker
         // rebuilds them on every full paint, the fast path consumes
         // them between full paints.
@@ -481,6 +486,25 @@ impl RenderTree {
             ctx.push_motion_subtree();
         }
         let composite_bg_start = in_motion_subtree.then(|| ctx.bg_primitive_count());
+        // Phase 4b: bracket CSS-animated subtrees the same way
+        // `composite_bg_start` brackets motion-bound subtrees, so
+        // the post-walk recording at the bottom of this fn can
+        // emit a `CssAnimPaintMeta { primitive_range: start..end,
+        // ... }` for `apply_css_deltas` to patch. Gated on
+        // `Animating(Css)` so settled CSS store entries (kept for
+        // the same-target restart guard in
+        // `detect_and_start_transitions`) don't get recorded.
+        // Motion-bound nodes that also have a CSS animation are
+        // handled by `composite_bindings` / `apply_binding_deltas`
+        // (motion takes precedence in `compute_animation_status`)
+        // and skip this CSS bookkeeping.
+        let in_css_subtree = matches!(
+            self.current_animation_status.borrow().get(&node).copied(),
+            Some(super::super::AnimationStatus::Animating(
+                super::super::AnimatedKind::Css
+            ))
+        );
+        let css_anim_bg_start = in_css_subtree.then(|| ctx.bg_primitive_count());
 
         // Compositor v2 ambient snapshot for motion-bound subtrees.
         // Captured BEFORE this node pushes any of its own transforms
@@ -731,8 +755,56 @@ impl RenderTree {
         let has_3d_shape =
             render_node.props.depth.unwrap_or(0.0) > 0.0 || render_node.props.shape_3d.is_some();
         let use_3d_layer = has_3d_css_transform && !has_3d_shape;
-        let has_opacity_layer =
-            node_motion_opacity < 1.0 || has_layer_effects || has_blend_mode || use_3d_layer;
+        // Hybrid opacity flatten (Phase 4a): if `opacity < 1.0` is
+        // the *only* reason we'd push a layer (no blur / drop-shadow /
+        // blend / 3D), and the element is structurally simple enough
+        // that per-primitive alpha gives the correct result, skip the
+        // layer push entirely and multiply opacity into descendants'
+        // primitive colours instead. Same model `apply_binding_deltas`
+        // uses for motion-bound opacity.
+        //
+        // Pre-fix, pure-opacity layers were pushed but then silently
+        // dropped by `render_with_clear_simple` / `render_with_layer_effects`
+        // (their `effect_layers` gate only matched layers with
+        // effects / blend / 3D), so the configured opacity went
+        // nowhere — CSS `@keyframes` like pulse / glow that animate
+        // only `opacity` never actually rendered the keyframed alpha.
+        //
+        // The `safe_to_flatten` check is conservative for first cut:
+        // we flatten only when the element has at most one child.
+        // Anything more complex (multiple children, possible overlap,
+        // nested opacity) takes the push_layer path, which the
+        // renderer now processes correctly via the relaxed
+        // `effect_layers` gate in `render_with_layer_effects`.
+        let only_opacity_drives_layer =
+            node_motion_opacity < 1.0 && !has_layer_effects && !has_blend_mode && !use_3d_layer;
+        // Don't flatten when a motion-binding opacity is in play.
+        // Flattening makes children inherit the parent's current
+        // motion_opacity — and when that opacity is at / near 0 on
+        // the slow-path frame (e.g. cn::switch's
+        // `motion().opacity(color_anim)` animating off → on with
+        // the spring just starting from 0.0), descendants hit the
+        // transparency guard above (their own `has_pending_motion`
+        // is false because the binding is on the ancestor, not on
+        // them) and get skipped entirely. Their primitives never
+        // land in `cached_dynamic_batch`; `apply_binding_deltas`
+        // has nothing to multiply when the spring climbs above
+        // 0.001, and the subtree stays invisible until a slow-path
+        // repaint forced by something else (mouse motion via
+        // state-style apply). Symptom: switch toggle off → on
+        // shows no bg fade.
+        //
+        // Pushing a layer is correct here: children inherit 1.0
+        // (layer composite owns the opacity), so they emit
+        // primitives regardless of the binding's current value.
+        // `apply_binding_deltas` patches `LayerConfig.opacity` at
+        // the recorded push index so the spring becomes visible.
+        let has_motion_opacity_binding = motion_bindings_ref.is_some_and(|b| b.opacity.is_some());
+        let safe_to_flatten =
+            !has_motion_opacity_binding && self.layout_tree.children(node).len() <= 1;
+        let can_flatten_opacity = only_opacity_drives_layer && safe_to_flatten;
+        let has_opacity_layer = !can_flatten_opacity
+            && (node_motion_opacity < 1.0 || has_layer_effects || has_blend_mode || use_3d_layer);
         let should_push_layer = has_opacity_layer && effective_layer == target_layer;
         if should_push_layer {
             // Scale layer effect radii by DPI factor (CSS px → physical px)
@@ -787,6 +859,40 @@ impl RenderTree {
                 transform_3d,
             });
         }
+        // Phase 4b: capture the layer-command index of the push we
+        // just made, so the CSS post-walk recording can drop it
+        // into `CssAnimPaintMeta`. `apply_css_deltas` patches
+        // `LayerConfig.opacity` at this index for opacity
+        // animations that took the layered (non-flattened) path.
+        // `bg_layer_command_count` returns the count AFTER the
+        // push, so the push's own index is `count - 1`.
+        let css_anim_layer_push_index = if in_css_subtree && should_push_layer {
+            let n = ctx.bg_layer_command_count();
+            if n > 0 {
+                Some(n - 1)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        // Same index, captured for the motion-binding case so
+        // `apply_binding_deltas` can patch `LayerConfig.opacity` at
+        // the binding's owning node. With the Phase 4a flatten
+        // disabled for motion bindings (above), opacity bindings
+        // always take the layered path and need this index to
+        // animate visibly.
+        let motion_binding_layer_push_index = if motion_bindings_ref.is_some() && should_push_layer
+        {
+            let n = ctx.bg_layer_command_count();
+            if n > 0 {
+                Some(n - 1)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Corner shape setup (superellipse per-corner) — MUST be set before draw_shadow
         // so shadows use the same corner_shape as the fill+border SDF.
@@ -1853,6 +1959,7 @@ impl RenderTree {
                             last_scale,
                             last_rotation_rad,
                             last_opacity,
+                            layer_push_index: motion_binding_layer_push_index,
                             centre,
                             last_screen_aabb,
                         },
@@ -1922,6 +2029,104 @@ impl RenderTree {
                                 z_layer: amb_z,
                             },
                             kind,
+                        },
+                    );
+                }
+            }
+        }
+
+        // Phase 4b: CSS-animated paint record. Same `effective_layer
+        // == target_layer` gate as the `composite_bindings` block
+        // above — only the pass that actually emits this node's
+        // primitives gets to record, otherwise the BG-pass entry
+        // would be clobbered by Glass / Foreground's empty range.
+        // `apply_css_deltas` reads this map to patch the cached
+        // batch from current `css_anim_store` values.
+        //
+        // First cut populates the fields the walker has easy access
+        // to here (opacity from `node_motion_opacity`, colours /
+        // corner radius / border / shadow / filter / 3D rotations
+        // from `render_node.props`). The transform-decomposition
+        // fields (`last_translate` / `last_scale` /
+        // `last_rotation_rad`) default to identity; Phase 4c can
+        // extend the recording to populate them when patching 2D
+        // transforms becomes a target case.
+        if let Some(start) = css_anim_bg_start.filter(|_| effective_layer == target_layer) {
+            let end = ctx.bg_primitive_count();
+            if end > start {
+                if let Some(stable_id) = self.stable_id(node) {
+                    let centre = self
+                        .layout_tree
+                        .get_absolute_bounds(node)
+                        .map(|abs| {
+                            (
+                                abs.x + abs.width / 2.0 + cumulative_scroll.0,
+                                abs.y + abs.height / 2.0 + cumulative_scroll.1,
+                            )
+                        })
+                        .unwrap_or((
+                            bounds.x + bounds.width / 2.0,
+                            bounds.y + bounds.height / 2.0,
+                        ));
+                    let last_screen_aabb = ctx.bg_primitive_aabb(start, end);
+
+                    // Extract solid background colour if present
+                    // (gradient / image brushes return None — those
+                    // animate via gradient_start/end_color which
+                    // are out of first-cut scope).
+                    let last_background_color =
+                        render_node.props.background.as_ref().and_then(|brush| {
+                            if let Brush::Solid(c) = brush {
+                                Some([c.r, c.g, c.b, c.a])
+                            } else {
+                                None
+                            }
+                        });
+                    let last_border_color =
+                        render_node.props.border_color.map(|c| [c.r, c.g, c.b, c.a]);
+                    let cr = &render_node.props.border_radius;
+                    let last_corner_radius =
+                        [cr.top_left, cr.top_right, cr.bottom_right, cr.bottom_left];
+                    let last_border_width = render_node.props.border_width;
+                    let (last_shadow_params, last_shadow_color) = match &render_node.props.shadow {
+                        Some(s) => (
+                            [s.offset_x, s.offset_y, s.blur, s.spread],
+                            [s.color.r, s.color.g, s.color.b, s.color.a],
+                        ),
+                        None => ([0.0; 4], [0.0; 4]),
+                    };
+                    let (last_filter_a, last_filter_b) = match &render_node.props.filter {
+                        Some(f) => (
+                            [f.grayscale, f.invert, f.sepia, f.hue_rotate.to_radians()],
+                            [f.brightness, f.contrast, f.saturate, 0.0],
+                        ),
+                        None => ([0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.0]),
+                    };
+                    let last_rotate_x_rad = render_node.props.rotate_x.unwrap_or(0.0).to_radians();
+                    let last_rotate_y_rad = render_node.props.rotate_y.unwrap_or(0.0).to_radians();
+
+                    self.css_anim_paint_records.borrow_mut().insert(
+                        node,
+                        super::super::CssAnimPaintMeta {
+                            stable_id,
+                            primitive_range: start..end,
+                            layer_push_index: css_anim_layer_push_index,
+                            last_opacity: node_motion_opacity,
+                            last_translate: (0.0, 0.0),
+                            last_scale: (1.0, 1.0),
+                            last_rotation_rad: 0.0,
+                            last_rotate_x_rad,
+                            last_rotate_y_rad,
+                            last_background_color,
+                            last_border_color,
+                            last_corner_radius,
+                            last_border_width,
+                            last_shadow_params,
+                            last_shadow_color,
+                            last_filter_a,
+                            last_filter_b,
+                            centre,
+                            last_screen_aabb,
                         },
                     );
                 }

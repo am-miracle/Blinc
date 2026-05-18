@@ -1194,19 +1194,45 @@ impl RenderContext {
                 .and_then(|v| v.lock().ok().map(|g| g.get()))
                 .unwrap_or(meta.last_opacity);
             if (new_opacity - meta.last_opacity).abs() > f32::EPSILON {
-                if meta.last_opacity.abs() < f32::EPSILON {
-                    return false;
-                }
-                let ratio = new_opacity / meta.last_opacity;
-                if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
-                    for p in prims.iter_mut() {
-                        p.color[3] *= ratio;
-                        p.border_color[3] *= ratio;
-                        p.shadow_color[3] *= ratio;
+                if let Some(push_idx) = meta.layer_push_index {
+                    // Layered path (motion-binding opacity always
+                    // takes this path post-Phase 4a): patch
+                    // `LayerConfig.opacity` at the push command's
+                    // index. The renderer's layer-composite blit
+                    // reads `config.opacity` and the new spring
+                    // value becomes visible the next composite.
+                    //
+                    // No divide-by-zero hazard here because we're
+                    // writing an absolute value, not computing a
+                    // ratio against `last_opacity`.
+                    use blinc_gpu::primitives::LayerCommand;
+                    match batch.layer_commands.get_mut(push_idx) {
+                        Some(entry) => {
+                            if let LayerCommand::Push { config } = &mut entry.command {
+                                config.opacity = new_opacity;
+                            } else {
+                                return false;
+                            }
+                        }
+                        None => return false,
                     }
+                    meta.last_opacity = new_opacity;
+                    any_binding_active = true;
+                } else {
+                    if meta.last_opacity.abs() < f32::EPSILON {
+                        return false;
+                    }
+                    let ratio = new_opacity / meta.last_opacity;
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                        for p in prims.iter_mut() {
+                            p.color[3] *= ratio;
+                            p.border_color[3] *= ratio;
+                            p.shadow_color[3] *= ratio;
+                        }
+                    }
+                    meta.last_opacity = new_opacity;
+                    any_binding_active = true;
                 }
-                meta.last_opacity = new_opacity;
-                any_binding_active = true;
                 binding_moved = true;
             }
 
@@ -1414,6 +1440,375 @@ impl RenderContext {
         // `has_visible_animating_statefuls`, so neither relies on
         // `visible_anim_active` to stay alive.
         tree.set_visible_anim_active(any_binding_active);
+        true
+    }
+
+    /// Re-bind the latest glyph atlas views onto the SDF pipeline.
+    /// Called right before `composite_frame` (and before any other
+    /// `PRIM_TEXT`-dispatching pass) on the compositor path so
+    /// canvas-emitted `draw_text` primitives — whose glyphs are
+    /// added to `text_ctx`'s atlas *after* the slow-path's
+    /// `set_glyph_atlas` call inside `render_tree_with_motion_opt` —
+    /// reach the GPU through a bind group that points at the
+    /// post-growth atlas texture rather than the stale pre-growth
+    /// view.
+    ///
+    /// Pre-fix the SDF bind group was set once per slow-path frame
+    /// (line ~7110), then `collect_canvas_overlay` ran canvas
+    /// closures whose `draw_text` calls could grow the atlas
+    /// texture (capacity exceeded). When the atlas re-allocated,
+    /// the view pointer changed but the bind group still
+    /// referenced the old view. Canvas-text PRIM_TEXT primitives
+    /// then sampled blank UVs and rendered invisibly — symptom:
+    /// canvas_demo's "Canvas Text" sample shows the background
+    /// plate but none of the headings.
+    ///
+    /// `set_glyph_atlas` no-ops on pointer equality so calling
+    /// before every `composite_frame` is cheap when the atlas
+    /// didn't grow.
+    fn rebind_glyph_atlas_for_overlay(&mut self) {
+        if let (Some(atlas), Some(color_atlas)) =
+            (self.text_ctx.atlas_view(), self.text_ctx.color_atlas_view())
+        {
+            self.renderer.set_glyph_atlas(atlas, color_atlas);
+        }
+    }
+
+    /// Patch the cached background batch's CSS-animated regions in
+    /// place from current `css_anim_store` values, without
+    /// re-walking the tree. Mirror of [`Self::apply_binding_deltas`]
+    /// for the CSS keyframe / transition path.
+    ///
+    /// Returns `false` (caller falls back to slow path) when:
+    /// - No cached batch exists yet (cold start; slow path will
+    ///   populate it).
+    /// - The animation targets an out-of-scope property (clip-path
+    ///   geometry, filter blur, layout dimensions) — Phase 4 first
+    ///   cut doesn't patch those.
+    /// - The cache shape changed since recording (layer push index
+    ///   out of bounds, etc.).
+    /// - A property went through a divide-by-zero (opacity zero on
+    ///   the previous frame).
+    ///
+    /// Returns `true` even when no actual patches happened — that's
+    /// the steady-state case where the animation tick produced the
+    /// same value as last frame (settled, paused, or at a flat
+    /// portion of the curve). The caller still needs to dispatch a
+    /// render to present a fresh frame.
+    ///
+    /// Property coverage (first cut):
+    /// - opacity (LayerConfig.opacity when push index present, OR
+    ///   primitive alpha channels via ratio multiplication)
+    /// - background_color (matching-based: only patches primitives
+    ///   whose current color equals `meta.last_background_color`,
+    ///   leaving children with their own backgrounds intact)
+    /// - border_color, border_width (matching-based)
+    /// - corner_radius (matching-based)
+    /// - shadow params + color (matching-based)
+    /// - rotate_x, rotate_y (absolute write across the range —
+    ///   3D rotation applies to the whole subtree per CSS spec)
+    /// - filter values (absolute write across the range)
+    ///
+    /// Properties that trigger a bail-to-slow-path:
+    /// - clip_inset / clip_circle_radius / clip_ellipse_radii
+    ///   (polygon vertices live in aux_data with cross-primitive
+    ///   offset bookkeeping)
+    /// - filter_blur (lives in LayerConfig.effects Vec)
+    /// - width / height / min_* / max_* / padding / margin / gap
+    ///   (layout — needs `compute_layout`)
+    /// - backdrop_* (glass material; separate dispatch path)
+    pub fn apply_css_deltas(&mut self, tree: &blinc_layout::RenderTree, _scale: f32) -> bool {
+        // CSS-animated primitives live on `cached_bg_batch` (the
+        // walker doesn't push a `motion_subtree` for CSS animations
+        // — that routing is motion-binding only). Patch through the
+        // bg batch.
+        let batch = match self.cached_bg_batch.as_mut() {
+            Some(b) => b,
+            None => return false,
+        };
+        let mut records = tree.css_anim_paint_records_mut();
+        if records.is_empty() {
+            // No CSS-animated nodes recorded at last paint. Nothing
+            // to patch — caller re-uses the cache as-is.
+            return true;
+        }
+        let store_arc = tree.css_anim_store();
+        let store = match store_arc.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+
+        // Tracks whether anything changed this frame. Always true
+        // for now (we always return `true` on no-op patches), but
+        // kept for future damage-rect collection (Phase 4d).
+        let mut any_changed = false;
+
+        for (_node, meta) in records.iter_mut() {
+            // Look up the active animation / transition for this
+            // node. Prefer animations (CSS `animation: ...`); fall
+            // back to transitions (CSS `transition: ...`). Both can
+            // target the same node in theory, but
+            // `apply_all_css_animation_props` runs before
+            // `apply_all_css_transition_props` so animations win in
+            // the slow-path render too.
+            let active_anim = store
+                .animations
+                .get(&meta.stable_id)
+                .filter(|a| a.is_playing);
+            let active_trans = store
+                .transitions
+                .get(&meta.stable_id)
+                .filter(|t| t.is_playing);
+
+            let props_anim = active_anim.map(|a| &a.current_properties);
+            let props_trans = active_trans.map(|t| &t.current_properties);
+
+            // Bail if either source targets a property we can't
+            // patch in place. The slow path handles those correctly.
+            let touches_out_of_scope = |p: &blinc_animation::KeyframeProperties| {
+                p.clip_inset.is_some()
+                    || p.clip_circle_radius.is_some()
+                    || p.clip_ellipse_radii.is_some()
+                    || p.filter_blur.is_some()
+                    || p.width.is_some()
+                    || p.height.is_some()
+                    || p.min_width.is_some()
+                    || p.max_width.is_some()
+                    || p.min_height.is_some()
+                    || p.max_height.is_some()
+                    || p.padding.is_some()
+                    || p.margin.is_some()
+                    || p.gap.is_some()
+                    || p.backdrop_blur.is_some()
+                    || p.backdrop_saturation.is_some()
+                    || p.backdrop_brightness.is_some()
+            };
+            if props_anim.is_some_and(touches_out_of_scope)
+                || props_trans.is_some_and(touches_out_of_scope)
+            {
+                return false;
+            }
+
+            // Helper: read a property from animation first, else
+            // transition, else default to `None` (no change).
+            let read_f32 = |get: fn(&blinc_animation::KeyframeProperties) -> Option<f32>| {
+                props_anim
+                    .and_then(get)
+                    .or_else(|| props_trans.and_then(get))
+            };
+            let read_arr = |get: fn(&blinc_animation::KeyframeProperties) -> Option<[f32; 4]>| {
+                props_anim
+                    .and_then(get)
+                    .or_else(|| props_trans.and_then(get))
+            };
+
+            // ---- opacity ----
+            if let Some(new_opacity) = read_f32(|p| p.opacity) {
+                if (new_opacity - meta.last_opacity).abs() > f32::EPSILON {
+                    if meta.last_opacity.abs() < f32::EPSILON {
+                        // Divide-by-zero — primitives were emitted
+                        // at zero alpha last paint; can't recover
+                        // the original color via ratio. Slow path.
+                        return false;
+                    }
+                    if let Some(push_idx) = meta.layer_push_index {
+                        use blinc_gpu::primitives::LayerCommand;
+                        match batch.layer_commands.get_mut(push_idx) {
+                            Some(entry) => {
+                                if let LayerCommand::Push { config } = &mut entry.command {
+                                    config.opacity = new_opacity;
+                                } else {
+                                    return false;
+                                }
+                            }
+                            None => return false,
+                        }
+                    } else if let Some(prims) =
+                        batch.primitives.get_mut(meta.primitive_range.clone())
+                    {
+                        let ratio = new_opacity / meta.last_opacity;
+                        for p in prims.iter_mut() {
+                            p.color[3] *= ratio;
+                            p.color2[3] *= ratio;
+                            p.border_color[3] *= ratio;
+                            p.shadow_color[3] *= ratio;
+                        }
+                    }
+                    meta.last_opacity = new_opacity;
+                    any_changed = true;
+                }
+            }
+
+            // ---- background_color ----
+            // Matching-based: only patches primitives whose `color`
+            // matches `meta.last_background_color` exactly, so a
+            // child with its own bg stays untouched.
+            if let Some(new_bg) = read_arr(|p| p.background_color) {
+                if let Some(last_bg) = meta.last_background_color {
+                    if new_bg != last_bg {
+                        if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone())
+                        {
+                            for p in prims.iter_mut() {
+                                if p.color == last_bg {
+                                    p.color = new_bg;
+                                }
+                            }
+                        }
+                        meta.last_background_color = Some(new_bg);
+                        any_changed = true;
+                    }
+                }
+            }
+
+            // ---- border_color ----
+            if let Some(new_bc) = read_arr(|p| p.border_color) {
+                if let Some(last_bc) = meta.last_border_color {
+                    if new_bc != last_bc {
+                        if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone())
+                        {
+                            for p in prims.iter_mut() {
+                                if p.border_color == last_bc {
+                                    p.border_color = new_bc;
+                                }
+                            }
+                        }
+                        meta.last_border_color = Some(new_bc);
+                        any_changed = true;
+                    }
+                }
+            }
+
+            // ---- border_width ----
+            if let Some(new_bw) = read_f32(|p| p.border_width) {
+                if (new_bw - meta.last_border_width).abs() > f32::EPSILON {
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                        for p in prims.iter_mut() {
+                            if (p.border[0] - meta.last_border_width).abs() < f32::EPSILON {
+                                p.border[0] = new_bw;
+                            }
+                        }
+                    }
+                    meta.last_border_width = new_bw;
+                    any_changed = true;
+                }
+            }
+
+            // ---- corner_radius ----
+            if let Some(new_cr) = read_arr(|p| p.corner_radius) {
+                if new_cr != meta.last_corner_radius {
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                        for p in prims.iter_mut() {
+                            if p.corner_radius == meta.last_corner_radius {
+                                p.corner_radius = new_cr;
+                            }
+                        }
+                    }
+                    meta.last_corner_radius = new_cr;
+                    any_changed = true;
+                }
+            }
+
+            // ---- shadow_params ----
+            if let Some(new_sp) = read_arr(|p| p.shadow_params) {
+                if new_sp != meta.last_shadow_params {
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                        for p in prims.iter_mut() {
+                            if p.shadow == meta.last_shadow_params {
+                                p.shadow = new_sp;
+                            }
+                        }
+                    }
+                    meta.last_shadow_params = new_sp;
+                    any_changed = true;
+                }
+            }
+
+            // ---- shadow_color ----
+            if let Some(new_sc) = read_arr(|p| p.shadow_color) {
+                if new_sc != meta.last_shadow_color {
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                        for p in prims.iter_mut() {
+                            if p.shadow_color == meta.last_shadow_color {
+                                p.shadow_color = new_sc;
+                            }
+                        }
+                    }
+                    meta.last_shadow_color = new_sc;
+                    any_changed = true;
+                }
+            }
+
+            // ---- rotate_x (3D tilt) ----
+            // perspective[0] = sin(rx), perspective[1] = cos(rx)
+            if let Some(new_rx_deg) = read_f32(|p| p.rotate_x) {
+                let new_rx_rad = new_rx_deg.to_radians();
+                if (new_rx_rad - meta.last_rotate_x_rad).abs() > f32::EPSILON {
+                    let sin_rx = new_rx_rad.sin();
+                    let cos_rx = new_rx_rad.cos();
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                        for p in prims.iter_mut() {
+                            p.perspective[0] = sin_rx;
+                            p.perspective[1] = cos_rx;
+                        }
+                    }
+                    meta.last_rotate_x_rad = new_rx_rad;
+                    any_changed = true;
+                }
+            }
+
+            // ---- rotate_y (3D turn) ----
+            // rotation[2] = sin(ry), rotation[3] = cos(ry)
+            if let Some(new_ry_deg) = read_f32(|p| p.rotate_y) {
+                let new_ry_rad = new_ry_deg.to_radians();
+                if (new_ry_rad - meta.last_rotate_y_rad).abs() > f32::EPSILON {
+                    let sin_ry = new_ry_rad.sin();
+                    let cos_ry = new_ry_rad.cos();
+                    if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                        for p in prims.iter_mut() {
+                            p.rotation[2] = sin_ry;
+                            p.rotation[3] = cos_ry;
+                        }
+                    }
+                    meta.last_rotate_y_rad = new_ry_rad;
+                    any_changed = true;
+                }
+            }
+
+            // ---- filter values ----
+            // filter_a = (grayscale, invert, sepia, hue_rotate_rad)
+            // filter_b = (brightness, contrast, saturate, 0)
+            let new_fa = [
+                read_f32(|p| p.filter_grayscale).unwrap_or(meta.last_filter_a[0]),
+                read_f32(|p| p.filter_invert).unwrap_or(meta.last_filter_a[1]),
+                read_f32(|p| p.filter_sepia).unwrap_or(meta.last_filter_a[2]),
+                read_f32(|p| p.filter_hue_rotate)
+                    .map(|d| d.to_radians())
+                    .unwrap_or(meta.last_filter_a[3]),
+            ];
+            let new_fb = [
+                read_f32(|p| p.filter_brightness).unwrap_or(meta.last_filter_b[0]),
+                read_f32(|p| p.filter_contrast).unwrap_or(meta.last_filter_b[1]),
+                read_f32(|p| p.filter_saturate).unwrap_or(meta.last_filter_b[2]),
+                0.0,
+            ];
+            if new_fa != meta.last_filter_a || new_fb != meta.last_filter_b {
+                if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                    for p in prims.iter_mut() {
+                        p.filter_a = new_fa;
+                        p.filter_b = new_fb;
+                    }
+                }
+                meta.last_filter_a = new_fa;
+                meta.last_filter_b = new_fb;
+                any_changed = true;
+            }
+        }
+
+        // Mirror `apply_binding_deltas`: drop the lock + the
+        // record borrow before the caller composes the frame.
+        let _ = any_changed;
+        drop(store);
+        drop(records);
         true
     }
 
@@ -5462,6 +5857,163 @@ impl RenderContext {
             self.cached_css_transformed_text_prims = None;
         }
 
+        // Phase 4d/f: CSS-only patch fast path. When CSS animations
+        // / transitions are the *only* animation signal (no motion
+        // bindings, no visual / layout / FLIP), patch the cached
+        // batch in place via `apply_css_deltas` and re-render the
+        // static cache from the patched batch. Skips the walker and
+        // `collect_elements_recursive` — the two biggest CPU costs
+        // on a CSS-only frame.
+        //
+        // Phase 4f relaxed the previous `BLINC_CSS_PATCH=1` opt-in:
+        // the path now engages by default. The per-record eligibility
+        // checks below (cached batch present + static layer valid +
+        // walker has populated records) keep the path correct for
+        // cold-start frames — first CSS frame after a structural
+        // change falls through to slow path, which repopulates the
+        // records; subsequent frames take the fast path.
+        //
+        // Bails (falls through to slow path) on:
+        //   - Motion bindings or other animations active (motion
+        //     damage path takes precedence; mixing the two would
+        //     race their respective last_* bookkeeping).
+        //   - Empty `css_anim_paint_records` (walker hasn't seen
+        //     the CSS-animated node yet — first frame of a newly-
+        //     started animation; slow path populates the records).
+        //   - `apply_css_deltas` reports an out-of-scope property
+        //     (clip-path geometry, blur, layout) or cache shape
+        //     mismatch.
+        //
+        // Cost vs slow path on a CSS-only frame:
+        //   - Skipped: paint walker (~0.5 ms), text shaping +
+        //     SVG/image collect (~0.5 ms), per-frame State updates.
+        //   - Paid: apply_css_deltas (~50 µs), batch clone for
+        //     re-render (~50 µs), full SDF dispatch (same as slow
+        //     path), text / SVG / image dispatch from cached
+        //     vectors (same as slow path).
+        //   - Net ≈ 1 ms saved per CSS-only frame, ~6 % at 60 fps.
+        let css_patch_eligible = css_only_active
+            && !bindings_animating
+            && self.cached_bg_batch.is_some()
+            && self.renderer.static_layer_valid()
+            && !tree.css_anim_paint_records().is_empty();
+        if css_patch_eligible {
+            let scale_factor = tree.scale_factor();
+            if self.apply_css_deltas(tree, scale_factor) {
+                // Re-render the static cache from the patched batch.
+                // Without this, `composite_frame` blits the stale
+                // texture from the last slow-path frame and the
+                // patched primitive values never reach pixels.
+                let batch_clone = self
+                    .cached_bg_batch
+                    .as_ref()
+                    .expect("css_patch_eligible implies cached_bg_batch is Some")
+                    .clone();
+                self.renderer
+                    .render_static_layer(&batch_clone, [0.0, 0.0, 0.0, self.clear_alpha as f64]);
+                // Re-dispatch text / SVG / image on top of the
+                // freshly-rendered cache. `render_static_layer`
+                // clears the cache before re-rendering SDF, so
+                // glyphs / SVGs / images that were composited on
+                // top last paint need to land again.
+                //
+                // Cached vectors are from the last slow-path frame.
+                // For pure visual / 3D-transform / color CSS
+                // animations they stay valid (positions don't
+                // shift). Layout animations would invalidate them,
+                // but layout properties trigger an
+                // `apply_css_deltas` bail above so we never reach
+                // here with stale positions.
+                let static_view_opt = self.renderer.static_layer_view().cloned();
+                if let Some(static_view) = static_view_opt {
+                    if let Some(glyphs_by_layer) = self.cached_glyphs_by_layer.clone() {
+                        for (_z, glyphs) in glyphs_by_layer.iter() {
+                            if !glyphs.is_empty() {
+                                self.render_text(&static_view, glyphs);
+                            }
+                        }
+                    }
+                    if let Some(fg_glyphs) = self.cached_fg_glyphs.clone() {
+                        if !fg_glyphs.is_empty() {
+                            self.render_text(&static_view, &fg_glyphs);
+                        }
+                    }
+                    if let Some(svgs) = self.cached_svgs.clone() {
+                        if !svgs.is_empty() {
+                            self.render_rasterized_svgs(&static_view, &svgs, scale_factor);
+                        }
+                    }
+                    if let Some(images) = self.cached_images.clone() {
+                        if !images.is_empty() {
+                            let refs: Vec<&ImageElement> = images.iter().collect();
+                            self.render_images_ref(&static_view, &refs);
+                        }
+                    }
+                }
+                // Composite cache + canvas overlay + dynamic batch
+                // to the surface. Same final-blit shape the motion
+                // damage path uses.
+                let mut overlay = self.collect_canvas_overlay(tree, width, height);
+                if !tree.dynamic_regions().is_empty() {
+                    let walked =
+                        self.collect_dynamic_region_primitives(tree, render_state, width, height);
+                    self.cached_dynamic_batch = Some(walked);
+                }
+                let (dyn_prims, dyn_aux) = match self.cached_dynamic_batch.as_ref() {
+                    Some(b) => (b.primitives.as_slice(), b.aux_data.as_slice()),
+                    None => (&[][..], &[][..]),
+                };
+                if !dyn_prims.is_empty() {
+                    overlay.primitives.extend_from_slice(dyn_prims);
+                }
+                // Rebind needs `&mut self` so we have to release the
+                // immutable borrow `dyn_aux` is holding on
+                // `cached_dynamic_batch`. Clone the aux slice into a
+                // local Vec — at most a few hundred entries on a
+                // motion-heavy frame, well under 1 µs to copy.
+                let dyn_aux_owned: Vec<[f32; 4]> = dyn_aux.to_vec();
+                self.rebind_glyph_atlas_for_overlay();
+                self.renderer.composite_frame(
+                    target_view,
+                    target_texture,
+                    &overlay.primitives,
+                    &dyn_aux_owned,
+                );
+                if !overlay.dynamic_images.is_empty() {
+                    self.renderer
+                        .render_dynamic_images(target_view, &overlay.dynamic_images);
+                }
+                if !overlay.meshes.is_empty() {
+                    dispatch_pending_meshes(
+                        &mut self.renderer,
+                        target_view,
+                        width,
+                        height,
+                        &overlay.meshes,
+                    );
+                }
+                // Authoritative `visible_anim_active` update —
+                // walker didn't run this frame, so reset the flag
+                // from current animation state. Mirrors the motion
+                // damage path's end-of-frame restate.
+                let has_visible_canvas = !tree.canvas_paint_records().is_empty();
+                let any_visible_anim = {
+                    let painted_set = tree.painted_node_ids().clone();
+                    let painted_stable = tree.painted_stable_ids();
+                    tree.has_any_active_animation_visible(
+                        render_state,
+                        &painted_set,
+                        &painted_stable,
+                    )
+                };
+                tree.set_visible_anim_active(any_visible_anim || has_visible_canvas);
+                return Ok(());
+            }
+            // apply_css_deltas returned false — out-of-scope
+            // property, cache shape mismatch, or divide-by-zero.
+            // Fall through to slow path.
+        }
+
         // Fast path: cache valid AND caller is fine with reusing it.
         // Skip the entire walker / dispatch chain — just composite.
         let use_fast =
@@ -5502,27 +6054,42 @@ impl RenderContext {
             } else {
                 true
             };
-            if damage_rect_eligible && self.cached_bg_batch.is_some() {
-                if !patched {
-                    // `apply_binding_deltas` bailed (typically the
-                    // last-opacity-is-zero guard — opacity binding
-                    // going `0 → 1` can't be ratio-scaled). The cache
-                    // is now stale; falling through to composite_frame
-                    // would blit the previous frame's pixels and the
-                    // animation would visibly freeze until something
-                    // else (mouse move, scroll) forced a slow-path
-                    // paint. Symptom: switch toggle starts the spring
-                    // but the colored track stays at off-state alpha.
-                    self.renderer.invalidate_static_layer();
-                    self.cached_texts = None;
-                    self.cached_svgs = None;
-                    self.cached_images = None;
-                    self.cached_flows = None;
-                    self.cached_glyphs_by_layer = None;
-                    self.cached_fg_glyphs = None;
-                    self.cached_css_transformed_text_prims = None;
-                    damage_rect_failed = true;
-                } else if !self.last_binding_damage_rects.is_empty() {
+            // Bail handling MUST run regardless of
+            // `damage_rect_eligible`. `apply_binding_deltas` returns
+            // false on the last-opacity-is-zero guard (opacity
+            // binding going `0 → 1` can't be ratio-scaled) and on
+            // degenerate scale (last_scale ~ 0). In either case the
+            // cache is stale this frame; `composite_frame` would
+            // blit the previous frame's pixels and the animation
+            // visibly freezes until something else (mouse move,
+            // scroll) forced a slow-path paint. Symptom: switch
+            // toggle's color fade (`motion().opacity(color_anim)`
+            // 0 → 1) starts the spring but the colored track stays
+            // at off-state alpha until you wiggle the mouse.
+            //
+            // Pre-fix this branch was gated on `damage_rect_eligible`
+            // which itself required `BLINC_DAMAGE_RECT=1`, so the
+            // bail handling never fired in the default build. Move
+            // it out of that gate — invalidate + `damage_rect_failed`
+            // marker so the slow path below picks up and re-walks
+            // with current binding values.
+            if !patched {
+                self.renderer.invalidate_static_layer();
+                self.cached_texts = None;
+                self.cached_svgs = None;
+                self.cached_images = None;
+                self.cached_flows = None;
+                self.cached_glyphs_by_layer = None;
+                self.cached_fg_glyphs = None;
+                self.cached_css_transformed_text_prims = None;
+                damage_rect_failed = true;
+            }
+            if damage_rect_eligible
+                && self.cached_bg_batch.is_some()
+                && patched
+                && !self.last_binding_damage_rects.is_empty()
+            {
+                {
                     let damaged = self.last_binding_damage_rects.clone();
                     let batch_ref = self
                         .cached_bg_batch
@@ -5706,11 +6273,14 @@ impl RenderContext {
                 if !dyn_prims.is_empty() {
                     overlay.primitives.extend_from_slice(dyn_prims);
                 }
+                // See sibling site above — same borrow workaround.
+                let dyn_aux_owned: Vec<[f32; 4]> = dyn_aux.to_vec();
+                self.rebind_glyph_atlas_for_overlay();
                 self.renderer.composite_frame(
                     target_view,
                     target_texture,
                     &overlay.primitives,
-                    dyn_aux,
+                    &dyn_aux_owned,
                 );
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
@@ -5911,6 +6481,7 @@ impl RenderContext {
                 overlay.primitives.extend_from_slice(&dyn_batch.primitives);
             }
         }
+        self.rebind_glyph_atlas_for_overlay();
         self.renderer.composite_frame(
             target_view,
             target_texture,

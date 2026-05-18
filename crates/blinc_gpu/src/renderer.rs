@@ -1130,6 +1130,18 @@ pub struct GpuRenderer {
     /// `render_static_layer_damaged`. `None` = no scissor (default;
     /// full-attachment dispatch).
     pending_scissor: Option<(u32, u32, u32, u32)>,
+    /// Damage scissor applied to subsequent layer-composite blits
+    /// inside `blit_tight_texture_to_target`. Unlike
+    /// [`Self::pending_scissor`] (a hard replacement used by text /
+    /// SVG / image overlays), this scissor is *intersected* with
+    /// the blit's own visible-bounds scissor so layer composites
+    /// can only paint inside the union of damage rect AND the
+    /// layer's content area. Phase 4d Opt 2 sets this on the
+    /// damage path so re-rendering a scissored cache region keeps
+    /// effect-layer composites confined to the damage rect.
+    /// `None` = no damage scissor (default; blit uses its own
+    /// visible-bounds scissor only).
+    pending_damage_scissor: Option<(u32, u32, u32, u32)>,
     /// Renderer configuration
     config: RendererConfig,
     /// Current frame time (for animations)
@@ -2387,6 +2399,7 @@ impl GpuRenderer {
             viewport_size,
             saved_viewport_size: None,
             pending_scissor: None,
+            pending_damage_scissor: None,
             memory_budget: GpuMemoryBudget::new(config.gpu_memory_budget),
             config,
             time: 0.0,
@@ -4192,6 +4205,24 @@ impl GpuRenderer {
         self.pending_scissor = Some(rect);
     }
 
+    /// Damage-scissor variant of [`Self::set_pending_scissor`]: the
+    /// rect is *intersected* with `blit_tight_texture_to_target`'s
+    /// own visible-bounds scissor instead of replacing it. Phase 4d
+    /// Opt 2 sets this before re-rendering a CSS-animated cache
+    /// region so layer-effect composites paint only inside the
+    /// damage rect, leaving the rest of the cache from last paint
+    /// untouched. Call [`Self::clear_pending_damage_scissor`] when
+    /// done.
+    pub fn set_pending_damage_scissor(&mut self, rect: (u32, u32, u32, u32)) {
+        self.pending_damage_scissor = Some(rect);
+    }
+
+    /// Clear the damage scissor — subsequent layer composites use
+    /// their own visible-bounds scissor only.
+    pub fn clear_pending_damage_scissor(&mut self) {
+        self.pending_damage_scissor = None;
+    }
+
     /// Drop the staged scissor so subsequent dispatches paint to the
     /// full attachment again. Paired with `set_pending_scissor`.
     pub fn clear_pending_scissor(&mut self) {
@@ -4298,12 +4329,33 @@ impl GpuRenderer {
     /// `self.bind_groups.sdf`, so ALL render paths automatically get the atlas
     /// without needing to thread it through every method.
     ///
-    /// Uses pointer comparison to avoid recreating the bind group when the atlas
-    /// hasn't changed between frames.
+    /// Always rebuilds the bind group. The previous pointer-equality
+    /// optimisation was a false-negative trap: `text_ctx` replaces
+    /// the `atlas_view` field *in place* (same `Option<TextureView>`
+    /// memory address, different inner `Arc`) when the atlas grows.
+    /// The borrowed reference `atlas_view as *const TextureView`
+    /// returned the same pointer before and after growth, so the
+    /// check thought "no change" while the underlying view was a
+    /// different texture — the bind group kept the OLD view's Arc
+    /// and subsequent glyph samples landed in the old atlas.
     ///
-    /// SAFETY: The raw pointers stored in `active_glyph_atlas` must remain valid
-    /// for the duration of the frame. This is guaranteed because they point to
-    /// TextureViews owned by the text context, which outlives all render calls.
+    /// Symptom: canvas_demo `ctx.draw_text` rendered blank because
+    /// `collect_canvas_overlay` grew the atlas after the slow
+    /// path's `set_glyph_atlas` call, the bind group stayed on the
+    /// pre-growth view, and the new glyph UVs (referring to the
+    /// post-growth atlas) sampled from the wrong texture.
+    ///
+    /// Cost of always rebuilding: one `create_bind_group` call
+    /// (~50 µs) per `set_glyph_atlas` invocation. Per frame on the
+    /// slow path that's negligible; the overlay-rebind helper
+    /// `BlincApp::rebind_glyph_atlas_for_overlay` calls this once
+    /// per `composite_frame` site, so total cost is one extra
+    /// rebuild per frame at most.
+    ///
+    /// SAFETY: The raw pointers stored in `active_glyph_atlas` must
+    /// remain valid for the duration of the frame — guaranteed
+    /// because they point to TextureViews owned by the text
+    /// context, which outlives all render calls.
     pub fn set_glyph_atlas(
         &mut self,
         atlas_view: &wgpu::TextureView,
@@ -4311,21 +4363,11 @@ impl GpuRenderer {
     ) {
         let atlas_ptr = atlas_view as *const wgpu::TextureView;
         let color_ptr = color_atlas_view as *const wgpu::TextureView;
-
-        let need_rebuild = match &self.active_glyph_atlas {
-            Some(active) => {
-                active.atlas_view_ptr != atlas_ptr || active.color_atlas_view_ptr != color_ptr
-            }
-            None => true,
-        };
-
-        if need_rebuild {
-            self.active_glyph_atlas = Some(ActiveGlyphAtlas {
-                atlas_view_ptr: atlas_ptr,
-                color_atlas_view_ptr: color_ptr,
-            });
-            self.rebind_sdf_bind_group();
-        }
+        self.active_glyph_atlas = Some(ActiveGlyphAtlas {
+            atlas_view_ptr: atlas_ptr,
+            color_atlas_view_ptr: color_ptr,
+        });
+        self.rebind_sdf_bind_group();
     }
 
     /// Get a mutable reference to the @flow pipeline cache
@@ -4946,12 +4988,17 @@ impl GpuRenderer {
         // This prevents memory bloat from accumulated large textures
         self.layer_texture_cache.evict_oversized();
 
-        // Check if we have layer commands with effects, blend modes, or 3D transforms
+        // Check whether any layer command needs the layer-aware path.
+        // Phase 4a: include pure-opacity layers so `config.opacity`
+        // actually reaches the composite blit. Without this, opacity-
+        // only `@keyframes` rendered at full alpha (the simple path
+        // ignores layer commands entirely).
         let has_layer_effects = batch.layer_commands.iter().any(|entry| {
             if let crate::primitives::LayerCommand::Push { config } = &entry.command {
                 !config.effects.is_empty()
                     || config.blend_mode != blinc_core::BlendMode::Normal
                     || config.transform_3d.is_some()
+                    || config.opacity < 1.0
             } else {
                 false
             }
@@ -5200,10 +5247,27 @@ impl GpuRenderer {
                 }
                 LayerCommand::Pop => {
                     if let Some((start, config)) = layer_stack.pop() {
-                        if !config.effects.is_empty()
+                        // Phase 4a: include pure-opacity layers
+                        // (`config.opacity < 1.0` alone). Pre-fix the
+                        // gate required effects / blend / 3D; pure-
+                        // opacity layers were silently dropped — their
+                        // primitives rendered at full alpha in the
+                        // first pass and `config.opacity` went
+                        // nowhere. The walker's hybrid flatten now
+                        // skips `push_layer` for simple-enough opacity
+                        // subtrees (children.len() <= 1) so those
+                        // don't reach this gate at all; what does
+                        // reach is the cases that genuinely need a
+                        // layer composite (overlapping children,
+                        // nested opacity), and they get correct
+                        // offscreen-then-composite rendering via
+                        // `blit_tight_texture_to_target`, which reads
+                        // `config.opacity`.
+                        let has_effect_or_blend_or_3d = !config.effects.is_empty()
                             || config.blend_mode != blinc_core::BlendMode::Normal
-                            || config.transform_3d.is_some()
-                        {
+                            || config.transform_3d.is_some();
+                        let has_pure_opacity = config.opacity < 1.0;
+                        if has_effect_or_blend_or_3d || has_pure_opacity {
                             effect_layers.push(EffectLayerRange {
                                 primitive_start: start.primitive_start,
                                 primitive_end: entry.primitive_index,
@@ -6708,10 +6772,16 @@ impl GpuRenderer {
     /// * `target` - The single-sampled texture view to render to (existing content is preserved)
     /// * `batch` - The primitive batch to render
     pub fn render_overlay(&mut self, target: &wgpu::TextureView, batch: &PrimitiveBatch) {
-        // Check if we have layer commands with effects or blend modes that need processing
+        // Phase 4a: include pure-opacity layers in the gate so an
+        // overlay containing only opacity-animated content takes the
+        // layer-aware path (which actually composites with the
+        // configured opacity) instead of the simple path (which drops
+        // layer commands entirely).
         let has_layer_processing = batch.layer_commands.iter().any(|entry| {
             if let crate::primitives::LayerCommand::Push { config } = &entry.command {
-                !config.effects.is_empty() || config.blend_mode != blinc_core::BlendMode::Normal
+                !config.effects.is_empty()
+                    || config.blend_mode != blinc_core::BlendMode::Normal
+                    || config.opacity < 1.0
             } else {
                 false
             }
@@ -6823,10 +6893,15 @@ impl GpuRenderer {
                 }
                 LayerCommand::Pop => {
                     if let Some((start_idx, config)) = layer_stack.pop() {
-                        if !config.effects.is_empty()
+                        // Phase 4a: pure-opacity layers also need
+                        // processing so `config.opacity` reaches the
+                        // composite blit instead of being silently
+                        // dropped.
+                        let needs_processing = !config.effects.is_empty()
                             || config.blend_mode != blinc_core::BlendMode::Normal
                             || config.transform_3d.is_some()
-                        {
+                            || config.opacity < 1.0;
+                        if needs_processing {
                             effect_layers.push((start_idx, entry.primitive_index, config));
                         }
                     }
@@ -11043,10 +11118,45 @@ impl GpuRenderer {
             let scissor_w = vis_w.max(1.0) as u32;
             let scissor_h = vis_h.max(1.0) as u32;
 
-            render_pass.set_scissor_rect(scissor_x, scissor_y, scissor_w, scissor_h);
-            render_pass.set_pipeline(&self.pipelines.layer_composite);
-            render_pass.set_bind_group(0, &bind_group, &[]);
-            render_pass.draw(0..6, 0..1);
+            // Phase 4d Opt 2: when a damage scissor is set,
+            // intersect it with the layer's visible bounds. The
+            // composite paints only in the overlap of (layer
+            // content area) ∩ (damage rect). Pixels outside the
+            // damage rect stay from the previous frame's render —
+            // which is what makes a scissored cache repaint
+            // correct for CSS-animated layer effects.
+            //
+            // Empty intersection ⇒ skip the draw entirely (layer
+            // doesn't touch the damage region this frame). Still
+            // submit the otherwise-empty render pass so the encoder
+            // doesn't leak — `LoadOp::Load` + no draw is a no-op
+            // on the GPU.
+            let scissor_and_draw = if let Some((dx, dy, dw, dh)) = self.pending_damage_scissor {
+                let lx0 = scissor_x;
+                let ly0 = scissor_y;
+                let lx1 = lx0 + scissor_w;
+                let ly1 = ly0 + scissor_h;
+                let dx1 = dx + dw;
+                let dy1 = dy + dh;
+                let ix0 = lx0.max(dx);
+                let iy0 = ly0.max(dy);
+                let ix1 = lx1.min(dx1);
+                let iy1 = ly1.min(dy1);
+                if ix1 <= ix0 || iy1 <= iy0 {
+                    None
+                } else {
+                    Some((ix0, iy0, ix1 - ix0, iy1 - iy0))
+                }
+            } else {
+                Some((scissor_x, scissor_y, scissor_w, scissor_h))
+            };
+
+            if let Some((sx, sy, sw, sh)) = scissor_and_draw {
+                render_pass.set_scissor_rect(sx, sy, sw, sh);
+                render_pass.set_pipeline(&self.pipelines.layer_composite);
+                render_pass.set_bind_group(0, &bind_group, &[]);
+                render_pass.draw(0..6, 0..1);
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
