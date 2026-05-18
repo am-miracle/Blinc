@@ -277,6 +277,21 @@ pub struct RenderContext {
     /// cache (with scissor + `LoadOp::Load`) instead of invalidating
     /// the whole layer.
     last_binding_damage_rects: Vec<[f32; 4]>,
+    /// Damage rectangles populated by the most recent
+    /// `apply_css_deltas` call. One entry per `CssAnimPaintMeta`
+    /// whose properties actually changed this frame; each is the
+    /// node's `last_screen_aabb` (screen pixels, post-DPI) captured
+    /// by the walker. The Phase 4d Opt 2 CSS-damage-rect path
+    /// passes these to `render_static_layer_damaged` so the cache
+    /// repaint is scissored to just the animated regions instead of
+    /// re-rendering the whole layer.
+    ///
+    /// Visual-only Phase 4c properties (opacity / colour /
+    /// corner_radius / shadow / filter / rotate_x / rotate_y) keep
+    /// the AABB stable, so the walker's recorded last_screen_aabb
+    /// covers both the pre- and post-patch pixel footprints — no
+    /// union with a new AABB needed.
+    last_css_damage_rects: Vec<[f32; 4]>,
     /// Prepared text glyphs from the most recent full paint, keyed
     /// by `z_index`. Populated by `render_tree_with_motion_opt`'s
     /// body right after the text-shaping loop, drained by the
@@ -605,6 +620,7 @@ impl RenderContext {
             image_load_times: std::collections::HashMap::new(),
             image_fade_deadlines: std::collections::HashMap::new(),
             last_binding_damage_rects: Vec::new(),
+            last_css_damage_rects: Vec::new(),
             cached_glyphs_by_layer: None,
             cached_fg_glyphs: None,
             cached_css_transformed_text_prims: None,
@@ -1542,8 +1558,18 @@ impl RenderContext {
         // for now (we always return `true` on no-op patches), but
         // kept for future damage-rect collection (Phase 4d).
         let mut any_changed = false;
+        // Phase 4d Opt 2: collect per-record damage rects. The
+        // caller's `last_css_damage_rects` slot is overwritten at
+        // the end of the function; if `apply_css_deltas` bails the
+        // caller falls back to the slow path and ignores rects.
+        // One entry per record whose patch actually moved a pixel.
+        let mut damage_rects: Vec<[f32; 4]> = Vec::new();
 
         for (_node, meta) in records.iter_mut() {
+            // Per-record patch tracking — distinct from `any_changed`
+            // which spans the whole loop. Only push a damage rect
+            // when at least one property on THIS record moved.
+            let mut record_changed = false;
             // Look up the active animation / transition for this
             // node. Prefer animations (CSS `animation: ...`); fall
             // back to transitions (CSS `transition: ...`). Both can
@@ -1636,6 +1662,7 @@ impl RenderContext {
                     }
                     meta.last_opacity = new_opacity;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1656,6 +1683,7 @@ impl RenderContext {
                         }
                         meta.last_background_color = Some(new_bg);
                         any_changed = true;
+                        record_changed = true;
                     }
                 }
             }
@@ -1674,6 +1702,7 @@ impl RenderContext {
                         }
                         meta.last_border_color = Some(new_bc);
                         any_changed = true;
+                        record_changed = true;
                     }
                 }
             }
@@ -1690,6 +1719,7 @@ impl RenderContext {
                     }
                     meta.last_border_width = new_bw;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1705,6 +1735,7 @@ impl RenderContext {
                     }
                     meta.last_corner_radius = new_cr;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1720,6 +1751,7 @@ impl RenderContext {
                     }
                     meta.last_shadow_params = new_sp;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1735,6 +1767,7 @@ impl RenderContext {
                     }
                     meta.last_shadow_color = new_sc;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1753,6 +1786,7 @@ impl RenderContext {
                     }
                     meta.last_rotate_x_rad = new_rx_rad;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1771,6 +1805,7 @@ impl RenderContext {
                     }
                     meta.last_rotate_y_rad = new_ry_rad;
                     any_changed = true;
+                    record_changed = true;
                 }
             }
 
@@ -1801,6 +1836,21 @@ impl RenderContext {
                 meta.last_filter_a = new_fa;
                 meta.last_filter_b = new_fb;
                 any_changed = true;
+                record_changed = true;
+            }
+
+            // Phase 4d Opt 2: if any property on this record moved,
+            // its `last_screen_aabb` is the damage rect for the
+            // cache repaint. Visual-only properties (opacity / colour
+            // / corner / shadow / filter / rotate_x / rotate_y) keep
+            // the AABB stable, so the walker's captured rect covers
+            // both pre- and post-patch pixel footprints. Records
+            // with no AABB (empty primitive range — text-only
+            // subtrees, off-screen) contribute nothing.
+            if record_changed {
+                if let Some(rect) = meta.last_screen_aabb {
+                    damage_rects.push(rect);
+                }
             }
         }
 
@@ -1809,6 +1859,7 @@ impl RenderContext {
         let _ = any_changed;
         drop(store);
         drop(records);
+        self.last_css_damage_rects = damage_rects;
         true
     }
 
