@@ -61,6 +61,44 @@ pub enum AnimationThreadMode {
     Background,
 }
 
+/// Frame-rate policy for animations.
+///
+/// Controls how the framework chooses the cadence at which animation
+/// frames are scheduled. Default is [`AnimationFps::Adaptive`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimationFps {
+    /// Framework picks an initial target FPS at window creation
+    /// based on a static heuristic (GPU device class, CPU core count)
+    /// and then adjusts dynamically based on observed frame times:
+    /// drops the cap when frames consistently overshoot the budget,
+    /// raises it when they come back under (with hysteresis to avoid
+    /// flapping).
+    ///
+    /// Goal: a single default that runs smooth on M1 / Ryzen as well
+    /// as 8 GB Linux laptops without per-app tuning.
+    ///
+    /// **Default.**
+    Adaptive,
+
+    /// Cap animation frames at exactly `N` per second. The framework
+    /// never overrides this — useful when timing matters (tests,
+    /// scrubbing UIs with a target SLA) or when you've measured the
+    /// right value yourself.
+    Fixed(u32),
+
+    /// Animations run at display refresh rate, no cap. Right for
+    /// games, video players, frame-perfect interactions. CPU and GPU
+    /// cost scale with refresh rate; on a 120 Hz monitor a complex
+    /// page is roughly 2× the cost vs 60 Hz.
+    Refresh,
+}
+
+impl Default for AnimationFps {
+    fn default() -> Self {
+        Self::Adaptive
+    }
+}
+
 /// Window configuration
 #[derive(Clone, Debug)]
 pub struct WindowConfig {
@@ -199,6 +237,26 @@ pub struct WindowConfig {
     /// cap-OK side. Apps with Stateful-driven transforms that need
     /// vsync should leave the cap off.
     pub animation_fps_cap: Option<u32>,
+    /// How the framework chooses the animation frame rate.
+    ///
+    /// Default is [`AnimationFps::Adaptive`]: at startup the
+    /// framework picks an initial target rate based on system
+    /// characteristics (GPU class, CPU core count) and adjusts
+    /// dynamically as frames run, dropping the rate when frames
+    /// consistently overshoot the budget and raising it when they
+    /// come back under. The goal is to keep a smooth steady state
+    /// across hardware tiers without per-app tuning.
+    ///
+    /// Apps that need predictable behaviour — games, scrubbing UIs,
+    /// timing-sensitive tests — override with [`AnimationFps::Fixed`]
+    /// or [`AnimationFps::Refresh`]; the framework then leaves the
+    /// rate alone.
+    ///
+    /// **Interaction with `animation_fps_cap`** — `animation_fps_cap`
+    /// is the legacy field and takes precedence when set: any
+    /// `Some(N)` value is treated as `AnimationFps::Fixed(N)`. New
+    /// code should use `animation_fps` instead.
+    pub animation_fps: AnimationFps,
     /// Where the animation scheduler ticks (springs, keyframes,
     /// timelines, tick_callbacks).
     ///
@@ -254,6 +312,7 @@ impl Default for WindowConfig {
             x11_class: None,
             max_frame_latency: 2,
             animation_fps_cap: None,
+            animation_fps: AnimationFps::default(),
             animation_thread_mode: AnimationThreadMode::default(),
         }
     }

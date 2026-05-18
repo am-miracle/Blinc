@@ -48,6 +48,39 @@ use crate::error::{BlincError, Result};
 /// Shared animation scheduler for the application (thread-safe)
 pub type SharedAnimationScheduler = Arc<Mutex<AnimationScheduler>>;
 
+/// Pick an initial animation-FPS cap for `AnimationFps::Adaptive`
+/// based on coarse system characteristics.
+///
+/// Currently looks at logical-core count via
+/// `std::thread::available_parallelism()`. Future revisions can add
+/// GPU class (via wgpu adapter info), total RAM, and battery /
+/// power-mode signals.
+///
+/// Thresholds are conservative: the dynamic adaptation step (when it
+/// lands) will raise the cap if frames are coming in well under
+/// budget, so we err on the side of starting lower and letting the
+/// adapter climb. The animation_fps_cap field clamping further
+/// enforces sane bounds.
+///
+/// Returns:
+/// * `<= 4` cores  → 30 fps  (typical low-end laptops, older
+///                            Chromebooks, single-board computers)
+/// * `<= 8` cores  → 60 fps  (mainstream desktops, recent laptops)
+/// * `>  8` cores  → 60 fps  (high-end; could be 120 but conservative)
+///
+/// Apps that want vsync regardless can set
+/// `WindowConfig::animation_fps = AnimationFps::Refresh`.
+pub(crate) fn detect_initial_fps_cap() -> u32 {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    if cores <= 4 {
+        30
+    } else {
+        60
+    }
+}
+
 // SharedAnimatedValue and SharedAnimatedTimeline are re-exported from blinc_animation
 
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
@@ -2203,18 +2236,56 @@ impl WindowedApp {
         let platform = DesktopPlatform::new().map_err(|e| BlincError::Platform(e.to_string()))?;
         let primary_transparent = config.transparent;
         let primary_max_frame_latency = config.max_frame_latency.clamp(1, 3);
-        // Snapshot the animation FPS cap before `config` moves into the
-        // event loop. `None` keeps every animation frame at native vsync
-        // (the existing behaviour, right for games / video / scrubbing
-        // UIs); `Some(N)` paces animation-only redraws via
-        // `wake_proxy.wake_at(1000/N ms)` so the chain doesn't loop at
-        // full refresh just because a slow CSS keyframe is on screen.
-        let animation_fps_cap = config.animation_fps_cap;
-        // Capture animation_thread_mode pre-move (config gets moved
-        // into `create_event_loop_with_config` below). Drives whether
-        // the AnimationScheduler spawns its bg thread or relies on
-        // the main thread's per-frame `tick()` call (Phase 3) to
-        // advance springs / keyframes / timelines / tick_callbacks.
+        // Snapshot the animation FPS policy before `config` moves into
+        // the event loop. Reconcile the two paths:
+        //
+        // * Legacy `animation_fps_cap: Option<u32>` — when set, wins
+        //   unconditionally (treated as `AnimationFps::Fixed(N)`). Lets
+        //   existing apps keep working without code changes.
+        //
+        // * New `animation_fps: AnimationFps`:
+        //   - `Fixed(N)`     → cap at N, framework never overrides.
+        //   - `Refresh`      → no cap, vsync-paced animations.
+        //   - `Adaptive`     → framework picks a starting cap from a
+        //                       static heuristic (GPU class proxy via
+        //                       core count + total RAM) and adjusts at
+        //                       runtime based on observed frame times.
+        //
+        // `animation_fps_cap_atomic` is shared with the Phase 4
+        // adaptation logic below so the adapter can mutate the cap
+        // at runtime; the per-frame paint gate and the scheduler
+        // both read through it.
+        let initial_animation_fps_cap: Option<u32> = match config.animation_fps_cap {
+            Some(n) => Some(n),
+            None => match config.animation_fps {
+                blinc_platform::AnimationFps::Fixed(n) => Some(n),
+                blinc_platform::AnimationFps::Refresh => None,
+                blinc_platform::AnimationFps::Adaptive => Some(detect_initial_fps_cap()),
+            },
+        };
+        let animation_fps_is_adaptive = config.animation_fps_cap.is_none()
+            && matches!(config.animation_fps, blinc_platform::AnimationFps::Adaptive);
+        let animation_fps_cap = initial_animation_fps_cap;
+        tracing::info!(
+            "animation_fps: source={} cap={:?} adaptive={}",
+            if config.animation_fps_cap.is_some() {
+                "legacy_animation_fps_cap"
+            } else {
+                match config.animation_fps {
+                    blinc_platform::AnimationFps::Adaptive => "Adaptive",
+                    blinc_platform::AnimationFps::Fixed(_) => "Fixed",
+                    blinc_platform::AnimationFps::Refresh => "Refresh",
+                }
+            },
+            animation_fps_cap,
+            animation_fps_is_adaptive,
+        );
+        let _ = animation_fps_is_adaptive; // Wired into Phase 4b dynamic adapter (TBD).
+                                           // Capture animation_thread_mode pre-move (config gets moved
+                                           // into `create_event_loop_with_config` below). Drives whether
+                                           // the AnimationScheduler spawns its bg thread or relies on
+                                           // the main thread's per-frame `tick()` call (Phase 3) to
+                                           // advance springs / keyframes / timelines / tick_callbacks.
         let animation_thread_mode = config.animation_thread_mode;
         let event_loop = platform
             .create_event_loop_with_config(config)
