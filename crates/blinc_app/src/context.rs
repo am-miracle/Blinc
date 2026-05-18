@@ -1417,6 +1417,362 @@ impl RenderContext {
         true
     }
 
+    /// Patch the cached background batch's CSS-animated regions in
+    /// place from current `css_anim_store` values, without
+    /// re-walking the tree. Mirror of [`Self::apply_binding_deltas`]
+    /// for the CSS keyframe / transition path.
+    ///
+    /// Returns `false` (caller falls back to slow path) when:
+    /// - No cached batch exists yet (cold start; slow path will
+    ///   populate it).
+    /// - The animation targets an out-of-scope property (clip-path
+    ///   geometry, filter blur, layout dimensions) — Phase 4 first
+    ///   cut doesn't patch those.
+    /// - The cache shape changed since recording (layer push index
+    ///   out of bounds, etc.).
+    /// - A property went through a divide-by-zero (opacity zero on
+    ///   the previous frame).
+    ///
+    /// Returns `true` even when no actual patches happened — that's
+    /// the steady-state case where the animation tick produced the
+    /// same value as last frame (settled, paused, or at a flat
+    /// portion of the curve). The caller still needs to dispatch a
+    /// render to present a fresh frame.
+    ///
+    /// Property coverage (first cut):
+    /// - opacity (LayerConfig.opacity when push index present, OR
+    ///   primitive alpha channels via ratio multiplication)
+    /// - background_color (matching-based: only patches primitives
+    ///   whose current color equals `meta.last_background_color`,
+    ///   leaving children with their own backgrounds intact)
+    /// - border_color, border_width (matching-based)
+    /// - corner_radius (matching-based)
+    /// - shadow params + color (matching-based)
+    /// - rotate_x, rotate_y (absolute write across the range —
+    ///   3D rotation applies to the whole subtree per CSS spec)
+    /// - filter values (absolute write across the range)
+    ///
+    /// Properties that trigger a bail-to-slow-path:
+    /// - clip_inset / clip_circle_radius / clip_ellipse_radii
+    ///   (polygon vertices live in aux_data with cross-primitive
+    ///   offset bookkeeping)
+    /// - filter_blur (lives in LayerConfig.effects Vec)
+    /// - width / height / min_* / max_* / padding / margin / gap
+    ///   (layout — needs `compute_layout`)
+    /// - backdrop_* (glass material; separate dispatch path)
+    pub fn apply_css_deltas(
+        &mut self,
+        tree: &blinc_layout::RenderTree,
+        _scale: f32,
+    ) -> bool {
+        // CSS-animated primitives live on `cached_bg_batch` (the
+        // walker doesn't push a `motion_subtree` for CSS animations
+        // — that routing is motion-binding only). Patch through the
+        // bg batch.
+        let batch = match self.cached_bg_batch.as_mut() {
+            Some(b) => b,
+            None => return false,
+        };
+        let mut records = tree.css_anim_paint_records_mut();
+        if records.is_empty() {
+            // No CSS-animated nodes recorded at last paint. Nothing
+            // to patch — caller re-uses the cache as-is.
+            return true;
+        }
+        let store_arc = tree.css_anim_store();
+        let store = match store_arc.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+
+        // Tracks whether anything changed this frame. Always true
+        // for now (we always return `true` on no-op patches), but
+        // kept for future damage-rect collection (Phase 4d).
+        let mut any_changed = false;
+
+        for (_node, meta) in records.iter_mut() {
+            // Look up the active animation / transition for this
+            // node. Prefer animations (CSS `animation: ...`); fall
+            // back to transitions (CSS `transition: ...`). Both can
+            // target the same node in theory, but
+            // `apply_all_css_animation_props` runs before
+            // `apply_all_css_transition_props` so animations win in
+            // the slow-path render too.
+            let active_anim = store
+                .animations
+                .get(&meta.stable_id)
+                .filter(|a| a.is_playing);
+            let active_trans = store
+                .transitions
+                .get(&meta.stable_id)
+                .filter(|t| t.is_playing);
+
+            let props_anim = active_anim.map(|a| &a.current_properties);
+            let props_trans = active_trans.map(|t| &t.current_properties);
+
+            // Bail if either source targets a property we can't
+            // patch in place. The slow path handles those correctly.
+            let touches_out_of_scope = |p: &blinc_animation::KeyframeProperties| {
+                p.clip_inset.is_some()
+                    || p.clip_circle_radius.is_some()
+                    || p.clip_ellipse_radii.is_some()
+                    || p.filter_blur.is_some()
+                    || p.width.is_some()
+                    || p.height.is_some()
+                    || p.min_width.is_some()
+                    || p.max_width.is_some()
+                    || p.min_height.is_some()
+                    || p.max_height.is_some()
+                    || p.padding.is_some()
+                    || p.margin.is_some()
+                    || p.gap.is_some()
+                    || p.backdrop_blur.is_some()
+                    || p.backdrop_saturation.is_some()
+                    || p.backdrop_brightness.is_some()
+            };
+            if props_anim.is_some_and(touches_out_of_scope)
+                || props_trans.is_some_and(touches_out_of_scope)
+            {
+                return false;
+            }
+
+            // Helper: read a property from animation first, else
+            // transition, else default to `None` (no change).
+            let read_f32 = |get: fn(&blinc_animation::KeyframeProperties) -> Option<f32>| {
+                props_anim
+                    .and_then(get)
+                    .or_else(|| props_trans.and_then(get))
+            };
+            let read_arr = |get: fn(&blinc_animation::KeyframeProperties) -> Option<[f32; 4]>| {
+                props_anim
+                    .and_then(get)
+                    .or_else(|| props_trans.and_then(get))
+            };
+
+            // ---- opacity ----
+            if let Some(new_opacity) = read_f32(|p| p.opacity) {
+                if (new_opacity - meta.last_opacity).abs() > f32::EPSILON {
+                    if meta.last_opacity.abs() < f32::EPSILON {
+                        // Divide-by-zero — primitives were emitted
+                        // at zero alpha last paint; can't recover
+                        // the original color via ratio. Slow path.
+                        return false;
+                    }
+                    if let Some(push_idx) = meta.layer_push_index {
+                        use blinc_gpu::primitives::LayerCommand;
+                        match batch.layer_commands.get_mut(push_idx) {
+                            Some(entry) => {
+                                if let LayerCommand::Push { config } = &mut entry.command {
+                                    config.opacity = new_opacity;
+                                } else {
+                                    return false;
+                                }
+                            }
+                            None => return false,
+                        }
+                    } else if let Some(prims) =
+                        batch.primitives.get_mut(meta.primitive_range.clone())
+                    {
+                        let ratio = new_opacity / meta.last_opacity;
+                        for p in prims.iter_mut() {
+                            p.color[3] *= ratio;
+                            p.color2[3] *= ratio;
+                            p.border_color[3] *= ratio;
+                            p.shadow_color[3] *= ratio;
+                        }
+                    }
+                    meta.last_opacity = new_opacity;
+                    any_changed = true;
+                }
+            }
+
+            // ---- background_color ----
+            // Matching-based: only patches primitives whose `color`
+            // matches `meta.last_background_color` exactly, so a
+            // child with its own bg stays untouched.
+            if let Some(new_bg) = read_arr(|p| p.background_color) {
+                if let Some(last_bg) = meta.last_background_color {
+                    if new_bg != last_bg {
+                        if let Some(prims) =
+                            batch.primitives.get_mut(meta.primitive_range.clone())
+                        {
+                            for p in prims.iter_mut() {
+                                if p.color == last_bg {
+                                    p.color = new_bg;
+                                }
+                            }
+                        }
+                        meta.last_background_color = Some(new_bg);
+                        any_changed = true;
+                    }
+                }
+            }
+
+            // ---- border_color ----
+            if let Some(new_bc) = read_arr(|p| p.border_color) {
+                if let Some(last_bc) = meta.last_border_color {
+                    if new_bc != last_bc {
+                        if let Some(prims) =
+                            batch.primitives.get_mut(meta.primitive_range.clone())
+                        {
+                            for p in prims.iter_mut() {
+                                if p.border_color == last_bc {
+                                    p.border_color = new_bc;
+                                }
+                            }
+                        }
+                        meta.last_border_color = Some(new_bc);
+                        any_changed = true;
+                    }
+                }
+            }
+
+            // ---- border_width ----
+            if let Some(new_bw) = read_f32(|p| p.border_width) {
+                if (new_bw - meta.last_border_width).abs() > f32::EPSILON {
+                    if let Some(prims) =
+                        batch.primitives.get_mut(meta.primitive_range.clone())
+                    {
+                        for p in prims.iter_mut() {
+                            if (p.border[0] - meta.last_border_width).abs() < f32::EPSILON {
+                                p.border[0] = new_bw;
+                            }
+                        }
+                    }
+                    meta.last_border_width = new_bw;
+                    any_changed = true;
+                }
+            }
+
+            // ---- corner_radius ----
+            if let Some(new_cr) = read_arr(|p| p.corner_radius) {
+                if new_cr != meta.last_corner_radius {
+                    if let Some(prims) =
+                        batch.primitives.get_mut(meta.primitive_range.clone())
+                    {
+                        for p in prims.iter_mut() {
+                            if p.corner_radius == meta.last_corner_radius {
+                                p.corner_radius = new_cr;
+                            }
+                        }
+                    }
+                    meta.last_corner_radius = new_cr;
+                    any_changed = true;
+                }
+            }
+
+            // ---- shadow_params ----
+            if let Some(new_sp) = read_arr(|p| p.shadow_params) {
+                if new_sp != meta.last_shadow_params {
+                    if let Some(prims) =
+                        batch.primitives.get_mut(meta.primitive_range.clone())
+                    {
+                        for p in prims.iter_mut() {
+                            if p.shadow == meta.last_shadow_params {
+                                p.shadow = new_sp;
+                            }
+                        }
+                    }
+                    meta.last_shadow_params = new_sp;
+                    any_changed = true;
+                }
+            }
+
+            // ---- shadow_color ----
+            if let Some(new_sc) = read_arr(|p| p.shadow_color) {
+                if new_sc != meta.last_shadow_color {
+                    if let Some(prims) =
+                        batch.primitives.get_mut(meta.primitive_range.clone())
+                    {
+                        for p in prims.iter_mut() {
+                            if p.shadow_color == meta.last_shadow_color {
+                                p.shadow_color = new_sc;
+                            }
+                        }
+                    }
+                    meta.last_shadow_color = new_sc;
+                    any_changed = true;
+                }
+            }
+
+            // ---- rotate_x (3D tilt) ----
+            // perspective[0] = sin(rx), perspective[1] = cos(rx)
+            if let Some(new_rx_deg) = read_f32(|p| p.rotate_x) {
+                let new_rx_rad = new_rx_deg.to_radians();
+                if (new_rx_rad - meta.last_rotate_x_rad).abs() > f32::EPSILON {
+                    let sin_rx = new_rx_rad.sin();
+                    let cos_rx = new_rx_rad.cos();
+                    if let Some(prims) =
+                        batch.primitives.get_mut(meta.primitive_range.clone())
+                    {
+                        for p in prims.iter_mut() {
+                            p.perspective[0] = sin_rx;
+                            p.perspective[1] = cos_rx;
+                        }
+                    }
+                    meta.last_rotate_x_rad = new_rx_rad;
+                    any_changed = true;
+                }
+            }
+
+            // ---- rotate_y (3D turn) ----
+            // rotation[2] = sin(ry), rotation[3] = cos(ry)
+            if let Some(new_ry_deg) = read_f32(|p| p.rotate_y) {
+                let new_ry_rad = new_ry_deg.to_radians();
+                if (new_ry_rad - meta.last_rotate_y_rad).abs() > f32::EPSILON {
+                    let sin_ry = new_ry_rad.sin();
+                    let cos_ry = new_ry_rad.cos();
+                    if let Some(prims) =
+                        batch.primitives.get_mut(meta.primitive_range.clone())
+                    {
+                        for p in prims.iter_mut() {
+                            p.rotation[2] = sin_ry;
+                            p.rotation[3] = cos_ry;
+                        }
+                    }
+                    meta.last_rotate_y_rad = new_ry_rad;
+                    any_changed = true;
+                }
+            }
+
+            // ---- filter values ----
+            // filter_a = (grayscale, invert, sepia, hue_rotate_rad)
+            // filter_b = (brightness, contrast, saturate, 0)
+            let new_fa = [
+                read_f32(|p| p.filter_grayscale).unwrap_or(meta.last_filter_a[0]),
+                read_f32(|p| p.filter_invert).unwrap_or(meta.last_filter_a[1]),
+                read_f32(|p| p.filter_sepia).unwrap_or(meta.last_filter_a[2]),
+                read_f32(|p| p.filter_hue_rotate)
+                    .map(|d| d.to_radians())
+                    .unwrap_or(meta.last_filter_a[3]),
+            ];
+            let new_fb = [
+                read_f32(|p| p.filter_brightness).unwrap_or(meta.last_filter_b[0]),
+                read_f32(|p| p.filter_contrast).unwrap_or(meta.last_filter_b[1]),
+                read_f32(|p| p.filter_saturate).unwrap_or(meta.last_filter_b[2]),
+                0.0,
+            ];
+            if new_fa != meta.last_filter_a || new_fb != meta.last_filter_b {
+                if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
+                    for p in prims.iter_mut() {
+                        p.filter_a = new_fa;
+                        p.filter_b = new_fb;
+                    }
+                }
+                meta.last_filter_a = new_fa;
+                meta.last_filter_b = new_fb;
+                any_changed = true;
+            }
+        }
+
+        // Mirror `apply_binding_deltas`: drop the lock + the
+        // record borrow before the caller composes the frame.
+        let _ = any_changed;
+        drop(store);
+        drop(records);
+        true
+    }
+
     /// Update the current cursor position in physical pixels (for @flow pointer input)
     /// Register a custom render pass with the GPU renderer.
     ///
