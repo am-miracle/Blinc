@@ -5486,15 +5486,23 @@ impl RenderContext {
             // untouched. Used by all the cn motion widgets — switch
             // thumb, progress indicator, slider thumb, sortable drag
             // preview, etc.
-            if bindings_animating && self.cached_dynamic_batch.is_some() {
-                let scale_factor = tree.scale_factor();
-                let _ = self.apply_binding_deltas(tree, scale_factor);
-            }
-
+            // Single `apply_binding_deltas` per frame. Previously the
+            // damage-rect path called it again after the unconditional
+            // motion-binding update — the second call saw zero deltas
+            // (because the first had already advanced `last_translate`
+            // / `last_rotation_rad` / etc.) so `last_binding_damage_rects`
+            // came back empty and the scissored repaint step never
+            // ran. One call collects damage rects AND patches the
+            // cached dynamic batch in the same pass; the rect set is
+            // then consumed by the damage-rect branch below.
             let mut damage_rect_failed = false;
-            if damage_rect_eligible && self.cached_bg_batch.is_some() {
+            let patched = if bindings_animating && self.cached_dynamic_batch.is_some() {
                 let scale_factor = tree.scale_factor();
-                let patched = self.apply_binding_deltas(tree, scale_factor);
+                self.apply_binding_deltas(tree, scale_factor)
+            } else {
+                true
+            };
+            if damage_rect_eligible && self.cached_bg_batch.is_some() {
                 if !patched {
                     // `apply_binding_deltas` bailed (typically the
                     // last-opacity-is-zero guard — opacity binding
