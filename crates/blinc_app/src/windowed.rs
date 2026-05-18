@@ -2916,10 +2916,20 @@ impl WindowedApp {
                                     );
 
                                     // Adapt the scheduler's tick rate to the display's
-                                    // refresh rate. Winit returns refresh in millihertz;
-                                    // clamp to a sane range so a 240/360 Hz display
-                                    // doesn't pin a CPU and a missing/zero report
-                                    // doesn't drop us to 0 fps.
+                                    // refresh rate, capped further if the app set
+                                    // `animation_fps_cap`. The scheduler ticking
+                                    // faster than the paint cap just produces
+                                    // intermediate values that get overwritten
+                                    // before the next paint reads them — wasted
+                                    // CPU on every spring / keyframe / timeline
+                                    // step. Match the effective paint cadence so
+                                    // each scheduler tick corresponds to one paint
+                                    // attempt.
+                                    //
+                                    // Winit returns refresh in millihertz; clamp to a
+                                    // sane range so a 240/360 Hz display doesn't pin
+                                    // a CPU and a missing/zero report doesn't drop us
+                                    // to 0 fps.
                                     {
                                         let refresh = window
                                             .winit_window()
@@ -2927,11 +2937,17 @@ impl WindowedApp {
                                             .and_then(|m| m.refresh_rate_millihertz())
                                             .map(|mhz| (mhz / 1000).clamp(30, 120))
                                             .unwrap_or(60);
+                                        let effective_fps = match animation_fps_cap {
+                                            Some(cap) => refresh.min(cap),
+                                            None => refresh,
+                                        };
                                         if let Ok(mut sched) = animations.lock() {
-                                            sched.set_target_fps(refresh);
+                                            sched.set_target_fps(effective_fps);
                                             tracing::debug!(
-                                                "Scheduler target_fps adapted to display refresh: {} Hz",
-                                                refresh
+                                                "Scheduler target_fps set to {} Hz (refresh={}, cap={:?})",
+                                                effective_fps,
+                                                refresh,
+                                                animation_fps_cap
                                             );
                                         }
                                     }

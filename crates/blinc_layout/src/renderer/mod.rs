@@ -1194,9 +1194,32 @@ impl RenderTree {
         }
 
         // CSS animations / transitions: keyed by StableNodeId. Map
-        // back to LayoutNodeId via `stable_to_layout`.
+        // back to LayoutNodeId via `stable_to_layout`. Filter on
+        // `is_playing` — `CssAnimationStore` deliberately keeps
+        // settled / completed transitions in the map so the
+        // same-target guard in `detect_and_start_transitions` can
+        // match against them. Counting those settled entries as
+        // `Animating(Css)` would mark every cn_demo button that
+        // EVER hovered as perpetually dynamic, forcing the walker
+        // to push them through `dynamic_batch` on every slow paint
+        // forever and bloating the per-region re-walk set on the
+        // CSS-only fast path. The active-animation check (`is_playing`)
+        // matches `has_active_animations` / `has_active_transitions`
+        // for the same reason.
         if let Ok(store) = self.css_anim_store.lock() {
-            for stable in store.animations.keys().chain(store.transitions.keys()) {
+            for (stable, anim) in store.animations.iter() {
+                if !anim.is_playing {
+                    continue;
+                }
+                if let Some(layout) = self.stable_to_layout.get(stable).copied() {
+                    candidates.insert(layout);
+                    css_animating.insert(layout);
+                }
+            }
+            for (stable, trans) in store.transitions.iter() {
+                if !trans.is_playing {
+                    continue;
+                }
                 if let Some(layout) = self.stable_to_layout.get(stable).copied() {
                     candidates.insert(layout);
                     css_animating.insert(layout);

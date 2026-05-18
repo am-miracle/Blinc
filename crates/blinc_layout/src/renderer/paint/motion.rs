@@ -93,6 +93,38 @@ impl RenderTree {
                 ctx.push_transform(Transform::scale(self.scale_factor, self.scale_factor));
             }
 
+            // Skip Glass / Foreground passes when no node in the tree
+            // is on those layers. Each walker pass costs a full tree
+            // traversal (transform pushes / viewport-cull checks /
+            // child recursion) even when it ends up emitting nothing,
+            // so on a typical UI without glass material or
+            // `.foreground()` nodes — most cn / styling examples —
+            // two of the three passes were ~99 % wasted work.
+            //
+            // Scanning `render_nodes` once is O(N) but the check is
+            // a single `matches!` per node, an order of magnitude
+            // cheaper than the walker's per-node bounds lookups +
+            // prop reads + stack ops. Net win is roughly 2 × walker
+            // cost when the page has no glass / foreground content.
+            let mut has_glass = false;
+            let mut has_foreground = false;
+            for (_, node) in self.render_nodes.iter() {
+                if !has_glass
+                    && matches!(
+                        node.props.material,
+                        Some(crate::element::Material::Glass(_))
+                    )
+                {
+                    has_glass = true;
+                }
+                if !has_foreground && matches!(node.props.layer, RenderLayer::Foreground) {
+                    has_foreground = true;
+                }
+                if has_glass && has_foreground {
+                    break;
+                }
+            }
+
             // Pass 1: Background (primitives go to background batch)
             ctx.set_foreground_layer(false);
             self.render_layer_with_motion(
@@ -108,32 +140,36 @@ impl RenderTree {
             );
 
             // Pass 2: Glass (primitives go to glass batch)
-            self.render_layer_with_motion(
-                ctx,
-                root,
-                (0.0, 0.0),
-                RenderLayer::Glass,
-                0,     // glass_depth
-                false, // inside_foreground
-                render_state,
-                1.0, // Start with full opacity at root
-                (0.0, 0.0),
-            );
+            if has_glass {
+                self.render_layer_with_motion(
+                    ctx,
+                    root,
+                    (0.0, 0.0),
+                    RenderLayer::Glass,
+                    0,     // glass_depth
+                    false, // inside_foreground
+                    render_state,
+                    1.0, // Start with full opacity at root
+                    (0.0, 0.0),
+                );
+            }
 
             // Pass 3: Foreground (primitives go to foreground batch, rendered after glass)
-            ctx.set_foreground_layer(true);
-            self.render_layer_with_motion(
-                ctx,
-                root,
-                (0.0, 0.0),
-                RenderLayer::Foreground,
-                0,     // glass_depth
-                false, // inside_foreground
-                render_state,
-                1.0, // Start with full opacity at root
-                (0.0, 0.0),
-            );
-            ctx.set_foreground_layer(false);
+            if has_foreground {
+                ctx.set_foreground_layer(true);
+                self.render_layer_with_motion(
+                    ctx,
+                    root,
+                    (0.0, 0.0),
+                    RenderLayer::Foreground,
+                    0,     // glass_depth
+                    false, // inside_foreground
+                    render_state,
+                    1.0, // Start with full opacity at root
+                    (0.0, 0.0),
+                );
+                ctx.set_foreground_layer(false);
+            }
 
             // Pop the DPI scale transform
             if has_scale {
@@ -294,51 +330,38 @@ impl RenderTree {
         // node (cn_demo has ~13). Bindings whose values match
         // `last_*` are early-out'd inside `apply_binding_deltas` so
         // no GPU work happens for them.
-        // Tell the context this subtree is dynamic so all primitive
-        // emissions route into the dynamic batch instead of the
-        // static cache batch. Three sources qualify a subtree as
-        // dynamic:
+        // Tell the context this subtree is motion-bound so all
+        // primitive emissions route into the dynamic batch instead
+        // of the static cache batch. Paired with a `pop` at the end
+        // of this fn (any return path). The `composite_bg_start`
+        // captured immediately after now indexes into the dynamic
+        // batch, which is exactly what `apply_binding_deltas` and
+        // the per-frame overlay dispatch read.
         //
-        // 1. `MotionBindings` on this node (spring or
-        //    `rotation_timeline` driven) — `motion_bindings_ref` is
-        //    Some.
-        // 2. CSS keyframe animation or property transition that
-        //    `compute_animation_status` flagged as `Animating(Css)`.
-        // 3. (Canvas handled separately at the Canvas emission site.)
-        //
-        // Routing CSS-animated content through `dynamic_batch` lets
-        // the compositor keep the static cache valid across CSS
-        // transition frames — cn_demo's hover transitions on buttons
-        // and switches no longer invalidate the entire cache 60×/s
-        // while a transition is in flight. The `apply_binding_deltas`
-        // fast path doesn't apply to CSS animations directly, but
-        // the slow path stays cheap because the static-cache content
-        // is the same frame-to-frame: the walker overwrites
-        // `cached_bg_batch` with identical static primitives, and
-        // the inner render skips the cache re-dispatch via the
-        // primitive-identity check (Phase 3b).
-        //
-        // Paired with a `pop` at the end of this fn (any return
-        // path). The `composite_bg_start` captured immediately after
-        // now indexes into the dynamic batch — read by
-        // `apply_binding_deltas` (motion bindings only) and the
-        // per-frame overlay dispatch.
-        let css_animated = matches!(
-            self.current_animation_status.borrow().get(&node).copied(),
-            Some(super::super::AnimationStatus::Animating(
-                super::super::AnimatedKind::Css
-            ))
-        );
-        let in_motion_subtree = motion_bindings_ref.is_some() || css_animated;
+        // CSS-animated subtrees are deliberately NOT routed here.
+        // Earlier (Phase 3a) we routed `Animating(Css)` nodes too,
+        // hoping the per-region re-walk (Phase 3c) would refresh
+        // them each frame from the dynamic batch. But CSS keyframes
+        // commonly animate non-transform properties (height, width,
+        // color) where the text inside the animated subtree has no
+        // `css_affine`, so the text falls through to the regular
+        // `render_text` dispatch into the static cache — while the
+        // parent's bg / border SDF lived in the overlay (dynamic
+        // batch). The overlay drew the parent bg ON TOP of the
+        // cache, covering the text → "text disappears mid-keyframe"
+        // (user report on styling_demo's #layout-height transition
+        // and #layout-anim grow-shrink keyframes). Keeping CSS
+        // content in the static batch keeps the entire subtree
+        // (bg + border + child text + child SVG + …) co-located,
+        // so z-order falls out naturally from walker traversal
+        // order. Phase 3c can come back when we have a way to
+        // route regular text + SVG + image dispatch into the same
+        // overlay alongside the SDF (`motion_batch` / `css_batch`
+        // split or similar).
+        let in_motion_subtree = motion_bindings_ref.is_some();
         if in_motion_subtree {
             ctx.push_motion_subtree();
         }
-        // Capture the dynamic-batch primitive cursor whenever we enter
-        // a dynamic subtree (motion-bound OR CSS-animated). The motion
-        // path uses it for `composite_bindings` range bookkeeping; the
-        // CSS path uses the same range to populate
-        // `dynamic_regions` so the compositor can scissor / re-walk
-        // the CSS-animated subtree on subsequent frames.
         let composite_bg_start = in_motion_subtree.then(|| ctx.bg_primitive_count());
 
         // Compositor v2 ambient snapshot for motion-bound subtrees.
