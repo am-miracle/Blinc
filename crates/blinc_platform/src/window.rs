@@ -467,6 +467,18 @@ impl WindowConfig {
         self
     }
 
+    /// Set the animation frame-rate policy. See [`AnimationFps`] for
+    /// the full semantics — in short, [`AnimationFps::Adaptive`] (the
+    /// default) lets the framework pick and adjust the cap based on
+    /// system characteristics and observed frame times,
+    /// [`AnimationFps::Fixed`] pins it, and [`AnimationFps::Refresh`]
+    /// disables capping entirely. Note that the legacy
+    /// [`Self::animation_fps_cap`] still takes precedence when set.
+    pub fn animation_fps(mut self, policy: AnimationFps) -> Self {
+        self.animation_fps = policy;
+        self
+    }
+
     /// Pick where the animation scheduler ticks. See
     /// [`AnimationThreadMode`] for the full trade-off — the short
     /// version is `Main` (default) is right for almost everything;
