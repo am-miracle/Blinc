@@ -1393,17 +1393,75 @@ impl<S: StateTransitions + Default> Default for Stateful<S> {
 /// or stored for persistence across rebuilds (e.g., via `ctx.use_state()`).
 pub type SharedState<S> = Arc<Mutex<StatefulInner<S>>>;
 
+/// Bare auto-keyed `SharedState<S>` — uses `#[track_caller]` to
+/// generate a unique key from the source location of the call, so
+/// you don't have to invent + thread a string key just to get a
+/// stable handle.
+///
+/// This is the bare counterpart of [`use_state_for_keyed`]; the
+/// keyed version is still there for the loop / reusable-component
+/// case where one source location creates many instances.
+///
+/// Now that layout nodes carry `StableNodeId`s that survive
+/// subtree rebuilds, the call-site key alone is enough to keep
+/// the handle pointing at the same state across rebuilds. No
+/// manual key plumbing required for the common "one Stateful per
+/// source line" case.
+///
+/// # Bounds
+///
+/// - `S: StateTransitions + Clone + Send + 'static` — the FSM
+///   state type. `Sync` is not required (the value lives behind
+///   `Arc<Mutex<…>>`).
+///
+/// # Loops + reusable components
+///
+/// Two `use_state_for(...)` calls at the same source line collide
+/// (same `file:line:column` key). For loop bodies or factory
+/// functions called multiple times, use [`use_state_for_keyed`]
+/// with an explicit per-iteration key (e.g. `InstanceKey`, a
+/// numeric index, a tuple of identifying fields).
+///
+/// # Panics
+///
+/// Panics if [`BlincContextState::init`] hasn't been called — that
+/// happens automatically inside `WindowedApp::run` / `WebApp::run`
+/// / mobile runners.
+///
+/// # Example
+///
+/// ```ignore
+/// use blinc_layout::prelude::*;
+///
+/// fn settings_panel() -> impl ElementBuilder {
+///     // No key needed — the source location is the key.
+///     let modal = use_state_for(ButtonState::Idle);
+///     let toast = use_state_for(ButtonState::Idle);
+///     // …
+/// }
+/// ```
+#[track_caller]
+pub fn use_state_for<S>(initial: S) -> SharedState<S>
+where
+    S: StateTransitions + Clone + Send + 'static,
+{
+    let loc = std::panic::Location::caller();
+    // Pack file:line:column into a tuple key. Hashing a tuple is
+    // free and skips the `format!` allocation a string key would
+    // incur on every call.
+    use_state_for_keyed((loc.file(), loc.line(), loc.column()), initial)
+}
+
 /// Get or create a persistent `SharedState<S>` keyed by anything
 /// hashable. Survives UI rebuilds — backed by the global
 /// `BlincContextState` hooks + reactive graph, so the same `(key,
 /// S)` pair returns the same handle across every call regardless of
 /// what context the caller has.
 ///
-/// This is the standalone version of [`WindowedContext::use_state_for`]
-/// (which now delegates here): same hash-key shape, same bounds, but
-/// usable from any code path that has access to the global context —
-/// component factories called outside a `WindowedContext`, DSL
-/// programs, plugin modules, blinc_layout's own widgets, etc.
+/// Use this when one source line creates multiple instances (loops,
+/// reusable component factories called repeatedly with different
+/// props). For the common "one Stateful per call site" case,
+/// [`use_state_for`] is the auto-keyed variant.
 ///
 /// # Type Parameters
 ///
@@ -1425,16 +1483,15 @@ pub type SharedState<S> = Arc<Mutex<StatefulInner<S>>>;
 ///
 /// ```ignore
 /// use blinc_layout::prelude::*;
-/// use blinc_layout::stateful::{ButtonState, use_state_for};
 ///
 /// // Reusable component called multiple times from the same source line —
 /// // pass a unique key so each instance gets its own slot.
 /// fn feature_card(id: &str) -> impl ElementBuilder {
-///     let handle = use_state_for(id, ButtonState::Idle);
+///     let handle = use_state_for_keyed(id, ButtonState::Idle);
 ///     stateful_from_handle(handle).on_state(|state, div| { /* … */ })
 /// }
 /// ```
-pub fn use_state_for<K, S>(key: K, initial: S) -> SharedState<S>
+pub fn use_state_for_keyed<K, S>(key: K, initial: S) -> SharedState<S>
 where
     K: std::hash::Hash,
     S: StateTransitions + Clone + Send + 'static,
@@ -1444,7 +1501,7 @@ where
 
     let ctx = BlincContextState::get();
     // Key the slot by both the call-site-provided key AND the
-    // concrete `SharedState<S>` type. Two `use_state_for(0u32, …)`
+    // concrete `SharedState<S>` type. Two `use_state_for_keyed(0u32, …)`
     // calls with different `S` get distinct slots.
     let state_key = StateKey::new::<SharedState<S>, _>(&key);
 
@@ -5102,5 +5159,73 @@ mod tests {
 
         // State should still be ()
         assert_eq!(elem.state(), ());
+    }
+
+    /// Bare `use_state_for` derives its key from the source location.
+    /// Two calls from the same line must return the same handle so
+    /// state survives across rebuilds.
+    #[test]
+    fn use_state_for_bare_returns_same_handle_across_calls() {
+        // Set up the global context state the free function needs.
+        // Idempotent guard — multiple tests in this module run
+        // serially under the `PENDING_QUEUE_TEST_LOCK` already, and
+        // `init` panics on second call, so use the test-friendly
+        // initializer.
+        ensure_context_state_for_tests();
+
+        let _guard = PENDING_QUEUE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // `#[track_caller]` derives the key from the caller's
+        // source position (file, line, column). To verify that the
+        // same call site returns the same handle on repeat calls,
+        // both invocations must come from literally the same
+        // position — which is only true inside a loop body (each
+        // iteration runs the same line of code) or via a fixed
+        // closure body called twice.
+        #[track_caller]
+        fn get_handle() -> SharedState<ButtonState> {
+            use_state_for(ButtonState::Idle)
+        }
+
+        let mut handles = Vec::with_capacity(2);
+        for _ in 0..2 {
+            // SAME source line on each iteration → same forwarded
+            // Location::caller() inside use_state_for → same key.
+            handles.push(get_handle());
+        }
+
+        let handle_a = &handles[0];
+        let handle_b = &handles[1];
+
+        assert!(
+            Arc::ptr_eq(handle_a, handle_b),
+            "bare use_state_for must reuse the slot across calls from the same source line"
+        );
+
+        // And a state mutation through one handle must be visible
+        // through the other (since they're both views into the
+        // same `Arc<Mutex<StatefulInner<…>>>`).
+        handle_a.lock().unwrap().state = ButtonState::Hovered;
+        assert_eq!(
+            handle_b.lock().unwrap().state,
+            ButtonState::Hovered,
+            "the state mutation through handle_a should be visible through handle_b"
+        );
+    }
+
+    /// Lazily initialise `BlincContextState` for tests that exercise
+    /// the global hooks + reactive graph. No-op on subsequent calls.
+    fn ensure_context_state_for_tests() {
+        use blinc_core::context_state::BlincContextState;
+        use blinc_core::reactive::ReactiveGraph;
+        if BlincContextState::is_initialized() {
+            return;
+        }
+        let reactive = Arc::new(Mutex::new(ReactiveGraph::new()));
+        let hooks = Arc::new(Mutex::new(blinc_core::context_state::HookState::new()));
+        let dirty_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        BlincContextState::init(reactive, hooks, dirty_flag);
     }
 }

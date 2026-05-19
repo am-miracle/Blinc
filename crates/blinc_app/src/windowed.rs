@@ -1479,15 +1479,12 @@ impl WindowedContext {
     where
         S: blinc_layout::StateTransitions + Clone + Send + 'static,
     {
-        // Use caller location as the key
-        let location = std::panic::Location::caller();
-        let key = format!(
-            "{}:{}:{}",
-            location.file(),
-            location.line(),
-            location.column()
-        );
-        self.use_state_for(&key, initial)
+        // `#[track_caller]` on both this method and the standalone
+        // `use_state_for(initial)` forwards the original caller's
+        // location through the wrapper, so the auto-key matches
+        // exactly what a direct `use_state_for(initial)` call from
+        // the same line would produce.
+        blinc_layout::stateful::use_state_for(initial)
     }
 
     /// Create a persistent state with an explicit key
@@ -1518,14 +1515,9 @@ impl WindowedContext {
         K: Hash,
         S: blinc_layout::StateTransitions + Clone + Send + 'static,
     {
-        // Both the WindowedContext method and the free function
-        // route through the same global `BlincContextState` hooks +
-        // reactive graph, so the implementation lives once in
-        // `blinc_layout::stateful::use_state_for` and we just
-        // forward here. Keeps the WindowedContext method as the
-        // ergonomic call site that pre-runs but stops it from
-        // drifting from the standalone API.
-        blinc_layout::stateful::use_state_for(key, initial)
+        // Forward to the standalone keyed version so both API
+        // surfaces share one implementation and can't drift.
+        blinc_layout::stateful::use_state_for_keyed(key, initial)
     }
 
     /// Create a persistent animated value using caller location as key
