@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use blinc_layout::stateful::{request_redraw, use_shared_state_with, SharedState};
+use blinc_layout::stateful::{request_redraw, use_fsm_keyed, SharedState};
 
 use super::instance::FsmStateId;
 use super::registry::with_fsm_registry;
@@ -37,7 +37,7 @@ pub fn default_state(fsm_name: &str) -> Option<SharedState<FsmStateId>> {
         return None;
     }
     let initial = FsmStateId::from_fsm_name(fsm_name)?;
-    Some(use_shared_state_with::<FsmStateId>(
+    Some(use_fsm_keyed::<_, FsmStateId>(
         &state_key(fsm_name),
         initial,
     ))

@@ -265,7 +265,7 @@ impl AccordionBuilder {
         let radius = theme.radius(RadiusToken::Lg);
 
         let key_for_container = format!("{}_container", self.instance_key.get());
-        let container_state_handle = use_shared_state_with(&key_for_container, ());
+        let container_state_handle = blinc_layout::stateful::use_fsm_keyed(&key_for_container, ());
 
         // Clone for use inside the closure
         let anim_key_for_container = key_for_container.clone();

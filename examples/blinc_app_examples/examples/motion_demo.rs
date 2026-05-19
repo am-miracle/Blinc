@@ -244,7 +244,7 @@ fn pull_to_refresh_demo(ctx: &WindowedContext) -> Div {
     const ARMED_THRESHOLD: f32 = 50.0;
 
     // Get shared FSM state handle
-    let pull_state = ctx.use_state_for("pull_refresh", PullState::Idle);
+    let pull_state = ctx.use_fsm_keyed("pull_refresh", PullState::Idle);
     let pull_state_move = pull_state.clone();
 
     demo_card("Pull to Refresh", "stack + motion").child(

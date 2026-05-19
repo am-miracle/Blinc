@@ -36,9 +36,9 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     let overlay_mgr = ctx.overlay_manager();
 
     // Create button states via context for persistence across rebuilds
-    let modal_btn = ctx.use_state_for("modal_btn", ButtonState::Idle);
-    let toast_btn = ctx.use_state_for("toast_btn", ButtonState::Idle);
-    let dialog_btn = ctx.use_state_for("dialog_btn", ButtonState::Idle);
+    let modal_btn = ctx.use_fsm_keyed("modal_btn", ButtonState::Idle);
+    let toast_btn = ctx.use_fsm_keyed("toast_btn", ButtonState::Idle);
+    let dialog_btn = ctx.use_fsm_keyed("dialog_btn", ButtonState::Idle);
 
     div()
         .w(ctx.width)

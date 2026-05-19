@@ -712,7 +712,7 @@ pub(crate) extern "C" fn blinc_button_view(
     ensure_context_state();
     let label = decode_string_arg(label_ptr);
     let key = dsl_state_key("button", &label);
-    let state = blinc_layout::use_shared_state_with::<blinc_layout::stateful::ButtonState>(
+    let state = blinc_layout::use_fsm_keyed::<_, blinc_layout::stateful::ButtonState>(
         &key,
         blinc_layout::stateful::ButtonState::Idle,
     );

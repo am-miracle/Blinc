@@ -523,7 +523,7 @@ let signal_id = is_expanded.signal_id();
 ```
 
 Prefer the bare auto-keyed form when each call site holds one slot —
-`use_state` (for `State<T>`) and `use_state_for` (for `SharedState<S>`)
+`use_state` (for `State<T>`) and `use_fsm` (for `SharedState<S>`)
 both derive their keys from the caller's source location via
 `#[track_caller]`, so you don't have to invent + thread a string per
 slot. Keyed variants stay around for the cases auto-keying can't
@@ -534,6 +534,20 @@ the same line).
 
 ## Persistent Stateful Handles (`SharedState<S>`)
 
+Blinc has two distinct persistent-state abstractions and the names
+get confusing without context — picking the right one comes down
+to **what you're storing**:
+
+| Abstraction | Returns | Use for | Constructors |
+| --- | --- | --- | --- |
+| **`State<T>`** | A signal-backed slot with `.get()` / `.set()` / `.update()` and a `signal_id()` for `.deps([…])` | Fine-grained reactive values — counters, flags, form fields, anything one place writes and another reads via signals | `use_state(initial)` (bare, `#[track_caller]`), `use_state_keyed(key, init)` |
+| **`SharedState<S>`** | An `Arc<Mutex<StatefulInner<S>>>` — the handle a `Stateful<S>` widget hangs its FSM off of | Stateful UI elements with discrete states (hover / press / drag / custom state machines), shared across call sites or driven from external events | `use_fsm(initial)` (bare, `#[track_caller]`), `use_fsm_keyed(key, initial)` |
+
+> **TL;DR:** `use_state` returns `State<T>` (a signal). `use_fsm`
+> returns `SharedState<S>` (an FSM handle). They are not interchangeable.
+> If you reach for one and the type-checker rejects it, you almost
+> certainly want the other.
+
 When you build a `Stateful<S>` widget outside an `on_state` closure —
 typically because you want to share its FSM with multiple call sites
 or drive it from external events — you need a `SharedState<S>`
@@ -541,19 +555,19 @@ handle that survives UI rebuilds. Two factory functions cover this:
 
 ```rust
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{ButtonState, use_state_for, use_state_for_keyed};
+use blinc_layout::stateful::{ButtonState, use_fsm, use_fsm_keyed};
 
 // Bare — keyed by the source location of THIS call via `#[track_caller]`.
 // One slot per source line. Don't use inside a loop.
-let modal_btn   = use_state_for(ButtonState::Idle);
-let toast_btn   = use_state_for(ButtonState::Idle);
-let dialog_btn  = use_state_for(ButtonState::Idle);
+let modal_btn   = use_fsm(ButtonState::Idle);
+let toast_btn   = use_fsm(ButtonState::Idle);
+let dialog_btn  = use_fsm(ButtonState::Idle);
 
 // Explicit — keyed by anything `Hash` (string, integer, tuple,
 // InstanceKey, ...). Use this for loops, list items, or reusable
 // component factories called multiple times from the same line.
 for entry in items.iter() {
-    let entry_btn = use_state_for_keyed(entry.id, ButtonState::Idle);
+    let entry_btn = use_fsm_keyed(entry.id, ButtonState::Idle);
     // …
 }
 ```
@@ -566,7 +580,7 @@ graph, not in the layout tree.
 ### `#[track_caller]` and widget wrappers
 
 `#[track_caller]` is forwarding, not generating. If a widget factory
-is tagged `#[track_caller]` and calls `use_state_for` internally,
+is tagged `#[track_caller]` and calls `use_fsm` internally,
 `Location::caller()` returns the **user's** call site, not the
 factory's body. Two distinct call sites give two distinct slots —
 which is what you want for the common case:
@@ -574,8 +588,8 @@ which is what you want for the common case:
 ```rust
 #[track_caller]
 fn my_button(label: &str) -> impl ElementBuilder {
-    // Forwarded — `use_state_for` sees the caller's source line.
-    let handle = use_state_for(ButtonState::Idle);
+    // Forwarded — `use_fsm` sees the caller's source line.
+    let handle = use_fsm(ButtonState::Idle);
     stateful_from_handle(handle).on_state(/* … */)
 }
 
@@ -603,7 +617,7 @@ for i in 0..5 {
 
 #[track_caller]
 fn my_button_keyed(id: u32, label: &str) -> impl ElementBuilder {
-    let handle = use_state_for_keyed(id, ButtonState::Idle);
+    let handle = use_fsm_keyed(id, ButtonState::Idle);
     stateful_from_handle(handle).on_state(/* … */)
 }
 ```
@@ -612,16 +626,16 @@ fn my_button_keyed(id: u32, label: &str) -> impl ElementBuilder {
 
 | Scenario | API | Key |
 | --- | --- | --- |
-| One widget per source line | `use_state_for(initial)` | `(file, line, column)` via `#[track_caller]` |
-| Loop body / `.map()` / repeated factory call | `use_state_for_keyed(k, initial)` | Per-iteration data: index, id, tuple, `InstanceKey` |
-| Different widget types from the same line | `use_state_for(initial)` works | Key is also typed on `SharedState<S>`, so two calls with different `S` from one line still get distinct slots |
+| One widget per source line | `use_fsm(initial)` | `(file, line, column)` via `#[track_caller]` |
+| Loop body / `.map()` / repeated factory call | `use_fsm_keyed(k, initial)` | Per-iteration data: index, id, tuple, `InstanceKey` |
+| Different widget types from the same line | `use_fsm(initial)` works | Key is also typed on `SharedState<S>`, so two calls with different `S` from one line still get distinct slots |
 
 The same split exists for plain reactive cells (`State<T>`):
 
 | State type | Bare auto-keyed | Explicit key |
 | --- | --- | --- |
 | `State<T>` (basic reactive value) | `use_state(initial)` | `use_state_keyed(key, init)` |
-| `SharedState<S>` (FSM handle) | `use_state_for(initial)` | `use_state_for_keyed(key, initial)` |
+| `SharedState<S>` (FSM handle) | `use_fsm(initial)` | `use_fsm_keyed(key, initial)` |
 
 ### Why this works across rebuilds
 
@@ -629,7 +643,7 @@ A subtree rebuild replaces layout nodes, but `LayoutNodeId`s aren't
 the identity stateful state hangs off of — that lives in the
 process-wide hooks store, keyed by `(call_site, S)` (or
 `(explicit_key, S)`). Rebuilds tear down and re-mint layout nodes
-but the source location of `use_state_for` doesn't change, so the
+but the source location of `use_fsm` doesn't change, so the
 same slot is found on the next call. Combined with `StableNodeId`s
 (which make event routing survive rebuilds), Stateful widgets keep
 their internal FSM state, scoped signals, and registered springs /
@@ -655,4 +669,4 @@ keyframes across every rebuild.
 
 8. **Use `.deps()` for external dependencies** - When `on_state` needs to react to signal changes.
 
-9. **Prefer the bare auto-keyed variant** — `use_state(initial)` for `State<T>`, `use_state_for(initial)` for `SharedState<S>`. Reach for the `_keyed` variants only when one source line produces multiple instances (loops, reusable factories).
+9. **Prefer the bare auto-keyed variant** — `use_state(initial)` for `State<T>`, `use_fsm(initial)` for `SharedState<S>`. Reach for the `_keyed` variants only when one source line produces multiple instances (loops, reusable factories).

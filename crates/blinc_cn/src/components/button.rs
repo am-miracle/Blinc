@@ -28,7 +28,7 @@
 use blinc_core::Color;
 use blinc_layout::div::ElementBuilder;
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{use_shared_state, ButtonState, SharedState};
+use blinc_layout::stateful::{use_fsm_keyed, ButtonState, SharedState};
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_layout::widgets::button as layout_button;
 use blinc_layout::InstanceKey;
@@ -231,10 +231,10 @@ pub enum IconPosition {
 
 /// Get or create a persistent `SharedState<ButtonState>` for the given key
 ///
-/// This is a convenience wrapper around `use_shared_state::<ButtonState>`.
+/// Convenience wrapper around `use_fsm_keyed::<_, ButtonState>(key, default)`.
 /// Used by dropdown menus, menubars, and navigation menus.
 pub(crate) fn use_button_state(key: &str) -> SharedState<ButtonState> {
-    use_shared_state::<ButtonState>(key)
+    use_fsm_keyed(key, ButtonState::default())
 }
 
 /// Reset a button state to Idle

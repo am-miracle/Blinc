@@ -1450,74 +1450,128 @@ impl WindowedContext {
         &self.element_registry
     }
 
-    /// Create a persistent state for stateful UI elements
+    /// Create or retrieve a persistent fine-grained reactive cell,
+    /// auto-keyed by the caller's source location via
+    /// `#[track_caller]`. Returns a [`blinc_core::State`] — a
+    /// signal-backed slot with `.get()` / `.set()` / `.update()`
+    /// methods. Survives UI rebuilds.
     ///
-    /// This creates a `SharedState<S>` that survives across UI rebuilds.
-    /// State is keyed automatically by source location using `#[track_caller]`.
+    /// `State<T>` is the fine-grained reactive primitive: each
+    /// `.set()` notifies only the things that registered a
+    /// dependency on this signal. Use it for values like counters,
+    /// flags, form fields — anything you'd want to read in one
+    /// place and mutate from another.
     ///
-    /// Use with `stateful()` for the cleanest API:
+    /// For Stateful FSM handles (hover / press / drag / custom
+    /// state machines), reach for [`Self::use_state_for`] /
+    /// `use_state_for(initial)` instead — those return a
+    /// `SharedState<S>` (an `Arc<Mutex<StatefulInner<S>>>`), which
+    /// is a different abstraction.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// use blinc_layout::prelude::*;
-    ///
-    /// fn my_button(ctx: &WindowedContext) -> impl ElementBuilder {
-    ///     let handle = ctx.use_state(ButtonState::Idle);
-    ///
-    ///     stateful(handle)
-    ///         .on_state(|state, div| {
-    ///             match state {
-    ///                 ButtonState::Hovered => { *div = div.swap().bg(Color::RED); }
-    ///                 _ => { *div = div.swap().bg(Color::BLUE); }
-    ///             }
+    /// fn counter(ctx: &WindowedContext) -> impl ElementBuilder {
+    ///     let count = ctx.use_state(0i32);
+    ///     stateful::<NoState>()
+    ///         .deps([count.signal_id()])
+    ///         .on_state(move |_| {
+    ///             div()
+    ///                 .child(text(&format!("Clicks: {}", count.get())))
+    ///                 .on_click({
+    ///                     let count = count.clone();
+    ///                     move |_| count.update(|n| n + 1)
+    ///                 })
     ///         })
     /// }
     /// ```
     #[track_caller]
-    pub fn use_state<S>(&self, initial: S) -> blinc_layout::SharedState<S>
+    pub fn use_state<T>(&self, initial: T) -> blinc_core::State<T>
     where
-        S: blinc_layout::StateTransitions + Clone + Send + 'static,
+        T: Clone + Send + 'static,
     {
-        // `#[track_caller]` on both this method and the standalone
-        // `use_state_for(initial)` forwards the original caller's
-        // location through the wrapper, so the auto-key matches
-        // exactly what a direct `use_state_for(initial)` call from
-        // the same line would produce.
-        blinc_layout::stateful::use_state_for(initial)
+        // Forward to the global context's `use_state`. Both this
+        // method and `BlincContextState::use_state` are
+        // `#[track_caller]` so `Location::caller()` lands on the
+        // ORIGINAL caller of `ctx.use_state(...)`, not on this
+        // wrapper line.
+        blinc_core::context_state::BlincContextState::get().use_state(initial)
     }
 
-    /// Create a persistent state with an explicit key
+    /// Create or retrieve a persistent FSM handle (`SharedState<S>`)
+    /// with an explicit hash key. Use this for reusable components
+    /// called multiple times from the same source line (loops,
+    /// list items, factory functions).
     ///
-    /// Use this for reusable components that are called multiple times
-    /// from the same location (e.g., in a loop or when the same component
-    /// function is called multiple times with different props).
+    /// The key can be any type that implements `Hash` (strings,
+    /// numbers, tuples, `InstanceKey`, etc).
     ///
-    /// The key can be any type that implements `Hash` (strings, numbers, etc).
+    /// For the common "one widget per source line" case, prefer
+    /// the bare [`Self::use_fsm`] / `use_fsm(initial)` — it derives
+    /// the key from `#[track_caller]` automatically.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// // Reusable component - string key
+    /// // Reusable component — string key per instance
     /// fn feature_card(ctx: &WindowedContext, id: &str) -> impl ElementBuilder {
-    ///     let handle = ctx.use_state_for(id, ButtonState::Idle);
-    ///     stateful(handle).on_state(|state, div| { ... })
+    ///     let handle = ctx.use_fsm_keyed(id, ButtonState::Idle);
+    ///     stateful_from_handle(handle).on_state(|state, div| { /* … */ })
     /// }
     ///
-    /// // Or with numeric key in a loop
+    /// // Or with a numeric key in a loop
     /// for i in 0..3 {
-    ///     let handle = ctx.use_state_for(i, ButtonState::Idle);
-    ///     // ...
+    ///     let handle = ctx.use_fsm_keyed(i, ButtonState::Idle);
+    ///     // …
     /// }
     /// ```
-    pub fn use_state_for<K, S>(&self, key: K, initial: S) -> blinc_layout::SharedState<S>
+    pub fn use_fsm_keyed<K, S>(&self, key: K, initial: S) -> blinc_layout::SharedState<S>
     where
         K: Hash,
         S: blinc_layout::StateTransitions + Clone + Send + 'static,
     {
         // Forward to the standalone keyed version so both API
         // surfaces share one implementation and can't drift.
-        blinc_layout::stateful::use_state_for_keyed(key, initial)
+        blinc_layout::stateful::use_fsm_keyed(key, initial)
+    }
+
+    /// **Deprecated.** Renamed to [`Self::use_fsm_keyed`].
+    ///
+    /// The new name says what the method returns (a `SharedState<S>`
+    /// FSM handle, not a `State<T>` reactive cell). Existing call
+    /// sites still compile; they just emit a deprecation warning.
+    #[deprecated(
+        since = "0.5.2",
+        note = "use `use_fsm_keyed(key, initial)` instead — returns a SharedState<S> (FSM handle)"
+    )]
+    #[track_caller]
+    pub fn use_state_for<K, S>(&self, key: K, initial: S) -> blinc_layout::SharedState<S>
+    where
+        K: Hash,
+        S: blinc_layout::StateTransitions + Clone + Send + 'static,
+    {
+        self.use_fsm_keyed(key, initial)
+    }
+
+    /// Create or retrieve a persistent FSM handle (`SharedState<S>`),
+    /// auto-keyed by the caller's source location via
+    /// `#[track_caller]`. The common case for "one Stateful per call
+    /// site" — no manual key plumbing required.
+    ///
+    /// For loops or reusable factories called multiple times from
+    /// the same source line, use [`Self::use_fsm_keyed`] with an
+    /// explicit per-instance key (collisions on the auto-derived
+    /// `(file, line, column)` key would otherwise alias every
+    /// iteration onto the same slot).
+    ///
+    /// `Sync` is not required on `S` — the value lives behind
+    /// `Arc<Mutex<…>>`.
+    #[track_caller]
+    pub fn use_fsm<S>(&self, initial: S) -> blinc_layout::SharedState<S>
+    where
+        S: blinc_layout::StateTransitions + Clone + Send + 'static,
+    {
+        blinc_layout::stateful::use_fsm(initial)
     }
 
     /// Create a persistent animated value using caller location as key

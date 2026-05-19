@@ -158,8 +158,8 @@ pub use stateful::{
     clear_stateful_base_updaters, clear_stateful_deps, has_animating_statefuls,
     has_pending_subtree_rebuilds, has_stateful_base_updater, has_visible_animating_statefuls,
     peek_needs_redraw, queue_prop_update, queue_subtree_rebuild, request_redraw, take_needs_redraw,
-    take_pending_prop_updates, take_pending_subtree_rebuilds, update_stateful_base_props,
-    use_shared_state, use_shared_state_with, use_state_for, use_state_for_keyed,
+    take_pending_prop_updates, take_pending_subtree_rebuilds, update_stateful_base_props, use_fsm,
+    use_fsm_keyed, use_shared_state, use_shared_state_with, use_state_for, use_state_for_keyed,
     PendingSubtreeRebuild, SharedState, StateTransitions, StatefulInner,
 };
 
@@ -240,17 +240,22 @@ pub mod prelude {
         stateful_with_key,
         text_field,
         toggle,
-        // Utility functions for persistent shared state
-        use_shared_state,
-        use_shared_state_with,
-        // Bare auto-keyed `SharedState<S>` accessor — uses
+        // Bare auto-keyed FSM handle (`SharedState<S>`) — uses
         // `#[track_caller]` to derive a unique key from the source
         // location. The common case for "one Stateful per call
         // site" — no manual key plumbing required.
-        use_state_for,
+        use_fsm,
         // Explicit-key variant for loops / reusable component
         // factories where one source line creates multiple
         // instances.
+        use_fsm_keyed,
+        // Utility functions for persistent shared state
+        use_shared_state,
+        use_shared_state_with,
+        // Deprecated aliases — kept on the prelude during the
+        // migration window so existing call sites keep compiling
+        // (with a warning) without an extra import.
+        use_state_for,
         use_state_for_keyed,
         // Core generic type
         BoundStateful,

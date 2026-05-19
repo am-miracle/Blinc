@@ -323,7 +323,7 @@ impl TreeViewBuilder {
         let on_select = self.on_select.clone();
         let container_key = format!("{}_container", self.instance_key.get());
 
-        let container_state = use_shared_state_with(&container_key, ());
+        let container_state = blinc_layout::stateful::use_fsm_keyed(&container_key, ());
 
         let text_primary = theme.color(ColorToken::TextPrimary);
         let text_secondary = theme.color(ColorToken::TextSecondary);

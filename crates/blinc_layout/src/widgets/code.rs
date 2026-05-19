@@ -1445,7 +1445,10 @@ impl CodeEditor {
 
         let instance_key = crate::InstanceKey::new("code_editor").get().to_string();
         let state_key = format!("_code_editor_{}", instance_key);
-        let shared_state = crate::stateful::use_shared_state::<TextFieldState>(&state_key);
+        let shared_state = crate::stateful::use_fsm_keyed::<_, TextFieldState>(
+            &state_key,
+            TextFieldState::default(),
+        );
 
         let data_for_click = Arc::clone(state);
         let data_for_drag = Arc::clone(state);
@@ -2928,9 +2931,11 @@ fn open_search_overlay(shared_state: &SharedCodeEditorState, instance_key: &str)
             let state_for_stateful = Arc::clone(&state_for_content);
             let key_for_stateful = key.clone();
 
-            let search_stateful_state = crate::stateful::use_shared_state::<
-                crate::stateful::ButtonState,
-            >(&format!("{}:search_stateful", key));
+            let search_stateful_state =
+                crate::stateful::use_fsm_keyed::<_, crate::stateful::ButtonState>(
+                    &format!("{}:search_stateful", key),
+                    crate::stateful::ButtonState::default(),
+                );
 
             div().child(
                 crate::stateful::Stateful::with_shared_state(search_stateful_state)
@@ -2980,7 +2985,10 @@ fn search_icon_button(
     let theme = ThemeState::get();
     let hover = theme.color(ColorToken::SurfaceElevated);
     let pressed = theme.color(ColorToken::SurfaceOverlay);
-    let btn_state = crate::stateful::use_shared_state::<crate::stateful::ButtonState>(key);
+    let btn_state = crate::stateful::use_fsm_keyed::<_, crate::stateful::ButtonState>(
+        key,
+        crate::stateful::ButtonState::default(),
+    );
     let s = icon_size + 4.0;
     crate::widgets::button::Button::with_content(btn_state, move |_| {
         div().w(s).h(s).items_center().justify_center().child(
@@ -3011,7 +3019,10 @@ fn search_toggle_button(
     let theme = ThemeState::get();
     let hover = theme.color(ColorToken::SurfaceElevated);
     let border_color = theme.color(ColorToken::Border);
-    let btn_state = crate::stateful::use_shared_state::<crate::stateful::ButtonState>(key);
+    let btn_state = crate::stateful::use_fsm_keyed::<_, crate::stateful::ButtonState>(
+        key,
+        crate::stateful::ButtonState::default(),
+    );
 
     let (bg, border, tc) = if active {
         (accent.with_alpha(0.15), accent, accent)
