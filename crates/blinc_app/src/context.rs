@@ -8929,6 +8929,33 @@ impl RenderContext {
         // Poll the device to free completed command buffers
         self.renderer.poll();
 
+        // Motion-bound bg primitives (the dynamic batch) — slider
+        // thumbs, progress fills, spinner arcs, anything inside a
+        // `motion()` container. The walker routes these into a
+        // separate `cached_dynamic_batch` so the compositor's
+        // motion-binding fast path can patch transform / opacity
+        // in place without re-walking. The compositor dispatches
+        // it via `composite_frame`; the non-compositor path was
+        // populating the cache and then never drawing it.
+        //
+        // `render_overlay` re-uploads the dynamic batch's aux_data
+        // (polygon clip vertices, etc.) before dispatch — required
+        // for the cn::spinner arc whose clip-path polygon vertices
+        // live in this batch.
+        if let Some(ref dynamic_batch) = self.cached_dynamic_batch {
+            if !dynamic_batch.primitives.is_empty() {
+                self.renderer.render_overlay(target, dynamic_batch);
+                // The dynamic batch upload clobbered the static
+                // aux_data the next text/SVG dispatch might rely
+                // on (polygon clip-paths on regular elements).
+                // Re-upload the main batch's aux_data so anything
+                // downstream sees consistent state. (The compositor
+                // path doesn't need this because composite_frame
+                // handles aux_data sequencing internally.)
+                self.renderer.update_aux_data_for_batch(&batch);
+            }
+        }
+
         // Motion-subtree text + SVG overlay — text/SVG inside a
         // motion container (or with an inherited CSS affine) were
         // filtered out of the main `texts` / `svgs` lists earlier

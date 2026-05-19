@@ -5998,6 +5998,17 @@ impl GpuRenderer {
         self.update_aux_data_slice(&batch.aux_data);
     }
 
+    /// Public wrapper for callers in `blinc_app` that need to
+    /// re-upload a batch's aux_data after another batch's render
+    /// pass clobbered the shared GPU buffer. Used by the
+    /// non-compositor path's dynamic-batch dispatch: after the
+    /// motion-bound batch's aux upload + draw, the static batch's
+    /// polygon clip / 3D-group descriptor offsets would otherwise
+    /// reference stale data on downstream dispatches.
+    pub fn update_aux_data_for_batch(&mut self, batch: &PrimitiveBatch) {
+        self.update_aux_data_buffer(batch);
+    }
+
     /// Slice-variant of [`Self::update_aux_data_buffer`] for callers that
     /// only have an `&[[f32; 4]]` (e.g. the compositor overlay path
     /// which carries the dynamic batch's aux_data separately from a
