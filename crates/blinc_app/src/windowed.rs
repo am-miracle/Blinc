@@ -3680,6 +3680,19 @@ impl WindowedApp {
                                             && router.cursor_inside_last_leaf(lx, ly)
                                         {
                                             router.set_mouse_position(lx, ly);
+                                            // Drop the event callback before
+                                            // returning — it holds a raw ptr
+                                            // to `pending_events`'s stack
+                                            // slot, which would dangle after
+                                            // this scope exits. A later
+                                            // event (e.g. Resized broadcast)
+                                            // firing the stale callback
+                                            // writes to freed memory and
+                                            // corrupts the (since-replaced)
+                                            // Vec header, surfacing as
+                                            // "capacity overflow" on the
+                                            // next push.
+                                            router.clear_event_callback();
                                             return ControlFlow::Continue;
                                         }
 
@@ -3716,6 +3729,8 @@ impl WindowedApp {
                                                 window.set_cursor(want);
                                                 ws.last_cursor = Some(want);
                                             }
+                                            // See the matching clear above for why.
+                                            router.clear_event_callback();
                                             return ControlFlow::Continue;
                                         }
                                         if !needs_pointer_dispatch {
@@ -3730,6 +3745,8 @@ impl WindowedApp {
                                                 window.set_cursor(want);
                                                 ws.last_cursor = Some(want);
                                             }
+                                            // See the matching clear above for why.
+                                            router.clear_event_callback();
                                             return ControlFlow::Continue;
                                         }
 
@@ -4116,6 +4133,8 @@ impl WindowedApp {
                                         Key::Back => {
                                             // System back button — dispatch through back handler
                                             if blinc_layout::back_handler::dispatch_back() {
+                                                // See the matching clear above for why.
+                                                router.clear_event_callback();
                                                 return ControlFlow::Continue;
                                             }
                                             // Not consumed — let default handling proceed
