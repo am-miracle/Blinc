@@ -355,6 +355,10 @@ pub struct RenderContext {
     /// batch / overlay). Without this, text inside motion containers
     /// gets covered by their bg paint.
     cached_motion_subtree_text_prims: Option<Vec<GpuPrimitive>>,
+    /// SVGs inside motion subtrees — same routing as the text prims
+    /// above. Re-dispatched via `render_rasterized_svgs` after the
+    /// overlay so the icon lands on top of its motion container's bg.
+    cached_motion_subtree_svgs: Option<Vec<SvgElement>>,
     /// Same as `cached_glyphs_by_layer` but for CSS-transformed text
     /// primitives (text with a `transform:` style — routed through
     /// the SDF pipeline, not the glyph pipeline).
@@ -654,6 +658,12 @@ struct SvgElement {
     tag_overrides: std::collections::HashMap<String, blinc_layout::element::SvgTagStyle>,
     /// 3D layer info if this SVG is inside a perspective-transformed parent
     transform_3d_layer: Option<Transform3DLayerInfo>,
+    /// Whether this SVG sits inside a motion-bound subtree. Same
+    /// routing principle as `TextElement.in_motion_subtree`: deferred
+    /// from the static-cache SVG pass and re-dispatched after the
+    /// motion overlay so the SVG icon lands on top of its motion-bound
+    /// container's bg paint instead of being covered.
+    in_motion_subtree: bool,
 }
 
 /// Flow shader element — an element with `flow: <name>` that renders via a custom GPU pipeline
@@ -715,6 +725,7 @@ impl RenderContext {
             cached_glyphs_by_layer: None,
             cached_fg_glyphs: None,
             cached_motion_subtree_text_prims: None,
+            cached_motion_subtree_svgs: None,
             cached_css_transformed_text_prims: None,
             svg_cache: LruCache::new(NonZeroUsize::new(SVG_CACHE_CAPACITY).unwrap()),
             svg_atlas,
@@ -779,6 +790,7 @@ impl RenderContext {
         self.cached_glyphs_by_layer = None;
         self.cached_fg_glyphs = None;
         self.cached_motion_subtree_text_prims = None;
+        self.cached_motion_subtree_svgs = None;
         self.cached_css_transformed_text_prims = None;
         // Compositor static cache rides on the same lifecycle as the
         // primitive-batch cache — anything that would invalidate the
@@ -5605,6 +5617,7 @@ impl RenderContext {
                         css_affine: node_css_affine,
                         tag_overrides: render_node.props.svg_tag_styles.clone(),
                         transform_3d_layer: inside_3d_layer.clone(),
+                        in_motion_subtree: inside_motion_subtree,
                     });
                 }
                 ElementType::Image(image_data) => {
@@ -6627,6 +6640,7 @@ impl RenderContext {
             self.cached_glyphs_by_layer = None;
             self.cached_fg_glyphs = None;
         self.cached_motion_subtree_text_prims = None;
+        self.cached_motion_subtree_svgs = None;
             self.cached_css_transformed_text_prims = None;
         }
 
@@ -6879,13 +6893,13 @@ impl RenderContext {
                     &overlay.primitives,
                     &dyn_aux_owned,
                 );
-                // Motion-subtree text overlay — rendered on the surface
-                // after the motion-bound bg primitives so the text lands
-                // on top of the overlay paint instead of being covered.
-                // PRIM_TEXT primitives with `local_affine` so the motion
-                // container's scale / translate / rotate applies to each
-                // glyph, keeping text in sync with the bg as the
-                // animation progresses.
+                // Motion-subtree text + SVG overlay — rendered on the
+                // surface after the motion-bound bg primitives so they
+                // land on top of the overlay paint instead of being
+                // covered. PRIM_TEXT primitives carry `local_affine`
+                // so the motion container's scale / translate / rotate
+                // applies to each glyph. SVGs go through the same
+                // rasterized-image dispatch the static-cache path uses.
                 if let Some(motion_text_prims) =
                     self.cached_motion_subtree_text_prims.clone()
                 {
@@ -6893,6 +6907,12 @@ impl RenderContext {
                         self.rebind_glyph_atlas_for_overlay();
                         self.renderer
                             .render_primitives_overlay(target_view, &motion_text_prims);
+                    }
+                }
+                if let Some(motion_svgs) = self.cached_motion_subtree_svgs.clone() {
+                    if !motion_svgs.is_empty() {
+                        let dpi = tree.scale_factor();
+                        self.render_rasterized_svgs(target_view, &motion_svgs, dpi);
                     }
                 }
                 // Composited CSS layers — blit each promoted subtree's
@@ -7010,6 +7030,7 @@ impl RenderContext {
                 self.cached_glyphs_by_layer = None;
                 self.cached_fg_glyphs = None;
         self.cached_motion_subtree_text_prims = None;
+        self.cached_motion_subtree_svgs = None;
                 self.cached_css_transformed_text_prims = None;
                 damage_rect_failed = true;
             }
@@ -7040,6 +7061,7 @@ impl RenderContext {
                         self.cached_glyphs_by_layer = None;
                         self.cached_fg_glyphs = None;
         self.cached_motion_subtree_text_prims = None;
+        self.cached_motion_subtree_svgs = None;
                         self.cached_css_transformed_text_prims = None;
                     } else {
                         // Re-dispatch any glyph / SVG / image that
@@ -7212,13 +7234,13 @@ impl RenderContext {
                     &overlay.primitives,
                     &dyn_aux_owned,
                 );
-                // Motion-subtree text overlay — rendered on the surface
-                // after the motion-bound bg primitives so the text lands
-                // on top of the overlay paint instead of being covered.
-                // PRIM_TEXT primitives with `local_affine` so the motion
-                // container's scale / translate / rotate applies to each
-                // glyph, keeping text in sync with the bg as the
-                // animation progresses.
+                // Motion-subtree text + SVG overlay — rendered on the
+                // surface after the motion-bound bg primitives so they
+                // land on top of the overlay paint instead of being
+                // covered. PRIM_TEXT primitives carry `local_affine`
+                // so the motion container's scale / translate / rotate
+                // applies to each glyph. SVGs go through the same
+                // rasterized-image dispatch the static-cache path uses.
                 if let Some(motion_text_prims) =
                     self.cached_motion_subtree_text_prims.clone()
                 {
@@ -7226,6 +7248,12 @@ impl RenderContext {
                         self.rebind_glyph_atlas_for_overlay();
                         self.renderer
                             .render_primitives_overlay(target_view, &motion_text_prims);
+                    }
+                }
+                if let Some(motion_svgs) = self.cached_motion_subtree_svgs.clone() {
+                    if !motion_svgs.is_empty() {
+                        let dpi = tree.scale_factor();
+                        self.render_rasterized_svgs(target_view, &motion_svgs, dpi);
                     }
                 }
                 // Composited CSS layers — blit each promoted subtree's
@@ -7467,6 +7495,12 @@ impl RenderContext {
                 self.rebind_glyph_atlas_for_overlay();
                 self.renderer
                     .render_primitives_overlay(target_view, &motion_text_prims);
+            }
+        }
+        if let Some(motion_svgs) = self.cached_motion_subtree_svgs.clone() {
+            if !motion_svgs.is_empty() {
+                let dpi = tree.scale_factor();
+                self.render_rasterized_svgs(target_view, &motion_svgs, dpi);
             }
         }
         // Composited CSS layers (slow path's composite site) — same
@@ -7874,11 +7908,14 @@ impl RenderContext {
         }
 
         let mut svgs = Vec::new();
+        let mut motion_subtree_svgs: Vec<SvgElement> = Vec::new();
         let mut layer_3d_svgs: std::collections::HashMap<LayoutNodeId, Vec<SvgElement>> =
             std::collections::HashMap::new();
         for svg in all_svgs {
             if let Some(ref info) = svg.transform_3d_layer {
                 layer_3d_svgs.entry(info.node_id).or_default().push(svg);
+            } else if svg.in_motion_subtree {
+                motion_subtree_svgs.push(svg);
             } else {
                 svgs.push(svg);
             }
@@ -8344,6 +8381,7 @@ impl RenderContext {
         self.cached_glyphs_by_layer = Some(glyphs_by_layer.clone());
         self.cached_fg_glyphs = Some(fg_glyphs.clone());
         self.cached_motion_subtree_text_prims = Some(motion_subtree_text_prims.clone());
+        self.cached_motion_subtree_svgs = Some(motion_subtree_svgs.clone());
         self.cached_css_transformed_text_prims = Some(css_transformed_text_prims.clone());
 
         // Generate decoration primitives for foreground text once so the
