@@ -4874,6 +4874,30 @@ impl WindowedApp {
                                     tracing::trace!("Visual-only prop updates, skipping layout");
                                 }
 
+                                // Stateful animations (springs, keyframes,
+                                // timelines) queue prop updates here when their
+                                // scheduler-driven `refresh_callback` re-runs
+                                // the `on_state` callback. Without an explicit
+                                // cache invalidate, the fast path's
+                                // `cached_bg_batch` would keep the previous
+                                // frame's primitives — and the walker (which is
+                                // what reads `render_node.props` to emit fresh
+                                // primitives) doesn't run on the fast path.
+                                // Symptom: timeline_demo's bouncing ball,
+                                // motion_demo's pull-to-refresh contents, and
+                                // any other stateful-animation-driven visual
+                                // stay frozen on the previous frame until some
+                                // input (mouse move, scroll) trips a different
+                                // invalidate. The state-driven path through
+                                // `handle_event_internal` already covers
+                                // event-fired transitions via `state_changed`
+                                // above; this catches the scheduler-driven half.
+                                if had_prop_updates {
+                                    blinc_app.invalidate_render_cache_tagged(
+                                        "stateful_prop_update",
+                                    );
+                                }
+
                                 // Visual-only updates (e.g. hover state flip)
                                 // happened mid-frame — make sure the next
                                 // frame renders rather than getting skipped
