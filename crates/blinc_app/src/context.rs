@@ -2022,6 +2022,37 @@ impl RenderContext {
         // `has_visible_animating_statefuls`, so neither relies on
         // `visible_anim_active` to stay alive.
         tree.set_visible_anim_active(any_binding_active);
+
+        // Motion-subtree text / SVG primitives live in their own
+        // post-overlay caches (`cached_motion_subtree_text_prims`,
+        // `cached_motion_subtree_svgs`) — `apply_binding_deltas`
+        // patches the dynamic batch in place but doesn't touch those
+        // caches, so a spring snap-back after release would translate
+        // the bg correctly while the text / SVG stayed at the old
+        // position. Force the slow path when bindings are mid-flight
+        // *and* we have motion-subtree text or SVG cached: the slow
+        // path's walker + collect_elements_recursive re-shapes them
+        // at the current binding values.
+        //
+        // Returning false here flows back to the caller, which
+        // invalidates the static layer and falls through to the slow
+        // path. The cost is one full re-walk per binding-animating
+        // frame — same cost CSS / FLIP / FSM animations already pay
+        // — but only when motion-subtree text / SVG is in scope. Pure
+        // SDF motion bindings (cn_demo's switch / slider / progress
+        // bar without text inside the motion subtree) still get the
+        // fast in-place patch.
+        let has_motion_overlay_glyphs = self
+            .cached_motion_subtree_text_prims
+            .as_ref()
+            .is_some_and(|v| !v.is_empty())
+            || self
+                .cached_motion_subtree_svgs
+                .as_ref()
+                .is_some_and(|v| !v.is_empty());
+        if any_binding_active && has_motion_overlay_glyphs {
+            return false;
+        }
         true
     }
 
