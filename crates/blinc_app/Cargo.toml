@@ -35,6 +35,11 @@ blinc_theme = { path = "../blinc_theme", version = "0.5.1" }
 # scratch batches + textures.
 slotmap = { workspace = true }
 
+# Byte-level access to `GpuPrimitive` slices for the composite-layer
+# texture dirty-tracking hash. `GpuPrimitive` and `aux_data` are
+# already `bytemuck::Pod` upstream; we only need `cast_slice` here.
+bytemuck = { workspace = true }
+
 # GPU
 wgpu.workspace = true
 

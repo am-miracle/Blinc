@@ -429,6 +429,19 @@ pub struct RenderContext {
     /// 5 dirty tracking) or the node demotes out of the dynamic
     /// set.
     css_composited_textures: std::collections::HashMap<u64, blinc_gpu::renderer::LayerTexture>,
+    /// Hash of the scratch `PrimitiveBatch` that produced the texture
+    /// currently in [`Self::css_composited_textures`] for each node.
+    /// On every slow-path frame the walker re-emits primitives into a
+    /// fresh scratch batch; comparing the new hash against the cached
+    /// one tells us whether the subtree's intrinsic content actually
+    /// changed. When it hasn't — the steady-state case for a pulse /
+    /// glow node whose only animation is composite-promotable opacity
+    /// — we skip the GPU rasterize and reuse the existing texture.
+    /// Saves ~render_layer_range_tight per promoted region per slow-
+    /// path frame; on cn_demo with a single pulse on screen and a
+    /// non-promotable sibling driving the slow path that's ~200 µs
+    /// GPU time per frame.
+    css_composited_scratch_hash: std::collections::HashMap<u64, u64>,
     // Collected text / SVG / image elements from the most recent
     // full paint. Lives alongside `cached_bg_batch` so the
     // compositor fast path can skip `collect_render_elements_with_state`
@@ -691,6 +704,7 @@ impl RenderContext {
             cached_bg_batch: None,
             cached_dynamic_batch: None,
             css_composited_textures: std::collections::HashMap::new(),
+            css_composited_scratch_hash: std::collections::HashMap::new(),
             cached_texts: None,
             cached_svgs: None,
             cached_images: None,
@@ -1106,8 +1120,35 @@ impl RenderContext {
         // sort on (z, root) keeps the walker's tree-order as the
         // tiebreaker — same convention `collect_canvas_overlay`
         // uses).
-        let mut ordered: Vec<_> = regions.values().cloned().collect();
+        //
+        // CssAnimated regions are EXCLUDED: their pixels live in
+        // `css_composited_textures` and get blitted by
+        // `composite_css_layers_overlay`. Re-walking them here would
+        // re-enter `render_layer_with_motion` from the scratch
+        // context, which then writes a fresh `dynamic_regions` entry
+        // — but the scratch's cumulative transform already has DPI
+        // pushed once (by the outer `push_transform` below) AND
+        // again via the region's `ambient.affine` (captured from the
+        // main walker, which had DPI baked in). The result compounds
+        // DPI by an extra factor every fast-path frame; the new
+        // `screen_aabb` is DPI² physical, then DPI³ next frame,
+        // then DPI⁴... visible as `dest_w` / `dest_h` / `dest_pos`
+        // doubling each tick until the texture blits land far
+        // off-screen and pulse / glow vanish.
+        let mut ordered: Vec<_> = regions
+            .values()
+            .filter(|r| {
+                !matches!(
+                    r.kind,
+                    blinc_layout::renderer::DynamicKind::CssAnimated { .. }
+                )
+            })
+            .cloned()
+            .collect();
         drop(regions);
+        if ordered.is_empty() {
+            return PrimitiveBatch::new();
+        }
         ordered.sort_by(|a, b| {
             a.ambient
                 .z_layer
@@ -1156,6 +1197,27 @@ impl RenderContext {
              region re-walk emitted outside its motion-subtree gate"
         );
         out
+    }
+
+    /// Hash a composite-layer scratch `PrimitiveBatch` for the
+    /// rasterize-skip check in the slow-path texture step. Hashes
+    /// only the channels that affect rendered pixels: the SDF
+    /// primitives, foreground primitives, and the `aux_data` buffer
+    /// (polygon-clip vertices, 3D group descriptors). Glass / nested-
+    /// glass primitives don't appear in composited subtrees today
+    /// (the walker doesn't promote glass) so they're omitted; if a
+    /// future change ever lets glass land in a composite scratch,
+    /// promotability would have to be reconsidered anyway.
+    ///
+    /// `GpuPrimitive` and `aux_data` are `bytemuck::Pod`, so we hash
+    /// their raw bytes — cheap, allocation-free, deterministic.
+    fn hash_composite_scratch(batch: &blinc_gpu::primitives::PrimitiveBatch) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytemuck::cast_slice::<_, u8>(&batch.primitives).hash(&mut hasher);
+        bytemuck::cast_slice::<_, u8>(&batch.foreground_primitives).hash(&mut hasher);
+        bytemuck::cast_slice::<_, u8>(&batch.aux_data).hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Composite each promoted CSS-animated layer's texture onto the
@@ -4887,8 +4949,39 @@ impl RenderContext {
             inherited_motion_scale_center
         };
 
-        // Skip if completely transparent
-        if effective_motion_opacity <= 0.001 {
+        // Skip if completely transparent — UNLESS this node has an
+        // active motion binding or motion FSM that could ramp the
+        // opacity back up. Mirrors the same bypass the walker has at
+        // `paint/motion.rs::render_layer_with_motion` so SDF primitives
+        // (emitted by the walker) and text / SVG / image (collected
+        // here) stay in lockstep across animation frames.
+        //
+        // Without this bypass, a transient motion's first paint after
+        // a rebuild — when `current` still equals `enter_from` and
+        // opacity is exactly 0.0 — would emit bg / border primitives
+        // into the cache but no text. Subsequent slow-path frames
+        // re-collect with opacity > 0.001 and would normally repopulate
+        // the cache, but the cache invalidation gate (`other_animations
+        // _active`) reads `has_active_motions()` which goes false on
+        // the very frame the FSM hits `Visible` — so the final cached
+        // text vectors come from whatever the last *animating* frame
+        // produced. If that final animating frame happened to early-out
+        // here, the cache ships without text and the only way back is
+        // a mouse move to force another full paint. Symptom: router
+        // page transitions show buttons with invisible labels.
+        let has_pending_motion = tree
+            .motion_bindings_map()
+            .get(&node)
+            .is_some_and(|b| b.is_any_animating())
+            || render_state.is_some_and(|rs| {
+                if let Some(render_node) = tree.get_render_node(node) {
+                    if let Some(ref stable_key) = render_node.props.motion_stable_id {
+                        return rs.is_stable_motion_active(stable_key);
+                    }
+                }
+                rs.is_motion_active(node)
+            });
+        if effective_motion_opacity <= 0.001 && !has_pending_motion {
             return;
         }
 
@@ -7399,6 +7492,28 @@ impl RenderContext {
                     if natural_size.0 == 0 || natural_size.1 == 0 {
                         continue;
                     }
+                    // Dirty check: if the scratch batch we just walked
+                    // hashes the same as the one that produced the
+                    // currently-cached texture, the subtree's intrinsic
+                    // content didn't change this frame and we can keep
+                    // the existing texture. The promoted animation's
+                    // transform / opacity is applied at composite time
+                    // (`composite_css_layers_overlay`), so steady-state
+                    // pulse / glow frames hit this path and skip the
+                    // GPU rasterize entirely.
+                    //
+                    // Re-raster fires automatically whenever the walker
+                    // emits different primitives — state-style flip
+                    // (hover / active), layout recompute, theme swap,
+                    // promotion-property change all flow through the
+                    // walker and produce a different scratch. No
+                    // separate dirty flag plumbing needed.
+                    let scratch_hash = Self::hash_composite_scratch(scratch_batch);
+                    if self.css_composited_textures.contains_key(&key)
+                        && self.css_composited_scratch_hash.get(&key).copied() == Some(scratch_hash)
+                    {
+                        continue;
+                    }
                     let layer_pos = (region.screen_aabb[0], region.screen_aabb[1]);
                     let layer_size = (natural_size.0 as f32, natural_size.1 as f32);
                     let (layer_texture, _content_size) = self
@@ -7412,6 +7527,7 @@ impl RenderContext {
                         self.renderer.layer_texture_cache_mut().release(old);
                     }
                     self.css_composited_textures.insert(key, layer_texture);
+                    self.css_composited_scratch_hash.insert(key, scratch_hash);
                 }
             }
             // Demotion cleanup: any cached composited texture whose
@@ -7448,6 +7564,7 @@ impl RenderContext {
                 if let Some(old) = self.css_composited_textures.remove(&key) {
                     self.renderer.layer_texture_cache_mut().release(old);
                 }
+                self.css_composited_scratch_hash.remove(&key);
             }
         }
 

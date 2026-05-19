@@ -5198,16 +5198,24 @@ impl WindowedApp {
                             } else {
                                 16.0
                             };
-                            let css_active = if let Some(ref mut tree) = ws.render_tree {
-                                let store = tree.css_anim_store();
-                                let mut s = store.lock().unwrap();
-                                let (anim, trans) = s.tick(dt_ms);
-                                drop(s);
-                                let flip = tree.tick_flip_animations(dt_ms);
-                                anim || trans || flip || tree.css_has_active()
-                            } else {
-                                false
-                            };
+                            let (css_active, css_only_composite_promotable) =
+                                if let Some(ref mut tree) = ws.render_tree {
+                                    let store = tree.css_anim_store();
+                                    let mut s = store.lock().unwrap();
+                                    let (anim, trans) = s.tick(dt_ms);
+                                    drop(s);
+                                    let flip = tree.tick_flip_animations(dt_ms);
+                                    let active =
+                                        anim || trans || flip || tree.css_has_active();
+                                    // Composite-promotable predicate ignores FLIP
+                                    // (FLIP animations re-layout under the hood,
+                                    // so they always need the slow path).
+                                    let promotable = !flip
+                                        && tree.css_active_all_composite_promotable();
+                                    (active, promotable)
+                                } else {
+                                    (false, true)
+                                };
                             ws.last_frame_time_ms = current_time;
 
                             // Sync motion states to shared store for query_motion API
@@ -5451,9 +5459,21 @@ impl WindowedApp {
                                 // stays cached and the walker doesn't run.
                                 // See the split-paint flow in
                                 // `render_tree_with_motion_opt`.
+                                // CSS-only animation frames take the fast path
+                                // when every playing animation / transition is
+                                // composite-promotable (opacity / 2D translate /
+                                // 2D scale): the walker doesn't need to run
+                                // because the layer textures were rasterized on
+                                // the last full paint and `composite_frame`
+                                // already calls `composite_css_layers_overlay`
+                                // to blit them with the current animated
+                                // dest_pos / dest_size / opacity. Non-promotable
+                                // CSS work (colour / layout / 3D / rotate-z)
+                                // still trips the slow path through `css_active`.
+                                let css_blocks_fast = css_active && !css_only_composite_promotable;
                                 let try_fast_paint = !did_rebuild
                                     && !ws.needs_relayout
-                                    && !css_active
+                                    && !css_blocks_fast
                                     && !scroll_animating
                                     && ws.last_paint_time_ms != 0
                                     && blinc_app.has_render_cache();
