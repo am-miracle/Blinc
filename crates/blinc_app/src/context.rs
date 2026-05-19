@@ -7414,6 +7414,41 @@ impl RenderContext {
                     self.css_composited_textures.insert(key, layer_texture);
                 }
             }
+            // Demotion cleanup: any cached composited texture whose
+            // node is no longer in `dynamic_regions` as a CssAnimated
+            // region got demoted this paint (animation settled, went
+            // out-of-scope, or the node disappeared). Release its
+            // texture back to the pool so the bucket eviction can
+            // reclaim it. Without this step the map grows unbounded
+            // across re-promotions.
+            use slotmap::Key as _;
+            let live_keys: std::collections::HashSet<u64> = {
+                let regions = tree.dynamic_regions();
+                regions
+                    .iter()
+                    .filter_map(|(node, region)| {
+                        if matches!(
+                            region.kind,
+                            blinc_layout::renderer::DynamicKind::CssAnimated { .. }
+                        ) {
+                            Some(node.data().as_ffi())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+            let stale_keys: Vec<u64> = self
+                .css_composited_textures
+                .keys()
+                .copied()
+                .filter(|k| !live_keys.contains(k))
+                .collect();
+            for key in stale_keys {
+                if let Some(old) = self.css_composited_textures.remove(&key) {
+                    self.renderer.layer_texture_cache_mut().release(old);
+                }
+            }
         }
 
         // Take the batch (mutable so CSS-transformed text primitives can be added).
