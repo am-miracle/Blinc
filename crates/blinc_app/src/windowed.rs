@@ -4416,6 +4416,36 @@ impl WindowedApp {
                                 }
                             }
 
+                            // Per-hit cache-invalidation gate. Scan `pending_events`
+                            // for any pointer-motion event (POINTER_MOVE / DRAG /
+                            // DRAG_END / FILE_DRAG_OVER) whose target node actually
+                            // has a registered handler. The router's mouse-move
+                            // path already filters POINTER_MOVE emit to handler-
+                            // bearing nodes, but the drag-fast path emits DRAG to
+                            // pressed target + ancestors unfiltered, so we re-check
+                            // here. Used below in the post-dispatch gate so the
+                            // cache only gets invalidated when a real subscriber
+                            // was under the cursor — bare cursor wiggle over empty
+                            // space no longer pays the full re-render.
+                            let pointer_motion_to_handler = {
+                                let registry = tree.handler_registry();
+                                pending_events.iter().any(|e| {
+                                    let is_motion_event = matches!(
+                                        e.event_type,
+                                        blinc_core::events::event_types::POINTER_MOVE
+                                            | blinc_core::events::event_types::DRAG
+                                            | blinc_core::events::event_types::DRAG_END
+                                            | blinc_core::events::event_types::FILE_DRAG_OVER
+                                    );
+                                    if !is_motion_event {
+                                        return false;
+                                    }
+                                    tree.stable_id(e.node_id)
+                                        .map(|sid| registry.has_handler(sid, e.event_type))
+                                        .unwrap_or(false)
+                                })
+                            };
+
                             // Dispatch mouse/touch events (scroll is handled above with nested support)
                             if let Some(ref mut windowed_ctx) = ws.ctx {
                                 let router = &windowed_ctx.event_router;
@@ -4579,32 +4609,39 @@ impl WindowedApp {
                             // already uses: pointer_query elements or
                             // any node with an attached pointer handler.
                             if !state_changed && !had_scroll {
-                                // `has_pointer_move_subscribers` only counts
-                                // handlers that consume continuous motion
-                                // (POINTER_MOVE / DRAG / FILE_DRAG_OVER) plus
-                                // pointer_query elements. The previous
-                                // `has_any_pointer_handler` predicate also
-                                // counted POINTER_DOWN / POINTER_UP, which a
-                                // typical UI loaded with click handlers
-                                // (cn_demo) — making the gate
-                                // effectively unconditional and forcing a
-                                // full cache invalidation on every cursor
-                                // wiggle. CPU pinned to 50 % whenever the
-                                // user moved the mouse over empty space.
+                                // Per-hit invalidation: only invalidate the
+                                // cache when the cursor is over (or the press
+                                // target / ancestors include) a node that
+                                // actually has a POINTER_MOVE / DRAG / etc.
+                                // handler. The previous `has_pointer_move_subscribers`
+                                // gate fired whenever ANY such subscriber
+                                // existed in the tree — which for any UI with
+                                // a hoverable button or a draggable element
+                                // meant every bare cursor wiggle over empty
+                                // space invalidated the cache and forced the
+                                // slow path. `pointer_motion_to_handler`
+                                // (computed above before pending_events is
+                                // consumed) is true only when an emitted
+                                // pointer-motion event actually targets a
+                                // node with a registered handler.
+                                //
+                                // Pointer-query elements (calc(env(--mouse...)) /
+                                // canvas-kit cursor subscribers) still need the
+                                // global invalidate because they read mouse
+                                // position every frame regardless of hit
+                                // chain; we OR them in below.
                                 //
                                 // Click handlers don't need a redraw between
                                 // the move and the click event itself —
                                 // POINTER_DOWN dispatches its own
                                 // invalidation when it fires.
-                                let has_pointer_move_subscribers = ws
+                                let has_pointer_query = ws
                                     .ctx
                                     .as_ref()
-                                    .is_some_and(|c| !c.pointer_query.is_empty())
-                                    || ws.render_tree.as_ref().is_some_and(|t| {
-                                        t.handler_registry().has_any_pointer_move_subscriber()
-                                    });
+                                    .is_some_and(|c| !c.pointer_query.is_empty());
                                 if is_button_event
-                                    || (is_move_event && has_pointer_move_subscribers)
+                                    || (is_move_event
+                                        && (pointer_motion_to_handler || has_pointer_query))
                                 {
                                     frame_dirty.store(true, Ordering::Release);
                                     window.request_redraw();
