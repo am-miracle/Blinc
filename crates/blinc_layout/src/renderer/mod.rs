@@ -2361,6 +2361,15 @@ mod tests {
 
     #[test]
     fn stale_subtree_rebuilds_are_dropped_after_parent_rebuild() {
+        // Serialize against other tests that touch the global
+        // PENDING_SUBTREE_REBUILDS queue. Without this, slotmap
+        // `LayoutNodeId` collisions across parallel test trees let
+        // `structural_rebuilds_by_node` collapse unrelated rebuilds,
+        // and `process_pending_subtree_rebuilds` returns false when
+        // the test expects true. See PENDING_QUEUE_TEST_LOCK docs.
+        let _guard = crate::stateful::PENDING_QUEUE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _ = crate::stateful::take_pending_subtree_rebuilds();
 
         let ui = div().child(div().child(div()));
@@ -2381,6 +2390,11 @@ mod tests {
 
     #[test]
     fn descendant_subtree_rebuilds_are_dropped_before_parent_rebuild() {
+        // See `PENDING_QUEUE_TEST_LOCK` docs for the race this
+        // serializes against.
+        let _guard = crate::stateful::PENDING_QUEUE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _ = crate::stateful::take_pending_subtree_rebuilds();
 
         let ui = div().child(div().child(div()));

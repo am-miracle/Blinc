@@ -441,6 +441,36 @@ pub fn has_pending_subtree_rebuilds() -> bool {
     !PENDING_SUBTREE_REBUILDS.lock().unwrap().is_empty()
 }
 
+/// Test-only serialization for [`PENDING_SUBTREE_REBUILDS`].
+///
+/// The pending-rebuild queue is a process-wide static. Tests that
+/// queue rebuilds + assert against `process_pending_subtree_rebuilds`
+/// race when run in parallel: slotmap-allocated `LayoutNodeId`s
+/// frequently collide across independently-built test trees (same
+/// (index, version) pair), and `structural_rebuilds_by_node` in
+/// `process_pending_subtree_rebuilds` then collapses unrelated
+/// rebuilds onto each other — a test's own rebuild can end up
+/// "superseded" by an unrelated parallel test's rebuild, and
+/// `process_pending_subtree_rebuilds` returns `false` when the test
+/// expects `true`. Surfaces as a flaky CI failure (passes locally
+/// where macOS may parallel-schedule differently).
+///
+/// Each affected test acquires this lock for its full duration:
+///
+/// ```ignore
+/// #[test]
+/// fn my_pending_queue_test() {
+///     let _guard = crate::stateful::PENDING_QUEUE_TEST_LOCK.lock().unwrap();
+///     let _ = crate::stateful::take_pending_subtree_rebuilds();
+///     // … queue + assert …
+/// }
+/// ```
+///
+/// `Mutex<()>` rather than `RwLock` — every affected test mutates
+/// the queue, so there's no read-only path to benefit from sharing.
+#[cfg(test)]
+pub static PENDING_QUEUE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // =========================================================================
 // Stateful Base Render Props Updaters
 // =========================================================================

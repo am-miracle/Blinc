@@ -2196,6 +2196,15 @@ mod tests {
     /// stable_id resolution.
     #[test]
     fn pressed_target_survives_rebuild_between_down_and_up() {
+        // Serialize against other tests that touch the global
+        // PENDING_SUBTREE_REBUILDS queue (see
+        // `PENDING_QUEUE_TEST_LOCK` docs). Parallel slotmap
+        // `LayoutNodeId` collisions otherwise let an unrelated
+        // test's rebuild supersede ours, and
+        // `process_pending_subtree_rebuilds` returns false.
+        let _guard = crate::stateful::PENDING_QUEUE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Clear any leftover pending rebuilds from prior tests so we
         // only process the one this test queues.
         let _ = crate::stateful::take_pending_subtree_rebuilds();
