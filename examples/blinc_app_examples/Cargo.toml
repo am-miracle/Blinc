@@ -59,7 +59,7 @@ blinc_text = { path = "../../crates/blinc_text" }
 blinc_animation = { path = "../../crates/blinc_animation" }
 blinc_paint = { path = "../../crates/blinc_paint" }
 blinc_router = { path = "../../crates/blinc_router" }
-blinc_image = { path = "../../crates/blinc_image" }
+blinc_image = { path = "../../crates/blinc_image", features = ["webp"] }
 blinc_platform = { path = "../../crates/blinc_platform" }
 blinc_platform_desktop = { path = "../../extensions/blinc_platform_desktop" }
 
