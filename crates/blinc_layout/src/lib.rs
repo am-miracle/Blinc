@@ -159,8 +159,8 @@ pub use stateful::{
     has_pending_subtree_rebuilds, has_stateful_base_updater, has_visible_animating_statefuls,
     peek_needs_redraw, queue_prop_update, queue_subtree_rebuild, request_redraw, take_needs_redraw,
     take_pending_prop_updates, take_pending_subtree_rebuilds, update_stateful_base_props,
-    use_shared_state, use_shared_state_with, PendingSubtreeRebuild, SharedState, StateTransitions,
-    StatefulInner,
+    use_shared_state, use_shared_state_with, use_state_for, PendingSubtreeRebuild, SharedState,
+    StateTransitions, StatefulInner,
 };
 
 // Animation integration
@@ -243,6 +243,11 @@ pub mod prelude {
         // Utility functions for persistent shared state
         use_shared_state,
         use_shared_state_with,
+        // Hash-keyed `SharedState<S>` accessor — same shape as
+        // `WindowedContext::use_state_for` but callable from anywhere
+        // `BlincContextState::init` has run (component factories,
+        // DSL programs, plugin modules).
+        use_state_for,
         // Core generic type
         BoundStateful,
         // Type aliases for Stateful<S> - low-level for custom styling

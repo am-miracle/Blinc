@@ -1393,6 +1393,83 @@ impl<S: StateTransitions + Default> Default for Stateful<S> {
 /// or stored for persistence across rebuilds (e.g., via `ctx.use_state()`).
 pub type SharedState<S> = Arc<Mutex<StatefulInner<S>>>;
 
+/// Get or create a persistent `SharedState<S>` keyed by anything
+/// hashable. Survives UI rebuilds — backed by the global
+/// `BlincContextState` hooks + reactive graph, so the same `(key,
+/// S)` pair returns the same handle across every call regardless of
+/// what context the caller has.
+///
+/// This is the standalone version of [`WindowedContext::use_state_for`]
+/// (which now delegates here): same hash-key shape, same bounds, but
+/// usable from any code path that has access to the global context —
+/// component factories called outside a `WindowedContext`, DSL
+/// programs, plugin modules, blinc_layout's own widgets, etc.
+///
+/// # Type Parameters
+///
+/// - `K: Hash` — the key. Any hashable type works (`&str`, `String`,
+///   `u32`, `InstanceKey`, a tuple, etc.). Two distinct keys give
+///   independent state slots; the same key + same `S` returns the
+///   same handle.
+/// - `S: StateTransitions + Clone + Send + 'static` — the FSM state
+///   type. `Sync` is not required (the value lives behind an
+///   `Arc<Mutex<…>>`).
+///
+/// # Panics
+///
+/// Panics if [`BlincContextState::init`] has not been called (i.e.
+/// the global context isn't set up — happens automatically inside
+/// `WindowedApp::run` / `WebApp::run` / mobile runners).
+///
+/// # Example
+///
+/// ```ignore
+/// use blinc_layout::prelude::*;
+/// use blinc_layout::stateful::{ButtonState, use_state_for};
+///
+/// // Reusable component called multiple times from the same source line —
+/// // pass a unique key so each instance gets its own slot.
+/// fn feature_card(id: &str) -> impl ElementBuilder {
+///     let handle = use_state_for(id, ButtonState::Idle);
+///     stateful_from_handle(handle).on_state(|state, div| { /* … */ })
+/// }
+/// ```
+pub fn use_state_for<K, S>(key: K, initial: S) -> SharedState<S>
+where
+    K: std::hash::Hash,
+    S: StateTransitions + Clone + Send + 'static,
+{
+    use blinc_core::context_state::{BlincContextState, StateKey};
+    use blinc_core::reactive::{Signal, SignalId};
+
+    let ctx = BlincContextState::get();
+    // Key the slot by both the call-site-provided key AND the
+    // concrete `SharedState<S>` type. Two `use_state_for(0u32, …)`
+    // calls with different `S` get distinct slots.
+    let state_key = StateKey::new::<SharedState<S>, _>(&key);
+
+    let mut hooks = ctx.hooks().lock().unwrap();
+    if let Some(raw_id) = hooks.get(&state_key) {
+        // Existing slot — recover the signal id and read the
+        // `SharedState<S>` value out of the reactive graph.
+        let signal_id = SignalId::from_raw(raw_id);
+        let signal: Signal<SharedState<S>> = Signal::from_id(signal_id);
+        ctx.reactive().lock().unwrap().get(signal).unwrap()
+    } else {
+        // First call for this key — mint the handle, stash it in a
+        // signal so subsequent calls re-find it, and record the
+        // signal id in the hooks map.
+        let shared_state: SharedState<S> = Arc::new(Mutex::new(StatefulInner::new(initial)));
+        let signal = ctx
+            .reactive()
+            .lock()
+            .unwrap()
+            .create_signal(shared_state.clone());
+        hooks.insert(state_key, signal.id().to_raw());
+        shared_state
+    }
+}
+
 /// Get or create a persistent `SharedState<S>` for the given key.
 ///
 /// This bridges `BlincContextState` (which stores arbitrary values via signals)

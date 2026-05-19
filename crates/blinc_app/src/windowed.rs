@@ -1518,31 +1518,14 @@ impl WindowedContext {
         K: Hash,
         S: blinc_layout::StateTransitions + Clone + Send + 'static,
     {
-        use blinc_core::reactive::SignalId;
-        use blinc_layout::stateful::StatefulInner;
-
-        // We store the SharedState<S> as a signal value
-        let state_key = StateKey::new::<blinc_layout::SharedState<S>, _>(&key);
-        let mut hooks = self.hooks.lock().unwrap();
-
-        if let Some(raw_id) = hooks.get(&state_key) {
-            // Existing state - get the SharedState from the signal
-            let signal_id = SignalId::from_raw(raw_id);
-            let signal: Signal<blinc_layout::SharedState<S>> = Signal::from_id(signal_id);
-            self.reactive.lock().unwrap().get(signal).unwrap()
-        } else {
-            // New state - create SharedState and store in signal
-            let shared_state: blinc_layout::SharedState<S> =
-                Arc::new(Mutex::new(StatefulInner::new(initial)));
-            let signal = self
-                .reactive
-                .lock()
-                .unwrap()
-                .create_signal(shared_state.clone());
-            let raw_id = signal.id().to_raw();
-            hooks.insert(state_key, raw_id);
-            shared_state
-        }
+        // Both the WindowedContext method and the free function
+        // route through the same global `BlincContextState` hooks +
+        // reactive graph, so the implementation lives once in
+        // `blinc_layout::stateful::use_state_for` and we just
+        // forward here. Keeps the WindowedContext method as the
+        // ergonomic call site that pre-runs but stops it from
+        // drifting from the standalone API.
+        blinc_layout::stateful::use_state_for(key, initial)
     }
 
     /// Create a persistent animated value using caller location as key
