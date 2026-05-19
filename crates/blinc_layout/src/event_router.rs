@@ -589,6 +589,43 @@ impl EventRouter {
                 }
             }
         }
+
+        // Also emit POINTER_MOVE to the pressed target + ancestors. The
+        // slow `on_mouse_move_with_occlusion` path emits POINTER_MOVE
+        // on every hovered node (filtered to those with handlers); we
+        // mirror that for the drag fast path so an `on_mouse_move`
+        // handler on a pressed widget still receives per-move ticks
+        // during a drag. Without this, `motion_demo`'s pull-to-refresh
+        // (which uses `on_mouse_move` to read mouse_y and drive
+        // `set_immediate` on its translate binding) sat frozen during
+        // a drag because POINTER_MOVE never reached the handler —
+        // only DRAG did, and the demo doesn't subscribe to DRAG.
+        // Filtered to nodes with handlers so the common no-subscriber
+        // case stays cheap.
+        let registry = tree.handler_registry();
+        if let Some(target) = tree.layout_id(stable_target) {
+            if let Some(stable) = tree.stable_id(target) {
+                if registry.has_handler(stable, event_types::POINTER_MOVE) {
+                    self.emit_event(target, event_types::POINTER_MOVE);
+                    events.push((target, event_types::POINTER_MOVE));
+                }
+            }
+        }
+        let ancestors: Vec<_> = self
+            .pressed_ancestors
+            .iter()
+            .rev()
+            .skip(1)
+            .copied()
+            .collect();
+        for stable_ancestor in ancestors {
+            if registry.has_handler(stable_ancestor, event_types::POINTER_MOVE) {
+                if let Some(ancestor) = tree.layout_id(stable_ancestor) {
+                    self.emit_event(ancestor, event_types::POINTER_MOVE);
+                    events.push((ancestor, event_types::POINTER_MOVE));
+                }
+            }
+        }
         events
     }
 
