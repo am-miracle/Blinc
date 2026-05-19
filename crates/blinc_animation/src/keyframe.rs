@@ -1511,25 +1511,31 @@ mod composite_promotable_tests {
 
     #[test]
     fn opacity_only_is_promotable() {
-        let mut p = KeyframeProperties::default();
-        p.opacity = Some(0.5);
+        let p = KeyframeProperties {
+            opacity: Some(0.5),
+            ..Default::default()
+        };
         assert!(p.is_composite_promotable());
     }
 
     #[test]
     fn translate_only_is_promotable() {
-        let mut p = KeyframeProperties::default();
-        p.translate_x = Some(10.0);
-        p.translate_y = Some(20.0);
+        let p = KeyframeProperties {
+            translate_x: Some(10.0),
+            translate_y: Some(20.0),
+            ..Default::default()
+        };
         assert!(p.is_composite_promotable());
     }
 
     #[test]
     fn scale_opacity_combination_is_promotable() {
-        let mut p = KeyframeProperties::default();
-        p.scale_x = Some(1.5);
-        p.scale_y = Some(1.5);
-        p.opacity = Some(0.7);
+        let p = KeyframeProperties {
+            scale_x: Some(1.5),
+            scale_y: Some(1.5),
+            opacity: Some(0.7),
+            ..Default::default()
+        };
         assert!(p.is_composite_promotable());
     }
 
@@ -1538,24 +1544,30 @@ mod composite_promotable_tests {
         // 2D rotation is provisionally NOT promotable until the
         // blit shader gains a `rotate_z` path. Promoting today
         // would render the texture un-rotated.
-        let mut p = KeyframeProperties::default();
-        p.rotate = Some(45.0);
+        let p = KeyframeProperties {
+            rotate: Some(45.0),
+            ..Default::default()
+        };
         assert!(!p.is_composite_promotable());
     }
 
     #[test]
     fn width_disqualifies() {
-        let mut p = KeyframeProperties::default();
-        p.opacity = Some(0.5);
-        p.width = Some(100.0);
+        let p = KeyframeProperties {
+            opacity: Some(0.5),
+            width: Some(100.0),
+            ..Default::default()
+        };
         assert!(!p.is_composite_promotable());
     }
 
     #[test]
     fn background_color_disqualifies() {
-        let mut p = KeyframeProperties::default();
-        p.opacity = Some(0.5);
-        p.background_color = Some([1.0, 0.0, 0.0, 1.0]);
+        let p = KeyframeProperties {
+            opacity: Some(0.5),
+            background_color: Some([1.0, 0.0, 0.0, 1.0]),
+            ..Default::default()
+        };
         assert!(!p.is_composite_promotable());
     }
 
@@ -1563,15 +1575,19 @@ mod composite_promotable_tests {
     fn rotate_x_disqualifies() {
         // 3D rotation is out of scope for first cut (uses 3D
         // perspective pipeline, requires different math).
-        let mut p = KeyframeProperties::default();
-        p.rotate_x = Some(30.0);
+        let p = KeyframeProperties {
+            rotate_x: Some(30.0),
+            ..Default::default()
+        };
         assert!(!p.is_composite_promotable());
     }
 
     #[test]
     fn filter_blur_disqualifies() {
-        let mut p = KeyframeProperties::default();
-        p.filter_blur = Some(2.0);
+        let p = KeyframeProperties {
+            filter_blur: Some(2.0),
+            ..Default::default()
+        };
         assert!(!p.is_composite_promotable());
     }
 

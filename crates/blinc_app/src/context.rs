@@ -4884,11 +4884,11 @@ impl RenderContext {
                 &mut svgs,
                 &mut images,
                 &mut flows,
-                None, // No initial CSS transform
-                1.0,  // Initial inherited CSS opacity
-                None, // No parent node
-                None, // No initial scroll clip
-                None, // No 3D layer ancestor
+                None,  // No initial CSS transform
+                1.0,   // Initial inherited CSS opacity
+                None,  // No parent node
+                None,  // No initial scroll clip
+                None,  // No 3D layer ancestor
                 false, // No ancestor pending motion at root
                 false, // No ancestor motion container at root
             );
@@ -6670,8 +6670,8 @@ impl RenderContext {
             self.cached_flows = None;
             self.cached_glyphs_by_layer = None;
             self.cached_fg_glyphs = None;
-        self.cached_motion_subtree_text_prims = None;
-        self.cached_motion_subtree_svgs = None;
+            self.cached_motion_subtree_text_prims = None;
+            self.cached_motion_subtree_svgs = None;
             self.cached_css_transformed_text_prims = None;
         }
 
@@ -6931,9 +6931,7 @@ impl RenderContext {
                 // so the motion container's scale / translate / rotate
                 // applies to each glyph. SVGs go through the same
                 // rasterized-image dispatch the static-cache path uses.
-                if let Some(motion_text_prims) =
-                    self.cached_motion_subtree_text_prims.clone()
-                {
+                if let Some(motion_text_prims) = self.cached_motion_subtree_text_prims.clone() {
                     if !motion_text_prims.is_empty() {
                         self.rebind_glyph_atlas_for_overlay();
                         self.renderer
@@ -7060,8 +7058,8 @@ impl RenderContext {
                 self.cached_flows = None;
                 self.cached_glyphs_by_layer = None;
                 self.cached_fg_glyphs = None;
-        self.cached_motion_subtree_text_prims = None;
-        self.cached_motion_subtree_svgs = None;
+                self.cached_motion_subtree_text_prims = None;
+                self.cached_motion_subtree_svgs = None;
                 self.cached_css_transformed_text_prims = None;
                 damage_rect_failed = true;
             }
@@ -7091,8 +7089,8 @@ impl RenderContext {
                         self.cached_flows = None;
                         self.cached_glyphs_by_layer = None;
                         self.cached_fg_glyphs = None;
-        self.cached_motion_subtree_text_prims = None;
-        self.cached_motion_subtree_svgs = None;
+                        self.cached_motion_subtree_text_prims = None;
+                        self.cached_motion_subtree_svgs = None;
                         self.cached_css_transformed_text_prims = None;
                     } else {
                         // Re-dispatch any glyph / SVG / image that
@@ -7272,9 +7270,7 @@ impl RenderContext {
                 // so the motion container's scale / translate / rotate
                 // applies to each glyph. SVGs go through the same
                 // rasterized-image dispatch the static-cache path uses.
-                if let Some(motion_text_prims) =
-                    self.cached_motion_subtree_text_prims.clone()
-                {
+                if let Some(motion_text_prims) = self.cached_motion_subtree_text_prims.clone() {
                     if !motion_text_prims.is_empty() {
                         self.rebind_glyph_atlas_for_overlay();
                         self.renderer
@@ -7519,9 +7515,7 @@ impl RenderContext {
         // those subtrees has to render afterwards to land on top of
         // the bg paint. PRIM_TEXT primitives carry the motion affine
         // so the glyphs scale / translate with the bg.
-        if let Some(motion_text_prims) =
-            self.cached_motion_subtree_text_prims.clone()
-        {
+        if let Some(motion_text_prims) = self.cached_motion_subtree_text_prims.clone() {
             if !motion_text_prims.is_empty() {
                 self.rebind_glyph_atlas_for_overlay();
                 self.renderer
