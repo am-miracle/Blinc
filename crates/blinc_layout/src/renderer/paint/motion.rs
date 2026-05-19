@@ -504,7 +504,6 @@ impl RenderTree {
                 super::super::AnimatedKind::Css
             ))
         );
-        let css_anim_bg_start = in_css_subtree.then(|| ctx.bg_primitive_count());
 
         // Composite-layer promotion: if the node is CSS-animated AND
         // its current properties are composite-promotable (only
@@ -518,6 +517,11 @@ impl RenderTree {
         // the bottom of the function alongside the other balanced
         // pushes. Nested promotions are routed to the outermost
         // (see `GpuPaintContext::push_composite_layer`).
+        //
+        // MUST run BEFORE the `css_anim_bg_start` snapshot below —
+        // `bg_primitive_count` reads the ACTIVE batch (scratch when
+        // composite_layer is pushed), so both `start` and `end` need
+        // to come from the same batch.
         let pushed_composite_layer =
             if in_css_subtree && self.composite_promotion.borrow().contains(&node) {
                 // Use the slotmap key bits as the routing key — stable
@@ -531,6 +535,7 @@ impl RenderTree {
             } else {
                 false
             };
+        let css_anim_bg_start = in_css_subtree.then(|| ctx.bg_primitive_count());
 
         // Compositor v2 ambient snapshot for motion-bound subtrees.
         // Captured BEFORE this node pushes any of its own transforms
@@ -2146,30 +2151,44 @@ impl RenderTree {
                     let last_rotate_x_rad = render_node.props.rotate_x.unwrap_or(0.0).to_radians();
                     let last_rotate_y_rad = render_node.props.rotate_y.unwrap_or(0.0).to_radians();
 
-                    self.css_anim_paint_records.borrow_mut().insert(
-                        node,
-                        super::super::CssAnimPaintMeta {
-                            stable_id,
-                            primitive_range: start..end,
-                            layer_push_index: css_anim_layer_push_index,
-                            last_opacity: node_motion_opacity,
-                            last_translate: (0.0, 0.0),
-                            last_scale: (1.0, 1.0),
-                            last_rotation_rad: 0.0,
-                            last_rotate_x_rad,
-                            last_rotate_y_rad,
-                            last_background_color,
-                            last_border_color,
-                            last_corner_radius,
-                            last_border_width,
-                            last_shadow_params,
-                            last_shadow_color,
-                            last_filter_a,
-                            last_filter_b,
-                            centre,
-                            last_screen_aabb,
-                        },
-                    );
+                    // Skip `CssAnimPaintMeta` for composite-promoted
+                    // nodes — their primitives live in a per-node
+                    // scratch batch (now rasterized into a
+                    // `LayerTexture`), NOT in `cached_bg_batch`.
+                    // Inserting the record would point
+                    // `primitive_range` at scratch indices; the next
+                    // frame's `apply_css_deltas` would treat those
+                    // as indices into `cached_bg_batch` and mutate
+                    // unrelated primitives there (corruption). The
+                    // composite-layer path handles all animation
+                    // updates for promoted nodes via per-frame
+                    // `blit_tight_texture_to_target` instead.
+                    if !pushed_composite_layer {
+                        self.css_anim_paint_records.borrow_mut().insert(
+                            node,
+                            super::super::CssAnimPaintMeta {
+                                stable_id,
+                                primitive_range: start..end,
+                                layer_push_index: css_anim_layer_push_index,
+                                last_opacity: node_motion_opacity,
+                                last_translate: (0.0, 0.0),
+                                last_scale: (1.0, 1.0),
+                                last_rotation_rad: 0.0,
+                                last_rotate_x_rad,
+                                last_rotate_y_rad,
+                                last_background_color,
+                                last_border_color,
+                                last_corner_radius,
+                                last_border_width,
+                                last_shadow_params,
+                                last_shadow_color,
+                                last_filter_a,
+                                last_filter_b,
+                                centre,
+                                last_screen_aabb,
+                            },
+                        );
+                    }
 
                     // Composite-layer DynamicRegion. Only emit for
                     // CSS-animated nodes that the promotion predicate
