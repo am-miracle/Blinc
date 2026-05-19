@@ -8929,6 +8929,37 @@ impl RenderContext {
         // Poll the device to free completed command buffers
         self.renderer.poll();
 
+        // Motion-subtree text + SVG overlay — text/SVG inside a
+        // motion container (or with an inherited CSS affine) were
+        // filtered out of the main `texts` / `svgs` lists earlier
+        // and cached on `cached_motion_subtree_*`. The compositor
+        // dispatches them after `composite_frame`; we mirror that
+        // dispatch here for the non-compositor path so wasm /
+        // Android / iOS show motion-container text + SVG. Without
+        // this, motion_demo's inner labels, cn::tabs content,
+        // context-menu dropdowns, and any motion-animated SVG icon
+        // render invisible.
+        if let Some(motion_text_prims) = self.cached_motion_subtree_text_prims.clone() {
+            if !motion_text_prims.is_empty() {
+                self.rebind_glyph_atlas_for_overlay();
+                self.renderer
+                    .render_primitives_overlay(target, &motion_text_prims);
+            }
+        }
+        if let Some(motion_svgs) = self.cached_motion_subtree_svgs.clone() {
+            if !motion_svgs.is_empty() {
+                self.render_rasterized_svgs(target, &motion_svgs, scale_factor);
+            }
+        }
+
+        // Composited CSS layers — blit each promoted subtree's
+        // texture with the current animation transform. Same as
+        // the compositor flow's post-`composite_frame` call.
+        // Skips silently when nothing is promoted. Needed for
+        // styling_demo's `anim-pulse` / `anim-glow` (and any other
+        // composite-promotable CSS animation) on wasm / mobile.
+        self.composite_css_layers_overlay(tree, target);
+
         // Dispatch 3D mesh draws captured during `tree.render_with_motion`.
         // Each `PendingMesh` carries a snapshot of the camera and lights
         // active when `canvas(|ctx, bounds| ctx.draw_mesh_data(...))` fired,
