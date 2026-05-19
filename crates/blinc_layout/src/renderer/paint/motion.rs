@@ -504,6 +504,37 @@ impl RenderTree {
                 super::super::AnimatedKind::Css
             ))
         );
+
+        // Composite-layer promotion: if the node is CSS-animated AND
+        // its current properties are composite-promotable (only
+        // opacity / 2D transform), route its emit into a per-node
+        // scratch batch. The compositor rasterizes the scratch
+        // batch into a `LayerTexture` at end of paint and blits the
+        // texture per frame with the active CSS animation transform
+        // applied — no walker re-entry on animation ticks.
+        //
+        // The scope ends when this node finishes walking; we pop at
+        // the bottom of the function alongside the other balanced
+        // pushes. Nested promotions are routed to the outermost
+        // (see `GpuPaintContext::push_composite_layer`).
+        //
+        // MUST run BEFORE the `css_anim_bg_start` snapshot below —
+        // `bg_primitive_count` reads the ACTIVE batch (scratch when
+        // composite_layer is pushed), so both `start` and `end` need
+        // to come from the same batch.
+        let pushed_composite_layer =
+            if in_css_subtree && self.composite_promotion.borrow().contains(&node) {
+                // Use the slotmap key bits as the routing key — stable
+                // for the duration of the paint (slotmap version doesn't
+                // bump within a single paint pass). `Key::data().as_ffi()`
+                // packs (index, version) into a single u64.
+                use slotmap::Key as _;
+                let key = node.data().as_ffi();
+                ctx.push_composite_layer(key);
+                true
+            } else {
+                false
+            };
         let css_anim_bg_start = in_css_subtree.then(|| ctx.bg_primitive_count());
 
         // Compositor v2 ambient snapshot for motion-bound subtrees.
@@ -613,6 +644,10 @@ impl RenderTree {
             // when this early-out fires.
             if in_motion_subtree {
                 ctx.pop_motion_subtree();
+            }
+            // Same balancing for the composite-layer push.
+            if pushed_composite_layer {
+                ctx.pop_composite_layer();
             }
             return;
         }
@@ -1983,7 +2018,18 @@ impl RenderTree {
                     )) => Some(super::super::DynamicKind::MotionSubtree),
                     Some(super::super::AnimationStatus::Animating(
                         super::super::AnimatedKind::Css,
-                    )) => Some(super::super::DynamicKind::CssAnimated),
+                    )) => Some(super::super::DynamicKind::CssAnimated {
+                        // Sentinel — this code path only fires for
+                        // nodes that ALSO have motion bindings
+                        // (v2_motion_ambient is Some), and motion
+                        // takes precedence over Css in
+                        // `compute_animation_status`, so in practice
+                        // this arm is unreachable. The composited-
+                        // layer path populates real `natural_size`
+                        // values from a separate insertion site in
+                        // the CSS bracket below.
+                        natural_size: (0, 0),
+                    }),
                     _ => None,
                 };
                 if let (Some(kind), Some((amb_affine, amb_opacity, amb_clip, amb_z))) =
@@ -2105,30 +2151,86 @@ impl RenderTree {
                     let last_rotate_x_rad = render_node.props.rotate_x.unwrap_or(0.0).to_radians();
                     let last_rotate_y_rad = render_node.props.rotate_y.unwrap_or(0.0).to_radians();
 
-                    self.css_anim_paint_records.borrow_mut().insert(
-                        node,
-                        super::super::CssAnimPaintMeta {
-                            stable_id,
-                            primitive_range: start..end,
-                            layer_push_index: css_anim_layer_push_index,
-                            last_opacity: node_motion_opacity,
-                            last_translate: (0.0, 0.0),
-                            last_scale: (1.0, 1.0),
-                            last_rotation_rad: 0.0,
-                            last_rotate_x_rad,
-                            last_rotate_y_rad,
-                            last_background_color,
-                            last_border_color,
-                            last_corner_radius,
-                            last_border_width,
-                            last_shadow_params,
-                            last_shadow_color,
-                            last_filter_a,
-                            last_filter_b,
-                            centre,
-                            last_screen_aabb,
-                        },
-                    );
+                    // Skip `CssAnimPaintMeta` for composite-promoted
+                    // nodes — their primitives live in a per-node
+                    // scratch batch (now rasterized into a
+                    // `LayerTexture`), NOT in `cached_bg_batch`.
+                    // Inserting the record would point
+                    // `primitive_range` at scratch indices; the next
+                    // frame's `apply_css_deltas` would treat those
+                    // as indices into `cached_bg_batch` and mutate
+                    // unrelated primitives there (corruption). The
+                    // composite-layer path handles all animation
+                    // updates for promoted nodes via per-frame
+                    // `blit_tight_texture_to_target` instead.
+                    if !pushed_composite_layer {
+                        self.css_anim_paint_records.borrow_mut().insert(
+                            node,
+                            super::super::CssAnimPaintMeta {
+                                stable_id,
+                                primitive_range: start..end,
+                                layer_push_index: css_anim_layer_push_index,
+                                last_opacity: node_motion_opacity,
+                                last_translate: (0.0, 0.0),
+                                last_scale: (1.0, 1.0),
+                                last_rotation_rad: 0.0,
+                                last_rotate_x_rad,
+                                last_rotate_y_rad,
+                                last_background_color,
+                                last_border_color,
+                                last_corner_radius,
+                                last_border_width,
+                                last_shadow_params,
+                                last_shadow_color,
+                                last_filter_a,
+                                last_filter_b,
+                                centre,
+                                last_screen_aabb,
+                            },
+                        );
+                    }
+
+                    // Composite-layer DynamicRegion. Only emit for
+                    // CSS-animated nodes that the promotion predicate
+                    // selected — the walker routed their emit into
+                    // a per-node scratch batch (see the
+                    // `pushed_composite_layer` branch earlier in
+                    // this fn). `natural_size` is the screen-pixel
+                    // dimensions of the emitted primitives' AABB
+                    // (physical pixels — `last_screen_aabb` is post-
+                    // DPI). The compositor reads this region's
+                    // scratch batch via
+                    // `GpuPaintContext::take_composite_layer_batches`,
+                    // rasterizes it into a `LayerTexture` of size
+                    // `natural_size`, and blits it per frame with
+                    // the active animation transform applied.
+                    //
+                    // Captured at the CSS bracket (not the motion
+                    // bracket above) so we don't need
+                    // `v2_motion_ambient` to be Some — pure-CSS
+                    // animated nodes have no motion bindings.
+                    if pushed_composite_layer {
+                        let aabb = last_screen_aabb.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+                        let natural_w = aabb[2].max(1.0).ceil() as u32;
+                        let natural_h = aabb[3].max(1.0).ceil() as u32;
+                        let ambient = super::super::AmbientPaintState {
+                            affine: ctx.current_affine_elements(),
+                            opacity: ctx.current_opacity(),
+                            clip_aabb: ctx.current_clip_aabb(),
+                            z_layer: ctx.z_layer(),
+                        };
+                        self.dynamic_regions.borrow_mut().insert(
+                            node,
+                            super::super::DynamicRegion {
+                                root: node,
+                                screen_aabb: aabb,
+                                ambient,
+                                kind: super::super::DynamicKind::CssAnimated {
+                                    natural_size: (natural_w, natural_h),
+                                },
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -2227,6 +2329,13 @@ impl RenderTree {
         // exit. Earlier early-return paths handle their own pop.
         if in_motion_subtree {
             ctx.pop_motion_subtree();
+        }
+        // Balance the composite-layer push (same reasoning — the
+        // walker emits this node's primitives into the per-node
+        // scratch batch; once we exit, route emits back to the
+        // surrounding scope).
+        if pushed_composite_layer {
+            ctx.pop_composite_layer();
         }
     }
 }

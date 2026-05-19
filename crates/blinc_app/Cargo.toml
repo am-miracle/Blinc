@@ -29,6 +29,17 @@ blinc_macros = { path = "../blinc_macros", version = "0.5.1" }
 blinc_router = { path = "../blinc_router", version = "0.5.1" }
 blinc_theme = { path = "../blinc_theme", version = "0.5.1" }
 
+# Slotmap — needed to convert `LayoutNodeId` (a slotmap key) to a `u64`
+# routing handle that the GPU side (which doesn't share blinc_layout's
+# slotmap version) can use as a HashMap key for composite-layer
+# scratch batches + textures.
+slotmap = { workspace = true }
+
+# Byte-level access to `GpuPrimitive` slices for the composite-layer
+# texture dirty-tracking hash. `GpuPrimitive` and `aux_data` are
+# already `bytemuck::Pod` upstream; we only need `cast_slice` here.
+bytemuck = { workspace = true }
+
 # GPU
 wgpu.workspace = true
 

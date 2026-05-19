@@ -341,6 +341,24 @@ pub struct RenderContext {
     /// pass — glyphs inside `.foreground()` elements, dispatched
     /// after the rest of the scene.
     cached_fg_glyphs: Option<Vec<GpuGlyph>>,
+    /// Cached text *primitives* (PRIM_TEXT GpuPrimitives) for text that
+    /// lives inside a motion-bound subtree. Stored as primitives (not
+    /// glyphs) so the SDF pipeline can apply `local_affine` — that's
+    /// where the motion container's scale / translate is baked in. The
+    /// glyph pipeline (`render_text`) doesn't carry per-glyph affine,
+    /// so a fade-in animation that scales the bg would leave plain
+    /// glyphs at full size while the bg shrank.
+    ///
+    /// Dispatched via `render_primitives_overlay` onto the surface
+    /// *after* `composite_frame`'s overlay pass so they sit on top of
+    /// the motion-bound bg primitives (which route through the dynamic
+    /// batch / overlay). Without this, text inside motion containers
+    /// gets covered by their bg paint.
+    cached_motion_subtree_text_prims: Option<Vec<GpuPrimitive>>,
+    /// SVGs inside motion subtrees — same routing as the text prims
+    /// above. Re-dispatched via `render_rasterized_svgs` after the
+    /// overlay so the icon lands on top of its motion container's bg.
+    cached_motion_subtree_svgs: Option<Vec<SvgElement>>,
     /// Same as `cached_glyphs_by_layer` but for CSS-transformed text
     /// primitives (text with a `transform:` style — routed through
     /// the SDF pipeline, not the glyph pipeline).
@@ -413,6 +431,35 @@ pub struct RenderContext {
     /// place, so subsequent frames show the new positions without
     /// re-running the walker.
     cached_dynamic_batch: Option<blinc_gpu::PrimitiveBatch>,
+    /// Per-node `LayerTexture` cache for composite-promoted CSS
+    /// subtrees. The walker peels each promoted subtree's primitives
+    /// into a per-node scratch batch (see
+    /// `GpuPaintContext::push_composite_layer`); at end of paint we
+    /// rasterize each scratch batch into a tight texture and stash
+    /// it here keyed by the node's slotmap key
+    /// (`LayoutNodeId::data().as_ffi()`).
+    ///
+    /// On animation frames the per-frame composite reads these
+    /// textures by key (looked up via the matching `DynamicRegion`)
+    /// and blits each with the active CSS animation transform
+    /// applied — no walker re-entry. Textures stay resident across
+    /// frames until the subtree's intrinsic content changes (Phase
+    /// 5 dirty tracking) or the node demotes out of the dynamic
+    /// set.
+    css_composited_textures: std::collections::HashMap<u64, blinc_gpu::renderer::LayerTexture>,
+    /// Hash of the scratch `PrimitiveBatch` that produced the texture
+    /// currently in [`Self::css_composited_textures`] for each node.
+    /// On every slow-path frame the walker re-emits primitives into a
+    /// fresh scratch batch; comparing the new hash against the cached
+    /// one tells us whether the subtree's intrinsic content actually
+    /// changed. When it hasn't — the steady-state case for a pulse /
+    /// glow node whose only animation is composite-promotable opacity
+    /// — we skip the GPU rasterize and reuse the existing texture.
+    /// Saves ~render_layer_range_tight per promoted region per slow-
+    /// path frame; on cn_demo with a single pulse on screen and a
+    /// non-promotable sibling driving the slow path that's ~200 µs
+    /// GPU time per frame.
+    css_composited_scratch_hash: std::collections::HashMap<u64, u64>,
     // Collected text / SVG / image elements from the most recent
     // full paint. Lives alongside `cached_bg_batch` so the
     // compositor fast path can skip `collect_render_elements_with_state`
@@ -510,6 +557,17 @@ struct TextElement {
     transform_3d_layer: Option<Transform3DLayerInfo>,
     /// Whether this text is inside a foreground-layer element (rendered after foreground primitives)
     is_foreground: bool,
+    /// Whether this text sits inside a motion-bound subtree (one that
+    /// has `motion_bindings` or a motion FSM config on any ancestor).
+    /// Motion-subtree primitives are routed to the dynamic batch and
+    /// dispatched as an overlay on top of the static cache, so text
+    /// rendered into the static cache would otherwise be covered by
+    /// the overlay's bg paint. Texts with this flag are deferred from
+    /// the static-cache text pass and re-dispatched after the overlay
+    /// in `composite_frame`'s flow so they land on top of the motion
+    /// bg primitives. Same routing principle as foreground text but
+    /// triggered by ancestor motion instead of a foreground layer.
+    in_motion_subtree: bool,
 }
 
 /// Image element data for rendering
@@ -600,6 +658,12 @@ struct SvgElement {
     tag_overrides: std::collections::HashMap<String, blinc_layout::element::SvgTagStyle>,
     /// 3D layer info if this SVG is inside a perspective-transformed parent
     transform_3d_layer: Option<Transform3DLayerInfo>,
+    /// Whether this SVG sits inside a motion-bound subtree. Same
+    /// routing principle as `TextElement.in_motion_subtree`: deferred
+    /// from the static-cache SVG pass and re-dispatched after the
+    /// motion overlay so the SVG icon lands on top of its motion-bound
+    /// container's bg paint instead of being covered.
+    in_motion_subtree: bool,
 }
 
 /// Flow shader element — an element with `flow: <name>` that renders via a custom GPU pipeline
@@ -660,6 +724,8 @@ impl RenderContext {
             last_css_damage_rects: Vec::new(),
             cached_glyphs_by_layer: None,
             cached_fg_glyphs: None,
+            cached_motion_subtree_text_prims: None,
+            cached_motion_subtree_svgs: None,
             cached_css_transformed_text_prims: None,
             svg_cache: LruCache::new(NonZeroUsize::new(SVG_CACHE_CAPACITY).unwrap()),
             svg_atlas,
@@ -674,6 +740,8 @@ impl RenderContext {
             clear_alpha: 1.0,
             cached_bg_batch: None,
             cached_dynamic_batch: None,
+            css_composited_textures: std::collections::HashMap::new(),
+            css_composited_scratch_hash: std::collections::HashMap::new(),
             cached_texts: None,
             cached_svgs: None,
             cached_images: None,
@@ -721,6 +789,8 @@ impl RenderContext {
         self.cached_flows = None;
         self.cached_glyphs_by_layer = None;
         self.cached_fg_glyphs = None;
+        self.cached_motion_subtree_text_prims = None;
+        self.cached_motion_subtree_svgs = None;
         self.cached_css_transformed_text_prims = None;
         // Compositor static cache rides on the same lifecycle as the
         // primitive-batch cache — anything that would invalidate the
@@ -1089,8 +1159,35 @@ impl RenderContext {
         // sort on (z, root) keeps the walker's tree-order as the
         // tiebreaker — same convention `collect_canvas_overlay`
         // uses).
-        let mut ordered: Vec<_> = regions.values().cloned().collect();
+        //
+        // CssAnimated regions are EXCLUDED: their pixels live in
+        // `css_composited_textures` and get blitted by
+        // `composite_css_layers_overlay`. Re-walking them here would
+        // re-enter `render_layer_with_motion` from the scratch
+        // context, which then writes a fresh `dynamic_regions` entry
+        // — but the scratch's cumulative transform already has DPI
+        // pushed once (by the outer `push_transform` below) AND
+        // again via the region's `ambient.affine` (captured from the
+        // main walker, which had DPI baked in). The result compounds
+        // DPI by an extra factor every fast-path frame; the new
+        // `screen_aabb` is DPI² physical, then DPI³ next frame,
+        // then DPI⁴... visible as `dest_w` / `dest_h` / `dest_pos`
+        // doubling each tick until the texture blits land far
+        // off-screen and pulse / glow vanish.
+        let mut ordered: Vec<_> = regions
+            .values()
+            .filter(|r| {
+                !matches!(
+                    r.kind,
+                    blinc_layout::renderer::DynamicKind::CssAnimated { .. }
+                )
+            })
+            .cloned()
+            .collect();
         drop(regions);
+        if ordered.is_empty() {
+            return PrimitiveBatch::new();
+        }
         ordered.sort_by(|a, b| {
             a.ambient
                 .z_layer
@@ -1141,6 +1238,150 @@ impl RenderContext {
         out
     }
 
+    /// Hash a composite-layer scratch `PrimitiveBatch` for the
+    /// rasterize-skip check in the slow-path texture step. Hashes
+    /// only the channels that affect rendered pixels: the SDF
+    /// primitives, foreground primitives, and the `aux_data` buffer
+    /// (polygon-clip vertices, 3D group descriptors). Glass / nested-
+    /// glass primitives don't appear in composited subtrees today
+    /// (the walker doesn't promote glass) so they're omitted; if a
+    /// future change ever lets glass land in a composite scratch,
+    /// promotability would have to be reconsidered anyway.
+    ///
+    /// `GpuPrimitive` and `aux_data` are `bytemuck::Pod`, so we hash
+    /// their raw bytes — cheap, allocation-free, deterministic.
+    fn hash_composite_scratch(batch: &blinc_gpu::primitives::PrimitiveBatch) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytemuck::cast_slice::<_, u8>(&batch.primitives).hash(&mut hasher);
+        bytemuck::cast_slice::<_, u8>(&batch.foreground_primitives).hash(&mut hasher);
+        bytemuck::cast_slice::<_, u8>(&batch.aux_data).hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Composite each promoted CSS-animated layer's texture onto the
+    /// surface with the active animation's current opacity / 2D
+    /// transform applied at composite time.
+    ///
+    /// Called after `composite_frame` blits the static cache and
+    /// dispatches the motion-binding overlay. The layer textures
+    /// were rasterized at base state (the walker skipped applying
+    /// the composite-promotable CSS properties), so the animated
+    /// values read from the css-anim store here apply directly to
+    /// `blit_tight_texture_to_target`'s `dest_pos` / `dest_size` /
+    /// `opacity` — no delta math needed.
+    ///
+    /// Skips silently for any region whose texture isn't yet in
+    /// `css_composited_textures` (first-frame race after promotion,
+    /// or `LayerTexture` released on demotion).
+    fn composite_css_layers_overlay(
+        &mut self,
+        tree: &blinc_layout::RenderTree,
+        target_view: &wgpu::TextureView,
+    ) {
+        use slotmap::Key as _;
+
+        // Collect (key, screen_aabb, natural_size, stable_id) up-front
+        // so we don't hold the `dynamic_regions` borrow across the
+        // `&mut self.renderer` blit calls.
+        struct CompositeJob {
+            key: u64,
+            screen_aabb: [f32; 4],
+            natural_size: (u32, u32),
+            stable_id: Option<blinc_layout::tree::StableNodeId>,
+        }
+        let jobs: Vec<CompositeJob> = {
+            let regions = tree.dynamic_regions();
+            regions
+                .iter()
+                .filter_map(|(node, region)| match region.kind {
+                    blinc_layout::renderer::DynamicKind::CssAnimated { natural_size }
+                        if natural_size.0 > 0 && natural_size.1 > 0 =>
+                    {
+                        Some(CompositeJob {
+                            key: node.data().as_ffi(),
+                            screen_aabb: region.screen_aabb,
+                            natural_size,
+                            stable_id: tree.stable_id(*node),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        if jobs.is_empty() {
+            return;
+        }
+        // Snapshot current animated properties per stable id under a
+        // single lock acquisition. We need: opacity / translate / scale
+        // to apply to the blit.
+        let mut anim_props: std::collections::HashMap<
+            blinc_layout::tree::StableNodeId,
+            blinc_animation::KeyframeProperties,
+        > = std::collections::HashMap::new();
+        if let Ok(store) = tree.css_anim_store().lock() {
+            for job in &jobs {
+                let Some(sid) = job.stable_id else { continue };
+                if let Some(anim) = store.animations.get(&sid) {
+                    if anim.is_playing {
+                        anim_props.insert(sid, anim.current_properties.clone());
+                        continue;
+                    }
+                }
+                if let Some(trans) = store.transitions.get(&sid) {
+                    if trans.is_playing {
+                        anim_props.insert(sid, trans.current_properties.clone());
+                    }
+                }
+            }
+        }
+        // Issue the per-region blits. Texture was rendered at base
+        // state, so animated values map straight through:
+        //   dest_pos = screen_aabb.xy + translate (physical pixels)
+        //   dest_size = natural_size * scale
+        //   opacity = current opacity (default 1.0)
+        // 2D rotation is in the predicate but skipped in the blit
+        // until the shader gains a `rotate_z` path (next follow-up).
+        for job in jobs {
+            let Some(texture) = self.css_composited_textures.get(&job.key) else {
+                continue;
+            };
+            let props = job
+                .stable_id
+                .and_then(|sid| anim_props.get(&sid))
+                .cloned()
+                .unwrap_or_default();
+            let translate = (
+                props.translate_x.unwrap_or(0.0),
+                props.translate_y.unwrap_or(0.0),
+            );
+            let scale = (props.scale_x.unwrap_or(1.0), props.scale_y.unwrap_or(1.0));
+            let opacity = props.opacity.unwrap_or(1.0);
+
+            let dpi = tree.scale_factor().max(1.0);
+            let dest_pos = (
+                job.screen_aabb[0] + translate.0 * dpi,
+                job.screen_aabb[1] + translate.1 * dpi,
+            );
+            let dest_size = (
+                job.natural_size.0 as f32 * scale.0,
+                job.natural_size.1 as f32 * scale.1,
+            );
+
+            self.renderer.blit_tight_texture_to_target(
+                &texture.view,
+                job.natural_size,
+                target_view,
+                dest_pos,
+                dest_size,
+                opacity,
+                blinc_core::BlendMode::Normal,
+                None,
+                None,
+            );
+        }
+    }
+
     /// Re-walk a CSS-animated subtree and return the resulting bg
     /// `PrimitiveBatch`. Used by Phase 3 of the per-element slow path:
     /// when `apply_css_deltas` reports `PatchedWithReemits` for a
@@ -1178,7 +1419,7 @@ impl RenderContext {
 
         if !matches!(
             region.kind,
-            blinc_layout::renderer::DynamicKind::CssAnimated
+            blinc_layout::renderer::DynamicKind::CssAnimated { .. }
         ) {
             return None;
         }
@@ -1795,6 +2036,37 @@ impl RenderContext {
         // `has_visible_animating_statefuls`, so neither relies on
         // `visible_anim_active` to stay alive.
         tree.set_visible_anim_active(any_binding_active);
+
+        // Motion-subtree text / SVG primitives live in their own
+        // post-overlay caches (`cached_motion_subtree_text_prims`,
+        // `cached_motion_subtree_svgs`) — `apply_binding_deltas`
+        // patches the dynamic batch in place but doesn't touch those
+        // caches, so a spring snap-back after release would translate
+        // the bg correctly while the text / SVG stayed at the old
+        // position. Force the slow path when bindings are mid-flight
+        // *and* we have motion-subtree text or SVG cached: the slow
+        // path's walker + collect_elements_recursive re-shapes them
+        // at the current binding values.
+        //
+        // Returning false here flows back to the caller, which
+        // invalidates the static layer and falls through to the slow
+        // path. The cost is one full re-walk per binding-animating
+        // frame — same cost CSS / FLIP / FSM animations already pay
+        // — but only when motion-subtree text / SVG is in scope. Pure
+        // SDF motion bindings (cn_demo's switch / slider / progress
+        // bar without text inside the motion subtree) still get the
+        // fast in-place patch.
+        let has_motion_overlay_glyphs = self
+            .cached_motion_subtree_text_prims
+            .as_ref()
+            .is_some_and(|v| !v.is_empty())
+            || self
+                .cached_motion_subtree_svgs
+                .as_ref()
+                .is_some_and(|v| !v.is_empty());
+        if any_binding_active && has_motion_overlay_glyphs {
+            return false;
+        }
         true
     }
 
@@ -4626,11 +4898,13 @@ impl RenderContext {
                 &mut svgs,
                 &mut images,
                 &mut flows,
-                None, // No initial CSS transform
-                1.0,  // Initial inherited CSS opacity
-                None, // No parent node
-                None, // No initial scroll clip
-                None, // No 3D layer ancestor
+                None,  // No initial CSS transform
+                1.0,   // Initial inherited CSS opacity
+                None,  // No parent node
+                None,  // No initial scroll clip
+                None,  // No 3D layer ancestor
+                false, // No ancestor pending motion at root
+                false, // No ancestor motion container at root
             );
         }
 
@@ -4680,6 +4954,22 @@ impl RenderContext {
         // Text/SVGs/images inside 3D layers are rendered to offscreen textures
         // and blitted with the same perspective transform.
         inside_3d_layer: Option<Transform3DLayerInfo>,
+        // True if any ancestor on the recursion stack has a pending
+        // motion binding / FSM animation. When set, the opacity ≤ 0.001
+        // early-out below is suppressed so a transient motion's child
+        // text doesn't get filtered out on the opacity=0 first frame
+        // (the descendant has no motion of its own, so its local
+        // `has_pending_motion` would otherwise be false, dropping the
+        // whole subtree).
+        ancestor_pending_motion: bool,
+        // True if any ancestor is a motion-bound container (has
+        // `motion_bindings` or a motion FSM config). Used to flag
+        // collected text / SVG / image elements so they're deferred
+        // from the static-cache pass and re-dispatched on top of the
+        // motion overlay — the static cache otherwise sits *under* the
+        // motion-bound bg primitives and text gets covered by the
+        // overlay's bg paint.
+        inside_motion_subtree: bool,
     ) {
         use blinc_layout::Material;
 
@@ -4709,6 +4999,21 @@ impl RenderContext {
         // Only RenderState motion values need to be inherited through effective_motion_translate.
         let binding_scale = tree.get_motion_scale(node);
         let binding_opacity = tree.get_motion_opacity(node);
+
+        // Is this node itself a motion container? Either it owns
+        // continuous AnimatedValue bindings (motion bindings — used by
+        // springs / scrubs) or it carries a motion FSM config (enter /
+        // exit animations from the router or transient `motion()`). The
+        // walker pushes such nodes onto `motion_subtree_depth` and
+        // routes their primitives to the dynamic batch. We mirror that
+        // here so descendants' text / SVG / image flags can be marked
+        // for the post-overlay re-dispatch path.
+        let is_motion_container_node = tree.motion_bindings_map().contains_key(&node)
+            || tree
+                .get_render_node(node)
+                .map(|n| n.props.motion.is_some())
+                .unwrap_or(false);
+        let child_inside_motion_subtree = inside_motion_subtree || is_motion_container_node;
 
         // Calculate motion opacity for this node (combine both sources)
         let node_motion_opacity = motion_values
@@ -4761,8 +5066,48 @@ impl RenderContext {
             inherited_motion_scale_center
         };
 
-        // Skip if completely transparent
-        if effective_motion_opacity <= 0.001 {
+        // Skip if completely transparent — UNLESS this node has an
+        // active motion binding or motion FSM that could ramp the
+        // opacity back up. Mirrors the same bypass the walker has at
+        // `paint/motion.rs::render_layer_with_motion` so SDF primitives
+        // (emitted by the walker) and text / SVG / image (collected
+        // here) stay in lockstep across animation frames.
+        //
+        // Without this bypass, a transient motion's first paint after
+        // a rebuild — when `current` still equals `enter_from` and
+        // opacity is exactly 0.0 — would emit bg / border primitives
+        // into the cache but no text. Subsequent slow-path frames
+        // re-collect with opacity > 0.001 and would normally repopulate
+        // the cache, but the cache invalidation gate (`other_animations
+        // _active`) reads `has_active_motions()` which goes false on
+        // the very frame the FSM hits `Visible` — so the final cached
+        // text vectors come from whatever the last *animating* frame
+        // produced. If that final animating frame happened to early-out
+        // here, the cache ships without text and the only way back is
+        // a mouse move to force another full paint. Symptom: router
+        // page transitions show buttons with invisible labels.
+        let has_pending_motion = tree
+            .motion_bindings_map()
+            .get(&node)
+            .is_some_and(|b| b.is_any_animating())
+            || render_state.is_some_and(|rs| {
+                if let Some(render_node) = tree.get_render_node(node) {
+                    if let Some(ref stable_key) = render_node.props.motion_stable_id {
+                        return rs.is_stable_motion_active(stable_key);
+                    }
+                }
+                rs.is_motion_active(node)
+            });
+        // Propagate pending-motion state to descendants so a transient
+        // motion's children don't get filtered out at opacity=0. The
+        // immediate child has its own `has_pending_motion = false`
+        // (no motion bindings / FSM of its own), but its inherited
+        // opacity is 0 because the ancestor is mid-enter — without
+        // this propagation the child early-returns and its text /
+        // SVG / images never make it into the cache for the rest of
+        // the animation.
+        let subtree_pending_motion = ancestor_pending_motion || has_pending_motion;
+        if effective_motion_opacity <= 0.001 && !subtree_pending_motion {
             return;
         }
 
@@ -5235,6 +5580,7 @@ impl RenderContext {
                         text_shadow: render_node.props.text_shadow,
                         transform_3d_layer: inside_3d_layer.clone(),
                         is_foreground: children_inside_foreground,
+                        in_motion_subtree: inside_motion_subtree,
                     });
                 }
                 ElementType::Svg(svg_data) => {
@@ -5316,6 +5662,7 @@ impl RenderContext {
                         css_affine: node_css_affine,
                         tag_overrides: render_node.props.svg_tag_styles.clone(),
                         transform_3d_layer: inside_3d_layer.clone(),
+                        in_motion_subtree: inside_motion_subtree,
                     });
                 }
                 ElementType::Image(image_data) => {
@@ -5732,6 +6079,7 @@ impl RenderContext {
                             text_shadow: render_node.props.text_shadow,
                             transform_3d_layer: inside_3d_layer.clone(),
                             is_foreground: children_inside_foreground,
+                            in_motion_subtree: inside_motion_subtree,
                         });
 
                         x_offset += segment_width;
@@ -5837,6 +6185,8 @@ impl RenderContext {
                 Some(node), // pass current node as parent for children
                 child_scroll_clip,
                 child_3d_layer.clone(),
+                subtree_pending_motion,
+                child_inside_motion_subtree,
             );
         }
 
@@ -6334,6 +6684,8 @@ impl RenderContext {
             self.cached_flows = None;
             self.cached_glyphs_by_layer = None;
             self.cached_fg_glyphs = None;
+            self.cached_motion_subtree_text_prims = None;
+            self.cached_motion_subtree_svgs = None;
             self.cached_css_transformed_text_prims = None;
         }
 
@@ -6586,6 +6938,29 @@ impl RenderContext {
                     &overlay.primitives,
                     &dyn_aux_owned,
                 );
+                // Motion-subtree text + SVG overlay — rendered on the
+                // surface after the motion-bound bg primitives so they
+                // land on top of the overlay paint instead of being
+                // covered. PRIM_TEXT primitives carry `local_affine`
+                // so the motion container's scale / translate / rotate
+                // applies to each glyph. SVGs go through the same
+                // rasterized-image dispatch the static-cache path uses.
+                if let Some(motion_text_prims) = self.cached_motion_subtree_text_prims.clone() {
+                    if !motion_text_prims.is_empty() {
+                        self.rebind_glyph_atlas_for_overlay();
+                        self.renderer
+                            .render_primitives_overlay(target_view, &motion_text_prims);
+                    }
+                }
+                if let Some(motion_svgs) = self.cached_motion_subtree_svgs.clone() {
+                    if !motion_svgs.is_empty() {
+                        let dpi = tree.scale_factor();
+                        self.render_rasterized_svgs(target_view, &motion_svgs, dpi);
+                    }
+                }
+                // Composited CSS layers — blit each promoted subtree's
+                // texture with the current animation transform.
+                self.composite_css_layers_overlay(tree, target_view);
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
                         .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -6697,6 +7072,8 @@ impl RenderContext {
                 self.cached_flows = None;
                 self.cached_glyphs_by_layer = None;
                 self.cached_fg_glyphs = None;
+                self.cached_motion_subtree_text_prims = None;
+                self.cached_motion_subtree_svgs = None;
                 self.cached_css_transformed_text_prims = None;
                 damage_rect_failed = true;
             }
@@ -6726,6 +7103,8 @@ impl RenderContext {
                         self.cached_flows = None;
                         self.cached_glyphs_by_layer = None;
                         self.cached_fg_glyphs = None;
+                        self.cached_motion_subtree_text_prims = None;
+                        self.cached_motion_subtree_svgs = None;
                         self.cached_css_transformed_text_prims = None;
                     } else {
                         // Re-dispatch any glyph / SVG / image that
@@ -6898,6 +7277,29 @@ impl RenderContext {
                     &overlay.primitives,
                     &dyn_aux_owned,
                 );
+                // Motion-subtree text + SVG overlay — rendered on the
+                // surface after the motion-bound bg primitives so they
+                // land on top of the overlay paint instead of being
+                // covered. PRIM_TEXT primitives carry `local_affine`
+                // so the motion container's scale / translate / rotate
+                // applies to each glyph. SVGs go through the same
+                // rasterized-image dispatch the static-cache path uses.
+                if let Some(motion_text_prims) = self.cached_motion_subtree_text_prims.clone() {
+                    if !motion_text_prims.is_empty() {
+                        self.rebind_glyph_atlas_for_overlay();
+                        self.renderer
+                            .render_primitives_overlay(target_view, &motion_text_prims);
+                    }
+                }
+                if let Some(motion_svgs) = self.cached_motion_subtree_svgs.clone() {
+                    if !motion_svgs.is_empty() {
+                        let dpi = tree.scale_factor();
+                        self.render_rasterized_svgs(target_view, &motion_svgs, dpi);
+                    }
+                }
+                // Composited CSS layers — blit each promoted subtree's
+                // texture with the current animation transform.
+                self.composite_css_layers_overlay(tree, target_view);
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
                         .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -7068,7 +7470,12 @@ impl RenderContext {
                 .count();
             let css_count = regions
                 .values()
-                .filter(|r| matches!(r.kind, blinc_layout::renderer::DynamicKind::CssAnimated))
+                .filter(|r| {
+                    matches!(
+                        r.kind,
+                        blinc_layout::renderer::DynamicKind::CssAnimated { .. }
+                    )
+                })
                 .count();
             let legacy_canvas = tree.canvas_paint_records().len();
             let legacy_motion = tree.composite_bindings().len();
@@ -7116,6 +7523,30 @@ impl RenderContext {
             &overlay.primitives,
             &overlay_aux,
         );
+        // Motion-subtree text overlay — same rationale as the fast
+        // paths: motion-bound bg primitives paint on top of the static
+        // cache via `composite_frame`'s overlay, so the text inside
+        // those subtrees has to render afterwards to land on top of
+        // the bg paint. PRIM_TEXT primitives carry the motion affine
+        // so the glyphs scale / translate with the bg.
+        if let Some(motion_text_prims) = self.cached_motion_subtree_text_prims.clone() {
+            if !motion_text_prims.is_empty() {
+                self.rebind_glyph_atlas_for_overlay();
+                self.renderer
+                    .render_primitives_overlay(target_view, &motion_text_prims);
+            }
+        }
+        if let Some(motion_svgs) = self.cached_motion_subtree_svgs.clone() {
+            if !motion_svgs.is_empty() {
+                let dpi = tree.scale_factor();
+                self.render_rasterized_svgs(target_view, &motion_svgs, dpi);
+            }
+        }
+        // Composited CSS layers (slow path's composite site) — same
+        // overlay step the fast paths do, so the texture for a
+        // freshly-promoted region gets visible content on the very
+        // first frame after promotion.
+        self.composite_css_layers_overlay(tree, target_view);
         if !overlay.dynamic_images.is_empty() {
             self.renderer
                 .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -7222,6 +7653,116 @@ impl RenderContext {
             tree.render_with_motion(&mut ctx, render_state);
         }
         let t_paint_walker = p4_start.elapsed();
+
+        // Drain the per-node composite-layer scratch batches the
+        // walker peeled out of the bg batch (one per promoted CSS-
+        // animated subtree). Rasterize each into its own
+        // `LayerTexture` and stash on `css_composited_textures`
+        // keyed by slotmap key, so the per-frame composite (Phase 4)
+        // can blit each texture with the active animation
+        // transform applied — no walker re-entry on animation
+        // ticks. Fast path: no walker ran, no scratch batches; the
+        // map keeps the previous-paint textures alive.
+        if !used_fast_paint {
+            let scratch_batches = ctx.take_composite_layer_batches();
+            if !scratch_batches.is_empty() {
+                // Look up screen_aabb + natural_size from the
+                // matching `DynamicRegion`. We index by slotmap key
+                // (`LayoutNodeId::data().as_ffi()`) since
+                // `composite_layer_batches` keyed on that and
+                // blinc_layout doesn't share a slotmap with
+                // blinc_app.
+                use slotmap::Key as _;
+                let regions = tree.dynamic_regions();
+                for (region_node, region) in regions.iter() {
+                    let key = region_node.data().as_ffi();
+                    let Some(scratch_batch) = scratch_batches.get(&key) else {
+                        continue;
+                    };
+                    let natural_size = match region.kind {
+                        blinc_layout::renderer::DynamicKind::CssAnimated { natural_size } => {
+                            natural_size
+                        }
+                        _ => continue,
+                    };
+                    if natural_size.0 == 0 || natural_size.1 == 0 {
+                        continue;
+                    }
+                    // Dirty check: if the scratch batch we just walked
+                    // hashes the same as the one that produced the
+                    // currently-cached texture, the subtree's intrinsic
+                    // content didn't change this frame and we can keep
+                    // the existing texture. The promoted animation's
+                    // transform / opacity is applied at composite time
+                    // (`composite_css_layers_overlay`), so steady-state
+                    // pulse / glow frames hit this path and skip the
+                    // GPU rasterize entirely.
+                    //
+                    // Re-raster fires automatically whenever the walker
+                    // emits different primitives — state-style flip
+                    // (hover / active), layout recompute, theme swap,
+                    // promotion-property change all flow through the
+                    // walker and produce a different scratch. No
+                    // separate dirty flag plumbing needed.
+                    let scratch_hash = Self::hash_composite_scratch(scratch_batch);
+                    if self.css_composited_textures.contains_key(&key)
+                        && self.css_composited_scratch_hash.get(&key).copied() == Some(scratch_hash)
+                    {
+                        continue;
+                    }
+                    let layer_pos = (region.screen_aabb[0], region.screen_aabb[1]);
+                    let layer_size = (natural_size.0 as f32, natural_size.1 as f32);
+                    let (layer_texture, _content_size) = self
+                        .renderer
+                        .render_subtree_to_layer_texture(scratch_batch, layer_pos, layer_size);
+                    // Release any previous texture for this node
+                    // back to the pool before installing the new
+                    // one (saves the cache one acquire on the next
+                    // promotion of the same node).
+                    if let Some(old) = self.css_composited_textures.remove(&key) {
+                        self.renderer.layer_texture_cache_mut().release(old);
+                    }
+                    self.css_composited_textures.insert(key, layer_texture);
+                    self.css_composited_scratch_hash.insert(key, scratch_hash);
+                }
+            }
+            // Demotion cleanup: any cached composited texture whose
+            // node is no longer in `dynamic_regions` as a CssAnimated
+            // region got demoted this paint (animation settled, went
+            // out-of-scope, or the node disappeared). Release its
+            // texture back to the pool so the bucket eviction can
+            // reclaim it. Without this step the map grows unbounded
+            // across re-promotions.
+            use slotmap::Key as _;
+            let live_keys: std::collections::HashSet<u64> = {
+                let regions = tree.dynamic_regions();
+                regions
+                    .iter()
+                    .filter_map(|(node, region)| {
+                        if matches!(
+                            region.kind,
+                            blinc_layout::renderer::DynamicKind::CssAnimated { .. }
+                        ) {
+                            Some(node.data().as_ffi())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+            let stale_keys: Vec<u64> = self
+                .css_composited_textures
+                .keys()
+                .copied()
+                .filter(|k| !live_keys.contains(k))
+                .collect();
+            for key in stale_keys {
+                if let Some(old) = self.css_composited_textures.remove(&key) {
+                    self.renderer.layer_texture_cache_mut().release(old);
+                }
+                self.css_composited_scratch_hash.remove(&key);
+            }
+        }
 
         // Take the batch (mutable so CSS-transformed text primitives can be added).
         // Fast path: clone the patched cache; full path: take from ctx.
@@ -7378,8 +7919,13 @@ impl RenderContext {
         // Partition elements into normal (no 3D ancestor) and 3D-layer groups.
         // Elements inside a 3D-transformed parent need to be rendered to an offscreen
         // texture and blitted with the same perspective transform.
+        // Motion-subtree text is split out from `texts` so it can be
+        // rendered on the surface *after* the overlay pass, on top of
+        // the motion-bound bg primitives (which paint over the static
+        // cache the regular `texts` path renders into).
         let mut texts = Vec::new();
         let mut fg_texts = Vec::new();
+        let mut motion_subtree_texts: Vec<TextElement> = Vec::new();
         let mut layer_3d_texts: std::collections::HashMap<
             LayoutNodeId,
             (Transform3DLayerInfo, Vec<TextElement>),
@@ -7393,17 +7939,22 @@ impl RenderContext {
                     .push(text);
             } else if text.is_foreground {
                 fg_texts.push(text);
+            } else if text.in_motion_subtree {
+                motion_subtree_texts.push(text);
             } else {
                 texts.push(text);
             }
         }
 
         let mut svgs = Vec::new();
+        let mut motion_subtree_svgs: Vec<SvgElement> = Vec::new();
         let mut layer_3d_svgs: std::collections::HashMap<LayoutNodeId, Vec<SvgElement>> =
             std::collections::HashMap::new();
         for svg in all_svgs {
             if let Some(ref info) = svg.transform_3d_layer {
                 layer_3d_svgs.entry(info.node_id).or_default().push(svg);
+            } else if svg.in_motion_subtree {
+                motion_subtree_svgs.push(svg);
             } else {
                 svgs.push(svg);
             }
@@ -7732,6 +8283,127 @@ impl RenderContext {
             }
         }
 
+        // Prepare motion-subtree text *primitives*. Shape the glyphs
+        // first, then convert each to a `GpuPrimitive` (PRIM_TEXT type)
+        // with the motion / css affine baked into `local_affine` — same
+        // path the in-cache `css_transformed_text_prims` loop uses, but
+        // diverted into a separate batch we dispatch after
+        // `composite_frame`'s overlay. Going through the SDF pipeline
+        // (instead of the simpler glyph pipeline) means the motion
+        // container's scale / translate / rotate is applied per-glyph,
+        // so the text follows the bg as the animation progresses.
+        let mut motion_subtree_text_prims: Vec<GpuPrimitive> = Vec::new();
+        for text in &motion_subtree_texts {
+            if let Some([clip_x, clip_y, clip_w, clip_h]) = text.clip_bounds {
+                let text_right = text.x + text.width;
+                let text_bottom = text.y + text.height;
+                let clip_right = clip_x + clip_w;
+                let clip_bottom = clip_y + clip_h;
+                if text.x >= clip_right
+                    || text_right <= clip_x
+                    || text.y >= clip_bottom
+                    || text_bottom <= clip_y
+                {
+                    continue;
+                }
+            }
+
+            let alignment = match text.align {
+                TextAlign::Left => TextAlignment::Left,
+                TextAlign::Center => TextAlignment::Center,
+                TextAlign::Right => TextAlignment::Right,
+            };
+
+            let color = if text.motion_opacity < 1.0 {
+                [
+                    text.color[0],
+                    text.color[1],
+                    text.color[2],
+                    text.color[3] * text.motion_opacity,
+                ]
+            } else {
+                text.color
+            };
+
+            let effective_width = if let Some(clip) = text.clip_bounds {
+                clip[2].min(text.width)
+            } else {
+                text.width
+            };
+            let needs_wrap = text.wrap && effective_width < text.measured_width - 2.0;
+            let wrap_width = Some(text.width);
+            let font_name = text.font_family.name.as_deref();
+            let generic = to_gpu_generic_font(text.font_family.generic);
+            let font_weight = text.weight.weight();
+
+            let (anchor, y_pos, use_layout_height) = match text.v_align {
+                TextVerticalAlign::Center => {
+                    (TextAnchor::Center, text.y + text.height / 2.0, false)
+                }
+                TextVerticalAlign::Top => (TextAnchor::Top, text.y, true),
+                TextVerticalAlign::Baseline => {
+                    let baseline_y = text.y + text.ascender;
+                    (TextAnchor::Baseline, baseline_y, false)
+                }
+            };
+            let layout_height = if use_layout_height {
+                Some(text.height)
+            } else {
+                None
+            };
+
+            if let Ok(mut glyphs) = self.text_ctx.prepare_text_with_style(
+                &text.content,
+                text.x,
+                y_pos,
+                text.font_size,
+                color,
+                anchor,
+                alignment,
+                wrap_width,
+                needs_wrap,
+                font_name,
+                generic,
+                font_weight,
+                text.italic,
+                layout_height,
+                text.letter_spacing,
+            ) {
+                if let Some(clip) = text.clip_bounds {
+                    for glyph in &mut glyphs {
+                        glyph.clip_bounds = clip;
+                    }
+                }
+                // Convert glyphs to PRIM_TEXT primitives with the
+                // motion / css affine baked in. Identity affine when
+                // the text has none — the SDF pipeline still works
+                // and the glyphs render at base position, matching
+                // the behaviour of `render_text` for unaffined text.
+                let (a, b, c, d, tx_aff, ty_aff) = match text.css_affine {
+                    Some([a, b, c, d, tx, ty]) => (a, b, c, d, tx, ty),
+                    None => (1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+                };
+                let tx_scaled = tx_aff * scale_factor;
+                let ty_scaled = ty_aff * scale_factor;
+                for glyph in &glyphs {
+                    let gc_x = glyph.bounds[0] + glyph.bounds[2] / 2.0;
+                    let gc_y = glyph.bounds[1] + glyph.bounds[3] / 2.0;
+                    let new_gc_x = a * gc_x + c * gc_y + tx_scaled;
+                    let new_gc_y = b * gc_x + d * gc_y + ty_scaled;
+                    let mut prim = GpuPrimitive::from_glyph(glyph);
+                    prim.bounds = [
+                        new_gc_x - glyph.bounds[2] / 2.0,
+                        new_gc_y - glyph.bounds[3] / 2.0,
+                        glyph.bounds[2],
+                        glyph.bounds[3],
+                    ];
+                    prim.local_affine = [a, b, c, d];
+                    prim.set_z_layer(text.z_index);
+                    motion_subtree_text_prims.push(prim);
+                }
+            }
+        }
+
         // Cache the prepared glyph + CSS-transformed-prim vecs for
         // the compositor v2 damage-rect path. When motion bindings
         // patch the cached batch on a subsequent frame, the damage-
@@ -7747,6 +8419,8 @@ impl RenderContext {
         // wipe text.
         self.cached_glyphs_by_layer = Some(glyphs_by_layer.clone());
         self.cached_fg_glyphs = Some(fg_glyphs.clone());
+        self.cached_motion_subtree_text_prims = Some(motion_subtree_text_prims.clone());
+        self.cached_motion_subtree_svgs = Some(motion_subtree_svgs.clone());
         self.cached_css_transformed_text_prims = Some(css_transformed_text_prims.clone());
 
         // Generate decoration primitives for foreground text once so the

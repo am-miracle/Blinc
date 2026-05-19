@@ -169,10 +169,21 @@ pub enum DynamicKind {
     /// binding values pushed by the walker's normal binding-
     /// transform logic.
     MotionSubtree,
-    /// CSS-animated node — re-walk like `MotionSubtree`, but
-    /// distinguished so future damage-rect logic can treat CSS
-    /// timelines separately if needed.
-    CssAnimated,
+    /// CSS-animated node, distinguished so the compositor can route
+    /// it through the composited-layer path when its
+    /// `KeyframeProperties::is_composite_promotable()` predicate
+    /// matched at paint time.
+    ///
+    /// `natural_size` is the physical-pixel bounds the subtree was
+    /// rasterized at (scale=1, no animation transform applied). The
+    /// GPU side holds the actual `LayerTexture` in a separate map
+    /// keyed by `root` — `blinc_layout` doesn't depend on
+    /// `blinc_gpu`, so the texture handle stays out of this enum.
+    /// `(0, 0)` is a sentinel meaning "not composited" — the walker
+    /// emits a region with this value when it records a CSS-animated
+    /// node that didn't make it through promotion (kept for forwards
+    /// compatibility with the non-composited PR #47 path).
+    CssAnimated { natural_size: (u32, u32) },
 }
 
 impl Clone for DynamicKind {
@@ -188,7 +199,9 @@ impl Clone for DynamicKind {
                 bounds_wh: *bounds_wh,
             },
             DynamicKind::MotionSubtree => DynamicKind::MotionSubtree,
-            DynamicKind::CssAnimated => DynamicKind::CssAnimated,
+            DynamicKind::CssAnimated { natural_size } => DynamicKind::CssAnimated {
+                natural_size: *natural_size,
+            },
         }
     }
 }
@@ -206,7 +219,10 @@ impl std::fmt::Debug for DynamicKind {
                 .field("bounds_wh", bounds_wh)
                 .finish(),
             DynamicKind::MotionSubtree => write!(f, "MotionSubtree"),
-            DynamicKind::CssAnimated => write!(f, "CssAnimated"),
+            DynamicKind::CssAnimated { natural_size } => f
+                .debug_struct("CssAnimated")
+                .field("natural_size", natural_size)
+                .finish(),
         }
     }
 }
@@ -588,6 +604,14 @@ pub struct RenderTree {
     /// lookups: `current_animation_status.get(&node)` once per
     /// painted node, ~thousands of times per frame.
     current_animation_status: RefCell<HashMap<LayoutNodeId, AnimationStatus>>,
+    /// CSS-animated nodes whose current animated properties are
+    /// composite-promotable (only `opacity` / `translate` / `scale` /
+    /// 2D `rotate`). Populated alongside `current_animation_status`
+    /// by [`Self::compute_animation_status`]. The walker reads this
+    /// to decide whether to skip emitting a CSS-animated subtree
+    /// into the bg batch (the composited-layer path rasterizes it
+    /// into a `LayerTexture` instead).
+    composite_promotion: RefCell<std::collections::HashSet<LayoutNodeId>>,
     /// Hysteresis counter — frames spent classified as `Static`
     /// since the node last appeared `Animating`. Once the count
     /// reaches `SETTLED_STREAK_THRESHOLD`, the node is allowed to
@@ -796,6 +820,7 @@ impl RenderTree {
             dynamic_regions: RefCell::new(HashMap::new()),
             previous_animation_status: RefCell::new(HashMap::new()),
             current_animation_status: RefCell::new(HashMap::new()),
+            composite_promotion: RefCell::new(std::collections::HashSet::new()),
             settled_streak: RefCell::new(HashMap::new()),
             last_scroll_tick_ms: None,
             scale_factor: 1.0,
@@ -1327,6 +1352,12 @@ impl RenderTree {
         // CSS-only fast path. The active-animation check (`is_playing`)
         // matches `has_active_animations` / `has_active_transitions`
         // for the same reason.
+        // Composite-promotion set: every CSS-animated node whose
+        // current_properties pass `is_composite_promotable()`. Built
+        // alongside `css_animating` so the walker can pick up both
+        // signals on the same `current_animation_status.borrow()`
+        // dance.
+        let mut composite_promotion: HashSet<LayoutNodeId> = HashSet::new();
         if let Ok(store) = self.css_anim_store.lock() {
             for (stable, anim) in store.animations.iter() {
                 if !anim.is_playing {
@@ -1335,6 +1366,9 @@ impl RenderTree {
                 if let Some(layout) = self.stable_to_layout.get(stable).copied() {
                     candidates.insert(layout);
                     css_animating.insert(layout);
+                    if anim.current_properties.is_composite_promotable() {
+                        composite_promotion.insert(layout);
+                    }
                 }
             }
             for (stable, trans) in store.transitions.iter() {
@@ -1344,6 +1378,9 @@ impl RenderTree {
                 if let Some(layout) = self.stable_to_layout.get(stable).copied() {
                     candidates.insert(layout);
                     css_animating.insert(layout);
+                    if trans.current_properties.is_composite_promotable() {
+                        composite_promotion.insert(layout);
+                    }
                 }
             }
         }
@@ -1423,6 +1460,23 @@ impl RenderTree {
                 current.insert(*node, *status);
             }
         }
+        // Mirror the composite-promotion set into its live map for
+        // the walker's CSS bracket. We intersect with the actually-
+        // animating CSS set (post-hysteresis) so settled nodes still
+        // in their cooldown window don't get promoted on a frame
+        // where their `current_properties` happens to be empty.
+        {
+            let mut promo = self.composite_promotion.borrow_mut();
+            promo.clear();
+            for node in &composite_promotion {
+                if matches!(
+                    result.iter().find(|(n, _)| n == node).map(|(_, s)| *s),
+                    Some(AnimationStatus::Animating(AnimatedKind::Css))
+                ) {
+                    promo.insert(*node);
+                }
+            }
+        }
 
         result
     }
@@ -1444,6 +1498,18 @@ impl RenderTree {
         &self,
     ) -> std::cell::Ref<'_, HashMap<LayoutNodeId, AnimationStatus>> {
         self.current_animation_status.borrow()
+    }
+
+    /// Borrow the composite-promotion set for the current frame —
+    /// CSS-animated nodes whose active properties are
+    /// composite-promotable per
+    /// [`blinc_animation::KeyframeProperties::is_composite_promotable`].
+    /// Populated alongside `current_animation_status` so the walker
+    /// reads both off the same compute pass.
+    pub fn composite_promotion(
+        &self,
+    ) -> std::cell::Ref<'_, std::collections::HashSet<LayoutNodeId>> {
+        self.composite_promotion.borrow()
     }
 
     /// Replace the stored previous-status map with the supplied

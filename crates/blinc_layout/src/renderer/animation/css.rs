@@ -195,6 +195,103 @@ impl RenderTree {
         store.has_active_animations() || store.has_active_transitions()
     }
 
+    /// Whether every currently-playing CSS animation / transition on
+    /// a *visible* node is composite-promotable per
+    /// [`blinc_animation::KeyframeProperties::is_composite_promotable`].
+    ///
+    /// Used by the windowed frame loop's fast-path gate: when this is
+    /// true and there's no other dynamic activity, the walker can be
+    /// skipped — the cached layer textures already hold the subtree
+    /// pixels at base state, and the per-frame composite step
+    /// (`composite_css_layers_overlay`) blits them with the current
+    /// translate / scale / opacity applied at compose time.
+    ///
+    /// **Viewport gating**: animations on nodes that didn't paint
+    /// during the most recent walker pass (i.e. were scrolled
+    /// off-screen or otherwise culled) are ignored. The CSS animation
+    /// store keeps ticking them — their `current_properties` keep
+    /// advancing and `apply_all_css_animation_props` keeps mutating
+    /// `render_node.props` — but their pixel output isn't on the
+    /// surface this frame, so they don't block the fast path. The
+    /// moment one scrolls back into view, the scroll input
+    /// invalidates the cache (see `windowed::Event::Input` ->
+    /// `app.invalidate_render_cache_tagged("had_scroll")`), forcing
+    /// a slow paint that re-walks the now-visible node.
+    ///
+    /// Returns `true` when no visible animation is playing (vacuously
+    /// satisfied) so callers can use it as a single predicate without
+    /// also checking `css_has_active`.
+    pub fn css_active_all_composite_promotable(&self) -> bool {
+        let painted = self.painted_node_ids.borrow();
+        let store = self.css_anim_store.lock().unwrap();
+        for (stable, anim) in store.animations.iter() {
+            if !anim.is_playing {
+                continue;
+            }
+            let Some(layout) = self.stable_to_layout.get(stable).copied() else {
+                continue;
+            };
+            if !painted.contains(&layout) {
+                continue;
+            }
+            // Layout-affecting animations on a *visible* node force
+            // the slow path: `apply_animated_layout_props` will write
+            // to taffy and `compute_layout` will shift bounds the
+            // cache hasn't captured. Off-screen layout animations
+            // (e.g. styling_demo's `grow-shrink` / `constraint-pulse`
+            // ticking in unrelated sections) are tolerated — their
+            // bounds shift affects only their own off-screen flex
+            // container, and a scroll input invalidates the cache
+            // before the user can see the discrepancy.
+            if Self::keyframe_props_affect_layout(&anim.current_properties) {
+                return false;
+            }
+            if !anim.current_properties.is_composite_promotable() {
+                return false;
+            }
+        }
+        for (stable, trans) in store.transitions.iter() {
+            if !trans.is_playing {
+                continue;
+            }
+            let Some(layout) = self.stable_to_layout.get(stable).copied() else {
+                continue;
+            };
+            if !painted.contains(&layout) {
+                continue;
+            }
+            if Self::keyframe_props_affect_layout(&trans.current_properties) {
+                return false;
+            }
+            if !trans.current_properties.is_composite_promotable() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// True iff the keyframe properties touch any taffy style that
+    /// would force a `compute_layout` (and therefore potentially
+    /// reshuffle visible nodes via flex / grid). Mirrors the
+    /// `has_layout_props` check inside `apply_animated_layout_props`.
+    fn keyframe_props_affect_layout(p: &blinc_animation::KeyframeProperties) -> bool {
+        p.width.is_some()
+            || p.height.is_some()
+            || p.padding.is_some()
+            || p.margin.is_some()
+            || p.gap.is_some()
+            || p.min_width.is_some()
+            || p.max_width.is_some()
+            || p.min_height.is_some()
+            || p.max_height.is_some()
+            || p.flex_grow.is_some()
+            || p.flex_shrink.is_some()
+            || p.inset_top.is_some()
+            || p.inset_right.is_some()
+            || p.inset_bottom.is_some()
+            || p.inset_left.is_some()
+    }
+
     /// Start CSS animations for all registered elements that have animations defined
     ///
     /// Scans all registered element IDs, checks the stylesheet for animation properties,
@@ -270,6 +367,21 @@ impl RenderTree {
             let Some(node_id) = self.layout_id(stable_id) else {
                 continue;
             };
+            // Composite-promotable animations (only opacity / 2D
+            // transform) skip the per-frame property apply — the
+            // composite-layer path rasterizes the subtree at BASE
+            // state into a `LayerTexture` and applies the animated
+            // values at composite time via
+            // `blit_tight_texture_to_target` (dest_pos / dest_size /
+            // opacity). Writing animated values onto
+            // `render_node.props` here would bake them into the
+            // texture and double-apply at composite time. Mixed
+            // animations (any non-promotable property) keep the
+            // existing apply because `is_composite_promotable`
+            // returns false for them.
+            if anim_props.is_composite_promotable() {
+                continue;
+            }
             if let Some(render_node) = self.render_nodes.get_mut(&node_id) {
                 Self::apply_keyframe_props_to_render(&mut render_node.props, &anim_props);
             }
@@ -643,6 +755,13 @@ impl RenderTree {
             let Some(node_id) = self.layout_id(stable_id) else {
                 continue;
             };
+            // See `apply_all_css_animation_props` above — composite-
+            // promotable transitions skip the apply for the same
+            // reason (texture rasterizes at base, composite applies
+            // animated values).
+            if anim_props.is_composite_promotable() {
+                continue;
+            }
             if let Some(render_node) = self.render_nodes.get_mut(&node_id) {
                 Self::apply_keyframe_props_to_render(&mut render_node.props, &anim_props);
             }

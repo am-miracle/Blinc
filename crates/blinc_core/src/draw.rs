@@ -1748,6 +1748,20 @@ pub trait DrawContext {
     /// Pair with [`Self::push_motion_subtree`]. Default no-op.
     fn pop_motion_subtree(&mut self) {}
 
+    /// Walker entered a composite-promotable CSS-animated subtree.
+    /// Subsequent primitive / path / glass emissions route into a
+    /// per-node scratch batch keyed by `node_id` (rather than the
+    /// bg batch). At end of paint, the compositor rasterizes each
+    /// scratch batch into its own `LayerTexture` and the per-frame
+    /// composite blits the texture with the active animation
+    /// transform applied — no walker re-entry, no per-frame
+    /// rasterization. Pair with [`Self::pop_composite_layer`].
+    /// Default no-op for contexts without this distinction.
+    fn push_composite_layer(&mut self, _node_id: u64) {}
+
+    /// Pair with [`Self::push_composite_layer`]. Default no-op.
+    fn pop_composite_layer(&mut self) {}
+
     /// Union AABB (`[x, y, w, h]` in screen pixels, post-DPI) of every
     /// background-batch primitive in `start..end`. Used by the
     /// compositor v2 damage-rect path: it captures the on-screen

@@ -4416,6 +4416,55 @@ impl WindowedApp {
                                 }
                             }
 
+                            // Per-hit cache-invalidation gate. Scan `pending_events`
+                            // for any pointer event (POINTER_MOVE / DOWN / UP /
+                            // DRAG / DRAG_END / FILE_DRAG_OVER) whose target node
+                            // actually has a registered handler. The router's
+                            // mouse-move path filters POINTER_MOVE emit to handler-
+                            // bearing nodes; mouse-button / drag-fast paths emit
+                            // unfiltered, so we re-check via `has_handler` here.
+                            // Used below so the cache only invalidates when a
+                            // real subscriber was under the cursor — bare cursor
+                            // wiggle / click over empty space no longer pays the
+                            // full re-render.
+                            let pointer_event_to_handler = {
+                                use blinc_core::events::event_types;
+                                let registry = tree.handler_registry();
+                                pending_events.iter().any(|e| {
+                                    // DRAG / DRAG_END deliberately excluded.
+                                    // Widgets that need a redraw on drag (cn
+                                    // sliders / sortables, scroll-bar drag)
+                                    // either go through Stateful (caught by
+                                    // `state_changed` above) or call
+                                    // `stateful::request_redraw()` themselves
+                                    // when they actually move. Including DRAG
+                                    // here invalidated the cache every frame
+                                    // when the user dragged through an empty
+                                    // area of a scroll container — the scroll
+                                    // widget registers a permanent on_drag
+                                    // handler that no-ops unless the scrollbar
+                                    // itself is being dragged, so the gate saw
+                                    // a handler and triggered the full slow
+                                    // path for nothing.
+                                    let is_pointer_event = matches!(
+                                        e.event_type,
+                                        event_types::POINTER_MOVE
+                                            | event_types::POINTER_DOWN
+                                            | event_types::POINTER_UP
+                                            | event_types::POINTER_ENTER
+                                            | event_types::POINTER_LEAVE
+                                            | event_types::DOUBLE_TAP
+                                            | event_types::FILE_DRAG_OVER
+                                    );
+                                    if !is_pointer_event {
+                                        return false;
+                                    }
+                                    tree.stable_id(e.node_id)
+                                        .map(|sid| registry.has_handler(sid, e.event_type))
+                                        .unwrap_or(false)
+                                })
+                            };
+
                             // Dispatch mouse/touch events (scroll is handled above with nested support)
                             if let Some(ref mut windowed_ctx) = ws.ctx {
                                 let router = &windowed_ctx.event_router;
@@ -4579,33 +4628,37 @@ impl WindowedApp {
                             // already uses: pointer_query elements or
                             // any node with an attached pointer handler.
                             if !state_changed && !had_scroll {
-                                // `has_pointer_move_subscribers` only counts
-                                // handlers that consume continuous motion
-                                // (POINTER_MOVE / DRAG / FILE_DRAG_OVER) plus
-                                // pointer_query elements. The previous
-                                // `has_any_pointer_handler` predicate also
-                                // counted POINTER_DOWN / POINTER_UP, which a
-                                // typical UI loaded with click handlers
-                                // (cn_demo) — making the gate
-                                // effectively unconditional and forcing a
-                                // full cache invalidation on every cursor
-                                // wiggle. CPU pinned to 50 % whenever the
-                                // user moved the mouse over empty space.
+                                // Per-hit invalidation for ALL pointer events
+                                // (moves, button events, drags). The previous
+                                // gate invalidated unconditionally on button
+                                // events and globally on moves — together that
+                                // meant every click on empty space and every
+                                // cursor wiggle near hoverable elements forced
+                                // the slow path.
                                 //
-                                // Click handlers don't need a redraw between
-                                // the move and the click event itself —
-                                // POINTER_DOWN dispatches its own
-                                // invalidation when it fires.
-                                let has_pointer_move_subscribers = ws
+                                // `pointer_event_to_handler` (computed above
+                                // before pending_events is consumed) is true
+                                // only when an emitted pointer event actually
+                                // targets a node with a registered handler for
+                                // that event type. Stateful elements that
+                                // mutate state on POINTER_DOWN still get
+                                // caught by the `state_changed` gate above;
+                                // this branch covers non-stateful handlers
+                                // (custom on_click closures, drag handlers,
+                                // etc.).
+                                //
+                                // Pointer-query elements (calc(env(--mouse...)) /
+                                // canvas-kit cursor subscribers) read mouse
+                                // position every frame regardless of hit chain
+                                // and need the global invalidate; we OR them
+                                // in for move events.
+                                let has_pointer_query = ws
                                     .ctx
                                     .as_ref()
-                                    .is_some_and(|c| !c.pointer_query.is_empty())
-                                    || ws.render_tree.as_ref().is_some_and(|t| {
-                                        t.handler_registry().has_any_pointer_move_subscriber()
-                                    });
-                                if is_button_event
-                                    || (is_move_event && has_pointer_move_subscribers)
-                                {
+                                    .is_some_and(|c| !c.pointer_query.is_empty());
+                                let need_invalidate = pointer_event_to_handler
+                                    || (is_move_event && has_pointer_query);
+                                if need_invalidate {
                                     frame_dirty.store(true, Ordering::Release);
                                     window.request_redraw();
                                     if let Some(ref mut app) = ws.app {
@@ -4872,6 +4925,30 @@ impl WindowedApp {
                                 }
                                 if had_prop_updates && !needs_layout {
                                     tracing::trace!("Visual-only prop updates, skipping layout");
+                                }
+
+                                // Stateful animations (springs, keyframes,
+                                // timelines) queue prop updates here when their
+                                // scheduler-driven `refresh_callback` re-runs
+                                // the `on_state` callback. Without an explicit
+                                // cache invalidate, the fast path's
+                                // `cached_bg_batch` would keep the previous
+                                // frame's primitives — and the walker (which is
+                                // what reads `render_node.props` to emit fresh
+                                // primitives) doesn't run on the fast path.
+                                // Symptom: timeline_demo's bouncing ball,
+                                // motion_demo's pull-to-refresh contents, and
+                                // any other stateful-animation-driven visual
+                                // stay frozen on the previous frame until some
+                                // input (mouse move, scroll) trips a different
+                                // invalidate. The state-driven path through
+                                // `handle_event_internal` already covers
+                                // event-fired transitions via `state_changed`
+                                // above; this catches the scheduler-driven half.
+                                if had_prop_updates {
+                                    blinc_app.invalidate_render_cache_tagged(
+                                        "stateful_prop_update",
+                                    );
                                 }
 
                                 // Visual-only updates (e.g. hover state flip)
@@ -5198,16 +5275,24 @@ impl WindowedApp {
                             } else {
                                 16.0
                             };
-                            let css_active = if let Some(ref mut tree) = ws.render_tree {
-                                let store = tree.css_anim_store();
-                                let mut s = store.lock().unwrap();
-                                let (anim, trans) = s.tick(dt_ms);
-                                drop(s);
-                                let flip = tree.tick_flip_animations(dt_ms);
-                                anim || trans || flip || tree.css_has_active()
-                            } else {
-                                false
-                            };
+                            let (css_active, css_only_composite_promotable) =
+                                if let Some(ref mut tree) = ws.render_tree {
+                                    let store = tree.css_anim_store();
+                                    let mut s = store.lock().unwrap();
+                                    let (anim, trans) = s.tick(dt_ms);
+                                    drop(s);
+                                    let flip = tree.tick_flip_animations(dt_ms);
+                                    let active =
+                                        anim || trans || flip || tree.css_has_active();
+                                    // Composite-promotable predicate ignores FLIP
+                                    // (FLIP animations re-layout under the hood,
+                                    // so they always need the slow path).
+                                    let promotable = !flip
+                                        && tree.css_active_all_composite_promotable();
+                                    (active, promotable)
+                                } else {
+                                    (false, true)
+                                };
                             ws.last_frame_time_ms = current_time;
 
                             // Sync motion states to shared store for query_motion API
@@ -5451,9 +5536,21 @@ impl WindowedApp {
                                 // stays cached and the walker doesn't run.
                                 // See the split-paint flow in
                                 // `render_tree_with_motion_opt`.
+                                // CSS-only animation frames take the fast path
+                                // when every playing animation / transition is
+                                // composite-promotable (opacity / 2D translate /
+                                // 2D scale): the walker doesn't need to run
+                                // because the layer textures were rasterized on
+                                // the last full paint and `composite_frame`
+                                // already calls `composite_css_layers_overlay`
+                                // to blit them with the current animated
+                                // dest_pos / dest_size / opacity. Non-promotable
+                                // CSS work (colour / layout / 3D / rotate-z)
+                                // still trips the slow path through `css_active`.
+                                let css_blocks_fast = css_active && !css_only_composite_promotable;
                                 let try_fast_paint = !did_rebuild
                                     && !ws.needs_relayout
-                                    && !css_active
+                                    && !css_blocks_fast
                                     && !scroll_animating
                                     && ws.last_paint_time_ms != 0
                                     && blinc_app.has_render_cache();
