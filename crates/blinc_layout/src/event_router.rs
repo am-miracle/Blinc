@@ -2178,6 +2178,97 @@ mod tests {
         assert!(captured.contains(&event_types::POINTER_UP));
     }
 
+    /// Regression: pressed_target survives a tree rebuild between
+    /// POINTER_DOWN and POINTER_UP. Pre-fix `pressed_target` was a
+    /// `LayoutNodeId` — the slotmap version bumped during the rebuild,
+    /// the cached id resolved to None in `dispatch_event_full`, and the
+    /// release event was silently dropped. Symptom on the user side
+    /// was `on_click` closures never firing on `cn::button`,
+    /// `cn::sidebar`, and the cn_demo Reset Animation button after the
+    /// POINTER_DOWN handler ran any state mutation. The fix switched
+    /// `pressed_target` to `StableNodeId`, which survives the rebuild
+    /// and resolves to the new LayoutNodeId at release time.
+    ///
+    /// Setup: root → middle → leaf. Press lands on `leaf` (the
+    /// innermost hit). Queue a rebuild on `middle` so its children
+    /// (including `leaf`) get fresh LayoutNodeIds. Then release —
+    /// POINTER_UP must still reach the press target's *new* id, via
+    /// stable_id resolution.
+    #[test]
+    fn pressed_target_survives_rebuild_between_down_and_up() {
+        // Clear any leftover pending rebuilds from prior tests so we
+        // only process the one this test queues.
+        let _ = crate::stateful::take_pending_subtree_rebuilds();
+
+        let ui = div()
+            .w(400.0)
+            .h(300.0)
+            .child(div().w(200.0).h(200.0).child(div().w(100.0).h(100.0)));
+        let mut tree = RenderTree::from_element(&ui);
+        tree.compute_layout(400.0, 300.0);
+
+        let middle_id = tree.layout_tree.children(tree.root().unwrap())[0];
+        let leaf_id_before = tree.layout_tree.children(middle_id)[0];
+        let leaf_stable = tree.stable_id(leaf_id_before).unwrap();
+
+        let events: Rc<RefCell<Vec<(LayoutNodeId, u32)>>> = Rc::new(RefCell::new(Vec::new()));
+        let events_clone = Rc::clone(&events);
+
+        let mut router = EventRouter::new();
+        router.set_event_callback(move |node, event| {
+            events_clone.borrow_mut().push((node, event));
+        });
+
+        // Press on the leaf (innermost hit at 50,50).
+        router.on_mouse_down(&tree, 50.0, 50.0, MouseButton::Left);
+        assert_eq!(router.pressed_target_stable(), Some(leaf_stable));
+
+        // Rebuild `middle`'s subtree. `process_pending_subtree_rebuilds`
+        // removes and re-creates middle's children, so the slotmap
+        // version bumps and `leaf_id_before` is now stale. Note: we
+        // queue against `middle`, not the leaf — the rebuild root
+        // itself keeps its id; only its descendants get re-keyed.
+        crate::stateful::queue_subtree_rebuild(
+            middle_id,
+            div().w(200.0).h(200.0).child(div().w(100.0).h(100.0)),
+        );
+        assert!(tree.process_pending_subtree_rebuilds());
+        assert!(
+            tree.stable_id(leaf_id_before).is_none(),
+            "old leaf LayoutNodeId should be stale after rebuild — if this fails, the slotmap key didn't bump and the regression test no longer exercises the staleness path"
+        );
+
+        // The press target's stable id should still resolve, to a new
+        // LayoutNodeId. That's what `dispatch_event_full` does
+        // internally on POINTER_UP.
+        let leaf_id_after = tree
+            .layout_id(leaf_stable)
+            .expect("press target's stable id must survive the rebuild");
+        assert_ne!(
+            leaf_id_after, leaf_id_before,
+            "post-rebuild LayoutNodeId must differ from pre-rebuild id"
+        );
+
+        // Release — POINTER_UP must reach the new layout id, not the stale one.
+        router.on_mouse_up(&tree, 55.0, 55.0, MouseButton::Left);
+
+        let captured = events.borrow();
+        let up_events: Vec<_> = captured
+            .iter()
+            .filter(|(_, ty)| *ty == event_types::POINTER_UP)
+            .collect();
+        assert!(
+            !up_events.is_empty(),
+            "POINTER_UP must fire across the rebuild"
+        );
+        assert!(
+            up_events.iter().any(|(n, _)| *n == leaf_id_after),
+            "POINTER_UP must reach the press target's post-rebuild LayoutNodeId, not the stale one"
+        );
+
+        let _ = crate::stateful::take_pending_subtree_rebuilds();
+    }
+
     #[test]
     fn test_focus_blur() {
         let ui = div()
