@@ -4819,6 +4819,7 @@ impl RenderContext {
                 None, // No parent node
                 None, // No initial scroll clip
                 None, // No 3D layer ancestor
+                false, // No ancestor pending motion at root
             );
         }
 
@@ -4868,6 +4869,14 @@ impl RenderContext {
         // Text/SVGs/images inside 3D layers are rendered to offscreen textures
         // and blitted with the same perspective transform.
         inside_3d_layer: Option<Transform3DLayerInfo>,
+        // True if any ancestor on the recursion stack has a pending
+        // motion binding / FSM animation. When set, the opacity ≤ 0.001
+        // early-out below is suppressed so a transient motion's child
+        // text doesn't get filtered out on the opacity=0 first frame
+        // (the descendant has no motion of its own, so its local
+        // `has_pending_motion` would otherwise be false, dropping the
+        // whole subtree).
+        ancestor_pending_motion: bool,
     ) {
         use blinc_layout::Material;
 
@@ -4981,7 +4990,16 @@ impl RenderContext {
                 }
                 rs.is_motion_active(node)
             });
-        if effective_motion_opacity <= 0.001 && !has_pending_motion {
+        // Propagate pending-motion state to descendants so a transient
+        // motion's children don't get filtered out at opacity=0. The
+        // immediate child has its own `has_pending_motion = false`
+        // (no motion bindings / FSM of its own), but its inherited
+        // opacity is 0 because the ancestor is mid-enter — without
+        // this propagation the child early-returns and its text /
+        // SVG / images never make it into the cache for the rest of
+        // the animation.
+        let subtree_pending_motion = ancestor_pending_motion || has_pending_motion;
+        if effective_motion_opacity <= 0.001 && !subtree_pending_motion {
             return;
         }
 
@@ -6056,6 +6074,7 @@ impl RenderContext {
                 Some(node), // pass current node as parent for children
                 child_scroll_clip,
                 child_3d_layer.clone(),
+                subtree_pending_motion,
             );
         }
 
