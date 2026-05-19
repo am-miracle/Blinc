@@ -11,7 +11,7 @@
 Blinc can hot-patch the body of your UI builder closure while the
 app is running, so iterating on a layout or styling tweak doesn't
 need a full rebuild + relaunch. State held by `Stateful` widgets
-and hooks (`use_state`, `use_shared_state`, …) is preserved across
+and hooks (`use_state`, `use_fsm`, …) is preserved across
 patches because Blinc keys it by `InstanceKey` rather than by
 closure identity — your reactive graph survives the swap.
 
@@ -107,8 +107,8 @@ out of default builds; they only show up when the feature is on.
 - **State held by `Stateful` widgets and hooks**. Blinc's
   `InstanceKey` is derived from `#[track_caller]` + a per-frame
   call counter, so the same logical widget gets the same key
-  before and after a patch. `use_state`, `use_shared_state`,
-  reactive signals, and FSM state all survive.
+  before and after a patch. `use_state`, `use_fsm`, reactive
+  signals, and FSM state all survive.
 
 ## What doesn't
 

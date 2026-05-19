@@ -211,7 +211,7 @@ fn card_list() -> impl ElementBuilder {
 Use a custom state type for page navigation:
 
 ```rust
-use blinc_layout::stateful::{stateful, StateTransitions, use_shared_state};
+use blinc_layout::stateful::{stateful, StateTransitions};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 enum Page {

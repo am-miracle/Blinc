@@ -10,7 +10,10 @@ Blinc provides ready-to-use input widgets with built-in state management.
 use blinc_layout::widgets::button::{button, Button};
 
 fn my_ui(ctx: &WindowedContext) -> impl ElementBuilder {
-    let btn_state = ctx.use_state_for("save_btn", ButtonState::Idle);
+    // Bare auto-keyed FSM handle — one slot per source line via
+    // `#[track_caller]`. For multiple instances from the same line
+    // (loops, list items) use `ctx.use_fsm_keyed(key, initial)`.
+    let btn_state = ctx.use_fsm(ButtonState::Idle);
 
     button(btn_state, "Save")
         .on_click(|_| {
@@ -48,7 +51,7 @@ Button::with_content(state, |s| {
 ### Disabled Buttons
 
 ```rust
-let state = ctx.use_state_for("btn", ButtonState::Disabled);
+let state = ctx.use_fsm(ButtonState::Disabled);
 
 button(state, "Cannot Click")
     .disabled_color(Color::rgba(0.2, 0.2, 0.25, 0.5))
@@ -214,7 +217,7 @@ fn login_form(ctx: &WindowedContext) -> impl ElementBuilder {
     let email_state = text_input_state("Email address");
     let password_state = text_input_state("Password");
     let remember_state = checkbox_state(false);
-    let submit_state = ctx.use_state_for("submit", ButtonState::Idle);
+    let submit_state = ctx.use_fsm(ButtonState::Idle);
 
     div()
         .w(400.0)
