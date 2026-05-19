@@ -323,15 +323,55 @@ static PENDING_PROP_UPDATES: LazyLock<Mutex<Vec<(LayoutNodeId, RenderProps)>>> =
 static PENDING_SUBTREE_REBUILDS: LazyLock<Mutex<Vec<PendingSubtreeRebuild>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
+/// What kind of rebuild a pending entry represents.
+///
+/// Three tiers, from cheapest to most expensive:
+///
+/// - [`Visual`](RebuildKind::Visual): walk the existing layout nodes and
+///   replace `RenderProps` in place (transform / opacity / bg / etc.).
+///   No taffy work, no children teardown, no layout recompute.
+///
+/// - [`LayoutProps`](RebuildKind::LayoutProps): same as Visual, plus
+///   patch taffy `Style` on each existing layout node and recompute
+///   layout. The tree's *topology* (number/type/content of nodes) is
+///   unchanged, but dimensions / margins / inset / etc. differ. This is
+///   the path spring-animated `.w()` / `.h()` / `.left()` take after the
+///   topology-vs-structural hash split — without it, every spring tick
+///   tears down and reconstructs the subtree just to change a width by
+///   half a pixel.
+///
+/// - [`Structural`](RebuildKind::Structural): full subtree teardown,
+///   children rebuilt, stable ids re-minted, handlers re-registered.
+///   Only path that can handle children added/removed/reordered or
+///   content swaps (text changed, SVG source changed, element type
+///   changed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RebuildKind {
+    Visual,
+    LayoutProps,
+    Structural,
+}
+
 /// A pending subtree rebuild operation
 pub struct PendingSubtreeRebuild {
     /// The parent node whose children should be rebuilt
     pub parent_id: LayoutNodeId,
     /// The new child element (a Div that was produced by the callback)
     pub new_child: crate::div::Div,
-    /// Whether this rebuild requires layout recomputation
-    /// False for visual-only updates (hover/press state changes)
-    pub needs_layout: bool,
+    /// What kind of rebuild this is. See [`RebuildKind`].
+    pub kind: RebuildKind,
+}
+
+impl PendingSubtreeRebuild {
+    /// True for any rebuild that needs taffy `compute_layout` to run
+    /// after processing — structural rebuilds (children changed) and
+    /// layout-prop rebuilds (style dimensions changed).
+    pub fn needs_layout(&self) -> bool {
+        matches!(
+            self.kind,
+            RebuildKind::Structural | RebuildKind::LayoutProps
+        )
+    }
 }
 
 // Safety: PendingSubtreeRebuild is only accessed from the main thread
@@ -345,7 +385,7 @@ pub fn queue_subtree_rebuild(parent_id: LayoutNodeId, new_child: crate::div::Div
         .push(PendingSubtreeRebuild {
             parent_id,
             new_child,
-            needs_layout: true,
+            kind: RebuildKind::Structural,
         });
 }
 
@@ -360,7 +400,25 @@ pub fn queue_visual_subtree_rebuild(parent_id: LayoutNodeId, new_child: crate::d
         .push(PendingSubtreeRebuild {
             parent_id,
             new_child,
-            needs_layout: false,
+            kind: RebuildKind::Visual,
+        });
+}
+
+/// Queue a layout-prop subtree rebuild: patch taffy `Style` on existing
+/// nodes + recompute layout, without tearing down children.
+///
+/// Used when only layout-affecting properties changed (size, inset,
+/// padding, margin, flex sizing) but the tree's topology is the same.
+/// Spring animations bound to `.w()` / `.h()` / `.left()` etc. land
+/// here.
+pub fn queue_layout_prop_subtree_rebuild(parent_id: LayoutNodeId, new_child: crate::div::Div) {
+    PENDING_SUBTREE_REBUILDS
+        .lock()
+        .unwrap()
+        .push(PendingSubtreeRebuild {
+            parent_id,
+            new_child,
+            kind: RebuildKind::LayoutProps,
         });
 }
 
@@ -1229,6 +1287,14 @@ pub struct StatefulInner<S: StateTransitions> {
     /// we skip the expensive subtree rebuild and use the fast visual-only update path.
     pub(crate) previous_structural_hash: Option<crate::diff::DivHash>,
 
+    /// Like [`previous_structural_hash`] but excludes layout style. Lets
+    /// `refresh_props_internal` discriminate "topology really changed (full
+    /// rebuild)" from "only layout dimensions shifted (patch taffy in place)".
+    /// Without the split, every spring-driven `.w()` / `.h()` / `.left()`
+    /// tick rebuilds the entire Stateful subtree just to change a width by
+    /// half a pixel.
+    pub(crate) previous_topology_hash: Option<crate::diff::DivHash>,
+
     /// Container-level CSS classes set via `.class()` on the Stateful itself
     /// (not from the on_state callback). These must survive subtree rebuilds
     /// because the rebuild path replaces the parent node's classes/style with
@@ -1257,6 +1323,7 @@ impl<S: StateTransitions> StatefulInner<S> {
             refresh_callback: None,
             animation_keys: Vec::new(),
             previous_structural_hash: None,
+            previous_topology_hash: None,
             base_classes: Vec::new(),
             base_element_id: None,
         }
@@ -2632,6 +2699,7 @@ impl<S: StateTransitions> Stateful<S> {
                 refresh_callback: None,
                 animation_keys: Vec::new(),
                 previous_structural_hash: None,
+                previous_topology_hash: None,
                 base_classes: Vec::new(),
                 base_element_id: None,
             })),
@@ -3112,24 +3180,38 @@ impl<S: StateTransitions> Stateful<S> {
         let style_changed = temp_div.layout_style() != base_style_clone.as_ref();
 
         if !children.is_empty() || style_changed {
-            // Compute structural hash (excludes visual-only props like transform, opacity, bg).
-            // If structure hasn't changed, use fast visual-only update path.
-            let new_structural_hash = crate::diff::DivHash::compute_structural_tree(
-                &temp_div as &dyn crate::div::ElementBuilder,
-            );
-            let prev_hash = shared.lock().unwrap().previous_structural_hash;
+            // Three-tier discrimination via paired hashes:
+            //   topology changed         → full structural rebuild
+            //   structural changed only  → patch taffy `Style` in place
+            //   neither                  → visual-only prop update
+            //
+            // The middle path is what keeps spring-driven `.w()` / `.h()` /
+            // `.left()` cheap. Without it, every spring tick rebuilds the
+            // entire Stateful subtree just to change a width by half a
+            // pixel — see `RebuildKind` for the full rationale.
+            let element_ref = &temp_div as &dyn crate::div::ElementBuilder;
+            let new_topology_hash = crate::diff::DivHash::compute_topology_tree(element_ref);
+            let new_structural_hash = crate::diff::DivHash::compute_structural_tree(element_ref);
 
-            let structure_changed = prev_hash != Some(new_structural_hash);
+            let (prev_topology, prev_structural) = {
+                let g = shared.lock().unwrap();
+                (g.previous_topology_hash, g.previous_structural_hash)
+            };
 
-            // Store new hash for next comparison
-            shared.lock().unwrap().previous_structural_hash = Some(new_structural_hash);
+            let topology_changed = prev_topology != Some(new_topology_hash);
+            let structural_changed = prev_structural != Some(new_structural_hash);
 
-            if structure_changed {
-                // Full structural rebuild (children added/removed/reordered, or layout changed)
+            {
+                let mut g = shared.lock().unwrap();
+                g.previous_topology_hash = Some(new_topology_hash);
+                g.previous_structural_hash = Some(new_structural_hash);
+            }
+
+            if topology_changed {
                 queue_subtree_rebuild(cached_node_id, temp_div);
+            } else if structural_changed {
+                queue_layout_prop_subtree_rebuild(cached_node_id, temp_div);
             } else {
-                // Visual-only change (transform, opacity, bg, etc.) — skip expensive rebuild.
-                // Just update render props of existing children in-place.
                 queue_visual_subtree_rebuild(cached_node_id, temp_div);
             }
         }
@@ -3218,11 +3300,16 @@ impl<S: StateTransitions> Stateful<S> {
     }
 
     fn update_previous_structural_hash(&self) {
-        let structural_hash = {
+        let (structural_hash, topology_hash) = {
             let inner = self.inner.borrow();
-            crate::diff::DivHash::compute_structural_tree(&*inner)
+            (
+                crate::diff::DivHash::compute_structural_tree(&*inner),
+                crate::diff::DivHash::compute_topology_tree(&*inner),
+            )
         };
-        self.shared_state.lock().unwrap().previous_structural_hash = Some(structural_hash);
+        let mut g = self.shared_state.lock().unwrap();
+        g.previous_structural_hash = Some(structural_hash);
+        g.previous_topology_hash = Some(topology_hash);
     }
 
     pub fn id(self, id: &str) -> Self {

@@ -94,6 +94,29 @@ impl DivHash {
         hash_element_structural(element, &mut hasher);
         DivHash(hasher.finish())
     }
+
+    /// Compute a hash of the element's *topology* — element type, identity,
+    /// content (text / SVG / image source), and the same recursive shape of
+    /// the child tree, but **excluding** the taffy layout style.
+    ///
+    /// Pair with [`Self::compute_structural_tree`] to discriminate three
+    /// stateful-refresh paths:
+    /// - topology matches AND structural matches → visual-only update
+    ///   (just re-apply render props in place)
+    /// - topology matches AND structural differs → layout-prop update
+    ///   (patch taffy `Style` on existing nodes + recompute layout; no
+    ///   children teardown)
+    /// - topology differs → full structural rebuild
+    ///
+    /// The middle path is what makes spring-animated `.w()` / `.h()` /
+    /// `.left()` cheap. Without it, every spring tick tears down and
+    /// reconstructs the entire Stateful subtree because the layout
+    /// dimensions flow through the structural hash.
+    pub fn compute_topology_tree(element: &dyn ElementBuilder) -> Self {
+        let mut hasher = DefaultHasher::new();
+        hash_element_topology(element, &mut hasher);
+        DivHash(hasher.finish())
+    }
 }
 
 // =============================================================================
@@ -745,6 +768,42 @@ fn hash_element_structural(element: &dyn ElementBuilder, hasher: &mut impl Hashe
     children.len().hash(hasher);
     for child in children {
         hash_element_structural(child.as_ref(), hasher);
+    }
+}
+
+/// Like [`hash_element_structural`] but skips `hash_style` so that
+/// animated layout dimensions don't bump the hash. Element identity,
+/// element type, text / SVG / image content, and the child tree's
+/// own topology still participate, so anything that would actually
+/// require rebuilding nodes (a child added, a text content change,
+/// a new element_id) still trips the hash.
+fn hash_element_topology(element: &dyn ElementBuilder, hasher: &mut impl Hasher) {
+    std::mem::discriminant(&element.element_type_id()).hash(hasher);
+
+    if let Some(id) = element.element_id() {
+        1u8.hash(hasher);
+        id.hash(hasher);
+    } else {
+        0u8.hash(hasher);
+    }
+
+    if let Some(text_info) = element.text_render_info() {
+        text_info.content.hash(hasher);
+        hash_f32(text_info.font_size, hasher);
+    }
+
+    if let Some(svg_info) = element.svg_render_info() {
+        svg_info.source.hash(hasher);
+    }
+
+    if let Some(image_info) = element.image_render_info() {
+        image_info.source.hash(hasher);
+    }
+
+    let children = element.children_builders();
+    children.len().hash(hasher);
+    for child in children {
+        hash_element_topology(child.as_ref(), hasher);
     }
 }
 
@@ -1438,6 +1497,48 @@ mod tests {
             DivHash::compute_structural_tree(&div1),
             DivHash::compute_structural_tree(&div3),
             "Text content changes must still force a structural rebuild"
+        );
+    }
+
+    #[test]
+    fn topology_hash_ignores_layout_dimensions() {
+        // The whole point of the topology hash: spring-animated `.w()`
+        // / `.h()` / `.left()` must NOT trip it. Without this guarantee,
+        // every animation frame would full-rebuild the Stateful subtree.
+        let div1 = div().w(100.0).h(50.0).child(text("x"));
+        let div2 = div().w(200.0).h(80.0).child(text("x"));
+
+        assert_eq!(
+            DivHash::compute_topology_tree(&div1),
+            DivHash::compute_topology_tree(&div2),
+            "Width / height changes must not bump the topology hash — that's what enables the layout-prop fast path"
+        );
+        assert_ne!(
+            DivHash::compute_structural_tree(&div1),
+            DivHash::compute_structural_tree(&div2),
+            "Width / height changes still bump the structural hash, so we know to recompute layout"
+        );
+    }
+
+    #[test]
+    fn topology_hash_catches_real_structural_changes() {
+        // Adding/removing a child, changing text content, swapping
+        // element type — all must trip the topology hash so the
+        // layout-prop fast path doesn't try to patch a tree whose
+        // shape actually changed.
+        let one_child = div().w(100.0).child(text("x"));
+        let two_children = div().w(100.0).child(text("x")).child(text("y"));
+        let different_text = div().w(100.0).child(text("z"));
+
+        assert_ne!(
+            DivHash::compute_topology_tree(&one_child),
+            DivHash::compute_topology_tree(&two_children),
+            "Adding a child must bump the topology hash"
+        );
+        assert_ne!(
+            DivHash::compute_topology_tree(&one_child),
+            DivHash::compute_topology_tree(&different_text),
+            "Text content change must bump the topology hash"
         );
     }
 }

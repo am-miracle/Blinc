@@ -263,10 +263,17 @@ impl RenderTree {
         let mut needs_layout = false;
         let mut stale_rebuilds = 0usize;
         let mut superseded_rebuilds = 0usize;
+        // Only true structural rebuilds (children added/removed/reordered)
+        // can supersede other pending entries. Layout-prop rebuilds patch
+        // taffy styles on existing children without tearing them down, so
+        // a descendant's prop update on the same frame should still apply.
         let structural_rebuilds_by_node: std::collections::HashMap<LayoutNodeId, usize> = pending
             .iter()
             .enumerate()
-            .filter_map(|(idx, rebuild)| rebuild.needs_layout.then_some((rebuild.parent_id, idx)))
+            .filter_map(|(idx, rebuild)| {
+                matches!(rebuild.kind, crate::stateful::RebuildKind::Structural)
+                    .then_some((rebuild.parent_id, idx))
+            })
             .collect();
 
         for (idx, rebuild) in pending.into_iter().enumerate() {
@@ -312,11 +319,11 @@ impl RenderTree {
             }
 
             tracing::debug!(
-                "Subtree rebuild: processing node {:?}, needs_layout={}",
+                "Subtree rebuild: processing node {:?}, kind={:?}",
                 rebuild.parent_id,
-                rebuild.needs_layout
+                rebuild.kind
             );
-            if rebuild.needs_layout {
+            if matches!(rebuild.kind, crate::stateful::RebuildKind::Structural) {
                 // Full structural rebuild - remove old children and build new ones
                 needs_layout = true;
 
@@ -418,6 +425,15 @@ impl RenderTree {
                 // runs at full tree creation. Without this, new children from
                 // stateful rebuilds lose CSS class styles (border-radius, etc.).
                 self.apply_stylesheet_base_styles_for_subtree(rebuild.parent_id);
+            } else if matches!(rebuild.kind, crate::stateful::RebuildKind::LayoutProps) {
+                // Layout-prop update — patch taffy `Style` + render
+                // props on every existing layout node, then mark the
+                // frame dirty so taffy recomputes layout. No children
+                // teardown, no stable-id reminting, no handler re-
+                // registration. This is the path spring-animated
+                // `.w()` / `.h()` / `.left()` take.
+                needs_layout = true;
+                self.update_subtree_layout_recursive(rebuild.parent_id, &rebuild.new_child);
             } else {
                 // Visual-only update - just update render props of existing children
                 // Don't remove/rebuild, just walk the tree and update props
@@ -451,6 +467,82 @@ impl RenderTree {
         new_element: &crate::div::Div,
     ) {
         self.update_subtree_props_from_builder(parent_id, new_element);
+    }
+
+    /// Recursively update taffy `Style` AND render props for existing
+    /// children without rebuilding. Used by the LayoutProps rebuild
+    /// path: tree topology is unchanged, only dimensions / inset /
+    /// padding / margin shifted (typically from a spring driving a
+    /// `.w()` / `.h()` / `.left()`).
+    ///
+    /// Walks paired (existing layout node, new builder) and:
+    /// - replaces `RenderProps` (same as the Visual path)
+    /// - calls `layout_tree.set_style(node, new_builder.layout_style())`,
+    ///   which marks the taffy node dirty so the next `compute_layout`
+    ///   reflows just this subtree.
+    fn update_subtree_layout_recursive(
+        &mut self,
+        parent_id: LayoutNodeId,
+        new_element: &crate::div::Div,
+    ) {
+        // Update the parent node's own layout style + render props
+        // FIRST (the existing `update_subtree_props_from_builder` only
+        // walks children, not the parent). Without this, animations
+        // bound to the Stateful's own dimensions wouldn't take effect.
+        if let Some(style) = new_element.layout_style() {
+            self.layout_tree.set_style(parent_id, style.clone());
+        }
+        if let Some(render_node) = self.render_nodes.get_mut(&parent_id) {
+            let mut new_props = new_element.render_props();
+            new_props.node_id = Some(parent_id);
+            new_props.motion = render_node.props.motion.clone();
+            render_node.props = new_props;
+        }
+        self.update_subtree_layout_from_builder(parent_id, new_element);
+    }
+
+    fn update_subtree_layout_from_builder(
+        &mut self,
+        parent_id: LayoutNodeId,
+        new_element: &dyn crate::div::ElementBuilder,
+    ) {
+        let existing_children = self.layout_tree.children(parent_id);
+        let new_children = new_element.children_builders();
+
+        for (i, child_id) in existing_children.iter().enumerate() {
+            if let Some(new_child) = new_children.get(i) {
+                // Patch taffy style first so the next compute_layout
+                // sees the new dimensions.
+                if let Some(style) = new_child.layout_style() {
+                    self.layout_tree.set_style(*child_id, style.clone());
+                }
+
+                // Full replace of render props — preserve node_id and motion.
+                let mut new_props = new_child.render_props();
+                if let Some(render_node) = self.render_nodes.get_mut(child_id) {
+                    new_props.node_id = render_node.props.node_id;
+                    new_props.motion = render_node.props.motion.clone();
+                    render_node.props = new_props;
+                    render_node.element_type =
+                        Self::determine_element_type_boxed(new_child.as_ref());
+                }
+
+                // Re-register event handlers (closures may have captured
+                // new state on this refresh).
+                if let Some(handlers) = new_child.event_handlers() {
+                    let stable_id = self.stable_id_or_warn(*child_id);
+                    self.handler_registry.register(stable_id, handlers.clone());
+                }
+
+                if !new_child.children_builders().is_empty() {
+                    self.update_subtree_layout_from_builder(*child_id, new_child.as_ref());
+                }
+            }
+        }
+
+        // Re-apply CSS base styles since the full-replace cleared them
+        // (mirrors the visual path's final step).
+        self.apply_stylesheet_base_styles_for_subtree(parent_id);
     }
 
     /// Update subtree props from a generic ElementBuilder (for recursion)
