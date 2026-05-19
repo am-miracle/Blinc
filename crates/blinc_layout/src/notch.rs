@@ -2340,30 +2340,29 @@ impl std::fmt::Debug for NotchRenderData {
 // ElementBuilder Implementation
 // =============================================================================
 
-impl ElementBuilder for Notch {
-    fn build(&self, tree: &mut LayoutTree) -> LayoutNodeId {
-        // Clone style and adjust padding for center scoops
-        // Scoops curve INWARD, so we need to reserve that space for children
-        let mut style = self.style.clone();
-
-        // Add top padding for top center scoop
+impl Notch {
+    /// Apply the same style adjustments `build()` installs on taffy:
+    /// reserve scoop_depth of padding on whichever edge has a center
+    /// scoop, so child layout doesn't render under the carved-out
+    /// region. Pure function — shared by [`Notch::build`] and
+    /// [`<Notch as ElementBuilder>::effective_layout_style`] so the
+    /// fast layout-prop rebuild path reflows with the same style
+    /// taffy got at original build time.
+    fn apply_scoop_padding(&self, style: &mut Style) {
         if let Some(scoop) = &self.top_center_scoop {
             let current_top = match style.padding.top {
                 LengthPercentage::Length(v) => v,
-                LengthPercentage::Percent(_) => 0.0, // Can't add to percentage
+                LengthPercentage::Percent(_) => 0.0,
             };
             style.padding.top = LengthPercentage::Length(current_top + scoop.depth);
         }
-
-        // Add bottom padding for bottom center scoop
         if let Some(scoop) = &self.bottom_center_scoop {
             let current_bottom = match style.padding.bottom {
                 LengthPercentage::Length(v) => v,
-                LengthPercentage::Percent(_) => 0.0, // Can't add to percentage
+                LengthPercentage::Percent(_) => 0.0,
             };
             style.padding.bottom = LengthPercentage::Length(current_bottom + scoop.depth);
         }
-
         // NOTE: concave corner padding is intentionally NOT auto-added
         // here. Existing callers (e.g. the notch_demo dropdown) already
         // set explicit `.pt(top_radius + …)` padding on notches with
@@ -2371,6 +2370,14 @@ impl ElementBuilder for Notch {
         // inset. Callers that want the inner-body inset reserved for
         // children should set padding manually (or wrap their children
         // in a div sized to the inner body).
+    }
+}
+
+impl ElementBuilder for Notch {
+    fn build(&self, tree: &mut LayoutTree) -> LayoutNodeId {
+        let mut style = self.style.clone();
+        self.apply_scoop_padding(&mut style);
+
         let node = tree.create_node(style);
 
         // Build and add children
@@ -2380,6 +2387,12 @@ impl ElementBuilder for Notch {
         }
 
         node
+    }
+
+    fn effective_layout_style(&self) -> Option<Style> {
+        let mut style = self.style.clone();
+        self.apply_scoop_padding(&mut style);
+        Some(style)
     }
 
     fn render_props(&self) -> RenderProps {

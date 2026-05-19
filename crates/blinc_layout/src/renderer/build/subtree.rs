@@ -489,8 +489,15 @@ impl RenderTree {
         // FIRST (the existing `update_subtree_props_from_builder` only
         // walks children, not the parent). Without this, animations
         // bound to the Stateful's own dimensions wouldn't take effect.
-        if let Some(style) = new_element.layout_style() {
-            self.layout_tree.set_style(parent_id, style.clone());
+        //
+        // Use `effective_layout_style` rather than `layout_style` so
+        // widget-internal style adjustments (e.g. Notch reserving
+        // scoop padding) are preserved across the patch. The raw
+        // `layout_style()` value doesn't include those adjustments and
+        // patching with it would silently strip the padding taffy was
+        // given at original build time.
+        if let Some(style) = new_element.effective_layout_style() {
+            self.layout_tree.set_style(parent_id, style);
         }
         if let Some(render_node) = self.render_nodes.get_mut(&parent_id) {
             let mut new_props = new_element.render_props();
@@ -512,9 +519,12 @@ impl RenderTree {
         for (i, child_id) in existing_children.iter().enumerate() {
             if let Some(new_child) = new_children.get(i) {
                 // Patch taffy style first so the next compute_layout
-                // sees the new dimensions.
-                if let Some(style) = new_child.layout_style() {
-                    self.layout_tree.set_style(*child_id, style.clone());
+                // sees the new dimensions. `effective_layout_style`
+                // preserves widget-internal style adjustments (Notch
+                // scoop padding, etc.) — see the parent-node patch
+                // above for the rationale.
+                if let Some(style) = new_child.effective_layout_style() {
+                    self.layout_tree.set_style(*child_id, style);
                 }
 
                 // Full replace of render props — preserve node_id and motion.

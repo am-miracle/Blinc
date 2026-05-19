@@ -3898,6 +3898,27 @@ pub trait ElementBuilder {
         false
     }
 
+    /// The taffy `Style` that this element actually installs on its
+    /// layout node — i.e. the style after any widget-internal
+    /// adjustments `build()` would apply. The default delegates to
+    /// `layout_style().cloned()`, which is correct for elements
+    /// whose `build()` just forwards `self.style` verbatim. Override
+    /// when `build()` mutates the style before handing it to taffy
+    /// (e.g. `Notch::build` adds `scoop.depth` to padding so children
+    /// don't render over the carved-out region).
+    ///
+    /// The layout-prop fast path in `process_pending_subtree_rebuilds`
+    /// reads this via `layout_tree.set_style(node, effective)` to
+    /// reflow a Stateful subtree without rebuilding it. If the
+    /// element's effective style diverges from `layout_style()`, the
+    /// fast path patches the wrong style onto taffy and the layout
+    /// silently shifts (Notch's bottom-dock icons jumping to y=0 was
+    /// exactly this — the scoop padding was missing from the patched
+    /// style).
+    fn effective_layout_style(&self) -> Option<taffy::Style> {
+        self.layout_style().cloned()
+    }
+
     /// Get event handlers for this element
     ///
     /// Returns a reference to the element's event handlers for registration
