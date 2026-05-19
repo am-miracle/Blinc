@@ -579,11 +579,25 @@ impl RenderTree {
         // scrolling past them — 30 % CPU at idle.
         if intersects_viewport {
             let canvas_paints = matches!(render_node.element_type, ElementType::Canvas(_));
+            // Static canvases (e.g. notch) don't need a per-frame
+            // overlay re-paint — their bg primitives land in the
+            // static cache once and stay valid until layout
+            // changes invalidate the cache. Treat them as
+            // not-painting so the compositor fast-path gate
+            // (`!had_canvas_painted`) can still engage.
+            let canvas_paints_dynamic = if canvas_paints {
+                matches!(
+                    &render_node.element_type,
+                    ElementType::Canvas(canvas_data) if !canvas_data.is_static
+                )
+            } else {
+                false
+            };
             // Record canvas presence regardless of whether
             // `visible_anim_active` is already set — the fast path
             // needs to know about any in-viewport canvas, not just
             // the first one the walker sees.
-            if canvas_paints {
+            if canvas_paints_dynamic {
                 self.had_canvas_painted.set(true);
             }
             if !self.visible_anim_active.get() {
@@ -600,7 +614,7 @@ impl RenderTree {
                     } else {
                         render_state.is_motion_active(node)
                     };
-                if canvas_paints || has_active_binding || has_active_motion {
+                if canvas_paints_dynamic || has_active_binding || has_active_motion {
                     self.visible_anim_active.set(true);
                 }
             }
@@ -1502,7 +1516,7 @@ impl RenderTree {
                     // viewport stays hidden.
                     let saved_ancestor_clip = ctx.current_clip_aabb();
                     let canvas_start = ctx.bg_primitive_count();
-                    let skip_drawing = self.skip_canvas_drawing.get();
+                    let skip_drawing_flag = self.skip_canvas_drawing.get();
 
                     // The layer compositor uses `skip_canvas_drawing`
                     // to keep the cached static texture transparent
@@ -1512,6 +1526,14 @@ impl RenderTree {
                     // record the paint state for the overlay pass)
                     // but skip the actual `render_fn` invocation, so
                     // no primitives land in the static batch.
+                    //
+                    // Static canvases (e.g. notch) take the opposite
+                    // route: they ALWAYS emit into the static cache
+                    // and never go through the overlay. Their output
+                    // is deterministic in bounds + closure captures,
+                    // so the cache-only path matches reality and
+                    // doesn't overdraw children layered on top.
+                    let skip_drawing = skip_drawing_flag && !canvas_data.is_static;
                     if !skip_drawing {
                         render_fn(ctx, canvas_bounds);
                     }
@@ -1537,7 +1559,19 @@ impl RenderTree {
                     // bookkeeping marker.
                     let layer_matches = effective_layer == target_layer;
                     let has_emission = canvas_end > canvas_start;
-                    if layer_matches && (has_emission || skip_drawing) {
+                    // Static canvases (notch) emit to the static
+                    // cache once and stay valid until a layout
+                    // change forces a full repaint. Skipping the
+                    // overlay record means `composite_frame` won't
+                    // re-invoke `render_fn` on top of the surface
+                    // each frame — which would otherwise overdraw
+                    // any children the walker layered on top of
+                    // the canvas in the static cache. The matching
+                    // `DynamicRegion` insert below is also skipped
+                    // so the dynamic-batch path doesn't replay the
+                    // static canvas every frame either.
+                    let is_static_canvas = canvas_data.is_static;
+                    if layer_matches && (has_emission || skip_drawing) && !is_static_canvas {
                         self.canvas_paint_records.borrow_mut().insert(
                             node,
                             super::super::CanvasPaintRecord {

@@ -322,6 +322,12 @@ pub struct Notch {
     // Interaction
     pub(crate) event_handlers: EventHandlers,
     pub(crate) element_id: Option<String>,
+    /// When true, the notch's hit box is transparent to pointer
+    /// events — hit-test passes through to whatever sits beneath it
+    /// in z-order. Use when the notch is a decorative overlay (e.g.
+    /// a dropdown panel positioned over a menu bar) whose bbox would
+    /// otherwise block hovers on the items below.
+    pub(crate) pointer_events_none: bool,
 
     pub inner: Div,
 }
@@ -350,6 +356,7 @@ impl Notch {
             render_layer: RenderLayer::default(),
             event_handlers: EventHandlers::default(),
             element_id: None,
+            pointer_events_none: false,
             inner: Div::new(),
         }
     }
@@ -1276,6 +1283,16 @@ impl Notch {
     pub fn glass(mut self) -> Self {
         self.material = Some(Material::Glass(Default::default()));
         self.render_layer = RenderLayer::Glass;
+        self
+    }
+
+    /// Make the notch transparent to pointer events. Hit-test passes
+    /// through to whatever sits beneath it in z-order. Useful when
+    /// the notch is a decorative overlay (e.g. a dropdown panel over
+    /// a menu bar) whose bbox would otherwise block hovers on the
+    /// items underneath.
+    pub fn pointer_events_none(mut self) -> Self {
+        self.pointer_events_none = true;
         self
     }
 
@@ -2402,6 +2419,7 @@ impl ElementBuilder for Notch {
                 shadow: None, // Rendered via canvas
                 transform: None,
                 opacity: self.opacity,
+                pointer_events_none: self.pointer_events_none,
                 ..Default::default()
             }
         } else {
@@ -2417,9 +2435,25 @@ impl ElementBuilder for Notch {
                 shadow: self.shadow,
                 transform: None,
                 opacity: self.opacity,
+                pointer_events_none: self.pointer_events_none,
                 ..Default::default()
             }
         }
+    }
+
+    fn is_static_canvas(&self) -> bool {
+        // The notch's canvas closure captures all shape parameters
+        // (corner radii, scoop / bulge / cut / peak configs, brush,
+        // shadow, opacity) at construction. The only runtime input
+        // is `bounds.width / height` from layout, and any layout
+        // change forces a full repaint that refreshes the static
+        // cache. So the canvas overlay's per-frame re-invocation of
+        // `render_fn` produces the same output as the static-cache
+        // entry — except it overdraws any children the walker
+        // layered on top. Opting out of the overlay keeps the
+        // children visible and lets the compositor fast-path engage
+        // on frames where the only canvases are notches.
+        true
     }
 
     fn children_builders(&self) -> &[Box<dyn ElementBuilder>] {

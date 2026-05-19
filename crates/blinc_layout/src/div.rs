@@ -3882,6 +3882,22 @@ pub trait ElementBuilder {
         None
     }
 
+    /// Whether this canvas's `render_fn` produces deterministic output
+    /// for a given bounds + closure captures, with no per-frame state
+    /// (animations, timers, live signal reads). Static canvases get
+    /// emitted to the bg batch normally but skip the per-frame
+    /// overlay re-paint that would otherwise overdraw any children
+    /// the walker layered on top of them in the static cache. They
+    /// also don't flip the `had_canvas_painted` gate, so the
+    /// compositor fast path can still engage on frames where the
+    /// only canvases are static.
+    ///
+    /// Default `false` — applies only when `element_type_id` is
+    /// [`ElementTypeId::Canvas`]; ignored otherwise.
+    fn is_static_canvas(&self) -> bool {
+        false
+    }
+
     /// Get event handlers for this element
     ///
     /// Returns a reference to the element's event handlers for registration

@@ -265,12 +265,20 @@ impl ElementBuilder for Canvas {
 pub struct CanvasData {
     /// The render callback
     pub render_fn: Option<CanvasRenderFn>,
+    /// See [`ElementBuilder::is_static_canvas`]. When `true`, the
+    /// walker emits the canvas's primitives to the bg batch but
+    /// skips the `CanvasPaintRecord` insert so the compositor's
+    /// per-frame canvas-overlay pass won't re-draw the canvas on
+    /// top of any children. Also short-circuits the
+    /// `had_canvas_painted` flag so the fast path can engage.
+    pub is_static: bool,
 }
 
 impl std::fmt::Debug for CanvasData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CanvasData")
             .field("has_render_fn", &self.render_fn.is_some())
+            .field("is_static", &self.is_static)
             .finish()
     }
 }

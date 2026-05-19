@@ -84,6 +84,8 @@ impl MenuItem {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
+    use blinc_platform::AnimationFps;
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -97,6 +99,8 @@ fn main() -> Result<()> {
         height: 600,
         resizable: true,
         fullscreen: false,
+        animation_fps: AnimationFps::Fixed(30),
+        max_frame_latency: 2,
         ..Default::default()
     };
 
@@ -408,6 +412,13 @@ fn notched_dropdown(
             color: Color::BLACK.with_alpha(0.12),
         })
         .opacity(opacity)
+        // The dropdown's bbox (340 px wide, centered on the active
+        // icon) overlaps neighbour menu-bar icons. Without this,
+        // hit-test returns the dropdown for any cursor inside that
+        // box and the underlying icons' `hover_enter` never fires —
+        // hovering across the bar would only trigger every other
+        // icon.
+        .pointer_events_none()
         .absolute()
         .top(MENU_BAR_HEIGHT - top_radius)
         .bottom(12.0)
