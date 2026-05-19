@@ -141,6 +141,22 @@ struct SchedulerInner {
     tick_callbacks: SlotMap<TickCallbackId, TickCallback>,
     last_frame: Instant,
     target_fps: u32,
+    /// EMA-smoothed `dt` used for spring / keyframe / timeline
+    /// integration. `None` until the second tick.
+    ///
+    /// The bg thread targets `target_fps` (default = display refresh)
+    /// via `wait_timeout`, but `wait_timeout` on Linux futex /
+    /// Wayland / X11 has more wake-up jitter than macOS CFRunLoop —
+    /// a steady "every 16.67 ms" target can land at 14 ms / 22 ms /
+    /// 16 ms / 14 ms intervals under compositor load. Spring physics
+    /// stays mathematically correct under raw dt (RK4 substepping at
+    /// 8 ms keeps the integrator stable), but the *visual* sampling
+    /// is uneven — motion-bound elements appear to vibrate even
+    /// though the underlying trajectory is smooth. EMA blending
+    /// damps single-tick outliers while staying within ~1 % of true
+    /// elapsed wall time over the long run (verified in
+    /// `dt_smoothing_tracks_wall_clock`).
+    smoothed_dt: Option<f32>,
     /// Springs whose `value()` moved by ≥ `DIRTY_EPSILON` during the
     /// most recent tick, or whose target was just changed. Drained by
     /// the windowed runner each frame via
@@ -188,6 +204,33 @@ const DIRTY_EPSILON: f32 = 0.01;
 /// pacing (`animation_fps_cap = 30`) doesn't truncate normal
 /// integration.
 const MAX_TICK_DT: f32 = 0.032;
+
+/// EMA blend factor for `dt` smoothing. `smoothed = α·raw + (1-α)·prev`.
+///
+/// `α = 0.6` damps a single 25 ms outlier at 60 Hz target (16.67 ms) to
+/// ~21 ms on the spike frame and ~18 ms / ~17 ms on the two ticks after,
+/// instead of letting the raw 25 ms reach the spring as-is. Total
+/// integrated time tracks wall clock within ~1 % over the long run.
+///
+/// Lower α (more smoothing) under-shoots true elapsed time more
+/// aggressively, which makes long animations appear to drift behind
+/// wall clock; higher α (less smoothing) lets more compositor jitter
+/// through. 0.6 is the empirical compromise.
+const DT_SMOOTH_ALPHA: f32 = 0.6;
+
+/// Apply EMA smoothing to a raw inter-tick `dt`, updating `prev` in
+/// place. Returns the smoothed value to use for stepping.
+///
+/// First call after `prev = None` passes the raw value through (no
+/// historical sample to blend with) and primes `prev`.
+fn smooth_dt(raw_dt: f32, prev: &mut Option<f32>) -> f32 {
+    let smoothed = match *prev {
+        Some(p) => DT_SMOOTH_ALPHA * raw_dt + (1.0 - DT_SMOOTH_ALPHA) * p,
+        None => raw_dt,
+    };
+    *prev = Some(smoothed);
+    smoothed
+}
 
 /// Callback type for waking up the main thread from the animation thread.
 ///
@@ -274,6 +317,7 @@ impl AnimationScheduler {
                 last_frame: Instant::now(),
                 target_fps: 120,
                 dirty_springs: std::collections::HashSet::new(),
+                smoothed_dt: None,
             })),
             stop_flag: Arc::new(AtomicBool::new(false)),
             needs_redraw: Arc::new(AtomicBool::new(false)),
@@ -393,9 +437,11 @@ impl AnimationScheduler {
             // intervals) makes the animation pause-and-resume cleanly
             // instead of fast-forwarding through real time the user
             // didn't see.
-            let dt = (now - inner.last_frame).as_secs_f32().min(MAX_TICK_DT);
-            let dt_ms = dt * 1000.0;
+            let raw_dt = (now - inner.last_frame).as_secs_f32().min(MAX_TICK_DT);
             inner.last_frame = now;
+            // EMA-smooth dt before stepping. See [`smooth_dt`] for why.
+            let dt = smooth_dt(raw_dt, &mut inner.smoothed_dt);
+            let dt_ms = dt * 1000.0;
 
             // Update all springs. A spring whose `value()` actually
             // moves this tick is marked dirty for the fast-path
@@ -825,9 +871,11 @@ impl AnimationScheduler {
             // Same per-tick dt cap as `tick_frame_inner` — prevents
             // spring/keyframe/timeline teleports on slow frames.
             // See `MAX_TICK_DT` doc above.
-            let dt = (now - inner.last_frame).as_secs_f32().min(MAX_TICK_DT);
-            let dt_ms = dt * 1000.0;
+            let raw_dt = (now - inner.last_frame).as_secs_f32().min(MAX_TICK_DT);
             inner.last_frame = now;
+            // EMA-smooth dt before stepping. See [`smooth_dt`] for why.
+            let dt = smooth_dt(raw_dt, &mut inner.smoothed_dt);
+            let dt_ms = dt * 1000.0;
 
             // Step springs and record those whose value actually
             // moved (≥ DIRTY_EPSILON) into `dirty_springs`. Mirrors
@@ -2649,5 +2697,60 @@ mod tests {
         assert_eq!(scheduler.spring_count(), 1);
         assert_eq!(scheduler.keyframe_count(), 1);
         assert_eq!(scheduler.timeline_count(), 1);
+    }
+
+    #[test]
+    fn dt_smoothing_damps_outliers() {
+        // A 25 ms spike at 16.67 ms steady state must be partially
+        // smoothed (not passed through raw) but not over-smoothed
+        // either.
+        let mut prev = Some(0.01667);
+        let smoothed = smooth_dt(0.025, &mut prev);
+        assert!(
+            smoothed < 0.025 && smoothed > 0.01667,
+            "outlier should be damped toward the running average, got {smoothed}"
+        );
+        // EMA weight: 0.6·0.025 + 0.4·0.01667 = 0.0217 ≈ 21.7 ms
+        assert!((smoothed - 0.02167).abs() < 1e-4);
+    }
+
+    #[test]
+    fn dt_smoothing_first_tick_passes_through() {
+        // No history → no smoothing, just record.
+        let mut prev = None;
+        let smoothed = smooth_dt(0.0167, &mut prev);
+        assert_eq!(smoothed, 0.0167);
+        assert_eq!(prev, Some(0.0167));
+    }
+
+    #[test]
+    fn dt_smoothing_tracks_wall_clock() {
+        // EMA must not drift more than ~1 % from true elapsed time
+        // over a long run, otherwise spring animations would
+        // visibly fall behind wall clock. Simulate 600 ticks (10 s
+        // at 60 Hz) with a noisy stream and check the integrated
+        // smoothed dt is within 1 % of the raw sum.
+        let mut prev: Option<f32> = None;
+        let raw_dts: Vec<f32> = (0..600)
+            .map(|i| {
+                // Jittery 16.67 ms target: spike every 7 ticks to 24
+                // ms, otherwise normal jitter ±1 ms.
+                if i % 7 == 0 {
+                    0.024
+                } else if i % 2 == 0 {
+                    0.0157
+                } else {
+                    0.0176
+                }
+            })
+            .collect();
+        let raw_sum: f32 = raw_dts.iter().sum();
+        let smoothed_sum: f32 = raw_dts.iter().map(|&raw| smooth_dt(raw, &mut prev)).sum();
+        let drift = (smoothed_sum - raw_sum).abs() / raw_sum;
+        assert!(
+            drift < 0.01,
+            "smoothed integration drifted from wall clock by {:.3}% (raw={raw_sum}, smoothed={smoothed_sum})",
+            drift * 100.0
+        );
     }
 }
