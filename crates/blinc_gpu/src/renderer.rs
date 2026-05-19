@@ -1844,6 +1844,10 @@ impl GpuRenderer {
             (800, 600),
         )?;
 
+        // Force driver to compile deferred Vulkan pipelines now,
+        // before the first surface present. No-op on macOS/Windows.
+        renderer.pre_warm_pipelines();
+
         Ok((renderer, surface))
     }
 
@@ -2049,6 +2053,122 @@ impl GpuRenderer {
             (800, 600),
         )
     }
+
+    /// Pre-compile the eagerly-created render pipelines by issuing
+    /// dummy draws against a throwaway texture.
+    ///
+    /// Vulkan drivers defer shader compilation to first-draw, so the
+    /// first frame in a Linux app pays the cost of compiling 8+ SDF
+    /// shaders + path/clear_quad sequentially on the main thread. On
+    /// 8GB-RAM laptops the user reported this as "huge delay before
+    /// the initial route renders". Pre-warming pushes that cost into
+    /// renderer construction (before the window is visible), trading
+    /// a slightly slower `with_surface` for a snappy first paint.
+    ///
+    /// Only pipelines whose required bind groups exist at this point
+    /// are pre-warmed (SDF family + path + clear_quad). text_overlay,
+    /// composite_overlay, and layer_composite need per-call bind
+    /// groups created at first use, so they're left to JIT-compile on
+    /// the first real frame — those are individually cheap. MSAA
+    /// variants are created lazily for the active sample_count and
+    /// aren't pre-warmed here either.
+    ///
+    /// Opt out with `BLINC_PIPELINE_PREWARM=0`. No-op on non-Linux
+    /// (Metal/DX12 don't defer compilation this way).
+    #[cfg(target_os = "linux")]
+    fn pre_warm_pipelines(&self) {
+        if std::env::var("BLINC_PIPELINE_PREWARM").as_deref() == Ok("0") {
+            tracing::debug!("Pipeline pre-warm disabled via BLINC_PIPELINE_PREWARM=0");
+            return;
+        }
+
+        let start = std::time::Instant::now();
+
+        let throwaway = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Pipeline Pre-Warm Throwaway"),
+            size: wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.texture_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = throwaway.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Pipeline Pre-Warm Encoder"),
+            });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Pipeline Pre-Warm Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Discard,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // clear_quad — no bind group required.
+            pass.set_pipeline(&self.pipelines.clear_quad);
+            pass.draw(0..3, 0..1);
+
+            // SDF family shares `bind_groups.sdf` at slot 0.
+            pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
+            for sdf_pipeline in [
+                &self.pipelines.sdf_core,
+                &self.pipelines.sdf_shadow,
+                &self.pipelines.sdf_3d,
+                &self.pipelines.sdf_notch,
+                &self.pipelines.sdf_core_overlay,
+                &self.pipelines.sdf_shadow_overlay,
+                &self.pipelines.sdf_3d_overlay,
+                &self.pipelines.sdf_notch_overlay,
+            ] {
+                pass.set_pipeline(sdf_pipeline);
+                pass.draw(0..6, 0..1);
+            }
+
+            // Path family shares `bind_groups.path` at slot 0.
+            pass.set_bind_group(0, &self.bind_groups.path, &[]);
+            for path_pipeline in [&self.pipelines.path, &self.pipelines.path_overlay] {
+                pass.set_pipeline(path_pipeline);
+                pass.draw(0..3, 0..1);
+            }
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Block until the GPU has actually finished compiling and
+        // running these. Without this the work stays queued and the
+        // first real frame still pays the compile cost.
+        let _ = self.device.poll(wgpu::PollType::Wait);
+
+        tracing::info!(
+            "Vulkan pipeline pre-warm complete in {:.1} ms",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    /// No-op pre-warm for non-Linux targets — Metal (macOS),
+    /// DX12 (Windows), and WebGPU compile shaders eagerly at
+    /// pipeline creation, so there's nothing to warm up.
+    #[cfg(not(target_os = "linux"))]
+    fn pre_warm_pipelines(&self) {}
 
     fn create_renderer(
         instance: wgpu::Instance,
