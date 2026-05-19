@@ -1700,7 +1700,6 @@ impl RenderContext {
         // the mouse" symptom this addresses.
         let motion_bindings = tree.motion_bindings_map();
         let mut any_binding_active = false;
-        let mut damage_rects: Vec<[f32; 4]> = Vec::new();
         for (node, meta) in bindings.iter_mut() {
             let bindings_for_node = match motion_bindings.get(node) {
                 Some(b) => b,
@@ -1978,28 +1977,43 @@ impl RenderContext {
                 binding_moved = true;
             }
 
-            // Damage rect = union of the AABB before this frame's
-            // patches and the AABB after. Read both off the cached
-            // batch directly (post-patch primitives sit in
-            // `meta.primitive_range`). The union is what the
-            // compositor v2 path will re-render in the static cache:
-            // old pixels covered by the before-AABB get cleared, new
-            // pixels at the after-AABB get painted, so the static
-            // cache stays consistent with the motion-bound element's
-            // current position without invalidating the entire layer.
-            //
-            // Skip when nothing visually moved this frame — empty
-            // damage rect set lets the caller blit-only without
-            // touching the cache.
+            // Update the cached screen AABB even when we skip the
+            // damage-rect push below — `meta.last_screen_aabb` is
+            // also consumed by hit-test / scroll bookkeeping, not
+            // just damage rects.
             if binding_moved {
                 let aabb_after = bounds_union_of_range(&batch.primitives, &meta.primitive_range);
-                if let Some(rect) = union_aabbs(aabb_before, aabb_after) {
-                    damage_rects.push(rect);
-                }
                 meta.last_screen_aabb = aabb_after;
             }
+            // No damage-rect push intentionally. Motion-bound
+            // primitives live in `cached_dynamic_batch` (see the
+            // function-header comment), not `cached_bg_batch`. The
+            // static-cache pixels under a rotating spinner / a
+            // sliding switch thumb / a spring-y progress bar don't
+            // change between frames — those primitives never landed
+            // in the static cache to begin with. The dispatch step
+            // after this function (composite_frame) repaints the
+            // dynamic batch on top of the unchanged static cache.
+            //
+            // Earlier (pre-PR-#42) motion-bound primitives lived in
+            // the bg batch and the damage-rect path here was
+            // necessary to scrub their stale pixels off the static
+            // cache. After PR #42 routed motion subtrees through
+            // `push_motion_subtree`, the damage rect repaint became
+            // ~500 µs of wasted work per frame on cn_demo's three
+            // visible spinners — clearing card-background pixels and
+            // re-rendering identical ones in their place, plus the
+            // text/SVG re-dispatch chain. Dropping it is the single
+            // biggest steady-state win for motion-binding-only
+            // frames.
+            //
+            // `aabb_before` is intentionally unused now; kept
+            // computed above for readability + so a future
+            // re-introduction (if motion bindings ever route back
+            // through the bg batch) doesn't need extra plumbing.
+            let _ = aabb_before;
         }
-        self.last_binding_damage_rects = damage_rects;
+        self.last_binding_damage_rects.clear();
         // Authoritatively write `visible_anim_active` from what we
         // observed this frame. The walker resets it to `false` at the
         // top of every full paint and sets `true` only if it visits a
