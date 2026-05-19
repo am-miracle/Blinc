@@ -353,15 +353,18 @@ impl KeyframeProperties {
     /// transforming + alpha-blending a pre-rasterized texture, with
     /// no per-frame re-rasterization required.
     ///
-    /// The composite-promotable set is the four properties whose
-    /// runtime evaluation lives entirely in the GPU compositor — no
-    /// taffy recompute, no walker re-emission, no per-pixel shading
-    /// changes:
+    /// First-cut composite-promotable set:
     ///
     /// - `opacity` (alpha multiplier at composite time)
     /// - `translate_x` / `translate_y` (dest-rect translation)
     /// - `scale_x` / `scale_y` (dest-rect size)
-    /// - `rotate` (2D z-rotation around the rect centre)
+    ///
+    /// 2D `rotate` is technically composite-friendly but
+    /// `blit_tight_texture_to_target` doesn't have a `rotate_z`
+    /// path yet — promoting rotation animations today would
+    /// render them without the rotation applied. Tracked as a
+    /// follow-up; until then we keep rotation animations on the
+    /// slow path.
     ///
     /// Used by the compositor's composited-layer path: when a CSS-
     /// animated node's `current_properties` is composite-promotable,
@@ -371,9 +374,9 @@ impl KeyframeProperties {
     /// walker re-emission cost.
     ///
     /// Returns `false` if any property outside the set above is set
-    /// (3D rotation, layout sizing, colour, filter, clip, shadow, …).
-    /// Those properties require re-rasterizing the subtree on every
-    /// animation tick, so they take the slow path.
+    /// (3D rotation, layout sizing, colour, filter, clip, shadow,
+    /// 2D rotate, …). Those properties require re-rasterizing the
+    /// subtree on every animation tick, so they take the slow path.
     pub fn is_composite_promotable(&self) -> bool {
         // Out-of-scope: any field that changes shading or geometry
         // beyond a 2D affine + alpha. Inverse of the promotable set
@@ -457,6 +460,16 @@ impl KeyframeProperties {
         if touches_non_compositable {
             return false;
         }
+        // 2D rotation is provisionally OUT of the promotable set
+        // until the blit shader supports a `rotate_z` path. Without
+        // it, promoting `rotate` would render the texture without
+        // the rotation applied — visually broken. Track this in
+        // touches_non_compositable so a rotate-bearing keyframe
+        // takes the slow path even if every other property is
+        // promotable.
+        if self.rotate.is_some() {
+            return false;
+        }
         // At least one promotable property must be Some — an empty
         // properties block means "no animation tick", not "promote
         // an idle subtree".
@@ -465,7 +478,6 @@ impl KeyframeProperties {
             || self.translate_y.is_some()
             || self.scale_x.is_some()
             || self.scale_y.is_some()
-            || self.rotate.is_some()
     }
 
     /// Create properties with only opacity set
@@ -1513,13 +1525,22 @@ mod composite_promotable_tests {
     }
 
     #[test]
-    fn scale_rotate_opacity_combination_is_promotable() {
+    fn scale_opacity_combination_is_promotable() {
         let mut p = KeyframeProperties::default();
         p.scale_x = Some(1.5);
         p.scale_y = Some(1.5);
-        p.rotate = Some(45.0);
         p.opacity = Some(0.7);
         assert!(p.is_composite_promotable());
+    }
+
+    #[test]
+    fn rotate_disqualifies_pending_shader_support() {
+        // 2D rotation is provisionally NOT promotable until the
+        // blit shader gains a `rotate_z` path. Promoting today
+        // would render the texture un-rotated.
+        let mut p = KeyframeProperties::default();
+        p.rotate = Some(45.0);
+        assert!(!p.is_composite_promotable());
     }
 
     #[test]

@@ -413,6 +413,22 @@ pub struct RenderContext {
     /// place, so subsequent frames show the new positions without
     /// re-running the walker.
     cached_dynamic_batch: Option<blinc_gpu::PrimitiveBatch>,
+    /// Per-node `LayerTexture` cache for composite-promoted CSS
+    /// subtrees. The walker peels each promoted subtree's primitives
+    /// into a per-node scratch batch (see
+    /// `GpuPaintContext::push_composite_layer`); at end of paint we
+    /// rasterize each scratch batch into a tight texture and stash
+    /// it here keyed by the node's slotmap key
+    /// (`LayoutNodeId::data().as_ffi()`).
+    ///
+    /// On animation frames the per-frame composite reads these
+    /// textures by key (looked up via the matching `DynamicRegion`)
+    /// and blits each with the active CSS animation transform
+    /// applied — no walker re-entry. Textures stay resident across
+    /// frames until the subtree's intrinsic content changes (Phase
+    /// 5 dirty tracking) or the node demotes out of the dynamic
+    /// set.
+    css_composited_textures: std::collections::HashMap<u64, blinc_gpu::renderer::LayerTexture>,
     // Collected text / SVG / image elements from the most recent
     // full paint. Lives alongside `cached_bg_batch` so the
     // compositor fast path can skip `collect_render_elements_with_state`
@@ -674,6 +690,7 @@ impl RenderContext {
             clear_alpha: 1.0,
             cached_bg_batch: None,
             cached_dynamic_batch: None,
+            css_composited_textures: std::collections::HashMap::new(),
             cached_texts: None,
             cached_svgs: None,
             cached_images: None,
@@ -1139,6 +1156,129 @@ impl RenderContext {
              region re-walk emitted outside its motion-subtree gate"
         );
         out
+    }
+
+    /// Composite each promoted CSS-animated layer's texture onto the
+    /// surface with the active animation's current opacity / 2D
+    /// transform applied at composite time.
+    ///
+    /// Called after `composite_frame` blits the static cache and
+    /// dispatches the motion-binding overlay. The layer textures
+    /// were rasterized at base state (the walker skipped applying
+    /// the composite-promotable CSS properties), so the animated
+    /// values read from the css-anim store here apply directly to
+    /// `blit_tight_texture_to_target`'s `dest_pos` / `dest_size` /
+    /// `opacity` — no delta math needed.
+    ///
+    /// Skips silently for any region whose texture isn't yet in
+    /// `css_composited_textures` (first-frame race after promotion,
+    /// or `LayerTexture` released on demotion).
+    fn composite_css_layers_overlay(
+        &mut self,
+        tree: &blinc_layout::RenderTree,
+        target_view: &wgpu::TextureView,
+    ) {
+        use slotmap::Key as _;
+
+        // Collect (key, screen_aabb, natural_size, stable_id) up-front
+        // so we don't hold the `dynamic_regions` borrow across the
+        // `&mut self.renderer` blit calls.
+        struct CompositeJob {
+            key: u64,
+            screen_aabb: [f32; 4],
+            natural_size: (u32, u32),
+            stable_id: Option<blinc_layout::tree::StableNodeId>,
+        }
+        let jobs: Vec<CompositeJob> = {
+            let regions = tree.dynamic_regions();
+            regions
+                .iter()
+                .filter_map(|(node, region)| match region.kind {
+                    blinc_layout::renderer::DynamicKind::CssAnimated { natural_size }
+                        if natural_size.0 > 0 && natural_size.1 > 0 =>
+                    {
+                        Some(CompositeJob {
+                            key: node.data().as_ffi(),
+                            screen_aabb: region.screen_aabb,
+                            natural_size,
+                            stable_id: tree.stable_id(*node),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        if jobs.is_empty() {
+            return;
+        }
+        // Snapshot current animated properties per stable id under a
+        // single lock acquisition. We need: opacity / translate / scale
+        // to apply to the blit.
+        let mut anim_props: std::collections::HashMap<
+            blinc_layout::tree::StableNodeId,
+            blinc_animation::KeyframeProperties,
+        > = std::collections::HashMap::new();
+        if let Ok(store) = tree.css_anim_store().lock() {
+            for job in &jobs {
+                let Some(sid) = job.stable_id else { continue };
+                if let Some(anim) = store.animations.get(&sid) {
+                    if anim.is_playing {
+                        anim_props.insert(sid, anim.current_properties.clone());
+                        continue;
+                    }
+                }
+                if let Some(trans) = store.transitions.get(&sid) {
+                    if trans.is_playing {
+                        anim_props.insert(sid, trans.current_properties.clone());
+                    }
+                }
+            }
+        }
+        // Issue the per-region blits. Texture was rendered at base
+        // state, so animated values map straight through:
+        //   dest_pos = screen_aabb.xy + translate (physical pixels)
+        //   dest_size = natural_size * scale
+        //   opacity = current opacity (default 1.0)
+        // 2D rotation is in the predicate but skipped in the blit
+        // until the shader gains a `rotate_z` path (next follow-up).
+        for job in jobs {
+            let Some(texture) = self.css_composited_textures.get(&job.key) else {
+                continue;
+            };
+            let props = job
+                .stable_id
+                .and_then(|sid| anim_props.get(&sid))
+                .cloned()
+                .unwrap_or_default();
+            let translate = (
+                props.translate_x.unwrap_or(0.0),
+                props.translate_y.unwrap_or(0.0),
+            );
+            let scale = (props.scale_x.unwrap_or(1.0), props.scale_y.unwrap_or(1.0));
+            let opacity = props.opacity.unwrap_or(1.0);
+
+            let dpi = tree.scale_factor().max(1.0);
+            let dest_pos = (
+                job.screen_aabb[0] + translate.0 * dpi,
+                job.screen_aabb[1] + translate.1 * dpi,
+            );
+            let dest_size = (
+                job.natural_size.0 as f32 * scale.0,
+                job.natural_size.1 as f32 * scale.1,
+            );
+
+            self.renderer.blit_tight_texture_to_target(
+                &texture.view,
+                job.natural_size,
+                target_view,
+                dest_pos,
+                dest_size,
+                opacity,
+                blinc_core::BlendMode::Normal,
+                None,
+                None,
+            );
+        }
     }
 
     /// Re-walk a CSS-animated subtree and return the resulting bg
@@ -6572,6 +6712,9 @@ impl RenderContext {
                     &overlay.primitives,
                     &dyn_aux_owned,
                 );
+                // Composited CSS layers — blit each promoted subtree's
+                // texture with the current animation transform.
+                self.composite_css_layers_overlay(tree, target_view);
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
                         .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -6884,6 +7027,9 @@ impl RenderContext {
                     &overlay.primitives,
                     &dyn_aux_owned,
                 );
+                // Composited CSS layers — blit each promoted subtree's
+                // texture with the current animation transform.
+                self.composite_css_layers_overlay(tree, target_view);
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
                         .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -7107,6 +7253,11 @@ impl RenderContext {
             &overlay.primitives,
             &overlay_aux,
         );
+        // Composited CSS layers (slow path's composite site) — same
+        // overlay step the fast paths do, so the texture for a
+        // freshly-promoted region gets visible content on the very
+        // first frame after promotion.
+        self.composite_css_layers_overlay(tree, target_view);
         if !overlay.dynamic_images.is_empty() {
             self.renderer
                 .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -7213,6 +7364,57 @@ impl RenderContext {
             tree.render_with_motion(&mut ctx, render_state);
         }
         let t_paint_walker = p4_start.elapsed();
+
+        // Drain the per-node composite-layer scratch batches the
+        // walker peeled out of the bg batch (one per promoted CSS-
+        // animated subtree). Rasterize each into its own
+        // `LayerTexture` and stash on `css_composited_textures`
+        // keyed by slotmap key, so the per-frame composite (Phase 4)
+        // can blit each texture with the active animation
+        // transform applied — no walker re-entry on animation
+        // ticks. Fast path: no walker ran, no scratch batches; the
+        // map keeps the previous-paint textures alive.
+        if !used_fast_paint {
+            let scratch_batches = ctx.take_composite_layer_batches();
+            if !scratch_batches.is_empty() {
+                // Look up screen_aabb + natural_size from the
+                // matching `DynamicRegion`. We index by slotmap key
+                // (`LayoutNodeId::data().as_ffi()`) since
+                // `composite_layer_batches` keyed on that and
+                // blinc_layout doesn't share a slotmap with
+                // blinc_app.
+                use slotmap::Key as _;
+                let regions = tree.dynamic_regions();
+                for (region_node, region) in regions.iter() {
+                    let key = region_node.data().as_ffi();
+                    let Some(scratch_batch) = scratch_batches.get(&key) else {
+                        continue;
+                    };
+                    let natural_size = match region.kind {
+                        blinc_layout::renderer::DynamicKind::CssAnimated { natural_size } => {
+                            natural_size
+                        }
+                        _ => continue,
+                    };
+                    if natural_size.0 == 0 || natural_size.1 == 0 {
+                        continue;
+                    }
+                    let layer_pos = (region.screen_aabb[0], region.screen_aabb[1]);
+                    let layer_size = (natural_size.0 as f32, natural_size.1 as f32);
+                    let (layer_texture, _content_size) = self
+                        .renderer
+                        .render_subtree_to_layer_texture(scratch_batch, layer_pos, layer_size);
+                    // Release any previous texture for this node
+                    // back to the pool before installing the new
+                    // one (saves the cache one acquire on the next
+                    // promotion of the same node).
+                    if let Some(old) = self.css_composited_textures.remove(&key) {
+                        self.renderer.layer_texture_cache_mut().release(old);
+                    }
+                    self.css_composited_textures.insert(key, layer_texture);
+                }
+            }
+        }
 
         // Take the batch (mutable so CSS-transformed text primitives can be added).
         // Fast path: clone the patched cache; full path: take from ctx.

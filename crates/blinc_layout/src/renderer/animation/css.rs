@@ -270,6 +270,21 @@ impl RenderTree {
             let Some(node_id) = self.layout_id(stable_id) else {
                 continue;
             };
+            // Composite-promotable animations (only opacity / 2D
+            // transform) skip the per-frame property apply — the
+            // composite-layer path rasterizes the subtree at BASE
+            // state into a `LayerTexture` and applies the animated
+            // values at composite time via
+            // `blit_tight_texture_to_target` (dest_pos / dest_size /
+            // opacity). Writing animated values onto
+            // `render_node.props` here would bake them into the
+            // texture and double-apply at composite time. Mixed
+            // animations (any non-promotable property) keep the
+            // existing apply because `is_composite_promotable`
+            // returns false for them.
+            if anim_props.is_composite_promotable() {
+                continue;
+            }
             if let Some(render_node) = self.render_nodes.get_mut(&node_id) {
                 Self::apply_keyframe_props_to_render(&mut render_node.props, &anim_props);
             }
@@ -643,6 +658,13 @@ impl RenderTree {
             let Some(node_id) = self.layout_id(stable_id) else {
                 continue;
             };
+            // See `apply_all_css_animation_props` above — composite-
+            // promotable transitions skip the apply for the same
+            // reason (texture rasterizes at base, composite applies
+            // animated values).
+            if anim_props.is_composite_promotable() {
+                continue;
+            }
             if let Some(render_node) = self.render_nodes.get_mut(&node_id) {
                 Self::apply_keyframe_props_to_render(&mut render_node.props, &anim_props);
             }
