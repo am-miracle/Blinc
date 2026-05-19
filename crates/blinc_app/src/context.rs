@@ -7622,6 +7622,21 @@ impl RenderContext {
         // Get scale factor for HiDPI rendering
         let scale_factor = tree.scale_factor();
 
+        // Compute & commit animation-status / composite-promotion
+        // before the walker runs. The compositor path does this
+        // inside `try_render_with_compositor`; the non-compositor
+        // path (wasm / Android / iOS) was skipping it entirely, so
+        // `composite_promotion` stayed empty and the walker never
+        // routed any composite-promotable CSS subtree into the
+        // per-node scratch batch. Net effect on those targets:
+        // `styling_demo`'s `anim-pulse` / `anim-glow` (and any
+        // other composite-promotable CSS animation) emitted
+        // primitives straight into the bg batch with their *resting*
+        // values, then never animated — the composite_css_layers
+        // overlay had nothing to blit.
+        let v2_statuses = tree.compute_animation_status();
+        tree.commit_animation_status(&v2_statuses);
+
         // Try the compositor fast path. Two steps in sequence:
         //
         //   1. `redraw_canvases` — re-invokes every recorded
