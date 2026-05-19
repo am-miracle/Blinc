@@ -4417,27 +4417,46 @@ impl WindowedApp {
                             }
 
                             // Per-hit cache-invalidation gate. Scan `pending_events`
-                            // for any pointer-motion event (POINTER_MOVE / DRAG /
-                            // DRAG_END / FILE_DRAG_OVER) whose target node actually
-                            // has a registered handler. The router's mouse-move
-                            // path already filters POINTER_MOVE emit to handler-
-                            // bearing nodes, but the drag-fast path emits DRAG to
-                            // pressed target + ancestors unfiltered, so we re-check
-                            // here. Used below in the post-dispatch gate so the
-                            // cache only gets invalidated when a real subscriber
-                            // was under the cursor — bare cursor wiggle over empty
-                            // space no longer pays the full re-render.
-                            let pointer_motion_to_handler = {
+                            // for any pointer event (POINTER_MOVE / DOWN / UP /
+                            // DRAG / DRAG_END / FILE_DRAG_OVER) whose target node
+                            // actually has a registered handler. The router's
+                            // mouse-move path filters POINTER_MOVE emit to handler-
+                            // bearing nodes; mouse-button / drag-fast paths emit
+                            // unfiltered, so we re-check via `has_handler` here.
+                            // Used below so the cache only invalidates when a
+                            // real subscriber was under the cursor — bare cursor
+                            // wiggle / click over empty space no longer pays the
+                            // full re-render.
+                            let pointer_event_to_handler = {
+                                use blinc_core::events::event_types;
                                 let registry = tree.handler_registry();
                                 pending_events.iter().any(|e| {
-                                    let is_motion_event = matches!(
+                                    // DRAG / DRAG_END deliberately excluded.
+                                    // Widgets that need a redraw on drag (cn
+                                    // sliders / sortables, scroll-bar drag)
+                                    // either go through Stateful (caught by
+                                    // `state_changed` above) or call
+                                    // `stateful::request_redraw()` themselves
+                                    // when they actually move. Including DRAG
+                                    // here invalidated the cache every frame
+                                    // when the user dragged through an empty
+                                    // area of a scroll container — the scroll
+                                    // widget registers a permanent on_drag
+                                    // handler that no-ops unless the scrollbar
+                                    // itself is being dragged, so the gate saw
+                                    // a handler and triggered the full slow
+                                    // path for nothing.
+                                    let is_pointer_event = matches!(
                                         e.event_type,
-                                        blinc_core::events::event_types::POINTER_MOVE
-                                            | blinc_core::events::event_types::DRAG
-                                            | blinc_core::events::event_types::DRAG_END
-                                            | blinc_core::events::event_types::FILE_DRAG_OVER
+                                        event_types::POINTER_MOVE
+                                            | event_types::POINTER_DOWN
+                                            | event_types::POINTER_UP
+                                            | event_types::POINTER_ENTER
+                                            | event_types::POINTER_LEAVE
+                                            | event_types::DOUBLE_TAP
+                                            | event_types::FILE_DRAG_OVER
                                     );
-                                    if !is_motion_event {
+                                    if !is_pointer_event {
                                         return false;
                                     }
                                     tree.stable_id(e.node_id)
@@ -4609,40 +4628,37 @@ impl WindowedApp {
                             // already uses: pointer_query elements or
                             // any node with an attached pointer handler.
                             if !state_changed && !had_scroll {
-                                // Per-hit invalidation: only invalidate the
-                                // cache when the cursor is over (or the press
-                                // target / ancestors include) a node that
-                                // actually has a POINTER_MOVE / DRAG / etc.
-                                // handler. The previous `has_pointer_move_subscribers`
-                                // gate fired whenever ANY such subscriber
-                                // existed in the tree — which for any UI with
-                                // a hoverable button or a draggable element
-                                // meant every bare cursor wiggle over empty
-                                // space invalidated the cache and forced the
-                                // slow path. `pointer_motion_to_handler`
-                                // (computed above before pending_events is
-                                // consumed) is true only when an emitted
-                                // pointer-motion event actually targets a
-                                // node with a registered handler.
+                                // Per-hit invalidation for ALL pointer events
+                                // (moves, button events, drags). The previous
+                                // gate invalidated unconditionally on button
+                                // events and globally on moves — together that
+                                // meant every click on empty space and every
+                                // cursor wiggle near hoverable elements forced
+                                // the slow path.
+                                //
+                                // `pointer_event_to_handler` (computed above
+                                // before pending_events is consumed) is true
+                                // only when an emitted pointer event actually
+                                // targets a node with a registered handler for
+                                // that event type. Stateful elements that
+                                // mutate state on POINTER_DOWN still get
+                                // caught by the `state_changed` gate above;
+                                // this branch covers non-stateful handlers
+                                // (custom on_click closures, drag handlers,
+                                // etc.).
                                 //
                                 // Pointer-query elements (calc(env(--mouse...)) /
-                                // canvas-kit cursor subscribers) still need the
-                                // global invalidate because they read mouse
-                                // position every frame regardless of hit
-                                // chain; we OR them in below.
-                                //
-                                // Click handlers don't need a redraw between
-                                // the move and the click event itself —
-                                // POINTER_DOWN dispatches its own
-                                // invalidation when it fires.
+                                // canvas-kit cursor subscribers) read mouse
+                                // position every frame regardless of hit chain
+                                // and need the global invalidate; we OR them
+                                // in for move events.
                                 let has_pointer_query = ws
                                     .ctx
                                     .as_ref()
                                     .is_some_and(|c| !c.pointer_query.is_empty());
-                                if is_button_event
-                                    || (is_move_event
-                                        && (pointer_motion_to_handler || has_pointer_query))
-                                {
+                                let need_invalidate = pointer_event_to_handler
+                                    || (is_move_event && has_pointer_query);
+                                if need_invalidate {
                                     frame_dirty.store(true, Ordering::Release);
                                     window.request_redraw();
                                     if let Some(ref mut app) = ws.app {
