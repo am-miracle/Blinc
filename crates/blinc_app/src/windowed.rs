@@ -4885,6 +4885,7 @@ impl WindowedApp {
                                 ws.needs_rebuild = true;
                             }
 
+
                             // Check if a full relayout was requested (e.g., theme changes)
                             if blinc_layout::widgets::take_needs_relayout() {
                                 tracing::info!(
@@ -4970,6 +4971,53 @@ impl WindowedApp {
                                 }
                                 // Consume the dirty flag
                                 windowed_ctx.overlay_manager.take_dirty();
+                            }
+
+                            // Phase 3 transition: same incremental rebuild path
+                            // for the new OverlayStack + ToastTray. Generic helper
+                            // handles the dirty-check + registry-lookup +
+                            // queue_subtree_rebuild dance per surface, so adding
+                            // a new overlay layer in the future is a one-liner.
+                            {
+                                use blinc_layout::overlay_state::{
+                                    overlay_stack, rebuild_overlay_subtree_if_dirty,
+                                    toast_tray,
+                                };
+                                use blinc_layout::widgets::overlay_stack::OVERLAY_STACK_LAYER_ID;
+                                use blinc_layout::widgets::toast_tray::TOAST_TRAY_LAYER_ID;
+
+                                rebuild_overlay_subtree_if_dirty(
+                                    &element_registry,
+                                    OVERLAY_STACK_LAYER_ID,
+                                    overlay_stack()
+                                        .lock()
+                                        .map(|s| s.take_dirty())
+                                        .unwrap_or(false),
+                                    || {
+                                        overlay_stack()
+                                            .lock()
+                                            .ok()
+                                            .map(|s| s.build_overlay_layer())
+                                            .unwrap_or_else(div)
+                                    },
+                                );
+
+                                let viewport = (windowed_ctx.width, windowed_ctx.height);
+                                rebuild_overlay_subtree_if_dirty(
+                                    &element_registry,
+                                    TOAST_TRAY_LAYER_ID,
+                                    toast_tray()
+                                        .lock()
+                                        .map(|t| t.take_dirty())
+                                        .unwrap_or(false),
+                                    || {
+                                        toast_tray()
+                                            .lock()
+                                            .ok()
+                                            .map(|t| t.build_tray_layer(viewport))
+                                            .unwrap_or_else(div)
+                                    },
+                                );
                             }
 
                             // Check if stateful elements requested a redraw (hover/press changes)

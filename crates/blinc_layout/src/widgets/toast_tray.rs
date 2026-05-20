@@ -24,6 +24,10 @@ use blinc_core::BlincContextState;
 use crate::div::Div;
 use crate::widgets::overlay::Corner;
 
+/// Stable id for the toast tray layer. See `OVERLAY_STACK_LAYER_ID` for the
+/// subtree-rebuild rationale.
+pub const TOAST_TRAY_LAYER_ID: &str = "__cn_toast_tray_layer__";
+
 // =============================================================================
 // ToastHandle
 // =============================================================================
@@ -57,9 +61,15 @@ pub struct ToastEntry {
 }
 
 impl ToastEntry {
+    /// FSM stable key (with the "motion:" prefix that `motion_derived` adds
+    /// internally). Same caveat as `OverlayEntry::motion_stable_key`.
+    fn motion_stable_key(&self) -> String {
+        format!("motion:{}", self.motion_key)
+    }
+
     fn motion_done(&self) -> bool {
         let state = BlincContextState::try_get()
-            .map(|ctx| ctx.query_motion(&self.motion_key))
+            .map(|ctx| ctx.query_motion(&self.motion_stable_key()))
             .unwrap_or(MotionAnimationState::NotFound);
         matches!(
             state,
@@ -121,7 +131,7 @@ impl ToastTray {
                 return;
             }
             entry.exiting = true;
-            crate::queue_global_motion_exit_start(entry.motion_key.clone());
+            crate::queue_global_motion_exit_start(entry.motion_stable_key());
             if let Some(cb) = &entry.on_close {
                 cb();
             }
@@ -232,7 +242,7 @@ impl ToastTray {
         };
         self.toasts
             .iter()
-            .any(|e| ctx.query_motion(&e.motion_key).is_animating())
+            .any(|e| ctx.query_motion(&e.motion_stable_key()).is_animating())
     }
 
     // ----- Render -----
@@ -253,6 +263,7 @@ impl ToastTray {
         // events from the main UI underneath. Matches OverlayStack pattern.
         if self.toasts.is_empty() || viewport.0 <= 0.0 || viewport.1 <= 0.0 {
             return Div::new()
+                .id(TOAST_TRAY_LAYER_ID)
                 .absolute()
                 .top(0.0)
                 .left(0.0)
@@ -273,6 +284,7 @@ impl ToastTray {
         };
 
         let mut tray = Div::new()
+            .id(TOAST_TRAY_LAYER_ID)
             .absolute()
             .flex_col()
             .gap(self.gap_px)

@@ -68,6 +68,47 @@ pub fn toast_tray() -> SharedToastTray {
         .clone()
 }
 
+// =========================================================================
+// Subtree-rebuild helper
+// =========================================================================
+
+/// Generic "is this overlay surface dirty? then rebuild its subtree" pass.
+/// Used by the windowed runner so each surface (overlay stack, toast tray,
+/// future surfaces) doesn't accumulate its own copy-pasted dirty-check +
+/// registry-lookup + queue_subtree_rebuild block.
+///
+/// Returns `true` if a rebuild was queued.
+///
+/// ```ignore
+/// rebuild_overlay_subtree_if_dirty(
+///     &element_registry,
+///     OVERLAY_STACK_LAYER_ID,
+///     overlay_stack().lock().map(|s| s.take_dirty()).unwrap_or(false),
+///     || overlay_stack().lock().ok().map(|s| s.build_overlay_layer())
+///         .unwrap_or_else(crate::div::Div::new),
+/// );
+/// ```
+pub fn rebuild_overlay_subtree_if_dirty(
+    registry: &crate::prelude::ElementRegistry,
+    layer_id: &str,
+    dirty: bool,
+    build: impl FnOnce() -> crate::div::Div,
+) -> bool {
+    if !dirty {
+        return false;
+    }
+    let Some(node_id) = registry.get(layer_id) else {
+        tracing::trace!(
+            target: "blinc_layout::overlay_state",
+            "Overlay surface '{}' dirty but layer node not yet in registry — will mount on next full UI build",
+            layer_id,
+        );
+        return false;
+    };
+    crate::queue_subtree_rebuild(node_id, build());
+    true
+}
+
 /// Global overlay context instance
 static OVERLAY_CONTEXT: OnceLock<OverlayContext> = OnceLock::new();
 

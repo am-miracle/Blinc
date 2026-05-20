@@ -37,6 +37,13 @@ use crate::widgets::overlay::{
     AnchorDirection, BackdropConfig, Corner, EdgeSide, OverlayKind, OverlayPosition,
 };
 
+/// Stable element id for the layer produced by `OverlayStack::build_overlay_layer()`.
+/// The windowed runner registers this in the element registry on first mount so
+/// `push()` / `close()` can queue a subtree rebuild of just this layer (not the
+/// whole UI) when the stack content changes. Mirrors the legacy
+/// `widgets::overlay::OVERLAY_LAYER_ID` pattern.
+pub const OVERLAY_STACK_LAYER_ID: &str = "__cn_overlay_stack_layer__";
+
 // =============================================================================
 // OverlayHandle
 // =============================================================================
@@ -197,17 +204,36 @@ pub struct OverlayEntry {
 }
 
 impl OverlayEntry {
-    /// Returns true if `query_motion(motion_key)` reports the motion has
-    /// finished its exit (or never existed — content authors who skipped the
-    /// motion wrapper get instant eviction).
+    /// The FSM stable key for this entry's motion. `motion_derived(parent_key)`
+    /// internally prefixes the key with `"motion:"`, so EVERY query / queue
+    /// against the motion store must use this prefixed form. Forgetting the
+    /// prefix means `query_motion` returns `NotFound` (motion is opaque), and
+    /// `queue_global_motion_exit_start` is dropped (motion can't be exited).
+    fn motion_stable_key(&self) -> String {
+        format!("motion:{}", self.motion_key)
+    }
+
+    /// Returns true if the motion FSM has finished its exit (or was never
+    /// registered, i.e. the widget skipped the motion wrapper).
     fn motion_done(&self) -> bool {
         let state = BlincContextState::try_get()
-            .map(|ctx| ctx.query_motion(&self.motion_key))
+            .map(|ctx| ctx.query_motion(&self.motion_stable_key()))
             .unwrap_or(MotionAnimationState::NotFound);
         matches!(
             state,
             MotionAnimationState::Removed | MotionAnimationState::NotFound
         )
+    }
+
+    /// Trigger the motion's exit animation via the queued global mechanism.
+    fn queue_motion_exit(&self) {
+        crate::queue_global_motion_exit_start(self.motion_stable_key());
+    }
+
+    /// Interrupt the motion's exit animation (mouse re-entry during the
+    /// close-delay window).
+    fn queue_motion_exit_cancel(&self) {
+        crate::queue_global_motion_exit_cancel(self.motion_stable_key());
     }
 
     /// Invoke `on_close` with the given reason if set. Idempotent — caller
@@ -419,7 +445,7 @@ impl OverlayStack {
         }
         entry.exiting = false;
         entry.pending_close_deadline_ms = None;
-        crate::queue_global_motion_exit_cancel(entry.motion_key.clone());
+        entry.queue_motion_exit_cancel();
         self.animation_dirty.store(true, Ordering::Release);
     }
 
@@ -433,10 +459,11 @@ impl OverlayStack {
         }
         entry.exiting = true;
         entry.pending_close_deadline_ms = None;
-        // Trigger the motion exit. If the entry has no motion wrapper (or the
-        // key was wrong), this is a no-op and the entry will be reaped on the
-        // next `update()` tick via `motion_done() → true`.
-        crate::queue_global_motion_exit_start(entry.motion_key.clone());
+        // Trigger the motion exit via the FSM-keyed queue. If the entry has
+        // no motion wrapper (motion FSM was never registered for the key),
+        // the queue is a no-op and the entry will be reaped on the next
+        // `update()` tick via `motion_done() → true`.
+        entry.queue_motion_exit();
         entry.fire_on_close(reason);
     }
 
@@ -612,7 +639,8 @@ impl OverlayStack {
             return false;
         };
         self.entries.iter().any(|e| {
-            let state = ctx.query_motion(&e.motion_key);
+            // MUST query via the FSM-prefixed key — see `motion_stable_key`.
+            let state = ctx.query_motion(&e.motion_stable_key());
             state.is_animating()
         })
     }
@@ -702,6 +730,7 @@ impl OverlayStack {
             };
 
         let mut layer = Div::new()
+            .id(OVERLAY_STACK_LAYER_ID)
             .absolute()
             .top(0.0)
             .left(0.0)
