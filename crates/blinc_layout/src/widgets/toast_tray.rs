@@ -93,6 +93,8 @@ pub struct ToastTray {
     max_visible: usize,
     current_time_ms: u64,
     dirty: AtomicBool,
+    /// Time-based force-redraw window — see `OverlayStack::redraw_until_ms`.
+    redraw_until_ms: AtomicU64,
 }
 
 impl Default for ToastTray {
@@ -111,6 +113,15 @@ impl ToastTray {
             max_visible: 5,
             current_time_ms: 0,
             dirty: AtomicBool::new(false),
+            redraw_until_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn extend_redraw_window(&self, duration_ms: u64) {
+        let deadline = self.current_time_ms.saturating_add(duration_ms);
+        let prev = self.redraw_until_ms.load(Ordering::Acquire);
+        if deadline > prev {
+            self.redraw_until_ms.store(deadline, Ordering::Release);
         }
     }
 
@@ -129,12 +140,16 @@ impl ToastTray {
         let handle = entry.handle;
         self.toasts.push(entry);
         self.dirty.store(true, Ordering::Release);
+        // Cover the typical enter-motion duration — same defence as
+        // `OverlayStack::push`.
+        self.extend_redraw_window(1_200);
         handle
     }
 
     /// Begin dismissing a specific toast. Toast stays rendered until its
     /// motion exit completes; eviction happens in `update()`.
     pub fn dismiss(&mut self, handle: ToastHandle) {
+        let mut did_dismiss = false;
         if let Some(entry) = self.toasts.iter_mut().find(|e| e.handle == handle) {
             if entry.exiting {
                 return;
@@ -145,6 +160,11 @@ impl ToastTray {
                 cb();
             }
             self.dirty.store(true, Ordering::Release);
+            did_dismiss = true;
+        }
+        if did_dismiss {
+            // Cover the exit-motion duration; matches `OverlayStack::begin_exit`.
+            self.extend_redraw_window(800);
         }
     }
 
@@ -246,6 +266,10 @@ impl ToastTray {
     }
 
     pub fn has_animating(&self) -> bool {
+        // Time-window defence — see `OverlayStack::has_animating_overlays`.
+        if self.current_time_ms < self.redraw_until_ms.load(Ordering::Acquire) {
+            return true;
+        }
         let Some(ctx) = BlincContextState::try_get() else {
             return false;
         };

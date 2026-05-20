@@ -266,6 +266,15 @@ pub struct OverlayStack {
     /// Set when only animation state advanced (no structural delta). Consumed
     /// by the windowed runner to request a redraw without rebuilding.
     animation_dirty: AtomicBool,
+    /// Wall-time deadline (in `current_time_ms` space) until which
+    /// `has_animating_overlays` should report `true` regardless of the
+    /// FSM-poll result. Asserted on push / close so the runner keeps
+    /// scheduling frames for the entry's enter / exit motion to play out,
+    /// even if the FSM hasn't registered the motion yet (first frame race)
+    /// or has transitioned briefly through a Visible state between phases.
+    /// Time-based defense against the FSM-poll race; no functional cost
+    /// once past the deadline.
+    redraw_until_ms: AtomicU64,
 }
 
 impl Default for OverlayStack {
@@ -284,6 +293,18 @@ impl OverlayStack {
             current_time_ms: 0,
             dirty: AtomicBool::new(false),
             animation_dirty: AtomicBool::new(false),
+            redraw_until_ms: AtomicU64::new(0),
+        }
+    }
+
+    /// Extend the "force redraw" deadline by `duration_ms` from the current
+    /// stack time. Capped at `now + duration_ms`; never shortens.
+    fn extend_redraw_window(&self, duration_ms: u64) {
+        let deadline = self.current_time_ms.saturating_add(duration_ms);
+        // Monotonic: never roll the deadline backwards.
+        let prev = self.redraw_until_ms.load(Ordering::Acquire);
+        if deadline > prev {
+            self.redraw_until_ms.store(deadline, Ordering::Release);
         }
     }
 
@@ -304,7 +325,10 @@ impl OverlayStack {
         self.next_id.load(Ordering::Relaxed)
     }
 
-    /// Push an entry onto the top of the stack. Marks the stack dirty.
+    /// Push an entry onto the top of the stack. Marks the stack dirty and
+    /// asserts `animation_dirty` so the windowed runner's redraw chain stays
+    /// alive long enough for the entry's enter motion to play out — without
+    /// this, a static FSM-poll race could leave the loop sleeping mid-flight.
     pub fn push(&mut self, entry: OverlayEntry) -> OverlayHandle {
         let handle = entry.handle;
         tracing::trace!(
@@ -318,6 +342,11 @@ impl OverlayStack {
         );
         self.entries.push(entry);
         self.dirty.store(true, Ordering::Release);
+        self.animation_dirty.store(true, Ordering::Release);
+        // Cover the typical enter-motion duration so the redraw chain stays
+        // alive even if the FSM-poll race briefly reports the motion as
+        // settled (or NotFound) mid-flight.
+        self.extend_redraw_window(1_200);
         handle
     }
 
@@ -474,6 +503,13 @@ impl OverlayStack {
         // `update()` tick via `motion_done() → true`.
         entry.queue_motion_exit();
         entry.fire_on_close(reason);
+        // Assert animation_dirty so the runner's redraw chain wakes up to
+        // drive the exit motion — closing via ESC / programmatic close
+        // without input would otherwise leave the loop sleeping and the
+        // motion would only complete on the next mouse-move event.
+        self.animation_dirty.store(true, Ordering::Release);
+        // Same time-window defence as `push`: cover the typical exit motion.
+        self.extend_redraw_window(800);
     }
 
     // ----- Input handlers -----
@@ -644,6 +680,14 @@ impl OverlayStack {
     /// Any entry has a motion / animation currently mid-flight? Used by the
     /// windowed runner's redraw chain to keep frames coming during transitions.
     pub fn has_animating_overlays(&self) -> bool {
+        // Time-window defence: a recent push / close extends `redraw_until_ms`
+        // so the runner keeps scheduling frames even if the FSM-poll below
+        // briefly returns NotFound / Visible mid-transition (race between the
+        // shared-state sync, the renderer's motion tick, and the post-frame
+        // signal check).
+        if self.current_time_ms < self.redraw_until_ms.load(Ordering::Acquire) {
+            return true;
+        }
         let Some(ctx) = BlincContextState::try_get() else {
             return false;
         };
