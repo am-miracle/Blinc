@@ -37,14 +37,16 @@ fn main() -> Result<()> {
 
     WindowedApp::run_with_theme(
         config,
-        blinc_cn::cn_bundle().with_css(
-            r#"
-            #css-overrides .cn-button--primary { border-radius: 0; }
-            #css-overrides .cn-button--destructive:hover { background: var(--primary); }
-            #css-overrides .cn-badge--success { background: #00cc66; }
-            #css-demo-card { border-width: 2px; border-color: var(--primary); }
-        "#,
-        ),
+        HybridTheme::bundle()
+            .with_css(blinc_cn::cn_styles::CN_STYLES)
+            .with_css(
+                r#"
+                #css-overrides .cn-button--primary { border-radius: 0; }
+                #css-overrides .cn-button--destructive:hover { background: var(--primary); }
+                #css-overrides .cn-badge--success { background: #00cc66; }
+                #css-demo-card { border-width: 2px; border-color: var(--primary); }
+            "#,
+            ),
         blinc_theme::detect_system_color_scheme(),
         build_ui,
     )
@@ -283,20 +285,28 @@ fn menubar_demo() -> impl ElementBuilder {
                         .separator()
                         .item("About", || tracing::info!("About clicked"))
                 })
-                // Custom trigger example - button with dynamic text
+                // Custom trigger example — proper chevron SVG rather
+                // than the play-button glyph ("▶") that reads wrong
+                // against a textual label.
                 .menu_custom(
                     |is_open| {
                         let theme = ThemeState::get();
                         let text_color = theme.color(ColorToken::TextPrimary);
-                        let icon = if is_open { "▼" } else { "▶" };
+                        const CHEVRON_DOWN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#;
+                        const CHEVRON_RIGHT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
+                        let icon_svg = if is_open { CHEVRON_DOWN } else { CHEVRON_RIGHT };
                         div()
                             .flex_row()
                             .items_center()
-                            .gap(1.0)
-                            .px(2.0)
-                            .py(1.0)
-                            .child(text(icon).size(10.0).color(text_color))
-                            .child(text("Actions").size(14.0).color(text_color))
+                            .gap(6.0)
+                            .px(8.0)
+                            .py(4.0)
+                            .child(svg(icon_svg).size(12.0, 12.0).color(text_color))
+                            .child(
+                                text("Actions")
+                                    .size(theme.typography().text_sm)
+                                    .color(text_color),
+                            )
                     },
                     |m| {
                         m.item("Run Task", || tracing::info!("Run Task clicked"))
