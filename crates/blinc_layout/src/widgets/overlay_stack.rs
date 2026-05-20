@@ -714,80 +714,78 @@ impl OverlayStack {
                 layer = layer.child(motion_derived(&backdrop_key).child(backdrop_div));
             }
 
-            // Content. The widget's `content_fn` returns a Div positioned
-            // however the widget wants; we wrap it in the entry's motion so
-            // the widget's chosen enter / exit animation runs.
+            // Structure: positioned wrapper > motion > content_fn().
+            //
+            // The OUTER div carries absolute positioning so the overlay lands
+            // at the viewport coords the widget chose. The motion lives
+            // INSIDE that wrapper so its enter / exit animations operate on
+            // the in-flow content. If motion were the outer node, its child
+            // would be `position: absolute` (out of flow) and motion couldn't
+            // measure / transform it — opacity might still apply, but
+            // translate / scale animations would silently no-op. This
+            // matches the legacy `mgr.dropdown().content(...)` shape: a
+            // positioned container with an inner motion wrapper.
             let content = (entry.content_fn)();
-            let positioned = position_div(content, &entry.position, self.viewport);
-            let mut wrapper = motion_derived(&entry.motion_key);
+            let mut motion_wrapper = motion_derived(&entry.motion_key);
             if let Some(ref enter) = entry.motion_enter {
-                wrapper = wrapper.enter_animation(enter.clone());
+                motion_wrapper = motion_wrapper.enter_animation(enter.clone());
             }
             if let Some(ref exit) = entry.motion_exit {
-                wrapper = wrapper.exit_animation(exit.clone());
+                motion_wrapper = motion_wrapper.exit_animation(exit.clone());
             }
-            layer = layer.child(wrapper.child(positioned));
+            let positioned = position_wrapper(motion_wrapper.child(content), &entry.position, self.viewport);
+            layer = layer.child(positioned);
         }
 
         layer
     }
 }
 
-/// Apply positioning to a content div according to the entry's `OverlayPosition`.
-/// Phase 2 implements the common cases; widget migration refines via explicit
-/// `RelativeToAnchor` resolution in the cn layer.
-fn position_div(content: Div, position: &OverlayPosition, viewport: (f32, f32)) -> Div {
+/// Wrap a child element in a positioned outer Div according to the entry's
+/// `OverlayPosition`. The child (typically `motion_derived(...).child(content_fn())`)
+/// renders in normal flow inside the wrapper so motion animations work
+/// correctly; the wrapper handles the absolute placement at viewport coords.
+fn position_wrapper(
+    child: impl crate::div::ElementBuilder + 'static,
+    position: &OverlayPosition,
+    viewport: (f32, f32),
+) -> Div {
+    let outer = Div::new().absolute();
     match position {
-        OverlayPosition::Centered => content
-            .absolute()
+        OverlayPosition::Centered => outer
             .top(0.0)
             .left(0.0)
             .w(viewport.0)
             .h(viewport.1)
             .items_center()
-            .justify_center(),
-        OverlayPosition::AtPoint { x, y } => content.absolute().left(*x).top(*y),
+            .justify_center()
+            .child(child),
+        OverlayPosition::AtPoint { x, y } => outer.left(*x).top(*y).child(child),
         OverlayPosition::Corner(c) => {
             // Anchor to a corner with a default 16px inset. Widgets can override.
             const INSET: f32 = 16.0;
-            let mut d = content.absolute();
-            match c {
-                Corner::TopLeft => {
-                    d = d.top(INSET).left(INSET);
-                }
-                Corner::TopRight => {
-                    d = d.top(INSET).left(viewport.0 - INSET);
-                }
-                Corner::BottomLeft => {
-                    d = d.top(viewport.1 - INSET).left(INSET);
-                }
-                Corner::BottomRight => {
-                    d = d.top(viewport.1 - INSET).left(viewport.0 - INSET);
-                }
-            }
-            d
+            let outer = match c {
+                Corner::TopLeft => outer.top(INSET).left(INSET),
+                Corner::TopRight => outer.top(INSET).left(viewport.0 - INSET),
+                Corner::BottomLeft => outer.top(viewport.1 - INSET).left(INSET),
+                Corner::BottomRight => outer
+                    .top(viewport.1 - INSET)
+                    .left(viewport.0 - INSET),
+            };
+            outer.child(child)
         }
         OverlayPosition::Edge(side) => {
             // Drawer / sheet placement — widget layer is the right place to do
             // the proper full-edge sizing because it knows the content's
             // desired dimensions. For Phase 2 we pin to the edge at viewport
             // bounds and let the widget's own layout drive size.
-            let mut d = content.absolute();
-            match side {
-                EdgeSide::Left => {
-                    d = d.top(0.0).left(0.0).h(viewport.1);
-                }
-                EdgeSide::Right => {
-                    d = d.top(0.0).left(viewport.0).h(viewport.1);
-                }
-                EdgeSide::Top => {
-                    d = d.top(0.0).left(0.0).w(viewport.0);
-                }
-                EdgeSide::Bottom => {
-                    d = d.top(viewport.1).left(0.0).w(viewport.0);
-                }
-            }
-            d
+            let outer = match side {
+                EdgeSide::Left => outer.top(0.0).left(0.0).h(viewport.1),
+                EdgeSide::Right => outer.top(0.0).left(viewport.0).h(viewport.1),
+                EdgeSide::Top => outer.top(0.0).left(0.0).w(viewport.0),
+                EdgeSide::Bottom => outer.top(viewport.1).left(0.0).w(viewport.0),
+            };
+            outer.child(child)
         }
         OverlayPosition::RelativeToAnchor {
             offset_x, offset_y, ..
@@ -795,7 +793,7 @@ fn position_div(content: Div, position: &OverlayPosition, viewport: (f32, f32)) 
             // Phase 2: pass through as a relative offset. The cn widget layer
             // resolves the anchor's absolute bounds before pushing the entry,
             // so by the time we render the offset is already absolute.
-            content.absolute().left(*offset_x).top(*offset_y)
+            outer.left(*offset_x).top(*offset_y).child(child)
         }
     }
 }
