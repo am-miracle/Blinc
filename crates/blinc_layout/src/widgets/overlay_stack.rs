@@ -272,6 +272,15 @@ impl OverlayStack {
     /// Push an entry onto the top of the stack. Marks the stack dirty.
     pub fn push(&mut self, entry: OverlayEntry) -> OverlayHandle {
         let handle = entry.handle;
+        tracing::info!(
+            target: "blinc_layout::overlay_stack",
+            "push: handle={} kind={:?} motion_key={} stack_len={}->{}",
+            handle.raw(),
+            entry.kind,
+            entry.motion_key,
+            self.entries.len(),
+            self.entries.len() + 1,
+        );
         self.entries.push(entry);
         self.dirty.store(true, Ordering::Release);
         handle
@@ -670,6 +679,13 @@ impl OverlayStack {
     pub fn build_overlay_layer(&self) -> Div {
         use crate::motion::motion_derived;
 
+        tracing::trace!(
+            target: "blinc_layout::overlay_stack",
+            "build_overlay_layer: entries={} viewport={:?}",
+            self.entries.len(),
+            self.viewport,
+        );
+
         // Match the legacy `OverlayManagerInner::build_overlay_layer` shape:
         // - Zero-sized container when no entries → does NOT blanket the
         //   viewport and steal scroll / hover events from the main UI.
@@ -697,6 +713,13 @@ impl OverlayStack {
         if !has_visible {
             return layer;
         }
+
+        tracing::info!(
+            target: "blinc_layout::overlay_stack",
+            "build_overlay_layer: rendering {} entries at viewport {:?}",
+            self.entries.len(),
+            self.viewport,
+        );
 
         for entry in self.entries.iter() {
             // Backdrop — emit before content so the click-target is below.

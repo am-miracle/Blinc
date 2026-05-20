@@ -211,16 +211,31 @@ impl TooltipBuilder {
             .align_self_start()
             .child(trigger_content)
             .on_hover_enter(move |ctx| {
+                tracing::info!(
+                    target: "blinc_cn::tooltip",
+                    "hover_enter fired: bounds=({}, {}, {}x{})",
+                    ctx.bounds_x, ctx.bounds_y, ctx.bounds_width, ctx.bounds_height,
+                );
                 // Existing tooltip alive? Cancel any pending mouse-leave close
                 // and bail — no need to push a fresh entry.
                 if let Some(raw) = stored_for_enter.get() {
                     let handle = OverlayHandle::from_raw(raw);
                     if handle.is_live() {
+                        tracing::info!(
+                            target: "blinc_cn::tooltip",
+                            "existing handle {} is live, cancelling pending close",
+                            raw,
+                        );
                         if let Ok(mut stack) = overlay_stack().lock() {
                             stack.handle_mouse_enter(handle);
                         }
                         return;
                     }
+                    tracing::info!(
+                        target: "blinc_cn::tooltip",
+                        "existing handle {} is stale, dropping",
+                        raw,
+                    );
                     // Stale / exiting — drop the reference and open fresh.
                     stored_for_enter.set(None);
                 }
@@ -263,16 +278,30 @@ impl TooltipBuilder {
 
                 let stored_close = stored_for_close.clone();
                 let stored_open = stored_for_open.clone();
+                tracing::info!(
+                    target: "blinc_cn::tooltip",
+                    "pushing tooltip overlay at ({}, {})",
+                    x, y,
+                );
                 let handle = OverlayBuilder::tooltip()
                     .at(x, y)
                     .anchor_direction(anchor_dir)
                     .dismissable_by_mouse_leave(true, close_delay_ms)
                     .motion_enter(AnimationPreset::fade_in(100))
                     .motion_exit(AnimationPreset::fade_out(75))
-                    .on_close(move |_reason| {
+                    .on_close(move |reason| {
+                        tracing::info!(
+                            target: "blinc_cn::tooltip",
+                            "on_close fired: reason={:?}",
+                            reason,
+                        );
                         stored_close.set(None);
                     })
                     .content(move || {
+                        tracing::info!(
+                            target: "blinc_cn::tooltip",
+                            "content_fn called",
+                        );
                         div()
                             .class("cn-tooltip")
                             .flex_row()
@@ -289,15 +318,35 @@ impl TooltipBuilder {
                             )
                     })
                     .show();
+                tracing::info!(
+                    target: "blinc_cn::tooltip",
+                    "tooltip overlay pushed: handle={}",
+                    handle.raw(),
+                );
                 stored_open.set(Some(handle.raw()));
             })
             .on_hover_leave(move |_| {
+                tracing::info!(
+                    target: "blinc_cn::tooltip",
+                    "hover_leave fired",
+                );
                 if let Some(raw) = stored_for_leave.get() {
                     let handle = OverlayHandle::from_raw(raw);
                     if handle.is_live() {
+                        tracing::info!(
+                            target: "blinc_cn::tooltip",
+                            "marking handle {} for close via mouse_leave",
+                            raw,
+                        );
                         if let Ok(mut stack) = overlay_stack().lock() {
                             stack.handle_mouse_leave(handle);
                         }
+                    } else {
+                        tracing::info!(
+                            target: "blinc_cn::tooltip",
+                            "handle {} no longer live on hover_leave",
+                            raw,
+                        );
                     }
                 }
             });

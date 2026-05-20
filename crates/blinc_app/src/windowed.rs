@@ -5680,11 +5680,44 @@ impl WindowedApp {
                                         || t.has_active_layout_animations()
                                         || t.has_active_flip_animations()
                                 });
+                                // Phase 3 transition: when the new OverlayStack
+                                // or ToastTray is dirty / has live entries / is
+                                // animating, the fast-path's cached UI doesn't
+                                // include the new layer's content. Force slow
+                                // path so `build_overlay_layer` runs and the
+                                // stack's entries land in the rendered tree.
+                                //
+                                // (Discovered while migrating tooltip: the
+                                // tooltip pushed to the stack and on_close
+                                // fired ~30ms later, but `build_overlay_layer`
+                                // was never called between because fast-path
+                                // frames bypassed the UI build entirely. Same
+                                // root cause as the tree expand race that this
+                                // gate also guards against.)
+                                let new_overlay_active = {
+                                    use blinc_layout::overlay_state::{
+                                        overlay_stack, toast_tray,
+                                    };
+                                    let s = overlay_stack()
+                                        .lock()
+                                        .map(|s| {
+                                            s.is_dirty()
+                                                || s.has_visible_overlays()
+                                                || s.has_animating_overlays()
+                                        })
+                                        .unwrap_or(false);
+                                    let t = toast_tray()
+                                        .lock()
+                                        .map(|t| t.is_dirty() || !t.is_empty() || t.has_animating())
+                                        .unwrap_or(false);
+                                    s || t
+                                };
                                 let try_fast_paint = !did_rebuild
                                     && !ws.needs_relayout
                                     && !css_blocks_fast
                                     && !scroll_animating
                                     && !bounds_anim_active
+                                    && !new_overlay_active
                                     && ws.last_paint_time_ms != 0
                                     && blinc_app.has_render_cache();
 
