@@ -237,7 +237,7 @@ impl Switch {
                 .items_center()
                 .cursor_pointer()
                 .child(switch)
-                .child(text(label_text).size(14.0).color(label_color))
+                .child(text(label_text).size(theme.typography().text_sm).color(label_color))
         } else {
             // Wrap single switch in a div for consistent behavior
             div().child(switch)

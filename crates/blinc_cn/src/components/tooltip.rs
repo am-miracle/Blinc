@@ -411,7 +411,12 @@ fn show_tooltip_overlay(
                 .rounded(radius)
                 .lock_corner_shape()
                 .shadow_sm()
-                .child(text(&tooltip_text).size(12.0).color(text_color).no_wrap());
+                .child(
+                    text(&tooltip_text)
+                        .size(theme.typography().text_xs)
+                        .color(text_color)
+                        .no_wrap(),
+                );
 
             // Wrap in motion for enter/exit animations
             div().child(

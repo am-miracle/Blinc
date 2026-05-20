@@ -356,7 +356,7 @@ impl DropdownMenuBuilder {
                         .bg(bg)
                         .child(
                             text(label)
-                                .size(14.0)
+                                .size(theme.typography().text_sm)
                                 .color(theme.color(ColorToken::TextPrimary))
                                 .no_cursor()
                                 .pointer_events_none(),

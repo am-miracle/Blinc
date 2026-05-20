@@ -24,6 +24,56 @@
 /// Each component defines `var(--cn-component-prop, var(--fallback))` for overridability.
 pub const CN_STYLES: &str = r#"
 /* ============================================================================
+   Typography base — every cn widget inherits the theme's canonical
+   sans, body line-height, and dense-HID letter-spacing. CN_STYLES
+   was previously silent on these, leaving widgets to fall back to
+   the platform default font and ignore the theme's deliberate
+   "Noto Sans + 13px text_sm + tracking_tight" choice.
+   ============================================================================ */
+
+.cn-button, .cn-card, .cn-card-header, .cn-card-footer,
+.cn-badge, .cn-alert, .cn-alert-box,
+.cn-input, .cn-textarea, .cn-label,
+.cn-checkbox, .cn-switch, .cn-radio,
+.cn-tabs-list, .cn-tabs-trigger,
+.cn-select-trigger, .cn-select-content, .cn-select-item,
+.cn-combobox-trigger, .cn-combobox-content, .cn-combobox-item,
+.cn-slider-track, .cn-progress,
+.cn-avatar, .cn-tooltip,
+.cn-dialog, .cn-drawer, .cn-sheet, .cn-toast,
+.cn-accordion, .cn-accordion-trigger, .cn-accordion-content,
+.cn-breadcrumb, .cn-breadcrumb-item,
+.cn-pagination, .cn-pagination-btn,
+.cn-nav-menu, .cn-nav-link,
+.cn-sidebar, .cn-sidebar-item,
+.cn-dropdown-menu, .cn-dropdown-item,
+.cn-context-menu, .cn-context-menu-item,
+.cn-menubar, .cn-menubar-trigger, .cn-menubar-item,
+.cn-popover-content, .cn-hover-card-content,
+.cn-tree-node, .cn-skeleton {
+    font-family: var(--font-sans);
+}
+
+.cn-kbd {
+    font-family: var(--font-mono);
+}
+
+/* Body-text widgets get the theme's line-height so multi-line
+   content (alert descriptions, accordion content, tooltips) breathes
+   correctly. */
+.cn-alert, .cn-alert-box, .cn-accordion-content, .cn-tooltip {
+    line-height: var(--leading-normal);
+}
+
+/* Dense-HID tracking on interactive labels. Picks up the variant's
+   tracking_tight value (Universal HID = -0.025em). */
+.cn-button, .cn-tabs-trigger,
+.cn-input, .cn-textarea,
+.cn-select-trigger, .cn-combobox-trigger {
+    letter-spacing: var(--tracking-tight);
+}
+
+/* ============================================================================
    Button
    ============================================================================ */
 

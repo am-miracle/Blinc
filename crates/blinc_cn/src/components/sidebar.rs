@@ -243,7 +243,7 @@ impl Sidebar {
                             .when(!is_collapsed, |d| {
                                 d.px(3.0).py(2.0).child(
                                     text(title.to_uppercase())
-                                        .size(11.0)
+                                        .size(theme.typography().text_xs)
                                         .color(text_tertiary)
                                         .weight(FontWeight::SemiBold)
                                         .no_cursor()
@@ -305,7 +305,7 @@ impl Sidebar {
                                         .child(svg(&item_icon).size(18.0, 18.0).color(icon_color)),
                                 )
                                 .child(
-                                    div().child(text(&item_label).size(14.0).no_cursor().no_wrap()),
+                                    div().child(text(&item_label).size(theme.typography().text_sm).no_cursor().no_wrap()),
                                 )
                             })
                             .when(is_collapsed, |d| {
