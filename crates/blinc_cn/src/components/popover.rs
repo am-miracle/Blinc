@@ -35,18 +35,17 @@
 use std::cell::OnceCell;
 use std::sync::Arc;
 
-use blinc_animation::AnimationPreset;
 use blinc_core::context_state::BlincContextState;
 use blinc_core::State;
 use blinc_layout::div::ElementTypeId;
 use blinc_layout::element::{ElementBounds, RenderProps};
-use blinc_layout::motion::motion_derived;
-use blinc_layout::overlay_state::get_overlay_manager;
+use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
 use blinc_layout::stateful::{stateful_with_key, ButtonState};
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
-use blinc_layout::widgets::overlay::{AnchorDirection, OverlayHandle, OverlayManagerExt};
-use blinc_layout::{selector, InstanceKey};
+use blinc_layout::widgets::overlay::AnchorDirection;
+use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
+use blinc_layout::InstanceKey;
 use blinc_theme::{ColorToken, RadiusToken, SpacingToken, ThemeState};
 
 /// Side where the popover appears relative to the trigger
@@ -213,7 +212,6 @@ impl PopoverBuilder {
         let offset = self.offset;
         let content_builder = self.content.clone();
         let trigger_builder = self.trigger.clone();
-        let motion_key_str = format!("popover_{}", self.key.get());
         let button_key = self.key.derive("button");
 
         // Clone states for closures
@@ -221,7 +219,8 @@ impl PopoverBuilder {
         let open_state_for_click = open_state.clone();
         let overlay_handle_for_click = overlay_handle_state.clone();
         let overlay_handle_for_show = overlay_handle_state.clone();
-        let content_builder_for_show = content_builder.clone();
+        let open_state_for_close = open_state.clone();
+        let overlay_handle_for_close = overlay_handle_state.clone();
 
         // Build trigger with click handler
         let trigger = stateful_with_key::<ButtonState>(&button_key)
@@ -235,7 +234,6 @@ impl PopoverBuilder {
                 div().w_fit().cursor_pointer().child(trigger_content)
             })
             .on_click(move |ctx| {
-                // Use bounds directly from EventContext
                 let bounds = ElementBounds {
                     x: ctx.bounds_x,
                     y: ctx.bounds_y,
@@ -245,38 +243,34 @@ impl PopoverBuilder {
 
                 let is_open = open_state_for_click.get();
                 if is_open {
-                    // Close the popover
-                    if let Some(handle_id) = overlay_handle_for_click.get() {
-                        let mgr = get_overlay_manager();
-                        let handle = OverlayHandle::from_raw(handle_id);
-
-                        // Check if overlay is already closing or pending close
-                        if mgr.is_closing(handle) || mgr.is_pending_close(handle) {
-                            return;
+                    // Toggle off — close the active overlay if any.
+                    if let Some(raw) = overlay_handle_for_click.get() {
+                        let handle = OverlayHandle::from_raw(raw);
+                        if handle.is_live() {
+                            handle.close();
                         }
-
-                        mgr.close(handle);
                     }
-                } else {
-                    // Calculate position based on trigger bounds
-                    let (x, y) = calculate_popover_position(&bounds, side, align, offset);
-
-                    // Show the popover
-                    if let Some(ref content_fn) = content_builder_for_show {
-                        let handle = show_popover_overlay(
-                            x,
-                            y,
-                            side,
-                            Arc::clone(content_fn),
-                            overlay_handle_for_show.clone(),
-                            open_state_for_click.clone(),
-                            motion_key_str.clone(),
-                        );
-
-                        overlay_handle_for_show.set(Some(handle.id()));
-                        open_state_for_click.set(true);
-                    }
+                    return;
                 }
+
+                // Toggle on — push a fresh popover overlay.
+                let Some(ref content_fn) = content_builder else {
+                    return;
+                };
+                let (x, y) = calculate_popover_position(&bounds, side, align, offset);
+
+                let stored_close_handle = overlay_handle_for_close.clone();
+                let stored_close_state = open_state_for_close.clone();
+                let content_fn = Arc::clone(content_fn);
+
+                let handle = build_popover_overlay(x, y, side, content_fn, move |_reason| {
+                    // Fires on any close path (ESC / click-outside / programmatic).
+                    stored_close_state.set(false);
+                    stored_close_handle.set(None);
+                });
+
+                overlay_handle_for_show.set(Some(handle.raw()));
+                open_state_for_click.set(true);
             });
 
         let mut inner = trigger;
@@ -345,15 +339,18 @@ fn calculate_popover_position(
     }
 }
 
-/// Show the popover overlay
-fn show_popover_overlay(
+/// Push a popover overlay to the global `OverlayStack` and return its handle.
+///
+/// Enter animation is delegated to the CSS `@keyframes cn-popover-content-enter`
+/// rule defined in `cn_styles.rs` — same approach as `cn::tooltip`, since the
+/// new overlay stack's motion-FSM integration doesn't yet propagate opacity
+/// to cached primitives correctly (Phase 3 known issue). Exit snaps for now.
+fn build_popover_overlay(
     x: f32,
     y: f32,
     side: PopoverSide,
     content_fn: ContentBuilderFn,
-    overlay_handle_state: State<Option<u64>>,
-    open_state: State<bool>,
-    motion_key: String,
+    on_close: impl Fn(blinc_layout::widgets::overlay_stack::CloseReason) + Send + Sync + 'static,
 ) -> OverlayHandle {
     let theme = ThemeState::get();
     let bg = theme.color(ColorToken::SurfaceElevated);
@@ -361,19 +358,6 @@ fn show_popover_overlay(
     let radius = theme.radius(RadiusToken::Lg);
     let padding = theme.spacing_value(SpacingToken::Space4);
 
-    let mgr = get_overlay_manager();
-
-    // Clone states for closures
-    let handle_state_for_close = overlay_handle_state.clone();
-    let handle_state_for_ready = overlay_handle_state.clone();
-    let open_state_for_dismiss = open_state.clone();
-    let motion_key_for_content = motion_key.clone();
-
-    // Use dropdown() which creates transparent backdrop with dismiss_on_click
-    // The motion key includes ":child:0" suffix because animation is on child of wrapper
-    let motion_key_with_child = format!("{}:child:0", motion_key);
-
-    // Map PopoverSide to AnchorDirection for correct positioning
     let anchor_dir = match side {
         PopoverSide::Top => AnchorDirection::Top,
         PopoverSide::Bottom => AnchorDirection::Bottom,
@@ -381,51 +365,21 @@ fn show_popover_overlay(
         PopoverSide::Right => AnchorDirection::Right,
     };
 
-    // Use hover_card() which has no backdrop, allowing scroll events to pass through
-    // Disable hover-leave dismiss since popover is click-triggered
-    // Enable click-outside dismiss for click-to-close behavior
-    // Enable follows_scroll so popover moves with its trigger when scrolling
-    // Disable auto-dismiss - popover stays open until user closes it
-    mgr.hover_card()
+    OverlayBuilder::popover()
         .at(x, y)
         .anchor_direction(anchor_dir)
-        .dismiss_on_hover_leave(false)
-        .dismiss_on_click_outside(true) // Dismiss when clicking outside content
-        .dismiss_on_escape(true)
-        .follows_scroll(true) // Follow scroll to stay attached to trigger
-        .auto_dismiss(None) // Stay open indefinitely
-        .close_delay(None) // No close delay
-        .motion_key(&motion_key_with_child)
-        .on_close(move || {
-            open_state_for_dismiss.set(false);
-            handle_state_for_close.set(None);
-        })
+        // Popover defaults from `DismissRules::default_for(Dropdown)`:
+        // on_escape=true, on_click_outside=true, blocks_below=false, no
+        // backdrop. That's already what popover wants.
+        .on_close(on_close)
         .content(move || {
             let user_content = (content_fn)();
 
-            // Generate unique ID for hit-test size tracking
-            let popover_id = format!("popover-{}", motion_key_for_content);
-
-            // Register on_ready callback to capture content size for accurate hit-testing
-            let handle_state_for_on_ready = handle_state_for_ready.clone();
-            if let Some(handle) = selector::query(&popover_id) {
-                handle.on_ready(move |bounds| {
-                    if let Some(handle_id) = handle_state_for_on_ready.get() {
-                        let mgr = get_overlay_manager();
-                        let overlay_handle = OverlayHandle::from_raw(handle_id);
-                        mgr.set_content_size(overlay_handle, bounds.width, bounds.height);
-                    }
-                });
-            }
-
-            // Styled popover container. `lock_corner_shape` keeps the
-            // panel's corners circular even when a theme advertises a
-            // squircle exponent — overlay chrome reads cleanest with
-            // the platform-default rounded-rect shape, not the
-            // theme's hero curve.
-            let popover_content = div()
+            // `lock_corner_shape` keeps the panel's corners circular even
+            // when a theme advertises a squircle exponent — overlay chrome
+            // reads cleanest with platform-default rounded-rect shape.
+            div()
                 .class("cn-popover-content")
-                .id(&popover_id)
                 .flex_col()
                 .bg(bg)
                 .border(1.0, border)
@@ -435,15 +389,7 @@ fn show_popover_overlay(
                 .shadow_lg()
                 .min_w(150.0)
                 .overflow_clip()
-                .child(user_content);
-
-            // Wrap in motion for enter/exit animations
-            div().w_fit().h_fit().child(
-                motion_derived(&motion_key_for_content)
-                    .enter_animation(AnimationPreset::grow_in(150))
-                    .exit_animation(AnimationPreset::grow_out(100))
-                    .child(popover_content),
-            )
+                .child(user_content)
         })
         .show()
 }
