@@ -283,16 +283,16 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-checkbox {
-    border: 2px solid var(--cn-checkbox-border, var(--border));
+    /* Border width is Rust-owned because it varies per size
+       (1.5px / 2px / 2px). Border color + bg are state-driven by the
+       Stateful builder, but we still set `transition:` here so any user
+       cascade override animates rather than snaps. */
     border-radius: var(--radius-sm);
-    background: var(--cn-checkbox-bg, var(--input-bg));
     cursor: pointer;
-    transition: background var(--duration-fast), border-color var(--duration-fast), transform var(--duration-fastest);
+    transition: background var(--duration-fast), border-color var(--duration-fast);
 }
-.cn-checkbox:hover {
-    border-color: var(--border-hover);
-    transform: scale(1.05, 1.05);
-}
+/* Hover scale is Rust-driven via the Stateful FSM — duplicating it here
+   compounded with the Rust transform. State colors handled in Rust too. */
 .cn-checkbox--checked {
     background: var(--cn-checkbox-checked-bg, var(--primary));
     border-color: var(--cn-checkbox-checked-border, var(--primary));
@@ -362,18 +362,17 @@ pub const CN_STYLES: &str = r#"
        active trigger (raised to --surface) reads as elevated. */
     background: var(--cn-tabs-list-bg, var(--surface-overlay));
     border-radius: var(--radius-md);
-    padding: var(--space-1-5);
+    padding: var(--space-1);
     gap: var(--space-1);
 }
 .cn-tabs-trigger {
     border-radius: var(--radius-default);
     cursor: pointer;
     color: var(--text-secondary);
-    transition: background var(--duration-fast), color var(--duration-fast);
+    transition: color var(--duration-fast);
 }
-.cn-tabs-trigger:hover {
+.cn-tabs-trigger:hover:not(.cn-tabs-trigger--active) {
     color: var(--text-primary);
-    background: var(--surface-overlay);
 }
 .cn-tabs-trigger--active {
     /* Active trigger lifts to --surface so it stands out from the
@@ -389,26 +388,26 @@ pub const CN_STYLES: &str = r#"
     cursor: not-allowed;
 }
 
-/* Tab trigger sizes — height values stay raw (no height tokens exist
-   yet; tracked as a future spacing scale addition). */
-.cn-tabs-trigger--sm { height: 32px; padding: var(--space-1) var(--space-3); font-size: var(--text-sm); }
-.cn-tabs-trigger--md { height: 40px; padding: var(--space-2) var(--space-4); font-size: var(--text-sm); }
-.cn-tabs-trigger--lg { height: 48px; padding: var(--space-3) var(--space-5); font-size: var(--text-lg); }
+/* Tab trigger sizes — content + padding determines height (no fixed
+   heights). Vertical padding kept tight to keep the tray compact. */
+.cn-tabs-trigger--sm { padding: var(--space-1) var(--space-3); font-size: var(--text-sm); }
+.cn-tabs-trigger--md { padding: var(--space-1-5) var(--space-4); font-size: var(--text-sm); }
+.cn-tabs-trigger--lg { padding: var(--space-2) var(--space-5); font-size: var(--text-lg); }
 
 /* ============================================================================
    Select
    ============================================================================ */
 
 .cn-select-trigger {
-    background: var(--cn-select-bg, var(--surface));
-    border: 1px solid var(--cn-select-border, var(--border));
+    /* `background`, `border`, and `color` are Rust-owned (state-aware:
+       open / disabled / placeholder). Leaving CSS values here would
+       overwrite the disabled `InputBgDisabled` fill with `--surface`
+       (white) — the exact regression that hid the disabled trigger bg.
+       Keep only the radius + cursor + transition; users still cascade
+       via more specific rules if they need to override. */
     border-radius: var(--radius-default);
     cursor: pointer;
-    color: var(--text-primary);
     transition: border-color var(--duration-fast);
-}
-.cn-select-trigger:hover {
-    border-color: var(--border-hover);
 }
 
 .cn-select-content {
@@ -681,8 +680,12 @@ pub const CN_STYLES: &str = r#"
     background: transparent;
     color: var(--text-secondary);
 }
-.cn-sidebar-item:hover {
-    background: var(--surface-elevated);
+.cn-sidebar-item:hover:not(.cn-sidebar-item--active) {
+    /* Subtle accent feedback — matches the overlay-menu hover treatment
+       (dropdown / select / context). Previously this used
+       `--surface-elevated` (#FBFCFE in light), which is the same token
+       as the active state, so hover and active looked identical. */
+    background: var(--accent-subtle);
     color: var(--text-primary);
 }
 .cn-sidebar-item--active {
@@ -813,10 +816,11 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-tree-node {
-    padding: var(--space-1) var(--space-2);
+    /* No `padding` here — Rust owns per-side padding so the left side
+       can encode tree-depth indent. CSS overriding `padding:` would
+       collapse all rows to the same x-offset. */
     border-radius: var(--radius-sm);
     cursor: pointer;
-    color: var(--text-primary);
     transition: background var(--duration-fastest);
 }
 .cn-tree-node:hover {
@@ -856,15 +860,11 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-combobox-trigger {
-    background: var(--surface);
-    border: 1px solid var(--border);
+    /* Match select-trigger: bg / border / color are Rust-owned so the
+       state-aware disabled fill isn't clobbered by CSS. */
     border-radius: var(--radius-default);
     cursor: pointer;
-    color: var(--text-primary);
     transition: border-color var(--duration-fast);
-}
-.cn-combobox-trigger:hover {
-    border-color: var(--border-hover);
 }
 .cn-combobox-content {
     /* Shared overlay-menu chrome with select / dropdown / context. */

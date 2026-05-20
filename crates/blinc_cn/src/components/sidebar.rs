@@ -285,7 +285,16 @@ impl Sidebar {
                         let item_anim_key = format!("{}_anim", item_key);
                         let mut item_element = div()
                             .class("cn-sidebar-item")
-                            .w_fit()
+                            // `w_full` so the hover / active bg stretches
+                            // across the full sidebar width. With `w_fit`
+                            // the bg only painted as wide as the item's
+                            // own content — so short labels like "Inbox"
+                            // got a noticeably narrower highlight than
+                            // long ones like "Dashboard". The parent
+                            // `items_container` is `w_fit` and resolves
+                            // its own width from the widest sibling, so
+                            // every item now matches that one width.
+                            .w_full()
                             .h_fit()
                             .flex_row()
                             .items_center()
