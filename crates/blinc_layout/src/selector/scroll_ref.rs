@@ -54,12 +54,15 @@ pub enum PendingScroll {
 
 /// Reference for programmatic control of a scroll container
 ///
-/// Create with `ctx.use_scroll_ref("key")` and bind to a scroll widget with `.bind(&scroll_ref)`.
+/// Create with `ctx.use_scroll_ref()` (bare, auto-keyed by call
+/// site via `#[track_caller]`) or `ctx.use_scroll_ref_keyed(key)`
+/// for loops / reusable factories. Bind to a scroll widget with
+/// `.bind(&scroll_ref)`.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// let scroll_ref = ctx.use_scroll_ref("my_scroll");
+/// let scroll_ref = ctx.use_scroll_ref();
 ///
 /// scroll()
 ///     .bind(&scroll_ref)
@@ -392,20 +395,87 @@ impl ScrollRef {
 /// # Panics
 ///
 /// Panics if `BlincContextState` has not been initialized.
-pub fn use_scroll_ref(key: &str) -> ScrollRef {
+/// Bare auto-keyed [`ScrollRef`] — uses `#[track_caller]` to derive
+/// a unique key from the source location of the call, so one
+/// scroll ref per source line is wired up automatically. The
+/// handle survives UI rebuilds.
+///
+/// For loops or reusable component factories that need many scroll
+/// refs from one source line, use [`use_scroll_ref_keyed`] with an
+/// explicit per-instance key.
+///
+/// # Panics
+///
+/// Panics if [`blinc_core::context_state::BlincContextState`] has not been initialized.
+///
+/// # Example
+///
+/// ```ignore
+/// use blinc_layout::prelude::*;
+///
+/// fn page() -> impl ElementBuilder {
+///     // No key needed.
+///     let main_scroll = use_scroll_ref();
+///
+///     scroll().bind(&main_scroll).child(content)
+/// }
+/// ```
+#[track_caller]
+pub fn use_scroll_ref() -> ScrollRef {
+    let loc = std::panic::Location::caller();
+    // Reuse the keyed path with a `(file, line, column)` tuple key.
+    // Hashing a tuple is free and skips a `format!` alloc per call.
+    use_scroll_ref_keyed((loc.file(), loc.line(), loc.column()))
+}
+
+/// Get or create a persistent [`ScrollRef`] keyed by anything
+/// hashable. Use this for loops, list items, or reusable component
+/// factories called multiple times from the same source line.
+///
+/// For the common "one scroll-ref per call site" case, prefer the
+/// bare [`use_scroll_ref`].
+///
+/// # Panics
+///
+/// Panics if [`blinc_core::context_state::BlincContextState`] has not been initialized.
+pub fn use_scroll_ref_keyed<K: std::hash::Hash>(key: K) -> ScrollRef {
+    use blinc_core::context_state::StateKey;
+    use blinc_core::reactive::{Signal, SignalId};
     use blinc_core::BlincContextState;
 
     let ctx = BlincContextState::get();
-    let state_key = format!("scroll_ref:{}", key);
+    // Type-discriminated like the other hash-keyed constructors —
+    // two `use_scroll_ref_keyed(...)` calls with the same key but
+    // different `K` types still get distinct slots (since they
+    // wouldn't have been able to share state anyway).
+    let state_key = StateKey::new::<SharedScrollRefInner, _>(&key);
 
-    // Get or create the inner state using BlincContextState's persisted storage
-    let (signal_id, inner) = ctx.get_or_create_persisted(&state_key, ScrollRef::new_inner);
+    let mut hooks = ctx.hooks().lock().unwrap();
+    let (signal_id, inner) = if let Some(raw_id) = hooks.get(&state_key) {
+        let signal_id = SignalId::from_raw(raw_id);
+        let inner = ctx
+            .reactive()
+            .lock()
+            .unwrap()
+            .get_untracked(Signal::<SharedScrollRefInner>::from_id(signal_id))
+            .unwrap_or_else(ScrollRef::new_inner);
+        (signal_id, inner)
+    } else {
+        let new_inner = ScrollRef::new_inner();
+        let signal = ctx
+            .reactive()
+            .lock()
+            .unwrap()
+            .create_signal(Arc::clone(&new_inner));
+        hooks.insert(state_key, signal.id().to_raw());
+        (signal.id(), new_inner)
+    };
+    drop(hooks);
 
-    // Create a no-op trigger - scroll operations are processed every frame
-    // by the renderer's process_pending_scroll_refs(), so we don't need
-    // to trigger rebuilds on scroll commands
+    // No-op trigger — scroll operations are processed every frame
+    // by the renderer's `process_pending_scroll_refs()`, so we
+    // don't need to wake the reactive graph on each scroll command.
     let noop_trigger: TriggerCallback = Arc::new(|| {});
-
     ScrollRef::with_inner(inner, signal_id, noop_trigger)
 }
 

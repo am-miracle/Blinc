@@ -60,7 +60,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     let bg = theme.color(ColorToken::Background);
 
     // Create scroll ref to track scroll position
-    let scroll_ref = ctx.use_scroll_ref("main_scroll");
+    let scroll_ref = ctx.use_scroll_ref();
 
     div()
         .w(ctx.width)

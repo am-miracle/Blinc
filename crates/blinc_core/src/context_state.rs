@@ -511,15 +511,25 @@ impl BlincContextState {
         }
     }
 
-    /// Create a new reactive signal with an initial value (low-level API)
+    /// Create or retrieve a persistent reactive signal, auto-keyed
+    /// by the caller's source location via `#[track_caller]`.
+    /// Survives UI rebuilds — first call from a given line mints
+    /// the signal, subsequent calls return the same handle.
     ///
-    /// **Note**: Prefer [`Self::use_state`] (auto-keyed by call site)
-    /// for the common case of "a persistent value scoped to this
-    /// place in the source." `use_signal` always creates a fresh
-    /// signal — use it when you genuinely want a one-shot signal
-    /// whose lifetime is tied to the current build (rare).
-    pub fn use_signal<T: Send + 'static>(&self, initial: T) -> Signal<T> {
-        self.reactive.lock().unwrap().create_signal(initial)
+    /// For multiple instances from the same line (loops, factory
+    /// functions), use [`Self::use_signal_keyed`] with an explicit
+    /// per-instance key.
+    ///
+    /// Previously `use_signal` created a fresh signal on every
+    /// call — a footgun more often than a feature. Callers that
+    /// genuinely want a one-shot, non-persistent signal can call
+    /// `reactive().lock().unwrap().create_signal(initial)`
+    /// directly.
+    #[track_caller]
+    pub fn use_signal<T: Clone + Send + 'static>(&self, initial: T) -> Signal<T> {
+        let loc = std::panic::Location::caller();
+        let key = format!("use_signal@{}:{}:{}", loc.file(), loc.line(), loc.column());
+        self.use_signal_keyed(&key, || initial)
     }
 
     /// Create or retrieve a persistent reactive state, auto-keyed by

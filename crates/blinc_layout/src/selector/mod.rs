@@ -98,7 +98,8 @@ pub fn query_motion(key: &str) -> MotionHandle {
     MotionHandle::new(key)
 }
 pub use scroll_ref::{
-    use_scroll_ref, PendingScroll, ScrollRef, SharedScrollRefInner, TriggerCallback,
+    use_scroll_ref, use_scroll_ref_keyed, PendingScroll, ScrollRef, SharedScrollRefInner,
+    TriggerCallback,
 };
 
 /// Options for scroll-into-view behavior

@@ -1119,17 +1119,17 @@ impl WindowedContext {
         }
     }
 
-    /// Create a persistent ScrollRef for programmatic scroll control
-    ///
-    /// This creates a ScrollRef that survives across UI rebuilds. Use `.bind()`
-    /// on a scroll widget to connect it, then call methods like `.scroll_to()`
-    /// to programmatically control scrolling.
+    /// Bare auto-keyed [`ScrollRef`] — uses `#[track_caller]` to
+    /// derive a unique key from the source location, so the handle
+    /// survives UI rebuilds without a manual key. For loops or
+    /// repeated calls from the same line, use
+    /// [`Self::use_scroll_ref_keyed`].
     ///
     /// # Example
     ///
     /// ```ignore
     /// fn build_ui(ctx: &WindowedContext) -> impl ElementBuilder {
-    ///     let scroll_ref = ctx.use_scroll_ref("my_scroll");
+    ///     let scroll_ref = ctx.use_scroll_ref();
     ///
     ///     div()
     ///         .child(
@@ -1145,66 +1145,40 @@ impl WindowedContext {
     ///         )
     /// }
     /// ```
-    pub fn use_scroll_ref(&self, key: &str) -> blinc_layout::selector::ScrollRef {
-        use blinc_core::reactive::SignalId;
-        use blinc_layout::selector::{ScrollRef, SharedScrollRefInner, TriggerCallback};
-
-        // Create a unique key for the scroll ref's inner state
-        let state_key =
-            StateKey::from_string::<SharedScrollRefInner>(&format!("scroll_ref:{}", key));
-        let mut hooks = self.hooks.lock().unwrap();
-
-        // Check if we have an existing signal with this key
-        let (signal_id, inner) = if let Some(raw_id) = hooks.get(&state_key) {
-            // Reconstruct the signal ID and get the inner state from the reactive graph
-            let signal_id = SignalId::from_raw(raw_id);
-            let inner = self
-                .reactive
-                .lock()
-                .unwrap()
-                .get_untracked(Signal::<SharedScrollRefInner>::from_id(signal_id))
-                .unwrap_or_else(ScrollRef::new_inner);
-            (signal_id, inner)
-        } else {
-            // First time - create a new inner state and store it in the reactive graph
-            let new_inner = ScrollRef::new_inner();
-            let signal = self
-                .reactive
-                .lock()
-                .unwrap()
-                .create_signal(Arc::clone(&new_inner));
-            let raw_id = signal.id().to_raw();
-            hooks.insert(state_key, raw_id);
-            (signal.id(), new_inner)
-        };
-
-        drop(hooks);
-
-        // ScrollRef doesn't need to trigger rebuilds - scroll operations are processed
-        // every frame by process_pending_scroll_refs()
-        let noop_trigger: TriggerCallback = Arc::new(|| {});
-
-        ScrollRef::with_inner(inner, signal_id, noop_trigger)
+    #[track_caller]
+    pub fn use_scroll_ref(&self) -> blinc_layout::selector::ScrollRef {
+        blinc_layout::selector::use_scroll_ref()
     }
 
-    /// Create a new reactive signal with an initial value (low-level API)
+    /// Hash-keyed [`ScrollRef`] for loops / list items / reusable
+    /// component factories called multiple times from one line. The
+    /// key can be any `Hash` type (`&str`, `u32`, tuples,
+    /// `InstanceKey`, ...).
     ///
-    /// **Note**: Prefer `use_state` in most cases, as it automatically
-    /// persists signals across rebuilds.
+    /// Prefer [`Self::use_scroll_ref`] for the common one-call-site
+    /// case.
+    pub fn use_scroll_ref_keyed<K: Hash>(&self, key: K) -> blinc_layout::selector::ScrollRef {
+        blinc_layout::selector::use_scroll_ref_keyed(key)
+    }
+
+    /// Create or retrieve a persistent reactive signal, auto-keyed
+    /// by the caller's source location via `#[track_caller]`. The
+    /// signal survives UI rebuilds — first call from a given line
+    /// mints it, subsequent calls return the same handle.
     ///
-    /// This method always creates a new signal. Use this for advanced
-    /// cases where you manage signal lifecycle manually.
+    /// For loops or factories called multiple times from one line,
+    /// use [`Self::use_signal_keyed`].
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let count = ctx.use_signal(0);
-    ///
+    /// let count = ctx.use_signal(0i32);
     /// // In an event handler:
     /// ctx.set(count, ctx.get(count).unwrap_or(0) + 1);
     /// ```
-    pub fn use_signal<T: Send + 'static>(&self, initial: T) -> Signal<T> {
-        self.reactive.lock().unwrap().create_signal(initial)
+    #[track_caller]
+    pub fn use_signal<T: Clone + Send + 'static>(&self, initial: T) -> Signal<T> {
+        blinc_core::context_state::BlincContextState::get().use_signal(initial)
     }
 
     /// Get the current value of a signal
@@ -2110,7 +2084,8 @@ impl blinc_core::BlincContext for WindowedContext {
         WindowedContext::use_signal_keyed(self, key, init)
     }
 
-    fn use_signal<T: Send + 'static>(&self, initial: T) -> Signal<T> {
+    #[track_caller]
+    fn use_signal<T: Clone + Send + 'static>(&self, initial: T) -> Signal<T> {
         WindowedContext::use_signal(self, initial)
     }
 

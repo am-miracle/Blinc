@@ -197,8 +197,11 @@ Use `ctx.use_scroll_ref()` to create a persistent scroll reference:
 use blinc_layout::selector::{ScrollRef, ScrollOptions, ScrollBehavior, ScrollBlock};
 
 fn my_component(ctx: &WindowedContext) -> impl ElementBuilder {
-    // Create a ScrollRef - persists across rebuilds
-    let scroll_ref = ctx.use_scroll_ref("my_scroll");
+    // Create a ScrollRef — auto-keyed by call site via #[track_caller],
+    // so it survives UI rebuilds without a manual key. For loops or
+    // factories called multiple times from one line, use
+    // `ctx.use_scroll_ref_keyed(key)` instead.
+    let scroll_ref = ctx.use_scroll_ref();
 
     scroll()
         .bind(&scroll_ref)  // Bind the ref to this scroll container
@@ -308,7 +311,7 @@ use blinc_layout::selector::{ScrollBehavior, ScrollBlock, ScrollOptions, ScrollR
 use blinc_layout::units::px;  // Semantic unit for raw pixels
 
 fn carousel(ctx: &WindowedContext) -> impl ElementBuilder {
-    let scroll_ref = ctx.use_scroll_ref("carousel_scroll");
+    let scroll_ref = ctx.use_scroll_ref();
     let current_index = ctx.use_state_keyed("current_index", || 0usize);
 
     div()

@@ -76,11 +76,19 @@ pub trait BlincContext {
         T: Clone + Send + 'static,
         F: FnOnce() -> T;
 
-    /// Create a new reactive signal with an initial value (low-level API)
+    /// Create or retrieve a persistent reactive signal, auto-keyed
+    /// by the caller's source location via `#[track_caller]`.
+    /// Survives UI rebuilds.
     ///
-    /// **Note**: Prefer `use_state_keyed` in most cases, as it automatically
-    /// persists signals across rebuilds.
-    fn use_signal<T: Send + 'static>(&self, initial: T) -> Signal<T>;
+    /// Equivalent to `use_signal_keyed(unique_call_site_key, ||
+    /// initial)` — first call mints the signal, subsequent calls
+    /// from the same line return the same handle.
+    ///
+    /// For loops or factories called multiple times from the same
+    /// line, use [`Self::use_signal_keyed`] with an explicit per-
+    /// instance key.
+    #[track_caller]
+    fn use_signal<T: Clone + Send + 'static>(&self, initial: T) -> Signal<T>;
 
     /// Get the current value of a signal
     fn get<T: Clone + 'static>(&self, signal: Signal<T>) -> Option<T>;
@@ -158,7 +166,16 @@ pub trait BlincContextExt: BlincContext {
         self.use_state_keyed(&key, init)
     }
 
-    /// Create a persistent signal with automatic source-location key
+    /// **Deprecated.** [`BlincContext::use_signal`] is now itself
+    /// auto-keyed via the track_caller attribute and persistent
+    /// across rebuilds, so this extension method is redundant.
+    /// Switch to `ctx.use_signal(init())` (eagerly evaluate the
+    /// closure at the call site) or move to `use_signal_keyed` if
+    /// you need the lazy-init form for a non-Default `T`.
+    #[deprecated(
+        since = "0.5.2",
+        note = "use `use_signal(initial)` directly — it now auto-keys by caller location; pass `init()` if you previously deferred construction"
+    )]
     #[track_caller]
     fn use_signal_auto<T, F>(&self, init: F) -> Signal<T>
     where

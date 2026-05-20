@@ -43,7 +43,7 @@ fn main() -> Result<()> {
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     // Create a ScrollRef for programmatic scroll control
-    let scroll_ref = ctx.use_scroll_ref("carousel_scroll");
+    let scroll_ref = ctx.use_scroll_ref();
 
     let current_index = ctx.use_state_keyed("current_index", || 0usize);
 
@@ -59,6 +59,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         // Title
         .child(
             div()
+                .w_full()
                 .flex_col()
                 .items_center()
                 .gap_px(4.0)
@@ -76,6 +77,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         )
         .child(
             scroll()
+                .items_center()
                 .justify_center()
                 .w_full()
                 .h(ctx.height - 200.0)
@@ -85,6 +87,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                         .h_fit()
                         .flex_col()
                         .gap_px(12.0)
+                        .items_center()
                         .justify_center()
                         .child(build_carousel(ctx, &scroll_ref, &current_index))
                         .child(build_carousel_dots(ctx, &scroll_ref, &current_index))
@@ -131,50 +134,54 @@ fn build_carousel(
     let current_index_clone = current_index.clone();
 
     div()
+        .w_full()
         .flex_col()
         .items_center()
+        .justify_center()
         .gap_px(12.0)
         // Carousel container with rounded corners and shadow
         .child(
-            div()
-                .w(VIEWPORT_WIDTH)
-                .h_fit()
-                .bg(Color::rgba(0.12, 0.12, 0.16, 1.0))
-                .rounded(20.0)
-                .shadow_lg()
-                .overflow_clip()
-                .items_center()
-                .justify_center()
-                .padding_y_px(16.0)
-                .child(
-                    // Horizontal scroll container - cards are STATIC inside
-                    scroll()
-                        .bind(scroll_ref)
-                        .direction(ScrollDirection::Horizontal)
-                        .w(VIEWPORT_WIDTH)
-                        .h_fit()
-                        .items_start()
-                        .justify_start() // Ensure content starts at beginning
-                        .child(
-                            // Cards container - STATIC, no stateful needed
-                            div()
-                                .flex_row()
-                                .gap(CARD_GAP)
-                                .items_start()
-                                // Padding to center first and last cards in viewport
-                                // px() gives raw pixels, sp() gives scaled spacing units
-                                .padding_x(px((VIEWPORT_WIDTH - CARD_WIDTH) / 2.0))
-                                .children(
-                                    cards
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, (title, desc, accent))| {
-                                            build_card(i, title, desc, *accent)
-                                        })
-                                        .collect::<Vec<_>>(),
-                                ),
-                        ),
-                ),
+            div().w_full().h_fit().justify_center().child(
+                div()
+                    .w(VIEWPORT_WIDTH)
+                    .h_fit()
+                    .bg(Color::rgba(0.12, 0.12, 0.16, 1.0))
+                    .rounded(20.0)
+                    .shadow_lg()
+                    .overflow_clip()
+                    .items_center()
+                    .justify_center()
+                    .padding_y_px(16.0)
+                    .child(
+                        // Horizontal scroll container - cards are STATIC inside
+                        scroll()
+                            .bind(scroll_ref)
+                            .direction(ScrollDirection::Horizontal)
+                            .w(VIEWPORT_WIDTH)
+                            .h_fit()
+                            .items_start()
+                            .justify_start() // Ensure content starts at beginning
+                            .child(
+                                // Cards container - STATIC, no stateful needed
+                                div()
+                                    .flex_row()
+                                    .gap(CARD_GAP)
+                                    .items_start()
+                                    // Padding to center first and last cards in viewport
+                                    // px() gives raw pixels, sp() gives scaled spacing units
+                                    .padding_x(px((VIEWPORT_WIDTH - CARD_WIDTH) / 2.0))
+                                    .children(
+                                        cards
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(i, (title, desc, accent))| {
+                                                build_card(i, title, desc, *accent)
+                                            })
+                                            .collect::<Vec<_>>(),
+                                    ),
+                            ),
+                    ),
+            ),
         )
         // Current card indicator - ONLY this updates reactively
         .child(

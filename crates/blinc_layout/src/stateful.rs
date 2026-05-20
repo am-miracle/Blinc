@@ -1424,7 +1424,7 @@ pub type SharedState<S> = Arc<Mutex<StatefulInner<S>>>;
 ///
 /// # Panics
 ///
-/// Panics if [`BlincContextState::init`] hasn't been called — that
+/// Panics if [`blinc_core::context_state::BlincContextState::init`] hasn't been called — that
 /// happens automatically inside `WindowedApp::run` / `WebApp::run`
 /// / mobile runners.
 ///
@@ -1475,7 +1475,7 @@ where
 ///
 /// # Panics
 ///
-/// Panics if [`BlincContextState::init`] has not been called (i.e.
+/// Panics if [`blinc_core::context_state::BlincContextState::init`] has not been called (i.e.
 /// the global context isn't set up — happens automatically inside
 /// `WindowedApp::run` / `WebApp::run` / mobile runners).
 ///
