@@ -4195,11 +4195,16 @@ impl WindowedApp {
                                         KeyState::Pressed => {
                                             // Handle Escape key for overlays first
                                             // If an overlay handles it, don't propagate further
-                                            if kb_event.key == Key::Escape
-                                                && windowed_ctx.overlay_manager.handle_escape()
-                                            {
-                                                // Escape was consumed by overlay, skip further processing
-                                                // (but continue collecting events for non-overlay targets)
+                                            if kb_event.key == Key::Escape {
+                                                // Legacy manager first (covers widgets not yet
+                                                // migrated). Then the new OverlayStack.
+                                                let legacy_handled =
+                                                    windowed_ctx.overlay_manager.handle_escape();
+                                                let stack_handled = blinc_layout::overlay_state::overlay_stack()
+                                                    .lock()
+                                                    .map(|mut s| s.handle_escape())
+                                                    .unwrap_or(false);
+                                                let _ = legacy_handled || stack_handled;
                                             }
 
                                             // Dispatch KEY_DOWN for all keys

@@ -37,6 +37,7 @@ use std::sync::Arc;
 
 use blinc_core::context_state::BlincContextState;
 use blinc_core::State;
+use blinc_layout::click_outside;
 use blinc_layout::div::ElementTypeId;
 use blinc_layout::element::{ElementBounds, RenderProps};
 use blinc_layout::overlay_state::overlay_stack;
@@ -263,11 +264,14 @@ impl PopoverBuilder {
                 let stored_close_state = open_state_for_close.clone();
                 let content_fn = Arc::clone(content_fn);
 
-                let handle = build_popover_overlay(x, y, side, content_fn, move |_reason| {
-                    // Fires on any close path (ESC / click-outside / programmatic).
-                    stored_close_state.set(false);
-                    stored_close_handle.set(None);
-                });
+                let handle = build_popover_overlay(
+                    x,
+                    y,
+                    side,
+                    content_fn,
+                    stored_close_state,
+                    stored_close_handle,
+                );
 
                 overlay_handle_for_show.set(Some(handle.raw()));
                 open_state_for_click.set(true);
@@ -339,18 +343,23 @@ fn calculate_popover_position(
     }
 }
 
-/// Push a popover overlay to the global `OverlayStack` and return its handle.
+/// Push a popover overlay to the global `OverlayStack`. Wires:
+/// - Content with a unique `cn-popover-{handle.raw()}` element id so the
+///   click_outside registry can detect "click inside" via ancestor-id match.
+/// - on_close callback that flips the widget's open_state + overlay_handle_state
+///   back to defaults AND unregisters the click_outside handler.
+/// - click_outside registration that calls `handle.close()` on any mouse-down
+///   outside the popover's element subtree.
 ///
-/// Enter animation is delegated to the CSS `@keyframes cn-popover-content-enter`
-/// rule defined in `cn_styles.rs` — same approach as `cn::tooltip`, since the
-/// new overlay stack's motion-FSM integration doesn't yet propagate opacity
-/// to cached primitives correctly (Phase 3 known issue). Exit snaps for now.
+/// Returns the new OverlayHandle. Enter animation is delegated to the CSS
+/// `@keyframes cn-popover-enter` rule (see cn_styles.rs).
 fn build_popover_overlay(
     x: f32,
     y: f32,
     side: PopoverSide,
     content_fn: ContentBuilderFn,
-    on_close: impl Fn(blinc_layout::widgets::overlay_stack::CloseReason) + Send + Sync + 'static,
+    open_state: State<bool>,
+    overlay_handle_state: State<Option<u64>>,
 ) -> OverlayHandle {
     let theme = ThemeState::get();
     let bg = theme.color(ColorToken::SurfaceElevated);
@@ -365,21 +374,43 @@ fn build_popover_overlay(
         PopoverSide::Right => AnchorDirection::Right,
     };
 
-    OverlayBuilder::popover()
+    // Reserve the handle id before push so the content closure can stamp
+    // the same id onto the rendered div for click_outside ancestor matching.
+    // OverlayStack issues sequential handle ids; peek at the next one by
+    // briefly locking + reading the counter. (Locking inside the show()
+    // call would be re-entrant.)
+    let next_handle_id = overlay_stack()
+        .lock()
+        .ok()
+        .map(|s| s.peek_next_handle_id())
+        .unwrap_or(0);
+
+    let popover_id = format!("cn-popover-{}", next_handle_id);
+    let click_outside_key = format!("popover:{}", next_handle_id);
+
+    let popover_id_for_content = popover_id.clone();
+    let click_outside_key_for_close = click_outside_key.clone();
+
+    let handle = OverlayBuilder::popover()
         .at(x, y)
         .anchor_direction(anchor_dir)
-        // Popover defaults from `DismissRules::default_for(Dropdown)`:
-        // on_escape=true, on_click_outside=true, blocks_below=false, no
-        // backdrop. That's already what popover wants.
-        .on_close(on_close)
+        // Defaults from DismissRules::default_for(Dropdown): on_escape=true,
+        // on_click_outside=true (handled here via click_outside registry),
+        // blocks_below=false, no backdrop.
+        .on_close(move |_reason| {
+            open_state.set(false);
+            overlay_handle_state.set(None);
+            click_outside::unregister_click_outside(&click_outside_key_for_close);
+        })
         .content(move || {
             let user_content = (content_fn)();
 
-            // `lock_corner_shape` keeps the panel's corners circular even
-            // when a theme advertises a squircle exponent — overlay chrome
-            // reads cleanest with platform-default rounded-rect shape.
+            // `lock_corner_shape` keeps panel corners circular even when a
+            // theme advertises a squircle exponent — overlay chrome reads
+            // cleanest with platform-default rounded-rect shape.
             div()
                 .class("cn-popover-content")
+                .id(&popover_id_for_content)
                 .flex_col()
                 .bg(bg)
                 .border(1.0, border)
@@ -391,7 +422,23 @@ fn build_popover_overlay(
                 .overflow_clip()
                 .child(user_content)
         })
-        .show()
+        .show();
+
+    debug_assert_eq!(
+        handle.raw(),
+        next_handle_id,
+        "peek_next_handle_id was stale — concurrent push?"
+    );
+
+    // Register click_outside AFTER show() so the popover content has its id
+    // mounted on the next frame's tree walk. The registry doesn't depend on
+    // the tree being ready — it just stores the key→id mapping until the
+    // next mouse-down fires fire_click_outside().
+    click_outside::register_click_outside(&click_outside_key, &popover_id, move || {
+        handle.close();
+    });
+
+    handle
 }
 
 /// Built popover component

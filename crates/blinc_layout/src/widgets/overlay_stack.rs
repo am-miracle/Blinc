@@ -295,6 +295,15 @@ impl OverlayStack {
         OverlayHandle(self.next_id.fetch_add(1, Ordering::Relaxed))
     }
 
+    /// Peek the id that `allocate_handle` will return on its next call. Used
+    /// by widgets that need to compute a derived id (e.g. the popover's
+    /// click-outside element id) BEFORE pushing the entry. The widget must
+    /// `debug_assert_eq!(returned_handle.raw(), peeked_id)` after push to
+    /// detect a stale peek caused by concurrent pushes from another thread.
+    pub fn peek_next_handle_id(&self) -> u64 {
+        self.next_id.load(Ordering::Relaxed)
+    }
+
     /// Push an entry onto the top of the stack. Marks the stack dirty.
     pub fn push(&mut self, entry: OverlayEntry) -> OverlayHandle {
         let handle = entry.handle;
