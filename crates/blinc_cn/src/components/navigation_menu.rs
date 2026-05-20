@@ -323,9 +323,11 @@ fn show_navigation_dropdown(
     let handle = OverlayBuilder::tooltip()
         .at(x, y)
         .anchor_direction(AnchorDirection::Bottom)
-        // Defaults from DismissRules::default_for(Tooltip): on_mouse_leave=true,
-        // delay 0 (we don't want lingering hover-leave delay during trigger
-        // switching). Plus add ESC.
+        // Tooltip's default mouse_leave_delay_ms is 0 — too tight for a
+        // hover-anchored dropdown. Give the user ~300ms to cross from the
+        // trigger into the dropdown content; the content's own hover_enter
+        // handler then cancels the countdown.
+        .dismissable_by_mouse_leave(true, 300)
         .dismissable_by_escape(true)
         .on_close(move |_reason| {
             active_menu_for_close.set(None);

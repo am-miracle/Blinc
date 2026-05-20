@@ -626,7 +626,12 @@ fn spawn_menubar_dropdown(
     let menu_key_for_content = key.clone();
 
     let builder = if hover_mode {
-        OverlayBuilder::tooltip().anchor_direction(AnchorDirection::Bottom)
+        // Tooltip's default mouse_leave_delay_ms is 0 — too tight for a
+        // hover-anchored dropdown the user has to traverse into. Give them
+        // ~300ms to cross the gap between trigger and content.
+        OverlayBuilder::tooltip()
+            .anchor_direction(AnchorDirection::Bottom)
+            .dismissable_by_mouse_leave(true, 300)
     } else {
         OverlayBuilder::dropdown()
     };
@@ -715,6 +720,9 @@ fn spawn_menubar_submenu(
         .at(x, y)
         .anchor_direction(AnchorDirection::Right)
         .dismissable_by_escape(true)
+        // ~300ms grace so the cursor can cross from the parent row into the
+        // submenu without the close-on-leave countdown firing first.
+        .dismissable_by_mouse_leave(true, 300)
         .on_close(move |_reason| {
             // Pop ourselves from the parent's tracking slot if still pointing at us.
             if parent_submenu_for_close.get() == Some(submenu_handle.raw()) {
