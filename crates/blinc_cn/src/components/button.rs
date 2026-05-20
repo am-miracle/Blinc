@@ -208,13 +208,19 @@ impl ButtonSize {
         }
     }
 
-    /// Get default border radius (inline fallback — CSS overrides this)
-    fn border_radius(&self) -> f32 {
+    /// Map this size to a [`RadiusToken`] so the active theme's
+    /// radii ladder decides the corner reach. Tiny buttons get a
+    /// crisp `Sm`, default-sized buttons get `Default`, large
+    /// buttons step up to `Lg`. Picks up each theme's
+    /// `RadiusTokens` automatically: Hybrid's `Sm=4, Default=8, Lg=14`,
+    /// Restrained's `Sm=3, Default=6, Lg=10`, etc.
+    fn radius_token(&self) -> blinc_theme::RadiusToken {
+        use blinc_theme::RadiusToken;
         match self {
-            ButtonSize::Small => 4.0,
-            ButtonSize::Medium => 6.0,
-            ButtonSize::Large => 8.0,
-            ButtonSize::Icon => 6.0,
+            ButtonSize::Small => RadiusToken::Sm,
+            ButtonSize::Medium => RadiusToken::Default,
+            ButtonSize::Large => RadiusToken::Lg,
+            ButtonSize::Icon => RadiusToken::Default,
         }
     }
 }
@@ -349,7 +355,11 @@ impl Button {
             .bg_color(bg)
             .hover_color(hover_bg)
             .pressed_color(pressed_bg)
-            .rounded(config.btn_size.border_radius())
+            // Pull the corner radius from the active theme's
+            // `RadiusTokens` so Universal HID variants etc. each get
+            // their own corner-reach. CSS `.cn-button--{size}` rules
+            // can still cascade to override per-size.
+            .rounded(theme.radii().get(config.btn_size.radius_token()))
             .items_center()
             .justify_center()
             // CSS classes for user overrides
