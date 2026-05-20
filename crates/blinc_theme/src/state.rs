@@ -47,8 +47,13 @@ struct ThemeTransition {
 
 /// Global theme state - accessed directly by widgets during render
 pub struct ThemeState {
-    /// The current theme bundle (light/dark pair)
-    bundle: ThemeBundle,
+    /// The current theme bundle (light/dark pair).
+    ///
+    /// Wrapped in `RwLock` so [`Self::init`] can swap it when the user
+    /// calls `init` after the framework's automatic platform-theme
+    /// init has already populated `THEME_STATE`. Read by
+    /// [`Self::set_scheme`] to derive light/dark token sets.
+    bundle: RwLock<ThemeBundle>,
 
     /// Current color scheme
     scheme: RwLock<ColorScheme>,
@@ -94,29 +99,86 @@ pub struct ThemeState {
 }
 
 impl ThemeState {
-    /// Initialize the global theme state (call once at app startup)
+    /// Initialize (or replace) the global theme state.
+    ///
+    /// Safe to call after the framework's auto-initialization. The
+    /// windowed / mobile runtimes call [`Self::init_default`] before
+    /// the user's UI builder runs, which means a user calling `init`
+    /// from inside their builder would previously hit `OnceLock::set`
+    /// returning `Err` and have their theme silently dropped. This
+    /// path now swaps the bundle and re-derives every token set on
+    /// the existing state, then triggers the registered redraw
+    /// callback so CSS re-parses against the new theme variables.
     pub fn init(bundle: ThemeBundle, scheme: ColorScheme) {
         let theme = bundle.for_scheme(scheme);
 
-        let state = ThemeState {
-            bundle,
-            scheme: RwLock::new(scheme),
-            colors: RwLock::new(theme.colors().clone()),
-            shadows: RwLock::new(theme.shadows().clone()),
-            spacing: RwLock::new(theme.spacing().clone()),
-            typography: RwLock::new(theme.typography().clone()),
-            radii: RwLock::new(theme.radii().clone()),
-            animations: RwLock::new(theme.animations().clone()),
-            color_overrides: RwLock::new(FxHashMap::default()),
-            spacing_overrides: RwLock::new(FxHashMap::default()),
-            radius_overrides: RwLock::new(FxHashMap::default()),
-            needs_repaint: AtomicBool::new(false),
-            needs_layout: AtomicBool::new(false),
-            scheduler_handle: RwLock::new(None),
-            transition: Mutex::new(ThemeTransition::default()),
-        };
+        // Hand any CSS the bundle carries off to the module-level
+        // pending queue so the windowed runner registers it via
+        // `ctx.add_css` on the next frame — after this init has
+        // updated the theme variables. The queue is a
+        // `Mutex<Vec<String>>` static in `blinc_core::context_state`,
+        // so init order doesn't matter: `run_with_theme` calls
+        // `ThemeState::init` before the runner constructs
+        // `BlincContextState`, but the runner's
+        // `drain_stylesheets()` reads from the same place once it
+        // exists.
+        for css in &bundle.css_sources {
+            blinc_core::context_state::queue_pending_stylesheet(css.clone());
+        }
 
-        let _ = THEME_STATE.set(state);
+        // Track whether this call is creating the state or mutating
+        // an existing one, so we can skip the redraw trigger on the
+        // very first install (no UI exists to redraw yet — firing
+        // the callback then is harmless, but the trace log it
+        // produces would be misleading).
+        let mut first_time = false;
+        let state = THEME_STATE.get_or_init(|| {
+            first_time = true;
+            ThemeState {
+                bundle: RwLock::new(bundle.clone()),
+                scheme: RwLock::new(scheme),
+                colors: RwLock::new(theme.colors().clone()),
+                shadows: RwLock::new(theme.shadows().clone()),
+                spacing: RwLock::new(theme.spacing().clone()),
+                typography: RwLock::new(theme.typography().clone()),
+                radii: RwLock::new(theme.radii().clone()),
+                animations: RwLock::new(theme.animations().clone()),
+                color_overrides: RwLock::new(FxHashMap::default()),
+                spacing_overrides: RwLock::new(FxHashMap::default()),
+                radius_overrides: RwLock::new(FxHashMap::default()),
+                needs_repaint: AtomicBool::new(false),
+                needs_layout: AtomicBool::new(false),
+                scheduler_handle: RwLock::new(None),
+                transition: Mutex::new(ThemeTransition::default()),
+            }
+        });
+
+        if first_time {
+            // `get_or_init`'s closure already populated every field
+            // from the bundle we own; nothing left to do.
+            return;
+        }
+
+        // Replace path — `get_or_init` returned a previously-built
+        // state (the runner's platform default, or an earlier user
+        // bundle). Swap the bundle and re-derive each token set so
+        // existing readers see the new values, then trigger the
+        // redraw callback so cached stylesheets reparse against the
+        // new CSS variables.
+        *state.bundle.write().unwrap() = bundle;
+        *state.scheme.write().unwrap() = scheme;
+        *state.colors.write().unwrap() = theme.colors().clone();
+        *state.shadows.write().unwrap() = theme.shadows().clone();
+        *state.spacing.write().unwrap() = theme.spacing().clone();
+        *state.typography.write().unwrap() = theme.typography().clone();
+        *state.radii.write().unwrap() = theme.radii().clone();
+        *state.animations.write().unwrap() = theme.animations().clone();
+        state.color_overrides.write().unwrap().clear();
+        state.spacing_overrides.write().unwrap().clear();
+        state.radius_overrides.write().unwrap().clear();
+        state.needs_repaint.store(true, Ordering::SeqCst);
+        state.needs_layout.store(true, Ordering::SeqCst);
+        trigger_redraw();
     }
 
     /// Set the animation scheduler for theme transitions
@@ -178,7 +240,7 @@ impl ThemeState {
             drop(current);
 
             // Get new theme tokens
-            let theme = self.bundle.for_scheme(scheme);
+            let theme = self.bundle.read().unwrap().for_scheme(scheme);
             let new_colors = theme.colors().clone();
 
             // Update non-color tokens immediately (they don't animate)

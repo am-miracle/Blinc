@@ -43,8 +43,10 @@
 pub mod cn_styles;
 pub mod components;
 pub mod css_overrides;
+pub mod theme;
 
 pub use components::*;
+pub use theme::cn_bundle;
 
 // Re-export InstanceKey from blinc_layout (the canonical location)
 pub use blinc_layout::InstanceKey;

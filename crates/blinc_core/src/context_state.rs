@@ -347,12 +347,33 @@ pub struct BlincContextState {
     /// On wasm32, callers wrap `!Send` types in an unsafe Send shim
     /// before pushing — safe because wasm is single-threaded.
     pending_custom_passes: Mutex<Vec<Box<dyn std::any::Any + Send>>>,
-    /// Raw CSS strings queued by code that doesn't have direct
-    /// `WindowedContext::add_css` access (DSL programs, plugin
-    /// components, lazy initializers). The windowed runner
-    /// drains this on each frame and forwards each string
-    /// through the primary window's CSS parser.
-    pending_stylesheets: Mutex<Vec<String>>,
+}
+
+/// Backing queue for raw CSS strings handed in before the host
+/// stylesheet exists. Lives at module scope (rather than on
+/// `BlincContextState`) so producers can queue regardless of init
+/// order — relevant for [`ThemeBundle`](blinc_theme::ThemeBundle)
+/// `with_css` paths that fire from `WindowedApp::run_with_theme`
+/// before the runner has constructed the context state.
+///
+/// The windowed runner drains this once per frame and forwards each
+/// entry through the primary window's CSS parser.
+static PENDING_STYLESHEETS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Append a CSS source to the global pending queue.
+///
+/// Public free function so blinc_theme (and other producers that
+/// can't depend on a constructed `BlincContextState`) can queue
+/// without going through a context instance. The instance method
+/// [`BlincContextState::queue_stylesheet`] forwards here.
+pub fn queue_pending_stylesheet(css: impl Into<String>) {
+    PENDING_STYLESHEETS.lock().unwrap().push(css.into());
+}
+
+/// Drain and return the global pending queue. Called once per
+/// frame by the runtime.
+pub fn drain_pending_stylesheets() -> Vec<String> {
+    std::mem::take(&mut *PENDING_STYLESHEETS.lock().unwrap())
 }
 
 impl BlincContextState {
@@ -380,7 +401,6 @@ impl BlincContextState {
             recorder_snapshot_callback: RwLock::new(None),
             recorder_update_callback: RwLock::new(None),
             pending_custom_passes: Mutex::new(Vec::new()),
-            pending_stylesheets: Mutex::new(Vec::new()),
         };
 
         if CONTEXT_STATE.set(state).is_err() {
@@ -413,7 +433,6 @@ impl BlincContextState {
             recorder_snapshot_callback: RwLock::new(None),
             recorder_update_callback: RwLock::new(None),
             pending_custom_passes: Mutex::new(Vec::new()),
-            pending_stylesheets: Mutex::new(Vec::new()),
         };
 
         if CONTEXT_STATE.set(state).is_err() {
@@ -931,15 +950,21 @@ impl BlincContextState {
     /// the host's `build_ui` having to iterate
     /// `dsl.compiled_stylesheets()` and call `ctx.add_css` by
     /// hand.
+    ///
+    /// Delegates to the free [`queue_pending_stylesheet`] static so
+    /// callers reach the same backing queue without needing a
+    /// `BlincContextState` to be initialized first (a `ThemeBundle`
+    /// installed via `WindowedApp::run_with_theme` queues its CSS
+    /// before the runner has constructed the context).
     pub fn queue_stylesheet(&self, css: impl Into<String>) {
-        self.pending_stylesheets.lock().unwrap().push(css.into());
+        queue_pending_stylesheet(css);
     }
 
     /// Drain the pending stylesheet queue. Called by the
     /// windowed runner once per frame; each drained string is
     /// fed through the primary window's CSS parser.
     pub fn drain_stylesheets(&self) -> Vec<String> {
-        std::mem::take(&mut *self.pending_stylesheets.lock().unwrap())
+        drain_pending_stylesheets()
     }
 
     /// Register a `!Send` custom pass on wasm32. Wraps the value in

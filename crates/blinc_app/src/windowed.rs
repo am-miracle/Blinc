@@ -2198,23 +2198,28 @@ impl WindowedApp {
             detect_system_color_scheme, platform_theme_bundle, set_redraw_callback, ThemeState,
         };
 
-        // Only initialize if not already initialized
+        // Only seed the platform default if no theme has been
+        // installed yet — users who call `ThemeState::init` before
+        // `WindowedApp::run` keep their bundle. Users who call it
+        // *after* (e.g. from inside the UI builder) are handled by
+        // `ThemeState::init`'s replace-when-already-set path.
         if ThemeState::try_get().is_none() {
             let bundle = platform_theme_bundle();
             let scheme = detect_system_color_scheme();
             ThemeState::init(bundle, scheme);
-
-            // Set up the redraw callback to trigger full UI rebuilds when theme changes
-            // We use request_full_rebuild() to trigger all three phases:
-            // 1. Tree rebuild - reconstruct UI with new theme values
-            // 2. Layout recompute - recalculate flexbox layout
-            // 3. Visual redraw - render the frame
-            set_redraw_callback(|| {
-                tracing::debug!("Theme changed - requesting full rebuild + CSS reparse");
-                blinc_layout::widgets::request_css_reparse();
-                blinc_layout::widgets::request_full_rebuild();
-            });
         }
+
+        // Register the redraw callback unconditionally — needed for
+        // every theme swap (color scheme toggle, runtime bundle
+        // replace) regardless of who installed the initial theme.
+        // Previously this lived inside the `is_none()` branch, so a
+        // pre-init user theme silently disabled CSS reparse + tree
+        // rebuild on subsequent theme changes.
+        set_redraw_callback(|| {
+            tracing::debug!("Theme changed - requesting full rebuild + CSS reparse");
+            blinc_layout::widgets::request_css_reparse();
+            blinc_layout::widgets::request_full_rebuild();
+        });
     }
 
     /// Run a windowed Blinc application on desktop platforms
@@ -2247,6 +2252,45 @@ impl WindowedApp {
         F: FnMut(&mut WindowedContext) -> E + 'static,
         E: ElementBuilder + 'static,
     {
+        Self::run_desktop(config, ui_builder)
+    }
+
+    /// Run a windowed app with an explicit theme bundle.
+    ///
+    /// Equivalent to `ThemeState::init(bundle, scheme)` immediately
+    /// followed by [`Self::run`], but lets the caller install the
+    /// theme without having to do it from inside the UI builder
+    /// (where `init_theme`'s platform-default has already run and
+    /// the user's bundle has to fight that path).
+    ///
+    /// Pass any value that implements `Into<ThemeBundle>` — the
+    /// built-in [`BlincTheme::bundle()`](blinc_theme::BlincTheme::bundle)
+    /// or a custom bundle built by your app.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use blinc_theme::{BlincTheme, ColorScheme};
+    ///
+    /// WindowedApp::run_with_theme(
+    ///     WindowConfig::default(),
+    ///     BlincTheme::bundle(),
+    ///     ColorScheme::Dark,
+    ///     |ctx| my_ui(ctx),
+    /// )
+    /// ```
+    #[cfg(all(feature = "windowed", not(target_os = "android")))]
+    pub fn run_with_theme<F, E>(
+        config: WindowConfig,
+        bundle: blinc_theme::ThemeBundle,
+        scheme: blinc_theme::ColorScheme,
+        ui_builder: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&mut WindowedContext) -> E + 'static,
+        E: ElementBuilder + 'static,
+    {
+        blinc_theme::ThemeState::init(bundle, scheme);
         Self::run_desktop(config, ui_builder)
     }
 

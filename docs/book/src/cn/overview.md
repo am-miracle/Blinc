@@ -13,10 +13,28 @@ blinc_cn = { path = "path/to/blinc_cn" }
 
 ## Quick Start
 
-```rust
-use blinc_cn::prelude::*;
+Install the cn theme bundle with [`WindowedApp::run_with_theme`]. `cn_bundle()` is the framework's platform-detected
+theme pre-loaded with `CN_STYLES`, so cn components look right out of the box without any manual `add_css` calls:
 
-fn build_ui() -> impl ElementBuilder {
+```rust
+use blinc_app::prelude::*;
+use blinc_cn::{cn_bundle, prelude::*};
+
+fn main() -> Result<()> {
+    let config = WindowConfig {
+        title: "My cn app".to_string(),
+        ..Default::default()
+    };
+
+    WindowedApp::run_with_theme(
+        config,
+        cn_bundle(),
+        ColorScheme::Light,
+        build_ui,
+    )
+}
+
+fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     div()
         .flex_col()
         .gap(16.0)
@@ -33,6 +51,28 @@ fn build_ui() -> impl ElementBuilder {
         )
 }
 ```
+
+### Layering CSS overrides
+
+Chain [`with_css`](../core/theming.md#themebundlewith_css) (or `with_css_file`) on the bundle to attach extra
+stylesheets — they cascade after `CN_STYLES`, so they win on conflicts:
+
+```rust
+let bundle = cn_bundle()
+    .with_css(r#"
+        .cn-button--primary { border-radius: 0; }
+        .cn-card { border-width: 2px; }
+    "#)
+    .with_css_file("./styles/brand.css");
+
+WindowedApp::run_with_theme(config, bundle, ColorScheme::Light, build_ui)
+```
+
+### Using a custom theme
+
+If you want a different aesthetic, build your own [`ThemeBundle`](../core/theming.md#custom-theme-bundles) (light + dark
+variants) and pass it instead. Component classes (`.cn-button`, `.cn-card`, etc.) keep working because the cn CSS
+references theme tokens via `var()`.
 
 ## Design Principles
 

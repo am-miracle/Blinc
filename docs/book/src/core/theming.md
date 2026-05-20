@@ -8,8 +8,85 @@ The theming system is built around these core concepts:
 
 - **Design Tokens**: Semantic color, typography, spacing, and radius values
 - **ThemeState**: Global singleton for theme access and switching
+- **ThemeBundle**: Light + dark variants plus optional CSS, installed via `WindowedApp::run_with_theme`
 - **Animated Transitions**: Smooth spring-based color interpolation between themes
 - **Platform Detection**: Automatic system dark/light mode detection
+
+---
+
+## Installing a Theme
+
+The cleanest entry point is [`WindowedApp::run_with_theme`], which installs a `ThemeBundle` before
+the runtime's platform default has a chance to claim the global slot:
+
+```rust
+use blinc_app::prelude::*;
+use blinc_theme::{BlincTheme, ColorScheme};
+
+WindowedApp::run_with_theme(
+    WindowConfig::default(),
+    BlincTheme::bundle(),       // any ThemeBundle — `cn_bundle()`, `BlincTheme::bundle()`,
+                                // or your own
+    ColorScheme::Dark,
+    build_ui,
+)
+```
+
+If you'd rather call `ThemeState::init` yourself (e.g. from inside the UI builder, or before a
+mobile runner's `run`), that also works — `init` is idempotent. The first call populates the
+global state; later calls swap the bundle, re-derive every token set, and fire the redraw
+callback so any cached stylesheets re-parse against the new variables.
+
+```rust
+// Call from anywhere — including inside `ui_builder`
+ThemeState::init(BlincTheme::bundle(), ColorScheme::Dark);
+```
+
+### Attaching CSS to a bundle
+
+A `ThemeBundle` can carry one or more CSS sources that the runtime registers automatically
+after the bundle is installed:
+
+```rust
+use blinc_theme::BlincTheme;
+
+let bundle = BlincTheme::bundle()
+    .with_css(r#"
+        .my-card { border-radius: 12px; }
+        button.primary { background: var(--primary); }
+    "#)
+    .with_css_file("./styles/overrides.css");
+
+WindowedApp::run_with_theme(config, bundle, ColorScheme::Light, build_ui)
+```
+
+Two builder methods on [`ThemeBundle`]:
+
+| Method | Behaviour |
+| --- | --- |
+| `with_css(css: impl Into<String>)` | Append an inline CSS source. Multiple calls cascade in order. |
+| `with_css_file(path: impl AsRef<Path>)` | Read a file and append its contents. Read errors are inlined as a `/* … */` comment so the failure surfaces in the parser. Not available on `wasm32`. |
+
+Attached CSS sources are stashed in a process-wide queue and drained on the next frame's tree
+build — they're in place before the first paint and resolve `var()` references against the
+installed bundle's variables.
+
+### `cn_bundle()`
+
+When you're using `blinc_cn`, [`blinc_cn::cn_bundle()`] returns the platform default already
+pre-loaded with the cn components' default stylesheet:
+
+```rust
+WindowedApp::run_with_theme(
+    config,
+    blinc_cn::cn_bundle(),       // platform theme + CN_STYLES
+    ColorScheme::Dark,
+    build_ui,
+)
+```
+
+Chain `.with_css(...)` / `.with_css_file(...)` on it to layer your own overrides after the
+defaults.
 
 ---
 
@@ -51,17 +128,8 @@ fn my_component() -> impl ElementBuilder {
 
 ### Toggling Color Scheme
 
-> ⚠️ **Known Limitation: Dynamic Theme Toggle**
->
-> Dynamic theme switching at runtime (e.g., toggling between light/dark mode while the app is running) currently has significant limitations:
->
-> - **Full UI rebuild required**: Theme changes trigger a complete UI tree rebuild, which is expensive and can cause visual glitches
-> - **`on_ready` callbacks fire multiple times**: During theme animation, `on_ready` may fire repeatedly instead of once
-> - **Animation ticks cause rebuilds**: Each frame of the theme transition animation triggers another rebuild
->
-> **Recommendation**: For production apps, set the theme once at startup based on user preference or system settings. Theme changes should require an app restart.
->
-> This limitation will be addressed in a future release with token-based color resolution that allows visual-only repaints without tree rebuilds.
+Switching schemes is cheap — it animates the colour tokens via spring interpolation and triggers
+a UI rebuild + CSS reparse so cached stylesheets resolve against the new variables.
 
 ```rust
 // Toggle between light and dark mode
@@ -78,6 +146,24 @@ match scheme {
     ColorScheme::Light => { /* ... */ }
     ColorScheme::Dark => { /* ... */ }
 }
+```
+
+### Swapping Bundles at Runtime
+
+Calling `ThemeState::init(new_bundle, scheme)` after the app is running replaces the active
+bundle: every token set is re-derived, `color/spacing/radius_overrides` are cleared, the redraw
+callback fires (which reparses cached CSS against the new variables), and any CSS the new
+bundle carries via `with_css` is queued for registration on the next frame. Useful for
+in-app theme pickers:
+
+```rust
+on_click(move |_| {
+    let next = match ThemeState::get().scheme() {
+        ColorScheme::Light => shadcn_bundle(),
+        ColorScheme::Dark  => catppuccin_bundle(),
+    };
+    ThemeState::init(next, ThemeState::get().scheme());
+});
 ```
 
 ---
@@ -208,10 +294,6 @@ div().rounded(theme.radii().radius_full) // Pill shape
 
 ## Animated Theme Transitions
 
-> ⚠️ **Experimental Feature**
->
-> Animated theme transitions are currently experimental and have known issues. See the [Known Limitation](#toggling-color-scheme) above. For production use, disable animations and require app restart for theme changes.
-
 When switching between light and dark mode, colors smoothly animate using spring physics. This happens automatically when you call `toggle_scheme()` or `set_scheme()`.
 
 ### How It Works
@@ -338,10 +420,6 @@ The `WindowedApp` automatically initializes the theme with system color scheme d
 
 ## System Scheme Watcher (Optional)
 
-> ⚠️ **Not Recommended for Production**
->
-> Due to the [dynamic theme toggle limitations](#toggling-color-scheme), the system scheme watcher is not recommended for production apps. When the system theme changes, it triggers the same problematic full UI rebuild. Consider detecting the system scheme once at startup instead.
-
 For apps that need to automatically follow system theme changes (e.g., when the user toggles dark mode in system settings), Blinc provides an optional background watcher.
 
 ### Enabling the Feature
@@ -404,6 +482,73 @@ let watcher = WatcherConfig::new()
 - The default 1-second interval is a good balance between responsiveness and CPU usage
 - For less critical apps, consider using 5-10 second intervals
 - The watcher thread sleeps between checks, consuming minimal resources
+
+---
+
+## Custom Theme Bundles
+
+A `ThemeBundle` is a `(name, light, dark)` triple plus any attached CSS. To build your own,
+implement the [`Theme`] trait on two structs (one per scheme) and hand them to `ThemeBundle::new`:
+
+```rust
+use blinc_theme::{
+    AnimationTokens, ColorScheme, ColorTokens, RadiusTokens, ShadowTokens, SpacingTokens, Theme,
+    ThemeBundle, TypographyTokens,
+};
+
+#[derive(Clone)]
+pub struct MyTheme {
+    scheme: ColorScheme,
+    colors: ColorTokens,
+    typography: TypographyTokens,
+    spacing: SpacingTokens,
+    radii: RadiusTokens,
+    shadows: ShadowTokens,
+    animations: AnimationTokens,
+}
+
+impl MyTheme {
+    pub fn light() -> Self {
+        Self {
+            scheme: ColorScheme::Light,
+            colors: ColorTokens { /* … your tokens … */ ..Default::default() },
+            typography: TypographyTokens::default(),
+            spacing:    SpacingTokens::default(),
+            radii:      RadiusTokens::default(),
+            shadows:    ShadowTokens::light(),
+            animations: AnimationTokens::default(),
+        }
+    }
+
+    pub fn dark() -> Self { /* ditto with dark colors + ShadowTokens::dark() */ }
+
+    pub fn bundle() -> ThemeBundle {
+        ThemeBundle::new("MyTheme", Self::light(), Self::dark())
+    }
+}
+
+impl Theme for MyTheme {
+    fn name(&self) -> &str { "MyTheme" }
+    fn color_scheme(&self) -> ColorScheme { self.scheme }
+    fn colors(&self) -> &ColorTokens { &self.colors }
+    fn typography(&self) -> &TypographyTokens { &self.typography }
+    fn spacing(&self) -> &SpacingTokens { &self.spacing }
+    fn radii(&self) -> &RadiusTokens { &self.radii }
+    fn shadows(&self) -> &ShadowTokens { &self.shadows }
+    fn animations(&self) -> &AnimationTokens { &self.animations }
+}
+```
+
+Then install it with `run_with_theme`:
+
+```rust
+WindowedApp::run_with_theme(
+    config,
+    MyTheme::bundle().with_css(MY_STYLES),
+    ColorScheme::Dark,
+    build_ui,
+)
+```
 
 ---
 

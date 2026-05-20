@@ -259,5 +259,7 @@ pub mod prelude {
     pub use blinc_macros::BlincComponent;
 
     // Theme types
-    pub use blinc_theme::{ColorScheme, ColorToken, RadiusToken, SpacingToken, ThemeState};
+    pub use blinc_theme::{
+        ColorScheme, ColorToken, RadiusToken, SpacingToken, ThemeBundle, ThemeState,
+    };
 }

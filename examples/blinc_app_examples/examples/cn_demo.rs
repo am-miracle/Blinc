@@ -35,21 +35,22 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    WindowedApp::run(config, build_ui)
-}
-
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
-    if ctx.rebuild_count == 0 {
-        ctx.add_css(blinc_cn::cn_styles::CN_STYLES);
-        ctx.add_css(
+    WindowedApp::run_with_theme(
+        config,
+        blinc_cn::cn_bundle().with_css(
             r#"
             #css-overrides .cn-button--primary { border-radius: 0; }
             #css-overrides .cn-button--destructive:hover { background: var(--primary); }
             #css-overrides .cn-badge--success { background: #00cc66; }
             #css-demo-card { border-width: 2px; border-color: var(--primary); }
         "#,
-        );
-    }
+        ),
+        blinc_theme::detect_system_color_scheme(),
+        build_ui,
+    )
+}
+
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
     eprintln!("build_ui called");
     let theme = ThemeState::get();
 
