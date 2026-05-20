@@ -5070,6 +5070,21 @@ impl WindowedApp {
                                         // Start CSS animations for elements with animation properties
                                         tree.start_all_css_animations();
                                     }
+                                    // Re-run hit-test at the current mouse position so newly
+                                    // mounted subtrees (notably dropdown / context-menu items
+                                    // that just appeared under the stationary cursor) get
+                                    // POINTER_ENTER + CSS :hover immediately. Without this,
+                                    // hover state only updates on the next mouse-move event —
+                                    // so a freshly-opened dropdown shows no hover bg on the
+                                    // item the cursor is already over.
+                                    if let Some(ref mut tree) = ws.render_tree {
+                                        let (mx, my) = windowed_ctx.event_router.mouse_position();
+                                        if mx.is_finite() && my.is_finite() {
+                                            let _ = windowed_ctx
+                                                .event_router
+                                                .on_mouse_move(tree, mx, my);
+                                        }
+                                    }
                                 }
                                 if had_prop_updates && !needs_layout {
                                     tracing::trace!("Visual-only prop updates, skipping layout");
