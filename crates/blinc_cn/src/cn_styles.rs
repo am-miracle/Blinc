@@ -823,6 +823,14 @@ pub const CN_STYLES: &str = r#"
     border: 1px solid var(--border);
     border-radius: var(--radius-default);
     padding: var(--space-1);
+    /* CSS-driven enter — small scale + fade. Motion FSM workaround. */
+    animation: cn-context-menu-enter var(--duration-fast) ease-out;
+    transform-origin: top left;
+}
+
+@keyframes cn-context-menu-enter {
+    from { opacity: 0; transform: scale(0.96) translateY(-2px); }
+    to   { opacity: 1; transform: scale(1) translateY(0); }
 }
 .cn-context-menu-item {
     padding: var(--space-2) var(--space-3);
