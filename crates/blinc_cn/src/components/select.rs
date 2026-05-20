@@ -223,19 +223,36 @@ impl Select {
                     click_outside::unregister_click_outside(&wrapper_id_for_state);
                 }
 
-                let bg = btn_variant.background(theme, state);
+                // Disabled gets the same tonal-fill treatment as cn::button —
+                // solid `InputBgDisabled` bg, `BorderSecondary` outline,
+                // `TextTertiary` text. Matches the disabled-surface family
+                // (button / select / switch) so the inert states all read
+                // as the same UI tier.
+                let bg = if disabled {
+                    theme.color(ColorToken::InputBgDisabled)
+                } else {
+                    btn_variant.background(theme, state)
+                };
                 let current_val = value_state_for_display.get();
                 let selected_option = options_for_display
                     .iter()
                     .find(|opt| opt.value == current_val);
 
                 let is_placeholder = selected_option.is_none();
-                let text_clr = if is_placeholder {
+                let text_clr = if disabled {
+                    text_tertiary
+                } else if is_placeholder {
                     text_tertiary
                 } else {
                     text_color
                 };
-                let bdr = if is_open { border_hover } else { border };
+                let bdr = if disabled {
+                    theme.color(ColorToken::BorderSecondary)
+                } else if is_open {
+                    border_hover
+                } else {
+                    border
+                };
 
                 let display_content: Div = if let Some(opt) = selected_option {
                     if let Some(ref content_fn) = opt.content {
@@ -282,10 +299,11 @@ impl Select {
                     .bg(bg)
                     .border(1.0, bdr)
                     .rounded(radius)
-                    .when(disabled, |t| t.opacity(0.5))
                     .overflow_clip()
                     .flex_shrink_0()
-                    .shadow_sm()
+                    // No shadow when disabled — matches the flat,
+                    // non-interactive look the cn::button disabled state uses.
+                    .when(!disabled, |t| t.shadow_sm())
                     .child(content_wrapper)
                     .child(
                         svg(chevron_svg)
