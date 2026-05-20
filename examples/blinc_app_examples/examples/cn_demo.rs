@@ -156,7 +156,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 //         .child(section_title("Layout Animation Test"))
 //         .child(
 //             text("Click the box to add/remove children. The container should animate its height.")
-//                 .size(14.0)
+//                 .size(t_sm())
 //                 .color(text_secondary),
 //         )
 //         .child(
@@ -172,7 +172,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 //                         .w(300.0)
 //                         .bg(surface)
 //                         .border(2.0, border)
-//                         .rounded(8.0)
+//                         .rounded(r_default())
 //                         .overflow_clip()
 //                         .flex_col()
 //                         .gap(8.0)
@@ -195,7 +195,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 //                     // Always show header
 //                     animated_container = animated_container.child(
 //                         text("Click me to toggle content")
-//                             .size(14.0)
+//                             .size(t_sm())
 //                             .weight(FontWeight::Medium)
 //                             .color(text_primary),
 //                     );
@@ -203,10 +203,10 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 //                     // Conditionally add more children when expanded
 //                     if expanded {
 //                         animated_container = animated_container
-//                             .child(text("Item 1").size(14.0).color(text_secondary))
-//                             .child(text("Item 2").size(14.0).color(text_secondary))
-//                             .child(text("Item 3").size(14.0).color(text_secondary))
-//                             .child(text("Item 4").size(14.0).color(text_secondary));
+//                             .child(text("Item 1").size(t_sm()).color(text_secondary))
+//                             .child(text("Item 2").size(t_sm()).color(text_secondary))
+//                             .child(text("Item 3").size(t_sm()).color(text_secondary))
+//                             .child(text("Item 4").size(t_sm()).color(text_secondary));
 //                     }
 
 //                     let status = text(format!(
@@ -214,7 +214,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 //                         if expanded { "expanded" } else { "collapsed" },
 //                         if expanded { 5 } else { 1 }
 //                     ))
-//                     .size(12.0)
+//                     .size(t_xs())
 //                     .color(text_secondary);
 
 //                     container.merge(
@@ -377,6 +377,28 @@ fn section_title(title: &str) -> impl ElementBuilder {
         .color(text_primary)
 }
 
+// ----- Token shorthand helpers (used by hand-built demo elements) --------
+//
+// These keep the demo's hardcoded magic numbers in one place so a theme
+// swap (Restrained / Hybrid / Expressive) actually shows up in the demo
+// content rather than freezing every card at "8px radius / 14px text".
+
+fn r_default() -> f32 {
+    ThemeState::get().radius(RadiusToken::Default)
+}
+fn t_xs() -> f32 {
+    ThemeState::get().typography().text_xs
+}
+fn t_sm() -> f32 {
+    ThemeState::get().typography().text_sm
+}
+fn t_base() -> f32 {
+    ThemeState::get().typography().text_base
+}
+fn t_lg() -> f32 {
+    ThemeState::get().typography().text_lg
+}
+
 /// Section container helper
 fn section_container() -> Div {
     let theme = ThemeState::get();
@@ -412,7 +434,7 @@ fn css_overrides_section() -> impl ElementBuilder {
                   Primary buttons have square corners, destructive hover turns primary, \
                   and cards have a primary-colored border.",
             )
-            .size(13.0)
+            .size(t_sm())
             .color(text_secondary),
         )
         .child(
@@ -433,7 +455,7 @@ fn css_overrides_section() -> impl ElementBuilder {
                 .child(
                     cn::card_content().child(
                         text("This card has a 2px primary-colored border via CSS override")
-                            .size(14.0)
+                            .size(t_sm())
                             .color(text_secondary),
                     ),
                 ),
@@ -475,7 +497,7 @@ fn buttons_section(_ctx: &WindowedContext) -> impl ElementBuilder {
         // Icon-only buttons at various sizes
         .child(
             text("Icon-only buttons (centering test)")
-                .size(12.0)
+                .size(t_xs())
                 .color(text_secondary),
         )
         .child(
@@ -917,15 +939,15 @@ fn context_menu_section() -> impl ElementBuilder {
                         .h(120.0)
                         .bg(surface)
                         .border(1.0, border)
-                        .rounded(8.0)
+                        .rounded(r_default())
                         .flex_col()
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .child(text("Click me!").size(14.0).color(text_secondary))
+                        .child(text("Click me!").size(t_sm()).color(text_secondary))
                         .child(
                             text("(opens context menu)")
-                                .size(12.0)
+                                .size(t_xs())
                                 .color(text_secondary),
                         )
                         .on_click(move |ctx| {
@@ -946,12 +968,12 @@ fn context_menu_section() -> impl ElementBuilder {
                         .h(120.0)
                         .bg(surface)
                         .border(1.0, border)
-                        .rounded(8.0)
+                        .rounded(r_default())
                         .flex_col()
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .child(text("With Shortcuts").size(14.0).color(text_secondary))
+                        .child(text("With Shortcuts").size(t_sm()).color(text_secondary))
                         .on_click(move |ctx| {
                             cn::context_menu()
                                 .at(ctx.mouse_x, ctx.mouse_y)
@@ -980,12 +1002,12 @@ fn context_menu_section() -> impl ElementBuilder {
                         .h(120.0)
                         .bg(surface)
                         .border(1.0, border)
-                        .rounded(8.0)
+                        .rounded(r_default())
                         .flex_col()
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .child(text("With Icons").size(14.0).color(text_secondary))
+                        .child(text("With Icons").size(t_sm()).color(text_secondary))
                         .on_click(move |ctx| {
                             cn::context_menu()
                                 .at(ctx.mouse_x, ctx.mouse_y)
@@ -1006,12 +1028,12 @@ fn context_menu_section() -> impl ElementBuilder {
                         .h(120.0)
                         .bg(surface)
                         .border(1.0, border)
-                        .rounded(8.0)
+                        .rounded(r_default())
                         .flex_col()
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .child(text("With Disabled Items").size(14.0).color(text_secondary))
+                        .child(text("With Disabled Items").size(t_sm()).color(text_secondary))
                         .on_click(move |ctx| {
                             cn::context_menu()
                                 .at(ctx.mouse_x, ctx.mouse_y)
@@ -1116,12 +1138,12 @@ fn dialog_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                                         .gap(2.0)
                                         .child(
                                             text("This is a basic dialog with custom content.")
-                                                .size(14.0)
+                                                .size(t_sm())
                                                 .color(theme.color(ColorToken::TextSecondary)),
                                         )
                                         .child(
                                             text("You can put any content here - forms, lists, images, etc.")
-                                                .size(14.0)
+                                                .size(t_sm())
                                                 .color(theme.color(ColorToken::TextSecondary)),
                                         )
                                 })
@@ -1198,7 +1220,7 @@ fn sheet_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                                                 .h(36.0)
                                                 .bg(theme.color(ColorToken::SurfaceElevated))
                                                 .border(1.0, theme.color(ColorToken::Border))
-                                                .rounded(6.0),
+                                                .rounded(r_default()),
                                         ),
                                     )
                                     .child(
@@ -1208,7 +1230,7 @@ fn sheet_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                                                 .h(36.0)
                                                 .bg(theme.color(ColorToken::SurfaceElevated))
                                                 .border(1.0, theme.color(ColorToken::Border))
-                                                .rounded(6.0),
+                                                .rounded(r_default()),
                                         ),
                                     )
                                     .child(
@@ -1288,7 +1310,7 @@ fn sheet_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                                                     .rounded_full()
                                                     .bg(Color::rgb(0.2, 0.6, 1.0)),
                                             )
-                                            .child(text("Twitter").size(12.0)),
+                                            .child(text("Twitter").size(t_xs())),
                                     )
                                     .child(
                                         div()
@@ -1302,7 +1324,7 @@ fn sheet_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                                                     .rounded_full()
                                                     .bg(Color::rgb(0.0, 0.5, 0.0)),
                                             )
-                                            .child(text("WhatsApp").size(12.0)),
+                                            .child(text("WhatsApp").size(t_xs())),
                                     )
                                     .child(
                                         div()
@@ -1316,7 +1338,7 @@ fn sheet_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                                                     .rounded_full()
                                                     .bg(Color::rgb(0.9, 0.3, 0.3)),
                                             )
-                                            .child(text("Email").size(12.0)),
+                                            .child(text("Email").size(t_xs())),
                                     )
                             })
                             .show();
@@ -1346,7 +1368,7 @@ fn sheet_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                                             .w_full()
                                             .h(200.0)
                                             .bg(theme.color(ColorToken::SurfaceElevated))
-                                            .rounded(8.0)
+                                            .rounded(r_default())
                                             .items_center()
                                             .child(
                                                 text("Content Area")
@@ -1427,7 +1449,7 @@ fn drawer_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                                     .items_center()
                                     .gap(12.0)
                                     .p(8.0)
-                                    .rounded(8.0)
+                                    .rounded(r_default())
                                     .bg(theme.color(ColorToken::SurfaceElevated))
                                     .child(
                                         div()
@@ -1439,10 +1461,10 @@ fn drawer_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                                     .child(
                                         div()
                                             .flex_col()
-                                            .child(text("New message").size(14.0).medium())
+                                            .child(text("New message").size(t_sm()).medium())
                                             .child(
                                                 text("John sent you a message")
-                                                    .size(12.0)
+                                                    .size(t_xs())
                                                     .color(theme.color(ColorToken::TextSecondary)),
                                             ),
                                     )
@@ -1454,7 +1476,7 @@ fn drawer_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                                     .items_center()
                                     .gap(12.0)
                                     .p(8.0)
-                                    .rounded(8.0)
+                                    .rounded(r_default())
                                     .child(
                                         div()
                                             .w(32.0)
@@ -1465,10 +1487,10 @@ fn drawer_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                                     .child(
                                         div()
                                             .flex_col()
-                                            .child(text("Task completed").size(14.0).medium())
+                                            .child(text("Task completed").size(t_sm()).medium())
                                             .child(
                                                 text("Project X was finished")
-                                                    .size(12.0)
+                                                    .size(t_xs())
                                                     .color(theme.color(ColorToken::TextSecondary)),
                                             ),
                                     )
@@ -1558,30 +1580,19 @@ fn loading_section(ctx: &WindowedContext) -> impl ElementBuilder {
 fn progress_section(ctx: &WindowedContext, _scroll_ref: &ScrollRef) -> impl ElementBuilder {
     const PROGRESS_WIDTH: f32 = 300.0;
 
-    // Create animated progress - start at 0
-    // Using gentle() for visible spring animation
+    // Create animated progress - start at 0. Critically damped (damping ==
+    // 2*sqrt(stiffness*mass) for stiffness=400, mass=1) so the bar settles
+    // on target without bouncing back over the rest position.
     let animated_progress = ctx.use_animated_value_for(
-        "animated_progress_v9", // Fresh key to reset persisted state
+        "animated_progress_v10",
         0.0,
-        SpringConfig::gentle(),
+        SpringConfig::new(400.0, 40.0, 1.0),
     );
 
     let progress_for_ready = animated_progress.clone();
 
-    // Debug: log current animated value on each rebuild
-    if let Ok(value) = animated_progress.lock() {
-        tracing::info!(
-            "build: animated_progress current={:.1}, target={:.1}, animating={}",
-            value.get(),
-            value.target(),
-            value.is_animating()
-        );
-    }
-
-    let is_reset = ctx.use_state_keyed("is_reset", || false);
-
-    // Clone for reset button
-    let progress_for_reset = animated_progress.clone();
+    // Clone for replay button
+    let progress_for_replay = animated_progress.clone();
 
     let section = section_container().child(section_title("Progress")).child(
         div()
@@ -1626,32 +1637,33 @@ fn progress_section(ctx: &WindowedContext, _scroll_ref: &ScrollRef) -> impl Elem
                     .gap(12.0)
                     .child(cn::label("Animated Progress (auto-animates to 75%)"))
                     .child(cn::progress_animated(animated_progress).w(PROGRESS_WIDTH))
-                    .child(
+                    .child({
+                        let theme = ThemeState::get();
                         div()
                             .w(PROGRESS_WIDTH)
                             .justify_center()
-                            .p(8.0)
-                            .px(16.0)
-                            .bg(ThemeState::get().color(ColorToken::Primary))
-                            .rounded(6.0)
+                            .py(theme.spacing().space_2)
+                            .px(theme.spacing().space_4)
+                            .bg(theme.color(ColorToken::Primary))
+                            .rounded(theme.radius(RadiusToken::Md))
                             .cursor_pointer()
-                            .child(text("Reset Animation").size(14.0).color(Color::WHITE))
+                            .child(
+                                text("Replay Animation")
+                                    .size(theme.typography().text_sm)
+                                    .color(theme.color(ColorToken::TextInverse)),
+                            )
+                            // Click → snap to 0 (no animation) then re-target
+                            // 75%, so the bar visibly plays the 0→75% animation
+                            // again. set_immediate clears any active spring so
+                            // the snap is truly instant; the subsequent
+                            // set_target builds a fresh spring from 0 → 75%.
                             .on_click(move |_| {
-                                if let Ok(mut value) = progress_for_reset.lock() {
-                                    let reset_flag = !is_reset.get();
-
-                                    if reset_flag {
-                                        value.set_target(0.0);
-                                        is_reset.set(true);
-                                        tracing::info!("Progress animation reset to 0");
-                                    } else {
-                                        value.set_target(PROGRESS_WIDTH * 0.75);
-                                        is_reset.set(false);
-                                        tracing::info!("Progress animation reset to 75%");
-                                    }
+                                if let Ok(mut value) = progress_for_replay.lock() {
+                                    value.set_immediate(0.0);
+                                    value.set_target(PROGRESS_WIDTH * 0.75);
                                 }
-                            }),
-                    ),
+                            })
+                    }),
             )
             .id("progress-section"),
     );
@@ -1703,7 +1715,7 @@ fn tabs_section(ctx: &WindowedContext) -> impl ElementBuilder {
                                     .items_center()
                                     .child(
                                         text("Manage your account settings and preferences.")
-                                            .size(14.0)
+                                            .size(t_sm())
                                             .color(
                                                 ThemeState::get().color(ColorToken::TextSecondary),
                                             ),
@@ -1718,7 +1730,7 @@ fn tabs_section(ctx: &WindowedContext) -> impl ElementBuilder {
                                     .items_center()
                                     .child(
                                         text("Change your password and security settings.")
-                                            .size(14.0)
+                                            .size(t_sm())
                                             .color(
                                                 ThemeState::get().color(ColorToken::TextSecondary),
                                             ),
@@ -1733,7 +1745,7 @@ fn tabs_section(ctx: &WindowedContext) -> impl ElementBuilder {
                                     .items_center()
                                     .child(
                                         text("Configure your notification preferences.")
-                                            .size(14.0)
+                                            .size(t_sm())
                                             .color(
                                                 ThemeState::get().color(ColorToken::TextSecondary),
                                             ),
@@ -1800,7 +1812,7 @@ fn breadcrumb_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap(8.0)
-                        .child(text("Basic Breadcrumb").size(14.0).color(text_secondary))
+                        .child(text("Basic Breadcrumb").size(t_sm()).color(text_secondary))
                         .child(
                             cn::breadcrumb()
                                 .item("Home", || tracing::info!("Home clicked"))
@@ -1814,7 +1826,7 @@ fn breadcrumb_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap(8.0)
-                        .child(text("With Home Icon").size(14.0).color(text_secondary))
+                        .child(text("With Home Icon").size(t_sm()).color(text_secondary))
                         .child(
                             cn::breadcrumb()
                                 .item_with_icon("Home", home_icon, || {
@@ -1829,7 +1841,7 @@ fn breadcrumb_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap(8.0)
-                        .child(text("Slash Separator").size(14.0).color(text_secondary))
+                        .child(text("Slash Separator").size(t_sm()).color(text_secondary))
                         .child(
                             cn::breadcrumb()
                                 .slash_separator()
@@ -1844,7 +1856,7 @@ fn breadcrumb_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap(8.0)
-                        .child(text("Custom Separator").size(14.0).color(text_secondary))
+                        .child(text("Custom Separator").size(t_sm()).color(text_secondary))
                         .child(
                             cn::breadcrumb()
                                 .text_separator("→")
@@ -1858,7 +1870,7 @@ fn breadcrumb_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap(8.0)
-                        .child(text("Sizes").size(14.0).color(text_secondary))
+                        .child(text("Sizes").size(t_sm()).color(text_secondary))
                         .child(
                             div()
                                 .flex_col()
@@ -1911,7 +1923,7 @@ fn pagination_section(ctx: &WindowedContext) -> impl ElementBuilder {
                         .gap(8.0)
                         .child(
                             text("Basic Pagination (10 pages)")
-                                .size(14.0)
+                                .size(t_sm())
                                 .color(text_secondary),
                         )
                         .child(
@@ -1926,7 +1938,7 @@ fn pagination_section(ctx: &WindowedContext) -> impl ElementBuilder {
                         .gap(8.0)
                         .child(
                             text("With First/Last Buttons (50 pages)")
-                                .size(14.0)
+                                .size(t_sm())
                                 .color(text_secondary),
                         )
                         .child(
@@ -1941,7 +1953,7 @@ fn pagination_section(ctx: &WindowedContext) -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap(12.0)
-                        .child(text("Size Variants").size(14.0).color(text_secondary))
+                        .child(text("Size Variants").size(t_sm()).color(text_secondary))
                         .child(
                             div()
                                 .flex_row()
@@ -1952,14 +1964,14 @@ fn pagination_section(ctx: &WindowedContext) -> impl ElementBuilder {
                                     div()
                                         .flex_col()
                                         .gap(4.0)
-                                        .child(text("Small").size(12.0).color(text_secondary))
+                                        .child(text("Small").size(t_xs()).color(text_secondary))
                                         .child(cn::pagination(5, page3.clone()).small()),
                                 )
                                 .child(
                                     div()
                                         .flex_col()
                                         .gap(4.0)
-                                        .child(text("Large").size(12.0).color(text_secondary))
+                                        .child(text("Large").size(t_xs()).color(text_secondary))
                                         .child(cn::pagination(5, page3.clone()).large()),
                                 ),
                         ),
@@ -1983,7 +1995,7 @@ fn navigation_menu_section() -> impl ElementBuilder {
                 .gap(20.0)
                 .child(
                     text("Hover over triggers to see dropdown menus")
-                        .size(14.0)
+                        .size(t_sm())
                         .color(text_secondary),
                 )
                 .child(
@@ -2061,14 +2073,14 @@ fn sidebar_section(ctx: &WindowedContext) -> impl ElementBuilder {
             .gap(12.0)
             .child(
                 text("Click the toggle button to collapse/expand the sidebar")
-                    .size(14.0)
+                    .size(t_sm())
                     .color(text_secondary),
             )
             .child(
                 div()
                     .h(400.0)
                     .border(1.0, border)
-                    .rounded(8.0)
+                    .rounded(r_default())
                     .overflow_clip()
                     .child(
                         cn::sidebar(&sidebar_collapsed)
@@ -2099,7 +2111,7 @@ fn sidebar_section(ctx: &WindowedContext) -> impl ElementBuilder {
                                     .gap(24.0)
                                     .child(
                                         text("Icon Size Comparison")
-                                            .size(18.0)
+                                            .size(t_lg())
                                             .weight(FontWeight::SemiBold)
                                             .color(theme.color(ColorToken::TextPrimary)),
                                     )
@@ -2116,7 +2128,7 @@ fn sidebar_section(ctx: &WindowedContext) -> impl ElementBuilder {
                                                     .items_center()
                                                     .gap(8.0)
                                                     .child(svg(large_search).tint(theme.color(ColorToken::TextPrimary)))
-                                                    .child(text("64×64 Search").size(12.0).color(theme.color(ColorToken::TextSecondary)))
+                                                    .child(text("64×64 Search").size(t_xs()).color(theme.color(ColorToken::TextSecondary)))
                                             )
                                             .child(
                                                 div()
@@ -2124,7 +2136,7 @@ fn sidebar_section(ctx: &WindowedContext) -> impl ElementBuilder {
                                                     .items_center()
                                                     .gap(8.0)
                                                     .child(svg(large_settings).tint(theme.color(ColorToken::TextPrimary)))
-                                                    .child(text("64×64 Settings").size(12.0).color(theme.color(ColorToken::TextSecondary)))
+                                                    .child(text("64×64 Settings").size(t_xs()).color(theme.color(ColorToken::TextSecondary)))
                                             )
                                             // Small 20x20 icons for comparison
                                             .child(
@@ -2133,7 +2145,7 @@ fn sidebar_section(ctx: &WindowedContext) -> impl ElementBuilder {
                                                     .items_center()
                                                     .gap(8.0)
                                                     .child(svg(small_search).tint(theme.color(ColorToken::TextPrimary)))
-                                                    .child(text("20×20 Search").size(12.0).color(theme.color(ColorToken::TextSecondary)))
+                                                    .child(text("20×20 Search").size(t_xs()).color(theme.color(ColorToken::TextSecondary)))
                                             ),
                                     )
                             }),
@@ -2167,14 +2179,14 @@ fn resizable_section() -> impl ElementBuilder {
                         .child(cn::label("Horizontal Resizable"))
                         .child(
                             text("Drag the handles between panels to resize them")
-                                .size(14.0)
+                                .size(t_sm())
                                 .color(text_secondary),
                         )
                         .child(
                             div()
                                 .h(300.0)
                                 .border(1.0, border)
-                                .rounded(8.0)
+                                .rounded(r_default())
                                 .overflow_clip()
                                 .child(
                                     cn::resizable_group()
@@ -2196,7 +2208,7 @@ fn resizable_section() -> impl ElementBuilder {
                                                         .gap(8.0)
                                                         .child(
                                                             text("Left Panel")
-                                                                .size(14.0)
+                                                                .size(t_sm())
                                                                 .weight(FontWeight::SemiBold)
                                                                 .color(theme.color(
                                                                     ColorToken::TextPrimary,
@@ -2204,7 +2216,7 @@ fn resizable_section() -> impl ElementBuilder {
                                                         )
                                                         .child(
                                                             text("Min: 100px, Max: 400px")
-                                                                .size(12.0)
+                                                                .size(t_xs())
                                                                 .color(text_secondary),
                                                         ),
                                                 ),
@@ -2226,7 +2238,7 @@ fn resizable_section() -> impl ElementBuilder {
                                                         .gap(8.0)
                                                         .child(
                                                             text("Center Panel (Flex)")
-                                                                .size(14.0)
+                                                                .size(t_sm())
                                                                 .weight(FontWeight::SemiBold)
                                                                 .color(theme.color(
                                                                     ColorToken::TextPrimary,
@@ -2234,7 +2246,7 @@ fn resizable_section() -> impl ElementBuilder {
                                                         )
                                                         .child(
                                                             text("Grows to fill available space")
-                                                                .size(12.0)
+                                                                .size(t_xs())
                                                                 .color(text_secondary),
                                                         ),
                                                 ),
@@ -2254,7 +2266,7 @@ fn resizable_section() -> impl ElementBuilder {
                                                         .gap(8.0)
                                                         .child(
                                                             text("Right Panel")
-                                                                .size(14.0)
+                                                                .size(t_sm())
                                                                 .weight(FontWeight::SemiBold)
                                                                 .color(theme.color(
                                                                     ColorToken::TextPrimary,
@@ -2262,7 +2274,7 @@ fn resizable_section() -> impl ElementBuilder {
                                                         )
                                                         .child(
                                                             text("Min: 100px")
-                                                                .size(12.0)
+                                                                .size(t_xs())
                                                                 .color(text_secondary),
                                                         ),
                                                 ),
@@ -2279,14 +2291,14 @@ fn resizable_section() -> impl ElementBuilder {
                         .child(cn::label("Vertical Resizable"))
                         .child(
                             text("Panels can also resize vertically")
-                                .size(14.0)
+                                .size(t_sm())
                                 .color(text_secondary),
                         )
                         .child(
                             div()
                                 .h(350.0)
                                 .border(1.0, border)
-                                .rounded(8.0)
+                                .rounded(r_default())
                                 .overflow_clip()
                                 .child(
                                     cn::resizable_group()
@@ -2308,7 +2320,7 @@ fn resizable_section() -> impl ElementBuilder {
                                                         .justify_center()
                                                         .child(
                                                             text("Main Content Area")
-                                                                .size(14.0)
+                                                                .size(t_sm())
                                                                 .weight(FontWeight::SemiBold)
                                                                 .color(theme.color(
                                                                     ColorToken::TextPrimary,
@@ -2332,7 +2344,7 @@ fn resizable_section() -> impl ElementBuilder {
                                                         .gap(4.0)
                                                         .child(
                                                             text("Bottom Panel")
-                                                                .size(14.0)
+                                                                .size(t_sm())
                                                                 .weight(FontWeight::SemiBold)
                                                                 .color(theme.color(
                                                                     ColorToken::TextPrimary,
@@ -2340,7 +2352,7 @@ fn resizable_section() -> impl ElementBuilder {
                                                         )
                                                         .child(
                                                             text("Min: 60px, Max: 200px")
-                                                                .size(12.0)
+                                                                .size(t_xs())
                                                                 .color(text_secondary),
                                                         ),
                                                 ),
@@ -2380,21 +2392,21 @@ fn accordion_section() -> impl ElementBuilder {
                                 .item("faq-1", "What is Blinc?", || {
                                     div().w_full().p(4.0).items_center().child(
                                         text("Blinc is a Rust UI framework for building beautiful, performant user interfaces with a declarative, GPUI-inspired API.")
-                                            .size(14.0)
+                                            .size(t_sm())
                                             .color(ThemeState::get().color(ColorToken::TextSecondary)),
                                     )
                                 })
                                 .item("faq-2", "How do animations work?", || {
                                     div().w_full().p(4.0).items_center().child(
                                         text("Blinc uses spring physics animations via the blinc_animation crate. Animations are scheduled through a global scheduler for smooth performance.")
-                                            .size(14.0)
+                                            .size(t_sm())
                                             .color(ThemeState::get().color(ColorToken::TextSecondary)),
                                     )
                                 })
                                 .item("faq-3", "Is it production ready?", || {
                                     div().w_full().p(4.0).items_center().child(
                                         text("Blinc is under active development. It's suitable for experimentation and side projects, with a growing component library.")
-                                            .size(14.0)
+                                            .size(t_sm())
                                             .color(ThemeState::get().color(ColorToken::TextSecondary)),
                                     )
                                 })
@@ -2415,21 +2427,21 @@ fn accordion_section() -> impl ElementBuilder {
                                 .item("settings-1", "Appearance", || {
                                     div().w_full().h(60.0).p(4.0).items_center().child(
                                         text("Customize the look and feel of your application including themes, colors, and fonts.")
-                                            .size(14.0)
+                                            .size(t_sm())
                                             .color(ThemeState::get().color(ColorToken::TextSecondary)),
                                     )
                                 })
                                 .item("settings-2", "Notifications", || {
                                     div().w_full().h(60.0).p(4.0).items_center().child(
                                         text("Configure how and when you receive notifications, including email and push notifications.")
-                                            .size(14.0)
+                                            .size(t_sm())
                                             .color(ThemeState::get().color(ColorToken::TextSecondary)),
                                     )
                                 })
                                 .item("settings-3", "Privacy", || {
                                     div().w_full().h(60.0).p(4.0).items_center().child(
                                         text("Control your privacy settings, data sharing preferences, and account visibility.")
-                                            .size(14.0)
+                                            .size(t_sm())
                                             .color(ThemeState::get().color(ColorToken::TextSecondary)),
                                     )
                                 })
@@ -2545,7 +2557,7 @@ fn hover_card_section() -> impl ElementBuilder {
                         .gap(8.0)
                         .child(
                             text("Basic Hover Card")
-                                .size(14.0)
+                                .size(t_sm())
                                 .medium()
                                 .color(text_primary),
                         )
@@ -2553,7 +2565,7 @@ fn hover_card_section() -> impl ElementBuilder {
                             cn::hover_card(move || {
                                 div().w_fit()
                                     .cursor_pointer()
-                                    .child(text("@johndoe").size(14.0).color(accent).no_wrap())
+                                    .child(text("@johndoe").size(t_sm()).color(accent).no_wrap())
                             })
                             .content(move || {
                                 div()
@@ -2577,20 +2589,20 @@ fn hover_card_section() -> impl ElementBuilder {
                                                     .gap(2.0)
                                                     .child(
                                                         text("John Doe")
-                                                            .size(16.0)
+                                                            .size(t_base())
                                                             .medium()
                                                             .color(text_primary),
                                                     )
                                                     .child(
                                                         text("@johndoe")
-                                                            .size(14.0)
+                                                            .size(t_sm())
                                                             .color(text_secondary),
                                                     ),
                                             ),
                                     )
                                     .child(
                                         text("Software Engineer at Acme Corp. Building great things with Rust and TypeScript.")
-                                            .size(14.0)
+                                            .size(t_sm())
                                             .color(text_secondary),
                                     )
                                     .child(
@@ -2601,15 +2613,15 @@ fn hover_card_section() -> impl ElementBuilder {
                                                 div()
                                                     .flex_row()
                                                     .gap(4.0)
-                                                    .child(text("128").size(14.0).medium().color(text_primary))
-                                                    .child(text("Following").size(14.0).color(text_tertiary)),
+                                                    .child(text("128").size(t_sm()).medium().color(text_primary))
+                                                    .child(text("Following").size(t_sm()).color(text_tertiary)),
                                             )
                                             .child(
                                                 div()
                                                     .flex_row()
                                                     .gap(4.0)
-                                                    .child(text("2.4k").size(14.0).medium().color(text_primary))
-                                                    .child(text("Followers").size(14.0).color(text_tertiary)),
+                                                    .child(text("2.4k").size(t_sm()).medium().color(text_primary))
+                                                    .child(text("Followers").size(t_sm()).color(text_tertiary)),
                                             ),
                                     )
                             }),
@@ -2622,7 +2634,7 @@ fn hover_card_section() -> impl ElementBuilder {
                         .gap(8.0)
                         .child(
                             text("Side Positions")
-                                .size(14.0)
+                                .size(t_sm())
                                 .medium()
                                 .color(text_primary),
                         )
@@ -2638,7 +2650,7 @@ fn hover_card_section() -> impl ElementBuilder {
                                     .content(move || {
                                         div().child(
                                             text("This card appears below the trigger.")
-                                                .size(14.0)
+                                                .size(t_sm())
                                                 .color(text_secondary),
                                         )
                                     }),
@@ -2651,7 +2663,7 @@ fn hover_card_section() -> impl ElementBuilder {
                                     .content(move || {
                                         div().child(
                                             text("This card appears to the right.")
-                                                .size(14.0)
+                                                .size(t_sm())
                                                 .color(text_secondary),
                                         )
                                     }),
@@ -2664,7 +2676,7 @@ fn hover_card_section() -> impl ElementBuilder {
                                     .content(move || {
                                         div().child(
                                             text("This card appears above the trigger.")
-                                                .size(14.0)
+                                                .size(t_sm())
                                                 .color(text_secondary),
                                         )
                                     }),
@@ -2697,7 +2709,7 @@ fn popover_section() -> impl ElementBuilder {
                         .gap(8.0)
                         .child(
                             text("Basic Popover")
-                                .size(14.0)
+                                .size(t_sm())
                                 .medium()
                                 .color(text_primary),
                         )
@@ -2715,13 +2727,13 @@ fn popover_section() -> impl ElementBuilder {
                                     .gap(8.0)
                                     .child(
                                         text("Popover Content")
-                                            .size(14.0)
+                                            .size(t_sm())
                                             .medium()
                                             .color(theme.color(ColorToken::TextPrimary)),
                                     )
                                     .child(
                                         text("This is some content inside the popover. Click outside or press Escape to close.")
-                                            .size(13.0)
+                                            .size(t_sm())
                                             .color(theme.color(ColorToken::TextSecondary)),
                                     )
                             }),
@@ -2734,7 +2746,7 @@ fn popover_section() -> impl ElementBuilder {
                         .gap(8.0)
                         .child(
                             text("With Form Content")
-                                .size(14.0)
+                                .size(t_sm())
                                 .medium()
                                 .color(text_primary),
                         )
@@ -2753,7 +2765,7 @@ fn popover_section() -> impl ElementBuilder {
                                     .w(240.0)
                                     .child(
                                         text("Settings")
-                                            .size(14.0)
+                                            .size(t_sm())
                                             .medium()
                                             .color(theme.color(ColorToken::TextPrimary)),
                                     )
@@ -2768,7 +2780,7 @@ fn popover_section() -> impl ElementBuilder {
                                                     .h(32.0)
                                                     .bg(theme.color(ColorToken::SurfaceElevated))
                                                     .border(1.0, theme.color(ColorToken::Border))
-                                                    .rounded(6.0),
+                                                    .rounded(r_default()),
                                             ),
                                     )
                                     .child(
@@ -2782,7 +2794,7 @@ fn popover_section() -> impl ElementBuilder {
                                                     .h(32.0)
                                                     .bg(theme.color(ColorToken::SurfaceElevated))
                                                     .border(1.0, theme.color(ColorToken::Border))
-                                                    .rounded(6.0),
+                                                    .rounded(r_default()),
                                             ),
                                     )
                             }),
@@ -2795,7 +2807,7 @@ fn popover_section() -> impl ElementBuilder {
                         .gap(8.0)
                         .child(
                             text("Positioned Right")
-                                .size(14.0)
+                                .size(t_sm())
                                 .medium()
                                 .color(text_primary),
                         )
@@ -2814,7 +2826,7 @@ fn popover_section() -> impl ElementBuilder {
                                     .gap(4.0)
                                     .child(
                                         text("Right-positioned popover")
-                                            .size(13.0)
+                                            .size(t_sm())
                                             .color(theme.color(ColorToken::TextSecondary)),
                                     )
                             }),
@@ -2827,7 +2839,7 @@ fn popover_section() -> impl ElementBuilder {
                         .gap(8.0)
                         .child(
                             text("Positioned Top")
-                                .size(14.0)
+                                .size(t_sm())
                                 .medium()
                                 .color(text_primary),
                         )
@@ -2846,7 +2858,7 @@ fn popover_section() -> impl ElementBuilder {
                                     .gap(4.0)
                                     .child(
                                         text("Top-positioned popover")
-                                            .size(13.0)
+                                            .size(t_sm())
                                             .color(theme.color(ColorToken::TextSecondary)),
                                     )
                             }),
@@ -2874,7 +2886,7 @@ fn tooltip_section() -> impl ElementBuilder {
                     .gap(8.0)
                     .child(
                         text("Basic Tooltip")
-                            .size(14.0)
+                            .size(t_sm())
                             .medium()
                             .color(text_primary),
                     )
@@ -2892,7 +2904,7 @@ fn tooltip_section() -> impl ElementBuilder {
                     .gap(8.0)
                     .child(
                         text("Side Positions")
-                            .size(14.0)
+                            .size(t_sm())
                             .medium()
                             .color(text_primary),
                     )
@@ -2936,7 +2948,7 @@ fn tooltip_section() -> impl ElementBuilder {
                 div()
                     .flex_col()
                     .gap(8.0)
-                    .child(text("Custom Delay").size(14.0).medium().color(text_primary))
+                    .child(text("Custom Delay").size(t_sm()).medium().color(text_primary))
                     .child(
                         div()
                             .flex_row()
@@ -2980,13 +2992,13 @@ fn kbd_section() -> impl ElementBuilder {
                         .flex_row()
                         .items_center()
                         .gap_px(8.0)
-                        .child(text("Press").size(14.0).color(text_secondary))
+                        .child(text("Press").size(t_sm()).color(text_secondary))
                         .child(cn::kbd("⌘"))
-                        .child(text("+").size(14.0).color(text_secondary))
+                        .child(text("+").size(t_sm()).color(text_secondary))
                         .child(cn::kbd("K"))
                         .child(
                             text("to open command palette")
-                                .size(14.0)
+                                .size(t_sm())
                                 .color(text_secondary),
                         ),
                 )
@@ -3000,7 +3012,7 @@ fn kbd_section() -> impl ElementBuilder {
                                 .flex_row()
                                 .items_center()
                                 .gap_px(8.0)
-                                .child(text("Small:").size(14.0).color(text_secondary))
+                                .child(text("Small:").size(t_sm()).color(text_secondary))
                                 .child(cn::kbd("Ctrl").size(KbdSize::Small))
                                 .child(cn::kbd("S").size(KbdSize::Small)),
                         )
@@ -3009,7 +3021,7 @@ fn kbd_section() -> impl ElementBuilder {
                                 .flex_row()
                                 .items_center()
                                 .gap_px(8.0)
-                                .child(text("Medium:").size(14.0).color(text_secondary))
+                                .child(text("Medium:").size(t_sm()).color(text_secondary))
                                 .child(cn::kbd("Ctrl"))
                                 .child(cn::kbd("S")),
                         )
@@ -3018,7 +3030,7 @@ fn kbd_section() -> impl ElementBuilder {
                                 .flex_row()
                                 .items_center()
                                 .gap_px(8.0)
-                                .child(text("Large:").size(14.0).color(text_secondary))
+                                .child(text("Large:").size(t_sm()).color(text_secondary))
                                 .child(cn::kbd("Ctrl").size(KbdSize::Large))
                                 .child(cn::kbd("S").size(KbdSize::Large)),
                         ),
@@ -3036,7 +3048,7 @@ fn kbd_section() -> impl ElementBuilder {
                                 .gap_px(4.0)
                                 .child(cn::kbd("⌘"))
                                 .child(cn::kbd("C"))
-                                .child(text(" - Copy").size(12.0).color(text_secondary)),
+                                .child(text(" - Copy").size(t_xs()).color(text_secondary)),
                         )
                         .child(
                             div()
@@ -3045,7 +3057,7 @@ fn kbd_section() -> impl ElementBuilder {
                                 .gap_px(4.0)
                                 .child(cn::kbd("⌘"))
                                 .child(cn::kbd("V"))
-                                .child(text(" - Paste").size(12.0).color(text_secondary)),
+                                .child(text(" - Paste").size(t_xs()).color(text_secondary)),
                         )
                         .child(
                             div()
@@ -3054,7 +3066,7 @@ fn kbd_section() -> impl ElementBuilder {
                                 .gap_px(4.0)
                                 .child(cn::kbd("⌘"))
                                 .child(cn::kbd("Z"))
-                                .child(text(" - Undo").size(12.0).color(text_secondary)),
+                                .child(text(" - Undo").size(t_xs()).color(text_secondary)),
                         )
                         .child(
                             div()
@@ -3064,7 +3076,7 @@ fn kbd_section() -> impl ElementBuilder {
                                 .child(cn::kbd("⇧"))
                                 .child(cn::kbd("⌘"))
                                 .child(cn::kbd("Z"))
-                                .child(text(" - Redo").size(12.0).color(text_secondary)),
+                                .child(text(" - Redo").size(t_xs()).color(text_secondary)),
                         ),
                 )
                 // Special keys
@@ -3101,13 +3113,13 @@ fn misc_section() -> impl ElementBuilder {
                         .gap(12.0)
                         .child(
                             text("Left content")
-                                .size(14.0)
+                                .size(t_sm())
                                 .color(theme.color(ColorToken::TextSecondary)),
                         )
                         .child(cn::separator().w(100.0))
                         .child(
                             text("Right content")
-                                .size(14.0)
+                                .size(t_sm())
                                 .color(theme.color(ColorToken::TextSecondary)),
                         ),
                 )
@@ -3139,7 +3151,7 @@ fn tree_view_section() -> impl ElementBuilder {
                 div()
                     .flex_col()
                     .gap(8.0)
-                    .child(text("File Explorer").size(12.0).color(text_secondary))
+                    .child(text("File Explorer").size(t_xs()).color(text_secondary))
                     .child(
                         scroll()
                             .h_full()
@@ -3148,7 +3160,7 @@ fn tree_view_section() -> impl ElementBuilder {
                             .p(4.0)
                             .bg(theme.color(ColorToken::Surface))
                             .border(1.0, theme.color(ColorToken::Border))
-                            .rounded(8.0)
+                            .rounded(r_default())
                             .child(cn::tree_view().node("project", "my-project", |n| {
                                 n.expanded()
                                     .child("src", "src/", |n| {
@@ -3174,7 +3186,7 @@ fn tree_view_section() -> impl ElementBuilder {
                     .gap(8.0)
                     .child(
                         text("Element Tree with Diff")
-                            .size(12.0)
+                            .size(t_xs())
                             .color(text_secondary),
                     )
                     .child(
@@ -3185,7 +3197,7 @@ fn tree_view_section() -> impl ElementBuilder {
                             .p(4.0)
                             .bg(theme.color(ColorToken::Surface))
                             .border(1.0, theme.color(ColorToken::Border))
-                            .rounded(8.0)
+                            .rounded(r_default())
                             .child(
                                 cn::tree_view()
                                     .node("root", "Window", |n| {
@@ -3232,7 +3244,7 @@ fn charts_section() -> impl ElementBuilder {
                     .gap(8.0)
                     .child(
                         text("Line Chart - Multi-series")
-                            .size(12.0)
+                            .size(t_xs())
                             .color(text_secondary),
                     )
                     .child(
@@ -3262,7 +3274,7 @@ fn charts_section() -> impl ElementBuilder {
                             .gap(8.0)
                             .child(
                                 text("Bar Chart - Vertical")
-                                    .size(12.0)
+                                    .size(t_xs())
                                     .color(text_secondary),
                             )
                             .child(
@@ -3285,7 +3297,7 @@ fn charts_section() -> impl ElementBuilder {
                             .gap(8.0)
                             .child(
                                 text("Bar Chart - Horizontal")
-                                    .size(12.0)
+                                    .size(t_xs())
                                     .color(text_secondary),
                             )
                             .child(
@@ -3311,7 +3323,7 @@ fn charts_section() -> impl ElementBuilder {
                     .gap(8.0)
                     .child(
                         text("Sparklines - Inline trends")
-                            .size(12.0)
+                            .size(t_xs())
                             .color(text_secondary),
                     )
                     .child(
@@ -3324,7 +3336,7 @@ fn charts_section() -> impl ElementBuilder {
                                     .flex_row()
                                     .items_center()
                                     .gap(8.0)
-                                    .child(text("Sales").size(13.0).color(text_secondary))
+                                    .child(text("Sales").size(t_sm()).color(text_secondary))
                                     .child(
                                         cn::spark_line(&[1.0, 2.5, 2.0, 3.5, 3.0, 4.5, 4.0, 5.0])
                                             .width(100.0)
@@ -3334,7 +3346,7 @@ fn charts_section() -> impl ElementBuilder {
                                     )
                                     .child(
                                         text("+25%")
-                                            .size(12.0)
+                                            .size(t_xs())
                                             .color(theme.color(ColorToken::Success)),
                                     ),
                             )
@@ -3343,7 +3355,7 @@ fn charts_section() -> impl ElementBuilder {
                                     .flex_row()
                                     .items_center()
                                     .gap(8.0)
-                                    .child(text("Errors").size(13.0).color(text_secondary))
+                                    .child(text("Errors").size(t_sm()).color(text_secondary))
                                     .child(
                                         cn::spark_line(&[5.0, 4.0, 4.5, 3.0, 3.5, 2.0, 2.5, 1.0])
                                             .width(100.0)
@@ -3354,7 +3366,7 @@ fn charts_section() -> impl ElementBuilder {
                                     )
                                     .child(
                                         text("-60%")
-                                            .size(12.0)
+                                            .size(t_xs())
                                             .color(theme.color(ColorToken::Error)),
                                     ),
                             )
@@ -3363,7 +3375,7 @@ fn charts_section() -> impl ElementBuilder {
                                     .flex_row()
                                     .items_center()
                                     .gap(8.0)
-                                    .child(text("Latency").size(13.0).color(text_secondary))
+                                    .child(text("Latency").size(t_sm()).color(text_secondary))
                                     .child(
                                         cn::spark_line(&[
                                             45.0, 48.0, 42.0, 50.0, 47.0, 45.0, 43.0, 46.0,
@@ -3372,7 +3384,7 @@ fn charts_section() -> impl ElementBuilder {
                                         .height(24.0)
                                         .build(),
                                     )
-                                    .child(text("46ms").size(12.0).color(text_secondary)),
+                                    .child(text("46ms").size(t_xs()).color(text_secondary)),
                             ),
                     ),
             )
@@ -3383,7 +3395,7 @@ fn charts_section() -> impl ElementBuilder {
                     .gap(8.0)
                     .child(
                         text("Threshold Line Chart - Regression Detection")
-                            .size(12.0)
+                            .size(t_xs())
                             .color(text_secondary),
                     )
                     .child(
@@ -3406,7 +3418,7 @@ fn charts_section() -> impl ElementBuilder {
                     .gap(8.0)
                     .child(
                         text("Histogram - Pixel Diff Distribution")
-                            .size(12.0)
+                            .size(t_xs())
                             .color(text_secondary),
                     )
                     .child(
@@ -3425,7 +3437,7 @@ fn charts_section() -> impl ElementBuilder {
                     .gap(8.0)
                     .child(
                         text("Comparison Bar Chart - Baseline vs Current")
-                            .size(12.0)
+                            .size(t_xs())
                             .color(text_secondary),
                     )
                     .child(
@@ -3475,7 +3487,7 @@ fn icon_gallery_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap(8.0)
-                        .child(text("Size Variants").size(12.0).color(text_secondary))
+                        .child(text("Size Variants").size(t_xs()).color(text_secondary))
                         .child(
                             div()
                                 .flex_row()
@@ -3528,7 +3540,7 @@ fn icon_gallery_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap(8.0)
-                        .child(text("Color Variants").size(12.0).color(text_secondary))
+                        .child(text("Color Variants").size(t_xs()).color(text_secondary))
                         .child(
                             div()
                                 .flex_row()
@@ -3562,7 +3574,7 @@ fn icon_gallery_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap(8.0)
-                        .child(text("Common Icons").size(12.0).color(text_secondary))
+                        .child(text("Common Icons").size(t_xs()).color(text_secondary))
                         .child(
                             div()
                                 .flex_row()
@@ -3617,7 +3629,7 @@ fn icon_tile(icon_data: &'static str, name: &str) -> impl ElementBuilder {
         .p(2.0)
         .w(72.0)
         .border(1.0, border)
-        .rounded(6.0)
+        .rounded(r_default())
         .child(cn::icon(icon_data).size(IconSize::Large))
         .child(text(name).size(9.0).color(text_tertiary))
 }
@@ -3629,7 +3641,27 @@ fn icon_tile(icon_data: &'static str, name: &str) -> impl ElementBuilder {
 fn scroll_area_section() -> impl ElementBuilder {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
-    let surface = theme.color(ColorToken::Surface);
+    let text_primary = theme.color(ColorToken::TextPrimary);
+    let panel_bg = theme.color(ColorToken::SurfaceElevated);
+    let border = theme.color(ColorToken::Border);
+
+    // Build the inner scrollable list with explicit theme tokens — bg lifts
+    // the panel one tier above the section card, text uses TextPrimary so
+    // it reads correctly across light + dark schemes. Without this, the
+    // text widget defaulted to `Color::BLACK` which only worked in light.
+    let scroll_panel = |lines: &[&str]| -> Div {
+        let mut inner = div()
+            .flex_col()
+            .gap_px(8.0)
+            .p(8.0)
+            .bg(panel_bg)
+            .border(1.0, border)
+            .rounded(r_default());
+        for line in lines {
+            inner = inner.child(text(*line).size(t_sm()).color(text_primary));
+        }
+        inner
+    };
 
     section_container()
         .child(section_title("Scroll Area"))
@@ -3643,28 +3675,24 @@ fn scroll_area_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap_px(8.0)
-                        .child(text("Auto (default)").size(12.0).color(text_secondary))
+                        .child(text("Auto (default)").size(t_xs()).color(text_secondary))
                         .child(
                             cn::scroll_area()
                                 .scrollbar(cn::ScrollbarVisibility::Auto)
                                 .w(200.0)
                                 .h(150.0)
-                                .child(
-                                    div()
-                                        .flex_col()
-                                        .gap_px(8.0)
-                                        .p(8.0)
-                                        .child(text("Scroll content 1").size(14.0))
-                                        .child(text("Scroll content 2").size(14.0))
-                                        .child(text("Scroll content 3").size(14.0))
-                                        .child(text("Scroll content 4").size(14.0))
-                                        .child(text("Scroll content 5").size(14.0))
-                                        .child(text("Scroll content 6").size(14.0))
-                                        .child(text("Scroll content 7").size(14.0))
-                                        .child(text("Scroll content 8").size(14.0))
-                                        .child(text("Scroll content 9").size(14.0))
-                                        .child(text("Scroll content 10").size(14.0)),
-                                ),
+                                .child(scroll_panel(&[
+                                    "Scroll content 1",
+                                    "Scroll content 2",
+                                    "Scroll content 3",
+                                    "Scroll content 4",
+                                    "Scroll content 5",
+                                    "Scroll content 6",
+                                    "Scroll content 7",
+                                    "Scroll content 8",
+                                    "Scroll content 9",
+                                    "Scroll content 10",
+                                ])),
                         ),
                 )
                 // Always visible scrollbar
@@ -3672,27 +3700,16 @@ fn scroll_area_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap_px(8.0)
-                        .child(text("Always visible").size(12.0).color(text_secondary))
+                        .child(text("Always visible").size(t_xs()).color(text_secondary))
                         .child(
                             cn::scroll_area()
                                 .scrollbar(cn::ScrollbarVisibility::Always)
                                 .w(200.0)
                                 .h(150.0)
-                                .child(
-                                    div()
-                                        .flex_col()
-                                        .gap_px(8.0)
-                                        .p(8.0)
-                                        .bg(surface)
-                                        .child(text("Item A").size(14.0))
-                                        .child(text("Item B").size(14.0))
-                                        .child(text("Item C").size(14.0))
-                                        .child(text("Item D").size(14.0))
-                                        .child(text("Item E").size(14.0))
-                                        .child(text("Item F").size(14.0))
-                                        .child(text("Item G").size(14.0))
-                                        .child(text("Item H").size(14.0)),
-                                ),
+                                .child(scroll_panel(&[
+                                    "Item A", "Item B", "Item C", "Item D", "Item E",
+                                    "Item F", "Item G", "Item H",
+                                ])),
                         ),
                 )
                 // Hover visibility
@@ -3700,26 +3717,22 @@ fn scroll_area_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap_px(8.0)
-                        .child(text("Show on hover").size(12.0).color(text_secondary))
+                        .child(text("Show on hover").size(t_xs()).color(text_secondary))
                         .child(
                             cn::scroll_area()
                                 .scrollbar(cn::ScrollbarVisibility::Hover)
                                 .w(200.0)
                                 .h(150.0)
-                                .child(
-                                    div()
-                                        .flex_col()
-                                        .gap_px(8.0)
-                                        .p(8.0)
-                                        .child(text("Hover to see scrollbar").size(14.0))
-                                        .child(text("Line 2").size(14.0))
-                                        .child(text("Line 3").size(14.0))
-                                        .child(text("Line 4").size(14.0))
-                                        .child(text("Line 5").size(14.0))
-                                        .child(text("Line 6").size(14.0))
-                                        .child(text("Line 7").size(14.0))
-                                        .child(text("Line 8").size(14.0)),
-                                ),
+                                .child(scroll_panel(&[
+                                    "Hover to see scrollbar",
+                                    "Line 2",
+                                    "Line 3",
+                                    "Line 4",
+                                    "Line 5",
+                                    "Line 6",
+                                    "Line 7",
+                                    "Line 8",
+                                ])),
                         ),
                 )
                 // Never show scrollbar
@@ -3727,27 +3740,22 @@ fn scroll_area_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap_px(8.0)
-                        .child(text("Hidden scrollbar").size(12.0).color(text_secondary))
+                        .child(text("Hidden scrollbar").size(t_xs()).color(text_secondary))
                         .child(
                             cn::scroll_area()
                                 .scrollbar(cn::ScrollbarVisibility::Never)
                                 .w(200.0)
                                 .h(150.0)
-                                .child(
-                                    div()
-                                        .flex_col()
-                                        .gap_px(8.0)
-                                        .p(8.0)
-                                        .bg(surface)
-                                        .child(text("No visible scrollbar").size(14.0))
-                                        .child(text("But still scrollable").size(14.0))
-                                        .child(text("Line 3").size(14.0))
-                                        .child(text("Line 4").size(14.0))
-                                        .child(text("Line 5").size(14.0))
-                                        .child(text("Line 6").size(14.0))
-                                        .child(text("Line 7").size(14.0))
-                                        .child(text("Line 8").size(14.0)),
-                                ),
+                                .child(scroll_panel(&[
+                                    "No visible scrollbar",
+                                    "But still scrollable",
+                                    "Line 3",
+                                    "Line 4",
+                                    "Line 5",
+                                    "Line 6",
+                                    "Line 7",
+                                    "Line 8",
+                                ])),
                         ),
                 ),
         )
@@ -3777,19 +3785,19 @@ fn aspect_ratio_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap_px(8.0)
-                        .child(text("1:1 Square").size(12.0).color(text_secondary))
+                        .child(text("1:1 Square").size(t_xs()).color(text_secondary))
                         .child(
                             cn::aspect_ratio_square()
                                 .w(100.0)
                                 .bg(primary.with_alpha(0.25))
-                                .rounded(8.0)
+                                .rounded(r_default())
                                 .child(
                                     div()
                                         .w_full()
                                         .h_full()
                                         .items_center()
                                         .justify_center()
-                                        .child(text("1:1").size(14.0).color(text_primary)),
+                                        .child(text("1:1").size(t_sm()).color(text_primary)),
                                 ),
                         ),
                 )
@@ -3798,19 +3806,19 @@ fn aspect_ratio_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap_px(8.0)
-                        .child(text("16:9 Widescreen").size(12.0).color(text_secondary))
+                        .child(text("16:9 Widescreen").size(t_xs()).color(text_secondary))
                         .child(
                             cn::aspect_ratio_16_9()
                                 .w(160.0)
                                 .bg(primary.with_alpha(0.2))
-                                .rounded(8.0)
+                                .rounded(r_default())
                                 .child(
                                     div()
                                         .w_full()
                                         .h_full()
                                         .items_center()
                                         .justify_center()
-                                        .child(text("16:9").size(14.0).color(text_primary)),
+                                        .child(text("16:9").size(t_sm()).color(text_primary)),
                                 ),
                         ),
                 )
@@ -3819,19 +3827,19 @@ fn aspect_ratio_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap_px(8.0)
-                        .child(text("4:3 Traditional").size(12.0).color(text_secondary))
+                        .child(text("4:3 Traditional").size(t_xs()).color(text_secondary))
                         .child(
                             cn::aspect_ratio_4_3()
                                 .w(120.0)
                                 .bg(primary.with_alpha(0.1))
-                                .rounded(8.0)
+                                .rounded(r_default())
                                 .child(
                                     div()
                                         .w_full()
                                         .h_full()
                                         .items_center()
                                         .justify_center()
-                                        .child(text("4:3").size(14.0).color(text_primary)),
+                                        .child(text("4:3").size(t_sm()).color(text_primary)),
                                 ),
                         ),
                 )
@@ -3840,19 +3848,19 @@ fn aspect_ratio_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap_px(8.0)
-                        .child(text("21:9 Ultrawide").size(12.0).color(text_secondary))
+                        .child(text("21:9 Ultrawide").size(t_xs()).color(text_secondary))
                         .child(
                             cn::aspect_ratio_21_9()
                                 .w(210.0)
                                 .bg(primary.with_alpha(0.3))
-                                .rounded(8.0)
+                                .rounded(r_default())
                                 .child(
                                     div()
                                         .w_full()
                                         .h_full()
                                         .items_center()
                                         .justify_center()
-                                        .child(text("21:9").size(14.0).color(text_primary)),
+                                        .child(text("21:9").size(t_sm()).color(text_primary)),
                                 ),
                         ),
                 )
@@ -3861,19 +3869,19 @@ fn aspect_ratio_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap_px(8.0)
-                        .child(text("9:16 Vertical").size(12.0).color(text_secondary))
+                        .child(text("9:16 Vertical").size(t_xs()).color(text_secondary))
                         .child(
                             cn::aspect_ratio_9_16()
                                 .w(56.0)
                                 .bg(primary.with_alpha(0.35))
-                                .rounded(8.0)
+                                .rounded(r_default())
                                 .child(
                                     div()
                                         .w_full()
                                         .h_full()
                                         .items_center()
                                         .justify_center()
-                                        .child(text("9:16").size(12.0).color(text_primary)),
+                                        .child(text("9:16").size(t_xs()).color(text_primary)),
                                 ),
                         ),
                 )
@@ -3882,19 +3890,19 @@ fn aspect_ratio_section() -> impl ElementBuilder {
                     div()
                         .flex_col()
                         .gap_px(8.0)
-                        .child(text("Custom 3:2").size(12.0).color(text_secondary))
+                        .child(text("Custom 3:2").size(t_xs()).color(text_secondary))
                         .child(
                             cn::aspect_ratio(3.0 / 2.0)
                                 .w(120.0)
                                 .bg(primary.with_alpha(0.15))
-                                .rounded(8.0)
+                                .rounded(r_default())
                                 .child(
                                     div()
                                         .w_full()
                                         .h_full()
                                         .items_center()
                                         .justify_center()
-                                        .child(text("3:2").size(14.0).color(text_primary)),
+                                        .child(text("3:2").size(t_sm()).color(text_primary)),
                                 ),
                         ),
                 ),
@@ -3922,7 +3930,7 @@ fn avatar_section() -> impl ElementBuilder {
                     .gap_px(8.0)
                     .child(
                         text("Sizes")
-                            .size(14.0)
+                            .size(t_sm())
                             .weight(FontWeight::Medium)
                             .color(text_secondary),
                     )
@@ -3980,7 +3988,7 @@ fn avatar_section() -> impl ElementBuilder {
                     .gap_px(8.0)
                     .child(
                         text("Shapes")
-                            .size(14.0)
+                            .size(t_sm())
                             .weight(FontWeight::Medium)
                             .color(text_secondary),
                     )
@@ -4014,7 +4022,7 @@ fn avatar_section() -> impl ElementBuilder {
                     .gap_px(8.0)
                     .child(
                         text("Fallback Initials")
-                            .size(14.0)
+                            .size(t_sm())
                             .weight(FontWeight::Medium)
                             .color(text_secondary),
                     )
@@ -4041,7 +4049,7 @@ fn avatar_section() -> impl ElementBuilder {
                     .gap_px(8.0)
                     .child(
                         text("Status Indicators")
-                            .size(14.0)
+                            .size(t_sm())
                             .weight(FontWeight::Medium)
                             .color(text_secondary),
                     )
@@ -4091,7 +4099,7 @@ fn avatar_section() -> impl ElementBuilder {
                     .gap_px(8.0)
                     .child(
                         text("Avatar Group")
-                            .size(14.0)
+                            .size(t_sm())
                             .weight(FontWeight::Medium)
                             .color(text_secondary),
                     )
@@ -4123,7 +4131,7 @@ fn avatar_section() -> impl ElementBuilder {
                                 div()
                                     .flex_row()
                                     .gap_px(4.0)
-                                    .child(text("With max:").size(12.0).color(text_secondary))
+                                    .child(text("With max:").size(t_xs()).color(text_secondary))
                                     .child(
                                         cn::avatar_group()
                                             .size(cn::AvatarSize::Small)
