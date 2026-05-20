@@ -143,6 +143,8 @@ impl ToastTray {
         // Cover the typical enter-motion duration — same defence as
         // `OverlayStack::push`.
         self.extend_redraw_window(1_200);
+        // Wake the runner — see `OverlayStack::push`.
+        crate::stateful::request_redraw();
         handle
     }
 
@@ -165,6 +167,7 @@ impl ToastTray {
         if did_dismiss {
             // Cover the exit-motion duration; matches `OverlayStack::begin_exit`.
             self.extend_redraw_window(800);
+            crate::stateful::request_redraw();
         }
     }
 

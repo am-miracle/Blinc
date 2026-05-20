@@ -347,6 +347,11 @@ impl OverlayStack {
         // alive even if the FSM-poll race briefly reports the motion as
         // settled (or NotFound) mid-flight.
         self.extend_redraw_window(1_200);
+        // Wake the windowed runner. The Frame-event gate checks
+        // `stateful::peek_needs_redraw()`, so without this flip a push that
+        // happens between Frame events (typical from an `on_click`) would
+        // wait until the next external input to actually paint.
+        crate::stateful::request_redraw();
         handle
     }
 
@@ -510,6 +515,8 @@ impl OverlayStack {
         self.animation_dirty.store(true, Ordering::Release);
         // Same time-window defence as `push`: cover the typical exit motion.
         self.extend_redraw_window(800);
+        // Wake the runner — see `push` for the rationale.
+        crate::stateful::request_redraw();
     }
 
     // ----- Input handlers -----
