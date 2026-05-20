@@ -4925,6 +4925,23 @@ impl WindowedApp {
                                 windowed_ctx.scale_factor as f32,
                             );
                             windowed_ctx.overlay_manager.update(current_time);
+                            // Phase 3 transition: also tick the new OverlayStack +
+                            // ToastTray. Each is the authoritative manager for the
+                            // widgets that have already been migrated.
+                            {
+                                use blinc_layout::overlay_state::{overlay_stack, toast_tray};
+                                if let Ok(mut s) = overlay_stack().lock() {
+                                    s.set_viewport_with_scale(
+                                        windowed_ctx.width,
+                                        windowed_ctx.height,
+                                        windowed_ctx.scale_factor as f32,
+                                    );
+                                    s.update(current_time);
+                                }
+                                if let Ok(mut t) = toast_tray().lock() {
+                                    t.update(current_time);
+                                }
+                            }
 
                             // Check if overlay content changed (new overlay opened/closed)
                             // NOTE: We only rebuild on actual content changes, NOT during animations.
@@ -5127,12 +5144,33 @@ impl WindowedApp {
                                 // Compose user UI with overlay layer using a regular Div container
                                 // We use position:relative with the overlay absolutely positioned on top.
                                 let overlay_layer = windowed_ctx.overlay_manager.build_overlay_layer();
+                                // Phase 3 transition: the new OverlayStack composites alongside
+                                // the legacy manager. Each widget migration moves one widget
+                                // from the legacy layer to this layer; both render until
+                                // Phase 5 deletes the legacy module.
+                                let stack_layer = {
+                                    use blinc_layout::overlay_state::overlay_stack;
+                                    let stack = overlay_stack();
+                                    let guard = stack.lock().ok();
+                                    match guard {
+                                        Some(mut s) => {
+                                            s.set_viewport_with_scale(
+                                                windowed_ctx.width,
+                                                windowed_ctx.height,
+                                                windowed_ctx.scale_factor as f32,
+                                            );
+                                            s.build_overlay_layer()
+                                        }
+                                        None => div(),
+                                    }
+                                };
                                 let ui = div()
                                     .w(windowed_ctx.width)
                                     .h(windowed_ctx.height)
                                     .relative() // positioning context for overlay
                                     .child(user_ui)
-                                    .child(overlay_layer);
+                                    .child(overlay_layer)
+                                    .child(stack_layer);
 
                                 // Use incremental update if we have an existing tree
                                 // BUT: Skip incremental update during resize - do full rebuild instead
@@ -5782,6 +5820,25 @@ impl WindowedApp {
                                 let mgr = windowed_ctx.overlay_manager.lock().unwrap();
                                 mgr.take_dirty() || mgr.has_animating_overlays()
                             };
+                            // Phase 3 transition: same gate for the new stack +
+                            // tray. Either dirtying source schedules the next paint.
+                            let needs_overlay_stack_redraw = {
+                                use blinc_layout::overlay_state::{overlay_stack, toast_tray};
+                                let s_signal = overlay_stack()
+                                    .lock()
+                                    .map(|s| {
+                                        s.take_dirty()
+                                            || s.take_animation_dirty()
+                                            || s.has_animating_overlays()
+                                    })
+                                    .unwrap_or(false);
+                                let t_signal = toast_tray()
+                                    .lock()
+                                    .map(|t| t.take_dirty() || t.has_animating())
+                                    .unwrap_or(false);
+                                s_signal || t_signal
+                            };
+                            let needs_overlay_redraw = needs_overlay_redraw || needs_overlay_stack_redraw;
 
                             // Check if CSS animations/transitions/FLIP/visual-animations need
                             // continued redraws. Both `flip_animations` (older `animate_layout`)

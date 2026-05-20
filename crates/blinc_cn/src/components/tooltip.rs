@@ -34,10 +34,11 @@ use blinc_core::context_state::BlincContextState;
 use blinc_core::State;
 use blinc_layout::div::ElementTypeId;
 use blinc_layout::element::RenderProps;
-use blinc_layout::overlay_state::get_overlay_manager;
+use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
-use blinc_layout::widgets::overlay::{AnchorDirection, OverlayHandle, OverlayManagerExt};
+use blinc_layout::widgets::overlay::{AnchorDirection, OverlayKind};
+use blinc_layout::widgets::overlay_stack::{CloseReason, OverlayBuilder, OverlayHandle};
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
 
 use blinc_layout::InstanceKey;
@@ -186,109 +187,121 @@ impl TooltipBuilder {
 
     /// Build the tooltip component
     fn build_component(&self) -> Tooltip {
-        let _theme = ThemeState::get();
-
-        // Create state for tracking overlay handle
+        // Per-instance handle state — survives rebuilds because it's keyed by
+        // the InstanceKey. Stores the raw u64 of an active OverlayHandle.
         let overlay_handle_state: State<Option<u64>> =
             BlincContextState::get().use_state_keyed(&self.key.derive("handle"), || None);
 
-        // Clone values for closures
         let side = self.side;
         let align = self.align;
         let offset = self.offset;
+        let close_delay_ms = self.close_delay_ms;
         let tooltip_text = self.text.clone();
         let trigger_builder = self.trigger.clone();
-        // Use the instance key to create a unique motion key for this tooltip
-        let motion_key_str = format!("tooltip_{}", self.key.get());
 
-        // Build trigger with hover handlers
-        let overlay_handle_for_show = overlay_handle_state.clone();
-        let overlay_handle_for_trigger_leave = overlay_handle_state.clone();
-        let overlay_handle_for_trigger_enter = overlay_handle_state.clone();
-        let tooltip_text_for_show = tooltip_text.clone();
-        let motion_key_for_trigger = motion_key_str.clone();
+        let stored_for_enter = overlay_handle_state.clone();
+        let stored_for_leave = overlay_handle_state.clone();
+        let stored_for_open = overlay_handle_state.clone();
+        let stored_for_close = overlay_handle_state.clone();
 
-        // Build the trigger element with hover detection
         let trigger_content = (trigger_builder)();
 
         let trigger = div()
             .w_fit()
-            .align_self_start() // Prevent stretching in flex containers
+            .align_self_start()
             .child(trigger_content)
             .on_hover_enter(move |ctx| {
-                // Build the full motion key
-                let full_motion_key = format!("motion:{}:child:0", motion_key_for_trigger);
-
-                // First, check if we have an existing overlay that's pending close or closing
-                if let Some(handle_id) = overlay_handle_for_trigger_enter.get() {
-                    let mgr = get_overlay_manager();
-                    let handle = OverlayHandle::from_raw(handle_id);
-
-                    // If overlay is visible, cancel any pending close
-                    if mgr.is_visible(handle) {
-                        if mgr.is_pending_close(handle) {
-                            mgr.hover_enter(handle);
-                        }
-                        // Also cancel any exit animation
-                        let motion = blinc_layout::selector::query_motion(&full_motion_key);
-                        if motion.is_exiting() {
-                            mgr.cancel_close(handle);
-                            motion.cancel_exit();
+                // Existing tooltip alive? Cancel any pending mouse-leave close
+                // and bail — no need to push a fresh entry.
+                if let Some(raw) = stored_for_enter.get() {
+                    let handle = OverlayHandle::from_raw(raw);
+                    if handle.is_live() {
+                        if let Ok(mut stack) = overlay_stack().lock() {
+                            stack.handle_mouse_enter(handle);
                         }
                         return;
                     }
-                    // Our overlay was closed externally, clear our state
-                    overlay_handle_for_trigger_enter.set(None);
+                    // Stale / exiting — drop the reference and open fresh.
+                    stored_for_enter.set(None);
                 }
 
-                // Check if motion is already animating (entering) to prevent restart jitter
-                let motion = blinc_layout::selector::query_motion(&full_motion_key);
-                if motion.is_animating() && !motion.is_exiting() {
-                    return;
-                }
-
-                // Get bounds for positioning
-                let trigger_x = ctx.bounds_x;
-                let trigger_y = ctx.bounds_y;
-                let trigger_w = ctx.bounds_width;
-                let trigger_h = ctx.bounds_height;
-
-                // Calculate position based on side and alignment
+                // Compute anchor in viewport coords from the trigger's bounds.
                 let (x, y) = calculate_tooltip_position(
-                    trigger_x, trigger_y, trigger_w, trigger_h, side, align, offset,
+                    ctx.bounds_x,
+                    ctx.bounds_y,
+                    ctx.bounds_width,
+                    ctx.bounds_height,
+                    side,
+                    align,
+                    offset,
                 );
 
-                // Show the tooltip content
-                if let Some(ref text) = tooltip_text_for_show {
-                    let text_clone = text.clone();
-                    let overlay_handle_for_content = overlay_handle_for_show.clone();
+                let Some(ref text_str) = tooltip_text else {
+                    return;
+                };
+                let text_owned = text_str.clone();
+                let theme = ThemeState::get();
+                let bg = theme.color(ColorToken::TooltipBackground);
+                let fg = theme.color(ColorToken::TooltipText);
+                let radius = theme.radius(RadiusToken::Sm);
+                let font_size = theme.typography().text_xs;
+                let anchor_dir = match side {
+                    TooltipSide::Top => AnchorDirection::Top,
+                    TooltipSide::Bottom => AnchorDirection::Bottom,
+                    TooltipSide::Left => AnchorDirection::Left,
+                    TooltipSide::Right => AnchorDirection::Right,
+                };
 
-                    let handle = show_tooltip_overlay(
-                        x,
-                        y,
-                        side,
-                        text_clone,
-                        overlay_handle_for_content,
-                        motion_key_for_trigger.clone(),
-                    );
-
-                    overlay_handle_for_show.set(Some(handle.id()));
+                // Defensively reap any orphaned tooltips. With per-handle
+                // tracking above this should be a no-op in practice, but
+                // when hover events overlap across triggers (e.g. quickly
+                // moving between two tooltipped buttons) it prevents two
+                // tooltips from being visible at once.
+                if let Ok(mut stack) = overlay_stack().lock() {
+                    stack.close_all_of_kind(OverlayKind::Tooltip);
                 }
+
+                let stored_close = stored_for_close.clone();
+                let stored_open = stored_for_open.clone();
+                let handle = OverlayBuilder::tooltip()
+                    .at(x, y)
+                    .anchor_direction(anchor_dir)
+                    .dismissable_by_mouse_leave(true, close_delay_ms)
+                    .motion_enter(AnimationPreset::fade_in(100))
+                    .motion_exit(AnimationPreset::fade_out(75))
+                    .on_close(move |_reason| {
+                        stored_close.set(None);
+                    })
+                    .content(move || {
+                        div()
+                            .class("cn-tooltip")
+                            .flex_row()
+                            .items_center()
+                            .bg(bg)
+                            .rounded(radius)
+                            .lock_corner_shape()
+                            .shadow_sm()
+                            .child(
+                                text(&text_owned)
+                                    .size(font_size)
+                                    .color(fg)
+                                    .no_wrap(),
+                            )
+                    })
+                    .show();
+                stored_open.set(Some(handle.raw()));
             })
             .on_hover_leave(move |_| {
-                // Start close immediately or with delay
-                if let Some(handle_id) = overlay_handle_for_trigger_leave.get() {
-                    let mgr = get_overlay_manager();
-                    let handle = OverlayHandle::from_raw(handle_id);
-
-                    // Only start close if overlay is visible and in Open state
-                    if mgr.is_visible(handle) && !mgr.is_pending_close(handle) {
-                        mgr.hover_leave(handle);
+                if let Some(raw) = stored_for_leave.get() {
+                    let handle = OverlayHandle::from_raw(raw);
+                    if handle.is_live() {
+                        if let Ok(mut stack) = overlay_stack().lock() {
+                            stack.handle_mouse_leave(handle);
+                        }
                     }
                 }
             });
 
-        // Apply user classes and id
         let mut inner = trigger;
         for c in &self.classes {
             inner = inner.class(c);
@@ -358,81 +371,6 @@ fn calculate_tooltip_position(
             (x.max(0.0), y)
         }
     }
-}
-
-/// Show the tooltip overlay
-fn show_tooltip_overlay(
-    x: f32,
-    y: f32,
-    side: TooltipSide,
-    tooltip_text: String,
-    overlay_handle_state: State<Option<u64>>,
-    motion_key: String,
-) -> OverlayHandle {
-    let theme = ThemeState::get();
-    // Use inverted colors for tooltip (dark bg on light theme, light bg on dark theme)
-    let bg = theme.color(ColorToken::TooltipBackground);
-    let text_color = theme.color(ColorToken::TooltipText);
-    let radius = theme.radius(RadiusToken::Sm);
-    // padding from CSS: .cn-tooltip { padding: 6px 12px; }
-
-    let mgr = get_overlay_manager();
-
-    // Close any existing tooltip overlays before opening a new one
-    mgr.close_all_of(blinc_layout::widgets::overlay::OverlayKind::Tooltip);
-
-    // Clone state and key for closures
-    let motion_key_for_content = motion_key.clone();
-
-    // Use hover_card() which is a TRANSIENT overlay (both hover_card and tooltip use same behavior)
-    let motion_key_with_child = format!("{}:child:0", motion_key);
-
-    // Convert TooltipSide to AnchorDirection for correct positioning
-    let anchor_dir = match side {
-        TooltipSide::Top => AnchorDirection::Top,
-        TooltipSide::Bottom => AnchorDirection::Bottom,
-        TooltipSide::Left => AnchorDirection::Left,
-        TooltipSide::Right => AnchorDirection::Right,
-    };
-
-    // Use hover_card() builder - it creates a transient overlay with OverlayKind::Tooltip
-    mgr.hover_card()
-        .at(x, y)
-        .anchor_direction(anchor_dir)
-        .motion_key(&motion_key_with_child)
-        .follows_scroll(true)
-        .content(move || {
-            // padding from CSS: .cn-tooltip { padding: 6px 12px; }
-            let tooltip_content = div()
-                .class("cn-tooltip")
-                .flex_row()
-                .items_center()
-                .bg(bg)
-                .rounded(radius)
-                .lock_corner_shape()
-                .shadow_sm()
-                .child(
-                    text(&tooltip_text)
-                        .size(theme.typography().text_xs)
-                        .color(text_color)
-                        .no_wrap(),
-                );
-
-            // Wrap in motion for enter/exit animations
-            div().child(
-                blinc_layout::motion::motion_derived(&motion_key_for_content)
-                    .enter_animation(AnimationPreset::fade_in(100))
-                    .exit_animation(AnimationPreset::fade_out(75))
-                    .child(tooltip_content),
-            )
-        })
-        .on_close({
-            let overlay_handle = overlay_handle_state.clone();
-            move || {
-                overlay_handle.set(None);
-            }
-        })
-        .show()
 }
 
 /// Built tooltip component

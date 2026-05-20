@@ -32,6 +32,7 @@ use blinc_core::context_state::MotionAnimationState;
 use blinc_core::BlincContextState;
 
 use crate::div::Div;
+use crate::motion::ElementAnimation;
 use crate::widgets::overlay::{
     AnchorDirection, BackdropConfig, Corner, EdgeSide, OverlayKind, OverlayPosition,
 };
@@ -52,6 +53,13 @@ impl OverlayHandle {
     /// The raw u64 id. Cheap, stable identity for use as map key.
     pub fn raw(&self) -> u64 {
         self.0
+    }
+
+    /// Reconstruct from a raw id. Used when an id needs to round-trip through
+    /// a `State<Option<u64>>` (the State system stores values by `Hash`, and
+    /// `OverlayHandle` itself isn't a State-friendly type).
+    pub fn from_raw(id: u64) -> Self {
+        OverlayHandle(id)
     }
 }
 
@@ -169,6 +177,13 @@ pub struct OverlayEntry {
     pub dismiss: DismissRules,
     pub content_fn: Arc<dyn Fn() -> Div + Send + Sync>,
     pub motion_key: String,
+    /// Enter animation for the wrapping motion container. `None` lets the
+    /// motion's default-no-animation behaviour apply (content snaps in).
+    pub motion_enter: Option<ElementAnimation>,
+    /// Exit animation. `None` means the exit transitions instantly — the
+    /// stack reaps the entry on the next `update()` because
+    /// `query_motion(key).is_exited()` is true immediately.
+    pub motion_exit: Option<ElementAnimation>,
     pub spawned_at_ms: u64,
     /// True once `pop()` / `close()` / auto-dismiss fired. Renderer keeps
     /// painting the entry so its motion exit animation can play; the entry
@@ -356,6 +371,47 @@ impl OverlayStack {
         if !self.entries.is_empty() {
             self.dirty.store(true, Ordering::Release);
         }
+    }
+
+    /// Close every entry of the given kind. Used by widgets that enforce
+    /// single-instance semantics (only one tooltip, only one toast in
+    /// progress, etc.) — they call this before pushing a fresh entry to
+    /// reap stragglers that escaped per-handle lifecycle tracking.
+    pub fn close_all_of_kind(&mut self, kind: OverlayKind) {
+        let mut closed_any = false;
+        for i in 0..self.entries.len() {
+            if self.entries[i].kind == kind && !self.entries[i].exiting {
+                self.begin_exit(i, CloseReason::Programmatic);
+                closed_any = true;
+            }
+        }
+        if closed_any {
+            self.dirty.store(true, Ordering::Release);
+        }
+    }
+
+    /// Interrupt an in-flight exit. Used when a hover-driven close needs to be
+    /// cancelled because the user re-entered the trigger / content. Clears the
+    /// `exiting` flag, dismisses any pending motion exit, and clears any
+    /// pending mouse-leave countdown. No-op if the entry is already alive or
+    /// missing.
+    ///
+    /// Note: this does NOT un-fire `on_close` — if the close was driven by a
+    /// timer that already invoked the callback, side effects (e.g. user-side
+    /// `State<bool>` flips) have already happened. Widget authors who want to
+    /// support clean revival should keep `on_close` side-effect-free and rely
+    /// on `is_live()` / `is_exiting()` queries to coordinate state.
+    pub fn revive(&mut self, handle: OverlayHandle) {
+        let Some(entry) = self.entries.iter_mut().find(|e| e.handle == handle) else {
+            return;
+        };
+        if !entry.exiting && entry.pending_close_deadline_ms.is_none() {
+            return;
+        }
+        entry.exiting = false;
+        entry.pending_close_deadline_ms = None;
+        crate::queue_global_motion_exit_cancel(entry.motion_key.clone());
+        self.animation_dirty.store(true, Ordering::Release);
     }
 
     /// Internal helper. Idempotent — calling twice on the same idx is a no-op
@@ -642,7 +698,14 @@ impl OverlayStack {
             // the widget's chosen enter / exit animation runs.
             let content = (entry.content_fn)();
             let positioned = position_div(content, &entry.position, self.viewport);
-            layer = layer.child(motion_derived(&entry.motion_key).child(positioned));
+            let mut wrapper = motion_derived(&entry.motion_key);
+            if let Some(ref enter) = entry.motion_enter {
+                wrapper = wrapper.enter_animation(enter.clone());
+            }
+            if let Some(ref exit) = entry.motion_exit {
+                wrapper = wrapper.exit_animation(exit.clone());
+            }
+            layer = layer.child(wrapper.child(positioned));
         }
 
         layer
@@ -737,6 +800,8 @@ pub struct OverlayBuilder {
     on_open: Option<Arc<dyn Fn() + Send + Sync>>,
     on_close: Option<Arc<dyn Fn(CloseReason) + Send + Sync>>,
     motion_key: Option<String>,
+    motion_enter: Option<ElementAnimation>,
+    motion_exit: Option<ElementAnimation>,
 }
 
 impl OverlayBuilder {
@@ -758,6 +823,8 @@ impl OverlayBuilder {
             on_open: None,
             on_close: None,
             motion_key: None,
+            motion_enter: None,
+            motion_exit: None,
         }
     }
 
@@ -876,6 +943,22 @@ impl OverlayBuilder {
         self
     }
 
+    /// Configure the enter animation for the wrapping motion container.
+    /// Typically `AnimationPreset::fade_in(ms)` or `scale_in(ms)`. `None` (the
+    /// default) snaps in without animation.
+    pub fn motion_enter(mut self, animation: impl Into<ElementAnimation>) -> Self {
+        self.motion_enter = Some(animation.into());
+        self
+    }
+
+    /// Configure the exit animation. The stack waits for this to complete
+    /// before reaping the entry (observed via `query_motion(key).is_exited()`).
+    /// `None` means instant eviction.
+    pub fn motion_exit(mut self, animation: impl Into<ElementAnimation>) -> Self {
+        self.motion_exit = Some(animation.into());
+        self
+    }
+
     /// Push onto the global stack. Returns the new handle. Fires `on_open`
     /// once if configured.
     ///
@@ -901,6 +984,8 @@ impl OverlayBuilder {
             dismiss: self.dismiss,
             content_fn: self.content_fn.unwrap_or_else(|| Arc::new(|| Div::new())),
             motion_key,
+            motion_enter: self.motion_enter,
+            motion_exit: self.motion_exit,
             spawned_at_ms,
             exiting: false,
             pending_close_deadline_ms: None,
@@ -970,6 +1055,8 @@ mod tests {
             dismiss: DismissRules::default_for(kind),
             content_fn: Arc::new(|| Div::new()),
             motion_key: format!("test:{}:{}", kind as u8, stack.next_id.load(Ordering::Relaxed)),
+            motion_enter: None,
+            motion_exit: None,
             spawned_at_ms: 0,
             exiting: false,
             pending_close_deadline_ms: None,
@@ -1258,6 +1345,74 @@ mod tests {
         stack.close(h);
         let entry = stack.iter_bottom_up().find(|e| e.handle == h).unwrap();
         assert!(entry.exiting);
+    }
+
+    #[test]
+    fn close_all_of_kind_targets_only_matching_kind() {
+        let mut stack = OverlayStack::new();
+        let dialog_a = stack.push(dummy_entry(&stack, OverlayKind::Dialog));
+        let tooltip_b = stack.push(dummy_entry(&stack, OverlayKind::Tooltip));
+        let tooltip_c = stack.push(dummy_entry(&stack, OverlayKind::Tooltip));
+        let dialog_d = stack.push(dummy_entry(&stack, OverlayKind::Dialog));
+
+        stack.close_all_of_kind(OverlayKind::Tooltip);
+
+        let b = stack
+            .iter_bottom_up()
+            .find(|e| e.handle == tooltip_b)
+            .unwrap();
+        let c = stack
+            .iter_bottom_up()
+            .find(|e| e.handle == tooltip_c)
+            .unwrap();
+        assert!(b.exiting && c.exiting, "tooltips should be exiting");
+
+        let a = stack
+            .iter_bottom_up()
+            .find(|e| e.handle == dialog_a)
+            .unwrap();
+        let d = stack
+            .iter_bottom_up()
+            .find(|e| e.handle == dialog_d)
+            .unwrap();
+        assert!(!a.exiting && !d.exiting, "dialogs should remain alive");
+    }
+
+    #[test]
+    fn revive_clears_pending_close_and_exiting() {
+        let mut stack = OverlayStack::new();
+        // Use HoverCard-like settings: tooltip kind has on_mouse_leave = true.
+        let h = stack.push(dummy_entry(&stack, OverlayKind::Tooltip));
+
+        // 1. Simulate hover-leave: pending_close_deadline_ms gets set.
+        stack.handle_mouse_leave(h);
+        assert!(
+            stack
+                .iter_bottom_up()
+                .find(|e| e.handle == h)
+                .unwrap()
+                .pending_close_deadline_ms
+                .is_some()
+        );
+
+        // Revive should clear the pending close.
+        stack.revive(h);
+        assert!(
+            stack
+                .iter_bottom_up()
+                .find(|e| e.handle == h)
+                .unwrap()
+                .pending_close_deadline_ms
+                .is_none()
+        );
+
+        // 2. Now actually close it.
+        stack.close(h);
+        assert!(stack.iter_bottom_up().find(|e| e.handle == h).unwrap().exiting);
+
+        // Revive should clear the exiting flag.
+        stack.revive(h);
+        assert!(!stack.iter_bottom_up().find(|e| e.handle == h).unwrap().exiting);
     }
 
     #[test]
