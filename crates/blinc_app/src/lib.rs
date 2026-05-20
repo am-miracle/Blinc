@@ -233,6 +233,11 @@ pub use blinc_platform::{AnimationThreadMode, WindowConfig, WindowLevel};
 
 // Re-export derive macro
 pub use blinc_macros::BlincComponent;
+/// Short alias for the [`BlincComponent`] derive macro.
+pub use blinc_macros::BlincComponent as Component;
+
+/// Short alias for [`blinc_core::BlincContextState`] — the global state singleton.
+pub use blinc_core::BlincContextState as Context;
 
 /// Prelude module - import everything commonly needed
 pub mod prelude {
@@ -257,6 +262,11 @@ pub mod prelude {
 
     // Derive macro for components
     pub use blinc_macros::BlincComponent;
+    /// Short alias for the [`BlincComponent`] derive macro.
+    pub use blinc_macros::BlincComponent as Component;
+
+    /// Short alias for `BlincContextState` — the global state singleton.
+    pub use blinc_core::BlincContextState as Context;
 
     // Theme types
     pub use blinc_theme::{

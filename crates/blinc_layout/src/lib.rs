@@ -119,6 +119,8 @@ pub use element::{
 };
 
 // Builder API
+/// Short alias for [`ElementBuilder`].
+pub use div::ElementBuilder as Element;
 pub use div::{
     div, Div, ElementBuilder, ElementTypeId, FontFamily, FontWeight, GenericFont, ImageRenderInfo,
     StyledTextRenderInfo, StyledTextSpanInfo, TextAlign, TextVerticalAlign,
@@ -195,6 +197,8 @@ pub use text_selection::{
 
 /// Prelude module - import everything commonly needed
 pub mod prelude {
+    /// Short alias for [`ElementBuilder`].
+    pub use crate::div::ElementBuilder as Element;
     pub use crate::div::{
         div, Div, ElementBuilder, ElementTypeId, FontFamily, FontWeight, GenericFont,
         ImageRenderInfo, TextAlign, TextVerticalAlign,

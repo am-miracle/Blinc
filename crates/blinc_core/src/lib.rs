@@ -87,6 +87,9 @@ pub use context_state::{
     TreeSnapshotAny, UpdateCategory,
 };
 
+/// Short alias for [`BlincContextState`] — the global state singleton.
+pub use context_state::BlincContextState as Context;
+
 // Re-export flow DAG types
 pub use flow::{
     BuiltinVar, ChainLink, FlowChain, FlowError, FlowExpr, FlowFunc, FlowGraph, FlowInput,

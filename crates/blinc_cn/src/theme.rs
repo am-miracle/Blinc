@@ -1,12 +1,11 @@
 //! Default theme bundle for blinc_cn components.
 //!
 //! `cn_bundle()` forwards to the framework's
-//! [`platform_theme_bundle`](blinc_theme::platform_theme_bundle) (so
-//! cn components follow the host OS aesthetic) and attaches
-//! [`crate::cn_styles::CN_STYLES`] via
-//! [`ThemeBundle::with_css`](blinc_theme::ThemeBundle::with_css) so
-//! the default component stylesheet ships in the bundle itself —
-//! callers don't have to register it by hand.
+//! [`blinc_theme::platform_theme_bundle`] (so cn components follow the
+//! host OS aesthetic) and attaches [`crate::cn_styles::CN_STYLES`] via
+//! [`blinc_theme::ThemeBundle::with_css`] so the default component
+//! stylesheet ships in the bundle itself — callers don't have to
+//! register it by hand.
 //!
 //! ```ignore
 //! use blinc_app::prelude::*;
@@ -30,8 +29,8 @@
 //! ```
 //!
 //! When you need a different aesthetic entirely, build your own
-//! [`ThemeBundle`](blinc_theme::ThemeBundle) and pass it to
-//! `run_with_theme` / `ThemeState::init` directly.
+//! [`blinc_theme::ThemeBundle`] and pass it to `run_with_theme` /
+//! `ThemeState::init` directly.
 
 use blinc_theme::{platform_theme_bundle, ThemeBundle};
 
