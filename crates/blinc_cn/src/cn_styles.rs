@@ -746,6 +746,21 @@ pub const CN_STYLES: &str = r#"
     color: var(--text-primary);
 }
 
+.cn-nav-menu-content {
+    /* Floating overlay → elevation 2 */
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    /* CSS-driven enter — slide down + fade. Motion FSM workaround. */
+    animation: cn-nav-menu-enter var(--duration-fast) ease-out;
+    transform-origin: top center;
+}
+
+@keyframes cn-nav-menu-enter {
+    from { opacity: 0; transform: scale(0.98) translateY(-4px); }
+    to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
 /* ============================================================================
    Sidebar
    ============================================================================ */
