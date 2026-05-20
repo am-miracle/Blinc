@@ -570,6 +570,14 @@ pub const CN_STYLES: &str = r#"
     border: 1px solid var(--cn-toast-border, var(--border));
     border-radius: var(--radius-xl);
     color: var(--text-primary);
+    /* CSS-driven enter — slide in from the side + fade. The toast tray
+       positions toasts at a corner, so a slide-in pairs naturally. */
+    animation: cn-toast-enter var(--duration-normal) ease-out;
+}
+
+@keyframes cn-toast-enter {
+    from { opacity: 0; transform: translateX(8%); }
+    to   { opacity: 1; transform: translateX(0); }
 }
 .cn-toast--success {
     border-left: 4px solid var(--success);

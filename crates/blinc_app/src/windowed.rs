@@ -5217,13 +5217,25 @@ impl WindowedApp {
                                         None => div(),
                                     }
                                 };
+                                // Toast tray composites above the overlay stack
+                                // (notification queue lives above modal stack).
+                                let tray_layer = {
+                                    use blinc_layout::overlay_state::toast_tray;
+                                    let viewport = (windowed_ctx.width, windowed_ctx.height);
+                                    toast_tray()
+                                        .lock()
+                                        .ok()
+                                        .map(|t| t.build_tray_layer(viewport))
+                                        .unwrap_or_else(div)
+                                };
                                 let ui = div()
                                     .w(windowed_ctx.width)
                                     .h(windowed_ctx.height)
                                     .relative() // positioning context for overlay
                                     .child(user_ui)
                                     .child(overlay_layer)
-                                    .child(stack_layer);
+                                    .child(stack_layer)
+                                    .child(tray_layer);
 
                                 // Use incremental update if we have an existing tree
                                 // BUT: Skip incremental update during resize - do full rebuild instead

@@ -67,13 +67,11 @@
 
 use std::sync::Arc;
 
-use blinc_animation::AnimationPreset;
 use blinc_core::Color;
-use blinc_layout::motion::motion_derived;
-use blinc_layout::overlay_state::get_overlay_manager;
+use blinc_layout::overlay_state::toast_tray;
 use blinc_layout::prelude::*;
-use blinc_layout::widgets::overlay::{Corner, OverlayHandle, OverlayManagerExt};
-use blinc_layout::InstanceKey;
+use blinc_layout::widgets::overlay::Corner;
+use blinc_layout::widgets::toast_tray::{ToastBuilder as TrayBuilder, ToastHandle};
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
 
 use super::button::{button, ButtonSize, ButtonVariant};
@@ -244,7 +242,7 @@ impl ToastBuilder {
 
     /// Show the toast
     #[track_caller]
-    pub fn show(self) -> OverlayHandle {
+    pub fn show(self) -> ToastHandle {
         let theme = ThemeState::get();
         let bg = theme.color(ColorToken::Surface);
         let border = theme.color(ColorToken::Border);
@@ -265,17 +263,18 @@ impl ToastBuilder {
         let body = self.body;
         let custom_content = self.custom_content;
 
-        let mgr = get_overlay_manager();
+        // Pre-allocate handle id so action / close callbacks can capture the
+        // dismiss target.
+        let next_id = toast_tray()
+            .lock()
+            .ok()
+            .map(|t| t.peek_next_handle_id())
+            .unwrap_or(0);
+        let toast_handle = ToastHandle::from_raw(next_id);
 
-        // Create a unique motion key for this toast instance
-        let key = InstanceKey::new("toast");
-        let motion_key_str = format!("toast_{}", key.get());
-        let motion_key_with_child = format!("{}:child:0", motion_key_str);
-
-        let mut toast_builder = mgr
-            .toast()
+        let mut builder = TrayBuilder::new()
             .corner(corner)
-            .motion_key(&motion_key_with_child)
+            .dismiss_on_click(false) // dismiss via explicit close button / action
             .content(move || {
                 build_toast_content(
                     &title,
@@ -293,45 +292,26 @@ impl ToastBuilder {
                     show_close,
                     &body,
                     &custom_content,
-                    corner,
-                    &motion_key_str,
+                    toast_handle,
                 )
             });
 
-        // Set duration if not persistent
         if duration_ms > 0 {
-            toast_builder = toast_builder.duration_ms(duration_ms);
+            builder = builder.auto_after_ms(duration_ms as u64);
+        } else {
+            // 0 in the legacy API meant "persistent". For the new tray that's
+            // expressed as a very large auto_after_ms. Pick a 10-year sentinel
+            // — toasts shouldn't realistically live that long.
+            builder = builder.auto_after_ms(u64::MAX / 2);
         }
 
-        toast_builder.show()
+        builder.show()
     }
 }
 
-/// Get enter animation based on corner
-fn get_enter_animation(corner: Corner) -> blinc_animation::MultiKeyframeAnimation {
-    const SLIDE_DISTANCE: f32 = 200.0;
-    match corner {
-        Corner::TopLeft | Corner::BottomLeft => AnimationPreset::slide_in_left(200, SLIDE_DISTANCE),
-        Corner::TopRight | Corner::BottomRight => {
-            AnimationPreset::slide_in_right(200, SLIDE_DISTANCE)
-        }
-    }
-}
-
-/// Get exit animation based on corner
-fn get_exit_animation(corner: Corner) -> blinc_animation::MultiKeyframeAnimation {
-    const SLIDE_DISTANCE: f32 = 200.0;
-    match corner {
-        Corner::TopLeft | Corner::BottomLeft => {
-            AnimationPreset::slide_out_left(150, SLIDE_DISTANCE)
-        }
-        Corner::TopRight | Corner::BottomRight => {
-            AnimationPreset::slide_out_right(150, SLIDE_DISTANCE)
-        }
-    }
-}
-
-/// Build the toast content
+/// Build the toast content. Animation is delegated to CSS @keyframes
+/// (cn-toast-enter — defined in cn_styles.rs). `toast_handle` is captured
+/// so the action button and close button can dismiss this specific toast.
 #[allow(clippy::too_many_arguments)]
 fn build_toast_content(
     title: &Option<String>,
@@ -349,35 +329,23 @@ fn build_toast_content(
     show_close: bool,
     body: &Option<ToastBodyFn>,
     custom_content: &Option<ToastBodyFn>,
-    corner: Corner,
-    motion_key: &str,
+    toast_handle: ToastHandle,
 ) -> Div {
     let theme = ThemeState::get();
-    let enter_anim = get_enter_animation(corner);
-    let exit_anim = get_exit_animation(corner);
 
     // If fully custom content is provided, use that directly
     if let Some(ref custom_fn) = custom_content {
-        let toast = custom_fn()
+        return custom_fn()
             .class("cn-toast")
             .w(360.0)
             .bg(bg)
             .border(1.0, border)
             .rounded(radius)
             .shadow_lg();
-
-        return div().child(
-            motion_derived(motion_key)
-                .enter_animation(enter_anim)
-                .exit_animation(exit_anim)
-                .child(toast),
-        );
     }
 
-    // Check if this is a variant toast (has icon/accent)
     let has_accent = icon_svg.is_some();
 
-    // Main toast container - use left border for accent
     let mut toast = div()
         .class("cn-toast")
         .w(360.0)
@@ -386,7 +354,6 @@ fn build_toast_content(
         .rounded(radius)
         .shadow_lg();
 
-    // Add variant-specific class
     match variant {
         ToastVariant::Success => toast = toast.class("cn-toast--success"),
         ToastVariant::Warning => toast = toast.class("cn-toast--warning"),
@@ -394,15 +361,12 @@ fn build_toast_content(
         ToastVariant::Default => toast = toast.class("cn-toast--info"),
     }
 
-    // Add left border accent for variant toasts
     if has_accent {
         toast = toast.border_left(4.0, accent_color);
     }
 
-    // Inner content container
     let mut inner = div().w_full().flex_row().items_start().gap_3().p_4();
 
-    // Icon (if variant has one)
     if let Some(ref svg_str) = icon_svg {
         inner = inner.child(
             div()
@@ -411,10 +375,8 @@ fn build_toast_content(
         );
     }
 
-    // Content area
     let mut content = div().flex_1().flex_col().gap_1();
 
-    // Title (if present)
     if let Some(ref title_text) = title {
         content = content.child(
             text(title_text)
@@ -424,7 +386,6 @@ fn build_toast_content(
         );
     }
 
-    // Custom body content OR description
     if let Some(ref body_fn) = body {
         content = content.child(body_fn());
     } else if let Some(ref desc) = description {
@@ -437,7 +398,6 @@ fn build_toast_content(
 
     inner = inner.child(content);
 
-    // Action button (if provided)
     if let Some(ref label) = action_label {
         let callback = action_callback.clone();
         inner = inner.child(
@@ -448,13 +408,11 @@ fn build_toast_content(
                     if let Some(ref cb) = callback {
                         cb();
                     }
-                    // Close the toast after action
-                    get_overlay_manager().close_top();
+                    toast_handle.dismiss();
                 }),
         );
     }
 
-    // Close button
     if show_close {
         let close_icon = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/></svg>"#;
 
@@ -466,22 +424,14 @@ fn build_toast_content(
                 .items_center()
                 .rounded(theme.radius(RadiusToken::Sm))
                 .cursor_pointer()
-                .on_click(|_| {
-                    get_overlay_manager().close_top();
+                .on_click(move |_| {
+                    toast_handle.dismiss();
                 })
                 .child(svg(close_icon).size(16.0, 16.0).color(text_secondary)),
         );
     }
 
-    toast = toast.child(inner);
-
-    // Wrap in motion for animations
-    div().child(
-        motion_derived(motion_key)
-            .enter_animation(enter_anim)
-            .exit_animation(exit_anim)
-            .child(toast),
-    )
+    toast.child(inner)
 }
 
 /// Create a toast notification

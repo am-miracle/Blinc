@@ -115,6 +115,12 @@ impl ToastTray {
         ToastHandle(self.next_id.fetch_add(1, Ordering::Relaxed))
     }
 
+    /// Peek the id that `allocate_handle` will return on its next call.
+    /// Mirrors `OverlayStack::peek_next_handle_id`.
+    pub fn peek_next_handle_id(&self) -> u64 {
+        self.next_id.load(Ordering::Relaxed)
+    }
+
     /// Push a new toast onto the tray.
     pub fn push(&mut self, entry: ToastEntry) -> ToastHandle {
         let handle = entry.handle;
@@ -341,6 +347,121 @@ impl ToastTray {
 // =============================================================================
 // Tests
 // =============================================================================
+
+// =============================================================================
+// ToastBuilder
+// =============================================================================
+
+/// Fluent builder for pushing toasts to the global `toast_tray()`.
+pub struct ToastBuilder {
+    auto_after_ms: u64,
+    dismiss_on_click: bool,
+    corner: Option<Corner>,
+    content_fn: Option<Arc<dyn Fn() -> Div + Send + Sync>>,
+    on_close: Option<Arc<dyn Fn() + Send + Sync>>,
+    motion_key: Option<String>,
+}
+
+impl Default for ToastBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ToastBuilder {
+    pub fn new() -> Self {
+        Self {
+            auto_after_ms: 4_000,
+            dismiss_on_click: true,
+            corner: None,
+            content_fn: None,
+            on_close: None,
+            motion_key: None,
+        }
+    }
+
+    /// Auto-dismiss after this many ms. 0 = persistent (never auto-dismiss).
+    pub fn auto_after_ms(mut self, ms: u64) -> Self {
+        self.auto_after_ms = ms;
+        self
+    }
+
+    /// Whether clicking the toast dismisses it. Default true.
+    pub fn dismiss_on_click(mut self, b: bool) -> Self {
+        self.dismiss_on_click = b;
+        self
+    }
+
+    /// Override the tray's corner for THIS toast. Note: corner is a tray-level
+    /// config, so the last `corner()` call wins for the next render frame.
+    /// In practice all toasts in an app should use the same corner.
+    pub fn corner(mut self, c: Corner) -> Self {
+        self.corner = Some(c);
+        self
+    }
+
+    pub fn content<F: Fn() -> Div + Send + Sync + 'static>(mut self, f: F) -> Self {
+        self.content_fn = Some(Arc::new(f));
+        self
+    }
+
+    pub fn on_close(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_close = Some(Arc::new(f));
+        self
+    }
+
+    /// Override the motion key. Defaults to `cn-toast:{handle.raw()}`.
+    pub fn motion_key(mut self, key: impl Into<String>) -> Self {
+        self.motion_key = Some(key.into());
+        self
+    }
+
+    /// Push to the global toast tray. Returns the new handle.
+    pub fn show(self) -> ToastHandle {
+        use crate::overlay_state::toast_tray;
+
+        let tray_arc = toast_tray();
+        let mut tray = tray_arc.lock().unwrap();
+        let handle = tray.allocate_handle();
+        let motion_key = self
+            .motion_key
+            .unwrap_or_else(|| format!("cn-toast:{}", handle.raw()));
+        let spawned_at_ms = tray.current_time_ms;
+
+        if let Some(c) = self.corner {
+            tray.set_corner(c);
+        }
+
+        let entry = ToastEntry {
+            handle,
+            motion_key,
+            spawned_at_ms,
+            auto_after_ms: self.auto_after_ms,
+            exiting: false,
+            dismiss_on_click: self.dismiss_on_click,
+            content_fn: self
+                .content_fn
+                .unwrap_or_else(|| Arc::new(|| Div::new())),
+            on_close: self.on_close,
+        };
+        tray.push(entry)
+    }
+}
+
+impl ToastHandle {
+    /// Reconstruct from a raw id. Mirror of `OverlayHandle::from_raw`.
+    pub fn from_raw(id: u64) -> Self {
+        ToastHandle(id)
+    }
+
+    /// Sugar — calls `toast_tray().dismiss(self)`.
+    pub fn dismiss(&self) {
+        use crate::overlay_state::toast_tray;
+        if let Ok(mut t) = toast_tray().lock() {
+            t.dismiss(*self);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
