@@ -249,6 +249,19 @@ impl ToastTray {
         use crate::motion::motion_derived;
         use crate::visual_animation::VisualAnimationConfig;
 
+        // Zero-sized when empty so the tray container never blanket-absorbs
+        // events from the main UI underneath. Matches OverlayStack pattern.
+        if self.toasts.is_empty() || viewport.0 <= 0.0 || viewport.1 <= 0.0 {
+            return Div::new()
+                .absolute()
+                .top(0.0)
+                .left(0.0)
+                .w(0.0)
+                .h(0.0)
+                .stack_layer()
+                .pointer_events_none();
+        }
+
         // Container is full-viewport, transparent, with corner anchoring.
         // Each toast is positioned by flex-col + gap inside.
         const INSET: f32 = 16.0;

@@ -670,12 +670,33 @@ impl OverlayStack {
     pub fn build_overlay_layer(&self) -> Div {
         use crate::motion::motion_derived;
 
+        // Match the legacy `OverlayManagerInner::build_overlay_layer` shape:
+        // - Zero-sized container when no entries → does NOT blanket the
+        //   viewport and steal scroll / hover events from the main UI.
+        // - `stack_layer()` so the overlay renders above the main UI via
+        //   z-layer increment (interleaved rendering picks this up).
+        // - `pointer_events_none()` so the container itself never absorbs
+        //   events; backdrops + content children re-enable as needed.
+        let has_visible = !self.entries.is_empty();
+        let (layer_w, layer_h) =
+            if has_visible && self.viewport.0 > 0.0 && self.viewport.1 > 0.0 {
+                self.viewport
+            } else {
+                (0.0, 0.0)
+            };
+
         let mut layer = Div::new()
             .absolute()
             .top(0.0)
             .left(0.0)
-            .w(self.viewport.0)
-            .h(self.viewport.1);
+            .w(layer_w)
+            .h(layer_h)
+            .stack_layer()
+            .pointer_events_none();
+
+        if !has_visible {
+            return layer;
+        }
 
         for entry in self.entries.iter() {
             // Backdrop — emit before content so the click-target is below.
