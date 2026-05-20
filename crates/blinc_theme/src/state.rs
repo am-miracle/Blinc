@@ -396,11 +396,26 @@ impl ThemeState {
 
     // ========== CSS Variable Generation ==========
 
-    /// Generate a CSS variable map from all color tokens.
+    /// Generate a CSS variable map from every token family on the
+    /// active theme.
     ///
-    /// Returns a `HashMap<String, String>` where keys are variable names
-    /// (without `--` prefix) and values are hex color strings.
-    /// Variable names match the `theme()` CSS function token names.
+    /// Emits ~100 variables covering colour, radius, spacing,
+    /// typography (family / size / weight / line-height / tracking)
+    /// and motion (durations / easings). Keys are kebab-case
+    /// without the `--` prefix. Values are CSS-ready strings:
+    ///
+    /// - Colour tokens — `#rrggbb` or `rgba(r,g,b,a)`.
+    /// - Lengths (radius / spacing / type sizes) — `Npx`.
+    /// - Letter-spacing (tracking) — `Nem`.
+    /// - Durations — `Nms`.
+    /// - Font families — comma-separated CSS family stack.
+    /// - Easings — `linear` keyword or `cubic-bezier(...)`.
+    /// - Font weights and line-heights — unitless numerics.
+    ///
+    /// The CN component stylesheet (`blinc_cn::cn_styles::CN_STYLES`)
+    /// consumes these via `var(--radius-default)` etc., so the
+    /// active theme's ladder flows through to every cn widget
+    /// without per-widget Rust glue.
     ///
     /// # Example
     ///
@@ -408,6 +423,10 @@ impl ThemeState {
     /// let vars = ThemeState::get().to_css_variable_map();
     /// // vars["text-primary"] == "#1a1a2e"
     /// // vars["surface"] == "#ffffff"
+    /// // vars["radius-xl"] == "18px"      (Hybrid)
+    /// // vars["text-sm"] == "13px"        (Universal HID)
+    /// // vars["duration-fast"] == "180ms" (Hybrid)
+    /// // vars["font-sans"] == "\"Noto Sans\", system-ui, …"
     /// ```
     pub fn to_css_variable_map(&self) -> HashMap<String, String> {
         fn hex(c: Color) -> String {
@@ -428,8 +447,55 @@ impl ThemeState {
                 )
             }
         }
+        fn px(v: f32) -> String {
+            // Strip trailing `.0` so `12.0` becomes `"12px"`, matching
+            // hand-written CSS conventions. Fractional values keep
+            // the decimal (`2.5px`).
+            if (v - v.round()).abs() < f32::EPSILON {
+                format!("{}px", v as i64)
+            } else {
+                format!("{}px", v)
+            }
+        }
+        fn em(v: f32) -> String {
+            // tracking values are emitted as em; keep the decimal so
+            // a value like `-0.025` reads naturally.
+            format!("{}em", v)
+        }
+        fn ms(v: u64) -> String {
+            format!("{}ms", v)
+        }
+        fn family(f: &crate::tokens::FontFamily) -> String {
+            // Quote names that contain whitespace (matches the
+            // canonical CSS convention `"Noto Sans", system-ui, …`).
+            fn quote(s: &str) -> String {
+                if s.contains(char::is_whitespace) {
+                    format!("\"{}\"", s)
+                } else {
+                    s.to_string()
+                }
+            }
+            let mut out = quote(&f.name);
+            for fb in &f.fallbacks {
+                out.push_str(", ");
+                out.push_str(&quote(fb));
+            }
+            out
+        }
+        fn easing(e: crate::tokens::Easing) -> String {
+            use crate::tokens::Easing;
+            match e {
+                Easing::Linear => "linear".to_string(),
+                Easing::EaseIn => "cubic-bezier(0.4, 0, 1, 1)".to_string(),
+                Easing::EaseOut => "cubic-bezier(0, 0, 0.2, 1)".to_string(),
+                Easing::EaseInOut => "cubic-bezier(0.4, 0, 0.2, 1)".to_string(),
+                Easing::CubicBezier(a, b, c, d) => {
+                    format!("cubic-bezier({}, {}, {}, {})", a, b, c, d)
+                }
+            }
+        }
 
-        let mut vars = HashMap::with_capacity(44);
+        let mut vars = HashMap::with_capacity(110);
 
         // Use self.color() which checks overrides first
         vars.insert("primary".into(), hex(self.color(ColorToken::Primary)));
@@ -533,6 +599,110 @@ impl ThemeState {
             "tooltip-text".into(),
             hex(self.color(ColorToken::TooltipText)),
         );
+
+        // ===== Radius tokens =====
+        {
+            let r = self.radii.read().unwrap();
+            vars.insert("radius-none".into(), px(r.radius_none));
+            vars.insert("radius-sm".into(), px(r.radius_sm));
+            vars.insert("radius-default".into(), px(r.radius_default));
+            vars.insert("radius-md".into(), px(r.radius_md));
+            vars.insert("radius-lg".into(), px(r.radius_lg));
+            vars.insert("radius-xl".into(), px(r.radius_xl));
+            vars.insert("radius-2xl".into(), px(r.radius_2xl));
+            vars.insert("radius-3xl".into(), px(r.radius_3xl));
+            vars.insert("radius-full".into(), px(r.radius_full));
+        }
+
+        // ===== Spacing tokens (4-px scale) =====
+        {
+            let s = self.spacing.read().unwrap();
+            vars.insert("space-0".into(), px(s.space_0));
+            vars.insert("space-0-5".into(), px(s.space_0_5));
+            vars.insert("space-1".into(), px(s.space_1));
+            vars.insert("space-1-5".into(), px(s.space_1_5));
+            vars.insert("space-2".into(), px(s.space_2));
+            vars.insert("space-2-5".into(), px(s.space_2_5));
+            vars.insert("space-3".into(), px(s.space_3));
+            vars.insert("space-3-5".into(), px(s.space_3_5));
+            vars.insert("space-4".into(), px(s.space_4));
+            vars.insert("space-5".into(), px(s.space_5));
+            vars.insert("space-6".into(), px(s.space_6));
+            vars.insert("space-7".into(), px(s.space_7));
+            vars.insert("space-8".into(), px(s.space_8));
+            vars.insert("space-9".into(), px(s.space_9));
+            vars.insert("space-10".into(), px(s.space_10));
+            vars.insert("space-11".into(), px(s.space_11));
+            vars.insert("space-12".into(), px(s.space_12));
+            vars.insert("space-14".into(), px(s.space_14));
+            vars.insert("space-16".into(), px(s.space_16));
+            vars.insert("space-20".into(), px(s.space_20));
+            vars.insert("space-24".into(), px(s.space_24));
+            vars.insert("space-28".into(), px(s.space_28));
+            vars.insert("space-32".into(), px(s.space_32));
+        }
+
+        // ===== Typography tokens =====
+        {
+            let t = self.typography.read().unwrap();
+            // Font families — emitted as full CSS family stacks so a
+            // single `font-family: var(--font-sans);` declaration in
+            // CN_STYLES picks up the theme's "Noto Sans, system-ui, …"
+            // (Universal HID) or "system-ui, …" (BlincTheme default).
+            vars.insert("font-sans".into(), family(&t.font_sans));
+            vars.insert("font-mono".into(), family(&t.font_mono));
+            vars.insert("font-serif".into(), family(&t.font_serif));
+            // Sizes
+            vars.insert("text-xs".into(), px(t.text_xs));
+            vars.insert("text-sm".into(), px(t.text_sm));
+            vars.insert("text-base".into(), px(t.text_base));
+            vars.insert("text-lg".into(), px(t.text_lg));
+            vars.insert("text-xl".into(), px(t.text_xl));
+            vars.insert("text-2xl".into(), px(t.text_2xl));
+            vars.insert("text-3xl".into(), px(t.text_3xl));
+            vars.insert("text-4xl".into(), px(t.text_4xl));
+            vars.insert("text-5xl".into(), px(t.text_5xl));
+            // Weights (numeric 100..900)
+            vars.insert("font-thin".into(), (t.font_thin.as_u16()).to_string());
+            vars.insert("font-light".into(), (t.font_light.as_u16()).to_string());
+            vars.insert("font-normal".into(), (t.font_normal.as_u16()).to_string());
+            vars.insert("font-medium".into(), (t.font_medium.as_u16()).to_string());
+            vars.insert(
+                "font-semibold".into(),
+                (t.font_semibold.as_u16()).to_string(),
+            );
+            vars.insert("font-bold".into(), (t.font_bold.as_u16()).to_string());
+            vars.insert("font-black".into(), (t.font_black.as_u16()).to_string());
+            // Line heights (unitless multipliers — CSS `line-height` accepts these directly)
+            vars.insert("leading-none".into(), t.leading_none.to_string());
+            vars.insert("leading-tight".into(), t.leading_tight.to_string());
+            vars.insert("leading-snug".into(), t.leading_snug.to_string());
+            vars.insert("leading-normal".into(), t.leading_normal.to_string());
+            vars.insert("leading-relaxed".into(), t.leading_relaxed.to_string());
+            vars.insert("leading-loose".into(), t.leading_loose.to_string());
+            // Letter-spacing (em)
+            vars.insert("tracking-tighter".into(), em(t.tracking_tighter));
+            vars.insert("tracking-tight".into(), em(t.tracking_tight));
+            vars.insert("tracking-normal".into(), em(t.tracking_normal));
+            vars.insert("tracking-wide".into(), em(t.tracking_wide));
+            vars.insert("tracking-wider".into(), em(t.tracking_wider));
+        }
+
+        // ===== Motion tokens =====
+        {
+            let a = self.animations.read().unwrap();
+            vars.insert("duration-fastest".into(), ms(a.duration_fastest));
+            vars.insert("duration-faster".into(), ms(a.duration_faster));
+            vars.insert("duration-fast".into(), ms(a.duration_fast));
+            vars.insert("duration-normal".into(), ms(a.duration_normal));
+            vars.insert("duration-slow".into(), ms(a.duration_slow));
+            vars.insert("duration-slower".into(), ms(a.duration_slower));
+            vars.insert("duration-slowest".into(), ms(a.duration_slowest));
+            vars.insert("ease-default".into(), easing(a.ease_default));
+            vars.insert("ease-in".into(), easing(a.ease_in));
+            vars.insert("ease-out".into(), easing(a.ease_out));
+            vars.insert("ease-in-out".into(), easing(a.ease_in_out));
+        }
 
         vars
     }
@@ -664,4 +834,105 @@ impl ThemeState {
 /// Interpolate between two color token sets
 fn interpolate_color_tokens(from: &ColorTokens, to: &ColorTokens, t: f32) -> ColorTokens {
     ColorTokens::lerp(from, to, t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::themes::universal::HybridTheme;
+
+    /// Spot-check that `to_css_variable_map` emits keys from every
+    /// token family the cn stylesheet relies on. Without these the
+    /// CN_STYLES `var(...)` references would dead-resolve.
+    #[test]
+    fn css_variable_map_emits_every_token_family() {
+        // Use a known bundle so values are predictable.
+        ThemeState::init(HybridTheme::bundle(), ColorScheme::Light);
+        let vars = ThemeState::get().to_css_variable_map();
+
+        // Colour
+        assert!(vars.contains_key("primary"), "missing --primary");
+        assert!(vars.contains_key("surface"), "missing --surface");
+        assert!(vars.contains_key("surface-elevated"));
+        // Radius
+        assert!(vars.contains_key("radius-sm"));
+        assert!(vars.contains_key("radius-default"));
+        assert!(vars.contains_key("radius-xl"));
+        assert!(vars.contains_key("radius-full"));
+        // Spacing
+        assert!(vars.contains_key("space-0"));
+        assert!(vars.contains_key("space-4"));
+        assert!(vars.contains_key("space-32"));
+        // Typography — family
+        assert!(vars.contains_key("font-sans"));
+        assert!(vars.contains_key("font-mono"));
+        // Typography — size
+        assert!(vars.contains_key("text-xs"));
+        assert!(vars.contains_key("text-sm"));
+        assert!(vars.contains_key("text-base"));
+        // Typography — weight
+        assert!(vars.contains_key("font-medium"));
+        assert!(vars.contains_key("font-bold"));
+        // Typography — leading + tracking
+        assert!(vars.contains_key("leading-normal"));
+        assert!(vars.contains_key("tracking-tight"));
+        // Motion
+        assert!(vars.contains_key("duration-fast"));
+        assert!(vars.contains_key("duration-slowest"));
+        assert!(vars.contains_key("ease-default"));
+    }
+
+    #[test]
+    fn css_variable_values_are_well_formed() {
+        ThemeState::init(HybridTheme::bundle(), ColorScheme::Light);
+        let vars = ThemeState::get().to_css_variable_map();
+
+        // Lengths carry `px`.
+        assert!(
+            vars["radius-default"].ends_with("px"),
+            "radius-default = {}",
+            vars["radius-default"]
+        );
+        assert!(vars["text-sm"].ends_with("px"));
+        assert!(vars["space-4"].ends_with("px"));
+
+        // Durations carry `ms`.
+        assert!(vars["duration-fast"].ends_with("ms"));
+
+        // Letter-spacing carries `em`.
+        assert!(vars["tracking-tight"].ends_with("em"));
+
+        // Font weights are numeric and unitless.
+        let w: u16 = vars["font-medium"]
+            .parse()
+            .expect("font-medium should be numeric");
+        assert!((100..=900).contains(&w));
+
+        // Easings parse to a CSS function or a keyword.
+        let ease = &vars["ease-default"];
+        assert!(
+            ease.starts_with("cubic-bezier(") || ease == "linear",
+            "ease-default = {}",
+            ease
+        );
+
+        // Font family contains the canonical name and a comma-
+        // separated stack.
+        assert!(
+            vars["font-sans"].contains("Noto Sans"),
+            "Hybrid promotes Noto Sans to canonical sans; got {}",
+            vars["font-sans"]
+        );
+    }
+
+    /// Universal HID variants differ on `text_sm` (13 vs default 14)
+    /// and `radius_xl` (varies per variant). Confirm the css map
+    /// picks up the active theme's value, not a fallback constant.
+    #[test]
+    fn css_variable_map_reflects_active_theme() {
+        ThemeState::init(HybridTheme::bundle(), ColorScheme::Light);
+        let vars = ThemeState::get().to_css_variable_map();
+        assert_eq!(vars["radius-xl"], "18px"); // Hybrid: 18
+        assert_eq!(vars["text-sm"], "13px"); // Universal HID: 13 (vs default 14)
+    }
 }

@@ -239,8 +239,13 @@ const STANDARD: Easing = Easing::CubicBezier(0.25, 0.10, 0.25, 1.0);
 /// Noto Sans is Blinc's universal fallback on platforms without a
 /// system font; promoting it to the canonical sans means the
 /// Universal theme renders identically regardless of platform font
-/// resolution. `text_base` defaults to 15px for HID density (vs the
-/// stock 16px), per the design doc's recommendation.
+/// resolution.
+///
+/// The size ladder is the Universal HID-tuned scale (12 / 13 / 15 /
+/// 17 / …) — one step tighter than the default Tailwind-inspired
+/// scale (12 / 14 / 16 / 18 / …) per the design doc's "HID density"
+/// recommendation. `text_base` parameter lets a variant override
+/// the body size if needed (all three currently pass 15).
 pub(super) fn universal_typography(text_base: f32) -> TypographyTokens {
     TypographyTokens {
         font_sans: FontFamily::new(
@@ -258,7 +263,15 @@ pub(super) fn universal_typography(text_base: f32) -> TypographyTokens {
             "Noto Sans Mono",
             vec!["ui-monospace", "SF Mono", "Menlo", "monospace"],
         ),
-        text_base,
+        text_xs: 12.0,
+        text_sm: 13.0, // vs default 14 — HID density
+        text_base,     // = 15 (vs default 16)
+        text_lg: 17.0, // vs default 18
+        text_xl: 20.0,
+        text_2xl: 24.0,
+        text_3xl: 30.0,
+        text_4xl: 36.0,
+        text_5xl: 48.0,
         ..Default::default()
     }
 }
