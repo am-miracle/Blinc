@@ -5626,10 +5626,27 @@ impl WindowedApp {
                                 // CSS work (colour / layout / 3D / rotate-z)
                                 // still trips the slow path through `css_active`.
                                 let css_blocks_fast = css_active && !css_only_composite_promotable;
+                                // Visual / FLIP / layout animations resize / reposition
+                                // bounds each frame — the cached primitive batch
+                                // can't reflect the new clip rect, so we must
+                                // take the walker route while any of them are
+                                // mid-flight. Pre-fix, the tree-view expand
+                                // animation froze at whatever partial state the
+                                // first slow-path frame painted into the cache;
+                                // subsequent fast-path frames just blitted that
+                                // stale partial state until an input event
+                                // invalidated the cache. Same posture as
+                                // `scroll_animating` above.
+                                let bounds_anim_active = ws.render_tree.as_ref().is_some_and(|t| {
+                                    t.has_active_visual_animations()
+                                        || t.has_active_layout_animations()
+                                        || t.has_active_flip_animations()
+                                });
                                 let try_fast_paint = !did_rebuild
                                     && !ws.needs_relayout
                                     && !css_blocks_fast
                                     && !scroll_animating
+                                    && !bounds_anim_active
                                     && ws.last_paint_time_ms != 0
                                     && blinc_app.has_render_cache();
 
