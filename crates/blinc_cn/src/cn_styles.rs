@@ -308,7 +308,9 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-tabs-list {
-    background: var(--cn-tabs-list-bg, var(--surface-elevated));
+    /* Tonal tray for the trigger row — uses surface-overlay so the
+       active trigger (raised to --surface) reads as elevated. */
+    background: var(--cn-tabs-list-bg, var(--surface-overlay));
     border-radius: var(--radius-md);
     padding: var(--space-1-5);
     gap: var(--space-1);
@@ -324,7 +326,11 @@ pub const CN_STYLES: &str = r#"
     background: var(--surface-overlay);
 }
 .cn-tabs-trigger--active {
-    background: var(--cn-tabs-active-bg, var(--background));
+    /* Active trigger lifts to --surface so it stands out from the
+       --surface-overlay tray underneath. Previously --background,
+       which made the active trigger MERGE with the canvas instead
+       of reading as raised. */
+    background: var(--cn-tabs-active-bg, var(--surface));
     color: var(--text-primary);
     box-shadow: theme(shadow-sm);
 }
@@ -356,7 +362,8 @@ pub const CN_STYLES: &str = r#"
 }
 
 .cn-select-content {
-    background: var(--surface);
+    /* Floating dropdown panel → elevation 2 */
+    background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
 }
@@ -450,7 +457,8 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-dialog {
-    background: var(--cn-dialog-bg, var(--surface));
+    /* Modal → elevation 2 (lifts above surrounding cards) */
+    background: var(--cn-dialog-bg, var(--surface-elevated));
     border: 1px solid var(--cn-dialog-border, var(--border));
     border-radius: var(--radius-xl);
     padding: var(--space-6);
@@ -462,7 +470,8 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-drawer {
-    background: var(--cn-drawer-bg, var(--surface));
+    /* Modal overlay → elevation 2 */
+    background: var(--cn-drawer-bg, var(--surface-elevated));
     border: 1px solid var(--cn-drawer-border, var(--border));
 }
 .cn-drawer-header {
@@ -478,7 +487,8 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-sheet {
-    background: var(--cn-sheet-bg, var(--surface));
+    /* Modal overlay → elevation 2 */
+    background: var(--cn-sheet-bg, var(--surface-elevated));
     border: 1px solid var(--cn-sheet-border, var(--border));
 }
 
@@ -487,7 +497,8 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-toast {
-    background: var(--cn-toast-bg, var(--surface));
+    /* Floating notification → elevation 2 */
+    background: var(--cn-toast-bg, var(--surface-elevated));
     border: 1px solid var(--cn-toast-border, var(--border));
     border-radius: var(--radius-xl);
     color: var(--text-primary);
@@ -510,7 +521,9 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-accordion {
-    background: var(--cn-accordion-bg, var(--surface-elevated));
+    /* Accordion outer is a card-tier container, not a modal —
+       elevation 1 (--surface). */
+    background: var(--cn-accordion-bg, var(--surface));
     border: 1.5px solid var(--cn-accordion-border, var(--border));
     border-radius: var(--radius-xl);
 }
@@ -524,7 +537,9 @@ pub const CN_STYLES: &str = r#"
     background: var(--surface-overlay);
 }
 .cn-accordion-content {
-    background: var(--cn-accordion-content-bg, var(--surface));
+    /* Expanded content recedes to the canvas tone inside the
+       elevated container. */
+    background: var(--cn-accordion-content-bg, var(--background));
     border-top: 1px solid var(--border);
     color: var(--text-secondary);
 }
@@ -631,7 +646,8 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-dropdown-menu {
-    background: var(--surface);
+    /* Floating menu → elevation 2 */
+    background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     padding: var(--space-1);
@@ -660,7 +676,8 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-context-menu {
-    background: var(--surface);
+    /* Floating menu → elevation 2 */
+    background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     padding: var(--space-1);
@@ -682,7 +699,8 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-menubar {
-    background: var(--surface);
+    /* Elevated container → elevation 2 */
+    background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     padding: var(--space-1);
@@ -712,7 +730,8 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-popover-content {
-    background: var(--surface);
+    /* Floating overlay → elevation 2 */
+    background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     padding: var(--space-4);
@@ -723,7 +742,8 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-hover-card-content {
-    background: var(--surface);
+    /* Floating overlay → elevation 2 */
+    background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     padding: var(--space-4);
@@ -785,7 +805,8 @@ pub const CN_STYLES: &str = r#"
     border-color: var(--border-hover);
 }
 .cn-combobox-content {
-    background: var(--surface);
+    /* Floating dropdown panel → elevation 2 */
+    background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
 }
