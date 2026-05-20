@@ -36,6 +36,7 @@
 
 use std::sync::Arc;
 
+use blinc_animation::AnimationPreset;
 use blinc_core::Color;
 use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
@@ -233,6 +234,19 @@ impl DrawerBuilder {
         // stretches the perpendicular axis to viewport for Edge positions).
         let drawer_width = size.width();
 
+        // Slide from the edge the drawer is anchored to.
+        let enter_animation = match side {
+            DrawerSide::Left => AnimationPreset::slide_in_left(self.animation_duration, drawer_width),
+            DrawerSide::Right => AnimationPreset::slide_in_right(self.animation_duration, drawer_width),
+        };
+        let exit_animation = {
+            let d = (self.animation_duration as f32 * 0.7) as u32;
+            match side {
+                DrawerSide::Left => AnimationPreset::slide_out_left(d, drawer_width),
+                DrawerSide::Right => AnimationPreset::slide_out_right(d, drawer_width),
+            }
+        };
+
         // Pre-allocate the handle id so the close button can capture it
         // (same pattern as dialog/popover — `handle.close()` instead of
         // `close_top()`).
@@ -247,6 +261,8 @@ impl DrawerBuilder {
             // Modal defaults: ESC, click-outside (backdrop dismiss), backdrop=Some.
             .edge(edge_side)
             .size(drawer_width, 0.0) // height ignored — position_wrapper uses viewport.1
+            .motion_enter(enter_animation)
+            .motion_exit(exit_animation)
             .content(move || {
                 let mut content_div = build_drawer_content(
                     side,

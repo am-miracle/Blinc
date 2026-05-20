@@ -800,6 +800,19 @@ impl OverlayStack {
             // positioned container with an inner motion wrapper.
             let content = (entry.content_fn)();
             let mut motion_wrapper = motion_derived(&entry.motion_key);
+            // Position kinds where the wrapper must be content-sized (so flex
+            // centering or corner anchoring positions the panel by its own
+            // dimensions). Edge positions intentionally fill the perpendicular
+            // axis, so they keep the default w:100% / flex_grow:1.
+            match entry.position {
+                OverlayPosition::Centered
+                | OverlayPosition::AtPoint { .. }
+                | OverlayPosition::Corner(_)
+                | OverlayPosition::RelativeToAnchor { .. } => {
+                    motion_wrapper = motion_wrapper.fit_content();
+                }
+                OverlayPosition::Edge(_) => {}
+            }
             if let Some(ref enter) = entry.motion_enter {
                 motion_wrapper = motion_wrapper.enter_animation(enter.clone());
             }

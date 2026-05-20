@@ -1096,6 +1096,19 @@ impl Motion {
         self
     }
 
+    /// Shrink this motion wrapper to its content's intrinsic size instead of
+    /// the default fill-parent (`width: 100%; flex_grow: 1`). Used when the
+    /// motion wraps an overlay panel that should be flex-centered or
+    /// otherwise positioned by its own intrinsic dimensions — without this,
+    /// the motion expands to fill the centering container and the panel
+    /// ends up flush against the start edge.
+    pub fn fit_content(mut self) -> Self {
+        self.style.size.width = taffy::Dimension::Auto;
+        self.style.size.height = taffy::Dimension::Auto;
+        self.style.flex_grow = 0.0;
+        self
+    }
+
     /// Get the enter animation if set
     pub fn get_enter_animation(&self) -> Option<&ElementAnimation> {
         self.enter.as_ref()

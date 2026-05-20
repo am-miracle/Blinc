@@ -34,7 +34,7 @@
 
 use std::sync::Arc;
 
-use blinc_animation::MultiKeyframeAnimation;
+use blinc_animation::{AnimationPreset, MultiKeyframeAnimation};
 use blinc_core::Color;
 use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
@@ -240,6 +240,25 @@ impl SheetBuilder {
             SheetSide::Top | SheetSide::Bottom => (0.0, size.height()),
         };
 
+        // Slide in / out from the entry edge. Distance matches the panel's
+        // axis dimension so it fully slides off-screen.
+        let slide_distance = match side {
+            SheetSide::Left | SheetSide::Right => size.width(),
+            SheetSide::Top | SheetSide::Bottom => size.height(),
+        };
+        let enter_animation = self.enter_animation.clone().unwrap_or_else(|| match side {
+            SheetSide::Left => AnimationPreset::slide_in_left(300, slide_distance),
+            SheetSide::Right => AnimationPreset::slide_in_right(300, slide_distance),
+            SheetSide::Top => AnimationPreset::slide_in_top(300, slide_distance),
+            SheetSide::Bottom => AnimationPreset::slide_in_bottom(300, slide_distance),
+        });
+        let exit_animation = self.exit_animation.clone().unwrap_or_else(|| match side {
+            SheetSide::Left => AnimationPreset::slide_out_left(225, slide_distance),
+            SheetSide::Right => AnimationPreset::slide_out_right(225, slide_distance),
+            SheetSide::Top => AnimationPreset::slide_out_top(225, slide_distance),
+            SheetSide::Bottom => AnimationPreset::slide_out_bottom(225, slide_distance),
+        });
+
         let next_handle_id = overlay_stack()
             .lock()
             .ok()
@@ -251,6 +270,8 @@ impl SheetBuilder {
             // Modal defaults: ESC, click-outside (backdrop dismiss), backdrop=Some.
             .edge(edge_side)
             .size(panel_w, panel_h)
+            .motion_enter(enter_animation)
+            .motion_exit(exit_animation)
             .content(move || {
                 build_sheet_content(
                     side,

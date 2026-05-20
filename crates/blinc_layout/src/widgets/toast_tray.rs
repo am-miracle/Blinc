@@ -18,6 +18,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::ElementAnimation;
 use blinc_core::context_state::MotionAnimationState;
 use blinc_core::BlincContextState;
 
@@ -58,6 +59,8 @@ pub struct ToastEntry {
     pub dismiss_on_click: bool,
     pub content_fn: Arc<dyn Fn() -> Div + Send + Sync>,
     pub on_close: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub motion_enter: Option<ElementAnimation>,
+    pub motion_exit: Option<ElementAnimation>,
 }
 
 impl ToastEntry {
@@ -103,7 +106,7 @@ impl ToastTray {
         Self {
             toasts: Vec::new(),
             next_id: AtomicU64::new(1),
-            corner: Corner::TopRight,
+            corner: Corner::BottomRight,
             gap_px: 8.0,
             max_visible: 5,
             current_time_ms: 0,
@@ -279,31 +282,51 @@ impl ToastTray {
                 .pointer_events_none();
         }
 
-        // Container is full-viewport, transparent, with corner anchoring.
-        // Each toast is positioned by flex-col + gap inside.
+        // Tray container anchors to a corner via absolute top/right/bottom/left
+        // insets (rather than top+left only). For corners on the right or
+        // bottom edge we use the corresponding `right()` / `bottom()` insets
+        // so the tray's content sizes naturally — `left(viewport.0 - INSET)`
+        // would push the tray's left edge to the screen edge and the toasts
+        // would extend off-screen.
+        //
+        // For bottom-anchored corners we reverse the column so the newest
+        // toast sits closest to the corner (the visual root) and earlier
+        // toasts pile away from it.
         const INSET: f32 = 16.0;
-        let (anchor_top, anchor_left) = match self.corner {
-            Corner::TopLeft => (Some(INSET), Some(INSET)),
-            Corner::TopRight => (Some(INSET), Some(viewport.0 - INSET)),
-            Corner::BottomLeft => (Some(viewport.1 - INSET), Some(INSET)),
-            Corner::BottomRight => (Some(viewport.1 - INSET), Some(viewport.0 - INSET)),
-        };
+        let (anchor_top, anchor_bottom, anchor_left, anchor_right, column_reverse) =
+            match self.corner {
+                Corner::TopLeft => (Some(INSET), None, Some(INSET), None, false),
+                Corner::TopRight => (Some(INSET), None, None, Some(INSET), false),
+                Corner::BottomLeft => (None, Some(INSET), Some(INSET), None, true),
+                Corner::BottomRight => (None, Some(INSET), None, Some(INSET), true),
+            };
+        let _ = viewport; // viewport unused now that we anchor via right/bottom.
 
         let mut tray = Div::new()
             .id(TOAST_TRAY_LAYER_ID)
             .absolute()
-            .flex_col()
             .gap(self.gap_px)
             .animate_bounds(
                 VisualAnimationConfig::position()
                     .with_key("cn-toast-tray")
                     .snappy(),
             );
+        tray = if column_reverse {
+            tray.flex_col_reverse()
+        } else {
+            tray.flex_col()
+        };
         if let Some(t) = anchor_top {
             tray = tray.top(t);
         }
+        if let Some(b) = anchor_bottom {
+            tray = tray.bottom(b);
+        }
         if let Some(l) = anchor_left {
             tray = tray.left(l);
+        }
+        if let Some(r) = anchor_right {
+            tray = tray.right(r);
         }
 
         // Emit toasts in insertion order; the corner positioning + flex_col
@@ -312,7 +335,14 @@ impl ToastTray {
         // runs naturally.
         for toast in self.toasts.iter().take(self.max_visible) {
             let content = (toast.content_fn)();
-            tray = tray.child(motion_derived(&toast.motion_key).child(content));
+            let mut motion_wrapper = motion_derived(&toast.motion_key);
+            if let Some(ref enter) = toast.motion_enter {
+                motion_wrapper = motion_wrapper.enter_animation(enter.clone());
+            }
+            if let Some(ref exit) = toast.motion_exit {
+                motion_wrapper = motion_wrapper.exit_animation(exit.clone());
+            }
+            tray = tray.child(motion_wrapper.child(content));
         }
 
         tray
@@ -360,6 +390,8 @@ pub struct ToastBuilder {
     content_fn: Option<Arc<dyn Fn() -> Div + Send + Sync>>,
     on_close: Option<Arc<dyn Fn() + Send + Sync>>,
     motion_key: Option<String>,
+    motion_enter: Option<ElementAnimation>,
+    motion_exit: Option<ElementAnimation>,
 }
 
 impl Default for ToastBuilder {
@@ -377,7 +409,22 @@ impl ToastBuilder {
             content_fn: None,
             on_close: None,
             motion_key: None,
+            motion_enter: None,
+            motion_exit: None,
         }
+    }
+
+    /// Configure the enter animation. Defaults to slide-in from the corner
+    /// the tray is anchored to.
+    pub fn motion_enter(mut self, anim: impl Into<ElementAnimation>) -> Self {
+        self.motion_enter = Some(anim.into());
+        self
+    }
+
+    /// Configure the exit animation.
+    pub fn motion_exit(mut self, anim: impl Into<ElementAnimation>) -> Self {
+        self.motion_exit = Some(anim.into());
+        self
     }
 
     /// Auto-dismiss after this many ms. 0 = persistent (never auto-dismiss).
@@ -432,6 +479,27 @@ impl ToastBuilder {
             tray.set_corner(c);
         }
 
+        // Default slide-in animation matches the corner the tray is anchored to.
+        use blinc_animation::AnimationPreset;
+        let corner_for_motion = self.corner.unwrap_or_else(|| tray.corner());
+        let slide_distance = 320.0_f32;
+        let motion_enter = self.motion_enter.unwrap_or_else(|| match corner_for_motion {
+            Corner::TopLeft | Corner::BottomLeft => {
+                AnimationPreset::slide_in_left(300, slide_distance).into()
+            }
+            Corner::TopRight | Corner::BottomRight => {
+                AnimationPreset::slide_in_right(300, slide_distance).into()
+            }
+        });
+        let motion_exit = self.motion_exit.unwrap_or_else(|| match corner_for_motion {
+            Corner::TopLeft | Corner::BottomLeft => {
+                AnimationPreset::slide_out_left(225, slide_distance).into()
+            }
+            Corner::TopRight | Corner::BottomRight => {
+                AnimationPreset::slide_out_right(225, slide_distance).into()
+            }
+        });
+
         let entry = ToastEntry {
             handle,
             motion_key,
@@ -443,6 +511,8 @@ impl ToastBuilder {
                 .content_fn
                 .unwrap_or_else(|| Arc::new(|| Div::new())),
             on_close: self.on_close,
+            motion_enter: Some(motion_enter),
+            motion_exit: Some(motion_exit),
         };
         tray.push(entry)
     }
@@ -477,6 +547,8 @@ mod tests {
             dismiss_on_click: true,
             content_fn: Arc::new(|| Div::new()),
             on_close: None,
+            motion_enter: None,
+            motion_exit: None,
         }
     }
 

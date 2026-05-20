@@ -531,15 +531,8 @@ pub const CN_STYLES: &str = r#"
     border-radius: var(--radius-xl);
     padding: var(--space-6);
     gap: var(--space-4);
-    /* CSS-driven enter — same approach as cn-tooltip / cn-popover while the
-       motion FSM integration with the new OverlayStack is being fixed. */
-    animation: cn-dialog-enter var(--duration-normal) ease-out;
-    transform-origin: center;
-}
-
-@keyframes cn-dialog-enter {
-    from { opacity: 0; transform: scale(0.96); }
-    to   { opacity: 1; transform: scale(1); }
+    /* Enter/exit motion is driven by the OverlayBuilder motion_enter /
+       motion_exit; no CSS keyframe here. */
 }
 
 /* ============================================================================
@@ -547,21 +540,10 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-drawer {
-    /* Modal overlay → elevation 2 */
+    /* Modal overlay → elevation 2. Enter/exit motion is driven by the
+       DrawerBuilder motion_enter / motion_exit. */
     background: var(--cn-drawer-bg, var(--surface-elevated));
     border: 1px solid var(--cn-drawer-border, var(--border));
-    /* CSS-driven enter — slide in from edge + fade. The drawer is pinned to
-       an edge by OverlayStack; sides apply via .cn-drawer--left/right. */
-    animation: cn-drawer-enter-left var(--duration-normal) ease-out;
-}
-.cn-drawer--right {
-    animation-name: cn-drawer-enter-right;
-}
-.cn-drawer--top {
-    animation-name: cn-drawer-enter-top;
-}
-.cn-drawer--bottom {
-    animation-name: cn-drawer-enter-bottom;
 }
 .cn-drawer-header {
     border-bottom: 1px solid var(--border);
@@ -571,53 +553,15 @@ pub const CN_STYLES: &str = r#"
     padding: var(--space-4);
 }
 
-@keyframes cn-drawer-enter-left {
-    from { opacity: 0; transform: translateX(-100%); }
-    to   { opacity: 1; transform: translateX(0); }
-}
-@keyframes cn-drawer-enter-right {
-    from { opacity: 0; transform: translateX(100%); }
-    to   { opacity: 1; transform: translateX(0); }
-}
-@keyframes cn-drawer-enter-top {
-    from { opacity: 0; transform: translateY(-100%); }
-    to   { opacity: 1; transform: translateY(0); }
-}
-@keyframes cn-drawer-enter-bottom {
-    from { opacity: 0; transform: translateY(100%); }
-    to   { opacity: 1; transform: translateY(0); }
-}
-
 /* ============================================================================
    Sheet
    ============================================================================ */
 
 .cn-sheet {
-    /* Modal overlay → elevation 2 */
+    /* Modal overlay → elevation 2. Enter/exit motion is driven by the
+       SheetBuilder motion_enter / motion_exit. */
     background: var(--cn-sheet-bg, var(--surface-elevated));
     border: 1px solid var(--cn-sheet-border, var(--border));
-    animation: cn-sheet-enter-right var(--duration-normal) ease-out;
-}
-.cn-sheet--left   { animation-name: cn-sheet-enter-left; }
-.cn-sheet--right  { animation-name: cn-sheet-enter-right; }
-.cn-sheet--top    { animation-name: cn-sheet-enter-top; }
-.cn-sheet--bottom { animation-name: cn-sheet-enter-bottom; }
-
-@keyframes cn-sheet-enter-left {
-    from { opacity: 0; transform: translateX(-100%); }
-    to   { opacity: 1; transform: translateX(0); }
-}
-@keyframes cn-sheet-enter-right {
-    from { opacity: 0; transform: translateX(100%); }
-    to   { opacity: 1; transform: translateX(0); }
-}
-@keyframes cn-sheet-enter-top {
-    from { opacity: 0; transform: translateY(-100%); }
-    to   { opacity: 1; transform: translateY(0); }
-}
-@keyframes cn-sheet-enter-bottom {
-    from { opacity: 0; transform: translateY(100%); }
-    to   { opacity: 1; transform: translateY(0); }
 }
 
 /* ============================================================================
@@ -630,14 +574,8 @@ pub const CN_STYLES: &str = r#"
     border: 1px solid var(--cn-toast-border, var(--border));
     border-radius: var(--radius-xl);
     color: var(--text-primary);
-    /* CSS-driven enter — slide in from the side + fade. The toast tray
-       positions toasts at a corner, so a slide-in pairs naturally. */
-    animation: cn-toast-enter var(--duration-normal) ease-out;
-}
-
-@keyframes cn-toast-enter {
-    from { opacity: 0; transform: translateX(8%); }
-    to   { opacity: 1; transform: translateX(0); }
+    /* Enter/exit motion is driven by the ToastBuilder motion_enter /
+       motion_exit (slide from the tray corner by default). */
 }
 .cn-toast--success {
     border-left: 4px solid var(--success);

@@ -31,7 +31,7 @@
 
 use std::sync::Arc;
 
-use blinc_animation::MultiKeyframeAnimation;
+use blinc_animation::{AnimationPreset, MultiKeyframeAnimation};
 use blinc_core::Color;
 use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
@@ -269,6 +269,14 @@ impl DialogBuilder {
         let show_cancel = self.show_cancel;
         let classes = self.classes;
         let user_id = self.user_id;
+        // Scale-in / scale-out by default (matches router page navigation feel).
+        // User-supplied animations override.
+        let enter_animation = self
+            .enter_animation
+            .unwrap_or_else(|| AnimationPreset::scale_in(200));
+        let exit_animation = self
+            .exit_animation
+            .unwrap_or_else(|| AnimationPreset::scale_out(150));
 
         // Pre-allocate the handle id so the confirm/cancel buttons can capture
         // it before show() is called (same pattern as popover). Buttons close
@@ -285,6 +293,8 @@ impl DialogBuilder {
         let handle = OverlayBuilder::dialog()
             // Dialog defaults (DismissRules::default_for(Dialog)):
             // on_escape=true, on_click_outside=true (backdrop click), backdrop=Some.
+            .motion_enter(enter_animation)
+            .motion_exit(exit_animation)
             .content(move || {
                 let mut content_div = build_dialog_content(
                     &title,
