@@ -704,8 +704,10 @@ fn build_dropdown_content(
 
     let search_query_for_sync = search_query_state.clone();
 
+    // No `.w_full()` — inside the flex_row container `flex_grow()` distributes
+    // the remaining width after the container's padding. `w_full()` would
+    // make the input claim 100% of the container's outer (padded) width.
     let search_input = blinc_layout::widgets::text_input::text_input(search_data)
-        .w_full()
         .h(trigger_height)
         .text_size(font_size)
         .rounded(theme.radii().radius_sm)
@@ -723,10 +725,18 @@ fn build_dropdown_content(
             search_query_for_sync.set(new_value.to_string());
         });
 
+    // Container is flex_row so the input is a true flex item — without an
+    // explicit direction, `w_full()` on the input sizes to the container's
+    // full width *including* its padding (border-box), so the right edge
+    // got cropped at the dropdown's right border. Flex layout distributes
+    // remaining space after padding instead.
     let search_container = div()
         .w(width)
         .flex_shrink_0()
+        .flex_row()
+        .items_center()
         .border_bottom(1.0, border)
+        .p_px(padding / 2.0)
         .child(search_input);
 
     dropdown_div = dropdown_div.child(search_container);
