@@ -298,7 +298,7 @@ impl OverlayStack {
     /// Push an entry onto the top of the stack. Marks the stack dirty.
     pub fn push(&mut self, entry: OverlayEntry) -> OverlayHandle {
         let handle = entry.handle;
-        tracing::info!(
+        tracing::trace!(
             target: "blinc_layout::overlay_stack",
             "push: handle={} kind={:?} motion_key={} stack_len={}->{}",
             handle.raw(),
@@ -743,7 +743,7 @@ impl OverlayStack {
             return layer;
         }
 
-        tracing::info!(
+        tracing::trace!(
             target: "blinc_layout::overlay_stack",
             "build_overlay_layer: rendering {} entries at viewport {:?}",
             self.entries.len(),

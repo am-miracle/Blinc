@@ -506,6 +506,18 @@ pub const CN_STYLES: &str = r#"
     border-radius: var(--radius-sm);
     font-size: var(--text-xs);
     padding: var(--space-1-5) var(--space-3);
+    /* CSS-driven fade-in. Motion FSM via `motion_enter` on the new
+       OverlayStack is currently not propagating opacity to the cached
+       primitive batch correctly (Phase 3 known issue), so we delegate
+       enter animation to the CSS animation system which the renderer
+       already handles per-frame. Exit snaps for now; once the motion
+       integration is fixed, switch back to motion_enter/_exit. */
+    animation: cn-tooltip-enter var(--duration-fast) ease-out;
+}
+
+@keyframes cn-tooltip-enter {
+    from { opacity: 0; }
+    to   { opacity: 1; }
 }
 
 /* ============================================================================
