@@ -36,7 +36,7 @@ use blinc_layout::element::RenderProps;
 use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
-use blinc_layout::widgets::overlay::{AnchorDirection, OverlayKind};
+use blinc_layout::widgets::overlay::AnchorDirection;
 use blinc_layout::widgets::overlay_stack::{CloseReason, OverlayBuilder, OverlayHandle};
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
 
@@ -251,14 +251,15 @@ impl TooltipBuilder {
                     TooltipSide::Right => AnchorDirection::Right,
                 };
 
-                // Defensively reap any orphaned tooltips. With per-handle
-                // tracking above this should be a no-op in practice, but
-                // when hover events overlap across triggers (e.g. quickly
-                // moving between two tooltipped buttons) it prevents two
-                // tooltips from being visible at once.
-                if let Ok(mut stack) = overlay_stack().lock() {
-                    stack.close_all_of_kind(OverlayKind::Tooltip);
-                }
+                // No global `close_all_of_kind(Tooltip)` here — see the
+                // matching comment in `build_hover_card_overlay`. Each
+                // on_close it fired would State::set(None), which the
+                // reactive system treats as a global rebuild trigger.
+                // Rapid hover across many tooltipped elements then
+                // cascaded into many full UI rebuilds. We rely on
+                // per-widget handle tracking instead; the trade-off is
+                // that two tooltips can be visible briefly when the user
+                // moves between them faster than the close-delay.
 
                 let stored_close = stored_for_close.clone();
                 let stored_open = stored_for_open.clone();

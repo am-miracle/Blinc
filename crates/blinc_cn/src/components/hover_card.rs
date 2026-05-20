@@ -372,11 +372,12 @@ fn build_hover_card_overlay(
     let radius = theme.radius(RadiusToken::Lg);
     let padding = theme.spacing_value(SpacingToken::Space4);
 
-    // Single-instance enforcement — close any other hover cards before
-    // pushing this one.
-    if let Ok(mut stack) = overlay_stack().lock() {
-        stack.close_all_of_kind(blinc_layout::widgets::overlay::OverlayKind::Tooltip);
-    }
+    // Single-instance is enforced PER-TRIGGER via the widget's stored handle
+    // (see `build_component`). Avoid `close_all_of_kind(Tooltip)` here —
+    // each on_close it would fire calls State::set(None), which the
+    // reactive system treats as a global rebuild trigger. Rapid hover
+    // between multiple hover_card triggers then cascades into many
+    // full-UI rebuilds and the app locks up.
 
     let anchor_dir = match side {
         HoverCardSide::Top => AnchorDirection::Top,
