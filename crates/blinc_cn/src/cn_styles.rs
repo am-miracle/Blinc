@@ -531,6 +531,15 @@ pub const CN_STYLES: &str = r#"
     border-radius: var(--radius-xl);
     padding: var(--space-6);
     gap: var(--space-4);
+    /* CSS-driven enter — same approach as cn-tooltip / cn-popover while the
+       motion FSM integration with the new OverlayStack is being fixed. */
+    animation: cn-dialog-enter var(--duration-normal) ease-out;
+    transform-origin: center;
+}
+
+@keyframes cn-dialog-enter {
+    from { opacity: 0; transform: scale(0.96); }
+    to   { opacity: 1; transform: scale(1); }
 }
 
 /* ============================================================================

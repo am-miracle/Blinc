@@ -765,13 +765,25 @@ impl OverlayStack {
             // wrapper (keyed `{motion_key}:backdrop`).
             if let Some(ref backdrop) = entry.dismiss.backdrop {
                 let backdrop_key = format!("{}:backdrop", entry.motion_key);
-                let backdrop_div = Div::new()
+                let mut backdrop_div = Div::new()
                     .absolute()
                     .top(0.0)
                     .left(0.0)
                     .w(self.viewport.0)
                     .h(self.viewport.1)
                     .bg(backdrop.color);
+                // Backdrop click-to-dismiss. Fires OUTSIDE any held stack lock
+                // (the input pipeline dispatches events after release), so
+                // `handle.close()` (which re-acquires the lock) is safe here.
+                if backdrop.dismiss_on_click {
+                    let handle = entry.handle;
+                    backdrop_div = backdrop_div.on_click(move |_| {
+                        use crate::overlay_state::overlay_stack;
+                        if let Ok(mut stack) = overlay_stack().lock() {
+                            stack.close_with_reason(handle, CloseReason::ClickOutside);
+                        }
+                    });
+                }
                 layer = layer.child(motion_derived(&backdrop_key).child(backdrop_div));
             }
 
