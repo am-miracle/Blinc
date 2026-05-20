@@ -831,9 +831,14 @@ pub const CN_STYLES: &str = r#"
 .cn-menubar-item {
     border-radius: var(--radius-sm);
     background: transparent;
+    color: var(--text-primary);
+    transition: background var(--duration-fastest);
 }
+/* `--accent-subtle` — parent dropdown panel sits at `--surface-elevated`,
+   so hovering to the same tier is invisible. Match cn-dropdown-item /
+   cn-context-menu-item for visual consistency across menu primitives. */
 .cn-menubar-item:hover {
-    background: var(--surface-elevated);
+    background: var(--accent-subtle);
 }
 
 /* ============================================================================

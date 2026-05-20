@@ -57,7 +57,6 @@ use blinc_layout::click_outside;
 use blinc_layout::element::CursorStyle;
 use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{stateful_with_key, ButtonState};
 use blinc_layout::widgets::hr::hr_with_bg;
 use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
@@ -659,8 +658,6 @@ fn build_menu_content(
             let id_chain_for_open = id_chain.clone();
             let root_click_outside_key_for_open = root_click_outside_key.to_string();
 
-            let item_key = format!("{}_item-{}", self_id, idx);
-
             let item_text_color = if item_disabled {
                 text_tertiary
             } else {
@@ -669,94 +666,79 @@ fn build_menu_content(
 
             let shortcut_color = text_secondary;
 
-            let mut row = stateful_with_key::<ButtonState>(&item_key)
-                .on_state(move |ctx| {
-                    let state = ctx.state();
-                    let theme = ThemeState::get();
-                    let item_bg = bg;
+            // Plain div, NO Stateful wrapper. Same reason as menubar /
+            // dropdown_menu: Stateful subtree rebuilds inside an overlay
+            // content closure contaminate base_styles with hover state and
+            // jank the motion FSM / child z-ordering. CSS
+            // `.cn-context-menu-item:hover` handles the hover background.
+            let mut left_side = div()
+                .w_fit()
+                .h_fit()
+                .flex_row()
+                .items_center()
+                .gap(padding / 4.0);
 
-                    let text_col = if (state == ButtonState::Hovered || state == ButtonState::Pressed)
-                        && !item_disabled
-                    {
-                        theme.color(ColorToken::TextSecondary)
-                    } else {
-                        item_text_color
-                    };
+            if let Some(ref icon_svg) = item_icon {
+                left_side = left_side.child(svg(icon_svg).size(16.0, 16.0).color(item_text_color));
+            }
 
-                    let mut left_side = div()
-                        .w_fit()
-                        .h_fit()
-                        .flex_row()
-                        .items_center()
-                        .gap(padding / 4.0);
+            left_side = left_side
+                .child(
+                    text(&item_label)
+                        .size(font_size)
+                        .color(item_text_color)
+                        .no_cursor()
+                        .pointer_events_none(),
+                )
+                .pointer_events_none();
 
-                    if let Some(ref icon_svg) = item_icon {
-                        left_side =
-                            left_side.child(svg(icon_svg).size(16.0, 16.0).color(item_text_color));
-                    }
+            let right_side: Option<Div> = if let Some(ref shortcut) = item_shortcut {
+                Some(div().child(
+                    text(shortcut)
+                        .size(font_size - 2.0)
+                        .color(shortcut_color)
+                        .no_cursor(),
+                ))
+            } else if has_submenu {
+                let chevron_right = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
+                Some(
+                    div()
+                        .child(svg(chevron_right).size(12.0, 12.0).color(text_tertiary))
+                        .pointer_events_none(),
+                )
+            } else {
+                None
+            };
 
-                    left_side = left_side
-                        .child(
-                            text(&item_label)
-                                .size(font_size)
-                                .color(text_col)
-                                .no_cursor()
-                                .pointer_events_none(),
-                        )
-                        .pointer_events_none();
-
-                    let right_side: Option<Div> = if let Some(ref shortcut) = item_shortcut {
-                        Some(div().child(
-                            text(shortcut)
-                                .size(font_size - 2.0)
-                                .color(shortcut_color)
-                                .no_cursor(),
-                        ))
-                    } else if has_submenu {
-                        let chevron_right = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
-                        Some(
-                            div()
-                                .child(
-                                    svg(chevron_right).size(12.0, 12.0).color(text_tertiary),
-                                )
-                                .pointer_events_none(),
-                        )
-                    } else {
-                        None
-                    };
-
-                    let mut row_content = div()
-                        .class("cn-context-menu-item")
-                        .w_full()
-                        .h_fit()
-                        .py(padding / 4.0)
-                        .px(padding / 2.0)
-                        .bg(item_bg)
-                        .cursor(if item_disabled {
-                            CursorStyle::NotAllowed
-                        } else {
-                            CursorStyle::Pointer
-                        })
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .child(left_side);
-
-                    if let Some(right) = right_side {
-                        row_content = row_content.child(right);
-                    }
-
-                    row_content
+            let mut row_content = div()
+                .class("cn-context-menu-item")
+                .w_full()
+                .h_fit()
+                .py(padding / 4.0)
+                .px(padding / 2.0)
+                .cursor(if item_disabled {
+                    CursorStyle::NotAllowed
+                } else {
+                    CursorStyle::Pointer
                 })
-                .on_click(move |_| {
-                    if !item_disabled && !has_submenu {
-                        if let Some(ref cb) = item_on_click {
-                            cb();
-                        }
-                        // Closing the root cascades-closes the whole chain.
-                        root_handle.close();
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(left_side);
+
+            if let Some(right) = right_side {
+                row_content = row_content.child(right);
+            }
+
+            let mut row = row_content.on_click(move |_| {
+                if !item_disabled && !has_submenu {
+                    if let Some(ref cb) = item_on_click {
+                        cb();
                     }
-                });
+                    // Closing the root cascades-closes the whole chain.
+                    root_handle.close();
+                }
+            });
 
             // Submenu hover-to-open behaviour
             if has_submenu && !item_disabled {

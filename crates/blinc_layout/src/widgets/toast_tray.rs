@@ -306,6 +306,14 @@ impl ToastTray {
             .id(TOAST_TRAY_LAYER_ID)
             .absolute()
             .gap(self.gap_px)
+            // Render above the main UI via the renderer's z-layer increment.
+            // Without this, toasts overlapping main-UI content sometimes
+            // render *under* it (notably text glyphs / SVGs which paint
+            // through their own pipelines without honouring tree order).
+            .stack_layer()
+            // Container itself is transparent / event-pass-through; only
+            // the toast cards inside re-enable input.
+            .pointer_events_none()
             .animate_bounds(
                 VisualAnimationConfig::position()
                     .with_key("cn-toast-tray")
