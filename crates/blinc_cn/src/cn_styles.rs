@@ -412,10 +412,13 @@ pub const CN_STYLES: &str = r#"
 }
 
 .cn-select-content {
-    /* Floating dropdown panel → elevation 2 */
+    /* Floating dropdown panel → elevation 2.
+       Shared overlay-menu chrome — keep `.cn-dropdown-menu`,
+       `.cn-context-menu`, and `.cn-combobox-content` in sync. */
     background: var(--surface-elevated);
     border: 1px solid var(--border);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-default);
+    padding: var(--space-1);
 }
 
 .cn-select-item {
@@ -425,11 +428,15 @@ pub const CN_STYLES: &str = r#"
     border-radius: var(--radius-sm);
     transition: background var(--duration-fastest);
 }
+/* Item hover uses `--accent-subtle` because the parent panel is
+   already at `--surface-elevated`; hovering to the same colour
+   would be invisible. `--accent-subtle` is a low-alpha accent
+   tint specifically designed for this use. */
 .cn-select-item:hover {
-    background: var(--surface-elevated);
+    background: var(--accent-subtle);
 }
 .cn-select-item--selected {
-    background: var(--surface-elevated);
+    background: var(--accent-subtle);
 }
 
 /* ============================================================================
@@ -696,10 +703,10 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-dropdown-menu {
-    /* Floating menu → elevation 2 */
+    /* Shared overlay-menu chrome with select / context / combobox. */
     background: var(--surface-elevated);
     border: 1px solid var(--border);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-default);
     padding: var(--space-1);
 }
 .cn-dropdown-item {
@@ -710,8 +717,10 @@ pub const CN_STYLES: &str = r#"
     font-size: var(--text-sm);
     transition: background var(--duration-fastest);
 }
+/* `--accent-subtle` — parent panel sits at `--surface-elevated`,
+   so hovering to the same tier would be invisible. */
 .cn-dropdown-item:hover {
-    background: var(--surface-elevated);
+    background: var(--accent-subtle);
 }
 .cn-dropdown-item--disabled {
     opacity: 0.5;
@@ -726,10 +735,10 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-context-menu {
-    /* Floating menu → elevation 2 */
+    /* Shared overlay-menu chrome with select / dropdown / combobox. */
     background: var(--surface-elevated);
     border: 1px solid var(--border);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-default);
     padding: var(--space-1);
 }
 .cn-context-menu-item {
@@ -741,7 +750,7 @@ pub const CN_STYLES: &str = r#"
     transition: background var(--duration-fastest);
 }
 .cn-context-menu-item:hover {
-    background: var(--surface-elevated);
+    background: var(--accent-subtle);
 }
 
 /* ============================================================================
@@ -855,18 +864,24 @@ pub const CN_STYLES: &str = r#"
     border-color: var(--border-hover);
 }
 .cn-combobox-content {
-    /* Floating dropdown panel → elevation 2 */
+    /* Shared overlay-menu chrome with select / dropdown / context. */
     background: var(--surface-elevated);
     border: 1px solid var(--border);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-default);
+    padding: var(--space-1);
 }
 .cn-combobox-item {
     padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-sm);
     cursor: pointer;
     color: var(--text-primary);
+    font-size: var(--text-sm);
     transition: background var(--duration-fastest);
 }
 .cn-combobox-item:hover {
-    background: var(--surface-elevated);
+    background: var(--accent-subtle);
+}
+.cn-combobox-item--selected {
+    background: var(--accent-subtle);
 }
 "#;

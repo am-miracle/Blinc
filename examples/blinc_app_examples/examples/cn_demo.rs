@@ -285,9 +285,10 @@ fn menubar_demo() -> impl ElementBuilder {
                         .separator()
                         .item("About", || tracing::info!("About clicked"))
                 })
-                // Custom trigger example — proper chevron SVG rather
-                // than the play-button glyph ("▶") that reads wrong
-                // against a textual label.
+                // Custom trigger — chevron SVG + label. Leave padding
+                // to the outer `.cn-menubar-trigger` so this trigger
+                // sizes identically to the labelled ones (File / Edit
+                // / …) and stays inline with them.
                 .menu_custom(
                     |is_open| {
                         let theme = ThemeState::get();
@@ -298,15 +299,13 @@ fn menubar_demo() -> impl ElementBuilder {
                         div()
                             .flex_row()
                             .items_center()
-                            .gap(6.0)
-                            .px(8.0)
-                            .py(4.0)
-                            .child(svg(icon_svg).size(12.0, 12.0).color(text_color))
+                            .gap(4.0)
                             .child(
                                 text("Actions")
                                     .size(theme.typography().text_sm)
                                     .color(text_color),
                             )
+                            .child(svg(icon_svg).size(10.0, 10.0).color(text_color))
                     },
                     |m| {
                         m.item("Run Task", || tracing::info!("Run Task clicked"))
