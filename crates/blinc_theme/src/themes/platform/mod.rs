@@ -7,6 +7,13 @@
 //! - iOS: iOS Human Interface Guidelines
 //! - Android: Material You
 //! - Web: default Catppuccin-derived [`crate::themes::BlincTheme`]
+//!
+//! When no platform matches (custom targets, headless contexts,
+//! fallback paths), [`platform_theme_bundle`] returns the Universal
+//! HID Hybrid bundle ([`crate::themes::HybridTheme`]) — a
+//! considered Apple HIG / Material 3 synthesis that reads native
+//! on every platform. [`crate::themes::BlincTheme`] (Catppuccin)
+//! remains in the codebase as an opt-in named theme.
 
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -60,9 +67,11 @@ pub fn platform_theme_bundle() -> ThemeBundle {
         return web::WebTheme::bundle();
     }
 
-    // Fallback for other platforms
+    // Fallback for any context where no platform module compiled
+    // in (custom targets, headless tooling). Returns the Universal
+    // HID Hybrid bundle — designed as the cross-platform default.
     #[allow(unreachable_code)]
     {
-        crate::themes::BlincTheme::bundle()
+        crate::themes::HybridTheme::bundle()
     }
 }

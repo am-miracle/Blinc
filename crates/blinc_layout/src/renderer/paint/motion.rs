@@ -945,9 +945,24 @@ impl RenderTree {
 
         // Corner shape setup (superellipse per-corner) — MUST be set before draw_shadow
         // so shadows use the same corner_shape as the fill+border SDF.
-        let has_corner_shape = !render_node.props.corner_shape.is_round();
+        //
+        // Resolved through the active theme's ShapeTokens so Universal
+        // HID variants auto-substitute squircle on rounded corners
+        // that pass the threshold check; explicit per-element overrides
+        // win, and themes that don't opt in (every existing platform
+        // bundle + Catppuccin) keep circular corners via the trait's
+        // default off-state.
+        let theme_shape_m = blinc_theme::ThemeState::get().shape();
+        let radius_full_m = blinc_theme::ThemeState::get().radii().radius_full;
+        let resolved_corner_shape_m = super::helpers::resolve_corner_shape(
+            render_node.props.corner_shape,
+            render_node.props.border_radius,
+            &theme_shape_m,
+            radius_full_m,
+        );
+        let has_corner_shape = !resolved_corner_shape_m.is_round();
         if has_corner_shape {
-            ctx.set_corner_shape(render_node.props.corner_shape.to_array());
+            ctx.set_corner_shape(resolved_corner_shape_m.to_array());
         }
 
         // Draw shadow BEFORE pushing clip (shadows extend beyond element bounds)

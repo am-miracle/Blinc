@@ -73,6 +73,14 @@ pub struct ThemeState {
     /// Current radius tokens
     radii: RwLock<RadiusTokens>,
 
+    /// Current corner-shape tokens (squircle / superellipse policy).
+    /// Read by the paint walker to substitute the effective `n` on
+    /// rounded corners when the element doesn't carry an explicit
+    /// `corner_shape` override. Existing themes return the default
+    /// `ShapeTokens::default()` (off) via the trait default impl, so
+    /// they keep their circular-arc behaviour.
+    shape: RwLock<ShapeTokens>,
+
     /// Current animation tokens
     animations: RwLock<AnimationTokens>,
 
@@ -142,6 +150,7 @@ impl ThemeState {
                 spacing: RwLock::new(theme.spacing().clone()),
                 typography: RwLock::new(theme.typography().clone()),
                 radii: RwLock::new(theme.radii().clone()),
+                shape: RwLock::new(*theme.shape()),
                 animations: RwLock::new(theme.animations().clone()),
                 color_overrides: RwLock::new(FxHashMap::default()),
                 spacing_overrides: RwLock::new(FxHashMap::default()),
@@ -172,6 +181,7 @@ impl ThemeState {
         *state.spacing.write().unwrap() = theme.spacing().clone();
         *state.typography.write().unwrap() = theme.typography().clone();
         *state.radii.write().unwrap() = theme.radii().clone();
+        *state.shape.write().unwrap() = *theme.shape();
         *state.animations.write().unwrap() = theme.animations().clone();
         state.color_overrides.write().unwrap().clear();
         state.spacing_overrides.write().unwrap().clear();
@@ -248,6 +258,7 @@ impl ThemeState {
             *self.spacing.write().unwrap() = theme.spacing().clone();
             *self.typography.write().unwrap() = theme.typography().clone();
             *self.radii.write().unwrap() = theme.radii().clone();
+            *self.shape.write().unwrap() = *theme.shape();
             *self.animations.write().unwrap() = theme.animations().clone();
 
             // Try to animate colors if scheduler handle is available
@@ -582,6 +593,23 @@ impl ThemeState {
         self.radius_overrides.write().unwrap().insert(token, value);
         self.needs_repaint.store(true, Ordering::SeqCst);
         trigger_redraw();
+    }
+
+    // ========== Shape Access ==========
+
+    /// Get the active corner-shape tokens.
+    ///
+    /// `ShapeTokens` is 12 bytes (`Copy`), so this hands out a value
+    /// rather than a borrowed reference — the paint walker reads
+    /// it once per frame and the cost is negligible compared to
+    /// locking the `RwLock`.
+    pub fn shape(&self) -> ShapeTokens {
+        *self.shape.read().unwrap()
+    }
+
+    /// Get a single shape token value.
+    pub fn shape_token(&self, token: ShapeToken) -> f32 {
+        self.shape.read().unwrap().get(token)
     }
 
     // ========== Shadow Access ==========

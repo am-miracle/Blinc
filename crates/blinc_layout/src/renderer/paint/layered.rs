@@ -294,10 +294,23 @@ impl RenderTree {
             render_node.props.layer
         };
 
-        // Corner shape setup — must be before draw_shadow so shadows match fill shape
-        let has_corner_shape_n = !render_node.props.corner_shape.is_round();
+        // Corner shape setup — must be before draw_shadow so shadows
+        // match fill shape. Resolved through the active theme's
+        // ShapeTokens so Universal HID variants auto-substitute
+        // squircle on qualifying corners; explicit per-element
+        // overrides win, and themes that don't opt in keep circular
+        // corners.
+        let theme_shape_n = blinc_theme::ThemeState::get().shape();
+        let radius_full_n = blinc_theme::ThemeState::get().radii().radius_full;
+        let resolved_corner_shape_n = super::helpers::resolve_corner_shape(
+            render_node.props.corner_shape,
+            render_node.props.border_radius,
+            &theme_shape_n,
+            radius_full_n,
+        );
+        let has_corner_shape_n = !resolved_corner_shape_n.is_round();
         if has_corner_shape_n {
-            ctx.set_corner_shape(render_node.props.corner_shape.to_array());
+            ctx.set_corner_shape(resolved_corner_shape_n.to_array());
         }
 
         // Only render if this node matches the target layer

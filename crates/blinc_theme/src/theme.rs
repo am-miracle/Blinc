@@ -41,6 +41,30 @@ pub trait Theme: Send + Sync + std::fmt::Debug {
     /// Get radius tokens
     fn radii(&self) -> &RadiusTokens;
 
+    /// Get corner-shape tokens (squircle / superellipse policy).
+    ///
+    /// Default implementation returns the no-op
+    /// [`ShapeTokens::default()`] — themes that don't opt into
+    /// squircle rendering can omit this method and existing impls
+    /// stay source-compatible. The Universal HID themes override it
+    /// to advertise their preferred squircle exponent / threshold;
+    /// the paint walker reads it via
+    /// [`ThemeState::shape`](crate::ThemeState::shape) and stamps
+    /// the effective `n` on each rounded corner that passes the
+    /// per-corner threshold check.
+    fn shape(&self) -> &ShapeTokens {
+        // Static "off" instance returned by reference. Cheap because
+        // `ShapeTokens` is `Copy` and 12 bytes, but the trait
+        // signature is `&ShapeTokens` to match the rest of the
+        // getters, so we hand out a pointer to a const.
+        const OFF: ShapeTokens = ShapeTokens {
+            corner_smoothing: 0.0,
+            corner_exponent: 2.0,
+            smoothing_threshold: f32::INFINITY,
+        };
+        &OFF
+    }
+
     /// Get shadow tokens
     fn shadows(&self) -> &ShadowTokens;
 

@@ -11,7 +11,8 @@
 //!   their alpha; gradient and image brushes pass through unchanged
 //!   (TODO in the existing code base).
 
-use blinc_core::{Brush, Color, GradientStop};
+use blinc_core::{Brush, Color, CornerRadius, CornerShape, GradientStop};
+use blinc_theme::ShapeTokens;
 
 use crate::element::Material;
 
@@ -87,6 +88,163 @@ impl RenderTree {
         }
         let dpi = dpi.max(1.0);
         [min_x * dpi, min_y * dpi, max_x * dpi, max_y * dpi]
+    }
+}
+
+/// Substitute the theme's effective squircle `n` on any corner
+/// whose radius passes the threshold check, when the element has
+/// no explicit per-element `corner_shape` override.
+///
+/// Decision flow (per corner, evaluated independently):
+///
+/// - **Explicit override.** If `explicit` is not the default
+///   `CornerShape::ROUND`, return it unchanged — user-provided
+///   `.squircle()` / `.bevel()` / CSS `corner-shape` wins over the
+///   theme.
+/// - **Theme off.** If the active theme returns the default
+///   [`ShapeTokens`] (smoothing 0 or threshold = infinity), keep
+///   circular corners — existing themes (platform bundles,
+///   Catppuccin BlincTheme) all sit here via the trait's default
+///   `fn shape()` impl.
+/// - **Radius_full** (avatars, switch thumbs, dot indicators).
+///   When the corner's radius matches the theme's `radius_full`
+///   (within 1%) the corner must render as a true circle — most
+///   squircle bugs in the wild come from stretching the
+///   superellipse all the way to the avatar circle.
+/// - **Below threshold.** Squircle smoothing is imperceptible at
+///   small radii and only wastes path complexity. Below
+///   `theme_shape.smoothing_threshold` the corner falls back to
+///   `n = 1.0`.
+/// - **Otherwise.** Stamp the theme's
+///   [`effective_corner_n`](ShapeTokens::effective_corner_n) on
+///   that corner.
+///
+/// The per-corner evaluation handles asymmetric radii — a card
+/// with `rounded_t_lg().rounded_b_sm()` keeps the bottom corners
+/// circular even when the top ones get the squircle treatment.
+pub fn resolve_corner_shape(
+    explicit: CornerShape,
+    radius: CornerRadius,
+    theme_shape: &ShapeTokens,
+    radius_full: f32,
+) -> CornerShape {
+    if !explicit.is_round() {
+        return explicit;
+    }
+    if theme_shape.is_off() {
+        return CornerShape::ROUND;
+    }
+    let n = theme_shape.effective_corner_n();
+    let threshold = theme_shape.smoothing_threshold;
+    // 99% of radius_full catches the typical avatar pattern
+    // (`radius_full = 9999` matched against any large radius that
+    // intends "fully circular") without false-positives for
+    // legitimately large but still rectangular sheets.
+    let full_cutoff = radius_full * 0.99;
+    let nf = |r: f32| -> f32 {
+        if r >= full_cutoff || r < threshold {
+            1.0
+        } else {
+            n
+        }
+    };
+    CornerShape::new(
+        nf(radius.top_left),
+        nf(radius.top_right),
+        nf(radius.bottom_right),
+        nf(radius.bottom_left),
+    )
+}
+
+#[cfg(test)]
+mod resolve_corner_shape_tests {
+    use super::*;
+
+    fn hybrid_shape() -> ShapeTokens {
+        ShapeTokens {
+            corner_smoothing: 0.40,
+            corner_exponent: 3.3,
+            smoothing_threshold: 12.0,
+        }
+    }
+
+    #[test]
+    fn explicit_override_wins_over_theme() {
+        // Even with the Hybrid theme active, an element that explicitly
+        // sets `.bevel()` keeps that shape.
+        let resolved = resolve_corner_shape(
+            CornerShape::BEVEL,
+            CornerRadius::uniform(20.0),
+            &hybrid_shape(),
+            9999.0,
+        );
+        assert_eq!(resolved, CornerShape::BEVEL);
+    }
+
+    #[test]
+    fn theme_off_keeps_circular() {
+        // Existing themes return the default off-state; the resolver
+        // must return ROUND unconditionally.
+        let resolved = resolve_corner_shape(
+            CornerShape::ROUND,
+            CornerRadius::uniform(20.0),
+            &ShapeTokens::default(),
+            9999.0,
+        );
+        assert_eq!(resolved, CornerShape::ROUND);
+    }
+
+    #[test]
+    fn radius_full_stays_true_circle() {
+        // Avatar / switch thumb pattern: radius matches radius_full,
+        // resolver must keep ROUND so the rendered shape is a true
+        // circle (most squircle bugs in the wild come from stretching
+        // the superellipse to fully-circular elements).
+        let resolved = resolve_corner_shape(
+            CornerShape::ROUND,
+            CornerRadius::uniform(9999.0),
+            &hybrid_shape(),
+            9999.0,
+        );
+        assert_eq!(resolved, CornerShape::ROUND);
+    }
+
+    #[test]
+    fn below_threshold_per_corner_stays_circular() {
+        // Hybrid threshold = 12.0; a corner of 8 stays circular, a
+        // corner of 16 takes the theme exponent. Mixed radii hit
+        // both branches in the same element.
+        let resolved = resolve_corner_shape(
+            CornerShape::ROUND,
+            CornerRadius::new(8.0, 16.0, 16.0, 8.0),
+            &hybrid_shape(),
+            9999.0,
+        );
+        let n = hybrid_shape().effective_corner_n();
+        assert!((resolved.top_left - 1.0).abs() < 0.001);
+        assert!((resolved.bottom_left - 1.0).abs() < 0.001);
+        assert!((resolved.top_right - n).abs() < 0.001);
+        assert!((resolved.bottom_right - n).abs() < 0.001);
+    }
+
+    #[test]
+    fn above_threshold_applies_theme_n() {
+        // Uniform radius well above threshold and well below radius_full
+        // → every corner stamped with the theme's effective n.
+        let resolved = resolve_corner_shape(
+            CornerShape::ROUND,
+            CornerRadius::uniform(20.0),
+            &hybrid_shape(),
+            9999.0,
+        );
+        let n = hybrid_shape().effective_corner_n();
+        assert!((resolved.top_left - n).abs() < 0.001);
+        assert!((resolved.top_right - n).abs() < 0.001);
+        assert!((resolved.bottom_right - n).abs() < 0.001);
+        assert!((resolved.bottom_left - n).abs() < 0.001);
+        // Hybrid's effective n should sit between circle (1.0) and
+        // standard squircle (2.0) — a "considered HID" middle ground.
+        assert!(n > 1.0 && n < 2.0, "got n = {}", n);
     }
 }
 

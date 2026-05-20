@@ -80,7 +80,10 @@ pub mod watcher;
 pub use platform::{detect_system_color_scheme, Platform};
 pub use state::{set_redraw_callback, ThemeState};
 pub use theme::{ColorScheme, Theme, ThemeBundle};
-pub use themes::{platform::platform_theme_bundle, BlincTheme};
+pub use themes::{
+    platform::platform_theme_bundle, BlincTheme, DefaultTheme, ExpressiveTheme, HybridTheme,
+    RestrainedTheme,
+};
 pub use tokens::*;
 
 #[cfg(feature = "watcher")]

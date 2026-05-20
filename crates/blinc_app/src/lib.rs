@@ -270,6 +270,12 @@ pub mod prelude {
 
     // Theme types
     pub use blinc_theme::{
-        ColorScheme, ColorToken, RadiusToken, SpacingToken, ThemeBundle, ThemeState,
+        ColorScheme, ColorToken, RadiusToken, ShapeToken, ShapeTokens, SpacingToken, ThemeBundle,
+        ThemeState,
     };
+
+    /// Universal HID themes. Hybrid is the recommended cross-platform
+    /// default; Restrained and Expressive sit on either side of the
+    /// restraint↔expressiveness axis.
+    pub use blinc_theme::{DefaultTheme, ExpressiveTheme, HybridTheme, RestrainedTheme};
 }
