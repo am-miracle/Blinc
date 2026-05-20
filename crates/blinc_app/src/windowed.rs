@@ -4780,10 +4780,21 @@ impl WindowedApp {
                             // Tick scroll physics and sync ScrollRef state BEFORE any rebuilds
                             // This ensures ScrollRef has up-to-date values when stateful components
                             // query scroll position during rebuild
+                            //
+                            // `process_pending_scroll_refs` returns true when it just
+                            // promoted a ScrollRef command (e.g. a click handler's
+                            // `scroll_to_with_options`) into a live spring. Without
+                            // OR-ing that into `scroll_animating`, the frame that
+                            // started the spring sees `tick_scroll_physics`'s pre-
+                            // process Idle result and the end-of-frame redraw chain
+                            // closes — the spring then sits in `Bouncing` until the
+                            // next stray input wakes the loop. Symptom: smooth-scroll
+                            // commands in carousel_demo "jump" to the target only
+                            // after the next mouse move.
                             let scroll_animating = if let Some(ref mut tree) = ws.render_tree {
-                                let animating = tree.tick_scroll_physics(current_time);
-                                tree.process_pending_scroll_refs();
-                                animating
+                                let ticking = tree.tick_scroll_physics(current_time);
+                                let just_started = tree.process_pending_scroll_refs();
+                                ticking || just_started
                             } else {
                                 false
                             };

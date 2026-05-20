@@ -1012,6 +1012,26 @@ impl RenderTree {
             .any(|p| p.lock().unwrap().state == crate::stateful::ScrollState::Bouncing)
     }
 
+    /// Returns `true` if any registered scroll physics is in a state
+    /// whose per-frame `tick()` advances the offset off any input —
+    /// i.e. `Bouncing` (edge spring or programmatic `scroll_to_animated`)
+    /// or `Decelerating` (post-flick momentum).
+    ///
+    /// Used by the compositor to keep the static-cache walker honest
+    /// during these states: the cache primitives were emitted at the
+    /// pre-tick offset, so a frame whose only animation source is
+    /// scroll physics must still re-walk to reflect the new offset.
+    /// `Scrolling` (active drag / wheel) is excluded — the input
+    /// event that drove the offset change already tags the frame as
+    /// `had_scroll` and invalidates the cache through that path.
+    pub fn has_animating_scroll_physics(&self) -> bool {
+        use crate::stateful::ScrollState;
+        self.scroll_physics.values().any(|p| {
+            let s = p.lock().unwrap().state;
+            matches!(s, ScrollState::Bouncing | ScrollState::Decelerating)
+        })
+    }
+
     /// Returns `true` if any registered scroll physics is currently
     /// past its scroll bounds (rubber-band overscroll).
     ///

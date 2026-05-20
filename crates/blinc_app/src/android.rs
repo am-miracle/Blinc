@@ -1025,12 +1025,16 @@ impl AndroidApp {
                 }
             }
 
-            // Tick scroll physics for momentum/bounce animations
+            // Tick scroll physics for momentum/bounce animations.
+            // OR in `process_pending_scroll_refs`'s return value so a
+            // freshly-fired `scroll_to_with_options` keeps the redraw
+            // chain alive on its own frame (otherwise the spring sits
+            // in Bouncing until the next stray input).
             let scroll_animating = if let Some(ref mut tree) = render_tree {
                 let current_time = blinc_layout::prelude::elapsed_ms();
-                let animating = tree.tick_scroll_physics(current_time);
-                tree.process_pending_scroll_refs();
-                animating
+                let ticking = tree.tick_scroll_physics(current_time);
+                let just_started = tree.process_pending_scroll_refs();
+                ticking || just_started
             } else {
                 false
             };

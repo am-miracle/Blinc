@@ -7426,6 +7426,17 @@ impl RenderContext {
             || tree.has_active_visual_animations()
             || tree.has_active_layout_animations()
             || tree.has_active_flip_animations()
+            // Scroll-physics-driven offset changes (programmatic
+            // `scroll_to_animated`, edge bounce spring, post-flick
+            // momentum) advance the scroll offset off any input.
+            // The cached batch was emitted at the pre-tick offset, so
+            // skipping the walker reuses stale scroll content. The
+            // symptom is that smooth `scroll_to` looks like an instant
+            // jump that only "catches up" when the next mouse move
+            // forces a full re-walk through some other path. Wheel /
+            // touch drag scrolls don't need this — their input event
+            // already invalidates the static layer via `had_scroll`.
+            || tree.has_animating_scroll_physics()
             || {
                 let store = tree.css_anim_store();
                 let guard = store.lock();
