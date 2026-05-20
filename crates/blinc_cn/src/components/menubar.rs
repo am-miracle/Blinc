@@ -34,17 +34,16 @@
 use std::cell::OnceCell;
 use std::sync::Arc;
 
-use blinc_animation::AnimationPreset;
 use blinc_core::context_state::BlincContextState;
 use blinc_core::{Color, State};
 use blinc_layout::div::ElementTypeId;
 use blinc_layout::element::{CursorStyle, RenderProps};
-use blinc_layout::motion::motion_derived;
-use blinc_layout::overlay_state::get_overlay_manager;
+use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_layout::widgets::hr::hr_with_bg;
-use blinc_layout::widgets::overlay::{OverlayAnimation, OverlayHandle, OverlayManagerExt};
+use blinc_layout::widgets::overlay::AnchorDirection;
+use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
 use blinc_layout::InstanceKey;
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
 
@@ -459,45 +458,39 @@ impl MenubarBuilder {
             // Add click handler (used for Click mode, or to toggle in Hover mode)
             trigger = trigger.on_click(move |ctx| {
                 let current_active = active_menu_for_trigger.get();
-                let mgr = get_overlay_manager();
 
-                // If this menu is already open, close it
+                // Toggle off if same menu is open.
                 if current_active == Some(idx) {
                     if let Some(handle_id) = overlay_handle_for_trigger.get() {
-                        mgr.close(OverlayHandle::from_raw(handle_id));
+                        OverlayHandle::from_raw(handle_id).close();
                     }
                     active_menu_for_trigger.set(None);
                     return;
                 }
 
-                // Close any existing menu
+                // Close any previously-open menu.
                 if let Some(handle_id) = overlay_handle_for_trigger.get() {
-                    let handle = OverlayHandle::from_raw(handle_id);
-                    if !mgr.is_closing(handle) && !mgr.is_pending_close(handle) {
-                        mgr.close(handle);
-                    }
+                    OverlayHandle::from_raw(handle_id).close();
                 }
 
-                // Open this menu
                 active_menu_for_trigger.set(Some(idx));
 
-                // Calculate position (below the trigger)
                 let x = ctx.bounds_x;
-                let y = ctx.bounds_y + ctx.bounds_height + 4.0; // 4px offset
+                let y = ctx.bounds_y + ctx.bounds_height + 4.0;
 
-                // Show the dropdown
-                let handle = show_menubar_dropdown(
+                let handle = spawn_menubar_dropdown(
                     x,
                     y,
                     &menu_items,
-                    180.0, // min_width
+                    180.0,
                     overlay_handle_for_show.clone(),
                     active_menu_for_trigger.clone(),
                     menu_key_for_click.clone(),
                     idx,
+                    /* hover_mode */ false,
                 );
 
-                overlay_handle_for_show.set(Some(handle.id()));
+                overlay_handle_for_show.set(Some(handle.raw()));
             });
 
             // Add hover handlers for Hover trigger mode
@@ -507,41 +500,37 @@ impl MenubarBuilder {
 
                 trigger = trigger.on_hover_enter(move |ctx| {
                     let current_active = active_menu_for_hover.get();
-                    let mgr = get_overlay_manager();
 
-                    // Build the full motion key to check animation state
-                    let full_motion_key = format!("motion:menubar_{}:child:0", menu_key_for_hover);
-
-                    // If this menu is already open, cancel any pending close
+                    // If this menu is already open, revive any in-flight exit
+                    // and cancel any pending close countdown.
                     if current_active == Some(idx) {
                         if let Some(handle_id) = overlay_handle_for_hover.get() {
                             let handle = OverlayHandle::from_raw(handle_id);
-                            if mgr.is_pending_close(handle) {
-                                mgr.hover_enter(handle);
-                            }
-                            // Also cancel exit animation if playing
-                            let motion = blinc_layout::selector::query_motion(&full_motion_key);
-                            if motion.is_exiting() {
-                                mgr.cancel_close(handle);
-                                motion.cancel_exit();
+                            if let Ok(mut stack) = overlay_stack().lock() {
+                                let exiting = stack
+                                    .iter_bottom_up()
+                                    .any(|e| e.handle == handle && e.exiting);
+                                if exiting {
+                                    stack.revive(handle);
+                                } else {
+                                    stack.handle_mouse_enter(handle);
+                                }
                             }
                         }
                         return;
                     }
 
-                    // Close all existing hover-based overlays (menus) immediately
-                    // This ensures only one menu is visible at a time when switching
-                    mgr.close_all_of(blinc_layout::widgets::overlay::OverlayKind::Tooltip);
+                    // Close previously-open menu so only one is visible at a time.
+                    if let Some(handle_id) = overlay_handle_for_hover.get() {
+                        OverlayHandle::from_raw(handle_id).close();
+                    }
 
-                    // Open this menu
                     active_menu_for_hover.set(Some(idx));
 
-                    // Calculate position (below the trigger)
                     let x = ctx.bounds_x;
                     let y = ctx.bounds_y + ctx.bounds_height + 4.0;
 
-                    // Show the hover-based dropdown
-                    let handle = show_menubar_hover_dropdown(
+                    let handle = spawn_menubar_dropdown(
                         x,
                         y,
                         &menu_items_for_hover,
@@ -550,20 +539,20 @@ impl MenubarBuilder {
                         active_menu_for_hover.clone(),
                         menu_key_for_hover.clone(),
                         idx,
+                        /* hover_mode */ true,
                     );
 
-                    overlay_handle_for_hover.set(Some(handle.id()));
+                    overlay_handle_for_hover.set(Some(handle.raw()));
                 });
 
-                // Add hover leave handler to start close delay
+                // Start close countdown when leaving trigger; content's own
+                // hover handlers cancel/restart the same countdown so the
+                // dropdown stays open while the user is inside it.
                 trigger = trigger.on_hover_leave(move |_| {
                     if let Some(handle_id) = overlay_handle_for_hover_leave.get() {
-                        let mgr = get_overlay_manager();
                         let handle = OverlayHandle::from_raw(handle_id);
-
-                        // Only start close if overlay is visible and in Open state
-                        if mgr.is_visible(handle) && !mgr.is_pending_close(handle) {
-                            mgr.hover_leave(handle);
+                        if let Ok(mut stack) = overlay_stack().lock() {
+                            stack.handle_mouse_leave(handle);
                         }
                     }
                 });
@@ -590,9 +579,15 @@ impl Default for MenubarBuilder {
     }
 }
 
-/// Show the menubar dropdown overlay
+// =============================================================================
+// Dropdown / submenu spawning
+// =============================================================================
+
+/// Push a top-level menubar dropdown onto the stack. `hover_mode` chooses
+/// between click-outside-dismiss (Dropdown kind) and hover-leave-dismiss
+/// (Tooltip kind) — the trigger uses click vs hover handlers accordingly.
 #[allow(clippy::too_many_arguments)]
-fn show_menubar_dropdown(
+fn spawn_menubar_dropdown(
     x: f32,
     y: f32,
     items: &[ContextMenuItem],
@@ -601,6 +596,7 @@ fn show_menubar_dropdown(
     active_menu_state: State<Option<usize>>,
     key: String,
     menu_idx: usize,
+    hover_mode: bool,
 ) -> OverlayHandle {
     let theme = ThemeState::get();
     let bg = theme.color(ColorToken::Surface);
@@ -613,32 +609,46 @@ fn show_menubar_dropdown(
     let padding = 12.0;
 
     let items = items.to_vec();
-    let handle_state_for_content = handle_state.clone();
-    let active_menu_for_content = active_menu_state.clone();
     let handle_state_for_close = handle_state.clone();
     let active_menu_for_close = active_menu_state.clone();
 
-    let mgr = get_overlay_manager();
+    let next_handle_id = overlay_stack()
+        .lock()
+        .ok()
+        .map(|s| s.peek_next_handle_id())
+        .unwrap_or(0);
+    let menu_handle = OverlayHandle::from_raw(next_handle_id);
 
-    let motion_key_str = format!("menubar_{}", key);
+    // Per-menu submenu tracking (keyed off the dropdown's handle id).
+    let child_submenu_state: State<Option<u64>> = BlincContextState::get()
+        .use_state_keyed(&format!("menubar_child_sub_{}", next_handle_id), || None);
+    let child_submenu_for_content = child_submenu_state.clone();
+    let menu_key_for_content = key.clone();
 
-    mgr.dropdown()
+    let builder = if hover_mode {
+        OverlayBuilder::tooltip().anchor_direction(AnchorDirection::Bottom)
+    } else {
+        OverlayBuilder::dropdown()
+    };
+
+    let handle = builder
         .at(x, y)
-        .animation(OverlayAnimation::none())
-        .dismiss_on_escape(true)
-        .on_close(move || {
+        .dismissable_by_escape(true)
+        .on_close(move |_reason| {
             if active_menu_for_close.get() == Some(menu_idx) {
                 active_menu_for_close.set(None);
             }
             handle_state_for_close.set(None);
         })
         .content(move || {
-            build_menubar_dropdown_content(
+            let menu = build_menubar_menu_div(
                 &items,
                 min_width,
-                &handle_state_for_content,
-                &active_menu_for_content,
-                &motion_key_str,
+                menu_handle,
+                /* is_root */ true,
+                hover_mode,
+                &menu_key_for_content,
+                &child_submenu_for_content,
                 bg,
                 border,
                 text_color,
@@ -647,302 +657,32 @@ fn show_menubar_dropdown(
                 radius,
                 font_size,
                 padding,
-            )
+            );
+            menu
         })
-        .show()
+        .show();
+
+    debug_assert_eq!(
+        handle.raw(),
+        next_handle_id,
+        "peek_next_handle_id was stale — concurrent push?"
+    );
+
+    handle
 }
 
-/// Show the menubar dropdown overlay using hover-based overlay (for Hover trigger mode)
+/// Push a submenu onto the stack, positioned to the right of its parent item.
+/// `root_handle` is always the top-level dropdown so leaf-item clicks can
+/// close the whole chain. `parent_submenu_state` is the state slot the parent
+/// uses to track this child; we clear it on our own close.
 #[allow(clippy::too_many_arguments)]
-fn show_menubar_hover_dropdown(
+fn spawn_menubar_submenu(
     x: f32,
     y: f32,
     items: &[ContextMenuItem],
     min_width: f32,
-    handle_state: State<Option<u64>>,
-    active_menu_state: State<Option<usize>>,
-    key: String,
-    menu_idx: usize,
-) -> OverlayHandle {
-    let theme = ThemeState::get();
-    let bg = theme.color(ColorToken::Surface);
-    let border = theme.color(ColorToken::Border);
-    let text_color = theme.color(ColorToken::TextPrimary);
-    let text_secondary = theme.color(ColorToken::TextSecondary);
-    let text_tertiary = theme.color(ColorToken::TextTertiary);
-    let radius = theme.radius(RadiusToken::Md);
-    let font_size = 14.0;
-    let padding = 12.0;
-
-    let items = items.to_vec();
-
-    let handle_state_for_content = handle_state.clone();
-    let active_menu_for_content = active_menu_state.clone();
-    let handle_state_for_close = handle_state.clone();
-    let active_menu_for_close = active_menu_state.clone();
-    let handle_state_for_hover = handle_state.clone();
-
-    let mgr = get_overlay_manager();
-
-    let menu_key = key.clone();
-
-    mgr.hover_card()
-        .at(x, y)
-        .anchor_direction(blinc_layout::widgets::overlay::AnchorDirection::Bottom)
-        .animation(OverlayAnimation::none())
-        .dismiss_on_escape(true)
-        .on_close(move || {
-            if active_menu_for_close.get() == Some(menu_idx) {
-                active_menu_for_close.set(None);
-            }
-            handle_state_for_close.set(None);
-        })
-        .content(move || {
-            build_menubar_hover_dropdown_content(
-                &items,
-                min_width,
-                &handle_state_for_content,
-                &active_menu_for_content,
-                &handle_state_for_hover,
-                &menu_key,
-                bg,
-                border,
-                text_color,
-                text_secondary,
-                text_tertiary,
-                radius,
-                font_size,
-                padding,
-            )
-        })
-        .show()
-}
-
-/// Build the dropdown menu content for a menubar menu (hover mode - with hover handlers)
-#[allow(clippy::too_many_arguments)]
-fn build_menubar_hover_dropdown_content(
-    items: &[ContextMenuItem],
-    width: f32,
-    overlay_handle_state: &State<Option<u64>>,
-    _active_menu_state: &State<Option<usize>>,
-    handle_state_for_hover: &State<Option<u64>>,
-    key: &str,
-    bg: Color,
-    border: Color,
-    text_color: Color,
-    text_secondary: Color,
-    text_tertiary: Color,
-    radius: f32,
-    font_size: f32,
-    padding: f32,
-) -> Div {
-    let menu_id = key;
-
-    // State for tracking open submenu
-    let submenu_handle: State<Option<u64>> =
-        BlincContextState::get().use_state_keyed(&format!("{}_submenu", key), || None);
-
-    // Clone for hover handlers on the content
-    let handle_state_for_enter = handle_state_for_hover.clone();
-    let handle_state_for_leave = handle_state_for_hover.clone();
-
-    let mut menu = div()
-        .id(menu_id)
-        .flex_col()
-        .w(width)
-        .bg(bg)
-        .border(1.0, border)
-        .rounded(radius)
-        .shadow_lg()
-        .overflow_clip()
-        .h_fit()
-        .py(1.0)
-        // Add hover enter handler to cancel pending close when mouse enters dropdown
-        .on_hover_enter(move |_| {
-            if let Some(handle_id) = handle_state_for_enter.get() {
-                let mgr = get_overlay_manager();
-                let handle = OverlayHandle::from_raw(handle_id);
-                if mgr.is_pending_close(handle) {
-                    mgr.hover_enter(handle); // Cancel close delay
-                }
-            }
-        })
-        // Add hover leave handler to start close when mouse leaves dropdown
-        .on_hover_leave(move |_| {
-            if let Some(handle_id) = handle_state_for_leave.get() {
-                let mgr = get_overlay_manager();
-                let handle = OverlayHandle::from_raw(handle_id);
-                if mgr.is_visible(handle) && !mgr.is_pending_close(handle) {
-                    mgr.hover_leave(handle);
-                }
-            }
-        });
-
-    for (idx, item) in items.iter().enumerate() {
-        if item.is_separator() {
-            menu = menu.child(hr_with_bg(bg));
-        } else {
-            let item_label = item.get_label().to_string();
-            let item_shortcut = item.get_shortcut().map(|s| s.to_string());
-            let item_icon = item.get_icon().map(|s| s.to_string());
-            let item_disabled = item.is_disabled();
-            let item_on_click = item.get_on_click();
-            let has_submenu = item.has_submenu();
-            let submenu_items = item.get_submenu().cloned();
-
-            let submenu_handle_for_hover = submenu_handle.clone();
-            let submenu_handle_for_leave = submenu_handle.clone();
-
-            let submenu_key = format!("{}_sub-{}", key, idx);
-
-            let item_text_color = if item_disabled {
-                text_tertiary
-            } else {
-                text_color
-            };
-
-            let shortcut_color = text_secondary;
-            let cursor = if item_disabled {
-                CursorStyle::NotAllowed
-            } else {
-                CursorStyle::Pointer
-            };
-
-            // Build the row as a plain div — no Stateful wrapper.
-            let mut left_side = div()
-                .w_fit()
-                .h_fit()
-                .flex_row()
-                .items_center()
-                .gap(padding / 4.0);
-
-            if let Some(ref icon_svg) = item_icon {
-                left_side = left_side.child(svg(icon_svg).size(16.0, 16.0).color(item_text_color));
-            }
-
-            left_side = left_side
-                .child(
-                    text(&item_label)
-                        .size(font_size)
-                        .color(item_text_color)
-                        .no_cursor()
-                        .pointer_events_none(),
-                )
-                .pointer_events_none();
-
-            let right_side: Option<Div> = if let Some(ref shortcut) = item_shortcut {
-                Some(
-                    div().child(
-                        text(shortcut)
-                            .size(font_size - 2.0)
-                            .color(shortcut_color)
-                            .no_cursor(),
-                    ),
-                )
-            } else if has_submenu {
-                let chevron_right = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
-                Some(
-                    div()
-                        .child(svg(chevron_right).size(12.0, 12.0).color(text_tertiary))
-                        .pointer_events_none(),
-                )
-            } else {
-                None
-            };
-
-            let mut row_content = div()
-                .w_full()
-                .h_fit()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(left_side);
-
-            if let Some(right) = right_side {
-                row_content = row_content.child(right);
-            }
-
-            let mut row = row_content
-                .class("cn-menubar-item")
-                .w_full()
-                .h_fit()
-                .py(padding / 4.0)
-                .px(padding / 2.0)
-                .cursor(cursor)
-                .on_click(move |_| {
-                    if !item_disabled && !has_submenu {
-                        if let Some(ref cb) = item_on_click {
-                            cb();
-                        }
-
-                        // Close all menus immediately (no animation delay)
-                        let mgr = get_overlay_manager();
-                        mgr.close_all_of(blinc_layout::widgets::overlay::OverlayKind::Tooltip);
-                    }
-                });
-
-            // Add hover handlers for submenu items
-            if has_submenu && !item_disabled {
-                let submenu_items_for_hover = submenu_items.clone();
-                let overlay_handle_for_submenu = overlay_handle_state.clone();
-                let submenu_key_for_hover = submenu_key.clone();
-
-                row = row.on_hover_enter(move |ctx| {
-                    let mgr = get_overlay_manager();
-
-                    // Close any existing submenu tracked in state
-                    if let Some(handle_id) = submenu_handle_for_hover.get() {
-                        let handle = OverlayHandle::from_raw(handle_id);
-                        // Force close without animation delay
-                        mgr.close_immediate(handle);
-                    }
-
-                    // Show submenu to the right of this item
-                    if let Some(ref items) = submenu_items_for_hover {
-                        let x = ctx.bounds_x + ctx.bounds_width + 4.0;
-                        let y = ctx.bounds_y;
-
-                        let handle = show_menubar_submenu(
-                            x,
-                            y,
-                            items,
-                            160.0,
-                            overlay_handle_for_submenu.clone(),
-                            submenu_handle_for_hover.clone(),
-                            submenu_key_for_hover.clone(),
-                        );
-                        submenu_handle_for_hover.set(Some(handle.id()));
-                    }
-                });
-            } else {
-                // When hovering a non-submenu item, close any open submenu
-                row = row.on_hover_enter(move |_| {
-                    if let Some(handle_id) = submenu_handle_for_leave.get() {
-                        let mgr = get_overlay_manager();
-                        let handle = OverlayHandle::from_raw(handle_id);
-                        // Force close without animation delay
-                        mgr.close_immediate(handle);
-                        submenu_handle_for_leave.set(None);
-                    }
-                });
-            }
-
-            menu = menu.child(row);
-        }
-    }
-
-    // Return menu directly without motion wrapper to prevent lingering text
-    div().child(menu)
-}
-
-/// Show a submenu overlay positioned to the right of the parent item (hover mode)
-fn show_menubar_submenu(
-    x: f32,
-    y: f32,
-    items: &[ContextMenuItem],
-    min_width: f32,
-    parent_handle_state: State<Option<u64>>,
-    submenu_handle_state: State<Option<u64>>,
+    root_handle: OverlayHandle,
+    parent_submenu_state: State<Option<u64>>,
     key: String,
 ) -> OverlayHandle {
     let theme = ThemeState::get();
@@ -957,29 +697,39 @@ fn show_menubar_submenu(
 
     let items = items.to_vec();
 
-    let submenu_handle_for_content = submenu_handle_state.clone();
-    let parent_handle_for_content = parent_handle_state.clone();
-    let submenu_handle_for_close = submenu_handle_state.clone();
-    let parent_handle_for_hover = parent_handle_state.clone();
+    let next_handle_id = overlay_stack()
+        .lock()
+        .ok()
+        .map(|s| s.peek_next_handle_id())
+        .unwrap_or(0);
+    let submenu_handle = OverlayHandle::from_raw(next_handle_id);
 
-    let mgr = get_overlay_manager();
+    let child_submenu_state: State<Option<u64>> = BlincContextState::get()
+        .use_state_keyed(&format!("menubar_child_sub_{}", next_handle_id), || None);
+    let child_submenu_for_content = child_submenu_state.clone();
+    let menu_key_for_content = key.clone();
 
-    mgr.hover_card()
+    let parent_submenu_for_close = parent_submenu_state.clone();
+
+    let handle = OverlayBuilder::tooltip()
         .at(x, y)
-        .anchor_direction(blinc_layout::widgets::overlay::AnchorDirection::Right)
-        .animation(OverlayAnimation::none())
-        .dismiss_on_escape(true)
-        .on_close(move || {
-            submenu_handle_for_close.set(None);
+        .anchor_direction(AnchorDirection::Right)
+        .dismissable_by_escape(true)
+        .on_close(move |_reason| {
+            // Pop ourselves from the parent's tracking slot if still pointing at us.
+            if parent_submenu_for_close.get() == Some(submenu_handle.raw()) {
+                parent_submenu_for_close.set(None);
+            }
         })
         .content(move || {
-            build_menubar_submenu_content(
+            build_menubar_menu_div(
                 &items,
                 min_width,
-                &parent_handle_for_content,
-                &submenu_handle_for_content,
-                &parent_handle_for_hover,
-                &key,
+                root_handle,
+                /* is_root */ false,
+                /* hover_mode */ true,
+                &menu_key_for_content,
+                &child_submenu_for_content,
                 bg,
                 border,
                 text_color,
@@ -990,18 +740,30 @@ fn show_menubar_submenu(
                 padding,
             )
         })
-        .show()
+        .show();
+
+    debug_assert_eq!(
+        handle.raw(),
+        next_handle_id,
+        "peek_next_handle_id was stale — concurrent push?"
+    );
+
+    handle
 }
 
-/// Build submenu content for menubar (recursive for nested submenus)
+/// Build a menubar dropdown / submenu's content div. Item clicks call
+/// `root_handle.close()` so the whole chain dismisses. In hover_mode, the
+/// menu container's own hover handlers cancel / restart the pending-close
+/// countdown driven by Tooltip dismiss rules.
 #[allow(clippy::too_many_arguments)]
-fn build_menubar_submenu_content(
+fn build_menubar_menu_div(
     items: &[ContextMenuItem],
     width: f32,
-    parent_handle_state: &State<Option<u64>>,
-    submenu_handle_state: &State<Option<u64>>,
-    parent_menu_handle_state: &State<Option<u64>>,
+    root_handle: OverlayHandle,
+    is_root: bool,
+    hover_mode: bool,
     key: &str,
+    child_submenu_state: &State<Option<u64>>,
     bg: Color,
     border: Color,
     text_color: Color,
@@ -1011,16 +773,8 @@ fn build_menubar_submenu_content(
     font_size: f32,
     padding: f32,
 ) -> Div {
+    let _ = is_root; // reserved for future styling hooks
     let menu_id = key;
-
-    // State for tracking nested submenus
-    let nested_submenu_handle: State<Option<u64>> =
-        BlincContextState::get().use_state_keyed(&format!("{}_nested", key), || None);
-
-    // Clone handles for hover handlers
-    let submenu_handle_for_enter = submenu_handle_state.clone();
-    let submenu_handle_for_leave = submenu_handle_state.clone();
-    let parent_handle_for_enter = parent_menu_handle_state.clone();
 
     let mut menu = div()
         .id(menu_id)
@@ -1029,232 +783,36 @@ fn build_menubar_submenu_content(
         .bg(bg)
         .border(1.0, border)
         .rounded(radius)
-        .shadow_lg()
-        .overflow_clip()
-        .h_fit()
-        .py(1.0)
-        // When mouse enters submenu, cancel pending close on both submenu AND parent menu
-        .on_hover_enter(move |_| {
-            let mgr = get_overlay_manager();
-
-            // Cancel pending close on submenu
-            if let Some(handle_id) = submenu_handle_for_enter.get() {
-                let handle = OverlayHandle::from_raw(handle_id);
-                if mgr.is_pending_close(handle) {
-                    mgr.hover_enter(handle);
-                }
-            }
-
-            // Also cancel pending close on parent menu to keep it open
-            if let Some(handle_id) = parent_handle_for_enter.get() {
-                let handle = OverlayHandle::from_raw(handle_id);
-                if mgr.is_pending_close(handle) {
-                    mgr.hover_enter(handle);
-                }
-            }
-        })
-        // When mouse leaves submenu, start close countdown
-        .on_hover_leave(move |_| {
-            if let Some(handle_id) = submenu_handle_for_leave.get() {
-                let mgr = get_overlay_manager();
-                let handle = OverlayHandle::from_raw(handle_id);
-                if mgr.is_visible(handle) && !mgr.is_pending_close(handle) {
-                    mgr.hover_leave(handle);
-                }
-            }
-        });
-
-    for (idx, item) in items.iter().enumerate() {
-        if item.is_separator() {
-            menu = menu.child(hr_with_bg(bg));
-        } else {
-            let item_label = item.get_label().to_string();
-            let item_shortcut = item.get_shortcut().map(|s| s.to_string());
-            let item_icon = item.get_icon().map(|s| s.to_string());
-            let item_disabled = item.is_disabled();
-            let item_on_click = item.get_on_click();
-            let has_submenu = item.has_submenu();
-            let submenu_items = item.get_submenu().cloned();
-
-            let parent_handle_for_click = parent_handle_state.clone();
-            let nested_submenu_for_hover = nested_submenu_handle.clone();
-            let nested_submenu_for_leave = nested_submenu_handle.clone();
-
-            let submenu_key = format!("{}_sub-{}", key, idx);
-
-            let item_text_color = if item_disabled {
-                text_tertiary
-            } else {
-                text_color
-            };
-
-            let shortcut_color = text_secondary;
-            let cursor = if item_disabled {
-                CursorStyle::NotAllowed
-            } else {
-                CursorStyle::Pointer
-            };
-
-            // Build the row as a plain div — no Stateful wrapper.
-            let mut left_side = div()
-                .w_fit()
-                .h_fit()
-                .flex_row()
-                .items_center()
-                .gap(padding / 4.0);
-
-            if let Some(ref icon_svg) = item_icon {
-                left_side = left_side.child(svg(icon_svg).size(16.0, 16.0).color(item_text_color));
-            }
-
-            left_side = left_side
-                .child(
-                    text(&item_label)
-                        .size(font_size)
-                        .color(item_text_color)
-                        .no_cursor()
-                        .pointer_events_none(),
-                )
-                .pointer_events_none();
-
-            let right_side: Option<Div> = if let Some(ref shortcut) = item_shortcut {
-                Some(
-                    div().child(
-                        text(shortcut)
-                            .size(font_size - 2.0)
-                            .color(shortcut_color)
-                            .no_cursor(),
-                    ),
-                )
-            } else if has_submenu {
-                let chevron_right = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
-                Some(
-                    div()
-                        .child(svg(chevron_right).size(12.0, 12.0).color(text_tertiary))
-                        .pointer_events_none(),
-                )
-            } else {
-                None
-            };
-
-            let mut row_content = div()
-                .w_full()
-                .h_fit()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(left_side);
-
-            if let Some(right) = right_side {
-                row_content = row_content.child(right);
-            }
-
-            let mut row = row_content
-                .class("cn-menubar-item")
-                .w_full()
-                .h_fit()
-                .py(padding / 4.0)
-                .px(padding / 2.0)
-                .cursor(cursor)
-                .on_click(move |_| {
-                    if !item_disabled && !has_submenu {
-                        if let Some(ref cb) = item_on_click {
-                            cb();
-                        }
-
-                        // Close all menus immediately (no animation delay)
-                        let mgr = get_overlay_manager();
-                        mgr.close_all_of(blinc_layout::widgets::overlay::OverlayKind::Tooltip);
-                    }
-                });
-
-            // Add hover handlers for submenu items
-            if has_submenu && !item_disabled {
-                let submenu_items_for_hover = submenu_items.clone();
-                let parent_handle_for_submenu = parent_handle_state.clone();
-                let submenu_key_for_hover = submenu_key.clone();
-
-                row = row.on_hover_enter(move |ctx| {
-                    let mgr = get_overlay_manager();
-
-                    // Close any existing nested submenu immediately
-                    if let Some(handle_id) = nested_submenu_for_hover.get() {
-                        let handle = OverlayHandle::from_raw(handle_id);
-                        mgr.close_immediate(handle);
-                    }
-
-                    // Show new nested submenu
-                    if let Some(ref items) = submenu_items_for_hover {
-                        let x = ctx.bounds_x + ctx.bounds_width + 4.0;
-                        let y = ctx.bounds_y;
-
-                        let handle = show_menubar_submenu(
-                            x,
-                            y,
-                            items,
-                            160.0,
-                            parent_handle_for_submenu.clone(),
-                            nested_submenu_for_hover.clone(),
-                            submenu_key_for_hover.clone(),
-                        );
-                        nested_submenu_for_hover.set(Some(handle.id()));
-                    }
-                });
-            } else {
-                // Close nested submenu when hovering non-submenu item
-                row = row.on_hover_enter(move |_| {
-                    if let Some(handle_id) = nested_submenu_for_leave.get() {
-                        let mgr = get_overlay_manager();
-                        let handle = OverlayHandle::from_raw(handle_id);
-                        mgr.close_immediate(handle);
-                        nested_submenu_for_leave.set(None);
-                    }
-                });
-            }
-
-            menu = menu.child(row);
-        }
-    }
-
-    // Return menu directly without motion wrapper to prevent jittering
-    div().child(menu)
-}
-
-/// Build the dropdown menu content for a menubar menu
-#[allow(clippy::too_many_arguments)]
-fn build_menubar_dropdown_content(
-    items: &[ContextMenuItem],
-    width: f32,
-    overlay_handle_state: &State<Option<u64>>,
-    active_menu_state: &State<Option<usize>>,
-    key: &str,
-    bg: Color,
-    border: Color,
-    text_color: Color,
-    text_secondary: Color,
-    text_tertiary: Color,
-    radius: f32,
-    font_size: f32,
-    padding: f32,
-) -> Div {
-    let menu_id = key;
-
-    // State for tracking open submenu
-    let submenu_handle: State<Option<u64>> =
-        BlincContextState::get().use_state_keyed(&format!("{}_submenu", key), || None);
-
-    let mut menu = div()
-        .id(menu_id)
-        .flex_col()
-        .w(width)
-        .bg(bg)
-        .border(1.0, border)
-        .rounded(radius)
+        .lock_corner_shape()
         .shadow_lg()
         .overflow_clip()
         .h_fit()
         .py(1.0);
 
+    // In hover mode the dropdown stays open while the cursor sits inside it.
+    // Tooltip dismiss rules drive the countdown; container hover handlers
+    // cancel / restart via the held lock to avoid the re-entrant deadlock.
+    if hover_mode {
+        menu = menu
+            .on_hover_enter(move |_| {
+                if let Ok(mut stack) = overlay_stack().lock() {
+                    let exiting = stack
+                        .iter_bottom_up()
+                        .any(|e| e.handle == root_handle && e.exiting);
+                    if exiting {
+                        stack.revive(root_handle);
+                    } else {
+                        stack.handle_mouse_enter(root_handle);
+                    }
+                }
+            })
+            .on_hover_leave(move |_| {
+                if let Ok(mut stack) = overlay_stack().lock() {
+                    stack.handle_mouse_leave(root_handle);
+                }
+            });
+    }
+
     for (idx, item) in items.iter().enumerate() {
         if item.is_separator() {
             menu = menu.child(hr_with_bg(bg));
@@ -1267,10 +825,8 @@ fn build_menubar_dropdown_content(
             let has_submenu = item.has_submenu();
             let submenu_items = item.get_submenu().cloned();
 
-            let handle_state_for_click = overlay_handle_state.clone();
-            let submenu_handle_for_hover = submenu_handle.clone();
-            let submenu_handle_for_leave = submenu_handle.clone();
-
+            let child_submenu_for_hover_open = child_submenu_state.clone();
+            let child_submenu_for_hover_close = child_submenu_state.clone();
             let submenu_key = format!("{}_sub-{}", key, idx);
 
             let item_text_color = if item_disabled {
@@ -1278,7 +834,6 @@ fn build_menubar_dropdown_content(
             } else {
                 text_color
             };
-
             let shortcut_color = text_secondary;
             let cursor = if item_disabled {
                 CursorStyle::NotAllowed
@@ -1286,10 +841,6 @@ fn build_menubar_dropdown_content(
                 CursorStyle::Pointer
             };
 
-            // Build the row as a plain div — no Stateful wrapper.
-            // Stateful subtree rebuilds contaminate base_styles with hover
-            // state, causing hover backgrounds to persist after mouse leaves.
-            // CSS .cn-menubar-item:hover handles hover background.
             let mut left_side = div()
                 .w_fit()
                 .h_fit()
@@ -1312,14 +863,12 @@ fn build_menubar_dropdown_content(
                 .pointer_events_none();
 
             let right_side: Option<Div> = if let Some(ref shortcut) = item_shortcut {
-                Some(
-                    div().child(
-                        text(shortcut)
-                            .size(font_size - 2.0)
-                            .color(shortcut_color)
-                            .no_cursor(),
-                    ),
-                )
+                Some(div().child(
+                    text(shortcut)
+                        .size(font_size - 2.0)
+                        .color(shortcut_color)
+                        .no_cursor(),
+                ))
             } else if has_submenu {
                 let chevron_right = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
                 Some(
@@ -1338,7 +887,6 @@ fn build_menubar_dropdown_content(
                 .items_center()
                 .justify_between()
                 .child(left_side);
-
             if let Some(right) = right_side {
                 row_content = row_content.child(right);
             }
@@ -1355,55 +903,42 @@ fn build_menubar_dropdown_content(
                         if let Some(ref cb) = item_on_click {
                             cb();
                         }
-
-                        // Close the overlay
-                        if let Some(handle_id) = handle_state_for_click.get() {
-                            let mgr = get_overlay_manager();
-                            mgr.close(OverlayHandle::from_raw(handle_id));
-                        }
+                        // Closing the root cascades the whole chain.
+                        root_handle.close();
                     }
                 });
 
-            // Add hover handlers for submenu items
+            // Submenu hover-to-open at this level.
             if has_submenu && !item_disabled {
                 let submenu_items_for_hover = submenu_items.clone();
-                let overlay_handle_for_submenu = overlay_handle_state.clone();
                 let submenu_key_for_hover = submenu_key.clone();
 
                 row = row.on_hover_enter(move |ctx| {
-                    let mgr = get_overlay_manager();
-
-                    // Close any existing submenu immediately
-                    if let Some(handle_id) = submenu_handle_for_hover.get() {
-                        let handle = OverlayHandle::from_raw(handle_id);
-                        mgr.close_immediate(handle);
+                    // Close any existing child submenu at this level.
+                    if let Some(handle_id) = child_submenu_for_hover_open.get() {
+                        OverlayHandle::from_raw(handle_id).close();
                     }
 
-                    // Show submenu to the right of this item
                     if let Some(ref items) = submenu_items_for_hover {
                         let x = ctx.bounds_x + ctx.bounds_width + 4.0;
                         let y = ctx.bounds_y;
 
-                        let handle = show_menubar_submenu(
+                        let handle = spawn_menubar_submenu(
                             x,
                             y,
                             items,
                             160.0,
-                            overlay_handle_for_submenu.clone(),
-                            submenu_handle_for_hover.clone(),
+                            root_handle,
+                            child_submenu_for_hover_open.clone(),
                             submenu_key_for_hover.clone(),
                         );
-                        submenu_handle_for_hover.set(Some(handle.id()));
+                        child_submenu_for_hover_open.set(Some(handle.raw()));
                     }
                 });
             } else {
-                // When hovering a non-submenu item, close any open submenu
                 row = row.on_hover_enter(move |_| {
-                    if let Some(handle_id) = submenu_handle_for_leave.get() {
-                        let mgr = get_overlay_manager();
-                        let handle = OverlayHandle::from_raw(handle_id);
-                        mgr.close_immediate(handle);
-                        submenu_handle_for_leave.set(None);
+                    if let Some(handle_id) = child_submenu_for_hover_close.get() {
+                        OverlayHandle::from_raw(handle_id).close();
                     }
                 });
             }
@@ -1412,7 +947,7 @@ fn build_menubar_dropdown_content(
         }
     }
 
-    div().child(menu)
+    menu
 }
 
 /// The built menubar component
