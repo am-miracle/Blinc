@@ -526,8 +526,15 @@ impl TreeViewBuilder {
                         if has_children {
                             let anim_key = format!("tree-children-{}", node.key);
 
+                            // Mirrors the accordion pattern: `w_full()` so the
+                            // child width stays stable across collapsed → expanded
+                            // (without it, taffy resolves an `h(0)` container to a
+                            // different cross-axis size than the natural-height
+                            // expanded form, and the FLIP `from_bounds` snapshot
+                            // doesn't compose with the new `to_bounds`).
                             let mut children_container = div()
                                 .flex_col()
+                                .w_full()
                                 .flex_shrink_0()
                                 .relative()
                                 .overflow_clip()
@@ -575,7 +582,17 @@ impl TreeViewBuilder {
                             }
 
                             if !is_expanded {
-                                children_container = children_container.h(0.0);
+                                // Matches accordion's `w_full().h(0.0).px(1.0)`
+                                // pattern: a non-zero horizontal padding when
+                                // collapsed keeps the element's cross-axis size
+                                // stable so the FLIP `from_bounds` snapshot
+                                // produces a clean dh delta against the expanded
+                                // `to_bounds`. Pure `h(0)` left taffy
+                                // computing different widths between states
+                                // and that produced choppy mid-animation paints
+                                // (only some children visible until the next
+                                // input forced another full repaint).
+                                children_container = children_container.h(0.0).px(1.0);
                             }
 
                             node_div = node_div.child(children_container);
