@@ -759,7 +759,7 @@ pub const CN_STYLES: &str = r#"
     cursor: pointer;
     color: var(--text-primary);
     font-size: var(--text-sm);
-    transition: background var(--duration-fastest);
+    /* No transition — see cn-menubar-item rationale. */
 }
 /* `--accent-subtle` — parent panel sits at `--surface-elevated`,
    so hovering to the same tier would be invisible. */
@@ -799,7 +799,7 @@ pub const CN_STYLES: &str = r#"
     cursor: pointer;
     color: var(--text-primary);
     font-size: var(--text-sm);
-    transition: background var(--duration-fastest);
+    /* No transition — see cn-menubar-item rationale. */
 }
 .cn-context-menu-item:hover {
     background: var(--accent-subtle);
@@ -832,7 +832,10 @@ pub const CN_STYLES: &str = r#"
     border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-primary);
-    transition: background var(--duration-fastest);
+    /* No CSS `transition` here — when the cursor moves across menu rows
+       quickly, the transition trail leaves multiple rows partially
+       highlighted (each at a different point in the fade-out animation),
+       which reads as a stuck-hover bug. Instant on/off matches the HID. */
 }
 /* `--accent-subtle` — parent dropdown panel sits at `--surface-elevated`,
    so hovering to the same tier is invisible. Match cn-dropdown-item /
@@ -950,7 +953,7 @@ pub const CN_STYLES: &str = r#"
     cursor: pointer;
     color: var(--text-primary);
     font-size: var(--text-sm);
-    transition: background var(--duration-fastest);
+    /* No transition — see cn-menubar-item rationale. */
 }
 .cn-combobox-item:hover {
     background: var(--accent-subtle);

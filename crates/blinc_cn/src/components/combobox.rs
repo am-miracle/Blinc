@@ -841,11 +841,14 @@ fn build_dropdown_content(
                         text_color
                     };
 
-                    let base_bg = if is_selected { surface_elevated } else { bg };
-
                     // Plain div with element ID for proper event registration during subtree rebuilds.
+                    //
+                    // Background is owned by CSS (.cn-combobox-item /
+                    // .cn-combobox-item:hover / .cn-combobox-item--selected) —
+                    // an explicit `.bg(base_bg)` in Rust here was overriding
+                    // the :hover selector so hover bg never appeared.
                     let item_id = format!("{}_opt_{}", key_for_opts, idx);
-                    let option_item = div()
+                    let mut option_item = div()
                         .id(&item_id)
                         .class("cn-combobox-item")
                         .w_full()
@@ -856,8 +859,13 @@ fn build_dropdown_content(
                             CursorStyle::Pointer
                         })
                         .flex_row()
-                        .items_center()
-                        .bg(base_bg)
+                        .items_center();
+                    if is_selected {
+                        option_item = option_item.class("cn-combobox-item--selected");
+                    }
+                    let _ = surface_elevated; // kept for future use; bg now CSS-owned
+                    let _ = bg;
+                    let option_item = option_item
                         .child(if let Some(ref content_fn) = opt_content {
                             content_fn()
                         } else {
