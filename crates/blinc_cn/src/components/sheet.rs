@@ -34,16 +34,14 @@
 
 use std::sync::Arc;
 
-use blinc_animation::{AnimationPreset, MultiKeyframeAnimation};
+use blinc_animation::MultiKeyframeAnimation;
 use blinc_core::Color;
-use blinc_layout::motion::motion_derived;
-use blinc_layout::overlay_state::get_overlay_manager;
+use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
-use blinc_layout::widgets::overlay::{BackdropConfig, EdgeSide, OverlayHandle, OverlayManagerExt};
+use blinc_layout::widgets::overlay::EdgeSide;
+use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
 use blinc_layout::InstanceKey;
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
-
-use super::button::{button, ButtonVariant};
 
 /// Sheet side variants - which edge the sheet slides from
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -210,47 +208,6 @@ impl SheetBuilder {
         self
     }
 
-    /// Get the enter animation for this sheet's side
-    fn get_enter_animation(&self) -> MultiKeyframeAnimation {
-        if let Some(ref anim) = self.enter_animation {
-            return anim.clone();
-        }
-
-        let distance = match self.side {
-            SheetSide::Left | SheetSide::Right => self.size.width(),
-            SheetSide::Top | SheetSide::Bottom => self.size.height(),
-        };
-
-        match self.side {
-            SheetSide::Left => AnimationPreset::slide_in_left(self.animation_duration, distance),
-            SheetSide::Right => AnimationPreset::slide_in_right(self.animation_duration, distance),
-            SheetSide::Top => AnimationPreset::slide_in_top(self.animation_duration, distance),
-            SheetSide::Bottom => {
-                AnimationPreset::slide_in_bottom(self.animation_duration, distance)
-            }
-        }
-    }
-
-    /// Get the exit animation for this sheet's side
-    fn get_exit_animation(&self) -> MultiKeyframeAnimation {
-        if let Some(ref anim) = self.exit_animation {
-            return anim.clone();
-        }
-
-        let exit_duration = (self.animation_duration as f32 * 0.75) as u32;
-        let distance = match self.side {
-            SheetSide::Left | SheetSide::Right => self.size.width(),
-            SheetSide::Top | SheetSide::Bottom => self.size.height(),
-        };
-
-        match self.side {
-            SheetSide::Left => AnimationPreset::slide_out_left(exit_duration, distance),
-            SheetSide::Right => AnimationPreset::slide_out_right(exit_duration, distance),
-            SheetSide::Top => AnimationPreset::slide_out_top(exit_duration, distance),
-            SheetSide::Bottom => AnimationPreset::slide_out_bottom(exit_duration, distance),
-        }
-    }
-
     /// Show the sheet
     pub fn show(self) -> OverlayHandle {
         let theme = ThemeState::get();
@@ -258,10 +215,6 @@ impl SheetBuilder {
         let border = theme.color(ColorToken::Border);
         let text_primary = theme.color(ColorToken::TextPrimary);
         let text_secondary = theme.color(ColorToken::TextSecondary);
-
-        // Get animations before moving other fields
-        let enter_animation = self.get_enter_animation();
-        let exit_animation = self.get_exit_animation();
 
         let side = self.side;
         let size = self.size;
@@ -272,13 +225,6 @@ impl SheetBuilder {
         let show_close = self.show_close;
         let on_close = self.on_close;
 
-        let mgr = get_overlay_manager();
-
-        // Create a unique motion key for this sheet instance
-        let motion_key_str = format!("sheet_{}", self.key.get());
-        let motion_key_with_child = format!("{}:child:0", motion_key_str);
-
-        // Convert SheetSide to EdgeSide for overlay positioning
         let edge_side = match side {
             SheetSide::Left => EdgeSide::Left,
             SheetSide::Right => EdgeSide::Right,
@@ -286,20 +232,25 @@ impl SheetBuilder {
             SheetSide::Bottom => EdgeSide::Bottom,
         };
 
-        // Calculate sheet panel size for backdrop click detection
-        // For left/right sheets: width is fixed, height fills viewport (use large value)
-        // For top/bottom sheets: width fills viewport (use large value), height is fixed
-        let (sheet_width, sheet_height) = match side {
-            SheetSide::Left | SheetSide::Right => (size.width(), 10000.0), // Large height to fill viewport
-            SheetSide::Top | SheetSide::Bottom => (10000.0, size.height()), // Large width to fill viewport
+        // Size override: position_wrapper pins the panel flush to the edge,
+        // stretching the perpendicular axis to viewport. Pass the size that
+        // matches the slide axis; the other axis is ignored.
+        let (panel_w, panel_h) = match side {
+            SheetSide::Left | SheetSide::Right => (size.width(), 0.0),
+            SheetSide::Top | SheetSide::Bottom => (0.0, size.height()),
         };
 
-        mgr.modal()
-            .dismiss_on_escape(true)
-            .backdrop(BackdropConfig::dark().dismiss_on_click(true))
-            .edge_position(edge_side)
-            .size(sheet_width, sheet_height)
-            .motion_key(&motion_key_with_child)
+        let next_handle_id = overlay_stack()
+            .lock()
+            .ok()
+            .map(|s| s.peek_next_handle_id())
+            .unwrap_or(0);
+        let sheet_handle = OverlayHandle::from_raw(next_handle_id);
+
+        let handle = OverlayBuilder::modal()
+            // Modal defaults: ESC, click-outside (backdrop dismiss), backdrop=Some.
+            .edge(edge_side)
+            .size(panel_w, panel_h)
             .content(move || {
                 build_sheet_content(
                     side,
@@ -314,12 +265,18 @@ impl SheetBuilder {
                     border,
                     text_primary,
                     text_secondary,
-                    &enter_animation,
-                    &exit_animation,
-                    &motion_key_str,
+                    sheet_handle,
                 )
             })
-            .show()
+            .show();
+
+        debug_assert_eq!(
+            handle.raw(),
+            next_handle_id,
+            "peek_next_handle_id was stale — concurrent push?"
+        );
+
+        handle
     }
 }
 
@@ -345,7 +302,8 @@ pub fn sheet() -> SheetBuilder {
     SheetBuilder::new()
 }
 
-/// Build the sheet content
+/// Build the sheet content. Enter animation is delegated to the CSS
+/// `@keyframes cn-sheet-enter-{left,right,top,bottom}` rules on `.cn-sheet`.
 #[allow(clippy::too_many_arguments)]
 fn build_sheet_content(
     side: SheetSide,
@@ -360,9 +318,7 @@ fn build_sheet_content(
     border: Color,
     text_primary: Color,
     text_secondary: Color,
-    enter_animation: &MultiKeyframeAnimation,
-    exit_animation: &MultiKeyframeAnimation,
-    motion_key: &str,
+    handle: OverlayHandle,
 ) -> Div {
     let theme = ThemeState::get();
     let radius = theme.radius(RadiusToken::Lg);
@@ -403,9 +359,16 @@ fn build_sheet_content(
         }
     };
 
-    // Build sheet panel
+    let side_class = match side {
+        SheetSide::Left => "cn-sheet--left",
+        SheetSide::Right => "cn-sheet--right",
+        SheetSide::Top => "cn-sheet--top",
+        SheetSide::Bottom => "cn-sheet--bottom",
+    };
+
     let mut sheet = div()
         .class("cn-sheet")
+        .class(side_class)
         .bg(bg)
         .border(1.0, border)
         .shadow_xl()
@@ -477,7 +440,7 @@ fn build_sheet_content(
                     if let Some(ref cb) = on_close_clone {
                         cb();
                     }
-                    get_overlay_manager().close_top();
+                    handle.close();
                 })
                 .child(svg(close_icon).size(18.0, 18.0).color(text_secondary)),
         );
@@ -505,14 +468,7 @@ fn build_sheet_content(
         sheet = sheet.child(div().w_full().p_4().child(footer_fn()));
     }
 
-    // Wrap sheet panel in motion for slide animations
-    // The overlay system handles positioning via Edge position type
-    div().child(
-        motion_derived(motion_key)
-            .enter_animation(enter_animation.clone())
-            .exit_animation(exit_animation.clone())
-            .child(sheet),
-    )
+    sheet
 }
 
 /// Convenience function for a left-side sheet

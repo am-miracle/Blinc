@@ -596,6 +596,28 @@ pub const CN_STYLES: &str = r#"
     /* Modal overlay → elevation 2 */
     background: var(--cn-sheet-bg, var(--surface-elevated));
     border: 1px solid var(--cn-sheet-border, var(--border));
+    animation: cn-sheet-enter-right var(--duration-normal) ease-out;
+}
+.cn-sheet--left   { animation-name: cn-sheet-enter-left; }
+.cn-sheet--right  { animation-name: cn-sheet-enter-right; }
+.cn-sheet--top    { animation-name: cn-sheet-enter-top; }
+.cn-sheet--bottom { animation-name: cn-sheet-enter-bottom; }
+
+@keyframes cn-sheet-enter-left {
+    from { opacity: 0; transform: translateX(-100%); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes cn-sheet-enter-right {
+    from { opacity: 0; transform: translateX(100%); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes cn-sheet-enter-top {
+    from { opacity: 0; transform: translateY(-100%); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes cn-sheet-enter-bottom {
+    from { opacity: 0; transform: translateY(100%); }
+    to   { opacity: 1; transform: translateY(0); }
 }
 
 /* ============================================================================
