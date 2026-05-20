@@ -43,6 +43,8 @@ pub mod list;
 #[cfg(feature = "media")]
 pub mod media;
 pub mod overlay;
+pub mod overlay_stack;
+pub mod toast_tray;
 pub mod radio;
 pub mod rich_text_editor;
 pub mod scroll;
