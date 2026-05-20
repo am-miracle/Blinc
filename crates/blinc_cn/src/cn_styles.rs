@@ -550,6 +550,18 @@ pub const CN_STYLES: &str = r#"
     /* Modal overlay → elevation 2 */
     background: var(--cn-drawer-bg, var(--surface-elevated));
     border: 1px solid var(--cn-drawer-border, var(--border));
+    /* CSS-driven enter — slide in from edge + fade. The drawer is pinned to
+       an edge by OverlayStack; sides apply via .cn-drawer--left/right. */
+    animation: cn-drawer-enter-left var(--duration-normal) ease-out;
+}
+.cn-drawer--right {
+    animation-name: cn-drawer-enter-right;
+}
+.cn-drawer--top {
+    animation-name: cn-drawer-enter-top;
+}
+.cn-drawer--bottom {
+    animation-name: cn-drawer-enter-bottom;
 }
 .cn-drawer-header {
     border-bottom: 1px solid var(--border);
@@ -557,6 +569,23 @@ pub const CN_STYLES: &str = r#"
 }
 .cn-drawer-footer {
     padding: var(--space-4);
+}
+
+@keyframes cn-drawer-enter-left {
+    from { opacity: 0; transform: translateX(-100%); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes cn-drawer-enter-right {
+    from { opacity: 0; transform: translateX(100%); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes cn-drawer-enter-top {
+    from { opacity: 0; transform: translateY(-100%); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes cn-drawer-enter-bottom {
+    from { opacity: 0; transform: translateY(100%); }
+    to   { opacity: 1; transform: translateY(0); }
 }
 
 /* ============================================================================

@@ -806,7 +806,12 @@ impl OverlayStack {
             if let Some(ref exit) = entry.motion_exit {
                 motion_wrapper = motion_wrapper.exit_animation(exit.clone());
             }
-            let positioned = position_wrapper(motion_wrapper.child(content), &entry.position, self.viewport);
+            let positioned = position_wrapper(
+                motion_wrapper.child(content),
+                &entry.position,
+                entry.size,
+                self.viewport,
+            );
             layer = layer.child(positioned);
         }
 
@@ -821,6 +826,7 @@ impl OverlayStack {
 fn position_wrapper(
     child: impl crate::div::ElementBuilder + 'static,
     position: &OverlayPosition,
+    size: Option<(f32, f32)>,
     viewport: (f32, f32),
 ) -> Div {
     let outer = Div::new().absolute();
@@ -848,15 +854,26 @@ fn position_wrapper(
             outer.child(child)
         }
         OverlayPosition::Edge(side) => {
-            // Drawer / sheet placement — widget layer is the right place to do
-            // the proper full-edge sizing because it knows the content's
-            // desired dimensions. For Phase 2 we pin to the edge at viewport
-            // bounds and let the widget's own layout drive size.
+            // Drawer / sheet placement. When the widget supplied `entry.size`,
+            // pin the panel flush to that edge with the override size; the
+            // perpendicular axis stretches to the viewport (full-height panel
+            // sliding from L/R, full-width panel sliding from T/B). Without a
+            // size override we fall back to viewport-sized which is rarely what
+            // a widget wants — preferred call shape is `.size(w, h).edge(...)`.
+            let (panel_w, panel_h) = size.unwrap_or(viewport);
             let outer = match side {
-                EdgeSide::Left => outer.top(0.0).left(0.0).h(viewport.1),
-                EdgeSide::Right => outer.top(0.0).left(viewport.0).h(viewport.1),
-                EdgeSide::Top => outer.top(0.0).left(0.0).w(viewport.0),
-                EdgeSide::Bottom => outer.top(viewport.1).left(0.0).w(viewport.0),
+                EdgeSide::Left => outer.top(0.0).left(0.0).w(panel_w).h(viewport.1),
+                EdgeSide::Right => outer
+                    .top(0.0)
+                    .left(viewport.0 - panel_w)
+                    .w(panel_w)
+                    .h(viewport.1),
+                EdgeSide::Top => outer.top(0.0).left(0.0).w(viewport.0).h(panel_h),
+                EdgeSide::Bottom => outer
+                    .top(viewport.1 - panel_h)
+                    .left(0.0)
+                    .w(viewport.0)
+                    .h(panel_h),
             };
             outer.child(child)
         }
