@@ -571,6 +571,7 @@ fn build_submenu_content(
         .bg(bg)
         .border(1.0, border)
         .rounded(radius)
+        .lock_corner_shape()
         .shadow_lg()
         .overflow_clip()
         .h_fit();
@@ -783,6 +784,7 @@ fn build_menu_content(
         .bg(bg)
         .border(1.0, border)
         .rounded(radius)
+        .lock_corner_shape()
         .shadow_lg()
         .overflow_clip()
         .h_fit();

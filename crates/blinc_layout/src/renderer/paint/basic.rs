@@ -133,8 +133,10 @@ impl RenderTree {
         let resolved_corner_shape = super::helpers::resolve_corner_shape(
             render_node.props.corner_shape,
             radius,
+            (bounds.width, bounds.height),
             &theme_shape,
             radius_full,
+            render_node.props.corner_shape_locked,
         );
         let has_corner_shape_l = !resolved_corner_shape.is_round();
         if has_corner_shape_l {

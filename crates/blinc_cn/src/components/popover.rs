@@ -418,7 +418,11 @@ fn show_popover_overlay(
                 });
             }
 
-            // Styled popover container
+            // Styled popover container. `lock_corner_shape` keeps the
+            // panel's corners circular even when a theme advertises a
+            // squircle exponent — overlay chrome reads cleanest with
+            // the platform-default rounded-rect shape, not the
+            // theme's hero curve.
             let popover_content = div()
                 .class("cn-popover-content")
                 .id(&popover_id)
@@ -426,6 +430,7 @@ fn show_popover_overlay(
                 .bg(bg)
                 .border(1.0, border)
                 .rounded(radius)
+                .lock_corner_shape()
                 .p_px(padding)
                 .shadow_lg()
                 .min_w(150.0)

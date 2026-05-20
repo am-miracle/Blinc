@@ -375,6 +375,12 @@ pub struct Div {
     /// Tracks whether border_radius was explicitly set (distinguishes "set to 0" from "not set" in merges)
     pub(crate) border_radius_explicit: bool,
     pub(crate) corner_shape: CornerShape,
+    /// Set by [`Self::lock_corner_shape`]; instructs the paint walker
+    /// not to substitute the theme's squircle exponent. Floating
+    /// overlay widgets (popovers, dropdowns, select / combobox
+    /// menus) use this to keep their chrome circular regardless of
+    /// the active theme.
+    pub(crate) corner_shape_locked: bool,
     pub(crate) border_color: Option<Color>,
     pub(crate) border_width: f32,
     pub(crate) border_sides: crate::element::BorderSides,
@@ -460,6 +466,7 @@ impl Div {
             border_radius: CornerRadius::default(),
             border_radius_explicit: false,
             corner_shape: CornerShape::default(),
+            corner_shape_locked: false,
             border_color: None,
             border_width: 0.0,
             border_sides: crate::element::BorderSides::default(),
@@ -517,6 +524,7 @@ impl Div {
             border_radius: CornerRadius::default(),
             border_radius_explicit: false,
             corner_shape: CornerShape::default(),
+            corner_shape_locked: false,
             border_color: None,
             border_width: 0.0,
             border_sides: crate::element::BorderSides::default(),
@@ -2634,6 +2642,27 @@ impl Div {
         self.corner_shape(-1.0)
     }
 
+    /// Opt out of theme-driven squircle substitution.
+    ///
+    /// When the active theme advertises a non-default
+    /// [`ShapeTokens`](blinc_theme::ShapeTokens) (e.g. any of the
+    /// Universal HID variants), the paint walker substitutes the
+    /// theme's effective `n` onto rounded corners that pass the
+    /// threshold check. Calling `lock_corner_shape()` tells the
+    /// walker to leave this element's corners alone — useful for
+    /// floating overlay widgets (popovers, dropdown panels, select
+    /// menus) whose chrome should remain circular regardless of the
+    /// theme.
+    ///
+    /// Has no effect on themes that already use circular corners
+    /// (every existing platform bundle + Catppuccin BlincTheme) —
+    /// they short-circuit the substitution before this flag is
+    /// consulted.
+    pub fn lock_corner_shape(mut self) -> Self {
+        self.corner_shape_locked = true;
+        self
+    }
+
     // =========================================================================
     // Overflow Fade
     // =========================================================================
@@ -4132,6 +4161,7 @@ impl ElementBuilder for Div {
             border_radius: self.border_radius,
             border_radius_explicit: self.border_radius_explicit,
             corner_shape: self.corner_shape,
+            corner_shape_locked: self.corner_shape_locked,
             border_color: self.border_color,
             border_width: self.border_width,
             border_sides: self.border_sides,

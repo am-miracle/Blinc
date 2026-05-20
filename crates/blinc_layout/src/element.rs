@@ -997,6 +997,15 @@ pub struct RenderProps {
     pub border_radius_explicit: bool,
     /// Corner shape (superellipse n parameter per corner). Default is ROUND (n=1.0).
     pub corner_shape: CornerShape,
+    /// When `true`, the active theme's [`ShapeTokens`](blinc_theme::ShapeTokens)
+    /// must NOT substitute a squircle exponent onto this element's
+    /// corners even if `corner_shape.is_round()`. Used by floating
+    /// overlay widgets (popovers, dropdown panels, select menus,
+    /// combobox lists) that want their chrome to match the surrounding
+    /// UI's circular corners rather than picking up the theme's
+    /// squircle aesthetic. Default `false`: the paint walker is free
+    /// to substitute per the theme.
+    pub corner_shape_locked: bool,
     /// Border color (None = no border) - used for uniform borders
     pub border_color: Option<Color>,
     /// Border width in pixels - used for uniform borders
@@ -1182,6 +1191,7 @@ impl Default for RenderProps {
             border_radius: CornerRadius::default(),
             border_radius_explicit: false,
             corner_shape: CornerShape::default(),
+            corner_shape_locked: false,
             border_color: None,
             border_width: 0.0,
             border_sides: BorderSides::default(),

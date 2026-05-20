@@ -687,6 +687,7 @@ fn build_dropdown_content(
         .bg(bg)
         .border(1.0, border)
         .rounded(radius)
+        .lock_corner_shape()
         .shadow_lg()
         .overflow_clip()
         // Absolutely positioned below the trigger, rendered in foreground pass

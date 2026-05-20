@@ -409,6 +409,7 @@ fn show_tooltip_overlay(
                 .items_center()
                 .bg(bg)
                 .rounded(radius)
+                .lock_corner_shape()
                 .shadow_sm()
                 .child(text(&tooltip_text).size(12.0).color(text_color).no_wrap());
 
