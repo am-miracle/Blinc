@@ -428,10 +428,14 @@ fn build_hover_card_overlay(
                 .child(user_content)
                 .on_hover_enter(move |_| {
                     if let Ok(mut stack) = overlay_stack().lock() {
-                        // Cancel mouse-leave countdown. If exit already
-                        // started (countdown elapsed), `revive` flips
-                        // exiting back to live and cancels motion exit.
-                        if handle.is_exiting() {
+                        // CRITICAL: don't call `handle.is_exiting()` here —
+                        // it would re-lock the same mutex we already hold,
+                        // deadlocking on std::sync::Mutex. Inspect the
+                        // stack's entries directly while we hold the lock.
+                        let exiting = stack
+                            .iter_bottom_up()
+                            .any(|e| e.handle == handle && e.exiting);
+                        if exiting {
                             stack.revive(handle);
                         } else {
                             stack.handle_mouse_enter(handle);
