@@ -639,8 +639,34 @@ impl Slider {
                 };
                 let raw = min + norm * (max - min);
                 let new_val = round_to_step_click(raw);
+                // Mirror the drag handler: when `step` is set, snap the
+                // thumb to the stepped value rather than to the raw
+                // pointer x, so the visible thumb and the value stay
+                // aligned. Without this, clicking on a stepped slider
+                // springs the thumb to the cursor while value_state
+                // snaps to the nearest step — visibly diverging
+                // positions and (during the multi-frame spring) the
+                // double-thumb ghost the user reported.
+                let target_offset = if step.is_some() {
+                    if (max - min).abs() > f32::EPSILON {
+                        ((new_val - min) / (max - min)) * max_offset
+                    } else {
+                        0.0
+                    }
+                } else {
+                    x_offset
+                };
                 value_state_for_click.set(new_val);
-                thumb_offset_for_click.lock().unwrap().set_target(x_offset);
+                // `set_immediate` (not `set_target`) — drag handler
+                // also uses set_immediate and produces no artifact;
+                // the spring's multi-frame in-flight state was
+                // leaving a ghost thumb chrome at the prior position
+                // (matching the screenshot symptom). Click-to-seek
+                // now jumps cleanly to target, same as drag.
+                thumb_offset_for_click
+                    .lock()
+                    .unwrap()
+                    .set_immediate(target_offset);
                 if let Some(ref cb) = on_change_for_click {
                     cb(new_val);
                 }
