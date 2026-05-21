@@ -451,7 +451,12 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-slider-track {
-    background: var(--cn-slider-track-bg, var(--surface-elevated));
+    /* Match `.cn-progress` and `.cn-switch-track` — `--border` reads as
+       quiet chrome that delineates the track without competing with
+       the primary fill. `--surface-elevated` previously vanished
+       against the page on light themes (panel + page are both very
+       near-white in Hybrid). */
+    background: var(--cn-slider-track-bg, var(--border));
     border-radius: var(--radius-full);
 }
 .cn-slider-fill {
@@ -459,10 +464,31 @@ pub const CN_STYLES: &str = r#"
     border-radius: var(--radius-full);
 }
 .cn-slider-thumb {
-    border: 2px solid var(--cn-slider-thumb-border, var(--border));
+    /* No `background` here — bg is driven entirely by the Rust-side
+       `.bg(...)` call so per-state interiors (TextInverse for idle,
+       transparent for hover, input-bg-disabled for disabled via the
+       `--disabled` class) aren't clobbered by CSS-class application
+       order. The base CSS used to set `background: var(--surface)`,
+       which was applied AFTER any inline `.bg(TRANSPARENT)` and made
+       the hover halo invisible through the thumb's centre.
+       No `border` either — same rationale as the bg: state-specific
+       outlines (Border idle, Primary hover/drag, BorderSecondary
+       disabled) come from Rust. CSS keeps just the always-true chrome
+       (full rounded corners, pointer cursor). */
     border-radius: var(--radius-full);
-    background: var(--cn-slider-thumb-bg, var(--surface));
     cursor: pointer;
+}
+/* Disabled thumb tone — matches the disabled-button / disabled-input
+   surface family (--input-bg-disabled). Just changing the thumb bg
+   isn't enough on its own — `cn::slider` also overrides the track to
+   `--input-bg-disabled` and the fill to `--border-secondary` so the
+   whole control reads as inert (same approach `cn::switch` takes:
+   muted track + thumb chrome that doesn't change opacity). */
+.cn-slider-thumb--disabled {
+    background: var(--input-bg-disabled);
+    border-color: var(--border-secondary);
+    border-width: 1px;
+    cursor: not-allowed;
 }
 
 /* ============================================================================
@@ -470,7 +496,13 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-progress {
-    background: var(--cn-progress-track, var(--secondary));
+    /* Subtle gray track — matches typical HID expectations (Material /
+       Apple HIG / shadcn). `--secondary` was the dark slate Secondary-
+       button tone, which competed visually with the primary fill and
+       made the track read as a second-tier button rather than chrome.
+       `--border` is the same token used for switch tracks and reads as
+       light contained chrome. */
+    background: var(--cn-progress-track, var(--border));
     border-radius: var(--radius-full);
     overflow: hidden;
 }

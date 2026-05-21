@@ -31,7 +31,7 @@ fn main() -> Result<()> {
         resizable: true,
         fullscreen: false,
         animation_fps_cap: Some(30),
-        max_frame_latency: 2,
+        max_frame_latency: 1,
         ..Default::default()
     };
 
@@ -80,7 +80,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                 .child(
                     div()
                         .w_full()
-                        .p(theme.spacing().space_6)
+                        .p(theme.spacing().space_3)
                         .flex_col()
                         .gap(theme.spacing().space_8)
                         // Accordion at top for layout animation testing
@@ -337,7 +337,7 @@ fn header(ctx: &WindowedContext) -> impl ElementBuilder {
         .h(80.0)
         .bg(surface)
         .border_bottom(1.5, border)
-        .px(theme.spacing().space_6)
+        .px(theme.spacing().space_3)
         .flex_row()
         .items_center()
         .justify_between()
@@ -412,9 +412,9 @@ fn section_container() -> Div {
         .bg(surface)
         .rounded(radius)
         .border(1.5, border)
-        .p(theme.spacing().space_2)
+        .p(theme.spacing().space_1)
         .flex_col()
-        .gap(theme.spacing().space_4)
+        .gap(theme.spacing().space_3)
 }
 
 // ============================================================================
@@ -2570,11 +2570,11 @@ fn hover_card_section() -> impl ElementBuilder {
                             .content(move || {
                                 div()
                                     .flex_col()
-                                    .gap(12.0)
+                                    .gap(6.0)
                                     .child(
                                         div()
                                             .flex_row()
-                                            .gap(12.0)
+                                            .gap(6.0)
                                             .items_center()
                                             .child(
                                                 div()
@@ -2586,7 +2586,7 @@ fn hover_card_section() -> impl ElementBuilder {
                                             .child(
                                                 div()
                                                     .flex_col()
-                                                    .gap(2.0)
+                                                    .gap(1.0)
                                                     .child(
                                                         text("John Doe")
                                                             .size(t_base())
