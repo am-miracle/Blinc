@@ -1707,6 +1707,89 @@ impl RenderContext {
         // the loop. That's the "animation doesn't play until I move
         // the mouse" symptom this addresses.
         let motion_bindings = tree.motion_bindings_map();
+
+        // Pre-pass: compute each binding's translate delta this frame
+        // and the SUM of ancestor bindings' translate deltas
+        // ("inherited shift"). An "ancestor" here is any other binding
+        // whose `primitive_range` strictly contains this one's — which
+        // mirrors emission order, so it captures the motion-binding
+        // parent chain without needing a tree walk.
+        //
+        // Why this matters: the walker records `meta.centre` from
+        // `get_absolute_bounds(node)` — the LAYOUT centre, not the
+        // post-translate world centre. If an ancestor motion binding
+        // translates the subtree, this binding's primitives have
+        // shifted but its stored centre hasn't. Applying scale around
+        // the stale centre produces a positional error of
+        // `ancestor_translate × (new_scale - 1)`. Symptom (seen in
+        // cn::slider with halo): the inner scale binding paints the
+        // halo at the right position only when the thumb sits at
+        // translate=0; at any non-zero offset the halo drifts toward
+        // the layout origin, leaving a ghost trail.
+        //
+        // Fix: pre-compute each binding's inherited shift, then add it
+        // to the centre before applying scale (and persist the shifted
+        // centre so subsequent frames see the new world position as
+        // the baseline). Since we collect raw deltas BEFORE applying
+        // any patches, iteration order doesn't matter.
+        //
+        // Cost: O(N²) over composite_bindings — N is the count of
+        // motion-bound nodes in the rendered frame (~10-50 in cn_demo),
+        // so ~2500 max iterations of cheap range comparisons. The
+        // existing main loop is also O(N) with mutex locks per
+        // binding; this pre-pass is dominated by it.
+        let mut raw_translate_deltas: std::collections::HashMap<
+            blinc_layout::tree::LayoutNodeId,
+            (f32, f32),
+        > = std::collections::HashMap::new();
+        for (node, meta) in bindings.iter() {
+            let Some(b) = motion_bindings.get(node) else {
+                continue;
+            };
+            let tx = b
+                .translate_x
+                .as_ref()
+                .and_then(|v| v.lock().ok().map(|g| g.get()))
+                .unwrap_or(0.0);
+            let ty = b
+                .translate_y
+                .as_ref()
+                .and_then(|v| v.lock().ok().map(|g| g.get()))
+                .unwrap_or(0.0);
+            raw_translate_deltas
+                .insert(*node, (tx - meta.last_translate.0, ty - meta.last_translate.1));
+        }
+        let mut inherited_shifts: std::collections::HashMap<
+            blinc_layout::tree::LayoutNodeId,
+            (f32, f32),
+        > = std::collections::HashMap::new();
+        for (node, meta) in bindings.iter() {
+            let mut shift = (0.0f32, 0.0f32);
+            for (other_node, other_meta) in bindings.iter() {
+                if other_node == node {
+                    continue;
+                }
+                // "other strictly contains me" — handles the common
+                // case (ancestor has its own primitives outside the
+                // child's emission span). Equal-range pairs are
+                // excluded; that case only arises when a parent emits
+                // nothing of its own, and a translate on it composes
+                // through the existing translate patch on the SAME
+                // primitive set, so no centre adjustment is needed.
+                let contains = other_meta.primitive_range.start <= meta.primitive_range.start
+                    && other_meta.primitive_range.end >= meta.primitive_range.end
+                    && (other_meta.primitive_range.start < meta.primitive_range.start
+                        || other_meta.primitive_range.end > meta.primitive_range.end);
+                if contains {
+                    if let Some(&(dx, dy)) = raw_translate_deltas.get(other_node) {
+                        shift.0 += dx;
+                        shift.1 += dy;
+                    }
+                }
+            }
+            inherited_shifts.insert(*node, shift);
+        }
+
         let mut any_binding_active = false;
         for (node, meta) in bindings.iter_mut() {
             let bindings_for_node = match motion_bindings.get(node) {
@@ -1860,6 +1943,22 @@ impl RenderContext {
                 .as_ref()
                 .and_then(|v| v.lock().ok().map(|g| g.get()))
                 .unwrap_or(1.0);
+            // Track the inherited translate shift on EVERY frame, even
+            // when the local scale didn't change. Without this, an
+            // ancestor binding can advance its translate while this
+            // binding sits idle — and the next time scale moves, it
+            // pivots around a stale centre. Persisting the shift each
+            // frame keeps the centre tracking world space continuously.
+            // Each frame's shift is the frame delta (ancestor.current
+            // - ancestor.last), and the ancestor's `last_translate`
+            // moves to `current` further down in this loop, so this
+            // does NOT double-count across frames.
+            if let Some(&(sx_shift, sy_shift)) = inherited_shifts.get(node) {
+                if sx_shift.abs() > f32::EPSILON || sy_shift.abs() > f32::EPSILON {
+                    meta.centre.0 += sx_shift;
+                    meta.centre.1 += sy_shift;
+                }
+            }
             let new_sx = binding_scale_x * binding_scale;
             let new_sy = binding_scale_y * binding_scale;
             if (new_sx - meta.last_scale.0).abs() > f32::EPSILON
@@ -1873,12 +1972,32 @@ impl RenderContext {
                 let ratio_y = new_sy / meta.last_scale.1;
                 let cx_phys = meta.centre.0 * scale;
                 let cy_phys = meta.centre.1 * scale;
+                // For corner_radius the GPU primitive carries a
+                // single radius per corner that's used uniformly for
+                // the SDF rounded-rect (the renderer's `scale_corner_radius`
+                // pre-multiplies by the current affine's avg-scale at
+                // bake time). Use the geometric mean of the two
+                // ratios so a non-uniform scale still scales the
+                // radius coherently — for the uniform-scale case (the
+                // common one, e.g. cn::slider's halo) this is just
+                // `ratio_x = ratio_y`. Without this step a halo that's
+                // baked at scale=0.5 with corner_radius=halo_size/4
+                // (because the walker multiplied by 0.5) but then
+                // patched up to scale=1 by growing `bounds[2,3]`
+                // leaves the radius unchanged — width is now
+                // 2 × radius doubled, so the previously-circular halo
+                // renders as a rounded SQUARE.
+                let ratio_radius = (ratio_x * ratio_y).sqrt();
                 if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
                     for p in prims.iter_mut() {
                         p.bounds[0] = cx_phys + (p.bounds[0] - cx_phys) * ratio_x;
                         p.bounds[1] = cy_phys + (p.bounds[1] - cy_phys) * ratio_y;
                         p.bounds[2] *= ratio_x;
                         p.bounds[3] *= ratio_y;
+                        p.corner_radius[0] *= ratio_radius;
+                        p.corner_radius[1] *= ratio_radius;
+                        p.corner_radius[2] *= ratio_radius;
+                        p.corner_radius[3] *= ratio_radius;
                     }
                 }
                 meta.last_scale = (new_sx, new_sy);

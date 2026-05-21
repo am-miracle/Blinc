@@ -2034,30 +2034,88 @@ impl RenderTree {
                 // Centre MUST be in absolute logical-pixel coords (the
                 // consumer in `apply_binding_deltas` multiplies by DPI
                 // to get a physical-pixel pivot for rotating primitive
-                // centres). `bounds` here is parent-relative, so for any
-                // nested motion (e.g. cn::spinner where motion sits
-                // inside arc_layer inside spinner container) `bounds.x`
-                // is 0 and we'd rotate the primitives around the screen
-                // origin instead of the element's centre. Walk the
-                // parent chain via `get_absolute_bounds` and ADD
-                // `cumulative_scroll` so the centre tracks the element's
-                // actual on-screen midpoint (cn_demo's spinners sit
-                // inside a scroll container — without the scroll term
-                // the arc orbits the un-scrolled layout position
-                // instead of where the gray ring is currently drawn).
-                let centre = self
-                    .layout_tree
-                    .get_absolute_bounds(node)
-                    .map(|abs| {
-                        (
-                            abs.x + abs.width / 2.0 + cumulative_scroll.0,
-                            abs.y + abs.height / 2.0 + cumulative_scroll.1,
-                        )
-                    })
-                    .unwrap_or((
-                        bounds.x + bounds.width / 2.0,
-                        bounds.y + bounds.height / 2.0,
-                    ));
+                // centres). For a binding with no ancestor motion
+                // bindings, `get_absolute_bounds(node).centre +
+                // cumulative_scroll` is the right value. For a binding
+                // whose subtree sits inside another motion binding's
+                // translate (cn::slider's halo nested under the
+                // thumb's `motion().translate_x`), the primitives are
+                // baked at `layout + ancestor_translate`, but the
+                // layout-bounds centre doesn't know about
+                // `ancestor_translate`. Scaling around a centre that
+                // lags the primitives by `ancestor_translate` produces
+                // a positional error of `ancestor_translate ×
+                // (new_scale - 1)`.
+                //
+                // Fix: apply the current transform stack — which
+                // already includes every ancestor's position translate,
+                // motion translate, motion binding translate, and any
+                // scroll — to the node's local centre
+                // `(bounds.width/2, bounds.height/2)`. The result is
+                // the world-space pivot at bake time. Subsequent
+                // ancestor-translate changes are handled by the
+                // `inherited_shifts` pre-pass in `apply_binding_deltas`,
+                // which advances `meta.centre` by the per-frame
+                // ancestor delta to keep it tracking world space.
+                //
+                // Note: even though the binding's own scale + rotation
+                // around the same centre have already been pushed by
+                // this point, they leave the centre point fixed
+                // (`T(c)*S*T(-c)` fixes `c`), so `transform_point`
+                // gives the right answer regardless of where this sits
+                // in the sequence above.
+                // `meta.centre` is stored in LOGICAL pixels — the
+                // patcher (`apply_binding_deltas`) multiplies by the
+                // DPI scale factor when it needs physical-pixel pivot
+                // for rotating / scaling primitive centres.
+                //
+                // `ctx.current_transform()` returns a composite that
+                // includes the DPI scale push made at the top of
+                // `render_layer_with_motion` (line ~98), so the raw
+                // `transform_point` result is in PHYSICAL pixels. Divide
+                // by `scale_factor` to recover logical-pixel world
+                // coords. The DPI scale is uniform and only present at
+                // the bottom of the stack, so this divides out cleanly
+                // regardless of any rotation / scale / translate the
+                // node or its ancestors have layered on top.
+                //
+                // For the no-ancestor-motion case this matches the
+                // legacy `get_absolute_bounds + cumulative_scroll`
+                // formula bit-for-bit (both compute logical world
+                // centre of the node). For nested-motion subtrees —
+                // cn::slider's halo under the thumb's outer translate
+                // — it correctly includes the ancestor translate that
+                // `get_absolute_bounds` doesn't know about.
+                let centre = {
+                    let local_cx = bounds.width / 2.0;
+                    let local_cy = bounds.height / 2.0;
+                    let scale_factor = self.scale_factor.max(f32::EPSILON);
+                    match ctx.current_transform() {
+                        Transform::Affine2D(a) => {
+                            let p = a.transform_point(Point::new(local_cx, local_cy));
+                            (p.x / scale_factor, p.y / scale_factor)
+                        }
+                        // 3D path — no current consumer hits this for
+                        // a 2D-bound motion node; fall back to the
+                        // legacy layout-bounds calculation so the
+                        // existing 3D spinner / card flip workflows
+                        // keep their previous (correct-for-them)
+                        // behaviour.
+                        Transform::Mat4(_) => self
+                            .layout_tree
+                            .get_absolute_bounds(node)
+                            .map(|abs| {
+                                (
+                                    abs.x + abs.width / 2.0 + cumulative_scroll.0,
+                                    abs.y + abs.height / 2.0 + cumulative_scroll.1,
+                                )
+                            })
+                            .unwrap_or((
+                                bounds.x + bounds.width / 2.0,
+                                bounds.y + bounds.height / 2.0,
+                            )),
+                    }
+                };
                 let last_screen_aabb = ctx.bg_primitive_aabb(start, end);
                 // CSS-only nodes (no `MotionBindings`) reach this block
                 // because they pushed `motion_subtree` to route their
