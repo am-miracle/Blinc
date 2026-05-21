@@ -662,9 +662,28 @@ pub const CN_STYLES: &str = r#"
     color: var(--text-inverse);
     border-color: var(--primary);
 }
+/* The current page button is non-interactive (cursor: default, no
+   click handler), so its hover state should stay locked on the active
+   styling. Without this, the generic `.cn-pagination-btn:hover` rule
+   above wins (same specificity, state-selector applied after base) and
+   the primary-blue fill flips to `--surface-elevated` mid-hover — the
+   number disappears against the now-light bg and the row reads as if
+   no page is selected. */
+.cn-pagination-btn--active:hover {
+    background: var(--primary);
+    color: var(--text-inverse);
+    border-color: var(--primary);
+}
 .cn-pagination-btn--disabled {
     opacity: 0.5;
     cursor: not-allowed;
+}
+/* Match the active rule — disabled buttons (chevrons at first/last
+   page) shouldn't repaint to surface-elevated on hover; they keep
+   their dimmed look so the interactive affordance reads as 'not
+   available right now'. */
+.cn-pagination-btn--disabled:hover {
+    background: transparent;
 }
 
 /* ============================================================================
