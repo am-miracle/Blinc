@@ -1052,6 +1052,17 @@ pub struct RenderProps {
     /// Whether this is a Stack layer that increments z_layer for proper z-ordering
     /// When true, entering this node increments the DrawContext's z_layer
     pub is_stack_layer: bool,
+    /// Whether this node is the root of an overlay panel (`overlay_stack` layer
+    /// or `toast_tray` layer) that should be routed to the dynamic batch so
+    /// the panel's SDF lands in `composite_frame`'s overlay pass — AFTER the
+    /// static cache (and the static SVG dispatch) is blitted.
+    ///
+    /// Distinct from `is_stack_layer` because the generic `Stack` widget
+    /// (used by e.g. `cn::avatar` for layering a status dot over the avatar
+    /// circle) sets `is_stack_layer: true` for z-counter bumping but is NOT
+    /// an overlay — routing those to the dynamic batch broke the avatar's
+    /// inner SDF / image rendering.
+    pub is_overlay_root: bool,
     /// Cursor style when hovering over this element (None = inherit from parent)
     pub cursor: Option<CursorStyle>,
     /// Whether this element is transparent to hit-testing (pointer-events: none)
@@ -1212,6 +1223,7 @@ impl Default for RenderProps {
             motion_is_suspended: false,
             motion_on_ready_callback: None,
             is_stack_layer: false,
+            is_overlay_root: false,
             cursor: None,
             pointer_events_none: false,
             is_fixed: false,

@@ -308,6 +308,7 @@ impl ToastTray {
                 .w(0.0)
                 .h(0.0)
                 .stack_layer()
+                .overlay_root()
                 .pointer_events_none();
         }
 
@@ -347,6 +348,11 @@ impl ToastTray {
             // increment. Without this, toasts overlapping main-UI content
             // sometimes render *under* it (notably text glyphs / SVGs).
             .stack_layer()
+            // Route the entire toast-tray subtree's SDF + text + SVG
+            // into the dynamic batch so it paints in composite_frame's
+            // overlay pass — after the static cache + static-SVG
+            // dispatch is blitted, so toasts always sit on top.
+            .overlay_root()
             // Layer is transparent / event-pass-through; each toast card
             // re-enables input as needed.
             .pointer_events_none();

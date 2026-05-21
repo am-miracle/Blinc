@@ -831,6 +831,14 @@ impl OverlayStack {
             .w(layer_w)
             .h(layer_h)
             .stack_layer()
+            // Route the entire overlay-stack subtree's SDF + text + SVG
+            // into the dynamic batch so it paints in composite_frame's
+            // overlay pass — after the static cache + static-SVG
+            // dispatch is blitted. Otherwise a sibling button's static
+            // chevron-down SVG at z=0 paints on top of the overlay
+            // panel's z=1 bg primitive (the SVG dispatch is one batched
+            // draw at the end of the cache pass).
+            .overlay_root()
             .pointer_events_none();
 
         if !has_visible {

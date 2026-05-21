@@ -514,7 +514,7 @@ impl RenderTree {
         // so this change doesn't reactivate that regression.
         let in_motion_subtree = motion_bindings_ref.is_some()
             || render_node.props.motion.is_some()
-            || render_node.props.is_stack_layer;
+            || render_node.props.is_overlay_root;
         if in_motion_subtree {
             ctx.push_motion_subtree();
         }

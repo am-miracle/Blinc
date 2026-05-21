@@ -395,6 +395,11 @@ pub struct Div {
     pub(crate) layer_effects: Vec<LayerEffect>,
     /// Marks this as a stack layer for z-ordering (increments z_layer for interleaved rendering)
     pub(crate) is_stack_layer: bool,
+    /// Whether this node is the root of an overlay panel that should route
+    /// its SDF + text + SVG dispatches into the dynamic batch. Set by
+    /// OverlayStack / ToastTray; the generic `Stack` widget does NOT set
+    /// this (it only uses `is_stack_layer` for z-counter bumping).
+    pub(crate) is_overlay_root: bool,
     pub(crate) event_handlers: crate::event_handler::EventHandlers,
     /// Element ID for selector API queries
     pub(crate) element_id: Option<String>,
@@ -479,6 +484,7 @@ impl Div {
             pointer_events_none: false,
             layer_effects: Vec::new(),
             is_stack_layer: false,
+            is_overlay_root: false,
             event_handlers: crate::event_handler::EventHandlers::new(),
             element_id: None,
             classes: Vec::new(),
@@ -537,6 +543,7 @@ impl Div {
             pointer_events_none: false,
             layer_effects: Vec::new(),
             is_stack_layer: false,
+            is_overlay_root: false,
             event_handlers: crate::event_handler::EventHandlers::new(),
             element_id: None,
             classes: Vec::new(),
@@ -3216,6 +3223,17 @@ impl Div {
         self
     }
 
+    /// Mark this node as the root of an overlay panel — used by
+    /// `OverlayStack` / `ToastTray` so their content routes through the
+    /// dynamic batch (and lands in `composite_frame`'s overlay pass after
+    /// the static cache + static-SVG dispatch). The generic `Stack`
+    /// widget should NOT call this — its `is_stack_layer` is purely for
+    /// z-counter bumping within the static cache.
+    pub fn overlay_root(mut self) -> Self {
+        self.is_overlay_root = true;
+        self
+    }
+
     /// Set CSS z-index for stacking order (higher values render on top)
     pub fn z_index(mut self, z: i32) -> Self {
         self.z_index = z;
@@ -4172,6 +4190,7 @@ impl ElementBuilder for Div {
             opacity: self.opacity,
             clips_content,
             is_stack_layer: self.is_stack_layer,
+            is_overlay_root: self.is_overlay_root,
             pointer_events_none: self.pointer_events_none,
             cursor: self.cursor,
             layer_effects: self.layer_effects.clone(),
