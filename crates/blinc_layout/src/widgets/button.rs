@@ -536,85 +536,96 @@ where
         .justify_center()
 }
 
+impl Button {
+    /// Register the state callback on the inner Stateful's shared state.
+    ///
+    /// Called from both `build()` and `render_props()` so that when a fresh
+    /// `Button` is constructed mid-rebuild (e.g. cn::button created inside
+    /// an outer Stateful's `on_state` callback, then visited only via
+    /// `render_props()` on the visual-rebuild path — which never calls
+    /// `build()`), the new Button's inner Div still gets populated.
+    ///
+    /// Pre-fix: registration lived only in `build()`. On the visual-rebuild
+    /// path the new `cn::button` builder's `render_props()` → Stateful's
+    /// `render_props()` → `ensure_callback_invoked()` would short-circuit
+    /// because either (a) the shared `state_callback` was None on a brand
+    /// new shared-state slot, or (b) `needs_visual_update` was false (the
+    /// previous callback run had reset it). Either way the new Stateful's
+    /// fresh inner Div stayed empty — no bg, no label — and the visual
+    /// rebuild then copied that empty render_props onto the existing
+    /// layout node, washing out the trigger button to page-bg white.
+    ///
+    /// Idempotent: re-registering the callback overwrites the previous
+    /// Arc and re-bumps `needs_visual_update`; `ensure_callback_invoked`
+    /// runs the callback exactly once after a flip to true and then
+    /// resets the flag.
+    fn register_state_callback(&self) {
+        let config_for_state = Arc::clone(&self.config);
+        let custom_callback = self.custom_state_callback.clone();
+        let css_element_id = self.inner.element_id().map(|s| s.to_string());
+
+        self.inner.ensure_state_handlers_registered();
+
+        let shared_state = self.inner.shared_state();
+        let mut shared = shared_state.lock().unwrap();
+        shared.state_callback =
+            Some(Arc::new(move |state: &ButtonState, container: &mut Div| {
+                tracing::debug!("Button on_state callback fired, state={:?}", state);
+                let mut cfg = config_for_state.lock().unwrap();
+
+                apply_css_overrides_button(
+                    &mut cfg,
+                    css_element_id.as_deref(),
+                    state,
+                    container,
+                );
+
+                let bg = match state {
+                    ButtonState::Idle => cfg.bg_color,
+                    ButtonState::Hovered => cfg.hover_color,
+                    ButtonState::Pressed => cfg.pressed_color,
+                    ButtonState::Disabled => cfg.disabled_color,
+                };
+
+                let mut update = div().bg(bg);
+
+                if let Some(ref callback) = custom_callback {
+                    drop(cfg);
+                    callback(*state, &mut update);
+                } else if let Some(ref label) = cfg.label {
+                    update =
+                        update.child(text(label).size(cfg.text_size).color(cfg.text_color));
+                    drop(cfg);
+                } else {
+                    drop(cfg);
+                }
+
+                container.merge(update);
+            }));
+        shared.base_render_props = Some(self.inner.inner_render_props());
+        shared.base_style = self.inner.inner_layout_style();
+        shared.needs_visual_update = true;
+    }
+}
+
 impl ElementBuilder for Button {
     fn build(&self, tree: &mut LayoutTree) -> LayoutNodeId {
         tracing::debug!("Button::build called");
-        // Capture current config values for the on_state callback
-        let config_for_state = Arc::clone(&self.config);
-        let custom_callback = self.custom_state_callback.clone();
-        // Capture element ID for CSS override resolution
-        let css_element_id = self.inner.element_id().map(|s| s.to_string());
-
-        // Ensure state transition handlers (hover, press) are registered
-        // This is needed because Button bypasses Stateful::on_state() and sets
-        // the callback directly, so register_state_handlers() is never called.
-        self.inner.ensure_state_handlers_registered();
-
-        // Register on_state callback with current config
-        // This will be applied by Stateful::build() when it sees needs_visual_update
-        {
-            let shared_state = self.inner.shared_state();
-            let mut shared = shared_state.lock().unwrap();
-            shared.state_callback =
-                Some(Arc::new(move |state: &ButtonState, container: &mut Div| {
-                    tracing::debug!("Button on_state callback fired, state={:?}", state);
-                    let mut cfg = config_for_state.lock().unwrap();
-
-                    // Apply CSS overrides if stylesheet is active
-                    apply_css_overrides_button(
-                        &mut cfg,
-                        css_element_id.as_deref(),
-                        state,
-                        container,
-                    );
-
-                    let bg = match state {
-                        ButtonState::Idle => cfg.bg_color,
-                        ButtonState::Hovered => cfg.hover_color,
-                        ButtonState::Pressed => cfg.pressed_color,
-                        ButtonState::Disabled => cfg.disabled_color,
-                    };
-
-                    // Apply background color and content
-                    let mut update = div().bg(bg);
-
-                    // Add content based on whether we have custom content or label
-                    if let Some(ref callback) = custom_callback {
-                        // Drop config lock before calling custom callback to avoid
-                        // deadlock if the callback reads the config (e.g. for text_color)
-                        drop(cfg);
-                        callback(*state, &mut update);
-                    } else if let Some(ref label) = cfg.label {
-                        tracing::debug!("Button adding label child: {}", label);
-                        update =
-                            update.child(text(label).size(cfg.text_size).color(cfg.text_color));
-                        drop(cfg);
-                    } else {
-                        drop(cfg);
-                    }
-
-                    let update_children = update.children.len();
-                    tracing::debug!(
-                        "Button update div has {} children before merge",
-                        update_children
-                    );
-                    container.merge(update);
-                    let container_children = container.children.len();
-                    tracing::debug!(
-                        "Button container has {} children after merge",
-                        container_children
-                    );
-                }));
-            shared.base_render_props = Some(self.inner.inner_render_props());
-            shared.base_style = self.inner.inner_layout_style();
-            shared.needs_visual_update = true;
-        }
-
-        // Build the inner Stateful - it will apply the callback we just set
+        self.register_state_callback();
+        // Build the inner Stateful — it will apply the callback we just set
         self.inner.build(tree)
     }
 
     fn render_props(&self) -> RenderProps {
+        // Mirror the setup done in `build()` so that visual-rebuild paths
+        // (which call `render_props()` but never `build()` on the new
+        // builder instance) still get a fully-populated inner Div. See
+        // `register_state_callback` for the full rationale — symptom was
+        // cn::dropdown_menu_custom / cn::popover triggers losing their
+        // background colour on hover because the outer wrapper Stateful's
+        // visual rebuild snapshotted an unset cn::button into the layout
+        // node.
+        self.register_state_callback();
         self.inner.render_props()
     }
 
