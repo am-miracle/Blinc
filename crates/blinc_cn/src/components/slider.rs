@@ -216,7 +216,7 @@ impl Slider {
     /// # Example
     /// ```ignore
     /// let volume = ctx.use_state_for("volume", 0.5);
-    /// cn::slider(&volume).build_final(ctx)
+    /// cn::slider(&volume)
     /// ```
     #[track_caller]
     pub fn new(value_state: &State<f32>) -> Self {
@@ -394,22 +394,32 @@ impl Slider {
             .on_state(move |sctx| {
                 let state = sctx.state();
 
-                // Halo ticker — drives stateful refreshes while the
-                // FSM is in Entering/Exiting. `loop_infinite()` so
-                // the kf never settles between frames; we manually
-                // `.stop()` it when the FSM hits a steady state.
-                // Without the loop, the kf settles after one cycle
-                // (HALO_DURATION_MS) and the stateful drops out of
-                // the animation registry — but `elapsed_ms` can
-                // lag wall-clock time when `delta_ms` is clamped
-                // (stall safety in `refresh_stateful`), so the FSM
-                // could still be in Entering/Exiting when refreshes
-                // stop, pinning the halo mid-animation.
+                // Halo ticker — its duration is intentionally much
+                // longer than `HALO_DURATION_MS` so the kf is still
+                // playing through worst-case stall scenarios (where
+                // `delta_ms` clamping makes `elapsed_ms` lag wall-
+                // clock by up to ~3x). Without the buffer the kf
+                // could settle before the FSM transitions out,
+                // dropping the stateful from the animation refresh
+                // registry mid-animation and freezing the halo
+                // partway through the ramp.
+                //
+                // `loop_count(0)` is essential: it pins `iterations`
+                // at 0 so `KeyframeTrack::should_continue` returns
+                // `false`, which reduces `is_playing()` to just
+                // `animation.is_playing()`. With the default
+                // `iterations = 1`, a freshly-created (never
+                // started) kf reports `is_playing = true` (because
+                // `current_iteration(0) < iterations(1)`) and the
+                // stateful re-registers for animation refresh every
+                // frame from creation onward — pegging idle CPU.
+                // With `loop_count(-1)` (loop_infinite) the same
+                // bug persists forever even after `.stop()`.
                 let kf = sctx.use_keyframes("halo_ticker", |b| {
                     b.at(0, 0.0)
-                        .at(HALO_DURATION_MS, 1.0)
+                        .at(HALO_DURATION_MS * 4, 1.0)
                         .ease(Easing::Linear)
-                        .loop_infinite()
+                        .loop_count(0)
                 });
 
                 let halo_scale = match state {
@@ -494,13 +504,11 @@ impl Slider {
                     .relative()
                     .child(animated_fill);
 
-                // Track visual + click-to-jump. The click handler is
-                // built fresh each on_state call so it can capture
-                // current clones of the relevant state.
-                let just_dragged_for_click = just_dragged_for_click.clone();
-                let value_state_for_click = value_state_for_click.clone();
-                let on_change_for_click = on_change_for_click.clone();
-                let thumb_offset_for_click = thumb_offset_for_click.clone();
+                // Track visual — purely cosmetic now. Click-to-seek
+                // is on the Stateful host below so it catches clicks
+                // anywhere on the slider's bounds (including over
+                // the blue fill and the thumb, which stack above
+                // this element and would otherwise swallow events).
                 let track_visual = div()
                     .class("cn-slider-track")
                     .absolute()
@@ -510,29 +518,7 @@ impl Slider {
                     .h(track_height)
                     .rounded(radius)
                     .bg(track_bg)
-                    .cursor_pointer()
-                    .on_click(move |event| {
-                        if disabled {
-                            return;
-                        }
-                        if just_dragged_for_click.get() {
-                            just_dragged_for_click.set(false);
-                            return;
-                        }
-                        let track_w = event.bounds_width;
-                        if track_w > 0.0 {
-                            let x = event.local_x;
-                            let norm = (x / track_w).clamp(0.0, 1.0);
-                            let raw = min + norm * (max - min);
-                            let new_val = round_to_step_click(raw);
-                            value_state_for_click.set(new_val);
-                            let x_offset = norm * (track_w - thumb_size);
-                            thumb_offset_for_click.lock().unwrap().set_target(x_offset);
-                            if let Some(ref cb) = on_change_for_click {
-                                cb(new_val);
-                            }
-                        }
-                    });
+                    .cursor_pointer();
 
                 let mut container = div()
                     .relative()
@@ -561,6 +547,15 @@ impl Slider {
             })
             // DRAG auto-dispatches Pressed → Dragging. This handler
             // updates the thumb position + value_state from mouse delta.
+            //
+            // When `step` is set the thumb snaps to step positions —
+            // the visible thumb tracks `value_state` (which is
+            // already snapped) instead of the continuous mouse
+            // position. Without this the continuous thumb and the
+            // snapped value diverge, and the previous baked
+            // continuous-position primitives can stay in the cache
+            // while the new render reflects the snapped value,
+            // producing a "double thumb" visual.
             .on_drag(move |event| {
                 if disabled {
                     return;
@@ -569,14 +564,29 @@ impl Slider {
                 let delta_x = event.mouse_x - start_x;
                 let start_offset = drag_start_offset_for_drag.get();
                 let max_offset = track_width - thumb_size;
-                let new_offset = (start_offset + delta_x).clamp(0.0, max_offset);
+                let continuous_offset = (start_offset + delta_x).clamp(0.0, max_offset);
+                let norm = if max_offset > 0.0 {
+                    continuous_offset / max_offset
+                } else {
+                    0.0
+                };
+                let raw = min + norm * (max - min);
+                let new_val = round_to_step_drag(raw);
+                // Snap the thumb to the value when `step` is set;
+                // otherwise track the cursor continuously.
+                let target_offset = if step.is_some() {
+                    if (max - min).abs() > f32::EPSILON {
+                        ((new_val - min) / (max - min)) * max_offset
+                    } else {
+                        0.0
+                    }
+                } else {
+                    continuous_offset
+                };
                 thumb_offset_for_drag
                     .lock()
                     .unwrap()
-                    .set_immediate(new_offset);
-                let norm = new_offset / max_offset;
-                let raw = min + norm * (max - min);
-                let new_val = round_to_step_drag(raw);
+                    .set_immediate(target_offset);
                 if (value_state_for_drag.get() - new_val).abs() > f32::EPSILON {
                     value_state_for_drag.set(new_val);
                     if let Some(ref cb) = on_change_for_drag {
@@ -589,6 +599,51 @@ impl Slider {
             // fires immediately after.
             .on_drag_end(move |_event| {
                 just_dragged_for_drag_end.set(true);
+            })
+            // Click-to-seek: a click anywhere on the slider container
+            // (track, fill, or thumb) jumps the thumb to the click
+            // position. Attached to the Stateful host so it catches
+            // clicks regardless of which child element they land on
+            // — track_visual, track_fill, and thumb_wrapper all stack
+            // above each other and would otherwise swallow events
+            // depending on which one happens to be on top at the
+            // click point.
+            //
+            // `just_dragged` is the post-drag suppression flag: a
+            // click event also fires after every drag (on POINTER_UP
+            // with no movement filter), so without this gate every
+            // released drag would seek to the release point.
+            .on_click(move |event| {
+                if disabled {
+                    return;
+                }
+                if just_dragged_for_click.get() {
+                    just_dragged_for_click.set(false);
+                    return;
+                }
+                let container_w = event.bounds_width;
+                if container_w <= 0.0 {
+                    return;
+                }
+                // The thumb's centre is what tracks the value: when
+                // the user clicks at `x`, drop the centre there.
+                // `x_offset` is the thumb's LEFT edge — shift left
+                // by `thumb_size/2` and clamp to the travel range.
+                let max_offset = container_w - thumb_size;
+                let x_offset =
+                    (event.local_x - thumb_size / 2.0).clamp(0.0, max_offset);
+                let norm = if max_offset > 0.0 {
+                    x_offset / max_offset
+                } else {
+                    0.0
+                };
+                let raw = min + norm * (max - min);
+                let new_val = round_to_step_click(raw);
+                value_state_for_click.set(new_val);
+                thumb_offset_for_click.lock().unwrap().set_target(x_offset);
+                if let Some(ref cb) = on_change_for_click {
+                    cb(new_val);
+                }
             });
 
         // Pre-fix the entire container was `.opacity(0.5)` on disabled
@@ -741,11 +796,13 @@ impl SliderConfig {
 
 /// Builder for creating Slider components with fluent API
 ///
-/// Unlike other builders, this one builds the slider immediately when `build_final()` is called,
-/// because the context reference cannot be stored due to lifetime constraints.
+/// Implements `ElementBuilder` directly via a lazy `OnceCell<Slider>`
+/// so the slider can be used inline without calling `build_final()` —
+/// the same pattern as `CheckboxBuilder` and `RadioGroupBuilder`.
 pub struct SliderBuilder {
     key: InstanceKey,
     config: SliderConfig,
+    built: std::cell::OnceCell<Slider>,
 }
 
 impl SliderBuilder {
@@ -757,6 +814,7 @@ impl SliderBuilder {
         Self {
             key: InstanceKey::new("slider"),
             config: SliderConfig::new(value_state.clone()),
+            built: std::cell::OnceCell::new(),
         }
     }
 
@@ -765,7 +823,16 @@ impl SliderBuilder {
         Self {
             key: InstanceKey::explicit(key),
             config: SliderConfig::new(value_state.clone()),
+            built: std::cell::OnceCell::new(),
         }
+    }
+
+    /// Get or build the inner Slider. Materialized on the first
+    /// `ElementBuilder` access; subsequent builder method calls
+    /// after this point are no-ops because the inner is cached.
+    fn get_or_build(&self) -> &Slider {
+        self.built
+            .get_or_init(|| Slider::with_config(self.key.clone(), self.config.clone()))
     }
 
     /// Set the minimum value (default: 0.0)
@@ -845,21 +912,35 @@ impl SliderBuilder {
         self
     }
 
-    /// Build the final Slider component with the given context
-    ///
-    /// This must be called last to create the actual Slider element.
-    pub fn build_final(self) -> Slider {
-        Slider::with_config(self.key, self.config)
+}
+
+impl ElementBuilder for SliderBuilder {
+    fn build(&self, tree: &mut LayoutTree) -> LayoutNodeId {
+        self.get_or_build().build(tree)
+    }
+
+    fn render_props(&self) -> RenderProps {
+        self.get_or_build().render_props()
+    }
+
+    fn children_builders(&self) -> &[Box<dyn ElementBuilder>] {
+        self.get_or_build().children_builders()
+    }
+
+    fn element_type_id(&self) -> ElementTypeId {
+        self.get_or_build().element_type_id()
+    }
+
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
+        self.get_or_build().element_classes()
     }
 }
 
 /// Create a slider with context and state
 ///
 /// The slider uses context-driven state that persists across UI rebuilds.
-/// Uses BlincComponent macro for type-safe state management.
-///
-/// **Important**: Call `.build_final(ctx)` at the end of the builder chain
-/// to create the final Slider element.
+/// `SliderBuilder` implements `ElementBuilder`, so the builder can be
+/// used inline as a child — no terminal `build_final()` call needed.
 ///
 /// # Example
 ///
@@ -875,7 +956,6 @@ impl SliderBuilder {
 ///         .label("Volume")
 ///         .show_value()
 ///         .on_change(|v| println!("Volume: {}", v))
-///         .build_final(ctx)
 /// }
 /// ```
 #[track_caller]
