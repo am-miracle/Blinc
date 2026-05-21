@@ -41,7 +41,7 @@ use blinc_layout::element::{CursorStyle, RenderProps};
 use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
-use blinc_layout::widgets::hr::hr_with_bg;
+use blinc_layout::widgets::hr::hr;
 use blinc_layout::widgets::overlay::AnchorDirection;
 use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
 use blinc_layout::InstanceKey;
@@ -785,6 +785,7 @@ fn build_menubar_menu_div(
     let menu_id = key;
 
     let mut menu = div()
+        .class("cn-menubar-content")
         .id(menu_id)
         .flex_col()
         .w(width)
@@ -823,7 +824,8 @@ fn build_menubar_menu_div(
 
     for (idx, item) in items.iter().enumerate() {
         if item.is_separator() {
-            menu = menu.child(hr_with_bg(bg));
+            // See dropdown_menu.rs for rationale.
+            menu = menu.child(hr());
         } else {
             let item_label = item.get_label().to_string();
             let item_shortcut = item.get_shortcut().map(|s| s.to_string());
@@ -875,6 +877,7 @@ fn build_menubar_menu_div(
                     text(shortcut)
                         .size(font_size - 2.0)
                         .color(shortcut_color)
+                        .monospace()
                         .no_cursor(),
                 ))
             } else if has_submenu {

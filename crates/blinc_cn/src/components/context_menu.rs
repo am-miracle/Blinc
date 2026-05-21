@@ -57,7 +57,7 @@ use blinc_layout::click_outside;
 use blinc_layout::element::CursorStyle;
 use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
-use blinc_layout::widgets::hr::hr_with_bg;
+use blinc_layout::widgets::hr::hr;
 use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
 
@@ -642,7 +642,11 @@ fn build_menu_content(
 
     for (idx, item) in items.iter().enumerate() {
         if item.is_separator {
-            menu = menu.child(hr_with_bg(bg));
+            // See dropdown_menu.rs for rationale — `hr()` lets the
+            // panel's --surface-elevated CSS bg show through the
+            // separator's padding instead of being covered by pure
+            // white `Surface`.
+            menu = menu.child(hr());
         } else {
             let item_label = item.label.clone();
             let item_shortcut = item.shortcut.clone();
@@ -697,6 +701,7 @@ fn build_menu_content(
                     text(shortcut)
                         .size(font_size - 2.0)
                         .color(shortcut_color)
+                        .monospace()
                         .no_cursor(),
                 ))
             } else if has_submenu {

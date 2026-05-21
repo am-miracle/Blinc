@@ -48,7 +48,7 @@ pub const CN_STYLES: &str = r#"
 .cn-sidebar, .cn-sidebar-item,
 .cn-dropdown-menu, .cn-dropdown-item,
 .cn-context-menu, .cn-context-menu-item,
-.cn-menubar, .cn-menubar-trigger, .cn-menubar-item,
+.cn-menubar, .cn-menubar-trigger, .cn-menubar-content, .cn-menubar-item,
 .cn-popover-content, .cn-hover-card-content,
 .cn-tree-node, .cn-skeleton {
     font-family: var(--font-sans);
@@ -425,7 +425,11 @@ pub const CN_STYLES: &str = r#"
     cursor: pointer;
     color: var(--text-primary);
     border-radius: var(--radius-sm);
-    transition: background var(--duration-fastest);
+    /* No CSS `transition` here — same rationale as cn-menubar-item:
+       when the cursor slides across rows quickly the bg transition
+       leaves multiple rows partially highlighted (each at a different
+       point in the fade-out) and reads as a stuck-hover bug. Instant
+       on/off matches the HID. */
 }
 /* Item hover uses `--accent-subtle` because the parent panel is
    already at `--surface-elevated`; hovering to the same colour
@@ -706,6 +710,15 @@ pub const CN_STYLES: &str = r#"
     background: var(--surface-elevated);
     color: var(--text-primary);
 }
+/* The dropdown panel (`.cn-nav-menu-content`) is itself painted at
+   `--surface-elevated`, so the generic `.cn-nav-link:hover` rule
+   above (which sets the same fill) leaves items inside the panel
+   with no visible hover affordance. Override with `--accent-subtle`
+   for the descendant case — same convention combobox / select /
+   dropdown-menu items use against their own surface-elevated panels. */
+.cn-nav-menu-content .cn-nav-link:hover {
+    background: var(--accent-subtle);
+}
 
 .cn-nav-menu-content {
     /* Floating overlay → elevation 2 */
@@ -851,6 +864,17 @@ pub const CN_STYLES: &str = r#"
 .cn-menubar-trigger:hover {
     background: var(--surface-elevated);
 }
+/* Dropdown panel that opens when a menubar trigger is activated.
+   Shared chrome with .cn-dropdown-menu / .cn-context-menu so the
+   File / Edit / View popups read as elevation-2 floating surfaces
+   instead of the pure-white `Surface` the Rust-side `.bg(...)`
+   fallback was painting. */
+.cn-menubar-content {
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-default);
+    padding: var(--space-1);
+}
 .cn-menubar-item {
     border-radius: var(--radius-sm);
     background: transparent;
@@ -918,7 +942,9 @@ pub const CN_STYLES: &str = r#"
        collapse all rows to the same x-offset. */
     border-radius: var(--radius-sm);
     cursor: pointer;
-    transition: background var(--duration-fastest);
+    /* No CSS `transition` here — same rationale as cn-menubar-item /
+       cn-select-item: the bg transition leaves multiple rows
+       partially highlighted on a fast cursor sweep. */
 }
 .cn-tree-node:hover {
     background: var(--surface-elevated);

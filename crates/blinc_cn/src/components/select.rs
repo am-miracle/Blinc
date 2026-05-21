@@ -645,7 +645,14 @@ fn build_dropdown_content(
             text_color
         };
 
-        let base_bg = if is_selected { surface_elevated } else { bg };
+        // No inline bg — `.w_full()` items would otherwise blanket the
+        // dropdown panel's `--surface-elevated` CSS bg with pure-white
+        // `Surface` for every non-selected row, leaving only the thin
+        // `var(--space-1)` padding edge of the panel visible. CSS
+        // `.cn-select-item:hover` / `.cn-select-item--selected` set
+        // the bg when interactive; everything else stays transparent
+        // so the panel's own surface-elevated fill reads through.
+        let _ = surface_elevated;
 
         // Plain div with element ID for proper event registration during subtree rebuilds.
         // Hover styles come from `.cn-select-item:hover` in cn_styles.rs.
@@ -662,7 +669,6 @@ fn build_dropdown_content(
             })
             .flex_row()
             .items_center()
-            .bg(base_bg)
             .child(if let Some(ref content_fn) = opt_content {
                 content_fn()
             } else {
