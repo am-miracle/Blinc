@@ -5474,6 +5474,23 @@ impl WindowedApp {
                             // This updates dynamic properties without touching tree structure
                             let _animations_active = rs.tick(current_time);
 
+                            // Detect "motion just settled this frame": pre-tick the
+                            // FSM had at least one motion mid-flight, post-tick it
+                            // has none. The current paint will display the settled
+                            // state — but we still arm one more redraw via
+                            // `stateful::request_redraw()` so the next Frame fires
+                            // unconditionally. Belt-and-suspenders against the
+                            // "final frame doesn't ship until mouse-move" symptom:
+                            // even if the current frame somehow skipped its paint
+                            // (cap-interval edge, surface contention, etc.), the
+                            // follow-up frame still paints the final state without
+                            // requiring external input to wake the loop.
+                            let motion_just_settled =
+                                motion_was_active_pre_tick && !rs.has_active_motions();
+                            if motion_just_settled {
+                                blinc_layout::stateful::request_redraw();
+                            }
+
                             // Tick CSS animations/transitions synchronously on the main thread.
                             // The scheduler's bg thread drives 120fps redraws via wake_callback,
                             // but actual ticking is done here to stay in phase with rendering.
