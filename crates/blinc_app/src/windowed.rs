@@ -5489,6 +5489,23 @@ impl WindowedApp {
                                 motion_was_active_pre_tick && !rs.has_active_motions();
                             if motion_just_settled {
                                 blinc_layout::stateful::request_redraw();
+                                // Force the next paint to re-walk the tree from
+                                // scratch. The compositor's static-cache
+                                // invalidation gate (`other_animations_active`
+                                // in `try_render_with_compositor`) reads
+                                // `has_active_motions()` POST-tick — on the
+                                // settle frame that's already `false`, so the
+                                // gate keeps the cached primitives from the
+                                // penultimate paint (which were rasterised with
+                                // `motion.current` in its lerped state, not the
+                                // settled `MotionKeyframe::default()`). User
+                                // sees the animation freeze one frame short of
+                                // the final state. Invalidating here forces
+                                // the walker to repopulate the cache with
+                                // post-tick `motion.current = default` values.
+                                blinc_app.invalidate_render_cache_tagged(
+                                    "motion_just_settled",
+                                );
                             }
 
                             // Tick CSS animations/transitions synchronously on the main thread.
