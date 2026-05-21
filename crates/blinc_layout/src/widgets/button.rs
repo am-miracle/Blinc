@@ -8,14 +8,14 @@
 //!
 //! ```ignore
 //! // Simple text button - state persists across rebuilds
-//! let btn_state = ctx.use_state_for("my_button", ButtonState::Idle);
+//! let btn_state = ctx.use_fsm(ButtonState::Idle);
 //! button(btn_state, "Click me")
 //!     .on_click(|_| println!("Clicked!"))
 //!     .bg_color(Color::RED)
 //!     .hover_color(Color::GREEN)
 //!
 //! // Button with custom child content
-//! let save_btn_state = ctx.use_state_for("save_btn", ButtonState::Idle);
+//! let save_btn_state = ctx.use_fsm(ButtonState::Idle);
 //! button_with(save_btn_state, |_state| {
 //!     div().flex_row().gap(8.0)
 //!         .child(svg_icon("save"))
@@ -90,13 +90,13 @@ pub struct Button {
 impl Button {
     /// Create a button with a text label and externally-managed state
     ///
-    /// The state handle should be created via `ctx.use_state_for()` for persistence
+    /// The state handle should be created via `ctx.use_fsm()` for persistence
     /// across rebuilds. The label text color can be customized with `.text_color()`.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let btn_state = ctx.use_state_for("my_button", ButtonState::Idle);
+    /// let btn_state = ctx.use_fsm(ButtonState::Idle);
     /// Button::new(btn_state, "Click me")
     ///     .on_click(|_| println!("Clicked!"))
     /// ```
@@ -121,7 +121,7 @@ impl Button {
 
     /// Create a button with custom content and externally-managed state
     ///
-    /// The state handle should be created via `ctx.use_state_for()` for persistence
+    /// The state handle should be created via `ctx.use_fsm()` for persistence
     /// across rebuilds. The content builder receives the current button state, allowing
     /// state-dependent content rendering (e.g., different icons for pressed state).
     ///
@@ -131,7 +131,7 @@ impl Button {
     /// # Example
     ///
     /// ```ignore
-    /// let btn_state = ctx.use_state_for("icon_btn", ButtonState::Idle);
+    /// let btn_state = ctx.use_fsm(ButtonState::Idle);
     /// Button::with_content(btn_state, |state| {
     ///     div().child(text("Click me").color(Color::WHITE))
     /// })
@@ -470,13 +470,13 @@ impl Button {
 
 /// Create a button with a text label and context-managed state
 ///
-/// The state handle should be created via `ctx.use_state_for()` for persistence
+/// The state handle should be created via `ctx.use_fsm()` for persistence
 /// across rebuilds. This is the most common button constructor. For buttons with
 /// custom content (icons, multiple elements, etc.), use `button_with()`.
 ///
 /// # Example
 /// ```ignore
-/// let btn_state = ctx.use_state_for("save_btn", ButtonState::Idle);
+/// let btn_state = ctx.use_fsm(ButtonState::Idle);
 /// button(btn_state, "Save")
 ///     .on_click(|_| save_data())
 ///     .bg_color(Color::GREEN)
@@ -492,21 +492,21 @@ pub fn button(state: SharedState<ButtonState>, label: impl Into<String>) -> Butt
 
 /// Create a button with custom content and context-managed state
 ///
-/// The state handle should be created via `ctx.use_state_for()` for persistence
+/// The state handle should be created via `ctx.use_fsm()` for persistence
 /// across rebuilds. The content builder receives the current button state, allowing
 /// state-dependent content (e.g., different icons for pressed state).
 ///
 /// # Example
 /// ```ignore
 /// // Icon button
-/// let trash_btn = ctx.use_state_for("trash_btn", ButtonState::Idle);
+/// let trash_btn = ctx.use_fsm(ButtonState::Idle);
 /// button_with(trash_btn, |_state| {
 ///     div().child(svg_icon("trash"))
 /// })
 /// .on_click(|_| delete_item())
 ///
 /// // Button with icon and text
-/// let save_btn = ctx.use_state_for("save_btn", ButtonState::Idle);
+/// let save_btn = ctx.use_fsm(ButtonState::Idle);
 /// button_with(save_btn, |_state| {
 ///     div().flex_row().gap(8.0)
 ///         .child(svg_icon("save"))
@@ -515,7 +515,7 @@ pub fn button(state: SharedState<ButtonState>, label: impl Into<String>) -> Butt
 /// .on_click(|_| save())
 ///
 /// // State-aware button (e.g., loading spinner when pressed)
-/// let submit_btn = ctx.use_state_for("submit_btn", ButtonState::Idle);
+/// let submit_btn = ctx.use_fsm(ButtonState::Idle);
 /// button_with(submit_btn, |state| {
 ///     if matches!(state, ButtonState::Pressed) {
 ///         div().child(spinner())
