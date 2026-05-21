@@ -54,7 +54,7 @@ pub mod typography;
 // Re-export all components
 pub use accordion::{accordion, Accordion, AccordionBuilder, AccordionMode};
 pub use alert::{alert, alert_box, Alert, AlertBox, AlertVariant};
-pub use badge::{badge, Badge, BadgeVariant};
+pub use badge::{badge, Badge, BadgeStyle, BadgeVariant};
 pub use breadcrumb::{
     breadcrumb, Breadcrumb, BreadcrumbBuilder, BreadcrumbItem, BreadcrumbSeparator, BreadcrumbSize,
 };

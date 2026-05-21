@@ -55,7 +55,7 @@ pub use blinc_layout::InstanceKey;
 pub mod cn {
     pub use crate::components::accordion::accordion;
     pub use crate::components::alert::{alert, alert_box};
-    pub use crate::components::badge::badge;
+    pub use crate::components::badge::{badge, BadgeStyle, BadgeVariant};
     pub use crate::components::breadcrumb::breadcrumb;
     pub use crate::components::button::button;
     pub use crate::components::card::{card, card_content, card_footer, card_header};
@@ -120,7 +120,7 @@ pub mod prelude {
     // Components
     pub use crate::components::accordion::{accordion, Accordion, AccordionBuilder, AccordionMode};
     pub use crate::components::alert::{alert, alert_box, Alert, AlertBox, AlertVariant};
-    pub use crate::components::badge::{badge, Badge, BadgeVariant};
+    pub use crate::components::badge::{badge, Badge, BadgeStyle, BadgeVariant};
     pub use crate::components::breadcrumb::{
         breadcrumb, Breadcrumb, BreadcrumbBuilder, BreadcrumbItem, BreadcrumbSeparator,
         BreadcrumbSize,
@@ -238,6 +238,8 @@ pub mod prelude {
     pub use blinc_layout::widgets::text_area::{text_area_state, SharedTextAreaState};
     // Re-export commonly needed theme types
     pub use blinc_theme::{ColorToken, RadiusToken, ShadowToken, SpacingToken, ThemeState};
-    // Re-export icons module for easy access
-    pub use blinc_icons::icons;
+    // Re-export icons module + raw SVG generators for inline use
+    // (e.g. inside a badge or anywhere the auto-tinted `cn::icon`
+    // would set the wrong fixed colour).
+    pub use blinc_icons::{icons, to_svg, to_svg_with_stroke};
 }

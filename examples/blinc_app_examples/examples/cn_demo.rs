@@ -14,6 +14,7 @@ use blinc_layout::selector::ScrollRef;
 use blinc_layout::widgets::text_input::text_input_data;
 use blinc_theme::{ColorToken, ThemeState};
 
+
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -537,15 +538,89 @@ fn buttons_section(_ctx: &WindowedContext) -> impl ElementBuilder {
 fn badges_section() -> impl ElementBuilder {
     section_container().child(section_title("Badges")).child(
         div()
-            .flex_row()
-            .flex_wrap()
+            .flex_col()
             .gap(12.0)
-            .child(cn::badge("Default"))
-            .child(cn::badge("Secondary").variant(BadgeVariant::Secondary))
-            .child(cn::badge("Success").variant(BadgeVariant::Success))
-            .child(cn::badge("Warning").variant(BadgeVariant::Warning))
-            .child(cn::badge("Destructive").variant(BadgeVariant::Destructive))
-            .child(cn::badge("Outline").variant(BadgeVariant::Outline)),
+            // Soft (default) — pale tint + same-hue text.
+            .child(
+                div()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(12.0)
+                    .child(cn::badge("In review"))
+                    .child(cn::badge("Pending").variant(BadgeVariant::Warning))
+                    .child(
+                        cn::badge("Shipped")
+                            .variant(BadgeVariant::Success)
+                            // Raw `svg()` (no `.color(...)` inline) so
+                            // the badge's CSS rule can tint the path's
+                            // stroke. `cn::icon` would set inline
+                            // `.color(TextPrimary)` which wins via
+                            // specificity and pins the glyph at dark
+                            // text colour.
+                            .icon(
+                                svg(&to_svg_with_stroke(icons::CHECK, 12.0, 2.0))
+                                    .size(12.0, 12.0),
+                            ),
+                    )
+                    .child(cn::badge("Blocked").variant(BadgeVariant::Destructive))
+                    .child(cn::badge("Draft").variant(BadgeVariant::Secondary)),
+            )
+            // Solid (legacy fill).
+            .child(
+                div()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(12.0)
+                    .child(cn::badge("Default").style(BadgeStyle::Solid))
+                    .child(
+                        cn::badge("Secondary")
+                            .style(BadgeStyle::Solid)
+                            .variant(BadgeVariant::Secondary),
+                    )
+                    .child(
+                        cn::badge("Success")
+                            .style(BadgeStyle::Solid)
+                            .variant(BadgeVariant::Success),
+                    )
+                    .child(
+                        cn::badge("Warning")
+                            .style(BadgeStyle::Solid)
+                            .variant(BadgeVariant::Warning),
+                    )
+                    .child(
+                        cn::badge("Destructive")
+                            .style(BadgeStyle::Solid)
+                            .variant(BadgeVariant::Destructive),
+                    ),
+            )
+            // Outline.
+            .child(
+                div()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(12.0)
+                    .child(cn::badge("Default").style(BadgeStyle::Outline))
+                    .child(
+                        cn::badge("Secondary")
+                            .style(BadgeStyle::Outline)
+                            .variant(BadgeVariant::Secondary),
+                    )
+                    .child(
+                        cn::badge("Success")
+                            .style(BadgeStyle::Outline)
+                            .variant(BadgeVariant::Success),
+                    )
+                    .child(
+                        cn::badge("Warning")
+                            .style(BadgeStyle::Outline)
+                            .variant(BadgeVariant::Warning),
+                    )
+                    .child(
+                        cn::badge("Destructive")
+                            .style(BadgeStyle::Outline)
+                            .variant(BadgeVariant::Destructive),
+                    ),
+            ),
     )
 }
 
