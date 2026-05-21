@@ -664,6 +664,14 @@ struct SvgElement {
     /// motion overlay so the SVG icon lands on top of its motion-bound
     /// container's bg paint instead of being covered.
     in_motion_subtree: bool,
+    /// Stack-layer z used to interleave with primitives + text. Higher
+    /// values render on top. Captured from the walker's `z_layer`
+    /// counter — bumped by `stack_layer()` (overlay layers, toast
+    /// tray, foreground content) and by explicit `z_index`. Without
+    /// this, icons inside an overlay subtree would all collapse to
+    /// z=0 and render *under* the dialog/sheet/drawer card their
+    /// container z-layered above the main UI.
+    z_layer: u32,
 }
 
 /// Flow shader element — an element with `flow: <name>` that renders via a custom GPU pipeline
@@ -5663,6 +5671,7 @@ impl RenderContext {
                         tag_overrides: render_node.props.svg_tag_styles.clone(),
                         transform_3d_layer: inside_3d_layer.clone(),
                         in_motion_subtree: inside_motion_subtree,
+                        z_layer: *z_layer,
                     });
                 }
                 ElementType::Image(image_data) => {
@@ -7985,6 +7994,14 @@ impl RenderContext {
                 svgs.push(svg);
             }
         }
+        // Stable-sort by z_layer so icons inside `stack_layer()` subtrees
+        // (overlays, toast tray, foreground content) dispatch after lower-z
+        // siblings. `render_rasterized_svgs` issues a single batched draw
+        // call per slice, so painting order = vec order. Tree order is the
+        // tiebreaker — `sort_by_key` is stable so siblings on the same
+        // z_layer keep their walker-emitted order.
+        svgs.sort_by_key(|s| s.z_layer);
+        motion_subtree_svgs.sort_by_key(|s| s.z_layer);
 
         let mut images = Vec::new();
         let mut layer_3d_images: std::collections::HashMap<LayoutNodeId, Vec<ImageElement>> =
