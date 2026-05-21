@@ -5019,7 +5019,7 @@ impl RenderContext {
         let is_motion_container_node = tree.motion_bindings_map().contains_key(&node)
             || tree
                 .get_render_node(node)
-                .map(|n| n.props.motion.is_some())
+                .map(|n| n.props.motion.is_some() || n.props.is_stack_layer)
                 .unwrap_or(false);
         let child_inside_motion_subtree = inside_motion_subtree || is_motion_container_node;
 

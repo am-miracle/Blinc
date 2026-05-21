@@ -481,7 +481,40 @@ impl RenderTree {
         // route regular text + SVG + image dispatch into the same
         // overlay alongside the SDF (`motion_batch` / `css_batch`
         // split or similar).
-        let in_motion_subtree = motion_bindings_ref.is_some();
+        // Route stack_layer subtrees (overlay stack, toast tray, legacy
+        // overlay manager) and motion FSM subtrees to the dynamic batch
+        // alongside motion-binding subtrees.
+        //
+        // The bug this fixes: the SVG dispatch in the static-cache pass
+        // emits ALL static SVGs as one batched draw call AFTER every SDF
+        // primitive in the cache (per-z text dispatch doesn't help — by
+        // then SDF has already committed). When an overlay's bg SDF
+        // lived in the static cache alongside the page's static SVGs,
+        // a sibling button's chevron-down SVG at z=0 would paint ON TOP
+        // of the overlay's z=1 bg primitive that should have occluded
+        // it. Symptom: opening one cn::dropdown_menu showed the chevron
+        // of an adjacent unopened dropdown trigger bleeding through the
+        // open menu's panel.
+        //
+        // Routing the overlay/tray subtree to the dynamic batch makes
+        // its SDF paint in `composite_frame`'s overlay pass — AFTER the
+        // static cache (chevrons and all) is blitted onto the surface —
+        // so the panel correctly occludes whatever's underneath. The
+        // collector (in blinc_app's `collect_elements_recursive`)
+        // already routes text/SVG/image for these subtrees via its
+        // `props.motion.is_some()` + `is_stack_layer` check, so this
+        // change brings the walker into alignment.
+        //
+        // CSS animations are deliberately still left in the static
+        // batch (see history comment further down for the
+        // text-disappears-mid-keyframe regression). `props.motion` here
+        // is set by explicit Motion FSM containers (e.g.
+        // `motion_derived(...)`) when they propagate enter/exit anims to
+        // children — CSS keyframes don't take the same propagation path,
+        // so this change doesn't reactivate that regression.
+        let in_motion_subtree = motion_bindings_ref.is_some()
+            || render_node.props.motion.is_some()
+            || render_node.props.is_stack_layer;
         if in_motion_subtree {
             ctx.push_motion_subtree();
         }
