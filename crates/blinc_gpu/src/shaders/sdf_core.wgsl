@@ -1161,8 +1161,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let inner_aa = aa_width;
             let border_blend = smoothstep(-inner_aa, inner_aa, -inner_sdf);
 
-            // Only apply border color where we're inside the shape
-            fill_color = mix(fill_color, prim.border_color, border_blend * step(0.001, fill_alpha));
+            // Composite the border ON TOP of the fill using src-over alpha
+            // compositing, NOT a four-component mix. The previous mix() pulled
+            // the border colour's alpha into fill_color.a — so when the border
+            // is semi-transparent (e.g. ColorToken::Border at 10 % alpha) the
+            // entire border ring became ~90 % transparent and the page bg
+            // showed through as a dark "extra outline stroke" tracing the
+            // rounded corner. With src-over, a 10 %-alpha border tints the
+            // fill by 10 % but keeps the fill's alpha intact, so the body
+            // stays opaque under the border ring.
+            let border_t = border_blend * step(0.001, fill_alpha);
+            let border_a = prim.border_color.a * border_t;
+            let new_rgb = prim.border_color.rgb * border_a + fill_color.rgb * (1.0 - border_a);
+            let new_a = border_a + fill_color.a * (1.0 - border_a);
+            fill_color = vec4<f32>(new_rgb, new_a);
         }
     }
 
