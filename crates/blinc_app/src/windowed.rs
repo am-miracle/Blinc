@@ -5459,6 +5459,17 @@ impl WindowedApp {
                             // Process suspended motion starts queued via query_motion(key).start()
                             rs.process_global_motion_starts();
 
+                            // Capture pre-tick motion liveness so the `should_render`
+                            // gate below can recognise a "this frame's tick settled
+                            // the motion" transition. Without this, the final tick
+                            // (Entering → Visible) would leave `has_active_motions()`
+                            // false at the should_render check, the cap gate could
+                            // skip the paint, and the user would see the animation
+                            // freeze at the penultimate state — the "animation is
+                            // not allowed to settle" symptom. Capturing pre-tick
+                            // ensures the paint of the settled state still ships.
+                            let motion_was_active_pre_tick = rs.has_active_motions();
+
                             // Tick render state (handles cursor blink, color animations, etc.)
                             // This updates dynamic properties without touching tree structure
                             let _animations_active = rs.tick(current_time);
@@ -5549,7 +5560,15 @@ impl WindowedApp {
                             // covers CSS animations / transitions; motion
                             // FSM (overlay enter / exit) is the
                             // `has_active_motions()` term.
-                            let needs_vsync = rs.has_active_motions()
+                            //
+                            // Use the PRE-tick `motion_was_active_pre_tick`
+                            // snapshot — not the post-tick poll — so the
+                            // frame where the final tick transitions the
+                            // FSM from Entering → Visible still counts as
+                            // vsync-class and the cap gate doesn't skip
+                            // the paint that displays the settled state.
+                            let needs_vsync = motion_was_active_pre_tick
+                                || rs.has_active_motions()
                                 || ws
                                     .render_tree
                                     .as_ref()
