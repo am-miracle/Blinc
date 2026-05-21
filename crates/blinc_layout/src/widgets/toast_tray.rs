@@ -65,9 +65,12 @@ pub struct ToastEntry {
 
 impl ToastEntry {
     /// FSM stable key (with the "motion:" prefix that `motion_derived` adds
-    /// internally). Same caveat as `OverlayEntry::motion_stable_key`.
+    /// internally, plus the `:child:0` suffix `collect_render_props_boxed`
+    /// appends when propagating motion config to the Motion container's
+    /// single child). See `OverlayEntry::motion_stable_key` for the full
+    /// rationale.
     fn motion_stable_key(&self) -> String {
-        format!("motion:{}", self.motion_key)
+        format!("motion:{}:child:0", self.motion_key)
     }
 
     fn motion_done(&self) -> bool {

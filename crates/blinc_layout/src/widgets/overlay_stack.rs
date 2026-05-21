@@ -209,8 +209,18 @@ impl OverlayEntry {
     /// against the motion store must use this prefixed form. Forgetting the
     /// prefix means `query_motion` returns `NotFound` (motion is opaque), and
     /// `queue_global_motion_exit_start` is dropped (motion can't be exited).
+    ///
+    /// `:child:0` suffix: `collect_render_props_boxed` appends `":child:{idx}"`
+    /// to the Motion container's stable id when propagating motion config to
+    /// its children (the actual content the FSM animates). We wrap the
+    /// overlay content with `motion_derived(...).child(content)` — exactly one
+    /// child, index 0 — so the registered motion ends up at this child key.
+    /// Without the suffix, `query_motion` would look up the parent (empty)
+    /// key, get `NotFound`, and `motion_done()` would report `true` on the
+    /// first `update()` after close — reaping the entry before the exit
+    /// animation has a chance to play.
     fn motion_stable_key(&self) -> String {
-        format!("motion:{}", self.motion_key)
+        format!("motion:{}:child:0", self.motion_key)
     }
 
     /// Returns true if the motion FSM has finished its exit (or was never
