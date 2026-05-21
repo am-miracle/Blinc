@@ -296,7 +296,6 @@ impl ToastTray {
     /// auto-dismisses, instead of leaving a hole.
     pub fn build_tray_layer(&self, viewport: (f32, f32)) -> Div {
         use crate::motion::motion_derived;
-        use crate::visual_animation::VisualAnimationConfig;
 
         // Zero-sized when empty so the tray container never blanket-absorbs
         // events from the main UI underneath. Matches OverlayStack pattern.
@@ -312,78 +311,91 @@ impl ToastTray {
                 .pointer_events_none();
         }
 
-        // Tray container anchors to a corner via absolute top/right/bottom/left
-        // insets (rather than top+left only). For corners on the right or
-        // bottom edge we use the corresponding `right()` / `bottom()` insets
-        // so the tray's content sizes naturally — `left(viewport.0 - INSET)`
-        // would push the tray's left edge to the screen edge and the toasts
-        // would extend off-screen.
+        // Outer layer is full-viewport (matches OverlayStack pattern) and
+        // serves as the positioned ancestor for per-toast wrappers. It
+        // doesn't lay its own children out — each toast wrapper inside
+        // carries explicit `top()` / `left()` insets computed from the
+        // viewport and the stack index.
         //
-        // For bottom-anchored corners we reverse the column so the newest
-        // toast sits closest to the corner (the visual root) and earlier
-        // toasts pile away from it.
+        // Pre-fix we tried two flex-based approaches: (a) `bottom() +
+        // right()` insets with `flex_col_reverse()` and auto width, and
+        // (b) full-viewport tray with `flex_col() + justify_end() +
+        // items_end()`. Both rendered the toasts at top-left in cn_demo —
+        // taffy's resolution of corner-anchored absolute boxes via either
+        // bare bottom/right insets or in-line flex alignment of in-flow
+        // children inside an absolute parent didn't behave the way CSS
+        // would suggest. Explicit `top()` / `left()` on each toast wrapper
+        // sidesteps the issue: the position is deterministic in viewport
+        // pixels.
         const INSET: f32 = 16.0;
-        let (anchor_top, anchor_bottom, anchor_left, anchor_right, column_reverse) =
-            match self.corner {
-                Corner::TopLeft => (Some(INSET), None, Some(INSET), None, false),
-                Corner::TopRight => (Some(INSET), None, None, Some(INSET), false),
-                Corner::BottomLeft => (None, Some(INSET), Some(INSET), None, true),
-                Corner::BottomRight => (None, Some(INSET), None, Some(INSET), true),
-            };
-        let _ = viewport; // viewport unused now that we anchor via right/bottom.
+        const TOAST_WIDTH: f32 = 360.0; // matches `cn::toast`'s `.w(360.0)`
+        // Height is approximate (we don't know the real per-toast height
+        // until layout completes). For first-cut stacking we assume a
+        // typical 2-line title+description card. Toasts with action
+        // buttons or `body()` content may overlap slightly; revisit when
+        // a measured-height feedback pass exists.
+        const ESTIMATED_TOAST_HEIGHT: f32 = 90.0;
 
-        let mut tray = Div::new()
+        let mut layer = Div::new()
             .id(TOAST_TRAY_LAYER_ID)
             .absolute()
-            .gap(self.gap_px)
-            // Render above the main UI via the renderer's z-layer increment.
-            // Without this, toasts overlapping main-UI content sometimes
-            // render *under* it (notably text glyphs / SVGs which paint
-            // through their own pipelines without honouring tree order).
+            .top(0.0)
+            .left(0.0)
+            .w(viewport.0)
+            .h(viewport.1)
+            // Render above the main UI via the renderer's z-layer
+            // increment. Without this, toasts overlapping main-UI content
+            // sometimes render *under* it (notably text glyphs / SVGs).
             .stack_layer()
-            // Container itself is transparent / event-pass-through; only
-            // the toast cards inside re-enable input.
-            .pointer_events_none()
-            .animate_bounds(
-                VisualAnimationConfig::position()
-                    .with_key("cn-toast-tray")
-                    .snappy(),
-            );
-        tray = if column_reverse {
-            tray.flex_col_reverse()
-        } else {
-            tray.flex_col()
-        };
-        if let Some(t) = anchor_top {
-            tray = tray.top(t);
-        }
-        if let Some(b) = anchor_bottom {
-            tray = tray.bottom(b);
-        }
-        if let Some(l) = anchor_left {
-            tray = tray.left(l);
-        }
-        if let Some(r) = anchor_right {
-            tray = tray.right(r);
-        }
+            // Layer is transparent / event-pass-through; each toast card
+            // re-enables input as needed.
+            .pointer_events_none();
 
-        // Emit toasts in insertion order; the corner positioning + flex_col
-        // gap handles stacking. Each is wrapped in its own motion so the
-        // widget's chosen enter/exit (typically slide-from-edge + fade)
-        // runs naturally.
-        for toast in self.toasts.iter().take(self.max_visible) {
+        let toast_left = match self.corner {
+            Corner::TopLeft | Corner::BottomLeft => INSET,
+            Corner::TopRight | Corner::BottomRight => viewport.0 - INSET - TOAST_WIDTH,
+        };
+        let is_bottom_anchored = matches!(self.corner, Corner::BottomLeft | Corner::BottomRight);
+
+        // For bottom-anchored corners the newest toast sits at the corner
+        // (closest to the anchor), and older toasts pile away from it. We
+        // reverse the slice so iteration order matches stack index 0 =
+        // closest-to-corner.
+        let visible: Vec<&ToastEntry> = self.toasts.iter().take(self.max_visible).collect();
+        let stacked: Vec<&ToastEntry> = if is_bottom_anchored {
+            visible.into_iter().rev().collect()
+        } else {
+            visible
+        };
+
+        for (idx, toast) in stacked.iter().enumerate() {
+            let offset = INSET + idx as f32 * (ESTIMATED_TOAST_HEIGHT + self.gap_px);
+            let toast_top = if is_bottom_anchored {
+                viewport.1 - offset - ESTIMATED_TOAST_HEIGHT
+            } else {
+                offset
+            };
+
             let content = (toast.content_fn)();
-            let mut motion_wrapper = motion_derived(&toast.motion_key);
+            let mut motion_wrapper = motion_derived(&toast.motion_key).fit_content();
             if let Some(ref enter) = toast.motion_enter {
                 motion_wrapper = motion_wrapper.enter_animation(enter.clone());
             }
             if let Some(ref exit) = toast.motion_exit {
                 motion_wrapper = motion_wrapper.exit_animation(exit.clone());
             }
-            tray = tray.child(motion_wrapper.child(content));
+
+            let positioned = Div::new()
+                .absolute()
+                .top(toast_top)
+                .left(toast_left)
+                .w(TOAST_WIDTH)
+                .child(motion_wrapper.child(content));
+
+            layer = layer.child(positioned);
         }
 
-        tray
+        layer
     }
 
     // ----- Config -----
@@ -517,25 +529,71 @@ impl ToastBuilder {
             tray.set_corner(c);
         }
 
-        // Default slide-in animation matches the corner the tray is anchored to.
-        use blinc_animation::AnimationPreset;
+        // Default enter/exit motion. Translate-only (no opacity keyframes)
+        // so the toast slides in/out fully opaque from the start.
+        //
+        // The off-the-shelf `slide_in_*` / `slide_out_*` presets layer
+        // `opacity: 0 → 1` on top of translate. For card-style toasts
+        // with `shadow_lg()`, that opacity fade causes a visible
+        // darkening artifact mid-animation:
+        // 1. The motion wrapper has a single child (the toast div), so the
+        //    paint walker takes the `can_flatten_opacity` fast path and
+        //    multiplies the wrapper's opacity into each descendant
+        //    primitive's alpha individually instead of pushing a
+        //    layer.
+        // 2. At 50 % opacity, the toast's solid bg primitive paints with
+        //    `α = 0.5` on top of (a) the shadow primitive's blurred
+        //    falloff outside the toast bounds and (b) the page bg
+        //    inside. The bg no longer fully occludes the visible part
+        //    of the shadow on either side of the toast's edge, so the
+        //    blurred shadow blends through the bg and reads as a
+        //    grey/dark tint over the toast itself.
+        // 3. A layer-push path (which would rasterise the toast +
+        //    shadow at full opacity and composite the texture once)
+        //    would avoid the artifact, but is gated behind
+        //    `safe_to_flatten = children > 1` — a structural change
+        //    just for toasts would be invasive.
+        //
+        // Dropping the opacity keyframes is the lightest fix: toasts
+        // still slide in/out (the spatial motion gives plenty of
+        // affordance), and there's no fractional-α frame where the
+        // shadow can bleed through.
+        use blinc_animation::{Easing, KeyframeProperties, MultiKeyframeAnimation};
         let corner_for_motion = self.corner.unwrap_or_else(|| tray.corner());
         let slide_distance = 320.0_f32;
-        let motion_enter = self.motion_enter.unwrap_or_else(|| match corner_for_motion {
-            Corner::TopLeft | Corner::BottomLeft => {
-                AnimationPreset::slide_in_left(300, slide_distance).into()
-            }
-            Corner::TopRight | Corner::BottomRight => {
-                AnimationPreset::slide_in_right(300, slide_distance).into()
-            }
+        let enter_translate = match corner_for_motion {
+            Corner::TopLeft | Corner::BottomLeft => (-slide_distance, 0.0),
+            Corner::TopRight | Corner::BottomRight => (slide_distance, 0.0),
+        };
+        let motion_enter = self.motion_enter.unwrap_or_else(|| {
+            MultiKeyframeAnimation::new(300)
+                .keyframe(
+                    0.0,
+                    KeyframeProperties::default()
+                        .with_translate(enter_translate.0, enter_translate.1),
+                    Easing::Linear,
+                )
+                .keyframe(
+                    1.0,
+                    KeyframeProperties::default().with_translate(0.0, 0.0),
+                    Easing::EaseOutCubic,
+                )
+                .into()
         });
-        let motion_exit = self.motion_exit.unwrap_or_else(|| match corner_for_motion {
-            Corner::TopLeft | Corner::BottomLeft => {
-                AnimationPreset::slide_out_left(225, slide_distance).into()
-            }
-            Corner::TopRight | Corner::BottomRight => {
-                AnimationPreset::slide_out_right(225, slide_distance).into()
-            }
+        let motion_exit = self.motion_exit.unwrap_or_else(|| {
+            MultiKeyframeAnimation::new(225)
+                .keyframe(
+                    0.0,
+                    KeyframeProperties::default().with_translate(0.0, 0.0),
+                    Easing::Linear,
+                )
+                .keyframe(
+                    1.0,
+                    KeyframeProperties::default()
+                        .with_translate(enter_translate.0, enter_translate.1),
+                    Easing::EaseInCubic,
+                )
+                .into()
         });
 
         let entry = ToastEntry {
