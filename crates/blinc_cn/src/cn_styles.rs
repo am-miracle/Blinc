@@ -434,8 +434,12 @@ pub const CN_STYLES: &str = r#"
 .cn-select-item:hover {
     background: var(--accent-subtle);
 }
+/* `--selection` (~24 % alpha accent on Hybrid, 20 % on macOS) vs hover's
+   `--accent-subtle` (~10 % alpha) so the currently-chosen row is
+   visibly distinct from hovered rows and from the panel itself. */
 .cn-select-item--selected {
-    background: var(--accent-subtle);
+    background: var(--selection);
+    color: var(--accent);
 }
 
 /* ============================================================================
@@ -955,10 +959,17 @@ pub const CN_STYLES: &str = r#"
     font-size: var(--text-sm);
     /* No transition — see cn-menubar-item rationale. */
 }
+/* Hover uses `--accent-subtle`. The selected state uses `--selection`,
+   which carries roughly 2× the alpha (~20% vs ~10%) on most themes so
+   the currently-chosen row is visibly distinct against the panel
+   background even when Surface is pure white — `accent-subtle` alone
+   on `Surface = #FFFFFF` (macOS light) renders as a ~5 % blue tint
+   that's effectively invisible. */
 .cn-combobox-item:hover {
     background: var(--accent-subtle);
 }
 .cn-combobox-item--selected {
-    background: var(--accent-subtle);
+    background: var(--selection);
+    color: var(--accent);
 }
 "#;
