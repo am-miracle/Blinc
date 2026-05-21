@@ -5114,6 +5114,30 @@ impl WindowedApp {
                                     );
                                 }
 
+                                // Structural subtree rebuilds replace render
+                                // nodes wholesale (new ids, fresh props from
+                                // `collect_render_props_boxed`, CSS class base
+                                // styles re-applied). The static-cache batch
+                                // still holds the *previous* frame's
+                                // primitives, so the first paint after a
+                                // dropdown-open / overlay-push / stateful
+                                // structural transition keeps showing stale
+                                // visuals (search input renders without its
+                                // configured bg, freshly-mounted `--selected`
+                                // rows show no highlight, etc.) until the
+                                // next user input trips `state_changed`. The
+                                // gate above only fires on prop updates;
+                                // mirror it here for the rebuild path. Same
+                                // root cause class as the `motion_just_settled`
+                                // cache-stamping fix — the walker has new data
+                                // but the compositor's cache predicate hasn't
+                                // been told to discard the old.
+                                if has_pending_rebuilds {
+                                    blinc_app.invalidate_render_cache_tagged(
+                                        "structural_subtree_rebuild",
+                                    );
+                                }
+
                                 // Visual-only updates (e.g. hover state flip)
                                 // happened mid-frame — make sure the next
                                 // frame renders rather than getting skipped
