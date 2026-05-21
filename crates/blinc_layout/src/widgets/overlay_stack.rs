@@ -28,6 +28,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use blinc_animation::AnimationPreset;
 use blinc_core::context_state::MotionAnimationState;
 use blinc_core::BlincContextState;
 
@@ -223,6 +224,19 @@ impl OverlayEntry {
         format!("motion:{}:child:0", self.motion_key)
     }
 
+    /// Backdrop motion's FSM stable key. Only meaningful when the entry
+    /// renders a backdrop (`dismiss.backdrop.is_some()`); otherwise no such
+    /// motion is registered. Same `:child:0` suffix logic as
+    /// `motion_stable_key` — `build_overlay_layer` creates the backdrop via
+    /// `motion_derived("{motion_key}:backdrop").child(backdrop_div)`, one
+    /// child at index 0.
+    fn backdrop_motion_stable_key(&self) -> Option<String> {
+        self.dismiss
+            .backdrop
+            .as_ref()
+            .map(|_| format!("motion:{}:backdrop:child:0", self.motion_key))
+    }
+
     /// Returns true if the motion FSM has finished its exit (or was never
     /// registered, i.e. the widget skipped the motion wrapper).
     fn motion_done(&self) -> bool {
@@ -236,14 +250,24 @@ impl OverlayEntry {
     }
 
     /// Trigger the motion's exit animation via the queued global mechanism.
+    /// Also queues the backdrop's exit so it fades out in lockstep with the
+    /// content; without this the dim layer would stay at full opacity until
+    /// the entry is reaped, then snap to gone.
     fn queue_motion_exit(&self) {
         crate::queue_global_motion_exit_start(self.motion_stable_key());
+        if let Some(backdrop_key) = self.backdrop_motion_stable_key() {
+            crate::queue_global_motion_exit_start(backdrop_key);
+        }
     }
 
     /// Interrupt the motion's exit animation (mouse re-entry during the
-    /// close-delay window).
+    /// close-delay window). Cancels both the content's and backdrop's exit
+    /// so they revive in sync.
     fn queue_motion_exit_cancel(&self) {
         crate::queue_global_motion_exit_cancel(self.motion_stable_key());
+        if let Some(backdrop_key) = self.backdrop_motion_stable_key() {
+            crate::queue_global_motion_exit_cancel(backdrop_key);
+        }
     }
 
     /// Invoke `on_close` with the given reason if set. Idempotent — caller
@@ -845,7 +869,25 @@ impl OverlayStack {
                         }
                     });
                 }
-                layer = layer.child(motion_derived(&backdrop_key).child(backdrop_div));
+                // Match the backdrop's fade timing to the entry's own enter /
+                // exit motion so the chrome (dim layer) and content (dialog /
+                // sheet / drawer panel) start and finish their animations
+                // together. Without these, the backdrop pops in and out
+                // instantly while the content animates — visually jarring.
+                let backdrop_enter_ms = entry
+                    .motion_enter
+                    .as_ref()
+                    .map(|e| e.animation.duration_ms())
+                    .unwrap_or(200);
+                let backdrop_exit_ms = entry
+                    .motion_exit
+                    .as_ref()
+                    .map(|e| e.animation.duration_ms())
+                    .unwrap_or(150);
+                let backdrop_motion = motion_derived(&backdrop_key)
+                    .enter_animation(AnimationPreset::fade_in(backdrop_enter_ms))
+                    .exit_animation(AnimationPreset::fade_out(backdrop_exit_ms));
+                layer = layer.child(backdrop_motion.child(backdrop_div));
             }
 
             // Structure: positioned wrapper > motion > content_fn().
