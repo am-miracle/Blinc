@@ -859,6 +859,13 @@ impl RenderState {
             }
         } // Drop scheduler lock
 
+        // Mirror the stable-motion redraw-self-perpetuate guard for node-based
+        // motions — same FSM-poll race could otherwise leave a node-bound
+        // enter / exit animation stalled until the next external input.
+        if motion_active {
+            crate::stateful::request_redraw();
+        }
+
         // Tick stable-keyed motions (for overlays)
         self.tick_stable_motions(dt_ms);
 
@@ -1780,13 +1787,27 @@ impl RenderState {
         // no-op and `sync_shared_motion_states` doesn't need to
         // rewrite the shared store. The Settled-fast-path is the
         // common case at idle.
-        if self.stable_motions.values().any(|m| {
+        let any_mid_flight = self.stable_motions.values().any(|m| {
             !matches!(
                 m.state,
                 MotionState::Visible | MotionState::Removed | MotionState::Suspended
             )
-        }) {
+        });
+        if any_mid_flight {
             self.motion_generation = self.motion_generation.wrapping_add(1);
+            // Force the runner to fire another frame.
+            //
+            // The post-frame redraw chain in the windowed runner OR's
+            // `rs.has_active_motions()` into `any_redraw_signal`, which
+            // is supposed to flip `frame_dirty` + arm the next wake. In
+            // practice users saw stable-motion animations freeze
+            // mid-flight until a mouse-move kicked the loop — the
+            // chain's wake path raced the FSM-poll in a way that
+            // sometimes settled before the post-frame check observed
+            // it. Asserting `NEEDS_REDRAW` directly from the tick
+            // guarantees the next Frame gate cannot skip while *any*
+            // stable motion is still entering / exiting / waiting.
+            crate::stateful::request_redraw();
         }
         for motion in self.stable_motions.values_mut() {
             Self::tick_single_motion(motion, dt_ms);
