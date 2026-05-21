@@ -1164,17 +1164,35 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // Composite the border ON TOP of the fill using src-over alpha
             // compositing, NOT a four-component mix. The previous mix() pulled
             // the border colour's alpha into fill_color.a — so when the border
-            // is semi-transparent (e.g. ColorToken::Border at 10 % alpha) the
-            // entire border ring became ~90 % transparent and the page bg
-            // showed through as a dark "extra outline stroke" tracing the
-            // rounded corner. With src-over, a 10 %-alpha border tints the
-            // fill by 10 % but keeps the fill's alpha intact, so the body
-            // stays opaque under the border ring.
+            // is semi-transparent (e.g. ColorToken::Border at 10 % alpha) over
+            // an opaque body the border ring became ~90 % transparent and the
+            // page bg leaked through as a dark "extra outline stroke" tracing
+            // the rounded corner.
+            //
+            // Standard "over" in straight-alpha form:
+            //   out_a   = src_a + dst_a * (1 - src_a)
+            //   out_rgb = (src_rgb * src_a + dst_rgb * dst_a * (1 - src_a)) / out_a
+            // Both branches matter:
+            //   * opaque fill + semi-transparent border  → out_a stays 1.0,
+            //     out_rgb = border * border_a + fill * (1 - border_a).
+            //     Body stays opaque, corner ring tinted by border colour.
+            //   * transparent fill (e.g. outline button) + semi-transparent
+            //     border → out_a = border_a, out_rgb = border_rgb. The border
+            //     renders at its own colour and alpha, exactly as before the
+            //     bug fix. The premultiplied form without the /out_a division
+            //     would have squared the alpha here (10 % × 10 % = 1 % effective)
+            //     and made the outline button's border invisible.
             let border_t = border_blend * step(0.001, fill_alpha);
             let border_a = prim.border_color.a * border_t;
-            let new_rgb = prim.border_color.rgb * border_a + fill_color.rgb * (1.0 - border_a);
-            let new_a = border_a + fill_color.a * (1.0 - border_a);
-            fill_color = vec4<f32>(new_rgb, new_a);
+            let out_a = border_a + fill_color.a * (1.0 - border_a);
+            let premult_rgb = prim.border_color.rgb * border_a
+                + fill_color.rgb * fill_color.a * (1.0 - border_a);
+            let new_rgb = select(
+                premult_rgb / max(out_a, 0.0001),
+                vec3<f32>(0.0),
+                out_a < 0.0001
+            );
+            fill_color = vec4<f32>(new_rgb, out_a);
         }
     }
 
