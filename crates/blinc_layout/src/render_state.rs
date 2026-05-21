@@ -797,12 +797,26 @@ impl RenderState {
     ///
     /// Returns true if any animations are active (need another frame)
     pub fn tick(&mut self, current_time_ms: u64) -> bool {
-        // Calculate delta time
-        let dt_ms = if let Some(last_time) = self.last_tick_time {
+        // Calculate delta time. `elapsed_ms()` is ms-resolution and macOS
+        // winit can deliver back-to-back Frame events at microsecond cadence
+        // (memory note: "winit on macOS delivers `request_redraw`'d frames
+        // back-to-back at microsecond cadence"). When the clock hasn't
+        // advanced between consecutive ticks the raw delta is 0, motion
+        // progress doesn't advance, and the FSM gets stuck mid-animation
+        // until something pushes the wall clock forward — exactly the
+        // "animation freezes near the end until I move my mouse" symptom.
+        //
+        // Floor `dt_ms` at 1 ms so a tick that observed *any* time advance
+        // (real or coalesced into the same millisecond bucket) still moves
+        // the FSM forward. The cap-paced wake_at scheduler already
+        // guarantees no more than one frame per cap interval in steady
+        // state; this floor is just for the sub-ms storm.
+        let raw_dt_ms = if let Some(last_time) = self.last_tick_time {
             (current_time_ms.saturating_sub(last_time)) as f32
         } else {
             16.0 // Assume ~60fps for first frame
         };
+        let dt_ms = raw_dt_ms.max(1.0);
         self.last_tick_time = Some(current_time_ms);
 
         // Tick the animation scheduler
