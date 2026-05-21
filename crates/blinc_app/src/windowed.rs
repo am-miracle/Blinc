@@ -5535,11 +5535,35 @@ impl WindowedApp {
                             };
                             let elapsed_since_paint =
                                 current_time.saturating_sub(ws.last_paint_time_ms);
+
+                            // Bypass the FPS cap whenever a vsync-class
+                            // animation is mid-flight — transforms, layout
+                            // sizing, clip-path geometry, and motion-FSM
+                            // enter / exit animations all stair-step
+                            // visibly when capped to 30 fps, and (more
+                            // critically) the cap can swallow the final
+                            // settle-to-Visible paint of a motion FSM
+                            // animation, leaving the dialog / sheet stuck
+                            // at the penultimate frame until a mouse-move
+                            // wakes the loop. `has_visible_vsync_class`
+                            // covers CSS animations / transitions; motion
+                            // FSM (overlay enter / exit) is the
+                            // `has_active_motions()` term.
+                            let needs_vsync = rs.has_active_motions()
+                                || ws
+                                    .render_tree
+                                    .as_ref()
+                                    .is_some_and(|t| {
+                                        let store = t.css_anim_store();
+                                        let guard = store.lock().unwrap();
+                                        guard.has_visible_vsync_class(&t.painted_stable_ids())
+                                    });
                             let should_render = match cap_interval_ms {
                                 None => true,
                                 Some(_) if did_rebuild => true,
                                 Some(_) if ws.needs_relayout => true,
                                 Some(_) if ws.last_paint_time_ms == 0 => true,
+                                Some(_) if needs_vsync => true,
                                 Some(interval) => elapsed_since_paint >= interval,
                             };
                             if !should_render {
