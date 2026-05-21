@@ -267,17 +267,20 @@ impl BuiltAvatar {
         let container = if let Some(status) = config.status {
             let status_size = config.size.status_size();
             let status_offset = config.size.status_offset();
+            // Status pip is a plain themed dot — colour pulls from
+            // the theme's semantic tokens (Success / Warning / Error
+            // / TextTertiary). No ring, no shadow: the renderer's
+            // SDF corner pipeline already produces a clean anti-
+            // aliased circle, and avoiding the extra border-stroke
+            // outline keeps the pip uncluttered at small sizes.
             let status_color = status.color(theme);
-            let border_color = theme.color(ColorToken::Background);
 
-            // Status indicator positioned at bottom-right of the circular avatar
             let status_indicator = div()
+                .class("cn-avatar-status")
                 .w(status_size)
                 .h(status_size)
                 .rounded_full()
                 .bg(status_color)
-                // .border(1.0, border_color)
-                .shadow_sm()
                 .absolute()
                 .bottom(status_offset)
                 .right(status_offset);
@@ -601,25 +604,30 @@ impl BuiltAvatarGroup {
         // Convert overlap pixels to margin units (1 unit = 4px)
         let overlap_units = -overlap / 4.0;
 
-        let mut container = div().flex_row().items_center();
+        let mut container = div().class("cn-avatar-group").flex_row().items_center();
 
         let total = config.avatars.len();
         let visible_count = config.max.unwrap_or(total).min(total);
         let remaining = total.saturating_sub(visible_count);
 
-        // Add visible avatars with overlap
+        // Add visible avatars with overlap. The wrapper's ring is
+        // sized to match the typical parent context (Surface — cards,
+        // panels, sheets) so it reads as a clean punch-out separator
+        // between overlapping avatars rather than a coloured halo.
         // Border adds 2px on each side, so total wrapper size is size_px + 4
         let wrapper_size = size_px + 4.0;
         let wrapper_radius = wrapper_size / 2.0;
+        let ring_color = theme.color(ColorToken::Surface);
 
         for (i, avatar) in config.avatars.into_iter().take(visible_count).enumerate() {
             // Each avatar after the first gets negative margin for overlap
             // No overflow_clip - let the avatar's own clipping handle it
             let mut avatar_wrapper = div()
+                .class("cn-avatar-group__item")
                 .w(wrapper_size)
                 .h(wrapper_size)
                 .rounded(wrapper_radius)
-                .border(2.0, theme.color(ColorToken::Background))
+                .border(2.0, ring_color)
                 .flex_row()
                 .items_center()
                 .justify_center()
@@ -635,11 +643,12 @@ impl BuiltAvatarGroup {
         // Add "+N" indicator if there are remaining avatars
         if remaining > 0 {
             let remaining_indicator = div()
+                .class("cn-avatar-group__more")
                 .w(wrapper_size)
                 .h(wrapper_size)
                 .rounded(wrapper_radius)
-                .bg(theme.color(ColorToken::Surface))
-                .border(2.0, theme.color(ColorToken::Background))
+                .bg(theme.color(ColorToken::SurfaceElevated))
+                .border(2.0, ring_color)
                 .flex_row()
                 .items_center()
                 .justify_center()
