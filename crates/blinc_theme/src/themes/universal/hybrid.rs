@@ -40,12 +40,17 @@ impl HybridTheme {
                 secondary: Color::from_hex(0x605C73),
                 secondary_hover: Color::from_hex(0x4B475C),
                 secondary_active: Color::from_hex(0x3A3748),
-                success: Color::from_hex(0x1F8F4E),
-                success_bg: Color::from_hex(0x1F8F4E).with_alpha(0.12),
-                warning: Color::from_hex(0xB5781C),
-                warning_bg: Color::from_hex(0xB5781C).with_alpha(0.12),
-                error: Color::from_hex(0xC7382D),
-                error_bg: Color::from_hex(0xC7382D).with_alpha(0.12),
+                // Light-scheme semantic colours — bumped to HIG-vibrant
+                // values (Tailwind-600 range) so status pips / chart
+                // marks / toast accents read as crisp on white surfaces.
+                // Still clears AA-large / UI-accent contrast against
+                // Surface and Background.
+                success: Color::from_hex(0x16A34A),
+                success_bg: Color::from_hex(0x16A34A).with_alpha(0.12),
+                warning: Color::from_hex(0xD97706),
+                warning_bg: Color::from_hex(0xD97706).with_alpha(0.12),
+                error: Color::from_hex(0xDC2626),
+                error_bg: Color::from_hex(0xDC2626).with_alpha(0.12),
                 info: Color::from_hex(0x1283C7),
                 info_bg: Color::from_hex(0x1283C7).with_alpha(0.12),
                 background: Color::from_hex(0xF6F8FC),
