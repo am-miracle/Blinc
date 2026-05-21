@@ -55,46 +55,98 @@ use std::sync::{Arc, Mutex};
 use super::label::{label, LabelSize};
 use blinc_layout::InstanceKey;
 
-/// Slider thumb interaction states
+/// Halo grow / shrink duration in milliseconds. FPS-independent —
+/// the framework's `on_next_animation_frame` provides the wall-clock
+/// delta each refresh, so the animation lasts the same wall time at
+/// 30 Hz, 60 Hz, or 120 Hz.
+const HALO_DURATION_MS: u32 = 220;
+
+/// Slider thumb interaction + halo-animation lifecycle.
 ///
-/// Unlike `ButtonState`, this FSM handles DRAG and DRAG_END events
-/// to properly track dragging state even when mouse leaves the thumb.
+/// `Idle / Hovered / Pressed / Dragging` are the user-facing
+/// interaction phases. `Entering { elapsed_ms }` / `Exiting { elapsed_ms }`
+/// are the transient animation phases — `elapsed_ms` accumulates
+/// the wall-clock delta each `on_next_animation_frame`, and the
+/// FSM transitions out once it reaches `HALO_DURATION_MS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SliderThumbState {
     #[default]
     Idle,
+    /// Halo growing in. `elapsed_ms` advances each frame via
+    /// `on_next_animation_frame`; transitions to `Hovered` once
+    /// it crosses `HALO_DURATION_MS`.
+    Entering {
+        elapsed_ms: u32,
+    },
     Hovered,
     Pressed,
     Dragging,
+    /// Halo shrinking out. Same shape as `Entering`; transitions
+    /// to `Idle` once `elapsed_ms` crosses `HALO_DURATION_MS`.
+    Exiting {
+        elapsed_ms: u32,
+    },
 }
 
 impl StateTransitions for SliderThumbState {
     fn on_event(&self, event: u32) -> Option<Self> {
+        use event_types::*;
         match (self, event) {
-            // Idle transitions
-            (SliderThumbState::Idle, event_types::POINTER_ENTER) => Some(SliderThumbState::Hovered),
+            // Enter / re-enter from any non-engaged state.
+            (Self::Idle, POINTER_ENTER) => Some(Self::Entering { elapsed_ms: 0 }),
+            (Self::Exiting { .. }, POINTER_ENTER) => Some(Self::Entering { elapsed_ms: 0 }),
 
-            // Hovered transitions
-            (SliderThumbState::Hovered, event_types::POINTER_LEAVE) => Some(SliderThumbState::Idle),
-            (SliderThumbState::Hovered, event_types::POINTER_DOWN) => {
-                Some(SliderThumbState::Pressed)
+            // Engage on press from any visible state.
+            (Self::Entering { .. }, POINTER_DOWN) => Some(Self::Pressed),
+            (Self::Hovered, POINTER_DOWN) => Some(Self::Pressed),
+
+            // Release / drag transitions.
+            (Self::Pressed, POINTER_UP) => Some(Self::Hovered),
+            (Self::Pressed, DRAG) => Some(Self::Dragging),
+
+            // Exit from any visible state. `Dragging × POINTER_LEAVE`
+            // falls through (catch-all `_ => None`) so a drag that
+            // wanders off the track stays Dragging — the halo
+            // remains lit until DRAG_END.
+            (Self::Entering { .. }, POINTER_LEAVE) => Some(Self::Exiting { elapsed_ms: 0 }),
+            (Self::Hovered, POINTER_LEAVE) => Some(Self::Exiting { elapsed_ms: 0 }),
+            (Self::Pressed, POINTER_LEAVE) => Some(Self::Exiting { elapsed_ms: 0 }),
+
+            // Drag end. POINTER_UP is the fallback when the host
+            // event stream doesn't deliver a discrete DRAG_END.
+            (Self::Dragging, DRAG_END) => Some(Self::Exiting { elapsed_ms: 0 }),
+            (Self::Dragging, POINTER_UP) => Some(Self::Exiting { elapsed_ms: 0 }),
+
+            _ => None,
+        }
+    }
+
+    /// Time-driven transition. The framework hands us the wall-clock
+    /// delta since the previous refresh; accumulate it into the
+    /// variant's `elapsed_ms` and pop into the next steady state
+    /// once `HALO_DURATION_MS` has elapsed. FPS-invariant by
+    /// construction.
+    fn on_next_animation_frame(&self, delta_ms: f32) -> Option<Self> {
+        let advance = |e: u32| -> u32 {
+            e.saturating_add(delta_ms.max(0.0).round() as u32)
+        };
+        match self {
+            Self::Entering { elapsed_ms } => {
+                let next = advance(*elapsed_ms);
+                if next >= HALO_DURATION_MS {
+                    Some(Self::Hovered)
+                } else {
+                    Some(Self::Entering { elapsed_ms: next })
+                }
             }
-
-            // Pressed transitions
-            (SliderThumbState::Pressed, event_types::POINTER_UP) => Some(SliderThumbState::Hovered),
-            (SliderThumbState::Pressed, event_types::POINTER_LEAVE) => Some(SliderThumbState::Idle),
-            // When dragging starts, transition to Dragging
-            (SliderThumbState::Pressed, event_types::DRAG) => Some(SliderThumbState::Dragging),
-
-            // Dragging transitions - stays in Dragging until DRAG_END
-            (SliderThumbState::Dragging, event_types::DRAG) => None, // Stay in Dragging
-            (SliderThumbState::Dragging, event_types::DRAG_END) => Some(SliderThumbState::Idle),
-            // Ignore POINTER_LEAVE/ENTER while dragging - we don't want visual changes
-            (SliderThumbState::Dragging, event_types::POINTER_LEAVE) => None,
-            (SliderThumbState::Dragging, event_types::POINTER_ENTER) => None,
-            // POINTER_UP also ends dragging (fallback if DRAG_END not fired)
-            (SliderThumbState::Dragging, event_types::POINTER_UP) => Some(SliderThumbState::Idle),
-
+            Self::Exiting { elapsed_ms } => {
+                let next = advance(*elapsed_ms);
+                if next >= HALO_DURATION_MS {
+                    Some(Self::Idle)
+                } else {
+                    Some(Self::Exiting { elapsed_ms: next })
+                }
+            }
             _ => None,
         }
     }
@@ -181,19 +233,30 @@ impl Slider {
         let thumb_size = config.size.thumb_size();
         let radius = theme.radius(RadiusToken::Full);
 
-        // Get colors
-        let track_bg = config
-            .track_color
-            .unwrap_or_else(|| theme.color(ColorToken::SurfaceElevated));
-        let thumb_bg = config
-            .thumb_color
-            .unwrap_or_else(|| theme.color(ColorToken::Border).with_alpha(1.0));
-        // Fill color for the filled portion of the track
-        let fill_bg = config
-            .fill_color
-            .unwrap_or_else(|| theme.color(ColorToken::Primary));
-        // Note: border_hover could be used for hover effects (not yet implemented due to motion transform limitation)
-        let _border_hover = theme.color(ColorToken::BorderHover);
+        // Get colors. Mute track + fill + thumb when disabled so the
+        // whole control reads as inert — same approach `cn::switch`
+        // takes (track → input-bg-disabled, no opacity dimming on the
+        // surfaces). Pre-fix the slider only muted via container
+        // `opacity(0.5)`, which dimmed every layer including the
+        // thumb's bg and left the knob looking like a translucent ring.
+        let track_bg = config.track_color.unwrap_or_else(|| {
+            if config.disabled {
+                theme.color(ColorToken::InputBgDisabled)
+            } else {
+                theme.color(ColorToken::Border)
+            }
+        });
+        // Fill color for the filled portion of the track. Killing the
+        // primary blue on disabled is what makes the control stop
+        // reading as "active"; without it, a blue fill on a gray
+        // disabled track still looks interactive.
+        let fill_bg = config.fill_color.unwrap_or_else(|| {
+            if config.disabled {
+                theme.color(ColorToken::BorderSecondary)
+            } else {
+                theme.color(ColorToken::Primary)
+            }
+        });
 
         let disabled = config.disabled;
         let min = config.min;
@@ -218,14 +281,18 @@ impl Slider {
         let scheduler = get_scheduler();
 
         let thumb_offset = Arc::new(Mutex::new(AnimatedValue::new(
-            scheduler,
+            scheduler.clone(),
             initial_offset,
             SpringConfig::snappy(),
         )));
         let drag_start_x = ctx.use_state_keyed(&format!("{}_drag_start_x", instance_key), || 0.0);
         let drag_start_offset =
             ctx.use_state_keyed(&format!("{}_drag_start_offset", instance_key), || 0.0);
-        let is_dragging = ctx.use_state_keyed(&format!("{}_is_dragging", instance_key), || false);
+        // Click-to-jump suppression between DRAG_END and the click
+        // that fires right after. (Click events fire even after a
+        // drag; without this we'd seek the thumb to the release point.)
+        let just_dragged =
+            ctx.use_state_keyed(&format!("{}_just_dragged", instance_key), || false);
 
         // Clones for closures
         let thumb_offset_for_click = thumb_offset.clone();
@@ -249,7 +316,6 @@ impl Slider {
         // Clones for event handlers
         let value_state_for_click = config.value_state.clone();
         let value_state_for_drag = config.value_state.clone();
-        // let value_state_for_fill = config.value_state.clone();
         let on_change_for_click = config.on_change.clone();
         let on_change_for_drag = config.on_change.clone();
 
@@ -261,216 +327,279 @@ impl Slider {
         let drag_start_offset_for_down = drag_start_offset.clone();
         let drag_start_x_for_drag = drag_start_x.clone();
         let drag_start_offset_for_drag = drag_start_offset.clone();
-        let is_dragging_for_click = is_dragging.clone();
-        let is_dragging_for_drag = is_dragging.clone();
-        let is_dragging_for_drag_end = is_dragging.clone();
-        let is_dragging_for_thumb = is_dragging.clone();
-        let is_dragging_for_leave = is_dragging.clone();
+        let just_dragged_for_click = just_dragged.clone();
+        let just_dragged_for_drag_end = just_dragged.clone();
 
-        // Get visual feedback colors
-        let thumb_border_dragging = theme.color(ColorToken::Primary);
+        // Get visual feedback colors. The thumb chrome no longer
+        // varies between idle / hover / drag — matching the design
+        // reference (Material-style slider) the thumb is a 2px primary
+        // ring with a Surface fill across all active states, and the
+        // halo carries all hover/drag feedback. Pre-fix idle used 1px
+        // Border (gray) and hover/drag used 2px Primary (blue), which
+        // (a) was inconsistent with the reference and (b) re-introduced
+        // AA-fighting between the SDF circle edge and a thicker stroke
+        // when the bg was transparent.
+        let thumb_border_active = theme.color(ColorToken::Primary);
+        let thumb_border_disabled = theme.color(ColorToken::BorderSecondary);
 
-        // Thumb element - uses Stateful with deps on is_dragging to show visual feedback
-        // Since motion.translate_x() uses visual transform, hit testing misses the thumb,
-        // but we can still react to the is_dragging state signal for visual changes.
-        let thumb_key = format!("{}_thumb", instance_key);
-        let thumb = stateful_with_key::<NoState>(&thumb_key)
-            .deps([is_dragging.signal_id()])
-            .on_state(move |_ctx| {
-                let dragging = is_dragging_for_thumb.get();
-                let mut thumb_div = div()
-                    .class("cn-slider-thumb")
+        let halo_size = thumb_size * 2.0;
+        // Soft accent-tinted halo. `AccentSubtle` is the shared
+        // hover-bg token (combobox / select / etc.) so the colour
+        // family is consistent across widgets, but at its native
+        // alpha (~14-16 %) the halo reads heavier than the
+        // Material-style reference. Drop to ~8 % so the halo
+        // registers as a soft glow rather than a solid disc.
+        let halo_bg = theme.color(ColorToken::Primary).with_alpha(0.08);
+        let halo_offset = (halo_size - thumb_size) / 2.0;
+
+        // Thumb chrome builder. Captures are Copy/'static so the
+        // closure is Fn — callable each time the Stateful re-renders.
+        let thumb_fill_override = config.thumb_color;
+        let make_thumb_div = move || {
+            let mut td = div()
+                .class("cn-slider-thumb")
+                .w(thumb_size)
+                .h(thumb_size)
+                .rounded(thumb_size / 2.0);
+            if disabled {
+                td = td
+                    .class("cn-slider-thumb--disabled")
+                    .bg(theme.color(ColorToken::InputBgDisabled))
+                    .border(1.0, thumb_border_disabled);
+            } else {
+                let fill = thumb_fill_override
+                    .unwrap_or_else(|| theme.color(ColorToken::Surface));
+                td = td.bg(fill).border(2.0, thumb_border_active);
+            }
+            td
+        };
+
+        // Fill bar geometry (precomputed; used inside on_state).
+        let fill_left = thumb_size / 2.0 - track_width;
+
+        // Clones for the stateful's child handlers and on_state body.
+        let thumb_offset_for_state = thumb_offset.clone();
+        let thumb_offset_for_fill_in = thumb_offset_for_fill.clone();
+        let just_dragged_for_click = just_dragged.clone();
+
+        // Outer container is a `Stateful<SliderThumbState>` — the
+        // framework auto-dispatches POINTER_*/DRAG/DRAG_END from this
+        // host element to the FSM (`SliderThumbState::on_event`), so
+        // we don't dispatch manually. The on_state callback re-runs
+        // on every transition and reads `sctx.state()` to drive the
+        // halo's visibility.
+        let slider_state_key = format!("{}_state", instance_key);
+        let slider_container = stateful_with_key::<SliderThumbState>(&slider_state_key)
+            .initial(SliderThumbState::Idle)
+            .on_state(move |sctx| {
+                let state = sctx.state();
+
+                // Halo ticker — drives stateful refreshes while the
+                // FSM is in Entering/Exiting. `loop_infinite()` so
+                // the kf never settles between frames; we manually
+                // `.stop()` it when the FSM hits a steady state.
+                // Without the loop, the kf settles after one cycle
+                // (HALO_DURATION_MS) and the stateful drops out of
+                // the animation registry — but `elapsed_ms` can
+                // lag wall-clock time when `delta_ms` is clamped
+                // (stall safety in `refresh_stateful`), so the FSM
+                // could still be in Entering/Exiting when refreshes
+                // stop, pinning the halo mid-animation.
+                let kf = sctx.use_keyframes("halo_ticker", |b| {
+                    b.at(0, 0.0)
+                        .at(HALO_DURATION_MS, 1.0)
+                        .ease(Easing::Linear)
+                        .loop_infinite()
+                });
+
+                let halo_scale = match state {
+                    SliderThumbState::Idle => {
+                        if kf.is_playing() {
+                            kf.stop();
+                        }
+                        0.0
+                    }
+                    SliderThumbState::Entering { elapsed_ms } => {
+                        if !kf.is_playing() {
+                            kf.restart();
+                        }
+                        (elapsed_ms as f32 / HALO_DURATION_MS as f32).clamp(0.0, 1.0)
+                    }
+                    SliderThumbState::Hovered
+                    | SliderThumbState::Pressed
+                    | SliderThumbState::Dragging => {
+                        if kf.is_playing() {
+                            kf.stop();
+                        }
+                        1.0
+                    }
+                    SliderThumbState::Exiting { elapsed_ms } => {
+                        if !kf.is_playing() {
+                            kf.restart();
+                        }
+                        1.0 - (elapsed_ms as f32 / HALO_DURATION_MS as f32).clamp(0.0, 1.0)
+                    }
+                };
+                let halo_scale = if disabled { 0.0 } else { halo_scale };
+
+                // Halo — `Transform::scale` is a static CSS-style
+                // element transform applied at walker time, so
+                // corner_radius is freshly baked each frame.
+                let halo = div()
+                    .class("cn-slider-halo")
+                    .absolute()
+                    .top(-halo_offset)
+                    .left(-halo_offset)
+                    .w(halo_size)
+                    .h(halo_size)
+                    .rounded(halo_size / 2.0)
+                    .bg(halo_bg)
+                    .pointer_events_none()
+                    .transform(Transform::scale(halo_scale, halo_scale));
+
+                // Thumb assembly — halo + static thumb chrome, wrapped
+                // in motion for translate_x binding to thumb_offset.
+                let thumb_combo = div()
+                    .relative()
                     .w(thumb_size)
                     .h(thumb_size)
-                    .rounded(thumb_size / 2.0)
-                    .border(2.0, theme.color(ColorToken::Border))
-                    .bg(thumb_bg)
-                    .shadow_sm();
+                    .child(halo)
+                    .child(make_thumb_div());
+                let thumb_wrapper = div().absolute().left(0.0).top(0.0).child(
+                    motion()
+                        .translate_x(thumb_offset_for_state.clone())
+                        .child(thumb_combo),
+                );
 
-                if dragging {
-                    // Visual feedback when dragging: add border
-                    thumb_div = thumb_div.border(2.0, thumb_border_dragging).shadow_md();
+                // Fill bar.
+                let fill_bar = div()
+                    .class("cn-slider-fill")
+                    .w(track_width)
+                    .h(track_height)
+                    .rounded(radius)
+                    .bg(fill_bg);
+                let fill_positioned =
+                    div().absolute().left(fill_left).top(0.0).child(fill_bar);
+                let animated_fill = motion()
+                    .translate_x(thumb_offset_for_fill_in.clone())
+                    .child(fill_positioned);
+                let track_fill = div()
+                    .absolute()
+                    .left(0.0)
+                    .top((thumb_size - track_height) / 2.0)
+                    .w(track_width)
+                    .h(track_height)
+                    .overflow_clip()
+                    .rounded(radius)
+                    .relative()
+                    .child(animated_fill);
+
+                // Track visual + click-to-jump. The click handler is
+                // built fresh each on_state call so it can capture
+                // current clones of the relevant state.
+                let just_dragged_for_click = just_dragged_for_click.clone();
+                let value_state_for_click = value_state_for_click.clone();
+                let on_change_for_click = on_change_for_click.clone();
+                let thumb_offset_for_click = thumb_offset_for_click.clone();
+                let track_visual = div()
+                    .class("cn-slider-track")
+                    .absolute()
+                    .left(0.0)
+                    .right(0.0)
+                    .top((thumb_size - track_height) / 2.0)
+                    .h(track_height)
+                    .rounded(radius)
+                    .bg(track_bg)
+                    .cursor_pointer()
+                    .on_click(move |event| {
+                        if disabled {
+                            return;
+                        }
+                        if just_dragged_for_click.get() {
+                            just_dragged_for_click.set(false);
+                            return;
+                        }
+                        let track_w = event.bounds_width;
+                        if track_w > 0.0 {
+                            let x = event.local_x;
+                            let norm = (x / track_w).clamp(0.0, 1.0);
+                            let raw = min + norm * (max - min);
+                            let new_val = round_to_step_click(raw);
+                            value_state_for_click.set(new_val);
+                            let x_offset = norm * (track_w - thumb_size);
+                            thumb_offset_for_click.lock().unwrap().set_target(x_offset);
+                            if let Some(ref cb) = on_change_for_click {
+                                cb(new_val);
+                            }
+                        }
+                    });
+
+                let mut container = div()
+                    .relative()
+                    .h(thumb_size)
+                    .overflow_visible()
+                    .cursor(CursorStyle::Grab)
+                    .child(track_visual)
+                    .child(track_fill)
+                    .child(thumb_wrapper);
+                if let Some(w) = width {
+                    container = container.w(w);
+                } else {
+                    container = container.w_full();
                 }
-
-                thumb_div
-            });
-
-        // Filled portion of track
-        //
-        // The fill bar is positioned so its right edge aligns with the thumb center.
-        // Both fill and thumb share the same animated offset value, so they move together.
-        //
-        // Layout:
-        // - A full-width fill bar starts at negative left position
-        // - Motion translates it by thumb_offset (same as thumb)
-        // - Result: fill right edge aligns with thumb center
-
-        // The fill bar - full track width
-        let fill_bar = div()
-            .class("cn-slider-fill")
-            .w(track_width)
-            .h(track_height)
-            .rounded(radius)
-            .bg(fill_bg);
-
-        // Position fill so its right edge is at thumb center when thumb_offset=0
-        // At offset=0, fill right edge should be at thumb_size/2
-        // So fill left edge should be at: thumb_size/2 - track_width
-        let fill_left = thumb_size / 2.0 - track_width;
-        let fill_positioned = div().absolute().left(fill_left).top(0.0).child(fill_bar);
-
-        // Motion translates by thumb_offset - same value as thumb uses
-        let animated_fill = motion()
-            .translate_x(thumb_offset_for_fill.clone())
-            .child(fill_positioned);
-
-        // Container for animated fill with clipping
-        let track_fill = div()
-            .absolute()
-            .left(0.0)
-            .top((thumb_size - track_height) / 2.0)
-            .w(track_width)
-            .h(track_height)
-            .overflow_clip()
-            .rounded(radius)
-            .relative() // Positioning context for absolute child
-            .child(animated_fill);
-
-        // Track visual element (the thin bar) - owns click-to-jump behavior
-        // Track is absolutely positioned and centered vertically
-        let track_visual = div()
-            .class("cn-slider-track")
-            .absolute()
-            .left(0.0)
-            .right(0.0)
-            .top((thumb_size - track_height) / 2.0) // Center vertically
-            .h(track_height)
-            .rounded(radius)
-            .bg(track_bg)
-            .cursor_pointer()
-            // Track owns the click-to-jump behavior
-            // Skip if a drag just occurred (is_dragging is cleared on DRAG_END)
-            .on_click(move |event| {
-                if disabled {
-                    return;
-                }
-
-                // Skip click-to-jump if we just finished dragging
-                // (the click event fires after drag end)
-                if is_dragging_for_click.get() {
-                    is_dragging_for_click.set(false);
-                    return;
-                }
-
-                let track_w = event.bounds_width;
-
-                if track_w > 0.0 {
-                    // Calculate normalized position from click
-                    let x = event.local_x;
-                    let norm = (x / track_w).clamp(0.0, 1.0);
-                    let raw = min + norm * (max - min);
-                    let new_val = round_to_step_click(raw);
-                    value_state_for_click.set(new_val);
-
-                    // Animate thumb to clicked position with spring
-                    let x_offset = norm * (track_w - thumb_size);
-                    thumb_offset_for_click.lock().unwrap().set_target(x_offset);
-
-                    if let Some(ref cb) = on_change_for_click {
-                        cb(new_val);
-                    }
-                }
-            });
-
-        // Thumb wrapper - absolutely positioned at left=0, top=0
-        // Motion.translate_x moves it visually from this base position
-        let thumb_wrapper = div()
-            .absolute()
-            .left(0.0)
-            .top(0.0)
-            .child(motion().translate_x(thumb_offset).child(thumb));
-
-        // Build the slider using div() with relative positioning
-        //
-        // IMPORTANT: The container handles ALL drag events because:
-        // - motion().translate_x() uses visual transform (GPU-level), not layout transform
-        // - Hit testing uses layout bounds, so clicks at the thumb's visual position miss it
-        // - The container spans the full track width and always receives events correctly
-        let mut slider_container = div()
-            .relative() // Positioning context for absolute children
-            .h(thumb_size)
-            .overflow_visible() // Allow thumb to overflow if needed
-            .cursor(CursorStyle::Grab)
-            // Track background layer (absolutely positioned, centered)
-            .child(track_visual)
-            // Track fill layer (shows progress, on top of background)
-            .child(track_fill)
-            // Thumb with motion translation for visual positioning (absolutely positioned)
-            .child(thumb_wrapper)
-            // Container handles POINTER_DOWN to capture drag start position
+                container
+            })
+            // POINTER_DOWN auto-dispatches Hovered → Pressed. This
+            // handler does only the drag-start bookkeeping.
             .on_mouse_down(move |event| {
                 if disabled {
                     return;
                 }
-                // Store mouse X position and current thumb offset at drag start
                 drag_start_x_for_down.set(event.mouse_x);
                 let current = thumb_offset_for_down.lock().unwrap().get();
                 drag_start_offset_for_down.set(current);
             })
-            // Container handles DRAG to update thumb position
-            // Uses mouse_x delta from drag start to calculate new offset
+            // DRAG auto-dispatches Pressed → Dragging. This handler
+            // updates the thumb position + value_state from mouse delta.
             .on_drag(move |event| {
                 if disabled {
                     return;
                 }
-                // Mark that we're dragging (to suppress click-to-jump on release)
-                is_dragging_for_drag.set(true);
-
-                // Calculate delta from drag start using absolute mouse coordinates
                 let start_x = drag_start_x_for_drag.get();
                 let delta_x = event.mouse_x - start_x;
                 let start_offset = drag_start_offset_for_drag.get();
                 let max_offset = track_width - thumb_size;
                 let new_offset = (start_offset + delta_x).clamp(0.0, max_offset);
-
-                // Update thumb position immediately (no spring animation during drag)
                 thumb_offset_for_drag
                     .lock()
                     .unwrap()
                     .set_immediate(new_offset);
-
-                // Calculate and update value
                 let norm = new_offset / max_offset;
                 let raw = min + norm * (max - min);
                 let new_val = round_to_step_drag(raw);
-                value_state_for_drag.set(new_val);
-
-                if let Some(ref cb) = on_change_for_drag {
-                    cb(new_val);
+                if (value_state_for_drag.get() - new_val).abs() > f32::EPSILON {
+                    value_state_for_drag.set(new_val);
+                    if let Some(ref cb) = on_change_for_drag {
+                        cb(new_val);
+                    }
                 }
             })
-            // DRAG_END - keep is_dragging true so click handler can clear it
-            // (click fires after drag_end, so we need the flag to persist briefly)
+            // DRAG_END auto-dispatches Dragging → Idle. This handler
+            // sets the click-suppression flag for the click that
+            // fires immediately after.
             .on_drag_end(move |_event| {
-                // is_dragging stays true - click handler will clear it
-                // This prevents click-to-jump from firing after a drag
-                let _ = is_dragging_for_drag_end.get(); // keep closure alive
-            })
-            // Mouse leave - clear is_dragging to reset visual state
-            .on_hover_leave(move |_event| {
-                is_dragging_for_leave.set(false);
+                just_dragged_for_drag_end.set(true);
             });
 
-        // Apply width
-        if let Some(w) = width {
-            slider_container = slider_container.w(w);
-        } else {
-            slider_container = slider_container.w_full();
-        }
-
-        if disabled {
-            slider_container = slider_container.opacity(0.5);
-        }
+        // Pre-fix the entire container was `.opacity(0.5)` on disabled
+        // — that dimmed the thumb's bg along with everything else and
+        // left the knob looking like a translucent ring. Matching the
+        // switch toggle's pattern: keep all surfaces fully opaque,
+        // express disabled via chrome changes (thinner border on thumb,
+        // see thumb construction above). Track / fill colour overrides
+        // for disabled can go via .track_color() / .fill_color() per
+        // builder; the default tracks (--border) already read as inert
+        // chrome.
 
         // If there's a label or show_value, wrap in a container
         let inner = if config.label.is_some() || config.show_value {
