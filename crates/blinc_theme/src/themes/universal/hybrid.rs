@@ -115,6 +115,13 @@ impl HybridTheme {
                 ease_in: Easing::EaseIn,
                 ease_out: Easing::EaseOut,
                 ease_in_out: Easing::EaseInOut,
+                // Hybrid is the cross-platform default — blends HIG
+                // snappiness with a touch of Material spring on the
+                // attention-grabbing surfaces.
+                ease_state: STANDARD,
+                ease_nav: HYBRID_NAV,
+                ease_spring: HYBRID_SPRING,
+                ease_sheet: HYBRID_NAV,
             },
         }
     }
@@ -194,6 +201,13 @@ impl HybridTheme {
                 ease_in: Easing::EaseIn,
                 ease_out: Easing::EaseOut,
                 ease_in_out: Easing::EaseInOut,
+                // Hybrid is the cross-platform default — blends HIG
+                // snappiness with a touch of Material spring on the
+                // attention-grabbing surfaces.
+                ease_state: STANDARD,
+                ease_nav: HYBRID_NAV,
+                ease_spring: HYBRID_SPRING,
+                ease_sheet: HYBRID_NAV,
             },
         }
     }
@@ -238,6 +252,13 @@ impl Theme for HybridTheme {
 // Used as `ease_default` for Restrained + Hybrid (Expressive overrides
 // to emphasised-decel).
 const STANDARD: Easing = Easing::CubicBezier(0.25, 0.10, 0.25, 1.0);
+
+// Hybrid navigation decelerate — between HIG_SHEET (Restrained) and
+// EMPHASIZED (Expressive). Reads smooth without overshoot.
+const HYBRID_NAV: Easing = Easing::CubicBezier(0.30, 0.70, 0.10, 1.0);
+
+// Mid-strength spring for popovers / badges (~6% past target).
+const HYBRID_SPRING: Easing = Easing::CubicBezier(0.34, 1.30, 0.64, 1.0);
 
 /// Shared typography for all three Universal variants.
 ///

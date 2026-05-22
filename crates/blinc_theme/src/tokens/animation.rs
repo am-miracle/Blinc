@@ -72,11 +72,31 @@ pub struct AnimationTokens {
     pub duration_slower: u64,
     pub duration_slowest: u64,
 
-    // Easing functions
+    // Generic easing functions (curve-shape semantics).
     pub ease_default: Easing,
     pub ease_in: Easing,
     pub ease_out: Easing,
     pub ease_in_out: Easing,
+
+    // Semantic easing roles (intent-shape semantics). Each maps onto
+    // a class of UI motion so callers can ask for the curve that
+    // matches the *meaning* of the motion rather than picking
+    // `ease_out` everywhere. Universal HID variants override these
+    // with platform-appropriate curves; the default impl falls back
+    // to the generic slots so older themes that haven't been
+    // migrated stay source-compatible.
+    /// State-change feedback (hover, press, focus, checked).
+    /// Snappy, short — should resolve within `duration_fast`.
+    pub ease_state: Easing,
+    /// Navigation transitions (page change, tab switch, route).
+    /// Smooth, directional — typically a long-tail decelerate.
+    pub ease_nav: Easing,
+    /// Spring-like motion (popovers, badges, attention nudges).
+    /// Overshoots slightly to draw the eye.
+    pub ease_spring: Easing,
+    /// Modal sheet / drawer slide-in. Heavier curve than `state` so
+    /// the surface reads as substantial — long-tail decelerate.
+    pub ease_sheet: Easing,
 }
 
 impl AnimationTokens {
@@ -114,6 +134,13 @@ impl Default for AnimationTokens {
             ease_in: Easing::EaseIn,
             ease_out: Easing::EaseOut,
             ease_in_out: Easing::EaseInOut,
+
+            // Generic fallbacks. Universal HID variants override
+            // these with platform-appropriate curves.
+            ease_state: Easing::EaseOut,
+            ease_nav: Easing::EaseInOut,
+            ease_spring: Easing::EaseOut,
+            ease_sheet: Easing::EaseOut,
         }
     }
 }

@@ -106,6 +106,12 @@ impl ExpressiveTheme {
                 ease_in: Easing::EaseIn,
                 ease_out: EMPH_DECEL,
                 ease_in_out: EMPHASIZED,
+                // Material 3-leaning semantic slots — emphasised
+                // curves throughout, springier popovers.
+                ease_state: EMPH_DECEL,
+                ease_nav: EMPHASIZED,
+                ease_spring: EXPRESSIVE_SPRING,
+                ease_sheet: EMPHASIZED,
             },
         }
     }
@@ -185,6 +191,12 @@ impl ExpressiveTheme {
                 ease_in: Easing::EaseIn,
                 ease_out: EMPH_DECEL,
                 ease_in_out: EMPHASIZED,
+                // Material 3-leaning semantic slots — emphasised
+                // curves throughout, springier popovers.
+                ease_state: EMPH_DECEL,
+                ease_nav: EMPHASIZED,
+                ease_spring: EXPRESSIVE_SPRING,
+                ease_sheet: EMPHASIZED,
             },
         }
     }
@@ -229,6 +241,9 @@ impl Theme for ExpressiveTheme {
 const EMPHASIZED: Easing = Easing::CubicBezier(0.20, 0.00, 0.00, 1.00);
 // Material 3 emphasized-decelerate for incoming elements.
 const EMPH_DECEL: Easing = Easing::CubicBezier(0.05, 0.70, 0.10, 1.00);
+
+// Expressive popover/spring — pronounced overshoot (~10% past target).
+const EXPRESSIVE_SPRING: Easing = Easing::CubicBezier(0.34, 1.56, 0.64, 1.0);
 
 // Expressive uses triple-layer shadows with a hint of accent tint —
 // Material's signature compound depth recipe. Inner tight ambient +

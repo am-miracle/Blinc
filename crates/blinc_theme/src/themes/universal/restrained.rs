@@ -103,6 +103,12 @@ impl RestrainedTheme {
                 ease_in: Easing::EaseIn,
                 ease_out: STANDARD,
                 ease_in_out: Easing::EaseInOut,
+                // Apple HIG-leaning semantic slots: snappy state
+                // feedback, long-tail navigation, light spring.
+                ease_state: STANDARD,
+                ease_nav: HIG_SHEET,
+                ease_spring: SUBTLE_SPRING,
+                ease_sheet: HIG_SHEET,
             },
         }
     }
@@ -182,6 +188,12 @@ impl RestrainedTheme {
                 ease_in: Easing::EaseIn,
                 ease_out: STANDARD,
                 ease_in_out: Easing::EaseInOut,
+                // Apple HIG-leaning semantic slots: snappy state
+                // feedback, long-tail navigation, light spring.
+                ease_state: STANDARD,
+                ease_nav: HIG_SHEET,
+                ease_spring: SUBTLE_SPRING,
+                ease_sheet: HIG_SHEET,
             },
         }
     }
@@ -224,6 +236,12 @@ impl Theme for RestrainedTheme {
 
 // HIG-style quiet ease-out.
 const STANDARD: Easing = Easing::CubicBezier(0.25, 0.10, 0.25, 1.0);
+
+// iOS-style sheet / nav decelerate — long tail so surfaces glide.
+const HIG_SHEET: Easing = Easing::CubicBezier(0.32, 0.72, 0.0, 1.0);
+
+// Subtle overshoot for popovers / badges (~3% past target).
+const SUBTLE_SPRING: Easing = Easing::CubicBezier(0.34, 1.20, 0.64, 1.0);
 
 // Restrained stacks a tight ambient (1 px ink @ low alpha) + a wider
 // diffuse key per elevation — Apple's HIG shadow recipe distilled.
