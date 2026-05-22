@@ -49,7 +49,7 @@ fn main() -> Result<()> {
         resizable: true,
         fullscreen: false,
         animation_fps_cap: Some(30),
-        max_frame_latency: 1,
+        max_frame_latency: 2,
         ..Default::default()
     };
 
