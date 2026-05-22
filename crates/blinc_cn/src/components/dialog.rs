@@ -270,13 +270,16 @@ impl DialogBuilder {
         let classes = self.classes;
         let user_id = self.user_id;
         // Scale-in / scale-out by default (matches router page navigation feel).
-        // User-supplied animations override.
+        // The theme's `ease_sheet` slot drives the curve so the dialog
+        // reads as "substantial modal surface" rather than a generic
+        // ease-out scale. User-supplied animations still override.
+        let sheet_easing = theme.animations().ease_sheet.to_animation_easing();
         let enter_animation = self
             .enter_animation
-            .unwrap_or_else(|| AnimationPreset::scale_in(200));
+            .unwrap_or_else(|| AnimationPreset::scale_in_with(200, sheet_easing));
         let exit_animation = self
             .exit_animation
-            .unwrap_or_else(|| AnimationPreset::scale_out(150));
+            .unwrap_or_else(|| AnimationPreset::scale_out_with(150, sheet_easing));
 
         // Pre-allocate the handle id so the confirm/cancel buttons can capture
         // it before show() is called (same pattern as popover). Buttons close

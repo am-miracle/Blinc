@@ -390,7 +390,9 @@ pub const CN_STYLES: &str = r#"
        cascade override animates rather than snaps. */
     border-radius: var(--radius-sm);
     cursor: pointer;
-    transition: background var(--duration-fast), border-color var(--duration-fast);
+    transition:
+        background var(--duration-fast) var(--ease-state),
+        border-color var(--duration-fast) var(--ease-state);
 }
 /* Hover scale is Rust-driven via the Stateful FSM — duplicating it here
    compounded with the Rust transform. State colors handled in Rust too. */
@@ -410,7 +412,7 @@ pub const CN_STYLES: &str = r#"
 .cn-switch {
     border-radius: var(--radius-full);
     cursor: pointer;
-    transition: background var(--duration-normal);
+    transition: background var(--duration-normal) var(--ease-state);
 }
 .cn-switch-track {
     background: var(--cn-switch-off-bg, var(--border));
@@ -436,7 +438,9 @@ pub const CN_STYLES: &str = r#"
     border: 2px solid var(--cn-radio-border, var(--border-secondary));
     border-radius: var(--radius-full);
     cursor: pointer;
-    transition: border-color var(--duration-fast), transform var(--duration-fastest);
+    transition:
+        border-color var(--duration-fast) var(--ease-state),
+        transform var(--duration-fastest) var(--ease-state);
 }
 .cn-radio:hover {
     border-color: var(--cn-radio-hover-border, var(--primary));
@@ -470,7 +474,7 @@ pub const CN_STYLES: &str = r#"
     border-radius: var(--radius-default);
     cursor: pointer;
     color: var(--text-secondary);
-    transition: color var(--duration-fast);
+    transition: color var(--duration-fast) var(--ease-state);
 }
 .cn-tabs-trigger:hover:not(.cn-tabs-trigger--active) {
     color: var(--text-primary);
@@ -508,7 +512,7 @@ pub const CN_STYLES: &str = r#"
        via more specific rules if they need to override. */
     border-radius: var(--radius-default);
     cursor: pointer;
-    transition: border-color var(--duration-fast);
+    transition: border-color var(--duration-fast) var(--ease-state);
 }
 
 .cn-select-content {
@@ -610,7 +614,7 @@ pub const CN_STYLES: &str = r#"
 .cn-progress-bar {
     background: var(--cn-progress-bar, var(--primary));
     border-radius: var(--radius-full);
-    transition: width var(--duration-slow);
+    transition: width var(--duration-slow) var(--ease-nav);
 }
 .cn-progress--sm { height: var(--space-1); }
 .cn-progress--md { height: var(--space-2); }
@@ -653,7 +657,7 @@ pub const CN_STYLES: &str = r#"
        enter animation to the CSS animation system which the renderer
        already handles per-frame. Exit snaps for now; once the motion
        integration is fixed, switch back to motion_enter/_exit. */
-    animation: cn-tooltip-enter var(--duration-fast) ease-out;
+    animation: cn-tooltip-enter var(--duration-fast) var(--ease-state);
 }
 
 @keyframes cn-tooltip-enter {
@@ -859,7 +863,7 @@ pub const CN_STYLES: &str = r#"
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     /* CSS-driven enter — slide down + fade. Motion FSM workaround. */
-    animation: cn-nav-menu-enter var(--duration-fast) ease-out;
+    animation: cn-nav-menu-enter var(--duration-fast) var(--ease-state);
     transform-origin: top center;
 }
 
@@ -914,7 +918,7 @@ pub const CN_STYLES: &str = r#"
     border-radius: var(--radius-default);
     padding: var(--space-1);
     /* CSS-driven enter — slight scale + fade. Motion FSM workaround. */
-    animation: cn-dropdown-menu-enter var(--duration-fast) ease-out;
+    animation: cn-dropdown-menu-enter var(--duration-fast) var(--ease-state);
     transform-origin: top center;
 }
 
@@ -954,7 +958,7 @@ pub const CN_STYLES: &str = r#"
     border-radius: var(--radius-default);
     padding: var(--space-1);
     /* CSS-driven enter — small scale + fade. Motion FSM workaround. */
-    animation: cn-context-menu-enter var(--duration-fast) ease-out;
+    animation: cn-context-menu-enter var(--duration-fast) var(--ease-state);
     transform-origin: top left;
 }
 
@@ -1043,7 +1047,7 @@ pub const CN_STYLES: &str = r#"
     padding: var(--space-4);
     /* CSS-driven enter — same approach as cn-tooltip while the motion FSM
        integration with the new OverlayStack is being fixed. */
-    animation: cn-popover-enter var(--duration-normal) ease-out;
+    animation: cn-popover-enter var(--duration-normal) var(--ease-spring);
     transform-origin: top center;
 }
 
@@ -1063,7 +1067,7 @@ pub const CN_STYLES: &str = r#"
     border-radius: var(--radius-md);
     padding: var(--space-4);
     /* CSS-driven enter — same approach as cn-tooltip / cn-popover. */
-    animation: cn-hover-card-enter var(--duration-normal) ease-out;
+    animation: cn-hover-card-enter var(--duration-normal) var(--ease-spring);
     transform-origin: top center;
 }
 
@@ -1127,7 +1131,7 @@ pub const CN_STYLES: &str = r#"
        state-aware disabled fill isn't clobbered by CSS. */
     border-radius: var(--radius-default);
     cursor: pointer;
-    transition: border-color var(--duration-fast);
+    transition: border-color var(--duration-fast) var(--ease-state);
 }
 .cn-combobox-content {
     /* Shared overlay-menu chrome with select / dropdown / context. */

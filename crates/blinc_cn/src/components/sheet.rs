@@ -246,18 +246,25 @@ impl SheetBuilder {
             SheetSide::Left | SheetSide::Right => size.width(),
             SheetSide::Top | SheetSide::Bottom => size.height(),
         };
-        let enter_animation = self.enter_animation.clone().unwrap_or_else(|| match side {
-            SheetSide::Left => AnimationPreset::slide_in_left(300, slide_distance),
-            SheetSide::Right => AnimationPreset::slide_in_right(300, slide_distance),
-            SheetSide::Top => AnimationPreset::slide_in_top(300, slide_distance),
-            SheetSide::Bottom => AnimationPreset::slide_in_bottom(300, slide_distance),
-        });
-        let exit_animation = self.exit_animation.clone().unwrap_or_else(|| match side {
-            SheetSide::Left => AnimationPreset::slide_out_left(225, slide_distance),
-            SheetSide::Right => AnimationPreset::slide_out_right(225, slide_distance),
-            SheetSide::Top => AnimationPreset::slide_out_top(225, slide_distance),
-            SheetSide::Bottom => AnimationPreset::slide_out_bottom(225, slide_distance),
-        });
+        // Theme's `ease_sheet` slot drives the slide curve so sheets
+        // read as "substantial drawer surface" — long-tail decelerate
+        // on enter, mirrored ease-in on exit. User overrides apply on
+        // top.
+        let sheet_easing = theme.animations().ease_sheet.to_animation_easing();
+        let (in_dx, in_dy, out_dx, out_dy) = match side {
+            SheetSide::Left => (-slide_distance, 0.0, -slide_distance, 0.0),
+            SheetSide::Right => (slide_distance, 0.0, slide_distance, 0.0),
+            SheetSide::Top => (0.0, -slide_distance, 0.0, -slide_distance),
+            SheetSide::Bottom => (0.0, slide_distance, 0.0, slide_distance),
+        };
+        let enter_animation = self
+            .enter_animation
+            .clone()
+            .unwrap_or_else(|| AnimationPreset::slide_in_with(300, in_dx, in_dy, sheet_easing));
+        let exit_animation = self
+            .exit_animation
+            .clone()
+            .unwrap_or_else(|| AnimationPreset::slide_out_with(225, out_dx, out_dy, sheet_easing));
 
         let next_handle_id = overlay_stack()
             .lock()

@@ -234,22 +234,22 @@ impl DrawerBuilder {
         // stretches the perpendicular axis to viewport for Edge positions).
         let drawer_width = size.width();
 
-        // Slide from the edge the drawer is anchored to.
-        let enter_animation = match side {
-            DrawerSide::Left => {
-                AnimationPreset::slide_in_left(self.animation_duration, drawer_width)
-            }
-            DrawerSide::Right => {
-                AnimationPreset::slide_in_right(self.animation_duration, drawer_width)
-            }
+        // Slide from the edge the drawer is anchored to. Theme's
+        // `ease_sheet` shapes the slide so the drawer reads as a heavy
+        // surface rather than a generic ease-out.
+        let sheet_easing = theme.animations().ease_sheet.to_animation_easing();
+        let (in_dx, out_dx) = match side {
+            DrawerSide::Left => (-drawer_width, -drawer_width),
+            DrawerSide::Right => (drawer_width, drawer_width),
         };
-        let exit_animation = {
-            let d = (self.animation_duration as f32 * 0.7) as u32;
-            match side {
-                DrawerSide::Left => AnimationPreset::slide_out_left(d, drawer_width),
-                DrawerSide::Right => AnimationPreset::slide_out_right(d, drawer_width),
-            }
-        };
+        let enter_animation =
+            AnimationPreset::slide_in_with(self.animation_duration, in_dx, 0.0, sheet_easing);
+        let exit_animation = AnimationPreset::slide_out_with(
+            (self.animation_duration as f32 * 0.7) as u32,
+            out_dx,
+            0.0,
+            sheet_easing,
+        );
 
         // Pre-allocate the handle id so the close button can capture it
         // (same pattern as dialog/popover — `handle.close()` instead of
