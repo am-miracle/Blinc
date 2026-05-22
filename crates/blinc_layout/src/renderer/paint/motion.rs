@@ -985,8 +985,14 @@ impl RenderTree {
         // win, and themes that don't opt in (every existing platform
         // bundle + Catppuccin) keep circular corners via the trait's
         // default off-state.
-        let theme_shape_m = blinc_theme::ThemeState::get().shape();
-        let radius_full_m = blinc_theme::ThemeState::get().radii().radius_full;
+        // Tolerate an uninitialised ThemeState (snapshot / GPU
+        // integration tests render through this path without calling
+        // `ThemeState::init_*` first). See basic.rs for the same
+        // fall-back rationale.
+        let (theme_shape_m, radius_full_m) = match blinc_theme::ThemeState::try_get() {
+            Some(theme) => (theme.shape(), theme.radii().radius_full),
+            None => (blinc_theme::ShapeTokens::default(), 9999.0),
+        };
         let resolved_corner_shape_m = super::helpers::resolve_corner_shape(
             render_node.props.corner_shape,
             render_node.props.border_radius,

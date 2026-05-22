@@ -128,8 +128,16 @@ impl RenderTree {
         // `corner-shape`) keep precedence. Themes that don't opt in
         // return the trait's default off-state and the element stays
         // circular.
-        let theme_shape = blinc_theme::ThemeState::get().shape();
-        let radius_full = blinc_theme::ThemeState::get().radii().radius_full;
+        // Tolerate an uninitialised ThemeState (snapshot / GPU
+        // integration tests render through this path without calling
+        // `ThemeState::init_*` first). Default ShapeTokens is the
+        // "off" state — no squircle substitution — and 9999.0 is the
+        // sentinel `radius_full` value used by themes whose ladder
+        // tops out at "fully circular".
+        let (theme_shape, radius_full) = match blinc_theme::ThemeState::try_get() {
+            Some(theme) => (theme.shape(), theme.radii().radius_full),
+            None => (blinc_theme::ShapeTokens::default(), 9999.0),
+        };
         let resolved_corner_shape = super::helpers::resolve_corner_shape(
             render_node.props.corner_shape,
             radius,
