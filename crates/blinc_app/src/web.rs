@@ -303,20 +303,7 @@ where
         ctx: &mut WindowedContext,
         registry: std::sync::Arc<blinc_layout::selector::ElementRegistry>,
     ) -> blinc_layout::renderer::RenderTree {
-        let user_ui = self(ctx);
-        // Compose user UI with overlay layer, mirroring
-        // windowed.rs:3713-3719. The overlay layer is an
-        // absolutely-positioned div that renders modals, toasts,
-        // dropdowns, and context menus on top of the user content.
-        // Without this wrapper, `overlay_manager.show()` pushes
-        // content into the manager but nothing ever renders it.
-        let overlay_layer = ctx.overlay_manager.build_overlay_layer();
-        let composed = Div::new()
-            .w(ctx.width)
-            .h(ctx.height)
-            .relative()
-            .child(user_ui)
-            .child(overlay_layer);
+        let composed = compose_with_overlays(self(ctx), ctx);
         blinc_layout::renderer::RenderTree::from_element_with_registry(&composed, registry)
     }
 
@@ -325,16 +312,45 @@ where
         ctx: &mut WindowedContext,
         tree: &mut blinc_layout::renderer::RenderTree,
     ) -> blinc_layout::UpdateResult {
-        let user_ui = self(ctx);
-        let overlay_layer = ctx.overlay_manager.build_overlay_layer();
-        let composed = Div::new()
-            .w(ctx.width)
-            .h(ctx.height)
-            .relative()
-            .child(user_ui)
-            .child(overlay_layer);
+        let composed = compose_with_overlays(self(ctx), ctx);
         tree.incremental_update(&composed)
     }
+}
+
+/// Compose the user UI with all overlay surfaces (legacy
+/// `overlay_manager`, new `overlay_stack`, `toast_tray`). Mirrors the
+/// per-frame composition done by `windowed.rs`. Without these
+/// children the corresponding manager `.show()` calls push content
+/// into a global manager but nothing ever lands in the tree.
+fn compose_with_overlays<E: blinc_layout::ElementBuilder + 'static>(
+    user_ui: E,
+    ctx: &mut WindowedContext,
+) -> Div {
+    use blinc_layout::overlay_state::{overlay_stack, toast_tray};
+
+    let overlay_layer = ctx.overlay_manager.build_overlay_layer();
+    let stack_layer = match overlay_stack().lock() {
+        Ok(mut s) => {
+            s.set_viewport_with_scale(ctx.width, ctx.height, ctx.scale_factor as f32);
+            s.build_overlay_layer()
+        }
+        Err(_) => Div::new(),
+    };
+    let viewport = (ctx.width, ctx.height);
+    let tray_layer = toast_tray()
+        .lock()
+        .ok()
+        .map(|t| t.build_tray_layer(viewport))
+        .unwrap_or_else(Div::new);
+
+    Div::new()
+        .w(ctx.width)
+        .h(ctx.height)
+        .relative()
+        .child(user_ui)
+        .child(overlay_layer)
+        .child(stack_layer)
+        .child(tray_layer)
 }
 
 /// User-supplied UI builder, boxed as a trait object so the
@@ -2312,12 +2328,21 @@ impl WebApp {
         let (pending_dx, pending_dy) = self.pending_wheel_delta;
         self.pending_wheel_delta = (0.0, 0.0);
         if pending_dx != 0.0 || pending_dy != 0.0 {
-            const DAMP_EXPONENT: f32 = 0.7;
+            // Pass small (trackpad-sized) deltas straight through so
+            // trackpad scrolling feels native, and only compress the
+            // tail above a threshold so discrete mouse-wheel ticks
+            // don't blast the viewport. Previous behaviour applied a
+            // 0.7 exponent to ALL deltas, which made trackpad scroll
+            // feel noticeably dampier than the desktop runner.
+            const PASSTHROUGH_THRESHOLD: f32 = 40.0;
+            const TAIL_EXPONENT: f32 = 0.85;
             let damp = |d: f32| -> f32 {
-                if d == 0.0 {
-                    0.0
+                let mag = d.abs();
+                if mag <= PASSTHROUGH_THRESHOLD {
+                    d
                 } else {
-                    d.signum() * d.abs().powf(DAMP_EXPONENT)
+                    let tail = (mag - PASSTHROUGH_THRESHOLD).powf(TAIL_EXPONENT);
+                    d.signum() * (PASSTHROUGH_THRESHOLD + tail)
                 }
             };
             Self::dispatch_scroll(self, damp(pending_dx), damp(pending_dy));
@@ -2356,6 +2381,24 @@ impl WebApp {
             self.ctx.scale_factor as f32,
         );
         self.ctx.overlay_manager.update(now);
+        // Tick the new OverlayStack + ToastTray alongside the legacy
+        // manager. Each is the authoritative manager for the widgets
+        // that have already been migrated to it. Mirrors
+        // `windowed.rs:4937-4949`.
+        {
+            use blinc_layout::overlay_state::{overlay_stack, toast_tray};
+            if let Ok(mut s) = overlay_stack().lock() {
+                s.set_viewport_with_scale(
+                    self.ctx.width,
+                    self.ctx.height,
+                    self.ctx.scale_factor as f32,
+                );
+                s.update(now);
+            }
+            if let Ok(mut t) = toast_tray().lock() {
+                t.update(now);
+            }
+        }
 
         if self.ctx.overlay_manager.is_dirty() {
             let registry = self.ctx.element_registry().clone();
@@ -2366,6 +2409,50 @@ impl WebApp {
                 blinc_layout::queue_subtree_rebuild(overlay_node_id, overlay_content);
             }
             self.ctx.overlay_manager.take_dirty();
+        }
+        // Mirror the dirty-check + subtree rebuild for the new
+        // OverlayStack + ToastTray (windowed.rs:4981-5026).
+        {
+            use blinc_layout::overlay_state::{
+                overlay_stack, rebuild_overlay_subtree_if_dirty, toast_tray,
+            };
+            use blinc_layout::widgets::overlay_stack::OVERLAY_STACK_LAYER_ID;
+            use blinc_layout::widgets::toast_tray::TOAST_TRAY_LAYER_ID;
+
+            let registry = self.ctx.element_registry().clone();
+
+            rebuild_overlay_subtree_if_dirty(
+                &registry,
+                OVERLAY_STACK_LAYER_ID,
+                overlay_stack()
+                    .lock()
+                    .map(|s| s.take_dirty())
+                    .unwrap_or(false),
+                || {
+                    overlay_stack()
+                        .lock()
+                        .ok()
+                        .map(|s| s.build_overlay_layer())
+                        .unwrap_or_else(Div::new)
+                },
+            );
+
+            let viewport = (self.ctx.width, self.ctx.height);
+            rebuild_overlay_subtree_if_dirty(
+                &registry,
+                TOAST_TRAY_LAYER_ID,
+                toast_tray()
+                    .lock()
+                    .map(|t| t.take_dirty())
+                    .unwrap_or(false),
+                || {
+                    toast_tray()
+                        .lock()
+                        .ok()
+                        .map(|t| t.build_tray_layer(viewport))
+                        .unwrap_or_else(Div::new)
+                },
+            );
         }
 
         // ─── Phase 1d: rebuild triggers ──────────────────────────
@@ -2435,6 +2522,20 @@ impl WebApp {
                 Some(b) => b,
                 None => return Ok(()),
             };
+
+            // Drain any CSS queued via `ThemeBundle::with_css` →
+            // `ThemeState::init`'s `queue_pending_stylesheet`, or
+            // `BlincContextState::queue_stylesheet` from DSL/plugin
+            // code that doesn't see `WindowedContext` directly. The
+            // queue is process-global; we run the drain on the
+            // rebuild path same as `windowed.rs:5228-5234` so
+            // `cn_bundle()` and friends light up identically on web.
+            {
+                let queued = blinc_core::BlincContextState::get().drain_stylesheets();
+                for css in queued {
+                    self.ctx.add_css(&css);
+                }
+            }
 
             blinc_layout::reset_call_counters();
             blinc_layout::clear_stateful_base_updaters();
