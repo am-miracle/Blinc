@@ -1,6 +1,6 @@
-//! Transparent window — regression test for GH #34.
+//! no-web: Transparent window — regression test for GH #34.
 //!
-//! no-web
+//!
 //!
 //! Linux Mesa surfaces only expose `[Opaque, PreMultiplied]`; the
 //! previous hardcoded `PostMultiplied` selection panicked on Linux

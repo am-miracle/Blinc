@@ -81,10 +81,10 @@ mod tests {
     }
 
     #[test]
-    fn existing_themes_keep_circular() {
-        // Catppuccin BlincTheme and the per-platform themes don't
-        // override `Theme::shape` — they inherit the trait's default
-        // off-state, which is what keeps their corners circular.
-        assert!(crate::BlincTheme::light().shape().is_off());
+    fn blinc_theme_aliases_hybrid() {
+        // `BlincTheme` is now a type alias for `HybridTheme` — the
+        // framework's canonical default. Squircle is opted-in.
+        assert!(!crate::BlincTheme::light().shape().is_off());
+        assert_eq!(crate::BlincTheme::light().name(), "Universal · Hybrid");
     }
 }

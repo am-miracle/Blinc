@@ -1013,10 +1013,12 @@ impl RenderTree {
         if effective_layer == target_layer {
             // Glass elements have shadows handled by the GPU glass system
             if !matches!(render_node.props.material, Some(Material::Glass(_))) {
-                if let Some(ref shadow) = render_node.props.shadow {
+                // Iterate the shadow stack back-to-front so the ambient layer
+                // paints first and the tight key-light layer lands on top.
+                for shadow in render_node.props.shadow.iter().rev() {
                     // When using opacity layer, draw shadow at full opacity (layer handles it)
                     // Otherwise, apply motion opacity to shadow color for fallback
-                    let shadow = if !has_opacity_layer && motion_opacity < 1.0 {
+                    let layer = if !has_opacity_layer && motion_opacity < 1.0 {
                         Shadow {
                             color: Color::rgba(
                                 shadow.color.r,
@@ -1029,7 +1031,7 @@ impl RenderTree {
                     } else {
                         *shadow
                     };
-                    ctx.draw_shadow(rect, radius, shadow);
+                    ctx.draw_shadow(rect, radius, layer);
                 }
             }
         }
@@ -1292,7 +1294,8 @@ impl RenderTree {
                     brightness: glass.brightness,
                     noise: glass.noise,
                     border_thickness: glass.border_thickness,
-                    shadow: render_node.props.shadow,
+                    // GlassStyle still carries a single shadow.
+                    shadow: render_node.props.shadow.first().copied(),
                     simple: glass.simple,
                     depth: glass_depth,
                     border_color: render_node.props.border_color,
@@ -2282,13 +2285,18 @@ impl RenderTree {
                     let last_corner_radius =
                         [cr.top_left, cr.top_right, cr.bottom_right, cr.bottom_left];
                     let last_border_width = render_node.props.border_width;
-                    let (last_shadow_params, last_shadow_color) = match &render_node.props.shadow {
-                        Some(s) => (
-                            [s.offset_x, s.offset_y, s.blur, s.spread],
-                            [s.color.r, s.color.g, s.color.b, s.color.a],
-                        ),
-                        None => ([0.0; 4], [0.0; 4]),
-                    };
+                    // CssAnimPaintMeta records the FIRST shadow layer only —
+                    // composite-layer fast-path animations interpolate one
+                    // shadow. Multi-layer animation needs a per-layer
+                    // CssAnimPaintMeta extension (follow-up).
+                    let (last_shadow_params, last_shadow_color) =
+                        match render_node.props.shadow.first() {
+                            Some(s) => (
+                                [s.offset_x, s.offset_y, s.blur, s.spread],
+                                [s.color.r, s.color.g, s.color.b, s.color.a],
+                            ),
+                            None => ([0.0; 4], [0.0; 4]),
+                        };
                     let (last_filter_a, last_filter_b) = match &render_node.props.filter {
                         Some(f) => (
                             [f.grayscale, f.invert, f.sepia, f.hue_rotate.to_radians()],

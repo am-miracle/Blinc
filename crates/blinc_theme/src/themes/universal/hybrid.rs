@@ -115,6 +115,13 @@ impl HybridTheme {
                 ease_in: Easing::EaseIn,
                 ease_out: Easing::EaseOut,
                 ease_in_out: Easing::EaseInOut,
+                // Hybrid is the cross-platform default — blends HIG
+                // snappiness with a touch of Material spring on the
+                // attention-grabbing surfaces.
+                ease_state: STANDARD,
+                ease_nav: HYBRID_NAV,
+                ease_spring: HYBRID_SPRING,
+                ease_sheet: HYBRID_NAV,
             },
         }
     }
@@ -194,6 +201,13 @@ impl HybridTheme {
                 ease_in: Easing::EaseIn,
                 ease_out: Easing::EaseOut,
                 ease_in_out: Easing::EaseInOut,
+                // Hybrid is the cross-platform default — blends HIG
+                // snappiness with a touch of Material spring on the
+                // attention-grabbing surfaces.
+                ease_state: STANDARD,
+                ease_nav: HYBRID_NAV,
+                ease_spring: HYBRID_SPRING,
+                ease_sheet: HYBRID_NAV,
             },
         }
     }
@@ -239,6 +253,13 @@ impl Theme for HybridTheme {
 // to emphasised-decel).
 const STANDARD: Easing = Easing::CubicBezier(0.25, 0.10, 0.25, 1.0);
 
+// Hybrid navigation decelerate — between HIG_SHEET (Restrained) and
+// EMPHASIZED (Expressive). Reads smooth without overshoot.
+const HYBRID_NAV: Easing = Easing::CubicBezier(0.30, 0.70, 0.10, 1.0);
+
+// Mid-strength spring for popovers / badges (~6% past target).
+const HYBRID_SPRING: Easing = Easing::CubicBezier(0.34, 1.30, 0.64, 1.0);
+
 /// Shared typography for all three Universal variants.
 ///
 /// Noto Sans is Blinc's universal fallback on platforms without a
@@ -281,35 +302,70 @@ pub(super) fn universal_typography(text_base: f32) -> TypographyTokens {
     }
 }
 
-// Hybrid uses dual-layer shadows (`0 Yo Yb …, 0 1px 2px …`). We
-// retain the OUTERMOST layer of each compound — the one carrying
-// the larger offset / blur — because the single-layer fallback
-// captures the dominant depth signal. Follow-up PR will extend
-// ShadowTokens to Vec<Shadow> for true multi-layer.
+// Hybrid uses dual-layer shadows: a tight 1 px inner ambient + a
+// broader key-light layer per elevation. Balanced between
+// Restrained's quiet single-layer feel and Expressive's bolder
+// Material recipe.
 fn hybrid_shadows_light() -> ShadowTokens {
     let ink = Color::from_hex(0x0F1422);
     ShadowTokens {
-        shadow_sm: Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.06)),
-        shadow_default: Shadow::new(0.0, 2.0, 4.0, 0.0, ink.with_alpha(0.06)),
-        shadow_md: Shadow::new(0.0, 4.0, 8.0, 0.0, ink.with_alpha(0.07)),
-        shadow_lg: Shadow::new(0.0, 12.0, 22.0, 0.0, ink.with_alpha(0.08)),
-        shadow_xl: Shadow::new(0.0, 24.0, 40.0, 0.0, ink.with_alpha(0.10)),
-        shadow_2xl: Shadow::new(0.0, 40.0, 64.0, 0.0, ink.with_alpha(0.14)),
-        shadow_inner: Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.07)),
-        shadow_none: Shadow::none(),
+        shadow_sm: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.05)),
+            Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.06)),
+        ],
+        shadow_default: vec![
+            Shadow::new(0.0, 1.0, 1.0, 0.0, ink.with_alpha(0.05)),
+            Shadow::new(0.0, 2.0, 4.0, 0.0, ink.with_alpha(0.06)),
+        ],
+        shadow_md: vec![
+            Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.05)),
+            Shadow::new(0.0, 4.0, 8.0, 0.0, ink.with_alpha(0.07)),
+        ],
+        shadow_lg: vec![
+            Shadow::new(0.0, 3.0, 6.0, 0.0, ink.with_alpha(0.06)),
+            Shadow::new(0.0, 12.0, 22.0, 0.0, ink.with_alpha(0.08)),
+        ],
+        shadow_xl: vec![
+            Shadow::new(0.0, 6.0, 12.0, 0.0, ink.with_alpha(0.07)),
+            Shadow::new(0.0, 24.0, 40.0, 0.0, ink.with_alpha(0.10)),
+        ],
+        shadow_2xl: vec![
+            Shadow::new(0.0, 10.0, 20.0, 0.0, ink.with_alpha(0.09)),
+            Shadow::new(0.0, 40.0, 64.0, 0.0, ink.with_alpha(0.14)),
+        ],
+        shadow_inner: vec![Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.07))],
+        shadow_none: Vec::new(),
     }
 }
 
 fn hybrid_shadows_dark() -> ShadowTokens {
     let ink = Color::BLACK;
     ShadowTokens {
-        shadow_sm: Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.35)),
-        shadow_default: Shadow::new(0.0, 2.0, 4.0, 0.0, ink.with_alpha(0.40)),
-        shadow_md: Shadow::new(0.0, 4.0, 8.0, 0.0, ink.with_alpha(0.42)),
-        shadow_lg: Shadow::new(0.0, 12.0, 22.0, 0.0, ink.with_alpha(0.44)),
-        shadow_xl: Shadow::new(0.0, 24.0, 40.0, 0.0, ink.with_alpha(0.50)),
-        shadow_2xl: Shadow::new(0.0, 40.0, 64.0, 0.0, ink.with_alpha(0.58)),
-        shadow_inner: Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.32)),
-        shadow_none: Shadow::none(),
+        shadow_sm: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.22)),
+            Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.35)),
+        ],
+        shadow_default: vec![
+            Shadow::new(0.0, 1.0, 1.0, 0.0, ink.with_alpha(0.26)),
+            Shadow::new(0.0, 2.0, 4.0, 0.0, ink.with_alpha(0.40)),
+        ],
+        shadow_md: vec![
+            Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.28)),
+            Shadow::new(0.0, 4.0, 8.0, 0.0, ink.with_alpha(0.42)),
+        ],
+        shadow_lg: vec![
+            Shadow::new(0.0, 3.0, 6.0, 0.0, ink.with_alpha(0.30)),
+            Shadow::new(0.0, 12.0, 22.0, 0.0, ink.with_alpha(0.44)),
+        ],
+        shadow_xl: vec![
+            Shadow::new(0.0, 6.0, 12.0, 0.0, ink.with_alpha(0.34)),
+            Shadow::new(0.0, 24.0, 40.0, 0.0, ink.with_alpha(0.50)),
+        ],
+        shadow_2xl: vec![
+            Shadow::new(0.0, 10.0, 20.0, 0.0, ink.with_alpha(0.40)),
+            Shadow::new(0.0, 40.0, 64.0, 0.0, ink.with_alpha(0.58)),
+        ],
+        shadow_inner: vec![Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.32))],
+        shadow_none: Vec::new(),
     }
 }

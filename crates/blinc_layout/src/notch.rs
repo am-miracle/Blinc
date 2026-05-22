@@ -314,7 +314,7 @@ pub struct Notch {
     pub(crate) background: Option<Brush>,
     pub(crate) border_color: Option<Color>,
     pub(crate) border_width: f32,
-    pub(crate) shadow: Option<Shadow>,
+    pub(crate) shadow: Vec<Shadow>,
     pub(crate) material: Option<Material>,
     pub(crate) opacity: f32,
     pub(crate) render_layer: RenderLayer,
@@ -350,7 +350,7 @@ impl Notch {
             background: None,
             border_color: None,
             border_width: 0.0,
-            shadow: None,
+            shadow: Vec::new(),
             material: None,
             opacity: 1.0,
             render_layer: RenderLayer::default(),
@@ -1244,32 +1244,38 @@ impl Notch {
         self
     }
 
-    /// Add drop shadow
+    /// Add a single drop shadow (replaces any existing stack).
     pub fn shadow(mut self, shadow: Shadow) -> Self {
-        self.shadow = Some(shadow);
+        self.shadow = vec![shadow];
+        self
+    }
+
+    /// Apply a compound drop shadow stack.
+    pub fn shadow_stack(mut self, shadows: Vec<Shadow>) -> Self {
+        self.shadow = shadows;
         self
     }
 
     /// Add a small shadow
     pub fn shadow_sm(mut self) -> Self {
-        self.shadow = Some(Shadow::new(0.0, 1.0, 3.0, Color::rgba(0.0, 0.0, 0.0, 0.1)));
+        self.shadow = vec![Shadow::new(0.0, 1.0, 3.0, Color::rgba(0.0, 0.0, 0.0, 0.1))];
         self
     }
 
     /// Add a medium shadow
     pub fn shadow_md(mut self) -> Self {
-        self.shadow = Some(Shadow::new(0.0, 4.0, 6.0, Color::rgba(0.0, 0.0, 0.0, 0.1)));
+        self.shadow = vec![Shadow::new(0.0, 4.0, 6.0, Color::rgba(0.0, 0.0, 0.0, 0.1))];
         self
     }
 
     /// Add a large shadow
     pub fn shadow_lg(mut self) -> Self {
-        self.shadow = Some(Shadow::new(
+        self.shadow = vec![Shadow::new(
             0.0,
             10.0,
             15.0,
             Color::rgba(0.0, 0.0, 0.0, 0.1),
-        ));
+        )];
         self
     }
 
@@ -2325,7 +2331,8 @@ pub struct NotchRenderData {
     pub background: Option<Brush>,
     pub border_color: Option<Color>,
     pub border_width: f32,
-    pub shadow: Option<Shadow>,
+    /// Drop shadow stack
+    pub shadow: Vec<Shadow>,
 }
 
 impl std::fmt::Debug for NotchRenderData {
@@ -2429,7 +2436,7 @@ impl ElementBuilder for Notch {
                 border_sides: Default::default(),
                 layer: self.render_layer,
                 material: self.material.clone(),
-                shadow: None, // Rendered via canvas
+                shadow: Vec::new(), // Rendered via canvas
                 transform: None,
                 opacity: self.opacity,
                 pointer_events_none: self.pointer_events_none,
@@ -2445,7 +2452,7 @@ impl ElementBuilder for Notch {
                 border_sides: Default::default(),
                 layer: self.render_layer,
                 material: self.material.clone(),
-                shadow: self.shadow,
+                shadow: self.shadow.clone(),
                 transform: None,
                 opacity: self.opacity,
                 pointer_events_none: self.pointer_events_none,
@@ -2527,7 +2534,10 @@ impl ElementBuilder for Notch {
         let background = self.background.clone();
         let border_color = self.border_color;
         let border_width = self.border_width;
-        let shadow = self.shadow;
+        // The notch canvas path emits a single fill_notch call. Compound
+        // shadow stacks degrade to the topmost layer here; full multi-layer
+        // support would need fill_notch to grow a per-shadow iteration.
+        let shadow = self.shadow.first().copied();
         let opacity = self.opacity;
 
         Some(Rc::new(

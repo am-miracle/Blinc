@@ -215,8 +215,8 @@ pub struct Image {
     style: Style,
     /// Render layer
     render_layer: RenderLayer,
-    /// Drop shadow
-    shadow: Option<Shadow>,
+    /// Drop shadow stack
+    shadow: Vec<Shadow>,
     /// Transform
     transform: Option<Transform>,
     /// Loading strategy (eager or lazy)
@@ -257,7 +257,7 @@ impl Image {
                 ..Default::default()
             },
             render_layer: RenderLayer::default(),
-            shadow: None,
+            shadow: Vec::new(),
             transform: None,
             loading: LoadingStrategy::default(),
             placeholder: Placeholder::default(),
@@ -579,9 +579,15 @@ impl Image {
     // Shadow
     // =========================================================================
 
-    /// Apply a drop shadow
+    /// Apply a single drop shadow (replaces any existing stack).
     pub fn shadow(mut self, shadow: Shadow) -> Self {
-        self.shadow = Some(shadow);
+        self.shadow = vec![shadow];
+        self
+    }
+
+    /// Apply a compound drop shadow stack.
+    pub fn shadow_stack(mut self, shadows: Vec<Shadow>) -> Self {
+        self.shadow = shadows;
         self
     }
 
@@ -778,7 +784,7 @@ impl ElementBuilder for Image {
             border_color: self.border_color,
             border_width: self.border_width,
             layer: self.render_layer,
-            shadow: self.shadow,
+            shadow: self.shadow.clone(),
             transform: self.transform.clone(),
             opacity: self.opacity,
             ..Default::default()

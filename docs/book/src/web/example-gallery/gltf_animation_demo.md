@@ -21,7 +21,7 @@ Controls:
 
 ```sh
 cargo run -p blinc_app_examples --example gltf_animation_demo \
-    --features windowed --release
+    --features gltf --release
 ```
 
 <iframe

@@ -233,28 +233,58 @@ impl WindowsTheme {
     fn light_shadows() -> ShadowTokens {
         let base_color = Color::BLACK;
         ShadowTokens {
-            shadow_sm: Shadow::new(0.0, 1.0, 2.0, 0.0, base_color.with_alpha(0.04)),
-            shadow_default: Shadow::new(0.0, 2.0, 4.0, 0.0, base_color.with_alpha(0.06)),
-            shadow_md: Shadow::new(0.0, 4.0, 8.0, 0.0, base_color.with_alpha(0.08)),
-            shadow_lg: Shadow::new(0.0, 8.0, 16.0, 0.0, base_color.with_alpha(0.1)),
-            shadow_xl: Shadow::new(0.0, 16.0, 24.0, 0.0, base_color.with_alpha(0.12)),
-            shadow_2xl: Shadow::new(0.0, 24.0, 48.0, 0.0, base_color.with_alpha(0.16)),
-            shadow_inner: Shadow::new(0.0, 1.0, 2.0, 0.0, base_color.with_alpha(0.04)),
-            shadow_none: Shadow::none(),
+            shadow_sm: vec![Shadow::new(0.0, 1.0, 2.0, 0.0, base_color.with_alpha(0.04))],
+            shadow_default: vec![Shadow::new(0.0, 2.0, 4.0, 0.0, base_color.with_alpha(0.06))],
+            shadow_md: vec![Shadow::new(0.0, 4.0, 8.0, 0.0, base_color.with_alpha(0.08))],
+            shadow_lg: vec![Shadow::new(0.0, 8.0, 16.0, 0.0, base_color.with_alpha(0.1))],
+            shadow_xl: vec![Shadow::new(
+                0.0,
+                16.0,
+                24.0,
+                0.0,
+                base_color.with_alpha(0.12),
+            )],
+            shadow_2xl: vec![Shadow::new(
+                0.0,
+                24.0,
+                48.0,
+                0.0,
+                base_color.with_alpha(0.16),
+            )],
+            shadow_inner: vec![Shadow::new(0.0, 1.0, 2.0, 0.0, base_color.with_alpha(0.04))],
+            shadow_none: Vec::new(),
         }
     }
 
     fn dark_shadows() -> ShadowTokens {
         let base_color = Color::BLACK;
         ShadowTokens {
-            shadow_sm: Shadow::new(0.0, 1.0, 2.0, 0.0, base_color.with_alpha(0.16)),
-            shadow_default: Shadow::new(0.0, 2.0, 4.0, 0.0, base_color.with_alpha(0.24)),
-            shadow_md: Shadow::new(0.0, 4.0, 8.0, 0.0, base_color.with_alpha(0.28)),
-            shadow_lg: Shadow::new(0.0, 8.0, 16.0, 0.0, base_color.with_alpha(0.32)),
-            shadow_xl: Shadow::new(0.0, 16.0, 24.0, 0.0, base_color.with_alpha(0.36)),
-            shadow_2xl: Shadow::new(0.0, 24.0, 48.0, 0.0, base_color.with_alpha(0.44)),
-            shadow_inner: Shadow::new(0.0, 1.0, 2.0, 0.0, base_color.with_alpha(0.12)),
-            shadow_none: Shadow::none(),
+            shadow_sm: vec![Shadow::new(0.0, 1.0, 2.0, 0.0, base_color.with_alpha(0.16))],
+            shadow_default: vec![Shadow::new(0.0, 2.0, 4.0, 0.0, base_color.with_alpha(0.24))],
+            shadow_md: vec![Shadow::new(0.0, 4.0, 8.0, 0.0, base_color.with_alpha(0.28))],
+            shadow_lg: vec![Shadow::new(
+                0.0,
+                8.0,
+                16.0,
+                0.0,
+                base_color.with_alpha(0.32),
+            )],
+            shadow_xl: vec![Shadow::new(
+                0.0,
+                16.0,
+                24.0,
+                0.0,
+                base_color.with_alpha(0.36),
+            )],
+            shadow_2xl: vec![Shadow::new(
+                0.0,
+                24.0,
+                48.0,
+                0.0,
+                base_color.with_alpha(0.44),
+            )],
+            shadow_inner: vec![Shadow::new(0.0, 1.0, 2.0, 0.0, base_color.with_alpha(0.12))],
+            shadow_none: Vec::new(),
         }
     }
 }

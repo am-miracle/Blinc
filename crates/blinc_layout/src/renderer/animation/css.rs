@@ -55,6 +55,53 @@ impl RenderTree {
         false
     }
 
+    /// Start a CSS keyframe animation for a node driven by a class rule.
+    ///
+    /// `start_css_animation_for_element` only looks up `#id` rules,
+    /// so class-only animations like `.cn-popover-content {
+    /// animation: cn-popover-enter ... }` never started even though
+    /// the rule existed in the stylesheet. This helper bridges the
+    /// gap: given a `node_id` whose class has an `animation` rule,
+    /// it resolves the keyframes block and registers the
+    /// `ActiveCssAnimation` against the node's stable id.
+    pub fn start_css_animation_for_class(&mut self, node_id: LayoutNodeId, class: &str) -> bool {
+        let stylesheet = match &self.stylesheet {
+            Some(s) => s.clone(),
+            None => return false,
+        };
+        let Some(style) = stylesheet.get_class(class) else {
+            return false;
+        };
+        let Some(anim_config) = style.animation.as_ref() else {
+            return false;
+        };
+        let Some(keyframes) = stylesheet.get_keyframes(&anim_config.name) else {
+            return false;
+        };
+
+        let mut animation = keyframes
+            .to_multi_keyframe_animation(anim_config.duration_ms, anim_config.timing.to_easing());
+        let iterations = if anim_config.iteration_count == 0 {
+            -1
+        } else {
+            anim_config.iteration_count as i32
+        };
+        animation.set_iterations(iterations);
+        animation.set_delay(anim_config.delay_ms);
+        animation.set_direction(anim_config.direction.to_play_direction());
+        animation.set_fill_mode(anim_config.fill_mode.to_fill_mode());
+        if anim_config.direction.starts_reversed() {
+            animation.set_reversed(true);
+        }
+
+        let stable_id = self.stable_id_or_warn(node_id);
+        self.css_anim_store.lock().unwrap().animations.insert(
+            stable_id,
+            crate::render_state::ActiveCssAnimation::new(animation),
+        );
+        true
+    }
+
     /// Start a CSS keyframe animation for a node with a specific state
     ///
     /// Used when element state changes (hover, active, etc.) and the state
@@ -329,6 +376,50 @@ impl RenderTree {
                     element_id,
                     node_id
                 );
+            }
+        }
+
+        // Class-based animations: iterate the registry's class index and
+        // start any class style that carries an `animation:` rule.
+        // Without this, `.cn-popover-content { animation: ... }` and the
+        // other cn overlay/toast keyframes would never fire on nodes
+        // that don't also have a matching `#id` rule. Skip nodes that
+        // already have an animation (id-based path wins, matching CSS
+        // specificity).
+        let class_to_nodes = self.element_registry.class_to_nodes_index();
+        for (class, node_ids) in &class_to_nodes {
+            // Cheap pre-check: the stylesheet has no class rule for this
+            // class name — skip the inner loop entirely.
+            let has_animation = self
+                .stylesheet
+                .as_ref()
+                .and_then(|s| s.get_class(class))
+                .and_then(|st| st.animation.as_ref())
+                .is_some();
+            if !has_animation {
+                continue;
+            }
+            for &node_id in node_ids {
+                let Some(stable_id) = self.stable_id(node_id) else {
+                    continue;
+                };
+                let already_has = self
+                    .css_anim_store
+                    .lock()
+                    .unwrap()
+                    .animations
+                    .contains_key(&stable_id);
+                if already_has {
+                    continue;
+                }
+                let started = self.start_css_animation_for_class(node_id, class);
+                if started {
+                    tracing::debug!(
+                        "CSS animation started for class '.{}' (node={:?})",
+                        class,
+                        node_id
+                    );
+                }
             }
         }
     }
@@ -642,6 +733,7 @@ impl RenderTree {
         check_transition!(overflow_fade, "overflow-fade");
         check_transition!(shadow_params, "box-shadow");
         check_transition!(shadow_color, "box-shadow");
+        check_transition!(shadow_stack, "box-shadow");
         check_transition!(clip_inset, "clip-path");
         check_transition!(clip_circle_radius, "clip-path");
         check_transition!(clip_ellipse_radii, "clip-path");
@@ -1098,25 +1190,45 @@ impl RenderTree {
             props.outline_offset = offset;
         }
 
-        // Shadow
-        if let Some([ox, oy, blur, spread]) = anim_props.shadow_params {
+        // Shadow — prefer the full compound stack when the snapshot
+        // carried one; fall back to the single-layer fields for
+        // animations that originated from `shadow_params/shadow_color`
+        // alone (older snapshots, programmatic Spring/Tween drivers
+        // that don't populate the stack).
+        if let Some(ref stack) = anim_props.shadow_stack {
+            props.shadow = stack
+                .iter()
+                .map(|l| blinc_core::Shadow {
+                    offset_x: l[0],
+                    offset_y: l[1],
+                    blur: l[2],
+                    spread: l[3],
+                    color: blinc_core::Color::rgba(l[4], l[5], l[6], l[7]),
+                })
+                .collect();
+        } else if let Some([ox, oy, blur, spread]) = anim_props.shadow_params {
             let color = if let Some([r, g, b, a]) = anim_props.shadow_color {
                 blinc_core::Color::rgba(r, g, b, a)
-            } else if let Some(ref existing) = props.shadow {
+            } else if let Some(existing) = props.shadow.first() {
                 existing.color
             } else {
                 blinc_core::Color::rgba(0.0, 0.0, 0.0, 0.5)
             };
-            props.shadow = Some(blinc_core::Shadow {
+            let layer = blinc_core::Shadow {
                 offset_x: ox,
                 offset_y: oy,
                 blur,
                 spread,
                 color,
-            });
+            };
+            if let Some(first) = props.shadow.first_mut() {
+                *first = layer;
+            } else {
+                props.shadow = vec![layer];
+            }
         } else if let Some([r, g, b, a]) = anim_props.shadow_color {
-            if let Some(ref mut shadow) = props.shadow {
-                shadow.color = blinc_core::Color::rgba(r, g, b, a);
+            if let Some(first) = props.shadow.first_mut() {
+                first.color = blinc_core::Color::rgba(r, g, b, a);
             }
         }
 
@@ -1427,16 +1539,28 @@ impl RenderTree {
         }
         kp.outline_offset = Some(props.outline_offset);
 
-        // Shadow
-        if let Some(shadow) = &props.shadow {
-            kp.shadow_params = Some([shadow.offset_x, shadow.offset_y, shadow.blur, shadow.spread]);
-            kp.shadow_color = Some([
-                shadow.color.r,
-                shadow.color.g,
-                shadow.color.b,
-                shadow.color.a,
-            ]);
+        // Shadow — snapshot the whole compound stack into
+        // `shadow_stack` and mirror the first layer into the
+        // single-layer fast-path fields (the composite-promoted
+        // CssAnimPaintMeta only samples layer 0). Empty Vec is the
+        // canonical "no shadow" marker, distinct from `None` (which
+        // means "don't animate this property").
+        if let Some(first) = props.shadow.first() {
+            kp.shadow_params = Some([first.offset_x, first.offset_y, first.blur, first.spread]);
+            kp.shadow_color = Some([first.color.r, first.color.g, first.color.b, first.color.a]);
         }
+        kp.shadow_stack = Some(
+            props
+                .shadow
+                .iter()
+                .map(|s| {
+                    [
+                        s.offset_x, s.offset_y, s.blur, s.spread, s.color.r, s.color.g, s.color.b,
+                        s.color.a,
+                    ]
+                })
+                .collect(),
+        );
 
         // 3D lighting
         kp.light_intensity = props.light_intensity;

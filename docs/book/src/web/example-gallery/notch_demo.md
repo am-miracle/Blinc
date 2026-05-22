@@ -1,8 +1,9 @@
 # Notch Menu Bar
 
-Demonstrates a macOS-style menu bar with a notched dropdown that slides
-horizontally between icons. The dropdown maintains a seamless visual
-connection to the menu bar via concave curves.
+Demonstrates a macOS-style menu bar with a notched dropdown that
+slides horizontally between icons, plus four other notch shapes:
+a nav bar with a top bulge, two V-shape cuts, a V-peak, and a
+Dynamic-Island-style bottom dock with a center scoop.
 
 <iframe
   src="../../examples/notch_demo/index.html"

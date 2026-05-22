@@ -1024,8 +1024,8 @@ pub struct RenderProps {
     pub material: Option<Material>,
     /// Node ID for looking up children
     pub node_id: Option<LayoutNodeId>,
-    /// Drop shadow applied to this element
-    pub shadow: Option<Shadow>,
+    /// Drop shadow stack (empty = none, 1 = single, 2-3 = compound layered shadows)
+    pub shadow: Vec<Shadow>,
     /// Transform applied to this element (translate, scale, rotate)
     pub transform: Option<Transform>,
     /// Opacity (0.0 = transparent, 1.0 = opaque)
@@ -1212,7 +1212,7 @@ impl Default for RenderProps {
             layer: RenderLayer::default(),
             material: None,
             node_id: None,
-            shadow: None,
+            shadow: Vec::new(),
             transform: None,
             opacity: 1.0,
             clips_content: false,
@@ -1345,9 +1345,15 @@ impl RenderProps {
         }
     }
 
-    /// Set drop shadow
+    /// Set drop shadow (replaces any existing layers).
     pub fn with_shadow(mut self, shadow: Shadow) -> Self {
-        self.shadow = Some(shadow);
+        self.shadow = vec![shadow];
+        self
+    }
+
+    /// Set a compound drop shadow stack.
+    pub fn with_shadow_stack(mut self, shadows: Vec<Shadow>) -> Self {
+        self.shadow = shadows;
         self
     }
 
@@ -1408,8 +1414,8 @@ impl RenderProps {
         }
         // node_id is not merged - keep the original
         // Override shadow if set
-        if other.shadow.is_some() {
-            self.shadow = other.shadow;
+        if !other.shadow.is_empty() {
+            self.shadow = other.shadow.clone();
         }
         // Override transform if set
         if other.transform.is_some() {
@@ -1471,8 +1477,8 @@ pub struct DynRenderProps {
     pub material: Option<Material>,
     /// Node ID for looking up children
     pub node_id: Option<LayoutNodeId>,
-    /// Drop shadow (typically static)
-    pub shadow: Option<Shadow>,
+    /// Drop shadow stack (typically static, 1-3 layers)
+    pub shadow: Vec<Shadow>,
     /// Transform (can be animated)
     pub transform: Option<Transform>,
     /// Opacity (can be static, signal, or spring animated)
@@ -1492,7 +1498,7 @@ impl Default for DynRenderProps {
             layer: RenderLayer::default(),
             material: None,
             node_id: None,
-            shadow: None,
+            shadow: Vec::new(),
             transform: None,
             opacity: DynFloat::Static(1.0),
             clips_content: false,
@@ -1518,7 +1524,7 @@ impl DynRenderProps {
             layer: self.layer,
             material: self.material.clone(),
             node_id: self.node_id,
-            shadow: self.shadow,
+            shadow: self.shadow.clone(),
             transform: self.transform.clone(),
             opacity: self.opacity.get(ctx),
             clips_content: self.clips_content,
@@ -1602,8 +1608,8 @@ pub struct ResolvedRenderProps {
     pub material: Option<Material>,
     /// Node ID
     pub node_id: Option<LayoutNodeId>,
-    /// Drop shadow
-    pub shadow: Option<Shadow>,
+    /// Drop shadow stack
+    pub shadow: Vec<Shadow>,
     /// Transform
     pub transform: Option<Transform>,
     /// Opacity (resolved)
@@ -1623,7 +1629,7 @@ impl Default for ResolvedRenderProps {
             layer: RenderLayer::default(),
             material: None,
             node_id: None,
-            shadow: None,
+            shadow: Vec::new(),
             transform: None,
             opacity: 1.0,
             clips_content: false,

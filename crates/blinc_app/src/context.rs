@@ -5855,8 +5855,10 @@ impl RenderContext {
                         .border_color
                         .unwrap_or(blinc_core::Color::TRANSPARENT);
 
-                    // Shadow: use image's own (parent shadow renders via SDF)
-                    let shadow = render_node.props.shadow;
+                    // Shadow: use image's own (parent shadow renders via SDF).
+                    // ImageElement holds a single shadow — pick the topmost
+                    // layer of any compound stack.
+                    let shadow = render_node.props.shadow.first().copied();
 
                     // Filter: prefer own, fall back to parent
                     let own_filter = &render_node.props.filter;
@@ -5995,7 +5997,7 @@ impl RenderContext {
                             border_width: 0.0,
                             border_color: blinc_core::Color::TRANSPARENT,
                             css_affine: node_css_affine,
-                            shadow: render_node.props.shadow,
+                            shadow: render_node.props.shadow.first().copied(),
                             filter_a: render_node
                                 .props
                                 .filter

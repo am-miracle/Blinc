@@ -1371,8 +1371,79 @@ impl AndroidApp {
                     &mut ctx,
                     &render_state,
                 ) {
-                    // Build UI
-                    let element = ui_builder(windowed_ctx);
+                    // Tick OverlayStack + ToastTray each frame so motion / TTL
+                    // state advances. Mirrors `windowed.rs:4937-4949` and the
+                    // matching block in `web.rs`/`ios.rs`. Without this,
+                    // overlays pushed via `OverlayStack::present()` never
+                    // animate in or auto-dismiss.
+                    let now = blinc_layout::prelude::elapsed_ms();
+                    {
+                        use blinc_layout::overlay_state::{overlay_stack, toast_tray};
+                        if let Ok(mut s) = overlay_stack().lock() {
+                            s.set_viewport_with_scale(
+                                windowed_ctx.width,
+                                windowed_ctx.height,
+                                windowed_ctx.scale_factor as f32,
+                            );
+                            s.update(now);
+                        }
+                        if let Ok(mut t) = toast_tray().lock() {
+                            t.update(now);
+                        }
+                    }
+
+                    // Drain CSS queued by `ThemeBundle::with_css` →
+                    // `ThemeState::init` (and DSL/plugin `queue_stylesheet`
+                    // calls) before the tree is built so `cn_bundle()`
+                    // styles land on the first frame. Same pattern as
+                    // `windowed.rs:5228-5234`.
+                    {
+                        let queued = blinc_core::BlincContextState::get().drain_stylesheets();
+                        for css in queued {
+                            windowed_ctx.add_css(&css);
+                        }
+                    }
+
+                    // Build UI — compose user UI with all overlay surfaces
+                    // (legacy + new OverlayStack + ToastTray). Without
+                    // these children the `.show()` / `.present()` calls
+                    // would push content into managers that never reach
+                    // the tree.
+                    let element = {
+                        let user_ui = ui_builder(windowed_ctx);
+                        let overlay_layer = windowed_ctx.overlay_manager.build_overlay_layer();
+                        let stack_layer = {
+                            use blinc_layout::overlay_state::overlay_stack;
+                            match overlay_stack().lock() {
+                                Ok(mut s) => {
+                                    s.set_viewport_with_scale(
+                                        windowed_ctx.width,
+                                        windowed_ctx.height,
+                                        windowed_ctx.scale_factor as f32,
+                                    );
+                                    s.build_overlay_layer()
+                                }
+                                Err(_) => blinc_layout::div::Div::new(),
+                            }
+                        };
+                        let viewport = (windowed_ctx.width, windowed_ctx.height);
+                        let tray_layer = {
+                            use blinc_layout::overlay_state::toast_tray;
+                            toast_tray()
+                                .lock()
+                                .ok()
+                                .map(|t| t.build_tray_layer(viewport))
+                                .unwrap_or_else(blinc_layout::div::Div::new)
+                        };
+                        blinc_layout::div::Div::new()
+                            .w(windowed_ctx.width)
+                            .h(windowed_ctx.height)
+                            .relative()
+                            .child(user_ui)
+                            .child(overlay_layer)
+                            .child(stack_layer)
+                            .child(tray_layer)
+                    };
 
                     // Clear stale Stateful base_render_props updaters before rebuild
                     blinc_layout::clear_stateful_base_updaters();

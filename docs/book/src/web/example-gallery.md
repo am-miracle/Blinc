@@ -37,13 +37,13 @@ manageable.
 - [**3D Mesh Demo — renders the Khronos glTF `DamagedHelmet` sample model**](./example-gallery/mesh_3d_demo.md) — Demonstrates:
 - [**Motion Demo**](./example-gallery/motion_demo.md) — Auto-built from the cross-target source.
 - [**Music Player Glass Card**](./example-gallery/music_player.md) — Recreates an iOS-style "Now Playing" music player card with liquid glass
-- [**Notch Menu Bar**](./example-gallery/notch_demo.md) — Demonstrates a macOS-style menu bar with a notched dropdown that slides
+- [**Notch Menu Bar**](./example-gallery/notch_demo.md) — Demonstrates a macOS-style menu bar with a notched dropdown that
 - [**Overflow Fade**](./example-gallery/overflow_fade_demo.md) — Demonstrates the `overflow-fade` CSS property which applies smooth alpha
 - [**Overlay System**](./example-gallery/overlay_demo.md) — This example demonstrates the overlay infrastructure for modals, dialogs,
 - [**Pointer Query**](./example-gallery/pointer_query_demo.md) — Demonstrates the CSS-driven continuous pointer query system.
 - [**Rich Text Element**](./example-gallery/rich_text_demo.md) — This example demonstrates the rich_text element for inline text formatting
 - [**Rich Text Editor**](./example-gallery/rich_text_editor_demo.md) — Full editable rich text editor with cursor, selection, and inline
-- [**Scroll Container**](./example-gallery/scroll.md) — This example demonstrates the scroll widget with webkit-style
+- [**Scroll Container**](./example-gallery/scroll.md) — This example demonstrates the scroll widget with opt-in webkit-style
 - [**Semantic @flow**](./example-gallery/semantic_flow_demo.md) — Demonstrates the semantic step/chain/use system for @flow shaders.
 - [**Sortable**](./example-gallery/sortable_demo.md) — Demonstrates drag-based interactions using FSM-driven stateful containers:
 - [**Stateful API**](./example-gallery/stateful_demo.md) — This example demonstrates the new stateful::<S>() API with:
@@ -57,6 +57,7 @@ manageable.
 - [**KHR_texture_transform**](./example-gallery/texture_transform_demo.md) — Loads Poly Haven's `marble_cliff_02` asset (CC0) — a displaced
 - [**Theme System**](./example-gallery/theme_demo.md) — This example demonstrates the Blinc theming system capabilities:
 - [**Timeline Animation**](./example-gallery/timeline_demo.md) — This example demonstrates timeline-based animations using the stateful API:
+- [**Transparent window — regression test for GH #34.**](./example-gallery/transparent_window.md) — no-web
 - [**Typography**](./example-gallery/typography_demo.md) — This example demonstrates typography helpers:
 - [**Video Player**](./example-gallery/video_demo.md) — Demonstrates the video_player widget with `blinc_media::VideoPlayer` instance and controls.
 - [**Wet Glass**](./example-gallery/wet_glass_demo.md) — Procedural wet-window effect with real light refraction through water drops.

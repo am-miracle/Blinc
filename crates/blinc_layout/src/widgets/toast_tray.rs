@@ -571,6 +571,21 @@ impl ToastBuilder {
             Corner::TopLeft | Corner::BottomLeft => (-slide_distance, 0.0),
             Corner::TopRight | Corner::BottomRight => (slide_distance, 0.0),
         };
+        // Theme-driven curves: enter uses `ease_spring` for the
+        // attention-grabbing pop; exit uses `ease_state` because the
+        // toast going away is interaction feedback, not navigation.
+        // Fall back to EaseOutCubic / EaseInCubic if ThemeState
+        // hasn't been initialised yet (rare — only in tests / cold
+        // boot before the runner installs the bundle).
+        let (enter_easing, exit_easing) = blinc_theme::ThemeState::try_get()
+            .map(|s| {
+                let a = s.animations();
+                (
+                    a.ease_spring.to_animation_easing(),
+                    a.ease_state.to_animation_easing(),
+                )
+            })
+            .unwrap_or((Easing::EaseOutCubic, Easing::EaseInCubic));
         let motion_enter = self.motion_enter.unwrap_or_else(|| {
             MultiKeyframeAnimation::new(300)
                 .keyframe(
@@ -582,7 +597,7 @@ impl ToastBuilder {
                 .keyframe(
                     1.0,
                     KeyframeProperties::default().with_translate(0.0, 0.0),
-                    Easing::EaseOutCubic,
+                    enter_easing,
                 )
                 .into()
         });
@@ -597,7 +612,7 @@ impl ToastBuilder {
                     1.0,
                     KeyframeProperties::default()
                         .with_translate(enter_translate.0, enter_translate.1),
-                    Easing::EaseInCubic,
+                    exit_easing,
                 )
                 .into()
         });
