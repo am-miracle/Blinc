@@ -654,8 +654,19 @@ impl BuiltAvatarGroup {
         // bg leak through as a faint "doubled" outline.
         let ring_color = theme.color(ColorToken::Surface);
 
+        // Ring width scales with avatar size — at small sizes a 2px
+        // ring is half the visible stroke and the 1px AA at its outer
+        // edge reads as a significant fraction of the perceived ring;
+        // bumping to ~3-4px keeps a solid centre that the eye locks
+        // onto and pushes the AA fringe into a smaller perceived
+        // proportion of the stroke.
+        let ring_width = match config.size {
+            AvatarSize::ExtraSmall | AvatarSize::Small => 2.0,
+            AvatarSize::Medium => 3.0,
+            AvatarSize::Large | AvatarSize::ExtraLarge => 4.0,
+        };
         for (i, avatar) in config.avatars.into_iter().take(visible_count).enumerate() {
-            let prepared = avatar.ring(ring_color, 2.0);
+            let prepared = avatar.ring(ring_color, ring_width);
             // Negative margin for overlap. Wrap in a layout-only div
             // (no bg/border/rounded — purely for the `ml` margin) so
             // it can't introduce a second primitive at the avatar's
@@ -678,7 +689,7 @@ impl BuiltAvatarGroup {
                 .h(size_px)
                 .rounded(size_px / 2.0)
                 .bg(theme.color(ColorToken::SurfaceElevated))
-                .border(2.0, ring_color)
+                .border(ring_width, ring_color)
                 .flex_row()
                 .items_center()
                 .justify_center()
