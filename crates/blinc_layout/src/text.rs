@@ -57,8 +57,8 @@ pub struct Text {
     style: Style,
     /// Render layer
     render_layer: RenderLayer,
-    /// Drop shadow
-    shadow: Option<Shadow>,
+    /// Drop shadow stack
+    shadow: Vec<Shadow>,
     /// Transform
     transform: Option<Transform>,
     /// Whether to wrap text at container bounds (default: true)
@@ -125,7 +125,7 @@ impl Text {
             font_family: FontFamily::default(),
             style: Style::default(),
             render_layer: RenderLayer::default(),
-            shadow: None,
+            shadow: Vec::new(),
             transform: None,
             wrap: true,           // wrap by default
             line_height: 1.2,     // standard line height
@@ -550,9 +550,15 @@ impl Text {
     // Shadow
     // =========================================================================
 
-    /// Apply a drop shadow to this text
+    /// Apply a single drop shadow to this text (replaces any existing stack).
     pub fn shadow(mut self, shadow: Shadow) -> Self {
-        self.shadow = Some(shadow);
+        self.shadow = vec![shadow];
+        self
+    }
+
+    /// Apply a compound drop shadow stack to this text.
+    pub fn shadow_stack(mut self, shadows: Vec<Shadow>) -> Self {
+        self.shadow = shadows;
         self
     }
 
@@ -638,7 +644,7 @@ impl ElementBuilder for Text {
     fn render_props(&self) -> RenderProps {
         RenderProps {
             layer: self.render_layer,
-            shadow: self.shadow,
+            shadow: self.shadow.clone(),
             transform: self.transform.clone(),
             pointer_events_none: self.pointer_events_none,
             cursor: self.cursor,

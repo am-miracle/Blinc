@@ -225,31 +225,70 @@ impl Theme for RestrainedTheme {
 // HIG-style quiet ease-out.
 const STANDARD: Easing = Easing::CubicBezier(0.25, 0.10, 0.25, 1.0);
 
-// Restrained uses single-layer ambient shadows — quiet depth.
+// Restrained stacks a tight ambient (1 px ink @ low alpha) + a wider
+// diffuse key per elevation — Apple's HIG shadow recipe distilled.
+// The ambient layer anchors the element to its surface; the key layer
+// gives the lift.
 fn restrained_shadows_light() -> ShadowTokens {
     let ink = Color::from_hex(0x0F141E);
     ShadowTokens {
-        shadow_sm: Shadow::new(0.0, 1.0, 1.5, 0.0, ink.with_alpha(0.06)),
-        shadow_default: Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.07)),
-        shadow_md: Shadow::new(0.0, 4.0, 8.0, 0.0, ink.with_alpha(0.05)),
-        shadow_lg: Shadow::new(0.0, 12.0, 20.0, 0.0, ink.with_alpha(0.07)),
-        shadow_xl: Shadow::new(0.0, 22.0, 36.0, 0.0, ink.with_alpha(0.09)),
-        shadow_2xl: Shadow::new(0.0, 32.0, 64.0, 0.0, ink.with_alpha(0.14)),
-        shadow_inner: Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.06)),
-        shadow_none: Shadow::none(),
+        shadow_sm: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.04)),
+            Shadow::new(0.0, 1.0, 1.5, 0.0, ink.with_alpha(0.06)),
+        ],
+        shadow_default: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.05)),
+            Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.07)),
+        ],
+        shadow_md: vec![
+            Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.04)),
+            Shadow::new(0.0, 4.0, 8.0, 0.0, ink.with_alpha(0.05)),
+        ],
+        shadow_lg: vec![
+            Shadow::new(0.0, 2.0, 4.0, 0.0, ink.with_alpha(0.05)),
+            Shadow::new(0.0, 12.0, 20.0, 0.0, ink.with_alpha(0.07)),
+        ],
+        shadow_xl: vec![
+            Shadow::new(0.0, 4.0, 8.0, 0.0, ink.with_alpha(0.06)),
+            Shadow::new(0.0, 22.0, 36.0, 0.0, ink.with_alpha(0.09)),
+        ],
+        shadow_2xl: vec![
+            Shadow::new(0.0, 6.0, 12.0, 0.0, ink.with_alpha(0.08)),
+            Shadow::new(0.0, 32.0, 64.0, 0.0, ink.with_alpha(0.14)),
+        ],
+        shadow_inner: vec![Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.06))],
+        shadow_none: Vec::new(),
     }
 }
 
 fn restrained_shadows_dark() -> ShadowTokens {
     let ink = Color::BLACK;
     ShadowTokens {
-        shadow_sm: Shadow::new(0.0, 1.0, 1.5, 0.0, ink.with_alpha(0.30)),
-        shadow_default: Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.40)),
-        shadow_md: Shadow::new(0.0, 4.0, 8.0, 0.0, ink.with_alpha(0.32)),
-        shadow_lg: Shadow::new(0.0, 12.0, 20.0, 0.0, ink.with_alpha(0.38)),
-        shadow_xl: Shadow::new(0.0, 22.0, 36.0, 0.0, ink.with_alpha(0.44)),
-        shadow_2xl: Shadow::new(0.0, 32.0, 64.0, 0.0, ink.with_alpha(0.58)),
-        shadow_inner: Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.30)),
-        shadow_none: Shadow::none(),
+        shadow_sm: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.20)),
+            Shadow::new(0.0, 1.0, 1.5, 0.0, ink.with_alpha(0.30)),
+        ],
+        shadow_default: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.25)),
+            Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.40)),
+        ],
+        shadow_md: vec![
+            Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.22)),
+            Shadow::new(0.0, 4.0, 8.0, 0.0, ink.with_alpha(0.32)),
+        ],
+        shadow_lg: vec![
+            Shadow::new(0.0, 2.0, 4.0, 0.0, ink.with_alpha(0.26)),
+            Shadow::new(0.0, 12.0, 20.0, 0.0, ink.with_alpha(0.38)),
+        ],
+        shadow_xl: vec![
+            Shadow::new(0.0, 4.0, 8.0, 0.0, ink.with_alpha(0.30)),
+            Shadow::new(0.0, 22.0, 36.0, 0.0, ink.with_alpha(0.44)),
+        ],
+        shadow_2xl: vec![
+            Shadow::new(0.0, 6.0, 12.0, 0.0, ink.with_alpha(0.36)),
+            Shadow::new(0.0, 32.0, 64.0, 0.0, ink.with_alpha(0.58)),
+        ],
+        shadow_inner: vec![Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.30))],
+        shadow_none: Vec::new(),
     }
 }

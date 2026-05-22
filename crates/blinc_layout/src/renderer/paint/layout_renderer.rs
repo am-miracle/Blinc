@@ -200,15 +200,16 @@ impl RenderTree {
                             brightness: glass.brightness,
                             noise: glass.noise,
                             border_thickness: glass.border_thickness,
-                            shadow: render_node.props.shadow,
+                            // GlassStyle still carries a single shadow.
+                            shadow: render_node.props.shadow.first().copied(),
                             simple: glass.simple,
                             depth: glass_depth,
                             border_color: render_node.props.border_color,
                         });
                         ctx.fill_rect(rect, radius, glass_brush);
                     } else {
-                        // For non-glass elements, draw shadow first (renders behind the element)
-                        if let Some(ref shadow) = render_node.props.shadow {
+                        // Draw the shadow stack back-to-front (ambient first, key on top).
+                        for shadow in render_node.props.shadow.iter().rev() {
                             ctx.draw_shadow(rect, radius, *shadow);
                         }
 

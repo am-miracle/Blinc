@@ -22,7 +22,16 @@ use blinc_core::{
     BlurQuality, BlurStyle, Brush, ClipPath, Color, CornerRadius, CornerShape, LayerEffect,
     OverflowFade, Shadow, Transform,
 };
-use blinc_theme::ThemeState;
+use blinc_theme::{ShadowTokens, ThemeState};
+
+/// Look up a theme shadow stack and convert it to `Vec<blinc_core::Shadow>`.
+fn theme_shadow_stack<F>(pick: F) -> Vec<Shadow>
+where
+    F: Fn(&ShadowTokens) -> &[blinc_theme::Shadow],
+{
+    let shadows = ThemeState::get().shadows();
+    pick(&shadows).iter().map(Shadow::from).collect()
+}
 use taffy::prelude::*;
 use taffy::Overflow;
 
@@ -386,7 +395,7 @@ pub struct Div {
     pub(crate) border_sides: crate::element::BorderSides,
     pub(crate) render_layer: RenderLayer,
     pub(crate) material: Option<Material>,
-    pub(crate) shadow: Option<Shadow>,
+    pub(crate) shadow: Vec<Shadow>,
     pub(crate) transform: Option<Transform>,
     pub(crate) opacity: f32,
     pub(crate) cursor: Option<crate::element::CursorStyle>,
@@ -477,7 +486,7 @@ impl Div {
             border_sides: crate::element::BorderSides::default(),
             render_layer: RenderLayer::default(),
             material: None,
-            shadow: None,
+            shadow: Vec::new(),
             transform: None,
             opacity: 1.0,
             cursor: None,
@@ -536,7 +545,7 @@ impl Div {
             border_sides: crate::element::BorderSides::default(),
             render_layer: RenderLayer::default(),
             material: None,
-            shadow: None,
+            shadow: Vec::new(),
             transform: None,
             opacity: 1.0,
             cursor: None,
@@ -829,10 +838,16 @@ impl Div {
         self.transform = Some(transform);
     }
 
-    /// Set the shadow without consuming self
+    /// Set the shadow without consuming self (replaces any existing stack).
     #[inline]
     pub fn set_shadow(&mut self, shadow: Shadow) {
-        self.shadow = Some(shadow);
+        self.shadow = vec![shadow];
+    }
+
+    /// Set a compound shadow stack without consuming self.
+    #[inline]
+    pub fn set_shadow_stack(&mut self, shadows: Vec<Shadow>) {
+        self.shadow = shadows;
     }
 
     /// Set the opacity without consuming self
@@ -968,8 +983,8 @@ impl Div {
         if let Some(fade) = style.overflow_fade {
             self.overflow_fade = fade;
         }
-        if let Some(ref shadow) = style.shadow {
-            self.shadow = Some(*shadow);
+        if !style.shadow.is_empty() {
+            self.shadow = style.shadow.clone();
         }
         if let Some(ref transform) = style.transform {
             self.transform = Some(transform.clone());
@@ -1255,8 +1270,8 @@ impl Div {
         if other.material.is_some() {
             self.material = other.material;
         }
-        if other.shadow.is_some() {
-            self.shadow = other.shadow;
+        if !other.shadow.is_empty() {
+            self.shadow = other.shadow.clone();
         }
         if other.transform.is_some() {
             self.transform = other.transform;
@@ -2922,9 +2937,15 @@ impl Div {
     // Shadow
     // =========================================================================
 
-    /// Apply a drop shadow to this element
+    /// Apply a single drop shadow to this element (replaces any existing stack).
     pub fn shadow(mut self, shadow: Shadow) -> Self {
-        self.shadow = Some(shadow);
+        self.shadow = vec![shadow];
+        self
+    }
+
+    /// Apply a compound drop shadow stack (multiple layered shadows).
+    pub fn shadow_stack(mut self, shadows: Vec<Shadow>) -> Self {
+        self.shadow = shadows;
         self
     }
 
@@ -2935,22 +2956,22 @@ impl Div {
 
     /// Apply a small drop shadow using theme colors
     pub fn shadow_sm(self) -> Self {
-        self.shadow(ThemeState::get().shadows().shadow_sm.into())
+        self.shadow_stack(theme_shadow_stack(|s| &s.shadow_sm))
     }
 
     /// Apply a medium drop shadow using theme colors
     pub fn shadow_md(self) -> Self {
-        self.shadow(ThemeState::get().shadows().shadow_md.into())
+        self.shadow_stack(theme_shadow_stack(|s| &s.shadow_md))
     }
 
     /// Apply a large drop shadow using theme colors
     pub fn shadow_lg(self) -> Self {
-        self.shadow(ThemeState::get().shadows().shadow_lg.into())
+        self.shadow_stack(theme_shadow_stack(|s| &s.shadow_lg))
     }
 
     /// Apply an extra large drop shadow using theme colors
     pub fn shadow_xl(self) -> Self {
-        self.shadow(ThemeState::get().shadows().shadow_xl.into())
+        self.shadow_stack(theme_shadow_stack(|s| &s.shadow_xl))
     }
 
     // =========================================================================
@@ -4185,7 +4206,7 @@ impl ElementBuilder for Div {
             border_sides: self.border_sides,
             layer: self.render_layer,
             material: self.material.clone(),
-            shadow: self.shadow,
+            shadow: self.shadow.clone(),
             transform: self.transform.clone(),
             opacity: self.opacity,
             clips_content,

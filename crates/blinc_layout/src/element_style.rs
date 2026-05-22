@@ -219,7 +219,16 @@ impl CssFilter {
             && self.drop_shadow.is_none()
     }
 }
-use blinc_theme::ThemeState;
+use blinc_theme::{ShadowTokens, ThemeState};
+
+/// Look up a theme shadow stack and convert it to a `Vec<blinc_core::Shadow>`.
+fn theme_shadow_stack<F>(pick: F) -> Vec<Shadow>
+where
+    F: Fn(&ShadowTokens) -> &[blinc_theme::Shadow],
+{
+    let shadows = ThemeState::get().shadows();
+    pick(&shadows).iter().map(Shadow::from).collect()
+}
 
 use crate::css_parser::{CssAnimation, CssTransitionSet};
 use crate::element::{GlassMaterial, Material, MetallicMaterial, RenderLayer, WoodMaterial};
@@ -403,8 +412,8 @@ pub struct ElementStyle {
     pub corner_radius: Option<CornerRadius>,
     /// Corner shape (superellipse parameter per corner)
     pub corner_shape: Option<CornerShape>,
-    /// Drop shadow
-    pub shadow: Option<Shadow>,
+    /// Drop shadow stack (empty = none, 1 = single, 2-3 = compound layered shadows).
+    pub shadow: Vec<Shadow>,
     /// Transform (scale, rotate, translate)
     pub transform: Option<Transform>,
     /// Material effect (glass, metallic, wood)
@@ -800,9 +809,15 @@ impl ElementStyle {
     // Shadow
     // =========================================================================
 
-    /// Set drop shadow
+    /// Set a single drop shadow (replaces any existing stack).
     pub fn shadow(mut self, shadow: Shadow) -> Self {
-        self.shadow = Some(shadow);
+        self.shadow = vec![shadow];
+        self
+    }
+
+    /// Set a compound drop shadow stack (multiple layered shadows).
+    pub fn shadow_stack(mut self, shadows: Vec<Shadow>) -> Self {
+        self.shadow = shadows;
         self
     }
 
@@ -813,28 +828,28 @@ impl ElementStyle {
 
     /// Small shadow preset using theme colors
     pub fn shadow_sm(self) -> Self {
-        self.shadow(ThemeState::get().shadows().shadow_sm.into())
+        self.shadow_stack(theme_shadow_stack(|s| &s.shadow_sm))
     }
 
     /// Medium shadow preset using theme colors
     pub fn shadow_md(self) -> Self {
-        self.shadow(ThemeState::get().shadows().shadow_md.into())
+        self.shadow_stack(theme_shadow_stack(|s| &s.shadow_md))
     }
 
     /// Large shadow preset using theme colors
     pub fn shadow_lg(self) -> Self {
-        self.shadow(ThemeState::get().shadows().shadow_lg.into())
+        self.shadow_stack(theme_shadow_stack(|s| &s.shadow_lg))
     }
 
     /// Extra large shadow preset using theme colors
     pub fn shadow_xl(self) -> Self {
-        self.shadow(ThemeState::get().shadows().shadow_xl.into())
+        self.shadow_stack(theme_shadow_stack(|s| &s.shadow_xl))
     }
 
     /// Explicitly clear shadow (override any inherited shadow)
     pub fn shadow_none(mut self) -> Self {
-        // Use a fully transparent shadow to indicate "no shadow"
-        self.shadow = Some(Shadow::new(0.0, 0.0, 0.0, Color::TRANSPARENT));
+        // Use a fully transparent single-layer shadow to indicate "no shadow"
+        self.shadow = vec![Shadow::new(0.0, 0.0, 0.0, Color::TRANSPARENT)];
         self
     }
 
@@ -1742,7 +1757,11 @@ impl ElementStyle {
             background: other.background.clone().or_else(|| self.background.clone()),
             corner_radius: other.corner_radius.or(self.corner_radius),
             corner_shape: other.corner_shape.or(self.corner_shape),
-            shadow: other.shadow.or(self.shadow),
+            shadow: if !other.shadow.is_empty() {
+                other.shadow.clone()
+            } else {
+                self.shadow.clone()
+            },
             transform: other.transform.clone().or_else(|| self.transform.clone()),
             material: other.material.clone().or_else(|| self.material.clone()),
             render_layer: other.render_layer.or(self.render_layer),
@@ -1890,7 +1909,7 @@ impl ElementStyle {
         self.background.is_some()
             || self.corner_radius.is_some()
             || self.corner_shape.is_some()
-            || self.shadow.is_some()
+            || !self.shadow.is_empty()
             || self.transform.is_some()
             || self.material.is_some()
             || self.render_layer.is_some()
@@ -4220,7 +4239,7 @@ mod tests {
 
         assert!(s.background.is_some());
         assert!(s.corner_radius.is_some());
-        assert!(s.shadow.is_some());
+        assert!(!s.shadow.is_empty());
         assert!(s.transform.is_some());
     }
 
@@ -4240,7 +4259,7 @@ mod tests {
         // Corner radius should be preserved from base
         assert!(merged.corner_radius.is_some());
         // Shadow should be preserved from base
-        assert!(merged.shadow.is_some());
+        assert!(!merged.shadow.is_empty());
         // Transform should come from hover
         assert!(merged.transform.is_some());
     }
@@ -4291,7 +4310,7 @@ mod tests {
 
         assert!(s.background.is_some());
         assert!(s.corner_radius.is_some());
-        assert!(s.shadow.is_some());
+        assert!(!s.shadow.is_empty());
     }
 
     #[test]
@@ -4357,7 +4376,7 @@ mod tests {
 
         assert!(card_style.background.is_some());
         assert!(card_style.corner_radius.is_some());
-        assert!(card_style.shadow.is_some());
+        assert!(!card_style.shadow.is_empty());
         assert_eq!(card_style.opacity, Some(0.95));
         assert!(card_style.transform.is_some());
     }
@@ -4387,16 +4406,16 @@ mod tests {
         ThemeState::init_default();
 
         let s1 = style! { shadow_sm };
-        assert!(s1.shadow.is_some());
+        assert!(!s1.shadow.is_empty());
 
         let s2 = style! { shadow_lg };
-        assert!(s2.shadow.is_some());
+        assert!(!s2.shadow.is_empty());
 
         let s3 = style! { shadow_xl };
-        assert!(s3.shadow.is_some());
+        assert!(!s3.shadow.is_empty());
 
         let s4 = style! { shadow_none };
-        assert!(s4.shadow.is_some()); // shadow_none sets a transparent shadow
+        assert!(!s4.shadow.is_empty()); // shadow_none sets a transparent shadow
     }
 
     #[test]
@@ -4467,12 +4486,12 @@ mod tests {
         let s = css! {
             box-shadow: md;
         };
-        assert!(s.shadow.is_some());
+        assert!(!s.shadow.is_empty());
 
         let s2 = css! {
             box-shadow: Shadow::new(0.0, 4.0, 8.0, Color::BLACK);
         };
-        assert!(s2.shadow.is_some());
+        assert!(!s2.shadow.is_empty());
     }
 
     #[test]
@@ -4507,7 +4526,7 @@ mod tests {
 
         assert!(card.background.is_some());
         assert!(card.corner_radius.is_some());
-        assert!(card.shadow.is_some());
+        assert!(!card.shadow.is_empty());
         assert_eq!(card.opacity, Some(0.95));
     }
 

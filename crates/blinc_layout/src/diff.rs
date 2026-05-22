@@ -540,7 +540,7 @@ pub fn detect_visual_changes(old: &Div, new: &Div) -> bool {
         || old.border_radius != new.border_radius
         || old.render_layer != new.render_layer
         || !material_eq(&old.material, &new.material)
-        || !shadow_eq(&old.shadow, &new.shadow)
+        || !shadow_stack_eq(&old.shadow, &new.shadow)
         || !transform_eq(&old.transform, &new.transform)
         || !f32_eq(old.opacity, new.opacity)
 }
@@ -604,7 +604,7 @@ fn apply_visual_changes(old: &mut Div, new: &Div) {
     old.border_width = new.border_width;
     old.render_layer = new.render_layer;
     old.material = new.material.clone();
-    old.shadow = new.shadow;
+    old.shadow = new.shadow.clone();
     old.transform = new.transform.clone();
     old.opacity = new.opacity;
 }
@@ -652,7 +652,7 @@ fn hash_div_props(div: &Div, hasher: &mut impl Hasher) {
     hash_f32(div.border_width, hasher);
     hash_render_layer(&div.render_layer, hasher);
     hash_option_material(&div.material, hasher);
-    hash_option_shadow(&div.shadow, hasher);
+    hash_shadow_stack(&div.shadow, hasher);
     hash_option_transform(&div.transform, hasher);
     hash_f32(div.opacity, hasher);
 }
@@ -821,7 +821,7 @@ fn hash_render_props(props: &RenderProps, hasher: &mut impl Hasher) {
     hash_f32(props.border_width, hasher);
     hash_render_layer(&props.layer, hasher);
     hash_option_material(&props.material, hasher);
-    hash_option_shadow(&props.shadow, hasher);
+    hash_shadow_stack(&props.shadow, hasher);
     hash_option_transform(&props.transform, hasher);
     hash_f32(props.opacity, hasher);
     props.clips_content.hash(hasher);
@@ -861,15 +861,10 @@ fn hash_shadow(shadow: &Shadow, hasher: &mut impl Hasher) {
     hash_color(&shadow.color, hasher);
 }
 
-fn hash_option_shadow(shadow: &Option<Shadow>, hasher: &mut impl Hasher) {
-    match shadow {
-        Some(s) => {
-            1u8.hash(hasher);
-            hash_shadow(s, hasher);
-        }
-        None => {
-            0u8.hash(hasher);
-        }
+fn hash_shadow_stack(shadows: &[Shadow], hasher: &mut impl Hasher) {
+    (shadows.len() as u32).hash(hasher);
+    for s in shadows {
+        hash_shadow(s, hasher);
     }
 }
 
@@ -880,7 +875,12 @@ fn hash_glass_style(glass: &GlassStyle, hasher: &mut impl Hasher) {
     hash_f32(glass.brightness, hasher);
     hash_f32(glass.noise, hasher);
     hash_f32(glass.border_thickness, hasher);
-    hash_option_shadow(&glass.shadow, hasher);
+    if let Some(s) = &glass.shadow {
+        1u8.hash(hasher);
+        hash_shadow(s, hasher);
+    } else {
+        0u8.hash(hasher);
+    }
 }
 
 fn hash_gradient_stop(stop: &GradientStop, hasher: &mut impl Hasher) {
@@ -1260,18 +1260,16 @@ fn color_eq(a: &Color, b: &Color) -> bool {
     f32_eq(a.r, b.r) && f32_eq(a.g, b.g) && f32_eq(a.b, b.b) && f32_eq(a.a, b.a)
 }
 
-fn shadow_eq(a: &Option<Shadow>, b: &Option<Shadow>) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(a), Some(b)) => {
-            f32_eq(a.offset_x, b.offset_x)
-                && f32_eq(a.offset_y, b.offset_y)
-                && f32_eq(a.blur, b.blur)
-                && f32_eq(a.spread, b.spread)
-                && color_eq(&a.color, &b.color)
-        }
-        _ => false,
-    }
+fn shadow_eq(a: &Shadow, b: &Shadow) -> bool {
+    f32_eq(a.offset_x, b.offset_x)
+        && f32_eq(a.offset_y, b.offset_y)
+        && f32_eq(a.blur, b.blur)
+        && f32_eq(a.spread, b.spread)
+        && color_eq(&a.color, &b.color)
+}
+
+fn shadow_stack_eq(a: &[Shadow], b: &[Shadow]) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| shadow_eq(x, y))
 }
 
 fn transform_eq(a: &Option<Transform>, b: &Option<Transform>) -> bool {
@@ -1303,7 +1301,11 @@ fn brush_eq(a: &Option<Brush>, b: &Option<Brush>) -> bool {
                 && f32_eq(a.brightness, b.brightness)
                 && f32_eq(a.noise, b.noise)
                 && f32_eq(a.border_thickness, b.border_thickness)
-                && shadow_eq(&a.shadow, &b.shadow)
+                && match (&a.shadow, &b.shadow) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => shadow_eq(x, y),
+                    _ => false,
+                }
         }
         (Some(Brush::Image(a)), Some(Brush::Image(b))) => {
             a.source == b.source
@@ -1376,7 +1378,7 @@ pub fn render_props_eq(a: &RenderProps, b: &RenderProps) -> bool {
         && a.border_radius == b.border_radius
         && a.layer == b.layer
         && material_eq(&a.material, &b.material)
-        && shadow_eq(&a.shadow, &b.shadow)
+        && shadow_stack_eq(&a.shadow, &b.shadow)
         && transform_eq(&a.transform, &b.transform)
         && f32_eq(a.opacity, b.opacity)
         && a.clips_content == b.clips_content

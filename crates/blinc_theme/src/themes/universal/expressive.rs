@@ -230,34 +230,81 @@ const EMPHASIZED: Easing = Easing::CubicBezier(0.20, 0.00, 0.00, 1.00);
 // Material 3 emphasized-decelerate for incoming elements.
 const EMPH_DECEL: Easing = Easing::CubicBezier(0.05, 0.70, 0.10, 1.00);
 
-// Expressive uses triple-layer shadows with an accent tint. We
-// retain the outermost layer (broad ambient) — captures the depth
-// signal but loses the tonal accent. Follow-up: extend ShadowTokens
-// to Vec<Shadow>.
+// Expressive uses triple-layer shadows with a hint of accent tint —
+// Material's signature compound depth recipe. Inner tight ambient +
+// mid contact + wide directional key.
 fn expressive_shadows_light() -> ShadowTokens {
     let ink = Color::from_hex(0x161726);
+    let accent = Color::from_hex(0x3D5FE8);
     ShadowTokens {
-        shadow_sm: Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.06)),
-        shadow_default: Shadow::new(0.0, 2.0, 6.0, 0.0, ink.with_alpha(0.07)),
-        shadow_md: Shadow::new(0.0, 4.0, 10.0, 0.0, ink.with_alpha(0.08)),
-        shadow_lg: Shadow::new(0.0, 14.0, 28.0, 0.0, ink.with_alpha(0.10)),
-        shadow_xl: Shadow::new(0.0, 28.0, 48.0, 0.0, ink.with_alpha(0.12)),
-        shadow_2xl: Shadow::new(0.0, 48.0, 80.0, 0.0, ink.with_alpha(0.16)),
-        shadow_inner: Shadow::new(0.0, 2.0, 4.0, 0.0, ink.with_alpha(0.08)),
-        shadow_none: Shadow::none(),
+        shadow_sm: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.04)),
+            Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.06)),
+        ],
+        shadow_default: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.04)),
+            Shadow::new(0.0, 1.0, 3.0, 0.0, ink.with_alpha(0.06)),
+            Shadow::new(0.0, 2.0, 6.0, 0.0, accent.with_alpha(0.04)),
+        ],
+        shadow_md: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.05)),
+            Shadow::new(0.0, 2.0, 4.0, 0.0, ink.with_alpha(0.06)),
+            Shadow::new(0.0, 4.0, 10.0, 0.0, accent.with_alpha(0.05)),
+        ],
+        shadow_lg: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.05)),
+            Shadow::new(0.0, 6.0, 12.0, 0.0, ink.with_alpha(0.07)),
+            Shadow::new(0.0, 14.0, 28.0, 0.0, accent.with_alpha(0.06)),
+        ],
+        shadow_xl: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.06)),
+            Shadow::new(0.0, 12.0, 22.0, 0.0, ink.with_alpha(0.08)),
+            Shadow::new(0.0, 28.0, 48.0, 0.0, accent.with_alpha(0.08)),
+        ],
+        shadow_2xl: vec![
+            Shadow::new(0.0, 0.0, 2.0, 0.0, ink.with_alpha(0.08)),
+            Shadow::new(0.0, 22.0, 38.0, 0.0, ink.with_alpha(0.10)),
+            Shadow::new(0.0, 48.0, 80.0, 0.0, accent.with_alpha(0.10)),
+        ],
+        shadow_inner: vec![Shadow::new(0.0, 2.0, 4.0, 0.0, ink.with_alpha(0.08))],
+        shadow_none: Vec::new(),
     }
 }
 
 fn expressive_shadows_dark() -> ShadowTokens {
     let ink = Color::BLACK;
+    let accent = Color::from_hex(0x3D5FE8);
     ShadowTokens {
-        shadow_sm: Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.40)),
-        shadow_default: Shadow::new(0.0, 2.0, 6.0, 0.0, ink.with_alpha(0.45)),
-        shadow_md: Shadow::new(0.0, 4.0, 10.0, 0.0, ink.with_alpha(0.48)),
-        shadow_lg: Shadow::new(0.0, 14.0, 28.0, 0.0, ink.with_alpha(0.50)),
-        shadow_xl: Shadow::new(0.0, 28.0, 48.0, 0.0, ink.with_alpha(0.56)),
-        shadow_2xl: Shadow::new(0.0, 48.0, 80.0, 0.0, ink.with_alpha(0.66)),
-        shadow_inner: Shadow::new(0.0, 2.0, 4.0, 0.0, ink.with_alpha(0.35)),
-        shadow_none: Shadow::none(),
+        shadow_sm: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.32)),
+            Shadow::new(0.0, 1.0, 2.0, 0.0, ink.with_alpha(0.40)),
+        ],
+        shadow_default: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.32)),
+            Shadow::new(0.0, 1.0, 3.0, 0.0, ink.with_alpha(0.40)),
+            Shadow::new(0.0, 2.0, 6.0, 0.0, accent.with_alpha(0.12)),
+        ],
+        shadow_md: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.36)),
+            Shadow::new(0.0, 2.0, 4.0, 0.0, ink.with_alpha(0.42)),
+            Shadow::new(0.0, 4.0, 10.0, 0.0, accent.with_alpha(0.14)),
+        ],
+        shadow_lg: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.40)),
+            Shadow::new(0.0, 6.0, 12.0, 0.0, ink.with_alpha(0.46)),
+            Shadow::new(0.0, 14.0, 28.0, 0.0, accent.with_alpha(0.16)),
+        ],
+        shadow_xl: vec![
+            Shadow::new(0.0, 0.0, 1.0, 0.0, ink.with_alpha(0.44)),
+            Shadow::new(0.0, 12.0, 22.0, 0.0, ink.with_alpha(0.52)),
+            Shadow::new(0.0, 28.0, 48.0, 0.0, accent.with_alpha(0.18)),
+        ],
+        shadow_2xl: vec![
+            Shadow::new(0.0, 0.0, 2.0, 0.0, ink.with_alpha(0.50)),
+            Shadow::new(0.0, 22.0, 38.0, 0.0, ink.with_alpha(0.60)),
+            Shadow::new(0.0, 48.0, 80.0, 0.0, accent.with_alpha(0.22)),
+        ],
+        shadow_inner: vec![Shadow::new(0.0, 2.0, 4.0, 0.0, ink.with_alpha(0.35))],
+        shadow_none: Vec::new(),
     }
 }

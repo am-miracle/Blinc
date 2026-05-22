@@ -46,8 +46,8 @@ impl RenderTree {
         if let Some(fade) = style.overflow_fade {
             props.overflow_fade = fade;
         }
-        if let Some(shadow) = style.shadow {
-            props.shadow = Some(shadow);
+        if !style.shadow.is_empty() {
+            props.shadow = style.shadow.clone();
         }
         if let Some(ref transform) = style.transform {
             props.transform = Some(transform.clone());

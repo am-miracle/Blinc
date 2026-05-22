@@ -1001,8 +1001,10 @@ impl CssKeyframes {
             props.outline_offset = Some(offset);
         }
 
-        // Shadow
-        if let Some(shadow) = &style.shadow {
+        // Shadow — keyframe interpolates the FIRST layer only. Multi-layer
+        // animations replace the stack on each tick; sub-layer lerping
+        // would need a Vec<Shadow> in KeyframeProperties (follow-up).
+        if let Some(shadow) = style.shadow.first() {
             props.shadow_params =
                 Some([shadow.offset_x, shadow.offset_y, shadow.blur, shadow.spread]);
             props.shadow_color = Some([
@@ -4837,8 +4839,8 @@ fn apply_property(style: &mut ElementStyle, name: &str, value: &str) {
             }
         }
         "box-shadow" => {
-            if let Some(shadow) = parse_shadow(value) {
-                style.shadow = Some(shadow);
+            if let Some(shadow_stack) = parse_shadow_stack(value) {
+                style.shadow = shadow_stack;
             }
         }
         "text-shadow" => {
@@ -6004,8 +6006,8 @@ fn apply_property_with_errors(
             }
         }
         "box-shadow" => {
-            if let Some(shadow) = parse_shadow(value) {
-                style.shadow = Some(shadow);
+            if let Some(stack) = parse_shadow_stack(value) {
+                style.shadow = stack;
             } else {
                 errors.push(ParseError::invalid_value(name, value, line, column));
             }
@@ -7322,24 +7324,48 @@ fn parse_theme_radius<'a, E: NomParseError<&'a str>>(
 }
 
 fn parse_shadow(value: &str) -> Option<Shadow> {
-    // Check for "none"
-    if value.trim().eq_ignore_ascii_case("none") {
-        return Some(Shadow::new(0.0, 0.0, 0.0, Color::TRANSPARENT));
+    // Returns just the first layer for callers (e.g. `text-shadow`) that
+    // still take a single `Shadow`. Use `parse_shadow_stack` for
+    // multi-layer box-shadow.
+    parse_shadow_stack(value).and_then(|s| s.into_iter().next())
+}
+
+/// Parse a CSS shadow value into a stack of layers.
+///
+/// Handles:
+/// - `none` → single transparent shadow,
+/// - `theme(shadow-*)` → the theme's full layer stack,
+/// - one or more comma-separated explicit shadows.
+fn parse_shadow_stack(value: &str) -> Option<Vec<Shadow>> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("none") {
+        return Some(vec![Shadow::new(0.0, 0.0, 0.0, Color::TRANSPARENT)]);
     }
 
-    // Try theme() function first
-    if let Ok((_, shadow)) = parse_theme_shadow::<nom::error::Error<&str>>(value) {
-        return Some(shadow);
+    // Try theme() function first — preserves multi-layer compound shadow.
+    if let Ok((_, stack)) = parse_theme_shadow::<nom::error::Error<&str>>(trimmed) {
+        return Some(stack);
     }
 
-    // Try parsing explicit shadow: offset-x offset-y blur color
-    parse_explicit_shadow(value)
+    // Comma-separated explicit shadows.
+    let parts = split_commas_respecting_parens(trimmed);
+    let mut layers = Vec::with_capacity(parts.len().max(1));
+    for part in parts {
+        if let Some(layer) = parse_explicit_shadow(part.trim()) {
+            layers.push(layer);
+        }
+    }
+    if layers.is_empty() {
+        None
+    } else {
+        Some(layers)
+    }
 }
 
 /// Parse theme(shadow-*) tokens
 fn parse_theme_shadow<'a, E: NomParseError<&'a str>>(
     input: &'a str,
-) -> IResult<&'a str, Shadow, E> {
+) -> IResult<&'a str, Vec<Shadow>, E> {
     let (input, _) = ws(input)?;
     let (input, _) = tag_no_case("theme")(input)?;
     let (input, _) = ws(input)?;
@@ -7349,14 +7375,14 @@ fn parse_theme_shadow<'a, E: NomParseError<&'a str>>(
     let token_name = token_name.trim();
     let shadows = ThemeState::get().shadows();
 
-    let shadow: blinc_core::Shadow = match token_name.to_lowercase().replace('_', "-").as_str() {
-        "shadow-sm" => shadows.shadow_sm.clone().into(),
-        "shadow-default" => shadows.shadow_default.clone().into(),
-        "shadow-md" => shadows.shadow_md.clone().into(),
-        "shadow-lg" => shadows.shadow_lg.clone().into(),
-        "shadow-xl" => shadows.shadow_xl.clone().into(),
-        "shadow-2xl" => shadows.shadow_2xl.clone().into(),
-        "shadow-none" => shadows.shadow_none.clone().into(),
+    let stack: &[blinc_theme::Shadow] = match token_name.to_lowercase().replace('_', "-").as_str() {
+        "shadow-sm" => &shadows.shadow_sm,
+        "shadow-default" => &shadows.shadow_default,
+        "shadow-md" => &shadows.shadow_md,
+        "shadow-lg" => &shadows.shadow_lg,
+        "shadow-xl" => &shadows.shadow_xl,
+        "shadow-2xl" => &shadows.shadow_2xl,
+        "shadow-none" => &shadows.shadow_none,
         _ => {
             debug!(token = token_name, "Unknown theme shadow token");
             return Err(nom::Err::Error(E::from_error_kind(
@@ -7366,7 +7392,40 @@ fn parse_theme_shadow<'a, E: NomParseError<&'a str>>(
         }
     };
 
-    Ok((input, shadow))
+    let stack: Vec<Shadow> = stack.iter().map(Shadow::from).collect();
+    Ok((input, stack))
+}
+
+/// Split a CSS list on commas while keeping parenthesised groups
+/// (e.g. `rgba(0, 0, 0, 0.5)`) intact.
+fn split_commas_respecting_parens(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut paren_depth: i32 = 0;
+    for c in input.chars() {
+        match c {
+            '(' => {
+                paren_depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                paren_depth = (paren_depth - 1).max(0);
+                current.push(c);
+            }
+            ',' if paren_depth == 0 => {
+                if !current.trim().is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                } else {
+                    current.clear();
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current);
+    }
+    parts
 }
 
 /// Split a CSS value by whitespace while keeping parenthesized groups intact.
@@ -10702,7 +10761,7 @@ mod tests {
         // The variable stores the raw value "theme(shadow-md)"
         // which gets resolved when applied to the style
         let style = result.stylesheet.get("card").unwrap();
-        assert!(style.shadow.is_some());
+        assert!(!style.shadow.is_empty());
     }
 
     #[test]
@@ -11807,7 +11866,7 @@ mod tests {
         let result = Stylesheet::parse_with_errors(css);
 
         let style = result.stylesheet.get("card").unwrap();
-        if let Some(shadow) = &style.shadow {
+        if let Some(shadow) = style.shadow.first() {
             // 1sp = 4px, 2sp = 8px, 4sp = 16px
             assert_eq!(shadow.offset_x, 4.0);
             assert_eq!(shadow.offset_y, 8.0);

@@ -1098,25 +1098,31 @@ impl RenderTree {
             props.outline_offset = offset;
         }
 
-        // Shadow
+        // Shadow — animations interpolate the FIRST layer only. Multi-layer
+        // animation would need per-layer keyframe storage (follow-up).
         if let Some([ox, oy, blur, spread]) = anim_props.shadow_params {
             let color = if let Some([r, g, b, a]) = anim_props.shadow_color {
                 blinc_core::Color::rgba(r, g, b, a)
-            } else if let Some(ref existing) = props.shadow {
+            } else if let Some(existing) = props.shadow.first() {
                 existing.color
             } else {
                 blinc_core::Color::rgba(0.0, 0.0, 0.0, 0.5)
             };
-            props.shadow = Some(blinc_core::Shadow {
+            let layer = blinc_core::Shadow {
                 offset_x: ox,
                 offset_y: oy,
                 blur,
                 spread,
                 color,
-            });
+            };
+            if let Some(first) = props.shadow.first_mut() {
+                *first = layer;
+            } else {
+                props.shadow = vec![layer];
+            }
         } else if let Some([r, g, b, a]) = anim_props.shadow_color {
-            if let Some(ref mut shadow) = props.shadow {
-                shadow.color = blinc_core::Color::rgba(r, g, b, a);
+            if let Some(first) = props.shadow.first_mut() {
+                first.color = blinc_core::Color::rgba(r, g, b, a);
             }
         }
 
@@ -1427,8 +1433,9 @@ impl RenderTree {
         }
         kp.outline_offset = Some(props.outline_offset);
 
-        // Shadow
-        if let Some(shadow) = &props.shadow {
+        // Shadow — only the FIRST layer is snapshot for animation (see
+        // apply notes above).
+        if let Some(shadow) = props.shadow.first() {
             kp.shadow_params = Some([shadow.offset_x, shadow.offset_y, shadow.blur, shadow.spread]);
             kp.shadow_color = Some([
                 shadow.color.r,
