@@ -34,6 +34,14 @@ impl AnimationPreset {
 
     /// Scale in from small to full size with fade
     pub fn scale_in(duration_ms: u32) -> MultiKeyframeAnimation {
+        Self::scale_in_with(duration_ms, Easing::EaseOutCubic)
+    }
+
+    /// Scale in with a caller-supplied final-keyframe easing. Lets
+    /// theme-aware callers thread a semantic curve (e.g.
+    /// `ease_sheet` / `ease_state`) through the preset without
+    /// rolling their own keyframe construction.
+    pub fn scale_in_with(duration_ms: u32, easing: Easing) -> MultiKeyframeAnimation {
         MultiKeyframeAnimation::new(duration_ms)
             .keyframe(
                 0.0,
@@ -47,12 +55,17 @@ impl AnimationPreset {
                 KeyframeProperties::default()
                     .with_scale(1.0)
                     .with_opacity(1.0),
-                Easing::EaseOutCubic,
+                easing,
             )
     }
 
     /// Scale out from full size to small with fade
     pub fn scale_out(duration_ms: u32) -> MultiKeyframeAnimation {
+        Self::scale_out_with(duration_ms, Easing::EaseInCubic)
+    }
+
+    /// Scale out with a caller-supplied final-keyframe easing.
+    pub fn scale_out_with(duration_ms: u32, easing: Easing) -> MultiKeyframeAnimation {
         MultiKeyframeAnimation::new(duration_ms)
             .keyframe(
                 0.0,
@@ -66,7 +79,7 @@ impl AnimationPreset {
                 KeyframeProperties::default()
                     .with_scale(0.0)
                     .with_opacity(0.0),
-                Easing::EaseInCubic,
+                easing,
             )
     }
 
@@ -100,13 +113,22 @@ impl AnimationPreset {
     // Slide animations
     // ========================================================================
 
-    /// Slide in from the left
-    pub fn slide_in_left(duration_ms: u32, distance: f32) -> MultiKeyframeAnimation {
+    /// Slide in from an arbitrary `(dx, dy)` offset with a caller-
+    /// supplied final-keyframe easing. The directional helpers
+    /// (`slide_in_left` etc.) call this with their respective offsets
+    /// and `Easing::EaseOutCubic`; theme-aware callers pass their
+    /// semantic curve directly (e.g. `ease_sheet`).
+    pub fn slide_in_with(
+        duration_ms: u32,
+        dx: f32,
+        dy: f32,
+        easing: Easing,
+    ) -> MultiKeyframeAnimation {
         MultiKeyframeAnimation::new(duration_ms)
             .keyframe(
                 0.0,
                 KeyframeProperties::default()
-                    .with_translate(-distance, 0.0)
+                    .with_translate(dx, dy)
                     .with_opacity(0.0),
                 Easing::Linear,
             )
@@ -115,141 +137,73 @@ impl AnimationPreset {
                 KeyframeProperties::default()
                     .with_translate(0.0, 0.0)
                     .with_opacity(1.0),
-                Easing::EaseOutCubic,
+                easing,
             )
+    }
+
+    /// Slide out to an arbitrary `(dx, dy)` offset with a caller-
+    /// supplied final-keyframe easing — companion to [`slide_in_with`].
+    pub fn slide_out_with(
+        duration_ms: u32,
+        dx: f32,
+        dy: f32,
+        easing: Easing,
+    ) -> MultiKeyframeAnimation {
+        MultiKeyframeAnimation::new(duration_ms)
+            .keyframe(
+                0.0,
+                KeyframeProperties::default()
+                    .with_translate(0.0, 0.0)
+                    .with_opacity(1.0),
+                Easing::Linear,
+            )
+            .keyframe(
+                1.0,
+                KeyframeProperties::default()
+                    .with_translate(dx, dy)
+                    .with_opacity(0.0),
+                easing,
+            )
+    }
+
+    /// Slide in from the left
+    pub fn slide_in_left(duration_ms: u32, distance: f32) -> MultiKeyframeAnimation {
+        Self::slide_in_with(duration_ms, -distance, 0.0, Easing::EaseOutCubic)
     }
 
     /// Slide in from the right
     pub fn slide_in_right(duration_ms: u32, distance: f32) -> MultiKeyframeAnimation {
-        MultiKeyframeAnimation::new(duration_ms)
-            .keyframe(
-                0.0,
-                KeyframeProperties::default()
-                    .with_translate(distance, 0.0)
-                    .with_opacity(0.0),
-                Easing::Linear,
-            )
-            .keyframe(
-                1.0,
-                KeyframeProperties::default()
-                    .with_translate(0.0, 0.0)
-                    .with_opacity(1.0),
-                Easing::EaseOutCubic,
-            )
+        Self::slide_in_with(duration_ms, distance, 0.0, Easing::EaseOutCubic)
     }
 
     /// Slide in from the top
     pub fn slide_in_top(duration_ms: u32, distance: f32) -> MultiKeyframeAnimation {
-        MultiKeyframeAnimation::new(duration_ms)
-            .keyframe(
-                0.0,
-                KeyframeProperties::default()
-                    .with_translate(0.0, -distance)
-                    .with_opacity(0.0),
-                Easing::Linear,
-            )
-            .keyframe(
-                1.0,
-                KeyframeProperties::default()
-                    .with_translate(0.0, 0.0)
-                    .with_opacity(1.0),
-                Easing::EaseOutCubic,
-            )
+        Self::slide_in_with(duration_ms, 0.0, -distance, Easing::EaseOutCubic)
     }
 
     /// Slide in from the bottom
     pub fn slide_in_bottom(duration_ms: u32, distance: f32) -> MultiKeyframeAnimation {
-        MultiKeyframeAnimation::new(duration_ms)
-            .keyframe(
-                0.0,
-                KeyframeProperties::default()
-                    .with_translate(0.0, distance)
-                    .with_opacity(0.0),
-                Easing::Linear,
-            )
-            .keyframe(
-                1.0,
-                KeyframeProperties::default()
-                    .with_translate(0.0, 0.0)
-                    .with_opacity(1.0),
-                Easing::EaseOutCubic,
-            )
+        Self::slide_in_with(duration_ms, 0.0, distance, Easing::EaseOutCubic)
     }
 
     /// Slide out to the left
     pub fn slide_out_left(duration_ms: u32, distance: f32) -> MultiKeyframeAnimation {
-        MultiKeyframeAnimation::new(duration_ms)
-            .keyframe(
-                0.0,
-                KeyframeProperties::default()
-                    .with_translate(0.0, 0.0)
-                    .with_opacity(1.0),
-                Easing::Linear,
-            )
-            .keyframe(
-                1.0,
-                KeyframeProperties::default()
-                    .with_translate(-distance, 0.0)
-                    .with_opacity(0.0),
-                Easing::EaseInCubic,
-            )
+        Self::slide_out_with(duration_ms, -distance, 0.0, Easing::EaseInCubic)
     }
 
     /// Slide out to the right
     pub fn slide_out_right(duration_ms: u32, distance: f32) -> MultiKeyframeAnimation {
-        MultiKeyframeAnimation::new(duration_ms)
-            .keyframe(
-                0.0,
-                KeyframeProperties::default()
-                    .with_translate(0.0, 0.0)
-                    .with_opacity(1.0),
-                Easing::Linear,
-            )
-            .keyframe(
-                1.0,
-                KeyframeProperties::default()
-                    .with_translate(distance, 0.0)
-                    .with_opacity(0.0),
-                Easing::EaseInCubic,
-            )
+        Self::slide_out_with(duration_ms, distance, 0.0, Easing::EaseInCubic)
     }
 
     /// Slide out to the top
     pub fn slide_out_top(duration_ms: u32, distance: f32) -> MultiKeyframeAnimation {
-        MultiKeyframeAnimation::new(duration_ms)
-            .keyframe(
-                0.0,
-                KeyframeProperties::default()
-                    .with_translate(0.0, 0.0)
-                    .with_opacity(1.0),
-                Easing::Linear,
-            )
-            .keyframe(
-                1.0,
-                KeyframeProperties::default()
-                    .with_translate(0.0, -distance)
-                    .with_opacity(0.0),
-                Easing::EaseInCubic,
-            )
+        Self::slide_out_with(duration_ms, 0.0, -distance, Easing::EaseInCubic)
     }
 
     /// Slide out to the bottom
     pub fn slide_out_bottom(duration_ms: u32, distance: f32) -> MultiKeyframeAnimation {
-        MultiKeyframeAnimation::new(duration_ms)
-            .keyframe(
-                0.0,
-                KeyframeProperties::default()
-                    .with_translate(0.0, 0.0)
-                    .with_opacity(1.0),
-                Easing::Linear,
-            )
-            .keyframe(
-                1.0,
-                KeyframeProperties::default()
-                    .with_translate(0.0, distance)
-                    .with_opacity(0.0),
-                Easing::EaseInCubic,
-            )
+        Self::slide_out_with(duration_ms, 0.0, distance, Easing::EaseInCubic)
     }
 
     // ========================================================================
