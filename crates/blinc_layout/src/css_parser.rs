@@ -12568,4 +12568,94 @@ mod tests {
         sheet.insert_with_state("active-only", ElementState::Active, ElementStyle::default());
         assert!(!sheet.participates_in_hover("active-only"));
     }
+
+    #[test]
+    fn animation_picks_up_cubic_bezier_from_var_ease() {
+        // Regression: `animation: name dur var(--ease-state);` must
+        // resolve the var to its cubic-bezier literal AND survive
+        // whitespace-tokenisation in parse_animation. Without paren-
+        // aware splitting the cubic-bezier args get chopped into
+        // separate tokens and the timing falls back to the default
+        // `Ease`, defeating the whole semantic-easing wiring.
+        let mut vars = std::collections::HashMap::new();
+        vars.insert(
+            "ease-state".to_string(),
+            "cubic-bezier(0.25, 0.10, 0.25, 1.0)".to_string(),
+        );
+        vars.insert("duration-fast".to_string(), "180ms".to_string());
+
+        let css = "#foo { animation: foo-enter var(--duration-fast) var(--ease-state); }";
+        let sheet = Stylesheet::parse_with_variables(css, &vars).expect("parse");
+        let style = sheet.get("foo").expect("rule");
+        let anim = style.animation.as_ref().expect("animation set");
+        assert_eq!(anim.name, "foo-enter");
+        assert_eq!(anim.duration_ms, 180);
+        match anim.timing {
+            AnimationTiming::CubicBezier(a, b, c, d) => {
+                assert!((a - 0.25).abs() < 1e-3 && (b - 0.10).abs() < 1e-3);
+                assert!((c - 0.25).abs() < 1e-3 && (d - 1.0).abs() < 1e-3);
+            }
+            other => panic!("expected CubicBezier, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn class_animation_picks_up_cubic_bezier_from_var_ease() {
+        // Same as `animation_picks_up_cubic_bezier_from_var_ease`
+        // but for a class selector and chained next to other
+        // properties — the shape cn_styles actually uses.
+        let mut vars = std::collections::HashMap::new();
+        vars.insert(
+            "ease-spring".to_string(),
+            "cubic-bezier(0.34, 1.3, 0.64, 1)".to_string(),
+        );
+        vars.insert("duration-normal".to_string(), "240ms".to_string());
+
+        let css = r#"
+            .cn-popover-content {
+                background: white;
+                padding: 16px;
+                animation: cn-popover-enter var(--duration-normal) var(--ease-spring);
+                transform-origin: top center;
+            }
+        "#;
+        let sheet = Stylesheet::parse_with_variables(css, &vars).expect("parse");
+        let style = sheet
+            .get_class("cn-popover-content")
+            .expect("no class style registered");
+        let anim = style
+            .animation
+            .as_ref()
+            .expect("animation set on .cn-popover-content");
+        assert_eq!(anim.name, "cn-popover-enter");
+        assert_eq!(anim.duration_ms, 240);
+        match anim.timing {
+            AnimationTiming::CubicBezier(a, b, c, d) => {
+                assert!((a - 0.34).abs() < 1e-3 && (b - 1.3).abs() < 1e-3);
+                assert!((c - 0.64).abs() < 1e-3 && (d - 1.0).abs() < 1e-3);
+            }
+            other => panic!("expected CubicBezier, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn transition_picks_up_cubic_bezier_from_var_ease() {
+        let mut vars = std::collections::HashMap::new();
+        vars.insert(
+            "ease-state".to_string(),
+            "cubic-bezier(0.25, 0.10, 0.25, 1.0)".to_string(),
+        );
+        vars.insert("duration-fast".to_string(), "150ms".to_string());
+
+        let css = "#foo { transition: background var(--duration-fast) var(--ease-state), \
+                   border-color var(--duration-fast) var(--ease-state); }";
+        let sheet = Stylesheet::parse_with_variables(css, &vars).expect("parse");
+        let style = sheet.get("foo").expect("rule");
+        let trans = style.transition.as_ref().expect("transitions set");
+        assert_eq!(trans.transitions.len(), 2);
+        for t in &trans.transitions {
+            assert_eq!(t.duration_ms, 150);
+            assert!(matches!(t.timing, AnimationTiming::CubicBezier(_, _, _, _)));
+        }
+    }
 }

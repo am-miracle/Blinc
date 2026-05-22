@@ -55,6 +55,57 @@ impl RenderTree {
         false
     }
 
+    /// Start a CSS keyframe animation for a node driven by a class rule.
+    ///
+    /// `start_css_animation_for_element` only looks up `#id` rules,
+    /// so class-only animations like `.cn-popover-content {
+    /// animation: cn-popover-enter ... }` never started even though
+    /// the rule existed in the stylesheet. This helper bridges the
+    /// gap: given a `node_id` whose class has an `animation` rule,
+    /// it resolves the keyframes block and registers the
+    /// `ActiveCssAnimation` against the node's stable id.
+    pub fn start_css_animation_for_class(
+        &mut self,
+        node_id: LayoutNodeId,
+        class: &str,
+    ) -> bool {
+        let stylesheet = match &self.stylesheet {
+            Some(s) => s.clone(),
+            None => return false,
+        };
+        let Some(style) = stylesheet.get_class(class) else {
+            return false;
+        };
+        let Some(anim_config) = style.animation.as_ref() else {
+            return false;
+        };
+        let Some(keyframes) = stylesheet.get_keyframes(&anim_config.name) else {
+            return false;
+        };
+
+        let mut animation = keyframes
+            .to_multi_keyframe_animation(anim_config.duration_ms, anim_config.timing.to_easing());
+        let iterations = if anim_config.iteration_count == 0 {
+            -1
+        } else {
+            anim_config.iteration_count as i32
+        };
+        animation.set_iterations(iterations);
+        animation.set_delay(anim_config.delay_ms);
+        animation.set_direction(anim_config.direction.to_play_direction());
+        animation.set_fill_mode(anim_config.fill_mode.to_fill_mode());
+        if anim_config.direction.starts_reversed() {
+            animation.set_reversed(true);
+        }
+
+        let stable_id = self.stable_id_or_warn(node_id);
+        self.css_anim_store.lock().unwrap().animations.insert(
+            stable_id,
+            crate::render_state::ActiveCssAnimation::new(animation),
+        );
+        true
+    }
+
     /// Start a CSS keyframe animation for a node with a specific state
     ///
     /// Used when element state changes (hover, active, etc.) and the state
@@ -329,6 +380,50 @@ impl RenderTree {
                     element_id,
                     node_id
                 );
+            }
+        }
+
+        // Class-based animations: iterate the registry's class index and
+        // start any class style that carries an `animation:` rule.
+        // Without this, `.cn-popover-content { animation: ... }` and the
+        // other cn overlay/toast keyframes would never fire on nodes
+        // that don't also have a matching `#id` rule. Skip nodes that
+        // already have an animation (id-based path wins, matching CSS
+        // specificity).
+        let class_to_nodes = self.element_registry.class_to_nodes_index();
+        for (class, node_ids) in &class_to_nodes {
+            // Cheap pre-check: the stylesheet has no class rule for this
+            // class name — skip the inner loop entirely.
+            let has_animation = self
+                .stylesheet
+                .as_ref()
+                .and_then(|s| s.get_class(class))
+                .and_then(|st| st.animation.as_ref())
+                .is_some();
+            if !has_animation {
+                continue;
+            }
+            for &node_id in node_ids {
+                let Some(stable_id) = self.stable_id(node_id) else {
+                    continue;
+                };
+                let already_has = self
+                    .css_anim_store
+                    .lock()
+                    .unwrap()
+                    .animations
+                    .contains_key(&stable_id);
+                if already_has {
+                    continue;
+                }
+                let started = self.start_css_animation_for_class(node_id, class);
+                if started {
+                    tracing::debug!(
+                        "CSS animation started for class '.{}' (node={:?})",
+                        class,
+                        node_id
+                    );
+                }
             }
         }
     }

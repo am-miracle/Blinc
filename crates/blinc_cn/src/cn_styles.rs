@@ -523,6 +523,9 @@ pub const CN_STYLES: &str = r#"
     border: 1px solid var(--border);
     border-radius: var(--radius-default);
     padding: var(--space-1);
+    /* Reuse the dropdown keyframes — same top-anchored slide/fade. */
+    animation: cn-dropdown-menu-enter var(--duration-fast) var(--ease-state);
+    transform-origin: top center;
 }
 
 .cn-select-item {
@@ -651,18 +654,14 @@ pub const CN_STYLES: &str = r#"
     border-radius: var(--radius-sm);
     font-size: var(--text-xs);
     padding: var(--space-1-5) var(--space-3);
-    /* CSS-driven fade-in. Motion FSM via `motion_enter` on the new
-       OverlayStack is currently not propagating opacity to the cached
-       primitive batch correctly (Phase 3 known issue), so we delegate
-       enter animation to the CSS animation system which the renderer
-       already handles per-frame. Exit snaps for now; once the motion
-       integration is fixed, switch back to motion_enter/_exit. */
-    animation: cn-tooltip-enter var(--duration-fast) var(--ease-state);
-}
-
-@keyframes cn-tooltip-enter {
-    from { opacity: 0; }
-    to   { opacity: 1; }
+    /* Snap-in for now. An earlier CSS-driven fade-in (`@keyframes
+       cn-tooltip-enter`) was wired up but never actually fired — class-
+       only `@keyframes` animations didn't start until the class-anim
+       fix in `start_all_css_animations`. Re-enabling the fade exposed
+       a text-glyph opacity gap: the glyph pipeline doesn't pick up the
+       container's animated opacity mid-animation, so the tooltip text
+       disappears on desktop and looks laggy on web. Keep snap-in until
+       the glyph path honours animated opacity. */
 }
 
 /* ============================================================================
@@ -1011,6 +1010,9 @@ pub const CN_STYLES: &str = r#"
     border: 1px solid var(--border);
     border-radius: var(--radius-default);
     padding: var(--space-1);
+    /* Reuse the dropdown keyframes — same top-anchored slide/fade. */
+    animation: cn-dropdown-menu-enter var(--duration-fast) var(--ease-state);
+    transform-origin: top center;
 }
 .cn-menubar-item {
     /* Match `.cn-dropdown-item` / `.cn-context-menu-item` so all three
@@ -1139,6 +1141,9 @@ pub const CN_STYLES: &str = r#"
     border: 1px solid var(--border);
     border-radius: var(--radius-default);
     padding: var(--space-1);
+    /* Reuse the dropdown keyframes — same top-anchored slide/fade. */
+    animation: cn-dropdown-menu-enter var(--duration-fast) var(--ease-state);
+    transform-origin: top center;
 }
 .cn-combobox-item {
     padding: var(--space-2) var(--space-3);
