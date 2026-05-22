@@ -100,17 +100,7 @@ pub fn fire_click_outside(ancestor_element_ids: &[String]) {
             .map(|(key, entry)| (key.clone(), Arc::clone(&entry.on_dismiss)))
             .collect()
     };
-
-    // if !callbacks.is_empty() {
-    //     let keys: Vec<_> = callbacks.iter().map(|(k, _)| k.as_str()).collect();
-    //     eprintln!(
-    //         "[CLICK_OUTSIDE] Firing {} handlers: {:?} (ancestors: {:?})",
-    //         callbacks.len(),
-    //         keys,
-    //         ancestor_element_ids
-    //     );
-    // }
-
+    
     for (_, cb) in callbacks {
         cb();
     }
