@@ -797,12 +797,26 @@ impl RenderState {
     ///
     /// Returns true if any animations are active (need another frame)
     pub fn tick(&mut self, current_time_ms: u64) -> bool {
-        // Calculate delta time
-        let dt_ms = if let Some(last_time) = self.last_tick_time {
+        // Calculate delta time. `elapsed_ms()` is ms-resolution and macOS
+        // winit can deliver back-to-back Frame events at microsecond cadence
+        // (memory note: "winit on macOS delivers `request_redraw`'d frames
+        // back-to-back at microsecond cadence"). When the clock hasn't
+        // advanced between consecutive ticks the raw delta is 0, motion
+        // progress doesn't advance, and the FSM gets stuck mid-animation
+        // until something pushes the wall clock forward — exactly the
+        // "animation freezes near the end until I move my mouse" symptom.
+        //
+        // Floor `dt_ms` at 1 ms so a tick that observed *any* time advance
+        // (real or coalesced into the same millisecond bucket) still moves
+        // the FSM forward. The cap-paced wake_at scheduler already
+        // guarantees no more than one frame per cap interval in steady
+        // state; this floor is just for the sub-ms storm.
+        let raw_dt_ms = if let Some(last_time) = self.last_tick_time {
             (current_time_ms.saturating_sub(last_time)) as f32
         } else {
             16.0 // Assume ~60fps for first frame
         };
+        let dt_ms = raw_dt_ms.max(1.0);
         self.last_tick_time = Some(current_time_ms);
 
         // Tick the animation scheduler
@@ -858,6 +872,13 @@ impl RenderState {
                 }
             }
         } // Drop scheduler lock
+
+        // Mirror the stable-motion redraw-self-perpetuate guard for node-based
+        // motions — same FSM-poll race could otherwise leave a node-bound
+        // enter / exit animation stalled until the next external input.
+        if motion_active {
+            crate::stateful::request_redraw();
+        }
 
         // Tick stable-keyed motions (for overlays)
         self.tick_stable_motions(dt_ms);
@@ -1780,13 +1801,27 @@ impl RenderState {
         // no-op and `sync_shared_motion_states` doesn't need to
         // rewrite the shared store. The Settled-fast-path is the
         // common case at idle.
-        if self.stable_motions.values().any(|m| {
+        let any_mid_flight = self.stable_motions.values().any(|m| {
             !matches!(
                 m.state,
                 MotionState::Visible | MotionState::Removed | MotionState::Suspended
             )
-        }) {
+        });
+        if any_mid_flight {
             self.motion_generation = self.motion_generation.wrapping_add(1);
+            // Force the runner to fire another frame.
+            //
+            // The post-frame redraw chain in the windowed runner OR's
+            // `rs.has_active_motions()` into `any_redraw_signal`, which
+            // is supposed to flip `frame_dirty` + arm the next wake. In
+            // practice users saw stable-motion animations freeze
+            // mid-flight until a mouse-move kicked the loop — the
+            // chain's wake path raced the FSM-poll in a way that
+            // sometimes settled before the post-frame check observed
+            // it. Asserting `NEEDS_REDRAW` directly from the tick
+            // guarantees the next Frame gate cannot skip while *any*
+            // stable motion is still entering / exiting / waiting.
+            crate::stateful::request_redraw();
         }
         for motion in self.stable_motions.values_mut() {
             Self::tick_single_motion(motion, dt_ms);

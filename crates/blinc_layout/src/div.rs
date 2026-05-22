@@ -375,6 +375,12 @@ pub struct Div {
     /// Tracks whether border_radius was explicitly set (distinguishes "set to 0" from "not set" in merges)
     pub(crate) border_radius_explicit: bool,
     pub(crate) corner_shape: CornerShape,
+    /// Set by [`Self::lock_corner_shape`]; instructs the paint walker
+    /// not to substitute the theme's squircle exponent. Floating
+    /// overlay widgets (popovers, dropdowns, select / combobox
+    /// menus) use this to keep their chrome circular regardless of
+    /// the active theme.
+    pub(crate) corner_shape_locked: bool,
     pub(crate) border_color: Option<Color>,
     pub(crate) border_width: f32,
     pub(crate) border_sides: crate::element::BorderSides,
@@ -389,6 +395,11 @@ pub struct Div {
     pub(crate) layer_effects: Vec<LayerEffect>,
     /// Marks this as a stack layer for z-ordering (increments z_layer for interleaved rendering)
     pub(crate) is_stack_layer: bool,
+    /// Whether this node is the root of an overlay panel that should route
+    /// its SDF + text + SVG dispatches into the dynamic batch. Set by
+    /// OverlayStack / ToastTray; the generic `Stack` widget does NOT set
+    /// this (it only uses `is_stack_layer` for z-counter bumping).
+    pub(crate) is_overlay_root: bool,
     pub(crate) event_handlers: crate::event_handler::EventHandlers,
     /// Element ID for selector API queries
     pub(crate) element_id: Option<String>,
@@ -460,6 +471,7 @@ impl Div {
             border_radius: CornerRadius::default(),
             border_radius_explicit: false,
             corner_shape: CornerShape::default(),
+            corner_shape_locked: false,
             border_color: None,
             border_width: 0.0,
             border_sides: crate::element::BorderSides::default(),
@@ -472,6 +484,7 @@ impl Div {
             pointer_events_none: false,
             layer_effects: Vec::new(),
             is_stack_layer: false,
+            is_overlay_root: false,
             event_handlers: crate::event_handler::EventHandlers::new(),
             element_id: None,
             classes: Vec::new(),
@@ -517,6 +530,7 @@ impl Div {
             border_radius: CornerRadius::default(),
             border_radius_explicit: false,
             corner_shape: CornerShape::default(),
+            corner_shape_locked: false,
             border_color: None,
             border_width: 0.0,
             border_sides: crate::element::BorderSides::default(),
@@ -529,6 +543,7 @@ impl Div {
             pointer_events_none: false,
             layer_effects: Vec::new(),
             is_stack_layer: false,
+            is_overlay_root: false,
             event_handlers: crate::event_handler::EventHandlers::new(),
             element_id: None,
             classes: Vec::new(),
@@ -2634,6 +2649,27 @@ impl Div {
         self.corner_shape(-1.0)
     }
 
+    /// Opt out of theme-driven squircle substitution.
+    ///
+    /// When the active theme advertises a non-default
+    /// [`ShapeTokens`](blinc_theme::ShapeTokens) (e.g. any of the
+    /// Universal HID variants), the paint walker substitutes the
+    /// theme's effective `n` onto rounded corners that pass the
+    /// threshold check. Calling `lock_corner_shape()` tells the
+    /// walker to leave this element's corners alone — useful for
+    /// floating overlay widgets (popovers, dropdown panels, select
+    /// menus) whose chrome should remain circular regardless of the
+    /// theme.
+    ///
+    /// Has no effect on themes that already use circular corners
+    /// (every existing platform bundle + Catppuccin BlincTheme) —
+    /// they short-circuit the substitution before this flag is
+    /// consulted.
+    pub fn lock_corner_shape(mut self) -> Self {
+        self.corner_shape_locked = true;
+        self
+    }
+
     // =========================================================================
     // Overflow Fade
     // =========================================================================
@@ -3184,6 +3220,17 @@ impl Div {
     /// render above other content.
     pub fn stack_layer(mut self) -> Self {
         self.is_stack_layer = true;
+        self
+    }
+
+    /// Mark this node as the root of an overlay panel — used by
+    /// `OverlayStack` / `ToastTray` so their content routes through the
+    /// dynamic batch (and lands in `composite_frame`'s overlay pass after
+    /// the static cache + static-SVG dispatch). The generic `Stack`
+    /// widget should NOT call this — its `is_stack_layer` is purely for
+    /// z-counter bumping within the static cache.
+    pub fn overlay_root(mut self) -> Self {
+        self.is_overlay_root = true;
         self
     }
 
@@ -4132,6 +4179,7 @@ impl ElementBuilder for Div {
             border_radius: self.border_radius,
             border_radius_explicit: self.border_radius_explicit,
             corner_shape: self.corner_shape,
+            corner_shape_locked: self.corner_shape_locked,
             border_color: self.border_color,
             border_width: self.border_width,
             border_sides: self.border_sides,
@@ -4142,6 +4190,7 @@ impl ElementBuilder for Div {
             opacity: self.opacity,
             clips_content,
             is_stack_layer: self.is_stack_layer,
+            is_overlay_root: self.is_overlay_root,
             pointer_events_none: self.pointer_events_none,
             cursor: self.cursor,
             layer_effects: self.layer_effects.clone(),

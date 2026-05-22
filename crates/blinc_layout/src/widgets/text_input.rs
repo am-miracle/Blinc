@@ -574,6 +574,41 @@ pub fn decrement_focus_count() {
     }
 }
 
+/// Programmatically focus a text_input by its shared state handle.
+///
+/// Mirrors what the click handler does internally — sets the widget's
+/// visual state to `Focused`, marks it as the active focus target for
+/// keyboard / IME / cursor-blink machinery, blurs any previously-focused
+/// text_input or text_area, and increments the soft-keyboard refcount.
+/// Use from a parent widget's open-handler when an embedded text input
+/// should grab focus on appearance (e.g. cn::combobox's search field on
+/// dropdown open).
+pub fn focus_text_input(state: &SharedTextInputData) {
+    use blinc_core::events::event_types;
+    if let Ok(mut s) = state.lock() {
+        if !s.visual.is_focused() {
+            if let Some(new_state) = s.visual.on_event(event_types::FOCUS) {
+                s.visual = new_state;
+            } else {
+                s.visual = TextFieldState::Focused;
+            }
+            s.focus_time_ms = elapsed_ms();
+            s.reset_cursor_blink();
+            increment_focus_count();
+            // Bump the stateful inner so its on_state callback re-runs
+            // with the new visual state — without this the focus border
+            // / bg colour don't reflect the change until the next event.
+            if let Some(ref stateful) = s.stateful_state {
+                if let Ok(mut shared) = stateful.lock() {
+                    shared.needs_visual_update = true;
+                }
+            }
+        }
+    }
+    set_focused_text_input(state);
+    crate::stateful::request_redraw();
+}
+
 pub(crate) fn set_focused_text_input(state: &SharedTextInputData) {
     use blinc_core::events::event_types;
 

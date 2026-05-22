@@ -43,6 +43,7 @@ pub mod list;
 #[cfg(feature = "media")]
 pub mod media;
 pub mod overlay;
+pub mod overlay_stack;
 pub mod radio;
 pub mod rich_text_editor;
 pub mod scroll;
@@ -50,6 +51,7 @@ pub mod table;
 pub mod text_area;
 pub mod text_edit;
 pub mod text_input;
+pub mod toast_tray;
 pub mod virtual_list;
 
 // Re-export button widget

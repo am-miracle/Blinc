@@ -71,7 +71,12 @@ impl ButtonVariant {
     /// Used by components that still use `Stateful<ButtonState>` (dropdown menu, select).
     pub(crate) fn background(&self, theme: &ThemeState, state: ButtonState) -> Color {
         match (self, state) {
-            (_, ButtonState::Disabled) => self.base_background(theme).with_alpha(0.5),
+            // Disabled keeps full bg alpha — the `.opacity(0.5)` applied
+            // at the button level (see `apply_css_overrides_button` callers)
+            // already dims the whole element (bg + text + border). Stacking
+            // a second 0.5 alpha on the bg made it 0.25 effective vs the
+            // parent surface and the button visually disappeared in light mode.
+            (_, ButtonState::Disabled) => self.base_background(theme),
             (ButtonVariant::Primary, ButtonState::Pressed) => {
                 theme.color(ColorToken::PrimaryActive)
             }
@@ -114,12 +119,13 @@ impl ButtonVariant {
     /// Get the foreground (text) color for this variant
     pub(crate) fn foreground(&self, theme: &ThemeState) -> Color {
         match self {
-            ButtonVariant::Primary | ButtonVariant::Destructive => {
+            // Filled tonal variants — Secondary's bg is dark slate in light
+            // mode / light gray in dark mode, so the inverse text token
+            // (white / near-black) is the correct contrast partner.
+            ButtonVariant::Primary | ButtonVariant::Destructive | ButtonVariant::Secondary => {
                 theme.color(ColorToken::TextInverse)
             }
-            ButtonVariant::Secondary | ButtonVariant::Outline | ButtonVariant::Ghost => {
-                theme.color(ColorToken::TextPrimary)
-            }
+            ButtonVariant::Outline | ButtonVariant::Ghost => theme.color(ColorToken::TextPrimary),
             ButtonVariant::Link => theme.color(ColorToken::Primary),
         }
     }
@@ -208,13 +214,19 @@ impl ButtonSize {
         }
     }
 
-    /// Get default border radius (inline fallback — CSS overrides this)
-    fn border_radius(&self) -> f32 {
+    /// Map this size to a [`RadiusToken`] so the active theme's
+    /// radii ladder decides the corner reach. Tiny buttons get a
+    /// crisp `Sm`, default-sized buttons get `Default`, large
+    /// buttons step up to `Lg`. Picks up each theme's
+    /// `RadiusTokens` automatically: Hybrid's `Sm=4, Default=8, Lg=14`,
+    /// Restrained's `Sm=3, Default=6, Lg=10`, etc.
+    fn radius_token(&self) -> blinc_theme::RadiusToken {
+        use blinc_theme::RadiusToken;
         match self {
-            ButtonSize::Small => 4.0,
-            ButtonSize::Medium => 6.0,
-            ButtonSize::Large => 8.0,
-            ButtonSize::Icon => 6.0,
+            ButtonSize::Small => RadiusToken::Sm,
+            ButtonSize::Medium => RadiusToken::Default,
+            ButtonSize::Large => RadiusToken::Lg,
+            ButtonSize::Icon => RadiusToken::Default,
         }
     }
 }
@@ -349,7 +361,11 @@ impl Button {
             .bg_color(bg)
             .hover_color(hover_bg)
             .pressed_color(pressed_bg)
-            .rounded(config.btn_size.border_radius())
+            // Pull the corner radius from the active theme's
+            // `RadiusTokens` so Universal HID variants etc. each get
+            // their own corner-reach. CSS `.cn-button--{size}` rules
+            // can still cascade to override per-size.
+            .rounded(theme.radii().get(config.btn_size.radius_token()))
             .items_center()
             .justify_center()
             // CSS classes for user overrides
@@ -358,11 +374,14 @@ impl Button {
             .class(config.btn_size.css_class());
 
         // Icon-only: explicit square dimensions so items_center/justify_center
-        // can center the icon. With-label: shrink-wrap to content.
+        // can center the icon. `flex_shrink_0` pins both axes — without it
+        // a narrowing parent row would let taffy compress the width while
+        // height held, collapsing the square into a vertical oval.
+        // With-label: shrink-wrap to content.
         if is_icon_only {
             let pad = config.btn_size.padding_y();
             let dim = resolved_icon_size + pad * 2.0;
-            btn = btn.w(dim).h(dim);
+            btn = btn.w(dim).h(dim).flex_shrink_0();
         } else {
             btn = btn.w_fit();
         }
@@ -426,20 +445,43 @@ impl Button {
         });
 
         if disabled {
-            btn = btn.class("cn-button--disabled").opacity(0.5).disabled(true);
+            // Filled tonal disabled treatment — matches the disabled
+            // select / input look. Solid muted surface + muted text reads
+            // as a button (still has identity) but clearly inert.
+            // Opacity dimming on a saturated bg (e.g. Primary blue at 50%)
+            // washed out to pale lavender against white, losing all contrast.
+            // A thin BorderSecondary outline gives the button a sharper
+            // silhouette against the page without re-introducing depth.
+            let disabled_bg = theme.color(ColorToken::InputBgDisabled);
+            let disabled_fg = theme.color(ColorToken::TextTertiary);
+            let disabled_border = theme.color(ColorToken::BorderSecondary);
+            btn = btn
+                .class("cn-button--disabled")
+                .bg_color(disabled_bg)
+                .hover_color(disabled_bg)
+                .pressed_color(disabled_bg)
+                .text_color(disabled_fg)
+                .border(1.0, disabled_border)
+                .disabled(true);
         }
 
-        // Shadow
-        if variant != ButtonVariant::Link && variant != ButtonVariant::Ghost {
-            btn = btn.shadow_md();
-        }
-        if variant == ButtonVariant::Outline {
-            btn = btn.shadow_sm();
+        // Shadow — disabled is intentionally flat (no shadow_md / shadow_sm)
+        // so the inert tonal fill reads as non-interactive.
+        if !disabled {
+            if variant != ButtonVariant::Link && variant != ButtonVariant::Ghost {
+                btn = btn.shadow_md();
+            }
+            if variant == ButtonVariant::Outline {
+                btn = btn.shadow_sm();
+            }
         }
 
-        // Border for outline variant
-        if let Some(border_color) = variant.border(theme) {
-            btn = btn.border(1.0, border_color);
+        // Border for outline variant (skip when disabled — disabled already
+        // applied its own BorderSecondary outline above).
+        if !disabled {
+            if let Some(border_color) = variant.border(theme) {
+                btn = btn.border(1.0, border_color);
+            }
         }
 
         // Click handler

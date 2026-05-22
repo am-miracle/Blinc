@@ -35,16 +35,15 @@
 use std::cell::OnceCell;
 use std::sync::Arc;
 
-use blinc_animation::AnimationPreset;
 use blinc_core::context_state::BlincContextState;
 use blinc_core::State;
 use blinc_layout::div::ElementTypeId;
 use blinc_layout::element::RenderProps;
-use blinc_layout::motion::motion;
-use blinc_layout::overlay_state::get_overlay_manager;
+use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
-use blinc_layout::widgets::overlay::{AnchorDirection, OverlayHandle, OverlayManagerExt};
+use blinc_layout::widgets::overlay::AnchorDirection;
+use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
 use blinc_theme::{ColorToken, RadiusToken, SpacingToken, ThemeState};
 
 use blinc_layout::InstanceKey;
@@ -198,118 +197,83 @@ impl HoverCardBuilder {
 
     /// Build the hover card component
     fn build_component(&self) -> HoverCard {
-        let _theme = ThemeState::get();
-
-        // Create state for tracking overlay handle
+        // Per-instance handle state, survives rebuilds.
         let overlay_handle_state: State<Option<u64>> =
             BlincContextState::get().use_state_keyed(&self.key.derive("handle"), || None);
 
-        // Clone values for closures
         let side = self.side;
         let align = self.align;
         let offset = self.offset;
+        let close_delay_ms = self.close_delay_ms;
         let content_builder = self.content.clone();
         let trigger_builder = self.trigger.clone();
-        // Use the instance key to create a unique motion key for this hover card
-        // This prevents collisions when multiple hover cards exist
-        let motion_key_str = format!("hovercard_{}", self.key.get());
 
-        // Build trigger with hover handlers
-        let overlay_handle_for_show = overlay_handle_state.clone();
-        let overlay_handle_for_trigger_leave = overlay_handle_state.clone();
-        let overlay_handle_for_trigger_enter = overlay_handle_state.clone();
-        let content_builder_for_show = content_builder.clone();
-        let motion_key_for_trigger = motion_key_str.clone();
+        let stored_for_enter = overlay_handle_state.clone();
+        let stored_for_leave = overlay_handle_state.clone();
+        let stored_for_open = overlay_handle_state.clone();
 
-        // Build the trigger element with hover detection
         let trigger_content = (trigger_builder)();
 
         let trigger = div()
             .w_fit()
-            .align_self_start() // Prevent stretching in flex containers
+            .align_self_start()
             .child(trigger_content)
             .on_hover_enter(move |ctx| {
-                tracing::debug!("TRIGGER on_hover_enter fired");
-                // Build the full motion key (motion_derived adds "motion:" prefix)
-                // The actual animation is on the child, so we need ":child:0" suffix
-                let full_motion_key = format!("motion:{}:child:0", motion_key_for_trigger);
-
-                // First, check if we have an existing overlay that's pending close or closing
-                if let Some(handle_id) = overlay_handle_for_trigger_enter.get() {
-                    let mgr = get_overlay_manager();
-                    let handle = OverlayHandle::from_raw(handle_id);
-
-                    // If overlay is visible, cancel any pending close
-                    if mgr.is_visible(handle) {
-                        if mgr.is_pending_close(handle) {
-                            // Cancel pending close - mouse re-entered trigger
-                            mgr.hover_enter(handle);
-                        }
-                        // Also cancel any exit animation
-                        let motion = blinc_layout::selector::query_motion(&full_motion_key);
-                        if motion.is_exiting() {
-                            mgr.cancel_close(handle);
-                            motion.cancel_exit();
+                // Live overlay → cancel pending close (or revive an exit
+                // that already started during the close-delay window).
+                if let Some(raw) = stored_for_enter.get() {
+                    let handle = OverlayHandle::from_raw(raw);
+                    if handle.is_live() {
+                        if let Ok(mut stack) = overlay_stack().lock() {
+                            stack.handle_mouse_enter(handle);
                         }
                         return;
                     }
-                    // Our overlay was closed externally, clear our state
-                    overlay_handle_for_trigger_enter.set(None);
+                    if handle.is_exiting() {
+                        // Exit animation already started — revive it.
+                        if let Ok(mut stack) = overlay_stack().lock() {
+                            stack.revive(handle);
+                        }
+                        return;
+                    }
+                    stored_for_enter.set(None);
                 }
 
-                // Check if motion is already animating (entering) to prevent restart jitter
-                let motion = blinc_layout::selector::query_motion(&full_motion_key);
-                if motion.is_animating() && !motion.is_exiting() {
+                let Some(ref content_fn) = content_builder else {
                     return;
-                }
+                };
 
-                // Get bounds for positioning
-                let trigger_x = ctx.bounds_x;
-                let trigger_y = ctx.bounds_y;
-                let trigger_w = ctx.bounds_width;
-                let trigger_h = ctx.bounds_height;
-
-                // Calculate position based on side and alignment
                 let (x, y) = calculate_hover_card_position(
-                    trigger_x, trigger_y, trigger_w, trigger_h, side, align, offset,
+                    ctx.bounds_x,
+                    ctx.bounds_y,
+                    ctx.bounds_width,
+                    ctx.bounds_height,
+                    side,
+                    align,
+                    offset,
                 );
 
-                // Show the hover card content
-                if let Some(ref content_fn) = content_builder_for_show {
-                    let content_fn_clone = Arc::clone(content_fn);
-                    let overlay_handle_for_content = overlay_handle_for_show.clone();
+                let content_fn = Arc::clone(content_fn);
+                let stored_close = stored_for_open.clone();
 
-                    let handle = show_hover_card_overlay(
-                        x,
-                        y,
-                        side,
-                        content_fn_clone,
-                        overlay_handle_for_content,
-                        motion_key_for_trigger.clone(),
-                    );
+                let handle = build_hover_card_overlay(
+                    x,
+                    y,
+                    side,
+                    content_fn,
+                    close_delay_ms,
+                    stored_close.clone(),
+                );
 
-                    overlay_handle_for_show.set(Some(handle.id()));
-                }
+                stored_for_open.set(Some(handle.raw()));
             })
             .on_hover_leave(move |_| {
-                // Start close delay countdown when mouse leaves trigger
-                // The countdown can be canceled if mouse enters the card
-                tracing::debug!("TRIGGER on_hover_leave fired");
-                if let Some(handle_id) = overlay_handle_for_trigger_leave.get() {
-                    let mgr = get_overlay_manager();
-                    let handle = OverlayHandle::from_raw(handle_id);
-
-                    tracing::debug!(
-                        "TRIGGER: overlay visible={}, pending_close={}",
-                        mgr.is_visible(handle),
-                        mgr.is_pending_close(handle)
-                    );
-
-                    // Only start close delay if overlay is visible and in Open state
-                    if mgr.is_visible(handle) && !mgr.is_pending_close(handle) {
-                        // Start close delay countdown (Open -> PendingClose)
-                        tracing::debug!("TRIGGER: calling hover_leave to start close delay");
-                        mgr.hover_leave(handle);
+                if let Some(raw) = stored_for_leave.get() {
+                    let handle = OverlayHandle::from_raw(raw);
+                    if handle.is_live() {
+                        if let Ok(mut stack) = overlay_stack().lock() {
+                            stack.handle_mouse_leave(handle);
+                        }
                     }
                 }
             });
@@ -383,14 +347,24 @@ fn calculate_hover_card_position(
     }
 }
 
-/// Show the hover card overlay
-fn show_hover_card_overlay(
+/// Push a hover card overlay to the global `OverlayStack`. Wires:
+/// - Card content `on_hover_enter` cancels any pending mouse-leave close
+///   (mouse moved from trigger → card without crossing dead space). Also
+///   revives an in-flight exit if the close-delay countdown elapsed before
+///   the user re-entered the card.
+/// - Card `on_hover_leave` restarts the mouse-leave countdown.
+/// - on_close clears the widget's stored handle.
+///
+/// Enter animation is delegated to CSS `@keyframes cn-hover-card-enter`
+/// (see cn_styles.rs) — same approach as cn::tooltip/popover. Exit snaps
+/// for now pending the motion-FSM fix.
+fn build_hover_card_overlay(
     x: f32,
     y: f32,
     side: HoverCardSide,
     content_fn: ContentBuilderFn,
+    close_delay_ms: u32,
     overlay_handle_state: State<Option<u64>>,
-    motion_key: String,
 ) -> OverlayHandle {
     let theme = ThemeState::get();
     let bg = theme.color(ColorToken::SurfaceElevated);
@@ -398,24 +372,13 @@ fn show_hover_card_overlay(
     let radius = theme.radius(RadiusToken::Lg);
     let padding = theme.spacing_value(SpacingToken::Space4);
 
-    let mgr = get_overlay_manager();
+    // Single-instance is enforced PER-TRIGGER via the widget's stored handle
+    // (see `build_component`). Avoid `close_all_of_kind(Tooltip)` here —
+    // each on_close it would fire calls State::set(None), which the
+    // reactive system treats as a global rebuild trigger. Rapid hover
+    // between multiple hover_card triggers then cascades into many
+    // full-UI rebuilds and the app locks up.
 
-    // Close any existing tooltip/hover card overlays before opening a new one
-    // This ensures only one hover card is visible at a time
-    mgr.close_all_of(blinc_layout::widgets::overlay::OverlayKind::Tooltip);
-
-    // Clone state and key for closures
-    let overlay_handle_for_leave = overlay_handle_state.clone();
-    let motion_key_for_content = motion_key.clone();
-    let motion_key_for_hover = motion_key.clone();
-
-    // Use hover_card() which is a TRANSIENT overlay - no backdrop, no scroll blocking
-    // Multiple hover cards can coexist without interfering with each other
-    // Set the motion_key so overlay can trigger exit animation when closing
-    // The actual animation is on the child of motion_derived, so include ":child:0" suffix
-    let motion_key_with_child = format!("{}:child:0", motion_key);
-
-    // Convert HoverCardSide to AnchorDirection for correct occlusion bounds calculation
     let anchor_dir = match side {
         HoverCardSide::Top => AnchorDirection::Top,
         HoverCardSide::Bottom => AnchorDirection::Bottom,
@@ -423,110 +386,77 @@ fn show_hover_card_overlay(
         HoverCardSide::Right => AnchorDirection::Right,
     };
 
-    mgr.hover_card()
+    // Pre-allocate handle id so the card content can capture it in its
+    // hover_enter / hover_leave closures (to call back into the stack
+    // with the right handle).
+    let next_handle_id = overlay_stack()
+        .lock()
+        .ok()
+        .map(|s| s.peek_next_handle_id())
+        .unwrap_or(0);
+
+    let stored_close = overlay_handle_state.clone();
+    let next_id_for_card = next_handle_id;
+
+    let handle = OverlayBuilder::tooltip()
         .at(x, y)
         .anchor_direction(anchor_dir)
-        .motion_key(&motion_key_with_child)
-        .follows_scroll(true)
+        // Tooltip kind already has on_mouse_leave=true. Use the configured
+        // close_delay so user can move mouse from trigger to card without
+        // the card popping closed.
+        .dismissable_by_mouse_leave(true, close_delay_ms)
+        .on_close(move |_reason| {
+            stored_close.set(None);
+        })
         .content(move || {
             let user_content = (content_fn)();
+            let handle = OverlayHandle::from_raw(next_id_for_card);
 
-            // Clone for the hover enter closure (to cancel closing when mouse enters card)
-            let overlay_handle_for_card_enter = overlay_handle_for_leave.clone();
-            // Clone for on_ready to set content size
-            let overlay_handle_for_ready = overlay_handle_for_leave.clone();
-            // Clone the motion key for use inside the on_hover_enter closure
-            let motion_key_for_card_enter = motion_key_for_hover.clone();
-
-            // Generate a unique ID for this card based on motion key
-            let card_id = format!("hover-card-{}", motion_key_for_content);
-
-            // Register on_ready callback via query API to capture content size
-            // This is called after layout when we have accurate bounds
-            if let Some(handle) = blinc_layout::selector::query(&card_id) {
-                handle.on_ready(move |bounds| {
-                    if let Some(handle_id) = overlay_handle_for_ready.get() {
-                        let mgr = get_overlay_manager();
-                        let overlay_handle = OverlayHandle::from_raw(handle_id);
-                        mgr.set_content_size(overlay_handle, bounds.width, bounds.height);
-                        tracing::debug!(
-                            "HOVER_CARD: set_content_size({}, {})",
-                            bounds.width,
-                            bounds.height
-                        );
-                    }
-                });
-            }
-
-            // Styled card container with hover enter detection
-            // When mouse enters the card (after leaving trigger), cancel any pending close
-            // This prevents the "blip" when moving mouse from trigger to card
-            tracing::debug!("HOVER_CARD: building card content");
-            let card = div()
+            // Card-side hover handlers — keep card open when mouse moves
+            // from trigger into card.
+            div()
                 .class("cn-hover-card-content")
-                .id(&card_id)
                 .flex_col()
                 .bg(bg)
                 .border(1.0, border)
                 .rounded(radius)
+                .lock_corner_shape()
                 .p_px(padding)
                 .shadow_lg()
                 .min_w(200.0)
                 .max_w(320.0)
                 .child(user_content)
                 .on_hover_enter(move |_| {
-                    tracing::debug!("CARD on_hover_enter fired");
-                    // When mouse enters the card, cancel any pending close delay
-                    // This handles the case where user moves mouse from trigger to card
-                    if let Some(handle_id) = overlay_handle_for_card_enter.get() {
-                        let mgr = get_overlay_manager();
-                        let handle = OverlayHandle::from_raw(handle_id);
-
-                        tracing::debug!("CARD: pending_close={}", mgr.is_pending_close(handle));
-
-                        // Check if we're in PendingClose state (delay countdown running)
-                        if mgr.is_pending_close(handle) {
-                            // Cancel the delay - transitions PendingClose -> Open
-                            tracing::debug!("CARD: cancelling pending close");
-                            mgr.hover_enter(handle);
-                        }
-
-                        // Also check if we're in Closing state (exit animation playing)
-                        // Use the unique motion key for this hover card
-                        // The actual animation is on the child, so we need ":child:0" suffix
-                        let full_motion_key =
-                            format!("motion:{}:child:0", motion_key_for_card_enter);
-                        let motion = blinc_layout::selector::query_motion(&full_motion_key);
-                        if motion.is_exiting() {
-                            // Cancel close - transitions Closing -> Open
-                            tracing::debug!("CARD: cancelling exit animation");
-                            mgr.cancel_close(handle);
-                            // Cancel the motion's exit animation
-                            motion.cancel_exit();
+                    if let Ok(mut stack) = overlay_stack().lock() {
+                        // CRITICAL: don't call `handle.is_exiting()` here —
+                        // it would re-lock the same mutex we already hold,
+                        // deadlocking on std::sync::Mutex. Inspect the
+                        // stack's entries directly while we hold the lock.
+                        let exiting = stack
+                            .iter_bottom_up()
+                            .any(|e| e.handle == handle && e.exiting);
+                        if exiting {
+                            stack.revive(handle);
+                        } else {
+                            stack.handle_mouse_enter(handle);
                         }
                     }
                 })
                 .on_hover_leave(move |_| {
-                    tracing::debug!("CARD on_hover_leave fired");
-                });
+                    if let Ok(mut stack) = overlay_stack().lock() {
+                        stack.handle_mouse_leave(handle);
+                    }
+                })
+        })
+        .show();
 
-            // Wrap in motion for enter/exit animations
-            // Use motion_derived with unique key so animation state persists across rebuilds
-            // and doesn't collide with other hover cards
-            div().child(
-                blinc_layout::motion::motion_derived(&motion_key_for_content)
-                    .enter_animation(AnimationPreset::grow_in(150))
-                    .exit_animation(AnimationPreset::grow_out(150))
-                    .child(card),
-            )
-        })
-        .on_close({
-            let overlay_handle = overlay_handle_state.clone();
-            move || {
-                overlay_handle.set(None);
-            }
-        })
-        .show()
+    debug_assert_eq!(
+        handle.raw(),
+        next_handle_id,
+        "peek_next_handle_id was stale — concurrent push?"
+    );
+
+    handle
 }
 
 /// Built hover card component

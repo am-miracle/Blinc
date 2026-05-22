@@ -874,6 +874,22 @@ pub trait StateTransitions:
     fn on_tick(&self) -> Option<Self> {
         None
     }
+
+    /// Time-driven transition. Called by the framework once per
+    /// animation refresh while the stateful is registered for
+    /// animation ticks (i.e. while `use_keyframes` / `use_spring`
+    /// is active), with `delta_ms` = wall-clock milliseconds since
+    /// the previous call (or `0.0` on the first call).
+    ///
+    /// Use this for FPS-independent timed transitions — for example
+    /// a slider halo's enter/exit ramp that should take a fixed wall-
+    /// clock duration regardless of whether the framework is running
+    /// at 30, 60, or 120 Hz. Encode elapsed time in the state itself
+    /// (e.g. `Entering { elapsed_ms: u32 }`) and advance it here.
+    /// Default impl returns `None`.
+    fn on_next_animation_frame(&self, _delta_ms: f32) -> Option<Self> {
+        None
+    }
 }
 
 /// A no-op state type for dependency-based refreshing without state transitions
@@ -1335,6 +1351,14 @@ pub struct StatefulInner<S: StateTransitions> {
     /// Container-level element id set via `.id()` on the Stateful itself.
     /// Mirrors `base_classes` for the same reason.
     pub(crate) base_element_id: Option<String>,
+
+    /// Wall-clock instant of the previous `on_next_animation_frame`
+    /// invocation, used to compute the delta passed to the next call.
+    /// `None` before the first call so the very first frame sees
+    /// `delta_ms = 0.0` (the FSM gets a chance to read its just-set
+    /// initial state without being immediately advanced by a stale
+    /// time delta).
+    pub(crate) last_animation_frame: Option<web_time::Instant>,
 }
 
 impl<S: StateTransitions> StatefulInner<S> {
@@ -1356,6 +1380,7 @@ impl<S: StateTransitions> StatefulInner<S> {
             previous_topology_hash: None,
             base_classes: Vec::new(),
             base_element_id: None,
+            last_animation_frame: None,
         }
     }
 
@@ -2804,9 +2829,35 @@ pub(crate) fn refresh_stateful<S: StateTransitions>(shared: &SharedState<S>) {
     // here may have crossed a guard condition that warrants a state
     // change without a discrete event. Default `on_tick` returns
     // `None`, so event-only state types stay no-op.
+    //
+    // Then the time-driven transition path. `on_next_animation_frame`
+    // gets the wall-clock delta since the previous refresh, so FSMs
+    // that encode elapsed time in their state (e.g. a halo with
+    // `Entering { elapsed_ms }`) can advance themselves FPS-
+    // independently. First call sees `delta_ms = 0.0` so the FSM
+    // gets to observe the just-set initial state before any time
+    // advances.
     {
         let mut inner = shared.lock().unwrap();
         if let Some(new_state) = inner.state.on_tick() {
+            inner.state = new_state;
+            inner.needs_visual_update = true;
+        }
+        let now = web_time::Instant::now();
+        let delta_ms = inner
+            .last_animation_frame
+            .map(|prev| now.duration_since(prev).as_secs_f32() * 1000.0)
+            .unwrap_or(0.0);
+        // Clamp to one frame at 30 Hz. A GC pause or long off-thread
+        // task can stall a frame for hundreds of ms; without this
+        // cap the FSM jumps the full stall ahead in one call and a
+        // running animation completes (or overshoots) in a single
+        // tick. Clamping keeps the animation pace bounded to the
+        // expected per-frame budget at the cost of stretching the
+        // animation a bit when the host is under load.
+        let delta_ms = delta_ms.clamp(0.0, 33.0);
+        inner.last_animation_frame = Some(now);
+        if let Some(new_state) = inner.state.on_next_animation_frame(delta_ms) {
             inner.state = new_state;
             inner.needs_visual_update = true;
         }
@@ -2881,6 +2932,7 @@ impl<S: StateTransitions> Stateful<S> {
                 previous_topology_hash: None,
                 base_classes: Vec::new(),
                 base_element_id: None,
+                last_animation_frame: None,
             })),
             children_cache: RefCell::new(Vec::new()),
             event_handlers_cache: RefCell::new(crate::event_handler::EventHandlers::new()),
@@ -3214,6 +3266,15 @@ impl<S: StateTransitions> Stateful<S> {
         guard.state = new_state;
         guard.needs_visual_update = true;
         guard.current_event = event_context;
+        // Reset the animation-frame anchor to *now* (not None) so
+        // the first `on_next_animation_frame` after this transition
+        // sees a real one-frame delta (~16 ms) instead of either
+        // (a) a stale delta from a possibly-seconds-old previous
+        // refresh — which would skip the whole animation in one
+        // tick — or (b) `delta_ms = 0`, which would waste an extra
+        // frame at `elapsed_ms = 0` and read as a perceptible delay
+        // before the animation visibly starts.
+        guard.last_animation_frame = Some(web_time::Instant::now());
 
         // Compute new props via callback and queue the update
         if let Some(ref callback) = guard.state_callback {

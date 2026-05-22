@@ -1696,6 +1696,7 @@ impl OverlayManagerInner {
             .left(0.0)
             .top(0.0)
             .stack_layer()
+            .overlay_root()
             .pointer_events_none();
 
         // Add visible overlays as children

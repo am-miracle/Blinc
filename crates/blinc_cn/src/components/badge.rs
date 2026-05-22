@@ -1,22 +1,42 @@
 //! Badge component for status indicators
 //!
-//! Small labeled indicators for status, counts, or categories.
+//! Small labeled indicators for status, counts, or categories. Two
+//! axes of customization:
+//!
+//! * `BadgeVariant` — semantic colour (Default / Secondary / Success
+//!   / Warning / Destructive).
+//! * `BadgeStyle` — visual treatment (`Soft` is the default — pale
+//!   tinted bg with same-hue text, matching the Alert component;
+//!   `Solid` is the legacy filled style; `Outline` is border-only).
+//!
+//! Supports icons via `.icon(...)` and `.icon_position(...)`,
+//! mirroring the Button API.
 //!
 //! # Example
 //!
 //! ```ignore
 //! use blinc_cn::prelude::*;
 //!
-//! // Default badge
+//! // Default badge (Soft style, Default variant)
 //! cn::badge("New")
 //!
-//! // Variant badges
+//! // Semantic variants — all default to Soft style
 //! cn::badge("Success").variant(BadgeVariant::Success)
 //! cn::badge("Warning").variant(BadgeVariant::Warning)
 //! cn::badge("Error").variant(BadgeVariant::Destructive)
 //!
-//! // Outline badge
-//! cn::badge("Draft").variant(BadgeVariant::Outline)
+//! // Style opt-ins
+//! cn::badge("Solid").style(BadgeStyle::Solid)
+//! cn::badge("Outline").style(BadgeStyle::Outline)
+//!
+//! // With icon — pass any ElementBuilder. CSS rules under
+//! // `.cn-badge--{style}-{variant} svg` set the fill to the variant's
+//! // colour automatically, so the icon stays in sync with the badge
+//! // tint without the caller passing it through. Inline `.color(...)`
+//! // on the icon still wins if you want a one-off override.
+//! cn::badge("Shipped")
+//!     .variant(BadgeVariant::Success)
+//!     .icon(svg(CHECK_SVG).size(12.0, 12.0))
 //! ```
 
 use std::ops::{Deref, DerefMut};
@@ -25,81 +45,185 @@ use blinc_layout::div::{Div, ElementBuilder, ElementTypeId};
 use blinc_layout::prelude::*;
 use blinc_theme::ThemeState;
 
-/// Badge visual variants
+pub use super::button::IconPosition;
+
+/// Badge semantic colour variant.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BadgeVariant {
-    /// Default badge - primary color
+    /// Default - primary accent (blue)
     #[default]
     Default,
-    /// Secondary badge - muted
+    /// Secondary - muted neutral
     Secondary,
-    /// Success badge - green
+    /// Success - green
     Success,
-    /// Warning badge - yellow/orange
+    /// Warning - yellow/orange
     Warning,
-    /// Destructive badge - red
+    /// Destructive - red
     Destructive,
-    /// Outline badge - border only
+}
+
+/// Badge visual treatment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BadgeStyle {
+    /// Soft tinted background + same-hue text (matches Alert) — the
+    /// modern default.
+    #[default]
+    Soft,
+    /// Solid filled background + inverse text (the legacy style).
+    Solid,
+    /// Transparent background + variant-coloured border + variant-
+    /// coloured text.
     Outline,
 }
 
-// All variant visuals (background, color, border) defined in CSS:
-// .cn-badge--default, .cn-badge--secondary, .cn-badge--success, etc.
+impl BadgeStyle {
+    fn css_suffix(self) -> &'static str {
+        match self {
+            BadgeStyle::Soft => "soft",
+            BadgeStyle::Solid => "solid",
+            BadgeStyle::Outline => "outline",
+        }
+    }
+}
 
-/// Badge component for status indicators
+impl BadgeVariant {
+    fn css_suffix(self) -> &'static str {
+        match self {
+            BadgeVariant::Default => "default",
+            BadgeVariant::Secondary => "secondary",
+            BadgeVariant::Success => "success",
+            BadgeVariant::Warning => "warning",
+            BadgeVariant::Destructive => "destructive",
+        }
+    }
+}
+
+/// Badge component for status indicators.
 ///
-/// Implements `Deref` to `Div` for full customization.
+/// Implements `Deref` to `Div` for full layout customisation. Use
+/// `.variant(...)`, `.style(...)`, `.icon(...)` to configure.
 pub struct Badge {
     inner: Div,
     label: String,
     variant: BadgeVariant,
+    style: BadgeStyle,
+    icon: Option<Box<dyn ElementBuilder>>,
+    icon_position: IconPosition,
 }
 
 impl Badge {
-    /// Create a new badge with text
+    /// Create a new badge with text. Defaults: `BadgeVariant::Default`,
+    /// `BadgeStyle::Soft`, no icon.
     pub fn new(label: impl Into<String>) -> Self {
-        Self::with_variant(label, BadgeVariant::default())
+        Self::rebuild(
+            label.into(),
+            BadgeVariant::default(),
+            BadgeStyle::default(),
+            None,
+            IconPosition::default(),
+        )
     }
 
-    fn with_variant(label: impl Into<String>, variant: BadgeVariant) -> Self {
-        let label = label.into();
+    fn rebuild(
+        label: String,
+        variant: BadgeVariant,
+        style: BadgeStyle,
+        icon: Option<Box<dyn ElementBuilder>>,
+        icon_position: IconPosition,
+    ) -> Self {
+        let variant_class = format!("cn-badge--{}-{}", style.css_suffix(), variant.css_suffix());
 
-        let variant_class = match variant {
-            BadgeVariant::Default => "cn-badge--default",
-            BadgeVariant::Secondary => "cn-badge--secondary",
-            BadgeVariant::Success => "cn-badge--success",
-            BadgeVariant::Warning => "cn-badge--warning",
-            BadgeVariant::Destructive => "cn-badge--destructive",
-            BadgeVariant::Outline => "cn-badge--outline",
+        // Content row: optional icon + label. The icon's colour
+        // comes from CSS descendant rules
+        // (`.cn-badge--{style}-{variant} svg { fill: ... }`), so we
+        // don't tint it from Rust.
+        let label_text = text(&label).medium();
+        let badge_body = div()
+            .class("cn-badge")
+            .class(&variant_class)
+            .items_center()
+            .justify_center();
+        let badge_body = match icon {
+            Some(icon_el) => {
+                let row = div().flex_row().items_center().justify_center().gap_px(4.0);
+                let row = match icon_position {
+                    IconPosition::Start => row.child_box(icon_el).child(label_text),
+                    IconPosition::End => row.child(label_text).child_box(icon_el),
+                };
+                badge_body.child(row)
+            }
+            None => badge_body.child(label_text),
         };
 
-        // All visual props from CSS: .cn-badge + .cn-badge--{variant}
-        let badge = div()
-            .class("cn-badge")
-            .class(variant_class)
-            .items_center()
-            .justify_center()
-            .child(text(&label).medium());
-
         Self {
-            inner: badge,
+            inner: badge_body,
             label,
             variant,
+            style,
+            // The icon's been consumed into `inner`. Subsequent
+            // builder methods re-call `rebuild` with `icon: None`,
+            // which means `.icon(...)` should typically be last in
+            // the chain (or the icon will be lost on the next
+            // method call).
+            icon: None,
+            icon_position,
         }
     }
 
-    /// Set the badge variant
+    /// Set the badge variant (semantic colour).
     pub fn variant(self, variant: BadgeVariant) -> Self {
-        Self::with_variant(self.label, variant)
+        Self::rebuild(
+            self.label,
+            variant,
+            self.style,
+            self.icon,
+            self.icon_position,
+        )
     }
 
-    /// Add a CSS class for selector matching
+    /// Set the badge visual treatment (Soft / Solid / Outline).
+    pub fn style(self, style: BadgeStyle) -> Self {
+        Self::rebuild(
+            self.label,
+            self.variant,
+            style,
+            self.icon,
+            self.icon_position,
+        )
+    }
+
+    /// Add a leading or trailing icon. Accepts any `ElementBuilder`
+    /// — typically `svg(MY_SVG).size(w, h)`. The badge's CSS rules
+    /// (`.cn-badge--{style}-{variant} svg { fill: var(--variant); }`)
+    /// tint the icon to match the variant automatically; pass an
+    /// inline `.color(...)` on the icon if you need to override
+    /// for a one-off.
+    pub fn icon<E>(self, icon: E) -> Self
+    where
+        E: ElementBuilder + 'static,
+    {
+        Self::rebuild(
+            self.label,
+            self.variant,
+            self.style,
+            Some(Box::new(icon)),
+            self.icon_position,
+        )
+    }
+
+    /// Position the icon before (default) or after the label.
+    pub fn icon_position(self, position: IconPosition) -> Self {
+        Self::rebuild(self.label, self.variant, self.style, self.icon, position)
+    }
+
+    /// Add a CSS class for selector matching.
     pub fn class(mut self, name: impl AsRef<str>) -> Self {
         self.inner = self.inner.class(name);
         self
     }
 
-    /// Set the element ID for CSS selector matching
+    /// Set the element ID for CSS selector matching.
     pub fn id(mut self, id: &str) -> Self {
         self.inner = self.inner.id(id);
         self
@@ -108,7 +232,6 @@ impl Badge {
 
 impl Deref for Badge {
     type Target = Div;
-
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
@@ -150,16 +273,7 @@ impl ElementBuilder for Badge {
     }
 }
 
-/// Create a badge with text
-///
-/// # Example
-///
-/// ```ignore
-/// use blinc_cn::prelude::*;
-///
-/// cn::badge("New")
-///     .variant(BadgeVariant::Success)
-/// ```
+/// Create a badge with text. See [`Badge`] for the full API.
 pub fn badge(label: impl Into<String>) -> Badge {
     Badge::new(label)
 }
@@ -188,7 +302,25 @@ mod tests {
         let _ = badge("Secondary").variant(BadgeVariant::Secondary);
         let _ = badge("Success").variant(BadgeVariant::Success);
         let _ = badge("Warning").variant(BadgeVariant::Warning);
-        let _ = badge("Error").variant(BadgeVariant::Destructive);
-        let _ = badge("Outline").variant(BadgeVariant::Outline);
+        let _ = badge("Destructive").variant(BadgeVariant::Destructive);
+    }
+
+    #[test]
+    fn test_badge_styles() {
+        init_theme();
+        let _ = badge("Soft").style(BadgeStyle::Soft);
+        let _ = badge("Solid").style(BadgeStyle::Solid);
+        let _ = badge("Outline").style(BadgeStyle::Outline);
+    }
+
+    #[test]
+    fn test_badge_icon() {
+        init_theme();
+        let _ = badge("Shipped")
+            .variant(BadgeVariant::Success)
+            .icon(text("✓"));
+        let _ = badge("End")
+            .icon(text("→"))
+            .icon_position(IconPosition::End);
     }
 }

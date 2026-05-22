@@ -38,6 +38,11 @@ pub struct Text {
     font_size: f32,
     /// Text color
     color: Color,
+    /// Whether the user explicitly set the color (vs the BLACK default).
+    /// When true, `render_props().text_color` is populated so the renderer
+    /// treats this color as authoritative — parent CSS `color:` inheritance
+    /// is blocked. When false, parent inheritance is allowed to fill in.
+    explicit_color: bool,
     /// Text alignment (horizontal)
     align: TextAlign,
     /// Vertical alignment within bounding box
@@ -112,6 +117,7 @@ impl Text {
             content: decoded_content,
             font_size: 14.0,
             color: Color::BLACK,
+            explicit_color: false,
             align: TextAlign::default(),
             v_align: TextVerticalAlign::default(),
             weight: FontWeight::default(),
@@ -172,6 +178,7 @@ impl Text {
     /// Set the text color
     pub fn color(mut self, color: Color) -> Self {
         self.color = color;
+        self.explicit_color = true;
         self
     }
 
@@ -635,6 +642,12 @@ impl ElementBuilder for Text {
             transform: self.transform.clone(),
             pointer_events_none: self.pointer_events_none,
             cursor: self.cursor,
+            text_color: self.explicit_color.then_some([
+                self.color.r,
+                self.color.g,
+                self.color.b,
+                self.color.a,
+            ]),
             ..Default::default()
         }
     }

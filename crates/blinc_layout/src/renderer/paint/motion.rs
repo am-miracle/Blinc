@@ -481,7 +481,40 @@ impl RenderTree {
         // route regular text + SVG + image dispatch into the same
         // overlay alongside the SDF (`motion_batch` / `css_batch`
         // split or similar).
-        let in_motion_subtree = motion_bindings_ref.is_some();
+        // Route stack_layer subtrees (overlay stack, toast tray, legacy
+        // overlay manager) and motion FSM subtrees to the dynamic batch
+        // alongside motion-binding subtrees.
+        //
+        // The bug this fixes: the SVG dispatch in the static-cache pass
+        // emits ALL static SVGs as one batched draw call AFTER every SDF
+        // primitive in the cache (per-z text dispatch doesn't help — by
+        // then SDF has already committed). When an overlay's bg SDF
+        // lived in the static cache alongside the page's static SVGs,
+        // a sibling button's chevron-down SVG at z=0 would paint ON TOP
+        // of the overlay's z=1 bg primitive that should have occluded
+        // it. Symptom: opening one cn::dropdown_menu showed the chevron
+        // of an adjacent unopened dropdown trigger bleeding through the
+        // open menu's panel.
+        //
+        // Routing the overlay/tray subtree to the dynamic batch makes
+        // its SDF paint in `composite_frame`'s overlay pass — AFTER the
+        // static cache (chevrons and all) is blitted onto the surface —
+        // so the panel correctly occludes whatever's underneath. The
+        // collector (in blinc_app's `collect_elements_recursive`)
+        // already routes text/SVG/image for these subtrees via its
+        // `props.motion.is_some()` + `is_stack_layer` check, so this
+        // change brings the walker into alignment.
+        //
+        // CSS animations are deliberately still left in the static
+        // batch (see history comment further down for the
+        // text-disappears-mid-keyframe regression). `props.motion` here
+        // is set by explicit Motion FSM containers (e.g.
+        // `motion_derived(...)`) when they propagate enter/exit anims to
+        // children — CSS keyframes don't take the same propagation path,
+        // so this change doesn't reactivate that regression.
+        let in_motion_subtree = motion_bindings_ref.is_some()
+            || render_node.props.motion.is_some()
+            || render_node.props.is_overlay_root;
         if in_motion_subtree {
             ctx.push_motion_subtree();
         }
@@ -945,9 +978,32 @@ impl RenderTree {
 
         // Corner shape setup (superellipse per-corner) — MUST be set before draw_shadow
         // so shadows use the same corner_shape as the fill+border SDF.
-        let has_corner_shape = !render_node.props.corner_shape.is_round();
+        //
+        // Resolved through the active theme's ShapeTokens so Universal
+        // HID variants auto-substitute squircle on rounded corners
+        // that pass the threshold check; explicit per-element overrides
+        // win, and themes that don't opt in (every existing platform
+        // bundle + Catppuccin) keep circular corners via the trait's
+        // default off-state.
+        // Tolerate an uninitialised ThemeState (snapshot / GPU
+        // integration tests render through this path without calling
+        // `ThemeState::init_*` first). See basic.rs for the same
+        // fall-back rationale.
+        let (theme_shape_m, radius_full_m) = match blinc_theme::ThemeState::try_get() {
+            Some(theme) => (theme.shape(), theme.radii().radius_full),
+            None => (blinc_theme::ShapeTokens::default(), 9999.0),
+        };
+        let resolved_corner_shape_m = super::helpers::resolve_corner_shape(
+            render_node.props.corner_shape,
+            render_node.props.border_radius,
+            (bounds.width, bounds.height),
+            &theme_shape_m,
+            radius_full_m,
+            render_node.props.corner_shape_locked,
+        );
+        let has_corner_shape = !resolved_corner_shape_m.is_round();
         if has_corner_shape {
-            ctx.set_corner_shape(render_node.props.corner_shape.to_array());
+            ctx.set_corner_shape(resolved_corner_shape_m.to_array());
         }
 
         // Draw shadow BEFORE pushing clip (shadows extend beyond element bounds)
@@ -1984,30 +2040,88 @@ impl RenderTree {
                 // Centre MUST be in absolute logical-pixel coords (the
                 // consumer in `apply_binding_deltas` multiplies by DPI
                 // to get a physical-pixel pivot for rotating primitive
-                // centres). `bounds` here is parent-relative, so for any
-                // nested motion (e.g. cn::spinner where motion sits
-                // inside arc_layer inside spinner container) `bounds.x`
-                // is 0 and we'd rotate the primitives around the screen
-                // origin instead of the element's centre. Walk the
-                // parent chain via `get_absolute_bounds` and ADD
-                // `cumulative_scroll` so the centre tracks the element's
-                // actual on-screen midpoint (cn_demo's spinners sit
-                // inside a scroll container — without the scroll term
-                // the arc orbits the un-scrolled layout position
-                // instead of where the gray ring is currently drawn).
-                let centre = self
-                    .layout_tree
-                    .get_absolute_bounds(node)
-                    .map(|abs| {
-                        (
-                            abs.x + abs.width / 2.0 + cumulative_scroll.0,
-                            abs.y + abs.height / 2.0 + cumulative_scroll.1,
-                        )
-                    })
-                    .unwrap_or((
-                        bounds.x + bounds.width / 2.0,
-                        bounds.y + bounds.height / 2.0,
-                    ));
+                // centres). For a binding with no ancestor motion
+                // bindings, `get_absolute_bounds(node).centre +
+                // cumulative_scroll` is the right value. For a binding
+                // whose subtree sits inside another motion binding's
+                // translate (cn::slider's halo nested under the
+                // thumb's `motion().translate_x`), the primitives are
+                // baked at `layout + ancestor_translate`, but the
+                // layout-bounds centre doesn't know about
+                // `ancestor_translate`. Scaling around a centre that
+                // lags the primitives by `ancestor_translate` produces
+                // a positional error of `ancestor_translate ×
+                // (new_scale - 1)`.
+                //
+                // Fix: apply the current transform stack — which
+                // already includes every ancestor's position translate,
+                // motion translate, motion binding translate, and any
+                // scroll — to the node's local centre
+                // `(bounds.width/2, bounds.height/2)`. The result is
+                // the world-space pivot at bake time. Subsequent
+                // ancestor-translate changes are handled by the
+                // `inherited_shifts` pre-pass in `apply_binding_deltas`,
+                // which advances `meta.centre` by the per-frame
+                // ancestor delta to keep it tracking world space.
+                //
+                // Note: even though the binding's own scale + rotation
+                // around the same centre have already been pushed by
+                // this point, they leave the centre point fixed
+                // (`T(c)*S*T(-c)` fixes `c`), so `transform_point`
+                // gives the right answer regardless of where this sits
+                // in the sequence above.
+                // `meta.centre` is stored in LOGICAL pixels — the
+                // patcher (`apply_binding_deltas`) multiplies by the
+                // DPI scale factor when it needs physical-pixel pivot
+                // for rotating / scaling primitive centres.
+                //
+                // `ctx.current_transform()` returns a composite that
+                // includes the DPI scale push made at the top of
+                // `render_layer_with_motion` (line ~98), so the raw
+                // `transform_point` result is in PHYSICAL pixels. Divide
+                // by `scale_factor` to recover logical-pixel world
+                // coords. The DPI scale is uniform and only present at
+                // the bottom of the stack, so this divides out cleanly
+                // regardless of any rotation / scale / translate the
+                // node or its ancestors have layered on top.
+                //
+                // For the no-ancestor-motion case this matches the
+                // legacy `get_absolute_bounds + cumulative_scroll`
+                // formula bit-for-bit (both compute logical world
+                // centre of the node). For nested-motion subtrees —
+                // cn::slider's halo under the thumb's outer translate
+                // — it correctly includes the ancestor translate that
+                // `get_absolute_bounds` doesn't know about.
+                let centre = {
+                    let local_cx = bounds.width / 2.0;
+                    let local_cy = bounds.height / 2.0;
+                    let scale_factor = self.scale_factor.max(f32::EPSILON);
+                    match ctx.current_transform() {
+                        Transform::Affine2D(a) => {
+                            let p = a.transform_point(Point::new(local_cx, local_cy));
+                            (p.x / scale_factor, p.y / scale_factor)
+                        }
+                        // 3D path — no current consumer hits this for
+                        // a 2D-bound motion node; fall back to the
+                        // legacy layout-bounds calculation so the
+                        // existing 3D spinner / card flip workflows
+                        // keep their previous (correct-for-them)
+                        // behaviour.
+                        Transform::Mat4(_) => self
+                            .layout_tree
+                            .get_absolute_bounds(node)
+                            .map(|abs| {
+                                (
+                                    abs.x + abs.width / 2.0 + cumulative_scroll.0,
+                                    abs.y + abs.height / 2.0 + cumulative_scroll.1,
+                                )
+                            })
+                            .unwrap_or((
+                                bounds.x + bounds.width / 2.0,
+                                bounds.y + bounds.height / 2.0,
+                            )),
+                    }
+                };
                 let last_screen_aabb = ctx.bg_primitive_aabb(start, end);
                 // CSS-only nodes (no `MotionBindings`) reach this block
                 // because they pushed `motion_subtree` to route their

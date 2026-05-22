@@ -431,6 +431,20 @@ pub struct RenderContext {
     /// place, so subsequent frames show the new positions without
     /// re-running the walker.
     cached_dynamic_batch: Option<blinc_gpu::PrimitiveBatch>,
+    /// True while `try_render_with_compositor` is running its inner
+    /// `render_tree_with_motion_opt(target=static_view, target_texture=None)`
+    /// step. The inner step paints the static cache; the compositor
+    /// then drives `composite_frame` separately to overlay the
+    /// `cached_dynamic_batch` onto the surface. Without this flag the
+    /// inner step also dispatched `cached_dynamic_batch` onto the
+    /// static-layer texture, so the static cache ended up containing
+    /// the motion-bound primitives at the slow-paint rotation —
+    /// subsequent frames blitted that into the surface AND
+    /// composite_frame painted them again at the current rotation,
+    /// producing two visible motion-bound primitives (the cn::spinner
+    /// double-arc symptom). The non-compositor path needs the
+    /// dispatch; the compositor path doesn't.
+    in_compositor_inner_call: bool,
     /// Per-node `LayerTexture` cache for composite-promoted CSS
     /// subtrees. The walker peels each promoted subtree's primitives
     /// into a per-node scratch batch (see
@@ -664,6 +678,14 @@ struct SvgElement {
     /// motion overlay so the SVG icon lands on top of its motion-bound
     /// container's bg paint instead of being covered.
     in_motion_subtree: bool,
+    /// Stack-layer z used to interleave with primitives + text. Higher
+    /// values render on top. Captured from the walker's `z_layer`
+    /// counter — bumped by `stack_layer()` (overlay layers, toast
+    /// tray, foreground content) and by explicit `z_index`. Without
+    /// this, icons inside an overlay subtree would all collapse to
+    /// z=0 and render *under* the dialog/sheet/drawer card their
+    /// container z-layered above the main UI.
+    z_layer: u32,
 }
 
 /// Flow shader element — an element with `flow: <name>` that renders via a custom GPU pipeline
@@ -740,6 +762,7 @@ impl RenderContext {
             clear_alpha: 1.0,
             cached_bg_batch: None,
             cached_dynamic_batch: None,
+            in_compositor_inner_call: false,
             css_composited_textures: std::collections::HashMap::new(),
             css_composited_scratch_hash: std::collections::HashMap::new(),
             cached_texts: None,
@@ -1699,6 +1722,91 @@ impl RenderContext {
         // the loop. That's the "animation doesn't play until I move
         // the mouse" symptom this addresses.
         let motion_bindings = tree.motion_bindings_map();
+
+        // Pre-pass: compute each binding's translate delta this frame
+        // and the SUM of ancestor bindings' translate deltas
+        // ("inherited shift"). An "ancestor" here is any other binding
+        // whose `primitive_range` strictly contains this one's — which
+        // mirrors emission order, so it captures the motion-binding
+        // parent chain without needing a tree walk.
+        //
+        // Why this matters: the walker records `meta.centre` from
+        // `get_absolute_bounds(node)` — the LAYOUT centre, not the
+        // post-translate world centre. If an ancestor motion binding
+        // translates the subtree, this binding's primitives have
+        // shifted but its stored centre hasn't. Applying scale around
+        // the stale centre produces a positional error of
+        // `ancestor_translate × (new_scale - 1)`. Symptom (seen in
+        // cn::slider with halo): the inner scale binding paints the
+        // halo at the right position only when the thumb sits at
+        // translate=0; at any non-zero offset the halo drifts toward
+        // the layout origin, leaving a ghost trail.
+        //
+        // Fix: pre-compute each binding's inherited shift, then add it
+        // to the centre before applying scale (and persist the shifted
+        // centre so subsequent frames see the new world position as
+        // the baseline). Since we collect raw deltas BEFORE applying
+        // any patches, iteration order doesn't matter.
+        //
+        // Cost: O(N²) over composite_bindings — N is the count of
+        // motion-bound nodes in the rendered frame (~10-50 in cn_demo),
+        // so ~2500 max iterations of cheap range comparisons. The
+        // existing main loop is also O(N) with mutex locks per
+        // binding; this pre-pass is dominated by it.
+        let mut raw_translate_deltas: std::collections::HashMap<
+            blinc_layout::tree::LayoutNodeId,
+            (f32, f32),
+        > = std::collections::HashMap::new();
+        for (node, meta) in bindings.iter() {
+            let Some(b) = motion_bindings.get(node) else {
+                continue;
+            };
+            let tx = b
+                .translate_x
+                .as_ref()
+                .and_then(|v| v.lock().ok().map(|g| g.get()))
+                .unwrap_or(0.0);
+            let ty = b
+                .translate_y
+                .as_ref()
+                .and_then(|v| v.lock().ok().map(|g| g.get()))
+                .unwrap_or(0.0);
+            raw_translate_deltas.insert(
+                *node,
+                (tx - meta.last_translate.0, ty - meta.last_translate.1),
+            );
+        }
+        let mut inherited_shifts: std::collections::HashMap<
+            blinc_layout::tree::LayoutNodeId,
+            (f32, f32),
+        > = std::collections::HashMap::new();
+        for (node, meta) in bindings.iter() {
+            let mut shift = (0.0f32, 0.0f32);
+            for (other_node, other_meta) in bindings.iter() {
+                if other_node == node {
+                    continue;
+                }
+                // "other strictly contains me" — handles the common
+                // case (ancestor has its own primitives outside the
+                // child's emission span). Equal-range pairs are
+                // excluded; that case only arises when a parent emits
+                // nothing of its own, and a translate on it composes
+                // through the existing translate patch on the SAME
+                // primitive set, so no centre adjustment is needed.
+                let contains = other_meta.primitive_range.start <= meta.primitive_range.start
+                    && other_meta.primitive_range.end >= meta.primitive_range.end
+                    && (other_meta.primitive_range.start < meta.primitive_range.start
+                        || other_meta.primitive_range.end > meta.primitive_range.end);
+                if contains {
+                    if let Some(&(dx, dy)) = raw_translate_deltas.get(other_node) {
+                        shift.0 += dx;
+                        shift.1 += dy;
+                    }
+                }
+            }
+            inherited_shifts.insert(*node, shift);
+        }
+
         let mut any_binding_active = false;
         for (node, meta) in bindings.iter_mut() {
             let bindings_for_node = match motion_bindings.get(node) {
@@ -1852,6 +1960,22 @@ impl RenderContext {
                 .as_ref()
                 .and_then(|v| v.lock().ok().map(|g| g.get()))
                 .unwrap_or(1.0);
+            // Track the inherited translate shift on EVERY frame, even
+            // when the local scale didn't change. Without this, an
+            // ancestor binding can advance its translate while this
+            // binding sits idle — and the next time scale moves, it
+            // pivots around a stale centre. Persisting the shift each
+            // frame keeps the centre tracking world space continuously.
+            // Each frame's shift is the frame delta (ancestor.current
+            // - ancestor.last), and the ancestor's `last_translate`
+            // moves to `current` further down in this loop, so this
+            // does NOT double-count across frames.
+            if let Some(&(sx_shift, sy_shift)) = inherited_shifts.get(node) {
+                if sx_shift.abs() > f32::EPSILON || sy_shift.abs() > f32::EPSILON {
+                    meta.centre.0 += sx_shift;
+                    meta.centre.1 += sy_shift;
+                }
+            }
             let new_sx = binding_scale_x * binding_scale;
             let new_sy = binding_scale_y * binding_scale;
             if (new_sx - meta.last_scale.0).abs() > f32::EPSILON
@@ -1865,12 +1989,32 @@ impl RenderContext {
                 let ratio_y = new_sy / meta.last_scale.1;
                 let cx_phys = meta.centre.0 * scale;
                 let cy_phys = meta.centre.1 * scale;
+                // For corner_radius the GPU primitive carries a
+                // single radius per corner that's used uniformly for
+                // the SDF rounded-rect (the renderer's `scale_corner_radius`
+                // pre-multiplies by the current affine's avg-scale at
+                // bake time). Use the geometric mean of the two
+                // ratios so a non-uniform scale still scales the
+                // radius coherently — for the uniform-scale case (the
+                // common one, e.g. cn::slider's halo) this is just
+                // `ratio_x = ratio_y`. Without this step a halo that's
+                // baked at scale=0.5 with corner_radius=halo_size/4
+                // (because the walker multiplied by 0.5) but then
+                // patched up to scale=1 by growing `bounds[2,3]`
+                // leaves the radius unchanged — width is now
+                // 2 × radius doubled, so the previously-circular halo
+                // renders as a rounded SQUARE.
+                let ratio_radius = (ratio_x * ratio_y).sqrt();
                 if let Some(prims) = batch.primitives.get_mut(meta.primitive_range.clone()) {
                     for p in prims.iter_mut() {
                         p.bounds[0] = cx_phys + (p.bounds[0] - cx_phys) * ratio_x;
                         p.bounds[1] = cy_phys + (p.bounds[1] - cy_phys) * ratio_y;
                         p.bounds[2] *= ratio_x;
                         p.bounds[3] *= ratio_y;
+                        p.corner_radius[0] *= ratio_radius;
+                        p.corner_radius[1] *= ratio_radius;
+                        p.corner_radius[2] *= ratio_radius;
+                        p.corner_radius[3] *= ratio_radius;
                     }
                 }
                 meta.last_scale = (new_sx, new_sy);
@@ -5011,7 +5155,7 @@ impl RenderContext {
         let is_motion_container_node = tree.motion_bindings_map().contains_key(&node)
             || tree
                 .get_render_node(node)
-                .map(|n| n.props.motion.is_some())
+                .map(|n| n.props.motion.is_some() || n.props.is_overlay_root)
                 .unwrap_or(false);
         let child_inside_motion_subtree = inside_motion_subtree || is_motion_container_node;
 
@@ -5663,6 +5807,7 @@ impl RenderContext {
                         tag_overrides: render_node.props.svg_tag_styles.clone(),
                         transform_3d_layer: inside_3d_layer.clone(),
                         in_motion_subtree: inside_motion_subtree,
+                        z_layer: *z_layer,
                     });
                 }
                 ElementType::Image(image_data) => {
@@ -7397,6 +7542,15 @@ impl RenderContext {
         };
 
         tree.set_skip_canvas_drawing(true);
+        // Tell the inner `render_tree_with_motion_opt` call NOT to
+        // dispatch `cached_dynamic_batch` onto its `target` (the
+        // static layer view) — composite_frame below handles that
+        // dispatch onto the surface. Without this gate, the motion-
+        // bound primitives end up in BOTH the static cache (at the
+        // slow-paint rotation) and the per-frame overlay (at the
+        // current rotation), which is the cn::spinner double-arc
+        // symptom.
+        self.in_compositor_inner_call = true;
         // Pass `try_fast_paint=true` so the inner call can take its
         // `apply_binding_deltas`-then-dispatch path when the cache
         // is structurally valid but pixel-stale (the
@@ -7455,6 +7609,7 @@ impl RenderContext {
             None, // suppress compositor mode inside the inner call
             inner_try_fast,
         );
+        self.in_compositor_inner_call = false;
         tree.set_skip_canvas_drawing(false);
         result?;
 
@@ -7985,6 +8140,14 @@ impl RenderContext {
                 svgs.push(svg);
             }
         }
+        // Stable-sort by z_layer so icons inside `stack_layer()` subtrees
+        // (overlays, toast tray, foreground content) dispatch after lower-z
+        // siblings. `render_rasterized_svgs` issues a single batched draw
+        // call per slice, so painting order = vec order. Tree order is the
+        // tiebreaker — `sort_by_key` is stable so siblings on the same
+        // z_layer keep their walker-emitted order.
+        svgs.sort_by_key(|s| s.z_layer);
+        motion_subtree_svgs.sort_by_key(|s| s.z_layer);
 
         let mut images = Vec::new();
         let mut layer_3d_images: std::collections::HashMap<LayoutNodeId, Vec<ImageElement>> =
@@ -8960,25 +9123,35 @@ impl RenderContext {
         // `motion()` container. The walker routes these into a
         // separate `cached_dynamic_batch` so the compositor's
         // motion-binding fast path can patch transform / opacity
-        // in place without re-walking. The compositor dispatches
-        // it via `composite_frame`; the non-compositor path was
-        // populating the cache and then never drawing it.
+        // in place without re-walking.
+        //
+        // Gate this dispatch on `!in_compositor_inner_call`: when
+        // we're called by `try_render_with_compositor` as its inner
+        // static-layer paint step, `composite_frame` will dispatch
+        // `cached_dynamic_batch` onto the surface separately —
+        // dispatching it here too lands the motion primitives in
+        // the static cache at the slow-paint rotation, then
+        // `composite_frame` paints them again at the current
+        // rotation, producing visibly duplicated motion content
+        // (cn::spinner double-arc). The non-compositor path
+        // (wasm / iOS / fuchsia) still needs this dispatch since it
+        // never reaches `composite_frame`.
         //
         // `render_overlay` re-uploads the dynamic batch's aux_data
-        // (polygon clip vertices, etc.) before dispatch — required
-        // for the cn::spinner arc whose clip-path polygon vertices
-        // live in this batch.
-        if let Some(ref dynamic_batch) = self.cached_dynamic_batch {
-            if !dynamic_batch.primitives.is_empty() {
-                self.renderer.render_overlay(target, dynamic_batch);
-                // The dynamic batch upload clobbered the static
-                // aux_data the next text/SVG dispatch might rely
-                // on (polygon clip-paths on regular elements).
-                // Re-upload the main batch's aux_data so anything
-                // downstream sees consistent state. (The compositor
-                // path doesn't need this because composite_frame
-                // handles aux_data sequencing internally.)
-                self.renderer.update_aux_data_for_batch(&batch);
+        // (polygon clip vertices, etc.) before dispatch.
+        if !self.in_compositor_inner_call {
+            if let Some(ref dynamic_batch) = self.cached_dynamic_batch {
+                if !dynamic_batch.primitives.is_empty() {
+                    self.renderer.render_overlay(target, dynamic_batch);
+                    // The dynamic batch upload clobbered the static
+                    // aux_data the next text/SVG dispatch might rely
+                    // on (polygon clip-paths on regular elements).
+                    // Re-upload the main batch's aux_data so anything
+                    // downstream sees consistent state. (The compositor
+                    // path doesn't need this because composite_frame
+                    // handles aux_data sequencing internally.)
+                    self.renderer.update_aux_data_for_batch(&batch);
+                }
             }
         }
 

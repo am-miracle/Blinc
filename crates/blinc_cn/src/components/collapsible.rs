@@ -399,7 +399,11 @@ impl CollapsibleTrigger {
                     .rounded(radius)
                     .cursor(CursorStyle::Pointer)
                     .bg(bg)
-                    .child(text(&label_text).size(14.0).color(text_primary))
+                    .child(
+                        text(&label_text)
+                            .size(theme.typography().text_sm)
+                            .color(text_primary),
+                    )
                     .child(svg(chevron_svg).size(16.0, 16.0).color(text_secondary))
             })
             .on_click(move |_| {

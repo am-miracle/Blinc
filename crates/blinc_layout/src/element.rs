@@ -997,6 +997,15 @@ pub struct RenderProps {
     pub border_radius_explicit: bool,
     /// Corner shape (superellipse n parameter per corner). Default is ROUND (n=1.0).
     pub corner_shape: CornerShape,
+    /// When `true`, the active theme's [`ShapeTokens`](blinc_theme::ShapeTokens)
+    /// must NOT substitute a squircle exponent onto this element's
+    /// corners even if `corner_shape.is_round()`. Used by floating
+    /// overlay widgets (popovers, dropdown panels, select menus,
+    /// combobox lists) that want their chrome to match the surrounding
+    /// UI's circular corners rather than picking up the theme's
+    /// squircle aesthetic. Default `false`: the paint walker is free
+    /// to substitute per the theme.
+    pub corner_shape_locked: bool,
     /// Border color (None = no border) - used for uniform borders
     pub border_color: Option<Color>,
     /// Border width in pixels - used for uniform borders
@@ -1043,6 +1052,17 @@ pub struct RenderProps {
     /// Whether this is a Stack layer that increments z_layer for proper z-ordering
     /// When true, entering this node increments the DrawContext's z_layer
     pub is_stack_layer: bool,
+    /// Whether this node is the root of an overlay panel (`overlay_stack` layer
+    /// or `toast_tray` layer) that should be routed to the dynamic batch so
+    /// the panel's SDF lands in `composite_frame`'s overlay pass — AFTER the
+    /// static cache (and the static SVG dispatch) is blitted.
+    ///
+    /// Distinct from `is_stack_layer` because the generic `Stack` widget
+    /// (used by e.g. `cn::avatar` for layering a status dot over the avatar
+    /// circle) sets `is_stack_layer: true` for z-counter bumping but is NOT
+    /// an overlay — routing those to the dynamic batch broke the avatar's
+    /// inner SDF / image rendering.
+    pub is_overlay_root: bool,
     /// Cursor style when hovering over this element (None = inherit from parent)
     pub cursor: Option<CursorStyle>,
     /// Whether this element is transparent to hit-testing (pointer-events: none)
@@ -1182,6 +1202,7 @@ impl Default for RenderProps {
             border_radius: CornerRadius::default(),
             border_radius_explicit: false,
             corner_shape: CornerShape::default(),
+            corner_shape_locked: false,
             border_color: None,
             border_width: 0.0,
             border_sides: BorderSides::default(),
@@ -1202,6 +1223,7 @@ impl Default for RenderProps {
             motion_is_suspended: false,
             motion_on_ready_callback: None,
             is_stack_layer: false,
+            is_overlay_root: false,
             cursor: None,
             pointer_events_none: false,
             is_fixed: false,

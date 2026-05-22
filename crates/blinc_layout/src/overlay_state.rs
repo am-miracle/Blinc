@@ -31,9 +31,83 @@
 #![allow(clippy::missing_const_for_thread_local)]
 
 use std::cell::Cell;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::widgets::overlay::OverlayManager;
+use crate::widgets::overlay_stack::OverlayStack;
+use crate::widgets::toast_tray::ToastTray;
+
+// Phase 2 of the overlay-stack refactor (see OVERLAY_STACK_DESIGN.md).
+// The new `OverlayStack` and `ToastTray` singletons live alongside the
+// legacy `OverlayManager` during the migration. Once every consumer is
+// ported (Phase 4) the legacy singleton + module will be deleted.
+
+pub type SharedOverlayStack = Arc<Mutex<OverlayStack>>;
+pub type SharedToastTray = Arc<Mutex<ToastTray>>;
+
+static OVERLAY_STACK: OnceLock<SharedOverlayStack> = OnceLock::new();
+static TOAST_TRAY: OnceLock<SharedToastTray> = OnceLock::new();
+
+/// Get the global overlay stack, creating it lazily on first access.
+///
+/// Unlike the legacy `OverlayContext::init()` which panics if called twice,
+/// this lazy initializer is safe to call from anywhere. The stack is shared
+/// across the entire process — every cn widget pushes / closes through this
+/// singleton, every windowed-runner queries it for `has_blocking_overlay()`
+/// and `build_overlay_layer()`.
+pub fn overlay_stack() -> SharedOverlayStack {
+    OVERLAY_STACK
+        .get_or_init(|| Arc::new(Mutex::new(OverlayStack::new())))
+        .clone()
+}
+
+/// Get the global toast tray. Lazy initializer, see `overlay_stack()`.
+pub fn toast_tray() -> SharedToastTray {
+    TOAST_TRAY
+        .get_or_init(|| Arc::new(Mutex::new(ToastTray::new())))
+        .clone()
+}
+
+// =========================================================================
+// Subtree-rebuild helper
+// =========================================================================
+
+/// Generic "is this overlay surface dirty? then rebuild its subtree" pass.
+/// Used by the windowed runner so each surface (overlay stack, toast tray,
+/// future surfaces) doesn't accumulate its own copy-pasted dirty-check +
+/// registry-lookup + queue_subtree_rebuild block.
+///
+/// Returns `true` if a rebuild was queued.
+///
+/// ```ignore
+/// rebuild_overlay_subtree_if_dirty(
+///     &element_registry,
+///     OVERLAY_STACK_LAYER_ID,
+///     overlay_stack().lock().map(|s| s.take_dirty()).unwrap_or(false),
+///     || overlay_stack().lock().ok().map(|s| s.build_overlay_layer())
+///         .unwrap_or_else(crate::div::Div::new),
+/// );
+/// ```
+pub fn rebuild_overlay_subtree_if_dirty(
+    registry: &crate::prelude::ElementRegistry,
+    layer_id: &str,
+    dirty: bool,
+    build: impl FnOnce() -> crate::div::Div,
+) -> bool {
+    if !dirty {
+        return false;
+    }
+    let Some(node_id) = registry.get(layer_id) else {
+        tracing::trace!(
+            target: "blinc_layout::overlay_state",
+            "Overlay surface '{}' dirty but layer node not yet in registry — will mount on next full UI build",
+            layer_id,
+        );
+        return false;
+    };
+    crate::queue_subtree_rebuild(node_id, build());
+    true
+}
 
 /// Global overlay context instance
 static OVERLAY_CONTEXT: OnceLock<OverlayContext> = OnceLock::new();

@@ -584,17 +584,8 @@ impl TabsBuilder {
             }
         }
 
-        // Theme colors - use SecondaryHover for better contrast with text
-        let tab_list_bg = theme.color(ColorToken::SurfaceOverlay);
-        let radius = theme.radius(RadiusToken::Md);
         let content_margin = theme.spacing().space_1;
         let size = config.size;
-
-        let border = if matches!(theme.scheme(), ColorScheme::Dark) {
-            theme.color(ColorToken::Surface)
-        } else {
-            Color::TRANSPARENT
-        };
 
         // ========================================
         // Container 1: Tab Button Area
@@ -616,15 +607,9 @@ impl TabsBuilder {
 
                 let mut buttons = div()
                     .class("cn-tabs-list")
-                    .h(size.height())
                     .w_full()
-                    .bg(tab_list_bg)
-                    .rounded_md()
-                    .padding(Length::Px(6.0))
                     .flex_row()
-                    .items_center()
-                    .border(1.0, border)
-                    .gap(4.0);
+                    .items_center();
 
                 for tab in tabs_for_buttons.iter() {
                     let is_active = tab.menu_item.value() == active_value;
@@ -785,14 +770,8 @@ fn build_tab_trigger(
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
     let text_secondary = theme.color(ColorToken::TextSecondary);
-    let surface = theme.color(ColorToken::SurfaceElevated);
-    let radius = theme.radius(RadiusToken::Md);
-
     let value = menu_item.value.clone();
     let disabled = menu_item.disabled;
-
-    // Calculate inner height (tab list height minus padding)
-    let inner_height = size.height() - 16.0;
 
     // Clone menu_item data for closure
     let icon_svg = menu_item.icon.clone();
@@ -815,14 +794,6 @@ fn build_tab_trigger(
             text_primary.with_alpha(0.8)
         } else {
             text_secondary
-        };
-
-        let bg = if is_active && !disabled {
-            surface
-        } else if is_hovered && !disabled {
-            surface.with_alpha(0.5)
-        } else {
-            Color::TRANSPARENT
         };
 
         // Build content
@@ -881,17 +852,9 @@ fn build_tab_trigger(
         let mut trigger_div = div()
             .class("cn-tabs-trigger")
             .class(trigger_size_class)
-            .h(inner_height)
-            .padding_x(Length::Px(size.padding_x()))
-            .padding_y(Length::Px(
-                size.padding_x() / if size != TabsSize::Small { 2.0 } else { 1.0 },
-            ))
             .flex_row()
             .items_center()
             .justify_center()
-            .when(size == TabsSize::Small, |d| d.rounded_sm())
-            .when(size != TabsSize::Small, |d| d.rounded_md())
-            .bg(bg)
             .cursor(if disabled {
                 CursorStyle::Default
             } else {
@@ -901,7 +864,7 @@ fn build_tab_trigger(
 
         // Add active class for active tab
         if is_active && !disabled {
-            trigger_div = trigger_div.class("cn-tabs-trigger--active").shadow_sm();
+            trigger_div = trigger_div.class("cn-tabs-trigger--active");
         }
 
         // Add disabled class

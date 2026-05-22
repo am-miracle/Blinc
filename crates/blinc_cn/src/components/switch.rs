@@ -125,9 +125,21 @@ impl Switch {
         let on_bg = config
             .on_color
             .unwrap_or_else(|| theme.color(ColorToken::Primary));
-        let off_bg = config
-            .off_color
-            .unwrap_or_else(|| theme.color(ColorToken::Border));
+        // BorderSecondary is a solid pale gray (matches the HID `uni-switch`
+        // reference). `Border` is alpha-based (~10% in light mode) and would
+        // be nearly invisible against the canvas — and disappear entirely
+        // once `--disabled` stacks opacity on top.
+        //
+        // When disabled, switch to `InputBgDisabled` so the track matches
+        // the disabled-button / disabled-select palette. Same tone the user
+        // confirmed reads correctly across the disabled surface family.
+        let off_bg = config.off_color.unwrap_or_else(|| {
+            if config.disabled {
+                theme.color(ColorToken::InputBgDisabled)
+            } else {
+                theme.color(ColorToken::BorderSecondary)
+            }
+        });
         let thumb_color = config
             .thumb_color
             .unwrap_or_else(|| theme.color(ColorToken::TextInverse));
@@ -142,13 +154,19 @@ impl Switch {
         let color_anim_for_click = config.color_anim.clone();
 
         // Build background layers outside of on_state so motion bindings are properly registered
-        // Off layer is always visible as the base
-        let off_layer = div()
+        // Off layer is always visible as the base. When disabled, a thin
+        // BorderSecondary outline gives the whole track a defined silhouette
+        // — matches the disabled-button treatment so the whole disabled
+        // surface family reads consistently.
+        let mut off_layer = div()
             .class("cn-switch-track")
             .absolute()
             .inset(0.0)
             .rounded(radius)
             .bg(off_bg);
+        if disabled {
+            off_layer = off_layer.border(1.0, theme.color(ColorToken::BorderSecondary));
+        }
 
         // On layer with animated opacity
         // The motion container must be absolutely positioned and sized to cover the track
@@ -166,13 +184,24 @@ impl Switch {
             .inset(0.0)
             .child(motion().opacity(color_anim).child(on_track_div));
 
-        // Thumb with animated position
-        let thumb_element = div()
+        // Thumb with animated position. A subtle shadow gives the white
+        // thumb definition against the pale track — matches the HID
+        // `uni-switch__thumb` reference and is the main visual cue that
+        // distinguishes an interactive (off / on) switch from a disabled
+        // one. Disabled drops the shadow but adds a thin BorderSecondary
+        // outline so the knob still has a clear silhouette (matches the
+        // disabled-button treatment).
+        let mut thumb_element = div()
             .class("cn-switch-thumb")
             .w(thumb_size)
             .h(thumb_size)
             .rounded(thumb_size / 2.0)
             .bg(thumb_color);
+        if !disabled {
+            thumb_element = thumb_element.shadow_sm();
+        } else {
+            thumb_element = thumb_element.border(1.0, theme.color(ColorToken::BorderSecondary));
+        }
 
         let animated_thumb = motion().translate_x(thumb_anim).child(thumb_element);
 
@@ -193,7 +222,10 @@ impl Switch {
             .child(animated_thumb);
 
         if disabled {
-            switch = switch.class("cn-switch--disabled").opacity(0.5);
+            // No opacity dim — the off-state colors are already correct
+            // for a disabled appearance. The lost thumb shadow above is
+            // what differentiates disabled from interactive-off.
+            switch = switch.class("cn-switch--disabled");
         }
 
         // Add click handler to toggle the state
@@ -237,7 +269,11 @@ impl Switch {
                 .items_center()
                 .cursor_pointer()
                 .child(switch)
-                .child(text(label_text).size(14.0).color(label_color))
+                .child(
+                    text(label_text)
+                        .size(theme.typography().text_sm)
+                        .color(label_color),
+                )
         } else {
             // Wrap single switch in a div for consistent behavior
             div().child(switch)

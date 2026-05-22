@@ -36,12 +36,12 @@
 
 use std::sync::Arc;
 
-use blinc_animation::{AnimationPreset, MultiKeyframeAnimation};
+use blinc_animation::AnimationPreset;
 use blinc_core::Color;
-use blinc_layout::motion::motion_derived;
-use blinc_layout::overlay_state::get_overlay_manager;
+use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
-use blinc_layout::widgets::overlay::{BackdropConfig, EdgeSide, OverlayHandle, OverlayManagerExt};
+use blinc_layout::widgets::overlay::EdgeSide;
+use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
 use blinc_layout::InstanceKey;
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
 
@@ -206,25 +206,6 @@ impl DrawerBuilder {
         self
     }
 
-    /// Get the enter animation for this drawer's side
-    fn get_enter_animation(&self) -> MultiKeyframeAnimation {
-        let distance = self.size.width();
-        match self.side {
-            DrawerSide::Left => AnimationPreset::slide_in_left(self.animation_duration, distance),
-            DrawerSide::Right => AnimationPreset::slide_in_right(self.animation_duration, distance),
-        }
-    }
-
-    /// Get the exit animation for this drawer's side
-    fn get_exit_animation(&self) -> MultiKeyframeAnimation {
-        let exit_duration = (self.animation_duration as f32 * 0.7) as u32;
-        let distance = self.size.width();
-        match self.side {
-            DrawerSide::Left => AnimationPreset::slide_out_left(exit_duration, distance),
-            DrawerSide::Right => AnimationPreset::slide_out_right(exit_duration, distance),
-        }
-    }
-
     /// Show the drawer
     pub fn show(self) -> OverlayHandle {
         let theme = ThemeState::get();
@@ -232,10 +213,6 @@ impl DrawerBuilder {
         let border = theme.color(ColorToken::Border);
         let text_primary = theme.color(ColorToken::TextPrimary);
         let text_secondary = theme.color(ColorToken::TextSecondary);
-
-        // Get animations before moving other fields
-        let enter_animation = self.get_enter_animation();
-        let exit_animation = self.get_exit_animation();
 
         let side = self.side;
         let size = self.size;
@@ -245,30 +222,53 @@ impl DrawerBuilder {
         let footer = self.footer;
         let show_close = self.show_close;
         let on_close = self.on_close;
+        let classes = self.classes;
+        let user_id = self.user_id;
 
-        let mgr = get_overlay_manager();
-
-        // Create a unique motion key for this drawer instance
-        let motion_key_str = format!("drawer_{}", self.key.get());
-        let motion_key_with_child = format!("{}:child:0", motion_key_str);
-
-        // Convert DrawerSide to EdgeSide for overlay positioning
         let edge_side = match side {
             DrawerSide::Left => EdgeSide::Left,
             DrawerSide::Right => EdgeSide::Right,
         };
 
-        // Drawer panel size: width is fixed, height fills viewport
+        // Drawer panel size: width is fixed, height fills viewport (position_wrapper
+        // stretches the perpendicular axis to viewport for Edge positions).
         let drawer_width = size.width();
 
-        mgr.modal()
-            .dismiss_on_escape(true)
-            .backdrop(BackdropConfig::dark().dismiss_on_click(true))
-            .edge_position(edge_side)
-            .size(drawer_width, 10000.0) // Large height to fill viewport
-            .motion_key(&motion_key_with_child)
+        // Slide from the edge the drawer is anchored to.
+        let enter_animation = match side {
+            DrawerSide::Left => {
+                AnimationPreset::slide_in_left(self.animation_duration, drawer_width)
+            }
+            DrawerSide::Right => {
+                AnimationPreset::slide_in_right(self.animation_duration, drawer_width)
+            }
+        };
+        let exit_animation = {
+            let d = (self.animation_duration as f32 * 0.7) as u32;
+            match side {
+                DrawerSide::Left => AnimationPreset::slide_out_left(d, drawer_width),
+                DrawerSide::Right => AnimationPreset::slide_out_right(d, drawer_width),
+            }
+        };
+
+        // Pre-allocate the handle id so the close button can capture it
+        // (same pattern as dialog/popover — `handle.close()` instead of
+        // `close_top()`).
+        let next_handle_id = overlay_stack()
+            .lock()
+            .ok()
+            .map(|s| s.peek_next_handle_id())
+            .unwrap_or(0);
+        let drawer_handle = OverlayHandle::from_raw(next_handle_id);
+
+        let handle = OverlayBuilder::modal()
+            // Modal defaults: ESC, click-outside (backdrop dismiss), backdrop=Some.
+            .edge(edge_side)
+            .size(drawer_width, 0.0) // height ignored — position_wrapper uses viewport.1
+            .motion_enter(enter_animation)
+            .motion_exit(exit_animation)
             .content(move || {
-                build_drawer_content(
+                let mut content_div = build_drawer_content(
                     side,
                     size,
                     &title,
@@ -281,12 +281,25 @@ impl DrawerBuilder {
                     border,
                     text_primary,
                     text_secondary,
-                    &enter_animation,
-                    &exit_animation,
-                    &motion_key_str,
-                )
+                    drawer_handle,
+                );
+                for c in &classes {
+                    content_div = content_div.class(c);
+                }
+                if let Some(ref id) = user_id {
+                    content_div = content_div.id(id);
+                }
+                content_div
             })
-            .show()
+            .show();
+
+        debug_assert_eq!(
+            handle.raw(),
+            next_handle_id,
+            "peek_next_handle_id was stale — concurrent push?"
+        );
+
+        handle
     }
 }
 
@@ -312,7 +325,9 @@ pub fn drawer() -> DrawerBuilder {
     DrawerBuilder::new()
 }
 
-/// Build the drawer content
+/// Build the drawer content. Enter animation is delegated to the CSS
+/// `@keyframes cn-drawer-enter-{left,right,top,bottom}` rules on `.cn-drawer`
+/// (see cn_styles.rs); side modifier classes pick the right keyframe.
 #[allow(clippy::too_many_arguments)]
 fn build_drawer_content(
     side: DrawerSide,
@@ -327,9 +342,7 @@ fn build_drawer_content(
     border: Color,
     text_primary: Color,
     text_secondary: Color,
-    enter_animation: &MultiKeyframeAnimation,
-    exit_animation: &MultiKeyframeAnimation,
-    motion_key: &str,
+    handle: OverlayHandle,
 ) -> Div {
     let theme = ThemeState::get();
     let radius = theme.radius(RadiusToken::Lg);
@@ -340,9 +353,14 @@ fn build_drawer_content(
         DrawerSide::Right => (radius, 0.0, 0.0, radius), // Left corners rounded
     };
 
-    // Build drawer panel
+    let side_class = match side {
+        DrawerSide::Left => "cn-drawer--left",
+        DrawerSide::Right => "cn-drawer--right",
+    };
+
     let mut drawer = div()
         .class("cn-drawer")
+        .class(side_class)
         .w(size.width())
         .h_full()
         .bg(bg)
@@ -366,7 +384,6 @@ fn build_drawer_content(
             .items_center()
             .justify_between();
 
-        // Custom header or title
         if let Some(ref header_fn) = header {
             header_div = header_div.child(header_fn());
         } else if let Some(ref title_text) = title {
@@ -397,7 +414,7 @@ fn build_drawer_content(
                         if let Some(ref cb) = on_close_clone {
                             cb();
                         }
-                        get_overlay_manager().close_top();
+                        handle.close();
                     })
                     .child(svg(close_icon).size(18.0, 18.0).color(text_secondary)),
             );
@@ -438,14 +455,7 @@ fn build_drawer_content(
         drawer = drawer.child(div().class("cn-drawer-footer").w_full().child(footer_fn()));
     }
 
-    // Wrap drawer panel in motion for slide animations
-    // The overlay system handles positioning via Edge position type
-    div().child(
-        motion_derived(motion_key)
-            .enter_animation(enter_animation.clone())
-            .exit_animation(exit_animation.clone())
-            .child(drawer),
-    )
+    drawer
 }
 
 /// Convenience function for a left-side drawer (navigation)

@@ -262,10 +262,14 @@ fn build_radio_button(
                 }
             }
 
-            // Border color based on state
-            let border_color = if is_selected {
+            // Border color based on state. Disabled wins over selected so
+            // the radio joins the shared disabled-surface palette
+            // (BorderSecondary outline, same as button / select / checkbox).
+            let border_color = if option_disabled {
+                theme.color(ColorToken::BorderSecondary)
+            } else if is_selected {
                 overrides.selected_color
-            } else if is_hovered && !option_disabled {
+            } else if is_hovered {
                 overrides.hover_border_color
             } else {
                 overrides.border_color
@@ -299,7 +303,12 @@ fn build_radio_button(
             }
 
             if option_disabled {
-                circle = circle.class("cn-radio--disabled");
+                // Fill the circle with InputBgDisabled so it reads as part of
+                // the shared disabled-surface palette. Override comes last
+                // so a user-provided `overrides.background` still wins.
+                circle = circle
+                    .class("cn-radio--disabled")
+                    .bg(theme.color(ColorToken::InputBgDisabled));
             }
 
             if let Some(bg) = overrides.background {
@@ -327,10 +336,12 @@ fn build_radio_button(
                 .child(circle)
                 .child(text(&option_label).size(14.0).color(overrides.label_color));
 
+            // Only apply opacity if a CSS rule explicitly set one. The
+            // tonal disabled palette (InputBgDisabled / BorderSecondary /
+            // TextTertiary via label_color) carries the inert state itself
+            // without dimming.
             if let Some(opacity) = overrides.opacity {
                 visual = visual.opacity(opacity);
-            } else if option_disabled {
-                visual = visual.opacity(0.5);
             }
 
             visual

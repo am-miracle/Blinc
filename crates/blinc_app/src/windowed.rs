@@ -4195,11 +4195,16 @@ impl WindowedApp {
                                         KeyState::Pressed => {
                                             // Handle Escape key for overlays first
                                             // If an overlay handles it, don't propagate further
-                                            if kb_event.key == Key::Escape
-                                                && windowed_ctx.overlay_manager.handle_escape()
-                                            {
-                                                // Escape was consumed by overlay, skip further processing
-                                                // (but continue collecting events for non-overlay targets)
+                                            if kb_event.key == Key::Escape {
+                                                // Legacy manager first (covers widgets not yet
+                                                // migrated). Then the new OverlayStack.
+                                                let legacy_handled =
+                                                    windowed_ctx.overlay_manager.handle_escape();
+                                                let stack_handled = blinc_layout::overlay_state::overlay_stack()
+                                                    .lock()
+                                                    .map(|mut s| s.handle_escape())
+                                                    .unwrap_or(false);
+                                                let _ = legacy_handled || stack_handled;
                                             }
 
                                             // Dispatch KEY_DOWN for all keys
@@ -4885,6 +4890,7 @@ impl WindowedApp {
                                 ws.needs_rebuild = true;
                             }
 
+
                             // Check if a full relayout was requested (e.g., theme changes)
                             if blinc_layout::widgets::take_needs_relayout() {
                                 tracing::info!(
@@ -4925,6 +4931,23 @@ impl WindowedApp {
                                 windowed_ctx.scale_factor as f32,
                             );
                             windowed_ctx.overlay_manager.update(current_time);
+                            // Phase 3 transition: also tick the new OverlayStack +
+                            // ToastTray. Each is the authoritative manager for the
+                            // widgets that have already been migrated.
+                            {
+                                use blinc_layout::overlay_state::{overlay_stack, toast_tray};
+                                if let Ok(mut s) = overlay_stack().lock() {
+                                    s.set_viewport_with_scale(
+                                        windowed_ctx.width,
+                                        windowed_ctx.height,
+                                        windowed_ctx.scale_factor as f32,
+                                    );
+                                    s.update(current_time);
+                                }
+                                if let Ok(mut t) = toast_tray().lock() {
+                                    t.update(current_time);
+                                }
+                            }
 
                             // Check if overlay content changed (new overlay opened/closed)
                             // NOTE: We only rebuild on actual content changes, NOT during animations.
@@ -4953,6 +4976,53 @@ impl WindowedApp {
                                 }
                                 // Consume the dirty flag
                                 windowed_ctx.overlay_manager.take_dirty();
+                            }
+
+                            // Phase 3 transition: same incremental rebuild path
+                            // for the new OverlayStack + ToastTray. Generic helper
+                            // handles the dirty-check + registry-lookup +
+                            // queue_subtree_rebuild dance per surface, so adding
+                            // a new overlay layer in the future is a one-liner.
+                            {
+                                use blinc_layout::overlay_state::{
+                                    overlay_stack, rebuild_overlay_subtree_if_dirty,
+                                    toast_tray,
+                                };
+                                use blinc_layout::widgets::overlay_stack::OVERLAY_STACK_LAYER_ID;
+                                use blinc_layout::widgets::toast_tray::TOAST_TRAY_LAYER_ID;
+
+                                rebuild_overlay_subtree_if_dirty(
+                                    &element_registry,
+                                    OVERLAY_STACK_LAYER_ID,
+                                    overlay_stack()
+                                        .lock()
+                                        .map(|s| s.take_dirty())
+                                        .unwrap_or(false),
+                                    || {
+                                        overlay_stack()
+                                            .lock()
+                                            .ok()
+                                            .map(|s| s.build_overlay_layer())
+                                            .unwrap_or_else(div)
+                                    },
+                                );
+
+                                let viewport = (windowed_ctx.width, windowed_ctx.height);
+                                rebuild_overlay_subtree_if_dirty(
+                                    &element_registry,
+                                    TOAST_TRAY_LAYER_ID,
+                                    toast_tray()
+                                        .lock()
+                                        .map(|t| t.take_dirty())
+                                        .unwrap_or(false),
+                                    || {
+                                        toast_tray()
+                                            .lock()
+                                            .ok()
+                                            .map(|t| t.build_tray_layer(viewport))
+                                            .unwrap_or_else(div)
+                                    },
+                                );
                             }
 
                             // Check if stateful elements requested a redraw (hover/press changes)
@@ -5000,6 +5070,21 @@ impl WindowedApp {
                                         // Start CSS animations for elements with animation properties
                                         tree.start_all_css_animations();
                                     }
+                                    // Re-run hit-test at the current mouse position so newly
+                                    // mounted subtrees (notably dropdown / context-menu items
+                                    // that just appeared under the stationary cursor) get
+                                    // POINTER_ENTER + CSS :hover immediately. Without this,
+                                    // hover state only updates on the next mouse-move event —
+                                    // so a freshly-opened dropdown shows no hover bg on the
+                                    // item the cursor is already over.
+                                    if let Some(ref mut tree) = ws.render_tree {
+                                        let (mx, my) = windowed_ctx.event_router.mouse_position();
+                                        if mx.is_finite() && my.is_finite() {
+                                            let _ = windowed_ctx
+                                                .event_router
+                                                .on_mouse_move(tree, mx, my);
+                                        }
+                                    }
                                 }
                                 if had_prop_updates && !needs_layout {
                                     tracing::trace!("Visual-only prop updates, skipping layout");
@@ -5026,6 +5111,30 @@ impl WindowedApp {
                                 if had_prop_updates {
                                     blinc_app.invalidate_render_cache_tagged(
                                         "stateful_prop_update",
+                                    );
+                                }
+
+                                // Structural subtree rebuilds replace render
+                                // nodes wholesale (new ids, fresh props from
+                                // `collect_render_props_boxed`, CSS class base
+                                // styles re-applied). The static-cache batch
+                                // still holds the *previous* frame's
+                                // primitives, so the first paint after a
+                                // dropdown-open / overlay-push / stateful
+                                // structural transition keeps showing stale
+                                // visuals (search input renders without its
+                                // configured bg, freshly-mounted `--selected`
+                                // rows show no highlight, etc.) until the
+                                // next user input trips `state_changed`. The
+                                // gate above only fires on prop updates;
+                                // mirror it here for the rebuild path. Same
+                                // root cause class as the `motion_just_settled`
+                                // cache-stamping fix — the walker has new data
+                                // but the compositor's cache predicate hasn't
+                                // been told to discard the old.
+                                if has_pending_rebuilds {
+                                    blinc_app.invalidate_render_cache_tagged(
+                                        "structural_subtree_rebuild",
                                     );
                                 }
 
@@ -5127,12 +5236,45 @@ impl WindowedApp {
                                 // Compose user UI with overlay layer using a regular Div container
                                 // We use position:relative with the overlay absolutely positioned on top.
                                 let overlay_layer = windowed_ctx.overlay_manager.build_overlay_layer();
+                                // Phase 3 transition: the new OverlayStack composites alongside
+                                // the legacy manager. Each widget migration moves one widget
+                                // from the legacy layer to this layer; both render until
+                                // Phase 5 deletes the legacy module.
+                                let stack_layer = {
+                                    use blinc_layout::overlay_state::overlay_stack;
+                                    let stack = overlay_stack();
+                                    let guard = stack.lock().ok();
+                                    match guard {
+                                        Some(mut s) => {
+                                            s.set_viewport_with_scale(
+                                                windowed_ctx.width,
+                                                windowed_ctx.height,
+                                                windowed_ctx.scale_factor as f32,
+                                            );
+                                            s.build_overlay_layer()
+                                        }
+                                        None => div(),
+                                    }
+                                };
+                                // Toast tray composites above the overlay stack
+                                // (notification queue lives above modal stack).
+                                let tray_layer = {
+                                    use blinc_layout::overlay_state::toast_tray;
+                                    let viewport = (windowed_ctx.width, windowed_ctx.height);
+                                    toast_tray()
+                                        .lock()
+                                        .ok()
+                                        .map(|t| t.build_tray_layer(viewport))
+                                        .unwrap_or_else(div)
+                                };
                                 let ui = div()
                                     .w(windowed_ctx.width)
                                     .h(windowed_ctx.height)
                                     .relative() // positioning context for overlay
                                     .child(user_ui)
-                                    .child(overlay_layer);
+                                    .child(overlay_layer)
+                                    .child(stack_layer)
+                                    .child(tray_layer);
 
                                 // Use incremental update if we have an existing tree
                                 // BUT: Skip incremental update during resize - do full rebuild instead
@@ -5341,9 +5483,54 @@ impl WindowedApp {
                             // Process suspended motion starts queued via query_motion(key).start()
                             rs.process_global_motion_starts();
 
+                            // Capture pre-tick motion liveness so the `should_render`
+                            // gate below can recognise a "this frame's tick settled
+                            // the motion" transition. Without this, the final tick
+                            // (Entering → Visible) would leave `has_active_motions()`
+                            // false at the should_render check, the cap gate could
+                            // skip the paint, and the user would see the animation
+                            // freeze at the penultimate state — the "animation is
+                            // not allowed to settle" symptom. Capturing pre-tick
+                            // ensures the paint of the settled state still ships.
+                            let motion_was_active_pre_tick = rs.has_active_motions();
+
                             // Tick render state (handles cursor blink, color animations, etc.)
                             // This updates dynamic properties without touching tree structure
                             let _animations_active = rs.tick(current_time);
+
+                            // Detect "motion just settled this frame": pre-tick the
+                            // FSM had at least one motion mid-flight, post-tick it
+                            // has none. The current paint will display the settled
+                            // state — but we still arm one more redraw via
+                            // `stateful::request_redraw()` so the next Frame fires
+                            // unconditionally. Belt-and-suspenders against the
+                            // "final frame doesn't ship until mouse-move" symptom:
+                            // even if the current frame somehow skipped its paint
+                            // (cap-interval edge, surface contention, etc.), the
+                            // follow-up frame still paints the final state without
+                            // requiring external input to wake the loop.
+                            let motion_just_settled =
+                                motion_was_active_pre_tick && !rs.has_active_motions();
+                            if motion_just_settled {
+                                blinc_layout::stateful::request_redraw();
+                                // Force the next paint to re-walk the tree from
+                                // scratch. The compositor's static-cache
+                                // invalidation gate (`other_animations_active`
+                                // in `try_render_with_compositor`) reads
+                                // `has_active_motions()` POST-tick — on the
+                                // settle frame that's already `false`, so the
+                                // gate keeps the cached primitives from the
+                                // penultimate paint (which were rasterised with
+                                // `motion.current` in its lerped state, not the
+                                // settled `MotionKeyframe::default()`). User
+                                // sees the animation freeze one frame short of
+                                // the final state. Invalidating here forces
+                                // the walker to repopulate the cache with
+                                // post-tick `motion.current = default` values.
+                                blinc_app.invalidate_render_cache_tagged(
+                                    "motion_just_settled",
+                                );
+                            }
 
                             // Tick CSS animations/transitions synchronously on the main thread.
                             // The scheduler's bg thread drives 120fps redraws via wake_callback,
@@ -5417,11 +5604,43 @@ impl WindowedApp {
                             };
                             let elapsed_since_paint =
                                 current_time.saturating_sub(ws.last_paint_time_ms);
+
+                            // Bypass the FPS cap whenever a vsync-class
+                            // animation is mid-flight — transforms, layout
+                            // sizing, clip-path geometry, and motion-FSM
+                            // enter / exit animations all stair-step
+                            // visibly when capped to 30 fps, and (more
+                            // critically) the cap can swallow the final
+                            // settle-to-Visible paint of a motion FSM
+                            // animation, leaving the dialog / sheet stuck
+                            // at the penultimate frame until a mouse-move
+                            // wakes the loop. `has_visible_vsync_class`
+                            // covers CSS animations / transitions; motion
+                            // FSM (overlay enter / exit) is the
+                            // `has_active_motions()` term.
+                            //
+                            // Use the PRE-tick `motion_was_active_pre_tick`
+                            // snapshot — not the post-tick poll — so the
+                            // frame where the final tick transitions the
+                            // FSM from Entering → Visible still counts as
+                            // vsync-class and the cap gate doesn't skip
+                            // the paint that displays the settled state.
+                            let needs_vsync = motion_was_active_pre_tick
+                                || rs.has_active_motions()
+                                || ws
+                                    .render_tree
+                                    .as_ref()
+                                    .is_some_and(|t| {
+                                        let store = t.css_anim_store();
+                                        let guard = store.lock().unwrap();
+                                        guard.has_visible_vsync_class(&t.painted_stable_ids())
+                                    });
                             let should_render = match cap_interval_ms {
                                 None => true,
                                 Some(_) if did_rebuild => true,
                                 Some(_) if ws.needs_relayout => true,
                                 Some(_) if ws.last_paint_time_ms == 0 => true,
+                                Some(_) if needs_vsync => true,
                                 Some(interval) => elapsed_since_paint >= interval,
                             };
                             if !should_render {
@@ -5626,10 +5845,60 @@ impl WindowedApp {
                                 // CSS work (colour / layout / 3D / rotate-z)
                                 // still trips the slow path through `css_active`.
                                 let css_blocks_fast = css_active && !css_only_composite_promotable;
+                                // Visual / FLIP / layout animations resize / reposition
+                                // bounds each frame — the cached primitive batch
+                                // can't reflect the new clip rect, so we must
+                                // take the walker route while any of them are
+                                // mid-flight. Pre-fix, the tree-view expand
+                                // animation froze at whatever partial state the
+                                // first slow-path frame painted into the cache;
+                                // subsequent fast-path frames just blitted that
+                                // stale partial state until an input event
+                                // invalidated the cache. Same posture as
+                                // `scroll_animating` above.
+                                let bounds_anim_active = ws.render_tree.as_ref().is_some_and(|t| {
+                                    t.has_active_visual_animations()
+                                        || t.has_active_layout_animations()
+                                        || t.has_active_flip_animations()
+                                });
+                                // Phase 3 transition: when the new OverlayStack
+                                // or ToastTray is dirty / has live entries / is
+                                // animating, the fast-path's cached UI doesn't
+                                // include the new layer's content. Force slow
+                                // path so `build_overlay_layer` runs and the
+                                // stack's entries land in the rendered tree.
+                                //
+                                // (Discovered while migrating tooltip: the
+                                // tooltip pushed to the stack and on_close
+                                // fired ~30ms later, but `build_overlay_layer`
+                                // was never called between because fast-path
+                                // frames bypassed the UI build entirely. Same
+                                // root cause as the tree expand race that this
+                                // gate also guards against.)
+                                let new_overlay_active = {
+                                    use blinc_layout::overlay_state::{
+                                        overlay_stack, toast_tray,
+                                    };
+                                    let s = overlay_stack()
+                                        .lock()
+                                        .map(|s| {
+                                            s.is_dirty()
+                                                || s.has_visible_overlays()
+                                                || s.has_animating_overlays()
+                                        })
+                                        .unwrap_or(false);
+                                    let t = toast_tray()
+                                        .lock()
+                                        .map(|t| t.is_dirty() || !t.is_empty() || t.has_animating())
+                                        .unwrap_or(false);
+                                    s || t
+                                };
                                 let try_fast_paint = !did_rebuild
                                     && !ws.needs_relayout
                                     && !css_blocks_fast
                                     && !scroll_animating
+                                    && !bounds_anim_active
+                                    && !new_overlay_active
                                     && ws.last_paint_time_ms != 0
                                     && blinc_app.has_render_cache();
 
@@ -5765,6 +6034,25 @@ impl WindowedApp {
                                 let mgr = windowed_ctx.overlay_manager.lock().unwrap();
                                 mgr.take_dirty() || mgr.has_animating_overlays()
                             };
+                            // Phase 3 transition: same gate for the new stack +
+                            // tray. Either dirtying source schedules the next paint.
+                            let needs_overlay_stack_redraw = {
+                                use blinc_layout::overlay_state::{overlay_stack, toast_tray};
+                                let s_signal = overlay_stack()
+                                    .lock()
+                                    .map(|s| {
+                                        s.take_dirty()
+                                            || s.take_animation_dirty()
+                                            || s.has_animating_overlays()
+                                    })
+                                    .unwrap_or(false);
+                                let t_signal = toast_tray()
+                                    .lock()
+                                    .map(|t| t.take_dirty() || t.has_animating())
+                                    .unwrap_or(false);
+                                s_signal || t_signal
+                            };
+                            let needs_overlay_redraw = needs_overlay_redraw || needs_overlay_stack_redraw;
 
                             // Check if CSS animations/transitions/FLIP/visual-animations need
                             // continued redraws. Both `flip_animations` (older `animate_layout`)

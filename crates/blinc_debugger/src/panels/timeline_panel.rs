@@ -177,8 +177,7 @@ impl BuiltTimelinePanel {
                     .min(0.0)
                     .max(1.0)
                     .size(SliderSize::Small)
-                    .w(740.0)
-                    .build_final(),
+                    .w(740.0),
             )
             .child(Self::time_labels(config.duration))
     }

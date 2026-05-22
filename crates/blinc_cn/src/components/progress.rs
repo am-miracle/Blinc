@@ -118,7 +118,7 @@ impl Progress {
             .unwrap_or_else(|| theme.color(ColorToken::Primary));
         let track_color = config
             .track_color
-            .unwrap_or_else(|| theme.color(ColorToken::Secondary));
+            .unwrap_or_else(|| theme.color(ColorToken::Border));
 
         // Calculate fill width in pixels
         let fill_ratio = config.value / 100.0;
@@ -346,7 +346,7 @@ impl AnimatedProgress {
             .unwrap_or_else(|| theme.color(ColorToken::Primary));
         let track_color = config
             .track_color
-            .unwrap_or_else(|| theme.color(ColorToken::Secondary));
+            .unwrap_or_else(|| theme.color(ColorToken::Border));
 
         // Progress bar approach: position indicator at left edge, use translate_x to show fill
         // At translate_x = 0: indicator fully hidden (positioned at -width)

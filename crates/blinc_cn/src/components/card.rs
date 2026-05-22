@@ -224,7 +224,7 @@ impl CardHeader {
         let theme = ThemeState::get();
         self.inner = self.inner.child(
             text(title)
-                .size(18.0)
+                .size(theme.typography().text_lg)
                 .semibold()
                 .color(theme.color(ColorToken::TextPrimary)),
         );
@@ -236,7 +236,7 @@ impl CardHeader {
         let theme = ThemeState::get();
         self.inner = self.inner.child(
             text(desc)
-                .size(14.0)
+                .size(theme.typography().text_sm)
                 .color(theme.color(ColorToken::TextSecondary)),
         );
         self

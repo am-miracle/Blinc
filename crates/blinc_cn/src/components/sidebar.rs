@@ -243,7 +243,7 @@ impl Sidebar {
                             .when(!is_collapsed, |d| {
                                 d.px(3.0).py(2.0).child(
                                     text(title.to_uppercase())
-                                        .size(11.0)
+                                        .size(theme.typography().text_xs)
                                         .color(text_tertiary)
                                         .weight(FontWeight::SemiBold)
                                         .no_cursor()
@@ -285,7 +285,16 @@ impl Sidebar {
                         let item_anim_key = format!("{}_anim", item_key);
                         let mut item_element = div()
                             .class("cn-sidebar-item")
-                            .w_fit()
+                            // `w_full` so the hover / active bg stretches
+                            // across the full sidebar width. With `w_fit`
+                            // the bg only painted as wide as the item's
+                            // own content — so short labels like "Inbox"
+                            // got a noticeably narrower highlight than
+                            // long ones like "Dashboard". The parent
+                            // `items_container` is `w_fit` and resolves
+                            // its own width from the widest sibling, so
+                            // every item now matches that one width.
+                            .w_full()
                             .h_fit()
                             .flex_row()
                             .items_center()
@@ -305,7 +314,12 @@ impl Sidebar {
                                         .child(svg(&item_icon).size(18.0, 18.0).color(icon_color)),
                                 )
                                 .child(
-                                    div().child(text(&item_label).size(14.0).no_cursor().no_wrap()),
+                                    div().child(
+                                        text(&item_label)
+                                            .size(theme.typography().text_sm)
+                                            .no_cursor()
+                                            .no_wrap(),
+                                    ),
                                 )
                             })
                             .when(is_collapsed, |d| {

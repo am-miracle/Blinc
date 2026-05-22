@@ -54,7 +54,7 @@ pub mod typography;
 // Re-export all components
 pub use accordion::{accordion, Accordion, AccordionBuilder, AccordionMode};
 pub use alert::{alert, alert_box, Alert, AlertBox, AlertVariant};
-pub use badge::{badge, Badge, BadgeVariant};
+pub use badge::{badge, Badge, BadgeStyle, BadgeVariant};
 pub use breadcrumb::{
     breadcrumb, Breadcrumb, BreadcrumbBuilder, BreadcrumbItem, BreadcrumbSeparator, BreadcrumbSize,
 };
@@ -110,7 +110,7 @@ pub use sheet::{
 pub use sidebar::{sidebar, Sidebar, SidebarBuilder, SidebarItem, SidebarSection};
 pub use skeleton::{skeleton, skeleton_circle, Skeleton};
 pub use slider::{slider, Slider, SliderSize};
-pub use spinner::{spinner, Spinner, SpinnerSize};
+pub use spinner::{spinner, Spinner, SpinnerBuilder, SpinnerSize};
 pub use switch::{switch, Switch, SwitchSize};
 pub use tabs::{tab_item, tabs, TabMenuItem, Tabs, TabsBuilder, TabsSize, TabsTransition};
 pub use textarea::{textarea, Textarea, TextareaSize};
