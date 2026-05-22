@@ -1,13 +1,11 @@
 //! Web (browser) theme
 //!
-//! Wraps the default Catppuccin-derived [`BlincTheme`] so the web
-//! target picks up the same look and feel as every other Blinc
-//! platform out of the box. The web theme is intentionally a thin
-//! re-export rather than a custom palette: the framework's default
-//! identity comes from Catppuccin (Latte for light, Mocha for dark),
-//! and apps that want a different look can call
-//! [`ThemeState::init`](crate::ThemeState::init) themselves with a
-//! custom [`ThemeBundle`] before [`crate::WebApp::run`] would
+//! Wraps the Universal HID Hybrid variant ([`crate::BlincTheme`],
+//! itself a type alias for [`crate::HybridTheme`]). The web target
+//! has no native chrome to mimic, so it inherits the framework's
+//! cross-platform default identity. Apps that want a different look
+//! can call [`ThemeState::init`](crate::ThemeState::init) themselves
+//! with a custom [`ThemeBundle`] before [`crate::WebApp::run`] would
 //! otherwise install this default.
 
 use crate::theme::{ColorScheme, Theme, ThemeBundle};

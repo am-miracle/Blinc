@@ -6,14 +6,14 @@
 //! - Linux: Adwaita (GNOME)
 //! - iOS: iOS Human Interface Guidelines
 //! - Android: Material You
-//! - Web: default Catppuccin-derived [`crate::themes::BlincTheme`]
+//! - Web: Universal HID Hybrid ([`crate::themes::HybridTheme`])
 //!
 //! When no platform matches (custom targets, headless contexts,
 //! fallback paths), [`platform_theme_bundle`] returns the Universal
-//! HID Hybrid bundle ([`crate::themes::HybridTheme`]) — a
-//! considered Apple HIG / Material 3 synthesis that reads native
-//! on every platform. [`crate::themes::BlincTheme`] (Catppuccin)
-//! remains in the codebase as an opt-in named theme.
+//! HID Hybrid bundle — a considered Apple HIG / Material 3 synthesis
+//! that reads native on every platform. [`crate::themes::BlincTheme`]
+//! is now a type alias for `HybridTheme`; the previous Catppuccin
+//! palette has been retired.
 
 #[cfg(target_os = "macos")]
 pub mod macos;
