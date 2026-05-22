@@ -330,10 +330,15 @@ mod resolve_corner_shape_tests {
     }
 
     #[test]
-    fn near_pill_with_one_smaller_corner_takes_theme() {
+    fn asymmetric_corners_below_near_full_take_theme() {
+        // bounds 40×40, half_short = 20, near-full cutoff at 0.9 ×
+        // 20 = 18. Three corners at radius 15 are above the
+        // squircle threshold (12) but below the near-full cutoff,
+        // so they take the theme `n`. The fourth corner at radius
+        // 4 is below threshold and stays circular.
         let resolved = resolve_corner_shape(
             CornerShape::ROUND,
-            CornerRadius::new(20.0, 20.0, 20.0, 4.0),
+            CornerRadius::new(15.0, 15.0, 15.0, 4.0),
             (40.0, 40.0),
             &hybrid_shape(),
             9999.0,
@@ -342,6 +347,29 @@ mod resolve_corner_shape_tests {
         let n = hybrid_shape().effective_corner_n();
         assert!((resolved.bottom_left - 1.0).abs() < 0.001);
         assert!((resolved.top_left - n).abs() < 0.001);
+        assert!((resolved.top_right - n).abs() < 0.001);
+        assert!((resolved.bottom_right - n).abs() < 0.001);
+    }
+
+    #[test]
+    fn near_full_corner_short_circuits_to_round() {
+        // bounds 40×40, half_short = 20. A corner at radius 19 is
+        // ≥ 90 % of half_short → the per-corner near-full cutoff
+        // catches it and returns ROUND, even when the element
+        // isn't a clean pill (one corner at radius 4 fails the
+        // four-corner pill gate).
+        let resolved = resolve_corner_shape(
+            CornerShape::ROUND,
+            CornerRadius::new(19.0, 19.0, 19.0, 4.0),
+            (40.0, 40.0),
+            &hybrid_shape(),
+            9999.0,
+            false,
+        );
+        assert!((resolved.top_left - 1.0).abs() < 0.001);
+        assert!((resolved.top_right - 1.0).abs() < 0.001);
+        assert!((resolved.bottom_right - 1.0).abs() < 0.001);
+        assert!((resolved.bottom_left - 1.0).abs() < 0.001);
     }
 
     #[test]
