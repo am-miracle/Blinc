@@ -175,7 +175,7 @@ pub struct KeyframeProperties {
 
     // --- Shadow properties ---
     /// Shadow [offset_x, offset_y, blur, spread] for the first layer.
-    /// Kept alongside [`shadow_stack`] for the single-layer fast paths
+    /// Kept alongside [`Self::shadow_stack`] for the single-layer fast paths
     /// (e.g. composite-promoted `CssAnimPaintMeta` in motion.rs) that
     /// only sample one layer.
     pub shadow_params: Option<[f32; 4]>,

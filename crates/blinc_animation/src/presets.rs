@@ -142,7 +142,7 @@ impl AnimationPreset {
     }
 
     /// Slide out to an arbitrary `(dx, dy)` offset with a caller-
-    /// supplied final-keyframe easing — companion to [`slide_in_with`].
+    /// supplied final-keyframe easing — companion to [`AnimationPreset::slide_in_with`].
     pub fn slide_out_with(
         duration_ms: u32,
         dx: f32,
