@@ -68,11 +68,9 @@ impl SpinnerSize {
 struct SpinnerConfig {
     size: SpinnerSize,
     color: Option<Color>,
-    /// Optional faint full-circle ring drawn behind the rotating arc.
-    /// `None` (default) leaves the empty 180° transparent so only the
-    /// arc itself is visible — the Material/shadcn-style spinner the
-    /// user reads as "a single arc rotating". `Some(colour)` opts in
-    /// to the older Apple-style track + arc look.
+    /// Faint full-circle ring drawn behind the rotating arc. Defaults
+    /// to `ColorToken::Border` when `None`. Pass `Color::TRANSPARENT`
+    /// (or override via `.track_color(...)`) to suppress the track.
     track_color: Option<Color>,
     duration_ms: u32,
     classes: Vec<Arc<str>>,
@@ -112,6 +110,9 @@ impl Spinner {
         let spinner_color = config
             .color
             .unwrap_or_else(|| theme.color(ColorToken::Primary));
+        let track_color = config
+            .track_color
+            .unwrap_or_else(|| theme.color(ColorToken::Border));
 
         // Internal timeline — one per built spinner. The scheduler
         // handle is global so multiple spinners share the same animation
@@ -140,11 +141,18 @@ impl Spinner {
             ],
         };
 
+        // Static track ring — full circle, faint colour. Sits in the
+        // static cache; only the arc above rotates.
+        let track = div()
+            .class("cn-spinner__track")
+            .absolute()
+            .inset(0.0)
+            .w(diameter)
+            .h(diameter)
+            .rounded(half)
+            .border(border_width, track_color);
+
         // Rotating arc: full-circle ring masked to 180° by polygon.
-        // The visible portion sweeps around as the timeline ticks; the
-        // hidden 180° is transparent (no track ring by default — the
-        // track + arc combo previously read as "two arcs forming a
-        // full circle" rather than a single rotating arc).
         let arc = motion()
             .rotate_timeline(timeline.clone(), entry_id)
             .child(
@@ -171,23 +179,9 @@ impl Spinner {
             .class("cn-spinner")
             .w(total)
             .h(total)
-            .relative();
-
-        // Opt-in faint track ring. Off by default; callers can layer
-        // it back in with `.track_color(...)` for the Apple-style look.
-        if let Some(track_color) = config.track_color {
-            spinner = spinner.child(
-                div()
-                    .class("cn-spinner__track")
-                    .absolute()
-                    .inset(0.0)
-                    .w(diameter)
-                    .h(diameter)
-                    .rounded(half)
-                    .border(border_width, track_color),
-            );
-        }
-        spinner = spinner.child(arc_layer);
+            .relative()
+            .child(track)
+            .child(arc_layer);
 
         for c in &config.classes {
             spinner = spinner.class(c.as_ref());
@@ -264,11 +258,9 @@ impl SpinnerBuilder {
         self
     }
 
-    /// Opt in to a faint full-circle track ring drawn behind the
-    /// rotating arc. Off by default — the default spinner is a
-    /// rotating 180° arc with a transparent complement (Material /
-    /// shadcn style). Setting a colour here brings back the older
-    /// "track + arc" appearance.
+    /// Override the faint full-circle track ring colour. Defaults
+    /// to `ColorToken::Border`. Pass `Color::TRANSPARENT` to hide
+    /// the track entirely (e.g. for a pure-arc spinner).
     pub fn track_color(self, color: impl Into<Color>) -> Self {
         self.config.borrow_mut().track_color = Some(color.into());
         self
