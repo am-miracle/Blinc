@@ -431,6 +431,20 @@ pub struct RenderContext {
     /// place, so subsequent frames show the new positions without
     /// re-running the walker.
     cached_dynamic_batch: Option<blinc_gpu::PrimitiveBatch>,
+    /// True while `try_render_with_compositor` is running its inner
+    /// `render_tree_with_motion_opt(target=static_view, target_texture=None)`
+    /// step. The inner step paints the static cache; the compositor
+    /// then drives `composite_frame` separately to overlay the
+    /// `cached_dynamic_batch` onto the surface. Without this flag the
+    /// inner step also dispatched `cached_dynamic_batch` onto the
+    /// static-layer texture, so the static cache ended up containing
+    /// the motion-bound primitives at the slow-paint rotation —
+    /// subsequent frames blitted that into the surface AND
+    /// composite_frame painted them again at the current rotation,
+    /// producing two visible motion-bound primitives (the cn::spinner
+    /// double-arc symptom). The non-compositor path needs the
+    /// dispatch; the compositor path doesn't.
+    in_compositor_inner_call: bool,
     /// Per-node `LayerTexture` cache for composite-promoted CSS
     /// subtrees. The walker peels each promoted subtree's primitives
     /// into a per-node scratch batch (see
@@ -748,6 +762,7 @@ impl RenderContext {
             clear_alpha: 1.0,
             cached_bg_batch: None,
             cached_dynamic_batch: None,
+            in_compositor_inner_call: false,
             css_composited_textures: std::collections::HashMap::new(),
             css_composited_scratch_hash: std::collections::HashMap::new(),
             cached_texts: None,
@@ -7552,6 +7567,15 @@ impl RenderContext {
         };
 
         tree.set_skip_canvas_drawing(true);
+        // Tell the inner `render_tree_with_motion_opt` call NOT to
+        // dispatch `cached_dynamic_batch` onto its `target` (the
+        // static layer view) — composite_frame below handles that
+        // dispatch onto the surface. Without this gate, the motion-
+        // bound primitives end up in BOTH the static cache (at the
+        // slow-paint rotation) and the per-frame overlay (at the
+        // current rotation), which is the cn::spinner double-arc
+        // symptom.
+        self.in_compositor_inner_call = true;
         // Pass `try_fast_paint=true` so the inner call can take its
         // `apply_binding_deltas`-then-dispatch path when the cache
         // is structurally valid but pixel-stale (the
@@ -7610,6 +7634,7 @@ impl RenderContext {
             None, // suppress compositor mode inside the inner call
             inner_try_fast,
         );
+        self.in_compositor_inner_call = false;
         tree.set_skip_canvas_drawing(false);
         result?;
 
@@ -9139,25 +9164,35 @@ impl RenderContext {
         // `motion()` container. The walker routes these into a
         // separate `cached_dynamic_batch` so the compositor's
         // motion-binding fast path can patch transform / opacity
-        // in place without re-walking. The compositor dispatches
-        // it via `composite_frame`; the non-compositor path was
-        // populating the cache and then never drawing it.
+        // in place without re-walking.
+        //
+        // Gate this dispatch on `!in_compositor_inner_call`: when
+        // we're called by `try_render_with_compositor` as its inner
+        // static-layer paint step, `composite_frame` will dispatch
+        // `cached_dynamic_batch` onto the surface separately —
+        // dispatching it here too lands the motion primitives in
+        // the static cache at the slow-paint rotation, then
+        // `composite_frame` paints them again at the current
+        // rotation, producing visibly duplicated motion content
+        // (cn::spinner double-arc). The non-compositor path
+        // (wasm / iOS / fuchsia) still needs this dispatch since it
+        // never reaches `composite_frame`.
         //
         // `render_overlay` re-uploads the dynamic batch's aux_data
-        // (polygon clip vertices, etc.) before dispatch — required
-        // for the cn::spinner arc whose clip-path polygon vertices
-        // live in this batch.
-        if let Some(ref dynamic_batch) = self.cached_dynamic_batch {
-            if !dynamic_batch.primitives.is_empty() {
-                self.renderer.render_overlay(target, dynamic_batch);
-                // The dynamic batch upload clobbered the static
-                // aux_data the next text/SVG dispatch might rely
-                // on (polygon clip-paths on regular elements).
-                // Re-upload the main batch's aux_data so anything
-                // downstream sees consistent state. (The compositor
-                // path doesn't need this because composite_frame
-                // handles aux_data sequencing internally.)
-                self.renderer.update_aux_data_for_batch(&batch);
+        // (polygon clip vertices, etc.) before dispatch.
+        if !self.in_compositor_inner_call {
+            if let Some(ref dynamic_batch) = self.cached_dynamic_batch {
+                if !dynamic_batch.primitives.is_empty() {
+                    self.renderer.render_overlay(target, dynamic_batch);
+                    // The dynamic batch upload clobbered the static
+                    // aux_data the next text/SVG dispatch might rely
+                    // on (polygon clip-paths on regular elements).
+                    // Re-upload the main batch's aux_data so anything
+                    // downstream sees consistent state. (The compositor
+                    // path doesn't need this because composite_frame
+                    // handles aux_data sequencing internally.)
+                    self.renderer.update_aux_data_for_batch(&batch);
+                }
             }
         }
 
