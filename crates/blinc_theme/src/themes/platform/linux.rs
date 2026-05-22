@@ -245,7 +245,13 @@ impl LinuxTheme {
             shadow_md: vec![Shadow::new(0.0, 2.0, 4.0, 0.0, base_color.with_alpha(0.15))],
             shadow_lg: vec![Shadow::new(0.0, 3.0, 6.0, 0.0, base_color.with_alpha(0.20))],
             shadow_xl: vec![Shadow::new(0.0, 4.0, 8.0, 0.0, base_color.with_alpha(0.25))],
-            shadow_2xl: vec![Shadow::new(0.0, 6.0, 12.0, 0.0, base_color.with_alpha(0.30))],
+            shadow_2xl: vec![Shadow::new(
+                0.0,
+                6.0,
+                12.0,
+                0.0,
+                base_color.with_alpha(0.30),
+            )],
             shadow_inner: vec![Shadow::new(0.0, 1.0, 2.0, 0.0, base_color.with_alpha(0.08))],
             shadow_none: Vec::new(),
         }
@@ -260,7 +266,13 @@ impl LinuxTheme {
             shadow_md: vec![Shadow::new(0.0, 2.0, 4.0, 0.0, base_color.with_alpha(0.40))],
             shadow_lg: vec![Shadow::new(0.0, 3.0, 6.0, 0.0, base_color.with_alpha(0.50))],
             shadow_xl: vec![Shadow::new(0.0, 4.0, 8.0, 0.0, base_color.with_alpha(0.60))],
-            shadow_2xl: vec![Shadow::new(0.0, 6.0, 12.0, 0.0, base_color.with_alpha(0.70))],
+            shadow_2xl: vec![Shadow::new(
+                0.0,
+                6.0,
+                12.0,
+                0.0,
+                base_color.with_alpha(0.70),
+            )],
             shadow_inner: vec![Shadow::new(0.0, 1.0, 2.0, 0.0, base_color.with_alpha(0.20))],
             shadow_none: Vec::new(),
         }
