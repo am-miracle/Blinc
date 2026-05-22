@@ -642,6 +642,7 @@ impl RenderTree {
         check_transition!(overflow_fade, "overflow-fade");
         check_transition!(shadow_params, "box-shadow");
         check_transition!(shadow_color, "box-shadow");
+        check_transition!(shadow_stack, "box-shadow");
         check_transition!(clip_inset, "clip-path");
         check_transition!(clip_circle_radius, "clip-path");
         check_transition!(clip_ellipse_radii, "clip-path");
@@ -1098,9 +1099,23 @@ impl RenderTree {
             props.outline_offset = offset;
         }
 
-        // Shadow — animations interpolate the FIRST layer only. Multi-layer
-        // animation would need per-layer keyframe storage (follow-up).
-        if let Some([ox, oy, blur, spread]) = anim_props.shadow_params {
+        // Shadow — prefer the full compound stack when the snapshot
+        // carried one; fall back to the single-layer fields for
+        // animations that originated from `shadow_params/shadow_color`
+        // alone (older snapshots, programmatic Spring/Tween drivers
+        // that don't populate the stack).
+        if let Some(ref stack) = anim_props.shadow_stack {
+            props.shadow = stack
+                .iter()
+                .map(|l| blinc_core::Shadow {
+                    offset_x: l[0],
+                    offset_y: l[1],
+                    blur: l[2],
+                    spread: l[3],
+                    color: blinc_core::Color::rgba(l[4], l[5], l[6], l[7]),
+                })
+                .collect();
+        } else if let Some([ox, oy, blur, spread]) = anim_props.shadow_params {
             let color = if let Some([r, g, b, a]) = anim_props.shadow_color {
                 blinc_core::Color::rgba(r, g, b, a)
             } else if let Some(existing) = props.shadow.first() {
@@ -1433,17 +1448,28 @@ impl RenderTree {
         }
         kp.outline_offset = Some(props.outline_offset);
 
-        // Shadow — only the FIRST layer is snapshot for animation (see
-        // apply notes above).
-        if let Some(shadow) = props.shadow.first() {
-            kp.shadow_params = Some([shadow.offset_x, shadow.offset_y, shadow.blur, shadow.spread]);
-            kp.shadow_color = Some([
-                shadow.color.r,
-                shadow.color.g,
-                shadow.color.b,
-                shadow.color.a,
-            ]);
+        // Shadow — snapshot the whole compound stack into
+        // `shadow_stack` and mirror the first layer into the
+        // single-layer fast-path fields (the composite-promoted
+        // CssAnimPaintMeta only samples layer 0). Empty Vec is the
+        // canonical "no shadow" marker, distinct from `None` (which
+        // means "don't animate this property").
+        if let Some(first) = props.shadow.first() {
+            kp.shadow_params = Some([first.offset_x, first.offset_y, first.blur, first.spread]);
+            kp.shadow_color = Some([first.color.r, first.color.g, first.color.b, first.color.a]);
         }
+        kp.shadow_stack = Some(
+            props
+                .shadow
+                .iter()
+                .map(|s| {
+                    [
+                        s.offset_x, s.offset_y, s.blur, s.spread, s.color.r, s.color.g, s.color.b,
+                        s.color.a,
+                    ]
+                })
+                .collect(),
+        );
 
         // 3D lighting
         kp.light_intensity = props.light_intensity;

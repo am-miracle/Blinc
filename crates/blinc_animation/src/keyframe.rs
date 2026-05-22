@@ -174,10 +174,20 @@ pub struct KeyframeProperties {
     pub overflow_fade: Option<[f32; 4]>,
 
     // --- Shadow properties ---
-    /// Shadow [offset_x, offset_y, blur, spread]
+    /// Shadow [offset_x, offset_y, blur, spread] for the first layer.
+    /// Kept alongside [`shadow_stack`] for the single-layer fast paths
+    /// (e.g. composite-promoted `CssAnimPaintMeta` in motion.rs) that
+    /// only sample one layer.
     pub shadow_params: Option<[f32; 4]>,
-    /// Shadow color RGBA
+    /// Shadow color RGBA for the first layer (mirrors `shadow_params`).
     pub shadow_color: Option<[f32; 4]>,
+    /// Full compound shadow stack — each entry is
+    /// `[offset_x, offset_y, blur, spread, r, g, b, a]`. When set this
+    /// is the canonical storage; the consumer applies the whole stack
+    /// to `RenderProps.shadow` rather than just the first layer. Empty
+    /// `Vec` means "no shadow" (so transitioning from a shadow to none
+    /// fades the stack out instead of popping).
+    pub shadow_stack: Option<Vec<[f32; 8]>>,
     /// Text shadow [offset_x, offset_y, blur, spread]
     pub text_shadow_params: Option<[f32; 4]>,
     /// Text shadow color RGBA
@@ -425,6 +435,7 @@ impl KeyframeProperties {
             || self.corner_shape.is_some()
             || self.shadow_params.is_some()
             || self.shadow_color.is_some()
+            || self.shadow_stack.is_some()
             || self.text_shadow_params.is_some()
             || self.text_shadow_color.is_some()
             || self.overflow_fade.is_some()
@@ -631,6 +642,11 @@ impl KeyframeProperties {
             // Shadow
             shadow_params: lerp_opt_array4(self.shadow_params, other.shadow_params, t),
             shadow_color: lerp_opt_array4(self.shadow_color, other.shadow_color, t),
+            shadow_stack: lerp_opt_shadow_stack(
+                self.shadow_stack.as_deref(),
+                other.shadow_stack.as_deref(),
+                t,
+            ),
             text_shadow_params: lerp_opt_array4(
                 self.text_shadow_params,
                 other.text_shadow_params,
@@ -846,6 +862,37 @@ fn lerp_opt_array8(a: Option<[f32; 8]>, b: Option<[f32; 8]>, t: f32) -> Option<[
         ]),
         (None, None) => None,
     }
+}
+
+/// Element-wise interpolation of a compound shadow stack. When the two
+/// stacks differ in length, the shorter side is padded with a fully
+/// transparent layer (zeros) so the extra layers fade in / out during
+/// the transition instead of popping. Mirrors `box-shadow:` lerp
+/// behaviour in CSS Level 4. Returns `None` only when both inputs are
+/// `None`.
+fn lerp_opt_shadow_stack(
+    a: Option<&[[f32; 8]]>,
+    b: Option<&[[f32; 8]]>,
+    t: f32,
+) -> Option<Vec<[f32; 8]>> {
+    if a.is_none() && b.is_none() {
+        return None;
+    }
+    let a = a.unwrap_or(&[]);
+    let b = b.unwrap_or(&[]);
+    let n = a.len().max(b.len());
+    let zero = [0.0f32; 8];
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let from = a.get(i).copied().unwrap_or(zero);
+        let to = b.get(i).copied().unwrap_or(zero);
+        let mut layer = [0.0f32; 8];
+        for j in 0..8 {
+            layer[j] = from[j] + (to[j] - from[j]) * t;
+        }
+        out.push(layer);
+    }
+    Some(out)
 }
 
 /// A keyframe with multiple animated properties
