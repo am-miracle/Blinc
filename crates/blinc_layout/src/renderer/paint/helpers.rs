@@ -175,8 +175,22 @@ pub fn resolve_corner_shape(
     // elements, but kept as a belt-and-braces guard for paths that
     // can't measure bounds.
     let full_cutoff = radius_full * 0.99;
+    // Per-corner "near full circle" cutoff. The `is_pill` guard
+    // above requires ALL corners to be ~half-short to short-circuit
+    // to ROUND, but an asymmetric corner radius — e.g. one rounded
+    // corner near the half-short ceiling and one square corner —
+    // still wants the round corner to render as a true circle (the
+    // squircle exponent makes a near-full-circle corner visibly
+    // wobble against the element's own outline). Treat any single
+    // corner ≥ 90 % of the shorter half-dimension as a true
+    // circle. The threshold is loose enough to catch obvious
+    // full-circle intents (avatars, switches' thumbs, spinner
+    // rings) while leaving room for moderately-rounded shapes
+    // (chip / button radii at 30–60 % of half-short) to keep the
+    // theme's squircle exponent.
+    let near_full_corner = half_short * 0.90;
     let nf = |r: f32| -> f32 {
-        if r >= full_cutoff || r < threshold {
+        if r >= full_cutoff || r >= near_full_corner || r < threshold {
             1.0
         } else {
             n

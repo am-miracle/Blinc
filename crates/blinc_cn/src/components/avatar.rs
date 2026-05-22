@@ -168,6 +168,12 @@ struct AvatarConfig {
     fallback_bg: Option<Color>,
     /// Custom text color for fallback
     fallback_color: Option<Color>,
+    /// Optional separator ring drawn on the avatar's own outer div
+    /// (NOT a wrapper). Used by `AvatarGroupBuilder` to give each
+    /// avatar a single-primitive border that anti-aliases cleanly,
+    /// the same way the spinner track does — no nested wrapper, no
+    /// co-located AA edges.
+    ring: Option<(Color, f32)>,
     /// User-added CSS classes
     classes: Vec<std::sync::Arc<str>>,
     /// User-set element ID
@@ -225,7 +231,14 @@ impl BuiltAvatar {
             (Some(bg), AvatarContent::Initials(placeholder))
         };
 
-        // Build the inner avatar container (with clipping for image/initials)
+        // Build the inner avatar container (with clipping for image/initials).
+        // When `config.ring` is set (the AvatarGroup case), we add the
+        // border directly to this div so the WHOLE avatar — bg, border,
+        // rounded corners — emits as a SINGLE SDF primitive. That's the
+        // same single-primitive recipe spinner_track / switch thumb /
+        // slider thumb use, and it's why their edges are smooth: one
+        // primitive means one AA gradient at the curve, no co-located
+        // doubling against a wrapper.
         let mut inner = div()
             .class("cn-avatar")
             .w(size_px)
@@ -243,6 +256,15 @@ impl BuiltAvatar {
         // Apply background if needed (for fallback)
         if let Some(bg) = background {
             inner = inner.bg(bg);
+        }
+
+        // Apply the separator ring directly on this div. The renderer
+        // merges uniform border + bg into a single primitive via
+        // `fill_rect_with_per_side_border`, so the SDF AA gradient at
+        // the rounded edge handles border + bg together — no second
+        // primitive, no co-located AA.
+        if let Some((color, width)) = config.ring {
+            inner = inner.border(width, color);
         }
 
         // Add content
@@ -405,6 +427,16 @@ impl AvatarBuilder {
         self
     }
 
+    /// Add a separator ring directly on the avatar's own outer div
+    /// (used by `AvatarGroupBuilder` to give each avatar a single-
+    /// primitive border that anti-aliases cleanly). The border merges
+    /// with the avatar's bg into one SDF primitive — same recipe the
+    /// spinner track uses — so the edge stays smooth at any radius.
+    pub fn ring(self, color: impl Into<Color>, width: f32) -> Self {
+        self.config.borrow_mut().ring = Some((color.into(), width));
+        self
+    }
+
     /// Add a CSS class for selector matching
     pub fn class(self, name: impl AsRef<str>) -> Self {
         self.config
@@ -564,7 +596,7 @@ pub fn avatar_group() -> AvatarGroupBuilder {
 /// Configuration for avatar group
 struct AvatarGroupConfig {
     /// Avatars in the group
-    avatars: Vec<Box<dyn ElementBuilder>>,
+    avatars: Vec<AvatarBuilder>,
     /// Size for all avatars
     size: AvatarSize,
     /// Maximum avatars to show (rest shows as +N)
@@ -610,43 +642,41 @@ impl BuiltAvatarGroup {
         let visible_count = config.max.unwrap_or(total).min(total);
         let remaining = total.saturating_sub(visible_count);
 
-        // Add visible avatars with overlap. The wrapper's ring is
-        // sized to match the typical parent context (Surface — cards,
-        // panels, sheets) so it reads as a clean punch-out separator
-        // between overlapping avatars rather than a coloured halo.
-        // Border adds 2px on each side, so total wrapper size is size_px + 4
-        let wrapper_size = size_px + 4.0;
-        let wrapper_radius = wrapper_size / 2.0;
+        // Single-primitive ring (no wrapper): each avatar gets its
+        // border applied DIRECTLY on its own outer div via
+        // `AvatarBuilder::ring(...)`. The renderer merges the
+        // border + bg + rounded corner into a single SDF primitive
+        // — same single-primitive recipe `cn::spinner`'s track
+        // and `cn::switch` / `cn::slider`'s thumbs use — so each
+        // avatar's edge is one smooth AA gradient. Avoids the
+        // wrapper-vs-inner co-located AA that previously layered
+        // two ~50 %-alpha gradients at the same curve and let parent
+        // bg leak through as a faint "doubled" outline.
         let ring_color = theme.color(ColorToken::Surface);
 
         for (i, avatar) in config.avatars.into_iter().take(visible_count).enumerate() {
-            // Each avatar after the first gets negative margin for overlap
-            // No overflow_clip - let the avatar's own clipping handle it
-            let mut avatar_wrapper = div()
-                .class("cn-avatar-group__item")
-                .w(wrapper_size)
-                .h(wrapper_size)
-                .rounded(wrapper_radius)
-                .border(2.0, ring_color)
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .child_box(avatar);
-
-            if i > 0 {
-                avatar_wrapper = avatar_wrapper.ml(overlap_units);
-            }
-
-            container = container.child(avatar_wrapper);
+            let prepared = avatar.ring(ring_color, 2.0);
+            // Negative margin for overlap. Wrap in a layout-only div
+            // (no bg/border/rounded — purely for the `ml` margin) so
+            // it can't introduce a second primitive at the avatar's
+            // outer edge.
+            let positioned = if i > 0 {
+                div().ml(overlap_units).child(prepared)
+            } else {
+                div().child(prepared)
+            };
+            container = container.child(positioned);
         }
 
-        // Add "+N" indicator if there are remaining avatars
+        // Add "+N" indicator if there are remaining avatars. Same
+        // single-primitive recipe as the avatars themselves: bg +
+        // border + rounded on one div, no wrapper.
         if remaining > 0 {
             let remaining_indicator = div()
                 .class("cn-avatar-group__more")
-                .w(wrapper_size)
-                .h(wrapper_size)
-                .rounded(wrapper_radius)
+                .w(size_px)
+                .h(size_px)
+                .rounded(size_px / 2.0)
                 .bg(theme.color(ColorToken::SurfaceElevated))
                 .border(2.0, ring_color)
                 .flex_row()
@@ -726,9 +756,16 @@ impl AvatarGroupBuilder {
         })
     }
 
-    /// Add an avatar to the group
-    pub fn child(self, avatar: impl ElementBuilder + 'static) -> Self {
-        self.config.borrow_mut().avatars.push(Box::new(avatar));
+    /// Add an avatar to the group. Takes an `AvatarBuilder`
+    /// specifically (not a generic ElementBuilder) so the group can
+    /// call `.ring(...)` on each one before it materialises —
+    /// applying the separator border to the avatar's own outer div
+    /// instead of wrapping it. That keeps each avatar a single SDF
+    /// primitive, which is what makes its edge AA cleanly (the
+    /// same reason `cn::spinner`'s track and `cn::switch`'s thumb
+    /// render smoothly).
+    pub fn child(self, avatar: AvatarBuilder) -> Self {
+        self.config.borrow_mut().avatars.push(avatar);
         self
     }
 
