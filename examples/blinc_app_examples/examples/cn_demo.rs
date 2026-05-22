@@ -12,7 +12,25 @@ use blinc_cn::prelude::*;
 use blinc_core::Color;
 use blinc_layout::selector::ScrollRef;
 use blinc_layout::widgets::text_input::text_input_data;
-use blinc_theme::{ColorToken, ThemeState};
+use blinc_theme::{ColorToken, ThemeBundle, ThemeState};
+
+/// Theme bundle shared by the desktop entry point and the wasm
+/// wrapper. The `build-web-examples` codegen detects this `pub fn`
+/// and hands the returned bundle to `ThemeState::init` before
+/// `WebApp::run`, so the cn `with_css(CN_STYLES)` payload + the
+/// `#css-overrides` rules land on both targets identically.
+pub fn theme_bundle() -> ThemeBundle {
+    HybridTheme::bundle()
+        .with_css(blinc_cn::cn_styles::CN_STYLES)
+        .with_css(
+            r#"
+                #css-overrides .cn-button--primary { border-radius: 0; }
+                #css-overrides .cn-button--destructive:hover { background: var(--primary); }
+                #css-overrides .cn-badge--success { background: #00cc66; }
+                #css-demo-card { border-width: 2px; border-color: var(--primary); }
+            "#,
+        )
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
@@ -37,16 +55,7 @@ fn main() -> Result<()> {
 
     WindowedApp::run_with_theme(
         config,
-        HybridTheme::bundle()
-            .with_css(blinc_cn::cn_styles::CN_STYLES)
-            .with_css(
-                r#"
-                #css-overrides .cn-button--primary { border-radius: 0; }
-                #css-overrides .cn-button--destructive:hover { background: var(--primary); }
-                #css-overrides .cn-badge--success { background: #00cc66; }
-                #css-demo-card { border-width: 2px; border-color: var(--primary); }
-            "#,
-            ),
+        theme_bundle(),
         blinc_theme::detect_system_color_scheme(),
         build_ui,
     )
@@ -696,7 +705,7 @@ fn alerts_section() -> impl ElementBuilder {
 // FORM INPUTS SECTION
 // ============================================================================
 
-fn form_inputs_section(_ctx: &WindowedContext) -> impl ElementBuilder {
+fn form_inputs_section(ctx: &WindowedContext) -> impl ElementBuilder {
     let username_data = text_input_data();
     let email_data = text_input_data();
     let password_data = text_input_data();
@@ -708,15 +717,14 @@ fn form_inputs_section(_ctx: &WindowedContext) -> impl ElementBuilder {
             div()
                 .flex_row()
                 .w_full()
-                .justify_between()
-                .gap_px(4.0)
+                .gap_px(24.0)
                 .h_fit()
                 // Column 1: Text inputs
                 .child(
                     div()
                         .flex_col()
                         .flex_wrap()
-                        .w(280.0)
+                        .w(300.0)
                         .h_fit()
                         .gap_px(16.0)
                         .child(
@@ -748,8 +756,7 @@ fn form_inputs_section(_ctx: &WindowedContext) -> impl ElementBuilder {
                             cn::textarea(&bio_state)
                                 .label("Bio")
                                 .placeholder("Tell us about yourself...")
-                                .rows(4)
-                                .w(280.0),
+                                .rows(4).w(300.0),
                         )
                         .child(cn::label("Labels can be standalone")),
                 ),

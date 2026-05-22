@@ -60,6 +60,7 @@
   - [KHR_texture_transform](./web/example-gallery/texture_transform_demo.md)
   - [Theme System](./web/example-gallery/theme_demo.md)
   - [Timeline Animation](./web/example-gallery/timeline_demo.md)
+  - [Transparent window — regression test for GH #34.](./web/example-gallery/transparent_window.md)
   - [Typography](./web/example-gallery/typography_demo.md)
   - [Video Player](./web/example-gallery/video_demo.md)
   - [Wet Glass](./web/example-gallery/wet_glass_demo.md)

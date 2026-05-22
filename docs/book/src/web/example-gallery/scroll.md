@@ -1,10 +1,10 @@
 # Scroll Container
 
-This example demonstrates the scroll widget with webkit-style
+This example demonstrates the scroll widget with opt-in webkit-style
 bounce physics, glass clipping, and scroll event handling.
 
 Features demonstrated:
-- `scroll()` container with bounce physics
+- `ScrollConfig::bouncy()` for opt-in bounce physics
 - Glass elements clipping properly inside scroll
 - Scroll event handling with delta reporting
 - Spring animation for edge bounce
