@@ -64,11 +64,7 @@ impl RenderTree {
     /// gap: given a `node_id` whose class has an `animation` rule,
     /// it resolves the keyframes block and registers the
     /// `ActiveCssAnimation` against the node's stable id.
-    pub fn start_css_animation_for_class(
-        &mut self,
-        node_id: LayoutNodeId,
-        class: &str,
-    ) -> bool {
+    pub fn start_css_animation_for_class(&mut self, node_id: LayoutNodeId, class: &str) -> bool {
         let stylesheet = match &self.stylesheet {
             Some(s) => s.clone(),
             None => return false,

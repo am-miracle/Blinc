@@ -524,7 +524,7 @@ impl IOSRenderContext {
     pub fn build_ui<F, E>(&mut self, ui_builder: F)
     where
         F: FnOnce(&mut WindowedContext) -> E,
-        E: ElementBuilder,
+        E: ElementBuilder + 'static,
     {
         // Clear dirty flag
         self.ref_dirty_flag.swap(false, Ordering::SeqCst);

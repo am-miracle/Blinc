@@ -705,7 +705,7 @@ fn alerts_section() -> impl ElementBuilder {
 // FORM INPUTS SECTION
 // ============================================================================
 
-fn form_inputs_section(ctx: &WindowedContext) -> impl ElementBuilder {
+fn form_inputs_section(_ctx: &WindowedContext) -> impl ElementBuilder {
     let username_data = text_input_data();
     let email_data = text_input_data();
     let password_data = text_input_data();
