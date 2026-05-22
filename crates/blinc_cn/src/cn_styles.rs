@@ -1009,9 +1009,16 @@ pub const CN_STYLES: &str = r#"
     padding: var(--space-1);
 }
 .cn-menubar-item {
+    /* Match `.cn-dropdown-item` / `.cn-context-menu-item` so all three
+       menu primitives share the same row chrome. The Rust builder
+       applies a smaller `.py / .px` to set a sensible fallback when
+       cn_styles isn't loaded; this CSS rule overrides it when the
+       stylesheet IS present. */
+    padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-primary);
+    font-size: var(--text-sm);
     /* No CSS `transition` here — when the cursor moves across menu rows
        quickly, the transition trail leaves multiple rows partially
        highlighted (each at a different point in the fade-out animation),
