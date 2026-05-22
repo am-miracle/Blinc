@@ -61,6 +61,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         "Current theme platform: {:?}",
         blinc_theme::platform::Platform::current()
     );
+    eprintln!("Theme color scheme: {:?}", theme.scheme());
     let bg = theme.color(ColorToken::Background);
 
     // Create scroll ref to track scroll position
@@ -412,7 +413,7 @@ fn section_container() -> Div {
         .h_fit()
         .bg(surface)
         .rounded(radius)
-        .border(1.5, border)
+        .border(1.0, border)
         .p(theme.spacing().space_1)
         .flex_col()
         .gap(theme.spacing().space_3)
@@ -1604,11 +1605,7 @@ fn drawer_section(_ctx: &WindowedContext) -> impl ElementBuilder {
 // LOADING SECTION (Skeleton, Spinner)
 // ============================================================================
 
-fn loading_section(ctx: &WindowedContext) -> impl ElementBuilder {
-    let timeline1 = ctx.use_animated_timeline_for("spinner1");
-    let timeline2 = ctx.use_animated_timeline_for("spinner2");
-    let timeline3 = ctx.use_animated_timeline_for("spinner3");
-
+fn loading_section(_ctx: &WindowedContext) -> impl ElementBuilder {
     section_container()
         .child(section_title("Loading States"))
         .child(
@@ -1628,15 +1625,15 @@ fn loading_section(ctx: &WindowedContext) -> impl ElementBuilder {
                 )
                 // Avatar skeleton
                 .child(cn::skeleton_circle(48.0))
-                // Spinners
+                // Spinners — timeline is constructed internally now.
                 .child(
                     div()
                         .flex_row()
                         .gap(16.0)
                         .items_center()
-                        .child(cn::spinner(timeline1).size(SpinnerSize::Small))
-                        .child(cn::spinner(timeline2).size(SpinnerSize::Medium))
-                        .child(cn::spinner(timeline3).size(SpinnerSize::Large)),
+                        .child(cn::spinner().size(SpinnerSize::Small))
+                        .child(cn::spinner().size(SpinnerSize::Medium))
+                        .child(cn::spinner().size(SpinnerSize::Large)),
                 ),
         )
 }

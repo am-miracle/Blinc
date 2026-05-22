@@ -29,10 +29,7 @@ fn main() -> Result<()> {
     };
 
     WindowedApp::run(config, |ctx| {
-        let timeline_small = ctx.use_animated_timeline();
-        let timeline_medium = ctx.use_animated_timeline();
-        let timeline_large = ctx.use_animated_timeline();
-
+       
         div()
             .w(ctx.width)
             .h(ctx.height)
@@ -41,8 +38,8 @@ fn main() -> Result<()> {
             .gap(40.0)
             .items_center()
             .justify_center()
-            .child(cn::spinner(timeline_small).size(SpinnerSize::Small))
-            .child(cn::spinner(timeline_medium).size(SpinnerSize::Medium))
-            .child(cn::spinner(timeline_large).size(SpinnerSize::Large))
+            .child(cn::spinner().size(SpinnerSize::Small))
+            .child(cn::spinner().size(SpinnerSize::Medium))
+            .child(cn::spinner().size(SpinnerSize::Large))
     })
 }
