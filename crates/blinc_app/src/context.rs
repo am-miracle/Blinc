@@ -1238,8 +1238,19 @@ impl RenderContext {
         // batch's aux array and can't be safely merged without
         // re-indexing them).
         let out = scratch.take_dynamic_batch();
+        let stranded_static = scratch.take_batch();
+        // Diagnostic for the spinner double-arc investigation. Enable
+        // with `RUST_LOG=blinc_app::spinner_debug=trace`.
+        tracing::trace!(
+            target: "blinc_app::spinner_debug",
+            regions = ordered.len(),
+            dyn_prims = out.primitives.len(),
+            aux_data = out.aux_data.len(),
+            stranded_static_prims = stranded_static.primitives.len(),
+            "collect_dynamic_region_primitives",
+        );
         debug_assert!(
-            scratch.take_batch().primitives.is_empty(),
+            stranded_static.primitives.is_empty(),
             "collect_dynamic_region_primitives: scratch.batch should be empty — \
              region re-walk emitted outside its motion-subtree gate"
         );
@@ -7059,6 +7070,14 @@ impl RenderContext {
                 // local Vec — at most a few hundred entries on a
                 // motion-heavy frame, well under 1 µs to copy.
                 let dyn_aux_owned: Vec<[f32; 4]> = dyn_aux.to_vec();
+                tracing::trace!(
+                    target: "blinc_app::spinner_debug",
+                    overlay_prims = overlay.primitives.len(),
+                    overlay_aux = dyn_aux_owned.len(),
+                    cached_bg_prims = self.cached_bg_batch.as_ref().map(|b| b.primitives.len()).unwrap_or(0),
+                    cached_dyn_prims = self.cached_dynamic_batch.as_ref().map(|b| b.primitives.len()).unwrap_or(0),
+                    "css_patch_dispatch_composite_frame",
+                );
                 self.rebind_glyph_atlas_for_overlay();
                 self.renderer.composite_frame(
                     target_view,
@@ -7398,6 +7417,14 @@ impl RenderContext {
                 }
                 // See sibling site above — same borrow workaround.
                 let dyn_aux_owned: Vec<[f32; 4]> = dyn_aux.to_vec();
+                tracing::trace!(
+                    target: "blinc_app::spinner_debug",
+                    overlay_prims = overlay.primitives.len(),
+                    overlay_aux = dyn_aux_owned.len(),
+                    cached_bg_prims = self.cached_bg_batch.as_ref().map(|b| b.primitives.len()).unwrap_or(0),
+                    cached_dyn_prims = dyn_prims.len(),
+                    "fast_dispatch_composite_frame",
+                );
                 self.rebind_glyph_atlas_for_overlay();
                 self.renderer.composite_frame(
                     target_view,
@@ -7655,6 +7682,14 @@ impl RenderContext {
                 overlay.primitives.extend_from_slice(&dyn_batch.primitives);
             }
         }
+        tracing::trace!(
+            target: "blinc_app::spinner_debug",
+            overlay_prims = overlay.primitives.len(),
+            overlay_aux = overlay_aux.len(),
+            cached_bg_prims = self.cached_bg_batch.as_ref().map(|b| b.primitives.len()).unwrap_or(0),
+            cached_dyn_prims = self.cached_dynamic_batch.as_ref().map(|b| b.primitives.len()).unwrap_or(0),
+            "slow_dispatch_composite_frame",
+        );
         self.rebind_glyph_atlas_for_overlay();
         self.renderer.composite_frame(
             target_view,
@@ -7937,7 +7972,15 @@ impl RenderContext {
         // motion-binding frame. On the full path we replace it with
         // the freshly-emitted batch.
         if !used_fast_paint {
-            self.cached_dynamic_batch = Some(ctx.take_dynamic_batch());
+            let dyn_batch = ctx.take_dynamic_batch();
+            tracing::trace!(
+                target: "blinc_app::spinner_debug",
+                bg_prims = batch.primitives.len(),
+                dyn_prims = dyn_batch.primitives.len(),
+                dyn_aux = dyn_batch.aux_data.len(),
+                "slow_paint_take_batches",
+            );
+            self.cached_dynamic_batch = Some(dyn_batch);
         }
 
         // Take any 3D mesh draws captured via `ctx.draw_mesh_data(...)`

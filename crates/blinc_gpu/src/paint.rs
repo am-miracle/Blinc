@@ -2317,6 +2317,21 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             border = [0.0, shape_count, aux_offset, max_depth];
         }
 
+        if clip_type == ClipType::Polygon {
+            tracing::trace!(
+                target: "blinc_app::spinner_debug",
+                site = "fill_rect",
+                bounds_x = transformed.x(),
+                bounds_y = transformed.y(),
+                bounds_w = transformed.width(),
+                bounds_h = transformed.height(),
+                clip_vertex_count = clip_radius[2],
+                clip_aux_offset = clip_radius[3],
+                in_motion_subtree = self.motion_subtree_depth > 0,
+                "emit_polygon_clipped_prim",
+            );
+        }
+
         let primitive = GpuPrimitive {
             bounds: [
                 transformed.x(),
@@ -2582,6 +2597,22 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
         };
 
+        // Spinner-arc diagnostic.
+        if clip_type == ClipType::Polygon {
+            tracing::trace!(
+                target: "blinc_app::spinner_debug",
+                site = "fill_rect_with_per_side_border",
+                bounds_x = primitive.bounds[0],
+                bounds_y = primitive.bounds[1],
+                bounds_w = primitive.bounds[2],
+                bounds_h = primitive.bounds[3],
+                clip_vertex_count = primitive.clip_radius[2],
+                clip_aux_offset = primitive.clip_radius[3],
+                in_motion_subtree = self.motion_subtree_depth > 0,
+                "emit_polygon_clipped_prim",
+            );
+        }
+
         if self.is_foreground {
             self.active_batch_mut().push_foreground(primitive);
         } else {
@@ -2644,6 +2675,21 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                 self.z_layer,
             ],
         };
+
+        if clip_type == ClipType::Polygon {
+            tracing::trace!(
+                target: "blinc_app::spinner_debug",
+                site = "stroke_rect",
+                bounds_x = primitive.bounds[0],
+                bounds_y = primitive.bounds[1],
+                bounds_w = primitive.bounds[2],
+                bounds_h = primitive.bounds[3],
+                clip_vertex_count = primitive.clip_radius[2],
+                clip_aux_offset = primitive.clip_radius[3],
+                in_motion_subtree = self.motion_subtree_depth > 0,
+                "emit_polygon_clipped_prim",
+            );
+        }
 
         if self.is_foreground {
             self.active_batch_mut().push_foreground(primitive);
