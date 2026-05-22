@@ -747,7 +747,7 @@ fn build_dropdown_content(
         .flex_row()
         .items_center()
         .justify_center()
-        .pb(padding/8.0)
+        .pb(padding / 8.0)
         .border_bottom(1.0, border)
         .child(search_input);
 

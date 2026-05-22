@@ -330,11 +330,11 @@ impl ToastTray {
         // pixels.
         const INSET: f32 = 16.0;
         const TOAST_WIDTH: f32 = 360.0; // matches `cn::toast`'s `.w(360.0)`
-        // Height is approximate (we don't know the real per-toast height
-        // until layout completes). For first-cut stacking we assume a
-        // typical 2-line title+description card. Toasts with action
-        // buttons or `body()` content may overlap slightly; revisit when
-        // a measured-height feedback pass exists.
+                                        // Height is approximate (we don't know the real per-toast height
+                                        // until layout completes). For first-cut stacking we assume a
+                                        // typical 2-line title+description card. Toasts with action
+                                        // buttons or `body()` content may overlap slightly; revisit when
+                                        // a measured-height feedback pass exists.
         const ESTIMATED_TOAST_HEIGHT: f32 = 90.0;
 
         let mut layer = Div::new()
@@ -609,9 +609,7 @@ impl ToastBuilder {
             auto_after_ms: self.auto_after_ms,
             exiting: false,
             dismiss_on_click: self.dismiss_on_click,
-            content_fn: self
-                .content_fn
-                .unwrap_or_else(|| Arc::new(|| Div::new())),
+            content_fn: self.content_fn.unwrap_or_else(|| Arc::new(Div::new)),
             on_close: self.on_close,
             motion_enter: Some(motion_enter),
             motion_exit: Some(motion_exit),
@@ -647,7 +645,7 @@ mod tests {
             auto_after_ms: auto_after,
             exiting: false,
             dismiss_on_click: true,
-            content_fn: Arc::new(|| Div::new()),
+            content_fn: Arc::new(Div::new),
             on_close: None,
             motion_enter: None,
             motion_exit: None,

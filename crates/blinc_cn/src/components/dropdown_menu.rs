@@ -509,10 +509,10 @@ fn spawn_dropdown_menu(
     let menu_id = format!("cn-dropdown-menu-{}", next_handle_id);
     let click_outside_key = format!("dropdown_menu:{}", next_handle_id);
 
-    let id_chain: State<Vec<String>> = BlincContextState::get().use_state_keyed(
-        &format!("dropdown_menu_chain_{}", next_handle_id),
-        || Vec::<String>::new(),
-    );
+    let id_chain: State<Vec<String>> = BlincContextState::get()
+        .use_state_keyed(&format!("dropdown_menu_chain_{}", next_handle_id), || {
+            Vec::<String>::new()
+        });
     id_chain.set(vec![menu_id.clone()]);
 
     let click_outside_key_for_close = click_outside_key.clone();
@@ -563,6 +563,7 @@ fn spawn_dropdown_menu(
 
 /// Push a submenu to the right of a parent item. Item clicks on leaves close
 /// `root_handle` (closing the whole chain via stack cascade).
+#[allow(clippy::too_many_arguments)]
 fn spawn_dropdown_submenu(
     x: f32,
     y: f32,
@@ -749,13 +750,15 @@ fn build_dropdown_menu_div(
                 .pointer_events_none();
 
             let right_side: Option<Div> = if let Some(ref shortcut) = item_shortcut {
-                Some(div().child(
-                    text(shortcut)
-                        .size(font_size - 2.0)
-                        .color(shortcut_color)
-                        .monospace()
-                        .no_cursor(),
-                ))
+                Some(
+                    div().child(
+                        text(shortcut)
+                            .size(font_size - 2.0)
+                            .color(shortcut_color)
+                            .monospace()
+                            .no_cursor(),
+                    ),
+                )
             } else if has_submenu {
                 let chevron_right = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
                 Some(

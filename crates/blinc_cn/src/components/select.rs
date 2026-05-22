@@ -239,9 +239,7 @@ impl Select {
                     .find(|opt| opt.value == current_val);
 
                 let is_placeholder = selected_option.is_none();
-                let text_clr = if disabled {
-                    text_tertiary
-                } else if is_placeholder {
+                let text_clr = if disabled || is_placeholder {
                     text_tertiary
                 } else {
                     text_color

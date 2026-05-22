@@ -29,7 +29,6 @@ fn main() -> Result<()> {
     };
 
     WindowedApp::run(config, |ctx| {
-       
         div()
             .w(ctx.width)
             .h(ctx.height)

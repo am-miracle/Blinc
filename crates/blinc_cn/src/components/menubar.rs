@@ -646,7 +646,7 @@ fn spawn_menubar_dropdown(
             handle_state_for_close.set(None);
         })
         .content(move || {
-            let menu = build_menubar_menu_div(
+            build_menubar_menu_div(
                 &items,
                 min_width,
                 menu_handle,
@@ -662,8 +662,7 @@ fn spawn_menubar_dropdown(
                 radius,
                 font_size,
                 padding,
-            );
-            menu
+            )
         })
         .show();
 
@@ -873,13 +872,15 @@ fn build_menubar_menu_div(
                 .pointer_events_none();
 
             let right_side: Option<Div> = if let Some(ref shortcut) = item_shortcut {
-                Some(div().child(
-                    text(shortcut)
-                        .size(font_size - 2.0)
-                        .color(shortcut_color)
-                        .monospace()
-                        .no_cursor(),
-                ))
+                Some(
+                    div().child(
+                        text(shortcut)
+                            .size(font_size - 2.0)
+                            .color(shortcut_color)
+                            .monospace()
+                            .no_cursor(),
+                    ),
+                )
             } else if has_submenu {
                 let chevron_right = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
                 Some(

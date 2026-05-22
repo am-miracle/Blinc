@@ -132,11 +132,7 @@ impl Badge {
         icon: Option<Box<dyn ElementBuilder>>,
         icon_position: IconPosition,
     ) -> Self {
-        let variant_class = format!(
-            "cn-badge--{}-{}",
-            style.css_suffix(),
-            variant.css_suffix()
-        );
+        let variant_class = format!("cn-badge--{}-{}", style.css_suffix(), variant.css_suffix());
 
         // Content row: optional icon + label. The icon's colour
         // comes from CSS descendant rules
@@ -150,11 +146,7 @@ impl Badge {
             .justify_center();
         let badge_body = match icon {
             Some(icon_el) => {
-                let row = div()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .gap_px(4.0);
+                let row = div().flex_row().items_center().justify_center().gap_px(4.0);
                 let row = match icon_position {
                     IconPosition::Start => row.child_box(icon_el).child(label_text),
                     IconPosition::End => row.child(label_text).child_box(icon_el),
@@ -222,13 +214,7 @@ impl Badge {
 
     /// Position the icon before (default) or after the label.
     pub fn icon_position(self, position: IconPosition) -> Self {
-        Self::rebuild(
-            self.label,
-            self.variant,
-            self.style,
-            self.icon,
-            position,
-        )
+        Self::rebuild(self.label, self.variant, self.style, self.icon, position)
     }
 
     /// Add a CSS class for selector matching.
@@ -330,7 +316,9 @@ mod tests {
     #[test]
     fn test_badge_icon() {
         init_theme();
-        let _ = badge("Shipped").variant(BadgeVariant::Success).icon(text("✓"));
+        let _ = badge("Shipped")
+            .variant(BadgeVariant::Success)
+            .icon(text("✓"));
         let _ = badge("End")
             .icon(text("→"))
             .icon_position(IconPosition::End);

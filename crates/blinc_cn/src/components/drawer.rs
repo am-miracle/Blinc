@@ -236,8 +236,12 @@ impl DrawerBuilder {
 
         // Slide from the edge the drawer is anchored to.
         let enter_animation = match side {
-            DrawerSide::Left => AnimationPreset::slide_in_left(self.animation_duration, drawer_width),
-            DrawerSide::Right => AnimationPreset::slide_in_right(self.animation_duration, drawer_width),
+            DrawerSide::Left => {
+                AnimationPreset::slide_in_left(self.animation_duration, drawer_width)
+            }
+            DrawerSide::Right => {
+                AnimationPreset::slide_in_right(self.animation_duration, drawer_width)
+            }
         };
         let exit_animation = {
             let d = (self.animation_duration as f32 * 0.7) as u32;

@@ -200,8 +200,7 @@ impl Switch {
         if !disabled {
             thumb_element = thumb_element.shadow_sm();
         } else {
-            thumb_element =
-                thumb_element.border(1.0, theme.color(ColorToken::BorderSecondary));
+            thumb_element = thumb_element.border(1.0, theme.color(ColorToken::BorderSecondary));
         }
 
         let animated_thumb = motion().translate_x(thumb_anim).child(thumb_element);
@@ -270,7 +269,11 @@ impl Switch {
                 .items_center()
                 .cursor_pointer()
                 .child(switch)
-                .child(text(label_text).size(theme.typography().text_sm).color(label_color))
+                .child(
+                    text(label_text)
+                        .size(theme.typography().text_sm)
+                        .color(label_color),
+                )
         } else {
             // Wrap single switch in a div for consistent behavior
             div().child(switch)

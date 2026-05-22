@@ -204,6 +204,36 @@ pub fn resolve_corner_shape(
     )
 }
 
+/// Apply opacity to a brush by modifying its alpha component
+pub(crate) fn apply_opacity_to_brush(brush: &Brush, opacity: f32) -> Brush {
+    match brush {
+        Brush::Solid(color) => {
+            Brush::Solid(Color::rgba(color.r, color.g, color.b, color.a * opacity))
+        }
+        Brush::Gradient(gradient) => {
+            // For gradients, we'd need to modify both start and end colors
+            // For now, just return the gradient as-is
+            // TODO: Apply opacity to gradient stops
+            Brush::Gradient(gradient.clone())
+        }
+        Brush::Glass(glass) => {
+            // Glass already has its own opacity handling
+            Brush::Glass(*glass)
+        }
+        Brush::Image(image) => {
+            // Image brushes - return as-is for now
+            // TODO: Apply opacity to image brush
+            Brush::Image(image.clone())
+        }
+        Brush::Blur(blur) => {
+            // Blur with adjusted opacity
+            let mut blur_adjusted = *blur;
+            blur_adjusted.opacity *= opacity;
+            Brush::Blur(blur_adjusted)
+        }
+    }
+}
+
 #[cfg(test)]
 mod resolve_corner_shape_tests {
     use super::*;
@@ -262,28 +292,19 @@ mod resolve_corner_shape_tests {
 
     #[test]
     fn shape_locked_keeps_explicit_round() {
-        // Floating-overlay opt-out: when a widget sets
-        // `corner_shape_locked = true` (e.g. via `.lock_corner_shape()`),
-        // the resolver returns the explicit shape unchanged even if
-        // it's the default ROUND. Popovers / dropdowns / select
-        // menus use this to keep their corners circular under any
-        // theme.
         let resolved = resolve_corner_shape(
             CornerShape::ROUND,
             CornerRadius::uniform(20.0),
             REC,
             &hybrid_shape(),
             9999.0,
-            true, // shape_locked
+            true,
         );
         assert_eq!(resolved, CornerShape::ROUND);
     }
 
     #[test]
     fn pill_stays_true_round() {
-        // Spinner / capsule pattern: square element with radius =
-        // half-side. The visible shape is a circle; substituting
-        // squircle `n` would wobble it. Resolver must keep ROUND.
         let resolved = resolve_corner_shape(
             CornerShape::ROUND,
             CornerRadius::uniform(16.0),
@@ -297,9 +318,6 @@ mod resolve_corner_shape_tests {
 
     #[test]
     fn horizontal_pill_stays_round() {
-        // Wide pill: 200×40 with radius 20 = half the shorter side.
-        // The rendered shape is two semicircles joined by a flat
-        // edge; substituting squircle would deform the half-circles.
         let resolved = resolve_corner_shape(
             CornerShape::ROUND,
             CornerRadius::uniform(20.0),
@@ -313,8 +331,6 @@ mod resolve_corner_shape_tests {
 
     #[test]
     fn near_pill_with_one_smaller_corner_takes_theme() {
-        // Three corners at the pill ceiling but one corner pinned to
-        // a smaller radius — not a clean pill, so the theme applies.
         let resolved = resolve_corner_shape(
             CornerShape::ROUND,
             CornerRadius::new(20.0, 20.0, 20.0, 4.0),
@@ -323,8 +339,6 @@ mod resolve_corner_shape_tests {
             9999.0,
             false,
         );
-        // The 4.0 corner is below threshold (12.0) → stays round;
-        // the three pill-ceiling corners take the theme n.
         let n = hybrid_shape().effective_corner_n();
         assert!((resolved.bottom_left - 1.0).abs() < 0.001);
         assert!((resolved.top_left - n).abs() < 0.001);
@@ -363,35 +377,5 @@ mod resolve_corner_shape_tests {
         assert!((resolved.bottom_right - n).abs() < 0.001);
         assert!((resolved.bottom_left - n).abs() < 0.001);
         assert!(n > 1.0 && n < 2.0, "got n = {}", n);
-    }
-}
-
-/// Apply opacity to a brush by modifying its alpha component
-pub(crate) fn apply_opacity_to_brush(brush: &Brush, opacity: f32) -> Brush {
-    match brush {
-        Brush::Solid(color) => {
-            Brush::Solid(Color::rgba(color.r, color.g, color.b, color.a * opacity))
-        }
-        Brush::Gradient(gradient) => {
-            // For gradients, we'd need to modify both start and end colors
-            // For now, just return the gradient as-is
-            // TODO: Apply opacity to gradient stops
-            Brush::Gradient(gradient.clone())
-        }
-        Brush::Glass(glass) => {
-            // Glass already has its own opacity handling
-            Brush::Glass(*glass)
-        }
-        Brush::Image(image) => {
-            // Image brushes - return as-is for now
-            // TODO: Apply opacity to image brush
-            Brush::Image(image.clone())
-        }
-        Brush::Blur(blur) => {
-            // Blur with adjusted opacity
-            let mut blur_adjusted = *blur;
-            blur_adjusted.opacity *= opacity;
-            Brush::Blur(blur_adjusted)
-        }
     }
 }

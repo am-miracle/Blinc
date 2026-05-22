@@ -314,7 +314,12 @@ impl Sidebar {
                                         .child(svg(&item_icon).size(18.0, 18.0).color(icon_color)),
                                 )
                                 .child(
-                                    div().child(text(&item_label).size(theme.typography().text_sm).no_cursor().no_wrap()),
+                                    div().child(
+                                        text(&item_label)
+                                            .size(theme.typography().text_sm)
+                                            .no_cursor()
+                                            .no_wrap(),
+                                    ),
                                 )
                             })
                             .when(is_collapsed, |d| {

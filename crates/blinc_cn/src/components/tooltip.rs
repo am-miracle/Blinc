@@ -285,12 +285,7 @@ impl TooltipBuilder {
                             .rounded(radius)
                             .lock_corner_shape()
                             .shadow_sm()
-                            .child(
-                                text(&text_owned)
-                                    .size(font_size)
-                                    .color(fg)
-                                    .no_wrap(),
-                            )
+                            .child(text(&text_owned).size(font_size).color(fg).no_wrap())
                     })
                     .show();
                 stored_open.set(Some(handle.raw()));

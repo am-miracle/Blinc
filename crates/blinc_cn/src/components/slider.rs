@@ -127,9 +127,7 @@ impl StateTransitions for SliderThumbState {
     /// once `HALO_DURATION_MS` has elapsed. FPS-invariant by
     /// construction.
     fn on_next_animation_frame(&self, delta_ms: f32) -> Option<Self> {
-        let advance = |e: u32| -> u32 {
-            e.saturating_add(delta_ms.max(0.0).round() as u32)
-        };
+        let advance = |e: u32| -> u32 { e.saturating_add(delta_ms.max(0.0).round() as u32) };
         match self {
             Self::Entering { elapsed_ms } => {
                 let next = advance(*elapsed_ms);
@@ -291,8 +289,7 @@ impl Slider {
         // Click-to-jump suppression between DRAG_END and the click
         // that fires right after. (Click events fire even after a
         // drag; without this we'd seek the thumb to the release point.)
-        let just_dragged =
-            ctx.use_state_keyed(&format!("{}_just_dragged", instance_key), || false);
+        let just_dragged = ctx.use_state_keyed(&format!("{}_just_dragged", instance_key), || false);
 
         // Clones for closures
         let thumb_offset_for_click = thumb_offset.clone();
@@ -367,8 +364,7 @@ impl Slider {
                     .bg(theme.color(ColorToken::InputBgDisabled))
                     .border(1.0, thumb_border_disabled);
             } else {
-                let fill = thumb_fill_override
-                    .unwrap_or_else(|| theme.color(ColorToken::Surface));
+                let fill = thumb_fill_override.unwrap_or_else(|| theme.color(ColorToken::Surface));
                 td = td.bg(fill).border(2.0, thumb_border_active);
             }
             td
@@ -488,8 +484,7 @@ impl Slider {
                     .h(track_height)
                     .rounded(radius)
                     .bg(fill_bg);
-                let fill_positioned =
-                    div().absolute().left(fill_left).top(0.0).child(fill_bar);
+                let fill_positioned = div().absolute().left(fill_left).top(0.0).child(fill_bar);
                 let animated_fill = motion()
                     .translate_x(thumb_offset_for_fill_in.clone())
                     .child(fill_positioned);
@@ -630,8 +625,7 @@ impl Slider {
                 // `x_offset` is the thumb's LEFT edge — shift left
                 // by `thumb_size/2` and clamp to the travel range.
                 let max_offset = container_w - thumb_size;
-                let x_offset =
-                    (event.local_x - thumb_size / 2.0).clamp(0.0, max_offset);
+                let x_offset = (event.local_x - thumb_size / 2.0).clamp(0.0, max_offset);
                 let norm = if max_offset > 0.0 {
                     x_offset / max_offset
                 } else {
@@ -937,7 +931,6 @@ impl SliderBuilder {
         self.config.on_change = Some(Arc::new(callback));
         self
     }
-
 }
 
 impl ElementBuilder for SliderBuilder {

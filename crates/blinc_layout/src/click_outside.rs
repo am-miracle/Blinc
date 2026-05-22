@@ -100,7 +100,7 @@ pub fn fire_click_outside(ancestor_element_ids: &[String]) {
             .map(|(key, entry)| (key.clone(), Arc::clone(&entry.on_dismiss)))
             .collect()
     };
-    
+
     for (_, cb) in callbacks {
         cb();
     }

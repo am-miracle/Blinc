@@ -238,7 +238,11 @@ impl Checkbox {
                 .items_center()
                 .cursor_pointer()
                 .child(checkbox)
-                .child(text(label_text).size(theme.typography().text_sm).color(label_color))
+                .child(
+                    text(label_text)
+                        .size(theme.typography().text_sm)
+                        .color(label_color),
+                )
                 .on_click(move |_| {
                     if disabled {
                         return;

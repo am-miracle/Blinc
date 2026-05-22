@@ -464,10 +464,7 @@ impl OverlayStack {
     /// the stack was empty / only contained already-exiting entries).
     pub fn pop(&mut self) -> Option<OverlayHandle> {
         // Find the topmost not-yet-exiting entry.
-        let idx = self
-            .entries
-            .iter()
-            .rposition(|e| !e.exiting)?;
+        let idx = self.entries.iter().rposition(|e| !e.exiting)?;
         let handle = self.entries[idx].handle;
         self.close_with_reason(handle, CloseReason::Programmatic);
         Some(handle)
@@ -816,12 +813,11 @@ impl OverlayStack {
         // - `pointer_events_none()` so the container itself never absorbs
         //   events; backdrops + content children re-enable as needed.
         let has_visible = !self.entries.is_empty();
-        let (layer_w, layer_h) =
-            if has_visible && self.viewport.0 > 0.0 && self.viewport.1 > 0.0 {
-                self.viewport
-            } else {
-                (0.0, 0.0)
-            };
+        let (layer_w, layer_h) = if has_visible && self.viewport.0 > 0.0 && self.viewport.1 > 0.0 {
+            self.viewport
+        } else {
+            (0.0, 0.0)
+        };
 
         let mut layer = Div::new()
             .id(OVERLAY_STACK_LAYER_ID)
@@ -971,9 +967,7 @@ fn position_wrapper(
                 Corner::TopLeft => outer.top(INSET).left(INSET),
                 Corner::TopRight => outer.top(INSET).left(viewport.0 - INSET),
                 Corner::BottomLeft => outer.top(viewport.1 - INSET).left(INSET),
-                Corner::BottomRight => outer
-                    .top(viewport.1 - INSET)
-                    .left(viewport.0 - INSET),
+                Corner::BottomRight => outer.top(viewport.1 - INSET).left(viewport.0 - INSET),
             };
             outer.child(child)
         }
@@ -1119,7 +1113,8 @@ impl OverlayBuilder {
     }
     /// Sugar — sets both `dismissable_by_escape` and `dismissable_by_click_outside`.
     pub fn dismissable(self, b: bool) -> Self {
-        self.dismissable_by_escape(b).dismissable_by_click_outside(b)
+        self.dismissable_by_escape(b)
+            .dismissable_by_click_outside(b)
     }
 
     // ----- Position / sizing -----
@@ -1215,7 +1210,7 @@ impl OverlayBuilder {
             anchor_direction: self.anchor_direction,
             size: self.size,
             dismiss: self.dismiss,
-            content_fn: self.content_fn.unwrap_or_else(|| Arc::new(|| Div::new())),
+            content_fn: self.content_fn.unwrap_or_else(|| Arc::new(Div::new)),
             motion_key,
             motion_enter: self.motion_enter,
             motion_exit: self.motion_exit,
@@ -1243,11 +1238,7 @@ impl OverlayHandle {
         use crate::overlay_state::overlay_stack;
         overlay_stack()
             .lock()
-            .map(|s| {
-                s.entries
-                    .iter()
-                    .any(|e| e.handle == *self && !e.exiting)
-            })
+            .map(|s| s.entries.iter().any(|e| e.handle == *self && !e.exiting))
             .unwrap_or(false)
     }
 
@@ -1286,8 +1277,12 @@ mod tests {
             anchor_direction: AnchorDirection::default(),
             size: None,
             dismiss: DismissRules::default_for(kind),
-            content_fn: Arc::new(|| Div::new()),
-            motion_key: format!("test:{}:{}", kind as u8, stack.next_id.load(Ordering::Relaxed)),
+            content_fn: Arc::new(Div::new),
+            motion_key: format!(
+                "test:{}:{}",
+                kind as u8,
+                stack.next_id.load(Ordering::Relaxed)
+            ),
             motion_enter: None,
             motion_exit: None,
             spawned_at_ms: 0,
@@ -1312,10 +1307,7 @@ mod tests {
         assert_eq!(popped, c);
         // C is exiting, B is now the top non-exiting
         assert_eq!(
-            stack
-                .iter_top_down()
-                .find(|e| !e.exiting)
-                .map(|e| e.handle),
+            stack.iter_top_down().find(|e| !e.exiting).map(|e| e.handle),
             Some(b)
         );
 
@@ -1359,11 +1351,11 @@ mod tests {
         // require that everything stacked above the target also unwinds, so
         // the tooltip closes too (as `UnwindFromBelow`). The toast — which is
         // BELOW the target — stays alive.
-        let modal_entry = stack
-            .iter_bottom_up()
-            .find(|e| e.handle == modal)
-            .unwrap();
-        assert!(modal_entry.exiting, "modal should be exiting (target of ESC)");
+        let modal_entry = stack.iter_bottom_up().find(|e| e.handle == modal).unwrap();
+        assert!(
+            modal_entry.exiting,
+            "modal should be exiting (target of ESC)"
+        );
 
         let tooltip_entry = stack
             .iter_bottom_up()
@@ -1374,10 +1366,7 @@ mod tests {
             "tooltip should unwind because it was stacked above the modal"
         );
 
-        let toast_entry = stack
-            .iter_bottom_up()
-            .find(|e| e.handle == toast)
-            .unwrap();
+        let toast_entry = stack.iter_bottom_up().find(|e| e.handle == toast).unwrap();
         assert!(
             !toast_entry.exiting,
             "toast (below ESC target) must remain alive"
@@ -1436,9 +1425,8 @@ mod tests {
         let dropdown_b = stack.push(dummy_entry(&stack, OverlayKind::Dropdown));
 
         // Hit test that says: top entry contains the click, lower doesn't.
-        let hit_top_only = move |entry: &OverlayEntry, _: f32, _: f32| -> bool {
-            entry.handle == dropdown_b
-        };
+        let hit_top_only =
+            move |entry: &OverlayEntry, _: f32, _: f32| -> bool { entry.handle == dropdown_b };
 
         let consumed = stack.handle_click_at(0.0, 0.0, &hit_top_only);
         assert!(consumed);
@@ -1565,8 +1553,14 @@ mod tests {
         let by_handle: std::collections::HashMap<OverlayHandle, CloseReason> =
             log.iter().copied().collect();
         assert_eq!(by_handle.get(&a_handle), Some(&CloseReason::Programmatic));
-        assert_eq!(by_handle.get(&b_handle), Some(&CloseReason::UnwindFromBelow));
-        assert_eq!(by_handle.get(&c_handle), Some(&CloseReason::UnwindFromBelow));
+        assert_eq!(
+            by_handle.get(&b_handle),
+            Some(&CloseReason::UnwindFromBelow)
+        );
+        assert_eq!(
+            by_handle.get(&c_handle),
+            Some(&CloseReason::UnwindFromBelow)
+        );
     }
 
     #[test]
@@ -1619,33 +1613,41 @@ mod tests {
 
         // 1. Simulate hover-leave: pending_close_deadline_ms gets set.
         stack.handle_mouse_leave(h);
-        assert!(
-            stack
-                .iter_bottom_up()
-                .find(|e| e.handle == h)
-                .unwrap()
-                .pending_close_deadline_ms
-                .is_some()
-        );
+        assert!(stack
+            .iter_bottom_up()
+            .find(|e| e.handle == h)
+            .unwrap()
+            .pending_close_deadline_ms
+            .is_some());
 
         // Revive should clear the pending close.
         stack.revive(h);
+        assert!(stack
+            .iter_bottom_up()
+            .find(|e| e.handle == h)
+            .unwrap()
+            .pending_close_deadline_ms
+            .is_none());
+
+        // 2. Now actually close it.
+        stack.close(h);
         assert!(
             stack
                 .iter_bottom_up()
                 .find(|e| e.handle == h)
                 .unwrap()
-                .pending_close_deadline_ms
-                .is_none()
+                .exiting
         );
-
-        // 2. Now actually close it.
-        stack.close(h);
-        assert!(stack.iter_bottom_up().find(|e| e.handle == h).unwrap().exiting);
 
         // Revive should clear the exiting flag.
         stack.revive(h);
-        assert!(!stack.iter_bottom_up().find(|e| e.handle == h).unwrap().exiting);
+        assert!(
+            !stack
+                .iter_bottom_up()
+                .find(|e| e.handle == h)
+                .unwrap()
+                .exiting
+        );
     }
 
     #[test]

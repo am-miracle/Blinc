@@ -642,9 +642,12 @@ impl ElementBuilder for Text {
             transform: self.transform.clone(),
             pointer_events_none: self.pointer_events_none,
             cursor: self.cursor,
-            text_color: self.explicit_color.then(|| {
-                [self.color.r, self.color.g, self.color.b, self.color.a]
-            }),
+            text_color: self.explicit_color.then_some([
+                self.color.r,
+                self.color.g,
+                self.color.b,
+                self.color.a,
+            ]),
             ..Default::default()
         }
     }

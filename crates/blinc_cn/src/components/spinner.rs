@@ -153,17 +153,15 @@ impl Spinner {
             .border(border_width, track_color);
 
         // Rotating arc: full-circle ring masked to 180° by polygon.
-        let arc = motion()
-            .rotate_timeline(timeline.clone(), entry_id)
-            .child(
-                div()
-                    .class("cn-spinner__arc")
-                    .w(diameter)
-                    .h(diameter)
-                    .rounded(half)
-                    .border(border_width, spinner_color)
-                    .clip_path(polygon),
-            );
+        let arc = motion().rotate_timeline(timeline.clone(), entry_id).child(
+            div()
+                .class("cn-spinner__arc")
+                .w(diameter)
+                .h(diameter)
+                .rounded(half)
+                .border(border_width, spinner_color)
+                .clip_path(polygon),
+        );
 
         let arc_layer = div()
             .absolute()

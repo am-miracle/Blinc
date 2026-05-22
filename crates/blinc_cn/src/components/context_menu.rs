@@ -360,10 +360,10 @@ impl ContextMenuBuilder {
         // Track every menu+submenu id in the open chain — used by the root's
         // click_outside registration so clicks inside any open submenu don't
         // dismiss the parent.
-        let id_chain: State<Vec<String>> = BlincContextState::get().use_state_keyed(
-            &format!("ctxmenu_chain_{}", next_handle_id),
-            || Vec::<String>::new(),
-        );
+        let id_chain: State<Vec<String>> = BlincContextState::get()
+            .use_state_keyed(&format!("ctxmenu_chain_{}", next_handle_id), || {
+                Vec::<String>::new()
+            });
         id_chain.set(vec![menu_id.clone()]);
 
         let click_outside_key_for_close = click_outside_key.clone();
@@ -504,6 +504,7 @@ impl Default for SubmenuBuilder {
 /// The root context menu owns the only click_outside registration. Submenus
 /// register themselves as "inside" ids on the root via `id_chain`, so a click
 /// landing inside any open submenu does NOT dismiss the root chain.
+#[allow(clippy::too_many_arguments)]
 fn spawn_submenu(
     x: f32,
     y: f32,
@@ -697,13 +698,15 @@ fn build_menu_content(
                 .pointer_events_none();
 
             let right_side: Option<Div> = if let Some(ref shortcut) = item_shortcut {
-                Some(div().child(
-                    text(shortcut)
-                        .size(font_size - 2.0)
-                        .color(shortcut_color)
-                        .monospace()
-                        .no_cursor(),
-                ))
+                Some(
+                    div().child(
+                        text(shortcut)
+                            .size(font_size - 2.0)
+                            .color(shortcut_color)
+                            .monospace()
+                            .no_cursor(),
+                    ),
+                )
             } else if has_submenu {
                 let chevron_right = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
                 Some(

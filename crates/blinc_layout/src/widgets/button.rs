@@ -568,40 +568,33 @@ impl Button {
 
         let shared_state = self.inner.shared_state();
         let mut shared = shared_state.lock().unwrap();
-        shared.state_callback =
-            Some(Arc::new(move |state: &ButtonState, container: &mut Div| {
-                tracing::debug!("Button on_state callback fired, state={:?}", state);
-                let mut cfg = config_for_state.lock().unwrap();
+        shared.state_callback = Some(Arc::new(move |state: &ButtonState, container: &mut Div| {
+            tracing::debug!("Button on_state callback fired, state={:?}", state);
+            let mut cfg = config_for_state.lock().unwrap();
 
-                apply_css_overrides_button(
-                    &mut cfg,
-                    css_element_id.as_deref(),
-                    state,
-                    container,
-                );
+            apply_css_overrides_button(&mut cfg, css_element_id.as_deref(), state, container);
 
-                let bg = match state {
-                    ButtonState::Idle => cfg.bg_color,
-                    ButtonState::Hovered => cfg.hover_color,
-                    ButtonState::Pressed => cfg.pressed_color,
-                    ButtonState::Disabled => cfg.disabled_color,
-                };
+            let bg = match state {
+                ButtonState::Idle => cfg.bg_color,
+                ButtonState::Hovered => cfg.hover_color,
+                ButtonState::Pressed => cfg.pressed_color,
+                ButtonState::Disabled => cfg.disabled_color,
+            };
 
-                let mut update = div().bg(bg);
+            let mut update = div().bg(bg);
 
-                if let Some(ref callback) = custom_callback {
-                    drop(cfg);
-                    callback(*state, &mut update);
-                } else if let Some(ref label) = cfg.label {
-                    update =
-                        update.child(text(label).size(cfg.text_size).color(cfg.text_color));
-                    drop(cfg);
-                } else {
-                    drop(cfg);
-                }
+            if let Some(ref callback) = custom_callback {
+                drop(cfg);
+                callback(*state, &mut update);
+            } else if let Some(ref label) = cfg.label {
+                update = update.child(text(label).size(cfg.text_size).color(cfg.text_color));
+                drop(cfg);
+            } else {
+                drop(cfg);
+            }
 
-                container.merge(update);
-            }));
+            container.merge(update);
+        }));
         shared.base_render_props = Some(self.inner.inner_render_props());
         shared.base_style = self.inner.inner_layout_style();
         shared.needs_visual_update = true;

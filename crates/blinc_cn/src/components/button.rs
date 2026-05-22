@@ -122,12 +122,10 @@ impl ButtonVariant {
             // Filled tonal variants — Secondary's bg is dark slate in light
             // mode / light gray in dark mode, so the inverse text token
             // (white / near-black) is the correct contrast partner.
-            ButtonVariant::Primary
-            | ButtonVariant::Destructive
-            | ButtonVariant::Secondary => theme.color(ColorToken::TextInverse),
-            ButtonVariant::Outline | ButtonVariant::Ghost => {
-                theme.color(ColorToken::TextPrimary)
+            ButtonVariant::Primary | ButtonVariant::Destructive | ButtonVariant::Secondary => {
+                theme.color(ColorToken::TextInverse)
             }
+            ButtonVariant::Outline | ButtonVariant::Ghost => theme.color(ColorToken::TextPrimary),
             ButtonVariant::Link => theme.color(ColorToken::Primary),
         }
     }

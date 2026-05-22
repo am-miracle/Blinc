@@ -14,7 +14,6 @@ use blinc_layout::selector::ScrollRef;
 use blinc_layout::widgets::text_input::text_input_data;
 use blinc_theme::{ColorToken, ThemeState};
 
-
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -559,8 +558,7 @@ fn badges_section() -> impl ElementBuilder {
                             // specificity and pins the glyph at dark
                             // text colour.
                             .icon(
-                                svg(&to_svg_with_stroke(icons::CHECK, 12.0, 2.0))
-                                    .size(12.0, 12.0),
+                                svg(to_svg_with_stroke(icons::CHECK, 12.0, 2.0)).size(12.0, 12.0),
                             ),
                     )
                     .child(cn::badge("Blocked").variant(BadgeVariant::Destructive))
@@ -813,9 +811,10 @@ fn slider_section(ctx: &WindowedContext) -> impl ElementBuilder {
             .h_fit()
             .gap(4.0)
             .child(
-                div().h_fit().w(300.0).child(
-                    cn::slider(&volume).label("Volume").show_value(),
-                ),
+                div()
+                    .h_fit()
+                    .w(300.0)
+                    .child(cn::slider(&volume).label("Volume").show_value()),
             )
             .child(
                 div().h_fit().w(300.0).child(
@@ -829,7 +828,9 @@ fn slider_section(ctx: &WindowedContext) -> impl ElementBuilder {
             )
             .child(
                 div().h_fit().w(300.0).child(
-                    cn::slider(&disabled_slider).label("Disabled").disabled(true),
+                    cn::slider(&disabled_slider)
+                        .label("Disabled")
+                        .disabled(true),
                 ),
             ),
     )
@@ -1102,7 +1103,11 @@ fn context_menu_section() -> impl ElementBuilder {
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .child(text("With Disabled Items").size(t_sm()).color(text_secondary))
+                        .child(
+                            text("With Disabled Items")
+                                .size(t_sm())
+                                .color(text_secondary),
+                        )
                         .on_click(move |ctx| {
                             cn::context_menu()
                                 .at(ctx.mouse_x, ctx.mouse_y)
@@ -3013,7 +3018,12 @@ fn tooltip_section() -> impl ElementBuilder {
                 div()
                     .flex_col()
                     .gap(8.0)
-                    .child(text("Custom Delay").size(t_sm()).medium().color(text_primary))
+                    .child(
+                        text("Custom Delay")
+                            .size(t_sm())
+                            .medium()
+                            .color(text_primary),
+                    )
                     .child(
                         div()
                             .flex_row()
@@ -3772,8 +3782,8 @@ fn scroll_area_section() -> impl ElementBuilder {
                                 .w(200.0)
                                 .h(150.0)
                                 .child(scroll_panel(&[
-                                    "Item A", "Item B", "Item C", "Item D", "Item E",
-                                    "Item F", "Item G", "Item H",
+                                    "Item A", "Item B", "Item C", "Item D", "Item E", "Item F",
+                                    "Item G", "Item H",
                                 ])),
                         ),
                 )
