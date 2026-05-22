@@ -652,7 +652,13 @@ impl BuiltAvatarGroup {
         // wrapper-vs-inner co-located AA that previously layered
         // two ~50 %-alpha gradients at the same curve and let parent
         // bg leak through as a faint "doubled" outline.
-        let ring_color = theme.color(ColorToken::Surface);
+        // BorderSecondary is calibrated as a divider tone — visible
+        // against Surface in BOTH schemes (light grey #D4D9E4 on
+        // white, medium grey #3A4055 on dark Surface). Surface as
+        // the ring colour disappeared in dark mode because the
+        // avatar's own bg AND the typical card parent are both
+        // Surface; nothing to contrast with.
+        let ring_color = theme.color(ColorToken::BorderSecondary);
 
         // Ring width scales with avatar size — at small sizes a 2px
         // ring is half the visible stroke and the 1px AA at its outer
