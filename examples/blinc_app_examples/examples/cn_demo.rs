@@ -756,7 +756,8 @@ fn form_inputs_section(ctx: &WindowedContext) -> impl ElementBuilder {
                             cn::textarea(&bio_state)
                                 .label("Bio")
                                 .placeholder("Tell us about yourself...")
-                                .rows(4).w(300.0),
+                                .rows(4)
+                                .w(300.0),
                         )
                         .child(cn::label("Labels can be standalone")),
                 ),

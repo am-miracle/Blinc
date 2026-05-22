@@ -334,9 +334,7 @@ fn discover_examples(workspace_root: &Path) -> Vec<ExampleMeta> {
         // example exports `theme_bundle()`. Force-add the dep even
         // if the example source happens not to mention `blinc_theme::`
         // by name (it usually does — but don't depend on it).
-        if has_theme_bundle
-            && !extra_deps.iter().any(|(p, _)| p == "blinc_theme")
-        {
+        if has_theme_bundle && !extra_deps.iter().any(|(p, _)| p == "blinc_theme") {
             extra_deps.push((
                 "blinc_theme".to_string(),
                 r#"{ path = "../../../crates/blinc_theme" }"#.to_string(),

@@ -1398,8 +1398,7 @@ impl AndroidApp {
                     // styles land on the first frame. Same pattern as
                     // `windowed.rs:5228-5234`.
                     {
-                        let queued =
-                            blinc_core::BlincContextState::get().drain_stylesheets();
+                        let queued = blinc_core::BlincContextState::get().drain_stylesheets();
                         for css in queued {
                             windowed_ctx.add_css(&css);
                         }

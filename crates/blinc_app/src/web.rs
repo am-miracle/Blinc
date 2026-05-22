@@ -2441,10 +2441,7 @@ impl WebApp {
             rebuild_overlay_subtree_if_dirty(
                 &registry,
                 TOAST_TRAY_LAYER_ID,
-                toast_tray()
-                    .lock()
-                    .map(|t| t.take_dirty())
-                    .unwrap_or(false),
+                toast_tray().lock().map(|t| t.take_dirty()).unwrap_or(false),
                 || {
                     toast_tray()
                         .lock()
