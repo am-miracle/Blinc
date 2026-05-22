@@ -195,7 +195,7 @@ pub mod prelude {
     };
     pub use crate::components::skeleton::{skeleton, skeleton_circle, Skeleton};
     pub use crate::components::slider::{slider, Slider, SliderBuilder, SliderSize};
-    pub use crate::components::spinner::{spinner, Spinner, SpinnerSize};
+    pub use crate::components::spinner::{spinner, Spinner, SpinnerBuilder, SpinnerSize};
     pub use crate::components::switch::{switch, Switch, SwitchSize};
     pub use crate::components::tabs::{
         tab_item, tabs, TabMenuItem, Tabs, TabsBuilder, TabsSize, TabsTransition,

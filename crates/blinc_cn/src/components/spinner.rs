@@ -1,45 +1,35 @@
 //! Spinner component for loading indicators
 //!
-//! A circular loading indicator that uses motion + clip-path to render a
-//! rotating 180° arc on top of a static track ring. Two primitives total
-//! (track + arc), so the static cache holds the track and only the arc's
-//! single motion-bound primitive is dispatched per frame.
+//! A circular loading indicator that renders as a static track ring with a
+//! motion-bound, polygon-masked 180° arc rotating on top. The timeline is
+//! constructed internally — callers just write `cn::spinner()`.
 //!
 //! # Example
 //!
 //! ```ignore
 //! use blinc_cn::prelude::*;
-//! use blinc_animation::AnimationContextExt;
 //!
-//! fn loading_view(ctx: &impl AnimationContext) -> impl ElementBuilder {
-//!     let timeline = ctx.use_animated_timeline();
-//!     cn::spinner(timeline)
+//! fn loading_view() -> impl ElementBuilder {
+//!     cn::spinner()
 //! }
 //!
-//! fn custom_spinner(ctx: &impl AnimationContext) -> impl ElementBuilder {
-//!     let timeline = ctx.use_animated_timeline();
-//!     cn::spinner(timeline)
-//!         .size(SpinnerSize::Large)
-//!         .color(Color::BLUE)
-//!         .track_color(Color::rgba(0.0, 0.0, 1.0, 0.2))
-//! }
-//!
-//! fn slow_spinner(ctx: &impl AnimationContext) -> impl ElementBuilder {
-//!     let timeline = ctx.use_animated_timeline();
-//!     cn::spinner(timeline)
-//!         .duration_ms(2000)
-//! }
+//! // Customised
+//! cn::spinner()
+//!     .size(SpinnerSize::Large)
+//!     .color(Color::BLUE)
+//!     .duration_ms(2000)
 //! ```
 
-use blinc_animation::SharedAnimatedTimeline;
+use blinc_animation::{get_scheduler, AnimatedTimeline, SharedAnimatedTimeline};
 use blinc_core::{ClipLength, ClipPath, Color};
 use blinc_layout::div::{Div, ElementTypeId};
 use blinc_layout::element::RenderProps;
 use blinc_layout::prelude::*;
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
+use blinc_layout::InstanceKey;
 use blinc_theme::{ColorToken, ThemeState};
-use std::cell::OnceCell;
-use std::sync::Arc;
+use std::cell::{OnceCell, RefCell};
+use std::sync::{Arc, Mutex};
 use taffy::Style;
 
 /// Spinner size variants
@@ -72,109 +62,75 @@ impl SpinnerSize {
     }
 }
 
-/// Animated spinner component for loading indicators
-///
-/// Renders as a static track ring + a motion-bound arc div whose visible
-/// region is masked by a clip-path polygon to 180°. The arc's rotation
-/// comes from a timeline-driven `motion().rotate_timeline()`; under the
-/// compositor's dynamic-batch routing the static cache never invalidates
-/// while the spinner spins.
-pub struct Spinner {
-    timeline: SharedAnimatedTimeline,
+/// Internal configuration accumulated by `SpinnerBuilder` before the
+/// inner element is materialised on first `ElementBuilder` access.
+#[derive(Clone)]
+struct SpinnerConfig {
     size: SpinnerSize,
     color: Option<Color>,
+    /// Optional faint full-circle ring drawn behind the rotating arc.
+    /// `None` (default) leaves the empty 180° transparent so only the
+    /// arc itself is visible — the Material/shadcn-style spinner the
+    /// user reads as "a single arc rotating". `Some(colour)` opts in
+    /// to the older Apple-style track + arc look.
     track_color: Option<Color>,
     duration_ms: u32,
     classes: Vec<Arc<str>>,
     user_id: Option<String>,
-    /// Lazily built composed Div. Initialized on first ElementBuilder
-    /// method call (after all chained config methods).
-    built: OnceCell<Div>,
 }
 
-impl Spinner {
-    /// Create a new spinning spinner
-    ///
-    /// The timeline is configured for infinite rotation on first build.
-    pub fn new(timeline: SharedAnimatedTimeline) -> Self {
+impl Default for SpinnerConfig {
+    fn default() -> Self {
         Self {
-            timeline,
             size: SpinnerSize::default(),
             color: None,
             track_color: None,
             duration_ms: 1000,
             classes: Vec::new(),
             user_id: None,
-            built: OnceCell::new(),
         }
     }
+}
 
-    /// Set the spinner size
-    pub fn size(mut self, size: SpinnerSize) -> Self {
-        self.size = size;
-        self
-    }
+/// Built spinner — wraps the composed inner `Div`. Created by
+/// `SpinnerBuilder::get_or_build` on first ElementBuilder access.
+pub struct Spinner {
+    inner: Div,
+}
 
-    /// Set the spinner color (the rotating arc)
-    pub fn color(mut self, color: impl Into<Color>) -> Self {
-        self.color = Some(color.into());
-        self
-    }
-
-    /// Set the track color (the static background circle)
-    pub fn track_color(mut self, color: impl Into<Color>) -> Self {
-        self.track_color = Some(color.into());
-        self
-    }
-
-    /// Set the rotation duration in milliseconds (default: 1000ms)
-    pub fn duration_ms(mut self, duration: u32) -> Self {
-        self.duration_ms = duration;
-        self
-    }
-
-    /// Add a CSS class for selector matching
-    pub fn class(mut self, name: impl AsRef<str>) -> Self {
-        self.classes.push(blinc_core::intern::intern(name.as_ref()));
-        self
-    }
-
-    /// Set the element ID for CSS selector matching
-    pub fn id(mut self, id: &str) -> Self {
-        self.user_id = Some(id.to_string());
-        self
-    }
-
-    fn get_or_build(&self) -> &Div {
-        self.built.get_or_init(|| self.build_inner())
-    }
-
-    fn build_inner(&self) -> Div {
+impl Spinner {
+    /// Materialise the spinner tree from accumulated config. `_key`
+    /// is the call-site `InstanceKey`; we don't currently use it to
+    /// persist the timeline across rebuilds (a fresh timeline on each
+    /// rebuild just restarts the rotation from 0° — visually
+    /// indistinguishable for a non-stop spinner).
+    fn with_config(_key: InstanceKey, config: SpinnerConfig) -> Self {
         let theme = ThemeState::get();
-        let diameter = self.size.diameter();
-        let border_width = self.size.border_width();
+        let diameter = config.size.diameter();
+        let border_width = config.size.border_width();
         let half = diameter / 2.0;
-        let spinner_color = self
+        let spinner_color = config
             .color
             .unwrap_or_else(|| theme.color(ColorToken::Primary));
-        let track_color = self
-            .track_color
-            .unwrap_or_else(|| theme.color(ColorToken::Border));
 
-        // Configure timeline once (idempotent: subsequent calls return
-        // the existing entry id rather than re-adding entries).
-        let entry_id = self.timeline.lock().unwrap().configure(|t| {
-            let id = t.add(0, self.duration_ms, 0.0, 360.0);
+        // Internal timeline — one per built spinner. The scheduler
+        // handle is global so multiple spinners share the same animation
+        // pump without contention.
+        let scheduler = get_scheduler();
+        let timeline: SharedAnimatedTimeline =
+            Arc::new(Mutex::new(AnimatedTimeline::new(scheduler)));
+
+        let entry_id = timeline.lock().unwrap().configure(|t| {
+            let id = t.add(0, config.duration_ms, 0.0, 360.0);
             t.set_loop(-1);
             t.start();
             id
         });
 
-        // Polygon mask: rectangle covering the left half. The right half
-        // of the ring is masked out, leaving a 180° visible arc.
-        // Vertices in element-local coords; they rotate with motion's
-        // timeline rotation thanks to the shader's `sp - bounds.xy`
-        // polygon test.
+        // Polygon mask: rectangle covering the left half of the
+        // bounding box. The polygon test runs in element-local coords,
+        // so the mask rotates with the element under motion's
+        // `rotate_timeline`, exposing a 180° arc that sweeps around.
         let polygon = ClipPath::Polygon {
             points: vec![
                 (ClipLength::Px(0.0), ClipLength::Px(0.0)),
@@ -184,20 +140,13 @@ impl Spinner {
             ],
         };
 
-        // Track ring — static, lives in the static cache.
-        let track = div()
-            .class("cn-spinner__track")
-            .absolute()
-            .inset(0.0)
-            .w(diameter)
-            .h(diameter)
-            .rounded(half)
-            .border(border_width, track_color);
-
-        // Arc ring — motion-bound, rotates via timeline. Polygon clip
-        // masks the top-right quadrant to leave a 270° visible arc.
+        // Rotating arc: full-circle ring masked to 180° by polygon.
+        // The visible portion sweeps around as the timeline ticks; the
+        // hidden 180° is transparent (no track ring by default — the
+        // track + arc combo previously read as "two arcs forming a
+        // full circle" rather than a single rotating arc).
         let arc = motion()
-            .rotate_timeline(self.timeline.clone(), entry_id)
+            .rotate_timeline(timeline.clone(), entry_id)
             .child(
                 div()
                     .class("cn-spinner__arc")
@@ -215,29 +164,152 @@ impl Spinner {
             .h(diameter)
             .child(arc);
 
-        // Container. Total size includes border-width padding on each
-        // side so the ring's stroke isn't clipped by the parent layout.
+        // Total container size includes border-stroke padding so the
+        // ring isn't clipped by the parent layout.
         let total = diameter + border_width;
         let mut spinner = div()
             .class("cn-spinner")
             .w(total)
             .h(total)
-            .relative()
-            .child(track)
-            .child(arc_layer);
+            .relative();
 
-        for c in &self.classes {
+        // Opt-in faint track ring. Off by default; callers can layer
+        // it back in with `.track_color(...)` for the Apple-style look.
+        if let Some(track_color) = config.track_color {
+            spinner = spinner.child(
+                div()
+                    .class("cn-spinner__track")
+                    .absolute()
+                    .inset(0.0)
+                    .w(diameter)
+                    .h(diameter)
+                    .rounded(half)
+                    .border(border_width, track_color),
+            );
+        }
+        spinner = spinner.child(arc_layer);
+
+        for c in &config.classes {
             spinner = spinner.class(c.as_ref());
         }
-        if let Some(ref id) = self.user_id {
+        if let Some(ref id) = config.user_id {
             spinner = spinner.id(id);
         }
 
-        spinner
+        Self { inner: spinner }
     }
 }
 
 impl ElementBuilder for Spinner {
+    fn build(&self, tree: &mut LayoutTree) -> LayoutNodeId {
+        self.inner.build(tree)
+    }
+
+    fn render_props(&self) -> RenderProps {
+        self.inner.render_props()
+    }
+
+    fn children_builders(&self) -> &[Box<dyn ElementBuilder>] {
+        self.inner.children_builders()
+    }
+
+    fn element_type_id(&self) -> ElementTypeId {
+        ElementTypeId::Div
+    }
+
+    fn layout_style(&self) -> Option<&Style> {
+        self.inner.layout_style()
+    }
+
+    fn element_classes(&self) -> &[Arc<str>] {
+        self.inner.element_classes()
+    }
+
+    fn element_id(&self) -> Option<&str> {
+        self.inner.element_id()
+    }
+}
+
+/// Fluent builder for `Spinner`. Implements `ElementBuilder` directly via
+/// a lazy `OnceCell<Spinner>`, so the builder can be used inline as a
+/// child — no terminal `build_final()` call needed. Same pattern as
+/// `SliderBuilder` / `AvatarBuilder` / `CheckboxBuilder`.
+pub struct SpinnerBuilder {
+    key: InstanceKey,
+    config: RefCell<SpinnerConfig>,
+    built: OnceCell<Spinner>,
+}
+
+impl SpinnerBuilder {
+    /// Create a new spinner builder. Uses `#[track_caller]` so each
+    /// distinct call-site gets a stable, unique `InstanceKey`.
+    #[track_caller]
+    pub fn new() -> Self {
+        Self {
+            key: InstanceKey::new("spinner"),
+            config: RefCell::new(SpinnerConfig::default()),
+            built: OnceCell::new(),
+        }
+    }
+
+    /// Set the spinner size.
+    pub fn size(self, size: SpinnerSize) -> Self {
+        self.config.borrow_mut().size = size;
+        self
+    }
+
+    /// Set the rotating arc colour. Defaults to `ColorToken::Primary`.
+    pub fn color(self, color: impl Into<Color>) -> Self {
+        self.config.borrow_mut().color = Some(color.into());
+        self
+    }
+
+    /// Opt in to a faint full-circle track ring drawn behind the
+    /// rotating arc. Off by default — the default spinner is a
+    /// rotating 180° arc with a transparent complement (Material /
+    /// shadcn style). Setting a colour here brings back the older
+    /// "track + arc" appearance.
+    pub fn track_color(self, color: impl Into<Color>) -> Self {
+        self.config.borrow_mut().track_color = Some(color.into());
+        self
+    }
+
+    /// Set the rotation duration in milliseconds (default: 1000ms).
+    pub fn duration_ms(self, duration: u32) -> Self {
+        self.config.borrow_mut().duration_ms = duration;
+        self
+    }
+
+    /// Add a CSS class for selector matching.
+    pub fn class(self, name: impl AsRef<str>) -> Self {
+        self.config
+            .borrow_mut()
+            .classes
+            .push(blinc_core::intern::intern(name.as_ref()));
+        self
+    }
+
+    /// Set the element ID for CSS selector matching.
+    pub fn id(self, id: &str) -> Self {
+        self.config.borrow_mut().user_id = Some(id.to_string());
+        self
+    }
+
+    fn get_or_build(&self) -> &Spinner {
+        self.built.get_or_init(|| {
+            let config = self.config.take();
+            Spinner::with_config(self.key.clone(), config)
+        })
+    }
+}
+
+impl Default for SpinnerBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ElementBuilder for SpinnerBuilder {
     fn build(&self, tree: &mut LayoutTree) -> LayoutNodeId {
         self.get_or_build().build(tree)
     }
@@ -267,24 +339,28 @@ impl ElementBuilder for Spinner {
     }
 }
 
-/// Create an animated spinner loading indicator
+/// Create an animated spinner loading indicator.
 ///
-/// Takes an `AnimatedTimeline` from the animation context. The timeline
-/// is automatically configured for infinite rotation.
+/// The timeline is constructed internally — no need to pass one in.
+/// Uses `#[track_caller]` for a stable per-call-site key.
 ///
 /// # Example
 ///
 /// ```ignore
 /// use blinc_cn::prelude::*;
-/// use blinc_animation::AnimationContextExt;
 ///
-/// fn loading(ctx: &impl AnimationContext) -> impl ElementBuilder {
-///     let timeline = ctx.use_animated_timeline();
-///     cn::spinner(timeline)
+/// fn loading() -> impl ElementBuilder {
+///     cn::spinner()
 /// }
+///
+/// // With customisation
+/// cn::spinner()
+///     .size(SpinnerSize::Large)
+///     .duration_ms(2000)
 /// ```
-pub fn spinner(timeline: SharedAnimatedTimeline) -> Spinner {
-    Spinner::new(timeline)
+#[track_caller]
+pub fn spinner() -> SpinnerBuilder {
+    SpinnerBuilder::new()
 }
 
 #[cfg(test)]

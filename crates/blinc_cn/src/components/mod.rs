@@ -110,7 +110,7 @@ pub use sheet::{
 pub use sidebar::{sidebar, Sidebar, SidebarBuilder, SidebarItem, SidebarSection};
 pub use skeleton::{skeleton, skeleton_circle, Skeleton};
 pub use slider::{slider, Slider, SliderSize};
-pub use spinner::{spinner, Spinner, SpinnerSize};
+pub use spinner::{spinner, Spinner, SpinnerBuilder, SpinnerSize};
 pub use switch::{switch, Switch, SwitchSize};
 pub use tabs::{tab_item, tabs, TabMenuItem, Tabs, TabsBuilder, TabsSize, TabsTransition};
 pub use textarea::{textarea, Textarea, TextareaSize};
