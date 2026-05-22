@@ -702,6 +702,13 @@ impl ThemeState {
             vars.insert("ease-in".into(), easing(a.ease_in));
             vars.insert("ease-out".into(), easing(a.ease_out));
             vars.insert("ease-in-out".into(), easing(a.ease_in_out));
+            // Semantic easing slots — intent-shaped curves so CSS
+            // animations / transitions can read `var(--ease-state)`
+            // etc. instead of hard-coding cubic-beziers.
+            vars.insert("ease-state".into(), easing(a.ease_state));
+            vars.insert("ease-nav".into(), easing(a.ease_nav));
+            vars.insert("ease-spring".into(), easing(a.ease_spring));
+            vars.insert("ease-sheet".into(), easing(a.ease_sheet));
         }
 
         vars

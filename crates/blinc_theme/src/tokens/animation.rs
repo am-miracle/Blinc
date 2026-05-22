@@ -26,6 +26,21 @@ pub enum Easing {
 }
 
 impl Easing {
+    /// Convert to the richer `blinc_animation::Easing` used by
+    /// keyframe presets / `MultiKeyframeAnimation`. The theme variant
+    /// is intentionally simpler (the design tokens only need the four
+    /// CSS-named curves + custom cubic-bezier), but every theme
+    /// curve maps cleanly onto an animation easing.
+    pub fn to_animation_easing(self) -> blinc_animation::Easing {
+        match self {
+            Easing::Linear => blinc_animation::Easing::Linear,
+            Easing::EaseIn => blinc_animation::Easing::EaseIn,
+            Easing::EaseOut => blinc_animation::Easing::EaseOut,
+            Easing::EaseInOut => blinc_animation::Easing::EaseInOut,
+            Easing::CubicBezier(a, b, c, d) => blinc_animation::Easing::CubicBezier(a, b, c, d),
+        }
+    }
+
     /// Evaluate the easing function at time t (0.0 to 1.0)
     pub fn evaluate(&self, t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);

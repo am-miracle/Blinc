@@ -1238,7 +1238,7 @@ impl Default for CssAnimation {
 }
 
 /// Animation timing function
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum AnimationTiming {
     Linear,
     #[default]
@@ -1246,17 +1246,24 @@ pub enum AnimationTiming {
     EaseIn,
     EaseOut,
     EaseInOut,
+    /// Literal `cubic-bezier(x1, y1, x2, y2)` — used when `var(--ease-X)`
+    /// resolves to a custom curve (e.g. theme-supplied semantic easings
+    /// like `--ease-state`, `--ease-spring`, `--ease-sheet`).
+    CubicBezier(f32, f32, f32, f32),
 }
+
+impl Eq for AnimationTiming {}
 
 impl AnimationTiming {
     fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
+        let trimmed = s.trim().to_lowercase();
+        match trimmed.as_str() {
             "linear" => Some(AnimationTiming::Linear),
             "ease" => Some(AnimationTiming::Ease),
             "ease-in" => Some(AnimationTiming::EaseIn),
             "ease-out" => Some(AnimationTiming::EaseOut),
             "ease-in-out" => Some(AnimationTiming::EaseInOut),
-            _ => None,
+            _ => parse_cubic_bezier(&trimmed),
         }
     }
 
@@ -1275,7 +1282,27 @@ impl AnimationTiming {
             AnimationTiming::EaseIn => Easing::CubicBezier(0.42, 0.0, 1.0, 1.0),
             AnimationTiming::EaseOut => Easing::CubicBezier(0.0, 0.0, 0.58, 1.0),
             AnimationTiming::EaseInOut => Easing::CubicBezier(0.42, 0.0, 0.58, 1.0),
+            AnimationTiming::CubicBezier(a, b, c, d) => Easing::CubicBezier(*a, *b, *c, *d),
         }
+    }
+}
+
+/// Parse a literal `cubic-bezier(x1, y1, x2, y2)` string into an
+/// `AnimationTiming::CubicBezier`. Returns `None` if the input isn't
+/// a well-formed cubic-bezier function call.
+fn parse_cubic_bezier(s: &str) -> Option<AnimationTiming> {
+    let inner = s.strip_prefix("cubic-bezier(")?.strip_suffix(')')?;
+    let parts: Vec<f32> = inner
+        .split(',')
+        .map(|p| p.trim().parse::<f32>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if parts.len() == 4 {
+        Some(AnimationTiming::CubicBezier(
+            parts[0], parts[1], parts[2], parts[3],
+        ))
+    } else {
+        None
     }
 }
 
@@ -7970,10 +7997,14 @@ fn parse_render_layer<'a, E: NomParseError<&'a str>>(
 /// - `animation: fade-in 300ms ease-out 0ms infinite`
 /// - `animation: slide-in 0.5s ease-in-out 0s 1 normal forwards`
 fn parse_animation(value: &str) -> Option<CssAnimation> {
-    let parts: Vec<&str> = value.split_whitespace().collect();
-    if parts.is_empty() {
+    // Use `split_whitespace_respecting_parens` so a `cubic-bezier(a, b,
+    // c, d)` (from `var(--ease-state)` resolution) survives as a single
+    // token instead of getting chopped on the commas.
+    let owned_parts = split_whitespace_respecting_parens(value);
+    if owned_parts.is_empty() {
         return None;
     }
+    let parts: Vec<&str> = owned_parts.iter().map(|s| s.as_str()).collect();
 
     let mut anim = CssAnimation::default();
     let mut duration_set = false;
@@ -8073,8 +8104,15 @@ fn parse_transition(value: &str) -> Option<CssTransitionSet> {
     }
 
     let mut transitions = Vec::new();
-    for segment in value.split(',') {
-        if let Some(t) = parse_single_transition(segment.trim()) {
+    // Paren-respecting split — `cubic-bezier(a, b, c, d)` in a
+    // comma-separated transition list (from `var(--ease-X)`
+    // resolution) must survive as a single segment.
+    for segment in split_commas_respecting_parens(value) {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(t) = parse_single_transition(trimmed) {
             transitions.push(t);
         } else {
             return None;
@@ -8090,10 +8128,14 @@ fn parse_transition(value: &str) -> Option<CssTransitionSet> {
 
 /// Parse a single transition: `property duration [timing] [delay]`
 fn parse_single_transition(value: &str) -> Option<CssTransition> {
-    let parts: Vec<&str> = value.split_whitespace().collect();
-    if parts.is_empty() {
+    // Use `split_whitespace_respecting_parens` so a `cubic-bezier(a, b,
+    // c, d)` (from `var(--ease-X)` resolution) survives as a single
+    // token instead of getting chopped on the commas.
+    let owned_parts = split_whitespace_respecting_parens(value);
+    if owned_parts.is_empty() {
         return None;
     }
+    let parts: Vec<&str> = owned_parts.iter().map(|s| s.as_str()).collect();
 
     let mut property = String::new();
     let mut duration_ms = 0u32;
