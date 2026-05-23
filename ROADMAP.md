@@ -44,6 +44,24 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 
 ### 1.4 Missing Widgets (P1)
 
+> **Layering rule** (applies to every widget in this section and §1.5):
+> all `blinc_layout::widgets::*` widgets must render with theme tokens
+> by default — colours from `ColorTokens`, radii from `RadiusTokens`,
+> shape from `ShapeTokens`, spacing from `SpacingTokens`, typography
+> from `TypographyTokens`, easings from `AnimationTokens`. A bare
+> `text_input(...)`, `slider(...)`, `number_input(...)` built against
+> the platform default bundle should look right out of the box —
+> theme-aware, dark-mode-aware, variant-aware (Restrained / Hybrid /
+> Expressive). `blinc_cn` then layers shadcn-flavoured surface
+> styling and micro-interactions on top via CSS classes and themed
+> wrappers (the same way `cn::input` wraps `blinc_layout::text_input`
+> today: the layout widget already paints itself from the active
+> theme; cn contributes the `.cn-input` border-shape / focus-ring /
+> hover-bg overlay and a few interaction polishes like the
+> outline-offset transition). This keeps the layout widgets useful
+> outside a `cn_bundle()` install — anyone building a custom theme
+> bundle gets cohesive defaults without depending on `blinc_cn`.
+
 | Widget | Status | Notes |
 |--------|--------|-------|
 | Date picker | Planned | Calendar grid + input. See §1.5 for the cn component sizing. |
