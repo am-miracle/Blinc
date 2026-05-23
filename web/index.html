@@ -11,9 +11,13 @@
 <meta name="color-scheme" content="light dark" />
 <link rel="canonical" href="https://blinc.rs/" />
 
-<!-- Icons -->
-<link rel="icon" type="image/png" href="assets/blinc_logo.png" />
-<link rel="apple-touch-icon" href="assets/blinc_logo.png" />
+<!-- Icons. Multiple variants + sizes="any" so Chrome / Firefox / Safari
+     each pick the favicon (they all disagree about precedence rules).
+     /favicon.ico and /favicon.png at site root cover the unconditional
+     `/favicon.ico` request browsers make regardless of these <link>s. -->
+<link rel="icon" type="image/png" sizes="any" href="/favicon.png" />
+<link rel="shortcut icon" href="/favicon.ico" />
+<link rel="apple-touch-icon" sizes="200x200" href="/favicon.png" />
 
 <!-- Open Graph -->
 <meta property="og:type" content="website" />
