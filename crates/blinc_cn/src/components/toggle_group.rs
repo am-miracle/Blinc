@@ -33,7 +33,7 @@ use blinc_layout::stateful::{ButtonState, stateful_with_key};
 use blinc_layout::svg::svg;
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_layout::{InstanceKey, units};
-use blinc_theme::{ColorToken, RadiusToken, ThemeState};
+use blinc_theme::{ColorToken, ThemeState};
 use std::sync::Arc;
 
 use crate::components::toggle::{ToggleSize, ToggleVariant};
@@ -151,7 +151,13 @@ fn build_item(
             let is_on = group_state.get() == item_value;
 
             let theme = ThemeState::get();
-            let radius = theme.radius(RadiusToken::Default);
+            // Match `cn::toggle`'s per-size radius — Small uses
+            // `radius_sm`, Medium / Large use `radius_default`. Pre-fix,
+            // group items always used `radius_default` so a Small icon
+            // item rendered with noticeably more rounding than a
+            // matching Small standalone toggle (which picks up
+            // `radius_sm` via the `.cn-toggle--sm` CSS rule).
+            let radius = theme.radius(size.radius_token());
             let surface = theme.color(ColorToken::Background);
             let text_primary = theme.color(ColorToken::TextPrimary);
 

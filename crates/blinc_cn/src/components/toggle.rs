@@ -105,6 +105,20 @@ impl ToggleSize {
         }
     }
 
+    /// Corner-radius token matching the `.cn-toggle--<size>` CSS rules
+    /// in `cn_styles`. Small toggles get a tighter `radius-sm`; Medium
+    /// and Large share the variant's `radius-default`. Used by
+    /// `cn::toggle_group` so its items pick up the same radius the
+    /// standalone `cn::toggle` resolves to via CSS overrides — without
+    /// it, group items rendered with a noticeably larger radius than
+    /// matching-size standalone toggles.
+    pub fn radius_token(self) -> blinc_theme::RadiusToken {
+        match self {
+            ToggleSize::Small => blinc_theme::RadiusToken::Sm,
+            ToggleSize::Medium | ToggleSize::Large => blinc_theme::RadiusToken::Default,
+        }
+    }
+
     fn css_class(self) -> &'static str {
         match self {
             ToggleSize::Small => "cn-toggle--sm",
