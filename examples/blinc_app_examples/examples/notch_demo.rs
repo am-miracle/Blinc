@@ -174,11 +174,11 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
 
 /// Section header + content stacked vertically. Used for the two
 /// static demos below the menu bar.
-fn labeled_section(
+fn labeled_section<C: ElementBuilder + 'static>(
     label: &'static str,
     label_color: Color,
-    content: impl ElementBuilder + 'static,
-) -> impl ElementBuilder + use<> {
+    content: C,
+) -> impl ElementBuilder + use<C> {
     div()
         .flex_col()
         .items_center()
@@ -211,7 +211,7 @@ fn menu_bar_section() -> impl ElementBuilder + use<> {
                 open_gen.set(open_gen.get() + 1);
             }
         }
-        let r#gen = open_gen.get();
+        let open_gen_id = open_gen.get();
 
         let target_width = if is_open {
             DROPDOWN_WIDTH
@@ -221,12 +221,12 @@ fn menu_bar_section() -> impl ElementBuilder + use<> {
         let target_height = if is_open { DROPDOWN_FULL_HEIGHT } else { 0.0 };
 
         let center_x = ctx.use_spring(
-            &format!("dropdown_x_{r#gen}"),
+            &format!("dropdown_x_{open_gen_id}"),
             snapshot.center_x,
             SpringConfig::gentle(),
         );
         let dropdown_width = ctx.use_spring(
-            &format!("dropdown_w_{r#gen}"),
+            &format!("dropdown_w_{open_gen_id}"),
             target_width,
             SpringConfig::snappy(),
         );
@@ -651,10 +651,10 @@ fn sharp_angle_demo() -> impl ElementBuilder + use<> {
         ))
 }
 
-fn labeled_demo(
+fn labeled_demo<D: ElementBuilder + 'static>(
     label: &'static str,
-    demo: impl ElementBuilder + 'static,
-) -> impl ElementBuilder + use<> {
+    demo: D,
+) -> impl ElementBuilder + use<D> {
     div()
         .flex_col()
         .items_center()

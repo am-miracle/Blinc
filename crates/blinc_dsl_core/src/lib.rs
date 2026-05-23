@@ -937,10 +937,10 @@ impl BlincDsl {
         } else {
             fsms.first().map(|s| s.as_str())
         };
-        if let Some(fsm_name) = fsm_for_binding {
-            if let Some(shared) = blinc_runtime::fsm::default_state(fsm_name) {
-                builder = builder.with_shared_state(shared);
-            }
+        if let Some(fsm_name) = fsm_for_binding
+            && let Some(shared) = blinc_runtime::fsm::default_state(fsm_name)
+        {
+            builder = builder.with_shared_state(shared);
         }
         builder = builder.deps(signal_ids);
 

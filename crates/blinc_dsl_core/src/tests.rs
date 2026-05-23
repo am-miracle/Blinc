@@ -1749,10 +1749,10 @@ fn lower_component_calls_strips_marker_callee() {
                     if let TypedStatement::Expression(e) = &s.node {
                         n += count_marker_refs(&e.node);
                     }
-                    if let TypedStatement::Let(l) = &s.node {
-                        if let Some(init) = &l.initializer {
-                            n += count_marker_refs(&init.node);
-                        }
+                    if let TypedStatement::Let(l) = &s.node
+                        && let Some(init) = &l.initializer
+                    {
+                        n += count_marker_refs(&init.node);
                     }
                 }
             }
@@ -1763,20 +1763,20 @@ fn lower_component_calls_strips_marker_callee() {
 
     let mut total = 0;
     for decl in &program.declarations {
-        if let zyntax_typed_ast::TypedDeclaration::Function(func) = &decl.node {
-            if let Some(body) = &func.body {
-                for stmt in &body.statements {
-                    match &stmt.node {
-                        TypedStatement::Expression(e) => {
-                            total += count_marker_refs(&e.node);
-                        }
-                        TypedStatement::Let(l) => {
-                            if let Some(init) = &l.initializer {
-                                total += count_marker_refs(&init.node);
-                            }
-                        }
-                        _ => {}
+        if let zyntax_typed_ast::TypedDeclaration::Function(func) = &decl.node
+            && let Some(body) = &func.body
+        {
+            for stmt in &body.statements {
+                match &stmt.node {
+                    TypedStatement::Expression(e) => {
+                        total += count_marker_refs(&e.node);
                     }
+                    TypedStatement::Let(l) => {
+                        if let Some(init) = &l.initializer {
+                            total += count_marker_refs(&init.node);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2068,14 +2068,14 @@ fn first_user_function_body(
     program: &TypedProgram,
 ) -> &[zyntax_typed_ast::TypedNode<TypedStatement>] {
     for decl in program.declarations.iter() {
-        if let TypedDeclaration::Function(func) = &decl.node {
-            if !func.is_external {
-                return func
-                    .body
-                    .as_ref()
-                    .map(|b| b.statements.as_slice())
-                    .unwrap_or(&[]);
-            }
+        if let TypedDeclaration::Function(func) = &decl.node
+            && !func.is_external
+        {
+            return func
+                .body
+                .as_ref()
+                .map(|b| b.statements.as_slice())
+                .unwrap_or(&[]);
         }
     }
     panic!("no user function found in program")
@@ -3165,11 +3165,11 @@ fn parse_else_if_chain_deep() {
             .else_block
             .as_ref()
             .unwrap_or_else(|| panic!("level {depth}: expected an else"));
-        if else_block.statements.len() == 1 {
-            if let TypedStatement::If(next) = &else_block.statements[0].node {
-                current = next;
-                continue;
-            }
+        if else_block.statements.len() == 1
+            && let TypedStatement::If(next) = &else_block.statements[0].node
+        {
+            current = next;
+            continue;
         }
         break;
     }
@@ -5363,10 +5363,10 @@ fn multiple_signals_rewrite_independently() {
         fn walk_expr(e: &zyntax_typed_ast::TypedNode<TypedExpression>, callee: &str) -> bool {
             match &e.node {
                 TypedExpression::Call(c) => {
-                    if let TypedExpression::Variable(name) = &c.callee.node {
-                        if name.resolve_global().as_deref() == Some(callee) {
-                            return true;
-                        }
+                    if let TypedExpression::Variable(name) = &c.callee.node
+                        && name.resolve_global().as_deref() == Some(callee)
+                    {
+                        return true;
                     }
                     c.positional_args.iter().any(|a| walk_expr(a, callee))
                         || walk_expr(&c.callee, callee)

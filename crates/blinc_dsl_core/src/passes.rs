@@ -134,10 +134,8 @@ pub(crate) fn collect_declared(program: &TypedProgram) -> (Vec<(String, Type)>, 
                     .methods
                     .iter()
                     .any(|m| m.name.resolve_global().as_deref() == Some("__fsm_meta__"));
-                if is_fsm {
-                    if let Some(name) = imp.trait_name.resolve_global() {
-                        fsms.push(name.to_string());
-                    }
+                if is_fsm && let Some(name) = imp.trait_name.resolve_global() {
+                    fsms.push(name.to_string());
                 }
             }
             _ => {}
@@ -167,10 +165,10 @@ pub(crate) fn extract_and_strip_stylesheets(program: &mut TypedProgram, out: &mu
             let TypedStatement::Expression(expr) = &stmt.node else {
                 continue;
             };
-            if let TypedExpression::Literal(TypedLiteral::String(s)) = &expr.node {
-                if let Some(text) = s.resolve_global() {
-                    out.push(auto_inject_semicolons(&text));
-                }
+            if let TypedExpression::Literal(TypedLiteral::String(s)) = &expr.node
+                && let Some(text) = s.resolve_global()
+            {
+                out.push(auto_inject_semicolons(&text));
             }
         }
         false
@@ -263,37 +261,34 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
     ) {
         // MUST intercept `<signal> = <expr>` BEFORE the recursive walk — the
         // LHS `Variable` doesn't otherwise trigger a rewrite.
-        if let TypedExpression::Binary(b) = &expr.node {
-            if b.op == zyntax_typed_ast::typed_ast::BinaryOp::Assign {
-                if let TypedExpression::Variable(name) = &b.left.node {
-                    if let Some(sig_ty) = signals.get(name).cloned() {
-                        if let Some(setter) = typed_signal_setter_extern_name(&sig_ty) {
-                            // Rewrite RHS first so nested signal reads route through getters.
-                            let mut rhs = (*b.right).clone();
-                            rewrite_expr(&mut rhs, signals);
+        if let TypedExpression::Binary(b) = &expr.node
+            && b.op == zyntax_typed_ast::typed_ast::BinaryOp::Assign
+            && let TypedExpression::Variable(name) = &b.left.node
+            && let Some(sig_ty) = signals.get(name).cloned()
+            && let Some(setter) = typed_signal_setter_extern_name(&sig_ty)
+        {
+            // Rewrite RHS first so nested signal reads route through getters.
+            let mut rhs = (*b.right).clone();
+            rewrite_expr(&mut rhs, signals);
 
-                            let name_arg = zyntax_typed_ast::TypedNode::new(
-                                TypedExpression::Literal(TypedLiteral::String(*name)),
-                                Type::Primitive(PrimitiveType::String),
-                                expr.span,
-                            );
-                            let callee = zyntax_typed_ast::TypedNode::new(
-                                TypedExpression::Variable(InternedString::new_global(setter)),
-                                Type::Unknown,
-                                expr.span,
-                            );
-                            expr.node = TypedExpression::Call(TypedCall {
-                                callee: Box::new(callee),
-                                positional_args: vec![name_arg, rhs],
-                                named_args: vec![],
-                                type_args: vec![],
-                            });
-                            expr.ty = Type::Primitive(PrimitiveType::Unit);
-                            return;
-                        }
-                    }
-                }
-            }
+            let name_arg = zyntax_typed_ast::TypedNode::new(
+                TypedExpression::Literal(TypedLiteral::String(*name)),
+                Type::Primitive(PrimitiveType::String),
+                expr.span,
+            );
+            let callee = zyntax_typed_ast::TypedNode::new(
+                TypedExpression::Variable(InternedString::new_global(setter)),
+                Type::Unknown,
+                expr.span,
+            );
+            expr.node = TypedExpression::Call(TypedCall {
+                callee: Box::new(callee),
+                positional_args: vec![name_arg, rhs],
+                named_args: vec![],
+                type_args: vec![],
+            });
+            expr.ty = Type::Primitive(PrimitiveType::Unit);
+            return;
         }
 
         // Children first so nested signal calls (e.g. `text(count.get())`) are rewritten.
@@ -517,15 +512,14 @@ pub(crate) fn resolve_fsm_trigger_calls(program: &mut TypedProgram) {
     // Phase 1: collect declared FSM names from `__fsm_meta__`-bearing impls.
     let mut fsm_names: HashSet<InternedString> = HashSet::new();
     for decl in &program.declarations {
-        if let TypedDeclaration::Impl(imp) = &decl.node {
-            if imp.trait_name.resolve_global().is_some()
-                && imp
-                    .methods
-                    .iter()
-                    .any(|m| m.name.resolve_global().as_deref() == Some("__fsm_meta__"))
-            {
-                fsm_names.insert(imp.trait_name);
-            }
+        if let TypedDeclaration::Impl(imp) = &decl.node
+            && imp.trait_name.resolve_global().is_some()
+            && imp
+                .methods
+                .iter()
+                .any(|m| m.name.resolve_global().as_deref() == Some("__fsm_meta__"))
+        {
+            fsm_names.insert(imp.trait_name);
         }
     }
     if fsm_names.is_empty() {
@@ -710,15 +704,14 @@ pub(crate) fn resolve_fsm_subscribe_calls(program: &mut TypedProgram) {
 
     let mut fsm_names: HashSet<InternedString> = HashSet::new();
     for decl in &program.declarations {
-        if let TypedDeclaration::Impl(imp) = &decl.node {
-            if imp.trait_name.resolve_global().is_some()
-                && imp
-                    .methods
-                    .iter()
-                    .any(|m| m.name.resolve_global().as_deref() == Some("__fsm_meta__"))
-            {
-                fsm_names.insert(imp.trait_name);
-            }
+        if let TypedDeclaration::Impl(imp) = &decl.node
+            && imp.trait_name.resolve_global().is_some()
+            && imp
+                .methods
+                .iter()
+                .any(|m| m.name.resolve_global().as_deref() == Some("__fsm_meta__"))
+        {
+            fsm_names.insert(imp.trait_name);
         }
     }
     if fsm_names.is_empty() {
@@ -1204,18 +1197,18 @@ pub(crate) fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec
 
     let mut known: HashSet<String> = HashSet::new();
     for decl in &program.declarations {
-        if let TypedDeclaration::Class(c) = &decl.node {
-            if let Some(name) = c.name.resolve_global() {
-                known.insert(name.to_string());
-            }
+        if let TypedDeclaration::Class(c) = &decl.node
+            && let Some(name) = c.name.resolve_global()
+        {
+            known.insert(name.to_string());
         }
         // Named imports — whitelist so the validator (pre import-resolution) doesn't flag them.
         if let TypedDeclaration::Import(import) = &decl.node {
             for item in &import.items {
-                if let zyntax_typed_ast::TypedImportItem::Named { name, .. } = item {
-                    if let Some(s) = name.resolve_global() {
-                        known.insert(s.to_string());
-                    }
+                if let zyntax_typed_ast::TypedImportItem::Named { name, .. } = item
+                    && let Some(s) = name.resolve_global()
+                {
+                    known.insert(s.to_string());
                 }
             }
         }
@@ -1247,22 +1240,18 @@ pub(crate) fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec
                 }
 
                 // Check `__component_call__("Name", ...)` against known set.
-                if let TypedExpression::Variable(callee_name) = &c.callee.node {
-                    if callee_name.resolve_global().as_deref() == Some("__component_call__") {
-                        if let Some(name_node) = c.positional_args.first() {
-                            if let TypedExpression::Literal(TypedLiteral::String(name)) =
-                                &name_node.node
-                            {
-                                let name_str = name.resolve_global().unwrap_or_default();
-                                if !known.contains::<str>(name_str.as_ref()) {
-                                    errors.push(format!(
-                                        "unknown component `{}` — declare it with \
+                if let TypedExpression::Variable(callee_name) = &c.callee.node
+                    && callee_name.resolve_global().as_deref() == Some("__component_call__")
+                    && let Some(name_node) = c.positional_args.first()
+                    && let TypedExpression::Literal(TypedLiteral::String(name)) = &name_node.node
+                {
+                    let name_str = name.resolve_global().unwrap_or_default();
+                    if !known.contains::<str>(name_str.as_ref()) {
+                        errors.push(format!(
+                            "unknown component `{}` — declare it with \
                                          `component {} {{ ... }}` before use",
-                                        name_str, name_str
-                                    ));
-                                }
-                            }
-                        }
+                            name_str, name_str
+                        ));
                     }
                 }
             }
@@ -1447,26 +1436,24 @@ pub(crate) fn lower_component_calls(program: &mut TypedProgram) {
 
         for arg in call.positional_args.iter().skip(1) {
             // Is this arg a `__named__("name", value)` marker call?
-            if let TypedExpression::Call(inner) = &arg.node {
-                if let TypedExpression::Variable(inner_callee) = &inner.callee.node {
-                    if inner_callee.resolve_global().as_deref() == Some("__named__") {
-                        let name_node = &inner.positional_args[0];
-                        let value_node = &inner.positional_args[1];
-                        let TypedExpression::Literal(TypedLiteral::String(arg_name)) =
-                            &name_node.node
-                        else {
-                            // Ill-formed marker — fall through as positional.
-                            new_positional.push(arg.clone());
-                            continue;
-                        };
-                        new_named.push(TypedNamedArg {
-                            name: *arg_name,
-                            value: Box::new(value_node.clone()),
-                            span: arg.span,
-                        });
-                        continue;
-                    }
-                }
+            if let TypedExpression::Call(inner) = &arg.node
+                && let TypedExpression::Variable(inner_callee) = &inner.callee.node
+                && inner_callee.resolve_global().as_deref() == Some("__named__")
+            {
+                let name_node = &inner.positional_args[0];
+                let value_node = &inner.positional_args[1];
+                let TypedExpression::Literal(TypedLiteral::String(arg_name)) = &name_node.node
+                else {
+                    // Ill-formed marker — fall through as positional.
+                    new_positional.push(arg.clone());
+                    continue;
+                };
+                new_named.push(TypedNamedArg {
+                    name: *arg_name,
+                    value: Box::new(value_node.clone()),
+                    span: arg.span,
+                });
+                continue;
             }
             new_positional.push(arg.clone());
         }
@@ -1516,106 +1503,105 @@ pub(crate) fn lower_component_calls(program: &mut TypedProgram) {
         out: &mut Vec<zyntax_typed_ast::TypedNode<TypedStatement>>,
         mut stmt: zyntax_typed_ast::TypedNode<TypedStatement>,
     ) {
-        if let TypedStatement::Expression(expr_node) = &mut stmt.node {
-            if let TypedExpression::Call(call) = &mut expr_node.node {
-                let has_body_block = matches!(
-                    call.positional_args.last().map(|a| &a.node),
-                    Some(TypedExpression::Block(_))
-                );
-                if has_body_block {
-                    if callee_is_substrate_primitive(call) {
-                        let block_arg = call.positional_args.pop().unwrap();
-                        let block_span = block_arg.span;
-                        let TypedExpression::Block(body_block) = block_arg.node else {
-                            unreachable!("just confirmed Block via the matches! above");
-                        };
-
-                        // Partition body statements: unnamed body
-                        // entries → default `children`; entries
-                        // inside `__slot_open__("X") … __slot_close__`
-                        // marker pairs → `slot_X` named arg.
-                        let mut default_children: Vec<
-                            zyntax_typed_ast::TypedNode<TypedExpression>,
-                        > = Vec::new();
-                        let mut slot_buckets: Vec<(
-                            String,
-                            Vec<zyntax_typed_ast::TypedNode<TypedExpression>>,
-                        )> = Vec::new();
-                        let mut current_slot: Option<String> = None;
-
-                        for s in body_block.statements {
-                            if let Some(name) = slot_open_name(&s) {
-                                current_slot = Some(name);
-                                continue;
-                            }
-                            if is_slot_close_stmt(&s) {
-                                current_slot = None;
-                                continue;
-                            }
-                            let TypedStatement::Expression(e) = s.node else {
-                                continue;
-                            };
-                            match &current_slot {
-                                None => default_children.push(*e),
-                                Some(name) => {
-                                    if let Some(bucket) =
-                                        slot_buckets.iter_mut().find(|(n, _)| n == name)
-                                    {
-                                        bucket.1.push(*e);
-                                    } else {
-                                        slot_buckets.push((name.clone(), vec![*e]));
-                                    }
-                                }
-                            }
-                        }
-
-                        if !default_children.is_empty() {
-                            call.named_args.push(zyntax_typed_ast::TypedNamedArg {
-                                name: zyntax_typed_ast::InternedString::new_global("children"),
-                                value: Box::new(zyntax_typed_ast::TypedNode::new(
-                                    TypedExpression::Array(default_children),
-                                    Type::Any,
-                                    block_span,
-                                )),
-                                span: block_span,
-                            });
-                        }
-                        for (name, exprs) in slot_buckets {
-                            let arg_name = format!("slot_{name}");
-                            call.named_args.push(zyntax_typed_ast::TypedNamedArg {
-                                name: zyntax_typed_ast::InternedString::new_global(&arg_name),
-                                value: Box::new(zyntax_typed_ast::TypedNode::new(
-                                    TypedExpression::Array(exprs),
-                                    Type::Any,
-                                    block_span,
-                                )),
-                                span: block_span,
-                            });
-                        }
-
-                        out.push(stmt);
-                        return;
-                    }
-
-                    // User-declared component with a body — fall
-                    // back to flatten: push the body-less call,
-                    // then inline each child statement at the
-                    // outer level. Slot markers are dropped here
-                    // (user-component view methods don't accept
-                    // named slots yet).
+        if let TypedStatement::Expression(expr_node) = &mut stmt.node
+            && let TypedExpression::Call(call) = &mut expr_node.node
+        {
+            let has_body_block = matches!(
+                call.positional_args.last().map(|a| &a.node),
+                Some(TypedExpression::Block(_))
+            );
+            if has_body_block {
+                if callee_is_substrate_primitive(call) {
                     let block_arg = call.positional_args.pop().unwrap();
+                    let block_span = block_arg.span;
                     let TypedExpression::Block(body_block) = block_arg.node else {
                         unreachable!("just confirmed Block via the matches! above");
                     };
-                    out.push(stmt);
-                    for inner in body_block.statements {
-                        if is_slot_marker_stmt(&inner) {
+
+                    // Partition body statements: unnamed body
+                    // entries → default `children`; entries
+                    // inside `__slot_open__("X") … __slot_close__`
+                    // marker pairs → `slot_X` named arg.
+                    let mut default_children: Vec<zyntax_typed_ast::TypedNode<TypedExpression>> =
+                        Vec::new();
+                    let mut slot_buckets: Vec<(
+                        String,
+                        Vec<zyntax_typed_ast::TypedNode<TypedExpression>>,
+                    )> = Vec::new();
+                    let mut current_slot: Option<String> = None;
+
+                    for s in body_block.statements {
+                        if let Some(name) = slot_open_name(&s) {
+                            current_slot = Some(name);
                             continue;
                         }
-                        collect_children_into(out, inner);
+                        if is_slot_close_stmt(&s) {
+                            current_slot = None;
+                            continue;
+                        }
+                        let TypedStatement::Expression(e) = s.node else {
+                            continue;
+                        };
+                        match &current_slot {
+                            None => default_children.push(*e),
+                            Some(name) => {
+                                if let Some(bucket) =
+                                    slot_buckets.iter_mut().find(|(n, _)| n == name)
+                                {
+                                    bucket.1.push(*e);
+                                } else {
+                                    slot_buckets.push((name.clone(), vec![*e]));
+                                }
+                            }
+                        }
                     }
+
+                    if !default_children.is_empty() {
+                        call.named_args.push(zyntax_typed_ast::TypedNamedArg {
+                            name: zyntax_typed_ast::InternedString::new_global("children"),
+                            value: Box::new(zyntax_typed_ast::TypedNode::new(
+                                TypedExpression::Array(default_children),
+                                Type::Any,
+                                block_span,
+                            )),
+                            span: block_span,
+                        });
+                    }
+                    for (name, exprs) in slot_buckets {
+                        let arg_name = format!("slot_{name}");
+                        call.named_args.push(zyntax_typed_ast::TypedNamedArg {
+                            name: zyntax_typed_ast::InternedString::new_global(&arg_name),
+                            value: Box::new(zyntax_typed_ast::TypedNode::new(
+                                TypedExpression::Array(exprs),
+                                Type::Any,
+                                block_span,
+                            )),
+                            span: block_span,
+                        });
+                    }
+
+                    out.push(stmt);
                     return;
                 }
+
+                // User-declared component with a body — fall
+                // back to flatten: push the body-less call,
+                // then inline each child statement at the
+                // outer level. Slot markers are dropped here
+                // (user-component view methods don't accept
+                // named slots yet).
+                let block_arg = call.positional_args.pop().unwrap();
+                let TypedExpression::Block(body_block) = block_arg.node else {
+                    unreachable!("just confirmed Block via the matches! above");
+                };
+                out.push(stmt);
+                for inner in body_block.statements {
+                    if is_slot_marker_stmt(&inner) {
+                        continue;
+                    }
+                    collect_children_into(out, inner);
+                }
+                return;
             }
         }
 
@@ -3418,11 +3404,11 @@ pub(crate) fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
         for na in existing_named {
             let resolved = na.name.resolve_global();
             let name_str: Option<&str> = resolved.as_deref();
-            if let Some(name) = name_str {
-                if let Some(entry) = STYLING_PROP_NAMES.iter().find(|(n, _, _)| *n == name) {
-                    styling_args.push((entry.1, na));
-                    continue;
-                }
+            if let Some(name) = name_str
+                && let Some(entry) = STYLING_PROP_NAMES.iter().find(|(n, _, _)| *n == name)
+            {
+                styling_args.push((entry.1, na));
+                continue;
             }
             remaining_named.push(na);
         }

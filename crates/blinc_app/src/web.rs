@@ -341,7 +341,7 @@ fn compose_with_overlays<E: blinc_layout::ElementBuilder + 'static>(
         .lock()
         .ok()
         .map(|t| t.build_tray_layer(viewport))
-        .unwrap_or_else(Div::new);
+        .unwrap_or_default();
 
     Div::new()
         .w(ctx.width)
@@ -2433,7 +2433,7 @@ impl WebApp {
                         .lock()
                         .ok()
                         .map(|s| s.build_overlay_layer())
-                        .unwrap_or_else(Div::new)
+                        .unwrap_or_default()
                 },
             );
 
@@ -2447,7 +2447,7 @@ impl WebApp {
                         .lock()
                         .ok()
                         .map(|t| t.build_tray_layer(viewport))
-                        .unwrap_or_else(Div::new)
+                        .unwrap_or_default()
                 },
             );
         }
@@ -2691,7 +2691,7 @@ impl WebApp {
             || !self
                 .current_tree
                 .as_ref()
-                .map_or(true, |t| t.css_transitions_empty())
+                .is_none_or(|t| t.css_transitions_empty())
         {
             if let Some(ref mut tree) = self.current_tree {
                 tree.apply_all_css_animation_props();

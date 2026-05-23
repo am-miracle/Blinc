@@ -5747,7 +5747,7 @@ impl WindowedApp {
 
                             // Apply CSS animation/transition values AFTER state styles
                             // (state styles reset to base, animations must override)
-                            if css_active || !ws.render_tree.as_ref().map_or(true, |t| t.css_transitions_empty()) {
+                            if css_active || !ws.render_tree.as_ref().is_none_or(|t| t.css_transitions_empty()) {
                                 if let Some(ref mut tree) = ws.render_tree {
                                     tree.apply_all_css_animation_props();
                                     tree.apply_all_css_transition_props();
@@ -6016,7 +6016,7 @@ impl WindowedApp {
                             // renders.
                             let visible_anim_paint = ws.render_tree
                                 .as_ref()
-                                .map_or(true, |t| t.visible_anim_active());
+                                .is_none_or(|t| t.visible_anim_active());
                             let visible_anim_stateful = ws.render_tree
                                 .as_ref()
                                 .is_some_and(|t| {

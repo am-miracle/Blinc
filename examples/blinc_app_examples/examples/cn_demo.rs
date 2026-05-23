@@ -10,7 +10,6 @@ use blinc_app::windowed::WindowedApp;
 use blinc_app::windowed::WindowedContext;
 use blinc_cn::prelude::*;
 use blinc_core::Color;
-use blinc_layout::selector::ScrollRef;
 use blinc_layout::widgets::text_input::text_input_data;
 use blinc_theme::{ColorToken, ThemeBundle, ThemeState};
 
@@ -62,7 +61,7 @@ fn main() -> Result<()> {
         // captures `ctx`'s lifetime in the return type (RPIT capture
         // rules), which breaks the higher-ranked `FnMut` bound. The
         // closure infers per-lifetime so the bound is satisfied.
-        |ctx| build_ui(ctx),
+        build_ui,
     )
 }
 

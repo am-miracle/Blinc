@@ -600,10 +600,10 @@ fn detect_image_assets(source: &str) -> Vec<String> {
     // Match markdown image syntax: ![alt](examples/blinc_app_examples/examples/assets/foo.webp)
     for segment in source.split('(') {
         let trimmed = segment.trim();
-        if trimmed.starts_with(asset_prefix) {
-            if let Some(end) = trimmed.find(')') {
-                raw_paths.insert(trimmed[..end].to_string());
-            }
+        if trimmed.starts_with(asset_prefix)
+            && let Some(end) = trimmed.find(')')
+        {
+            raw_paths.insert(trimmed[..end].to_string());
         }
     }
 
@@ -634,14 +634,13 @@ fn detect_image_assets(source: &str) -> Vec<String> {
         } else if p.is_file() {
             out.insert(path.clone());
             let is_gltf_json = path.ends_with(".gltf");
-            if is_gltf_json {
-                if let Some(parent) = p.parent() {
-                    if let Ok(entries) = list_files_recursive(parent) {
-                        for file_path in entries {
-                            if let Some(s) = file_path.to_str() {
-                                out.insert(s.to_string());
-                            }
-                        }
+            if is_gltf_json
+                && let Some(parent) = p.parent()
+                && let Ok(entries) = list_files_recursive(parent)
+            {
+                for file_path in entries {
+                    if let Some(s) = file_path.to_str() {
+                        out.insert(s.to_string());
                     }
                 }
             }
@@ -1681,11 +1680,11 @@ fn plan_builds(workspace_root: &Path, examples: &[ExampleMeta], force: bool) -> 
         if let Some(rest) = path.strip_prefix("examples/blinc_app_examples/examples/") {
             // Only top-level *.rs files in that directory count;
             // subdirectories (like the `assets/` folder) don't.
-            if let Some(stem) = rest.strip_suffix(".rs") {
-                if !stem.contains('/') {
-                    changed_examples.insert(stem.to_string());
-                    continue;
-                }
+            if let Some(stem) = rest.strip_suffix(".rs")
+                && !stem.contains('/')
+            {
+                changed_examples.insert(stem.to_string());
+                continue;
             }
             // Files under examples/blinc_app_examples/examples/ that aren't
             // top-level .rs (e.g. assets/) don't affect any

@@ -6696,11 +6696,11 @@ impl RenderContext {
         // 1:1-replaceable drop in slow-path frames.
         let css_anim_active = {
             let store = tree.css_anim_store();
-            let active = match store.lock() {
+
+            match store.lock() {
                 Ok(g) => g.has_active_animations() || g.has_active_transitions(),
                 Err(_) => false,
-            };
-            active
+            }
         };
         // CSS animations / transitions no longer force a static-cache
         // invalidation on their own — Phase 3a routed the CSS-animated

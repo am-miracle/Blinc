@@ -335,7 +335,8 @@ fn show_navigation_dropdown(
         })
         .content(move || {
             let user_content = content();
-            let panel = div()
+
+            div()
                 .class("cn-nav-menu-content")
                 .min_w(min_width / 4.0)
                 .bg(surface)
@@ -364,8 +365,7 @@ fn show_navigation_dropdown(
                     if let Ok(mut stack) = overlay_stack().lock() {
                         stack.handle_mouse_leave(dropdown_handle);
                     }
-                });
-            panel
+                })
         })
         .show();
 

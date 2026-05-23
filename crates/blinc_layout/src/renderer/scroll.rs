@@ -262,13 +262,13 @@ impl RenderTree {
 
         let direction = self.get_scroll_direction(node_id);
         let has_scroll_physics = direction.is_some();
-        let handles_x = direction.map_or(true, |d| {
+        let handles_x = direction.is_none_or(|d| {
             matches!(
                 d,
                 crate::scroll::ScrollDirection::Horizontal | crate::scroll::ScrollDirection::Both
             )
         });
-        let handles_y = direction.map_or(true, |d| {
+        let handles_y = direction.is_none_or(|d| {
             matches!(
                 d,
                 crate::scroll::ScrollDirection::Vertical | crate::scroll::ScrollDirection::Both
@@ -370,13 +370,13 @@ impl RenderTree {
 
         let direction = self.get_scroll_direction(node_id);
         let has_scroll_physics = direction.is_some();
-        let handles_x = direction.map_or(true, |d| {
+        let handles_x = direction.is_none_or(|d| {
             matches!(
                 d,
                 crate::scroll::ScrollDirection::Horizontal | crate::scroll::ScrollDirection::Both
             )
         });
-        let handles_y = direction.map_or(true, |d| {
+        let handles_y = direction.is_none_or(|d| {
             matches!(
                 d,
                 crate::scroll::ScrollDirection::Vertical | crate::scroll::ScrollDirection::Both

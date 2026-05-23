@@ -50,7 +50,7 @@ pub fn rich_text_editor(
     state: &RichTextState,
     theme: RichTextTheme,
     content_width: f32,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     // Per-editor signal that bumps on every state mutation. The Stateful
     // rebuilds whenever this signal changes, which triggers a fresh
     // line-index computation and a new cursor overlay.

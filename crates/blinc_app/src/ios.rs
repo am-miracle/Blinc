@@ -600,7 +600,7 @@ impl IOSRenderContext {
                     .lock()
                     .ok()
                     .map(|t| t.build_tray_layer(viewport))
-                    .unwrap_or_else(blinc_layout::div::Div::new)
+                    .unwrap_or_default()
             };
             blinc_layout::div::Div::new()
                 .w(ctx.width)

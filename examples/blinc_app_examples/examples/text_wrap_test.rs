@@ -78,10 +78,10 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
         ))
 }
 
-fn build_test_section(
+fn build_test_section<C: ElementBuilder + 'static>(
     title: &str,
-    content: impl ElementBuilder + 'static,
-) -> impl ElementBuilder + use<> {
+    content: C,
+) -> impl ElementBuilder + use<C> {
     div()
         .flex_col()
         .gap(8.0)
