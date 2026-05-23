@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://project-blinc.github.io/Blinc/sitemap.xml
+Sitemap: https://blinc.rs/sitemap.xml

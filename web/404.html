@@ -5,17 +5,16 @@
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <meta name="robots" content="noindex" />
 <title>Not found — Blinc</title>
-<link rel="icon" type="image/png" href="/Blinc/assets/blinc_logo.png" />
+<link rel="icon" type="image/png" href="/assets/blinc_logo.png" />
 <script>
-  // Old book paths used to live at /Blinc/<topic>/...; the docs book
-  // now lives at /Blinc/docs/<topic>/.... Try to rewrite any path
-  // that looks like a book topic so external links keep resolving.
+  // Old book paths used to live at /<topic>/...; the docs book now
+  // lives at /docs/<topic>/.... Rewrite any path that looks like a
+  // book topic so external links keep resolving.
   (function () {
-    var BASE = '/Blinc/';
     var path = location.pathname;
-    if (path.indexOf(BASE) !== 0) return;
-    var rest = path.slice(BASE.length); // e.g. "getting-started/installation.html"
-    if (!rest || rest.indexOf('docs/') === 0) return;
+    if (path === '/' || path.indexOf('/docs/') === 0) return;
+    var rest = path.replace(/^\/+/, ''); // strip leading slash
+    if (!rest) return;
     var topics = [
       'introduction', 'getting-started', 'core', 'components', 'cn',
       'widgets', 'animation', 'canvas-kit', 'web', 'mobile',
@@ -23,7 +22,7 @@
     ];
     var first = rest.split('/')[0].replace(/\.html$/, '');
     if (topics.indexOf(first) !== -1) {
-      location.replace(BASE + 'docs/' + rest + location.search + location.hash);
+      location.replace('/docs/' + rest + location.search + location.hash);
     }
   })();
 </script>
@@ -63,10 +62,10 @@
   <main class="card">
     <div class="code">Error · 404</div>
     <h1>Lost in a blinc.</h1>
-    <p>The page you're looking for doesn't exist here. The docs moved to <code>/Blinc/docs/</code> — try one of the links below.</p>
+    <p>The page you're looking for doesn't exist here. The docs moved to <code>/docs/</code> — try one of the links below.</p>
     <div class="row">
-      <a class="btn btn-primary" href="/Blinc/">Back home</a>
-      <a class="btn btn-ghost" href="/Blinc/docs/">Open the docs</a>
+      <a class="btn btn-primary" href="/">Back home</a>
+      <a class="btn btn-ghost" href="/docs/">Open the docs</a>
     </div>
   </main>
 </body>
