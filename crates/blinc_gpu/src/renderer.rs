@@ -2100,6 +2100,22 @@ impl GpuRenderer {
         });
         let view = throwaway.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Dummy vertex buffer for pipelines that declare a vertex
+        // buffer layout (Path always; SDF when VERTEX_STORAGE is
+        // unavailable and the renderer falls back to instance VBs).
+        // Validation requires slot 0 to be bound to a real buffer
+        // matching the declared stride — without it, `pass.draw(…)`
+        // panics with "requires vertex buffer 0 to be set" and the
+        // pre-warm aborts the whole renderer construction. 1 KiB of
+        // zeros covers every draw count we issue here (≤ 3 vertices
+        // × 120 B per PathVertex = 360 B, comfortably less than 1024).
+        let dummy_vb = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Pipeline Pre-Warm Dummy VB"),
+            size: 1024,
+            usage: wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: false,
+        });
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2123,12 +2139,20 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
 
-            // clear_quad — no bind group required.
+            // clear_quad — no bind group, no vertex buffer required.
             pass.set_pipeline(&self.pipelines.clear_quad);
             pass.draw(0..3, 0..1);
 
-            // SDF family shares `bind_groups.sdf` at slot 0.
+            // SDF family shares `bind_groups.sdf` at slot 0. The
+            // pipelines only declare a vertex buffer when
+            // `has_vertex_storage` is false (instance-stepped VB
+            // fallback) — bind the dummy in that case so validation
+            // accepts the draw on hosts without storage in vertex
+            // shaders (older Intel iGPUs, some Mesa configs).
             pass.set_bind_group(0, &self.bind_groups.sdf, &[]);
+            if !self.has_vertex_storage {
+                pass.set_vertex_buffer(0, dummy_vb.slice(..));
+            }
             for sdf_pipeline in [
                 &self.pipelines.sdf_core,
                 &self.pipelines.sdf_shadow,
@@ -2143,8 +2167,10 @@ impl GpuRenderer {
                 pass.draw(0..6, 0..1);
             }
 
-            // Path family shares `bind_groups.path` at slot 0.
+            // Path family always declares a vertex buffer layout —
+            // bind the dummy unconditionally before drawing.
             pass.set_bind_group(0, &self.bind_groups.path, &[]);
+            pass.set_vertex_buffer(0, dummy_vb.slice(..));
             for path_pipeline in [&self.pipelines.path, &self.pipelines.path_overlay] {
                 pass.set_pipeline(path_pipeline);
                 pass.draw(0..3, 0..1);
