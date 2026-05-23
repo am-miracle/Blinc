@@ -102,3 +102,8 @@ vendor/
 
 ./claude/*.logs
 *.logs
+
+# Ad-hoc screen recordings dropped into the workspace root while
+# debugging UI issues — keep them local, never commit binary captures.
+Screen Recording *.mov
+*.mov
