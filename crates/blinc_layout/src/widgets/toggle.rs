@@ -127,14 +127,26 @@ struct ResolvedColors {
 
 impl ResolvedColors {
     fn from_config(config: &ToggleConfig, theme: &ThemeState) -> Self {
+        // Off: transparent surface so the toggle reads as a ghost button
+        //      affordance (shadcn's `<Toggle>` baseline). The label/icon
+        //      itself carries the affordance — text colour is `TextPrimary`
+        //      (not Secondary) so it's clearly readable at rest.
+        // On:  a SUBTLE accent fill (8 % of the active foreground over
+        //      the surface), matching shadcn's `bg-accent`. Avoids the
+        //      "solid dark button" misread the previous `Secondary` token
+        //      produced — the on-state needs to feel like an emphasis, not
+        //      a different button entirely.
+        let on_bg_default = mix(
+            theme.color(ColorToken::Background),
+            theme.color(ColorToken::TextPrimary),
+            0.10,
+        );
         Self {
             off_bg: config.off_bg.unwrap_or(Color::TRANSPARENT),
-            on_bg: config
-                .on_bg
-                .unwrap_or_else(|| theme.color(ColorToken::Secondary)),
+            on_bg: config.on_bg.unwrap_or(on_bg_default),
             off_fg: config
                 .off_fg
-                .unwrap_or_else(|| theme.color(ColorToken::TextSecondary)),
+                .unwrap_or_else(|| theme.color(ColorToken::TextPrimary)),
             on_fg: config
                 .on_fg
                 .unwrap_or_else(|| theme.color(ColorToken::TextPrimary)),
@@ -336,10 +348,13 @@ impl Toggle {
                     .bg(bg)
                     .rounded(radius);
 
-                // Border:
-                //   - always when `on` (so off→on has a visible edge shift)
-                //   - when `bordered_off` is true (outline variant)
-                if (is_on || cfg.bordered_off) && cfg.border_width > 0.0 {
+                // Border: only the outline variant (`bordered_off=true`)
+                // draws a border, and it draws in both off and on states.
+                // The default variant relies on the icon/label + bg-accent
+                // overlay to communicate state (matching shadcn's
+                // `<Toggle>`); adding a border-on-on for the default would
+                // make it look like the outline variant.
+                if cfg.bordered_off && cfg.border_width > 0.0 {
                     body = body.border(cfg.border_width, colors.border_color);
                 }
 
