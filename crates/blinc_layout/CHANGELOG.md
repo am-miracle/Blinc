@@ -5,6 +5,7 @@ All notable changes to `blinc_layout` will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **`widgets::table::TableCell::class(name)`** + **`::id(id)`** — table cells can now carry CSS classes / ids for selector matching. Required by `blinc_cn::table` to layer `.cn-table-head` / `.cn-table-cell` over the layout widget's theme-token defaults.
 - **`TextInput::text_align(TextAlign)`** — horizontal alignment of the visible text inside the field. `Left` (default) keeps the previous behaviour. `Center` swaps the text wrapper from absolute-positioned (with `scroll_offset`) to a flex-centred row, suppresses the absolute-positioned cursor (whose math doesn't account for the dynamic centre offset), and triggers a single-click-selects-all gesture so numeric / OTP / code fields behave like `<input type=number>` in browsers.
 - **`TextInput::padding_x(px)`** — exposes the previously hard-coded 12 px internal padding so tight cells (number / OTP / code) can drop it to 4–6 px.
 - **`TextInput::on_step(callback)`** — stepper hook fired on ↑ / ↓ / `+` / `−` / `=` keys while the field is focused. When set, the keys are consumed (no character insert for `+` / `−`); the callback receives `+1` or `-1`. Off by default so plain text inputs still accept a typed `-` as the leading sign of a negative number.

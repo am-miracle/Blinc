@@ -90,6 +90,10 @@ pub mod cn {
     pub use crate::components::slider::slider;
     pub use crate::components::spinner::spinner;
     pub use crate::components::switch::switch;
+    pub use crate::components::table::{
+        table, table_body, table_caption, table_cell, table_footer, table_head, table_header,
+        table_row,
+    };
     pub use crate::components::tabs::{TabsSize, TabsTransition, tab_item, tabs};
     pub use crate::components::textarea::textarea;
     pub use crate::components::toast::{
@@ -200,6 +204,10 @@ pub mod prelude {
     pub use crate::components::slider::{Slider, SliderBuilder, SliderSize, slider};
     pub use crate::components::spinner::{Spinner, SpinnerBuilder, SpinnerSize, spinner};
     pub use crate::components::switch::{Switch, SwitchSize, switch};
+    pub use crate::components::table::{
+        TableRow, table, table_body, table_caption, table_cell, table_footer, table_head,
+        table_header, table_row,
+    };
     pub use crate::components::tabs::{
         TabMenuItem, Tabs, TabsBuilder, TabsSize, TabsTransition, tab_item, tabs,
     };

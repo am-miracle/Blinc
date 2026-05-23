@@ -297,6 +297,18 @@ impl TableCell {
         self
     }
 
+    /// Add a CSS class for selector matching
+    pub fn class(mut self, name: impl AsRef<str>) -> Self {
+        self.inner = self.inner.class(name);
+        self
+    }
+
+    /// Set the element id for CSS selector matching
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.inner = self.inner.id(id);
+        self
+    }
+
     /// Add a separator (vertical line) after this cell
     ///
     /// Creates a visual divider by adding a narrow colored div as the last child

@@ -45,6 +45,7 @@ pub mod skeleton;
 pub mod slider;
 pub mod spinner;
 pub mod switch;
+pub mod table;
 pub mod tabs;
 pub mod textarea;
 pub mod toast;
@@ -116,6 +117,10 @@ pub use skeleton::{Skeleton, skeleton, skeleton_circle};
 pub use slider::{Slider, SliderSize, slider};
 pub use spinner::{Spinner, SpinnerBuilder, SpinnerSize, spinner};
 pub use switch::{Switch, SwitchSize, switch};
+pub use table::{
+    TableRow, table, table_body, table_caption, table_cell, table_footer, table_head, table_header,
+    table_row,
+};
 pub use tabs::{TabMenuItem, Tabs, TabsBuilder, TabsSize, TabsTransition, tab_item, tabs};
 pub use textarea::{Textarea, TextareaSize, textarea};
 pub use toast::{

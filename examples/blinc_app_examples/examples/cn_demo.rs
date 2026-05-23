@@ -138,6 +138,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
                         .child(icon_gallery_section())
                         .child(misc_section())
                         .child(tree_view_section())
+                        .child(table_section())
                         .child(charts_section()),
                 ),
         )
@@ -3514,6 +3515,68 @@ fn tree_view_section() -> impl ElementBuilder + use<> {
                             ),
                     ),
             ),
+    )
+}
+
+// ============================================================================
+// Table Section
+// ============================================================================
+
+fn table_section() -> impl ElementBuilder + use<> {
+    section_container().child(section_title("Table")).child(
+        cn::table()
+            .w_full()
+            .child(
+                cn::table_header().child(
+                    cn::table_row()
+                        .child(cn::table_head("Invoice"))
+                        .child(cn::table_head("Status"))
+                        .child(cn::table_head("Method"))
+                        .child(cn::table_head("Amount")),
+                ),
+            )
+            .child(
+                cn::table_body()
+                    .child(
+                        cn::table_row()
+                            .child(cn::table_cell().child(text("INV001")))
+                            .child(cn::table_cell().child(text("Paid")))
+                            .child(cn::table_cell().child(text("Credit Card")))
+                            .child(cn::table_cell().child(text("$250.00"))),
+                    )
+                    .child(
+                        cn::table_row()
+                            .selected(true)
+                            .child(cn::table_cell().child(text("INV002")))
+                            .child(cn::table_cell().child(text("Pending")))
+                            .child(cn::table_cell().child(text("Wire")))
+                            .child(cn::table_cell().child(text("$1,200.00"))),
+                    )
+                    .child(
+                        cn::table_row()
+                            .child(cn::table_cell().child(text("INV003")))
+                            .child(cn::table_cell().child(text("Unpaid")))
+                            .child(cn::table_cell().child(text("ACH")))
+                            .child(cn::table_cell().child(text("$450.00"))),
+                    )
+                    .child(
+                        cn::table_row()
+                            .child(cn::table_cell().child(text("INV004")))
+                            .child(cn::table_cell().child(text("Paid")))
+                            .child(cn::table_cell().child(text("Credit Card")))
+                            .child(cn::table_cell().child(text("$80.00"))),
+                    ),
+            )
+            .child(
+                cn::table_footer().child(
+                    cn::table_row()
+                        .child(cn::table_cell().child(text("Total")))
+                        .child(cn::table_cell())
+                        .child(cn::table_cell())
+                        .child(cn::table_cell().child(text("$1,980.00"))),
+                ),
+            )
+            .child(cn::table_caption("A list of your recent invoices")),
     )
 }
 

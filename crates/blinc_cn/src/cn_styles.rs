@@ -1248,4 +1248,65 @@ pub const CN_STYLES: &str = r#"
     background: var(--selection);
     color: var(--accent);
 }
+
+/* ============================================================================
+   Table (shadcn `<Table>` family)
+   ============================================================================ */
+
+/* Outer container — 1px border, rounded, clipped so the row borders
+   don't bleed past the rounded corners. The layout `table()` widget
+   already paints `overflow_clip`; the cn rule adds the surface chrome
+   (border + radius + base font-size). bg stays unset so layout's
+   per-section setters (thead / tfoot paint `--surface-overlay`) win. */
+.cn-table {
+    border: 1px solid var(--cn-table-border, var(--border));
+    border-radius: var(--cn-table-radius, var(--radius-md));
+    font-size: var(--text-sm);
+}
+
+/* thead / tfoot bg is owned by the layout widget (theme token
+   `--surface-overlay` via Rust setters). Don't redeclare here — the
+   CSS value would clobber the setter result. The cn footer only adds
+   the top-border + medium font-weight. */
+.cn-table-footer {
+    font-weight: 500;
+    border-top: 1px solid var(--cn-table-border, var(--border));
+}
+
+/* Rows — bottom border + hover bg. The row separator is what gives the
+   table its grid feel; tbody's last row strips the border via the
+   `:last-child` rule so the closing edge sits flush with the outer
+   border-radius. */
+.cn-table-row {
+    border-bottom: 1px solid var(--cn-table-border, var(--border));
+    transition: background var(--duration-fast) var(--ease-state);
+}
+.cn-table-body .cn-table-row:last-child {
+    border-bottom: none;
+}
+.cn-table-row:hover {
+    background: var(--cn-table-row-hover, var(--surface-hover));
+}
+.cn-table-row--selected,
+.cn-table-row--selected:hover {
+    background: var(--cn-table-row-selected, var(--selection));
+}
+
+/* Header cell — muted-foreground, medium-weight, left-aligned, compact
+   40 px height to match shadcn. */
+.cn-table-head {
+    color: var(--text-secondary);
+    font-weight: 500;
+    font-size: var(--text-sm);
+}
+
+/* Data cell — no extra colour; inherits TextPrimary from the layout
+   widget. cn just contributes the class hook for users to extend. */
+.cn-table-cell { }
+
+/* Caption — small muted label below the table. */
+.cn-table-caption {
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+}
 "#;
