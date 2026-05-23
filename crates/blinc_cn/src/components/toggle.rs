@@ -73,7 +73,7 @@ pub enum ToggleSize {
 }
 
 impl ToggleSize {
-    fn height(self) -> f32 {
+    pub fn height(self) -> f32 {
         match self {
             ToggleSize::Small => 32.0,
             ToggleSize::Medium => 36.0,
@@ -81,7 +81,7 @@ impl ToggleSize {
         }
     }
 
-    fn padding_x(self) -> f32 {
+    pub fn padding_x(self) -> f32 {
         match self {
             ToggleSize::Small => 8.0,
             ToggleSize::Medium => 12.0,
@@ -89,7 +89,7 @@ impl ToggleSize {
         }
     }
 
-    fn icon_size(self) -> f32 {
+    pub fn icon_size(self) -> f32 {
         match self {
             ToggleSize::Small => 14.0,
             ToggleSize::Medium => 16.0,
@@ -97,7 +97,7 @@ impl ToggleSize {
         }
     }
 
-    fn font_size(self, typography: &TypographyTokens) -> f32 {
+    pub fn font_size(self, typography: &TypographyTokens) -> f32 {
         match self {
             ToggleSize::Small => typography.text_xs,
             ToggleSize::Medium => typography.text_sm,

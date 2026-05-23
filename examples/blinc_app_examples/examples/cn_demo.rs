@@ -798,6 +798,14 @@ fn toggles_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let disabled_on = ctx.use_state_keyed("toggle_disabled_on", || true);
     let disabled_off = ctx.use_state_keyed("toggle_disabled_off", || false);
 
+    // Toggle group: single-select text-alignment picker. The shared
+    // `State<String>` carries the current choice; each item flips it.
+    let text_align = ctx.use_state_keyed("toggle_group_align", || "left".to_string());
+    // Same group, Outline variant — same state, second instance to
+    // exercise the variant + shared-state pattern.
+    let text_align_outline =
+        ctx.use_state_keyed("toggle_group_align_outline", || "center".to_string());
+
     // Canonical Lucide icons re-exported through `blinc_cn::prelude`
     // (`icons` + `to_svg`). The helper wraps each path in a proper
     // `<svg width=… height=… stroke="currentColor">` so the SVG
@@ -805,6 +813,10 @@ fn toggles_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let icon_bold = to_svg(icons::BOLD, 16.0);
     let icon_italic = to_svg(icons::ITALIC, 16.0);
     let icon_underline = to_svg(icons::UNDERLINE, 16.0);
+    let icon_align_left = to_svg(icons::TEXT_ALIGN_START, 16.0);
+    let icon_align_center = to_svg(icons::TEXT_ALIGN_CENTER, 16.0);
+    let icon_align_right = to_svg(icons::TEXT_ALIGN_END, 16.0);
+    let icon_align_justify = to_svg(icons::TEXT_ALIGN_JUSTIFY, 16.0);
 
     let theme = ThemeState::get();
     let caption_color = theme.color(ColorToken::TextTertiary);
@@ -938,6 +950,32 @@ fn toggles_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
                                             .label("Off (disabled)")
                                             .disabled(true),
                                     ),
+                            ),
+                    )
+                    // ToggleGroup: single-select text-alignment picker.
+                    // First row uses Default variant + Small size; second
+                    // row uses Outline variant for the boxed look.
+                    .child(
+                        div()
+                            .flex_col()
+                            .gap(4.0)
+                            .child(row_caption("Group (single-select)"))
+                            .child(
+                                cn::toggle_group(&text_align)
+                                    .size(cn::ToggleSize::Small)
+                                    .item(cn::toggle_item("left").icon(&icon_align_left))
+                                    .item(cn::toggle_item("center").icon(&icon_align_center))
+                                    .item(cn::toggle_item("right").icon(&icon_align_right))
+                                    .item(cn::toggle_item("justify").icon(&icon_align_justify)),
+                            )
+                            .child(
+                                cn::toggle_group(&text_align_outline)
+                                    .variant(cn::ToggleVariant::Outline)
+                                    .size(cn::ToggleSize::Small)
+                                    .item(cn::toggle_item("left").icon(&icon_align_left))
+                                    .item(cn::toggle_item("center").icon(&icon_align_center))
+                                    .item(cn::toggle_item("right").icon(&icon_align_right))
+                                    .item(cn::toggle_item("justify").icon(&icon_align_justify)),
                             ),
                     ),
             ),
