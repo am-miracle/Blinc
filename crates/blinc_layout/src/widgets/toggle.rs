@@ -1,17 +1,17 @@
 //! Toggle — a button-shaped binary on/off control.
 //!
 //! Visually a button that stays "pressed in" while `on`. Distinct from
-//! [`switch`](super::super::super::widgets) (sliding track + thumb) and
-//! [`checkbox`](super::checkbox) (small box with checkmark). The
+//! `switch` (sliding track + thumb, lives in `blinc_cn::switch`) and
+//! [`checkbox`](mod@super::checkbox) (small box with checkmark). The
 //! canonical use is icon-only formatting toggles in a toolbar — bold /
 //! italic / underline — or a single-key feature flag in settings.
 //!
 //! Defaults to theme tokens for every visual value (colours from
 //! [`ColorToken`], radius from [`RadiusToken`], spacing from
-//! [`SpacingToken`], typography from [`TypographyTokens`]) so a bare
-//! `toggle(&state)` against any active theme bundle looks right out
-//! of the box. `blinc_cn::toggle` layers shadcn-flavoured surface
-//! styling on top via `.cn-toggle` classes.
+//! [`SpacingToken`], typography from [`blinc_theme::TypographyTokens`])
+//! so a bare `toggle(&state)` against any active theme bundle looks
+//! right out of the box. `blinc_cn::toggle` layers shadcn-flavoured
+//! surface styling on top via `.cn-toggle` classes.
 //!
 //! # Example
 //!

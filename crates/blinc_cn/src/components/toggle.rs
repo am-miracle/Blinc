@@ -1,6 +1,6 @@
 //! Toggle component — shadcn-style binary toggle button.
 //!
-//! Wraps [`blinc_layout::widgets::toggle`] with cn surface CSS classes
+//! Wraps [`blinc_layout::widgets::toggle`](mod@blinc_layout::widgets::toggle) with cn surface CSS classes
 //! (`.cn-toggle`, `.cn-toggle--<variant>`, `.cn-toggle--<size>`) plus
 //! shadcn-flavoured size + variant ladders. All parse / state /
 //! token-default work lives in the layout widget; cn only contributes
