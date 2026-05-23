@@ -688,8 +688,12 @@ fn build_dropdown_menu_div(
         .lock_corner_shape()
         .shadow_lg()
         .overflow_clip()
-        .h_fit()
-        .py(1.0);
+        .h_fit();
+    // No top/bottom padding — items extend edge-to-edge so the rounded
+    // overflow_clip can trim their hover bg into the panel's outer
+    // curve. A `py(1.0)` here would leave a 1px strip of the panel's
+    // surface bg between the first/last item's hover highlight and
+    // the rounded corner.
 
     for (idx, item) in items.iter().enumerate() {
         if item.is_separator() {

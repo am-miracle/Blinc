@@ -343,7 +343,10 @@ fn show_navigation_dropdown(
                 .rounded(radius)
                 .shadow_lg()
                 .overflow_clip()
-                .py(1.0)
+                // No top/bottom padding — items extend edge-to-edge so
+                // the rounded overflow_clip can trim their hover bg
+                // into the panel's outer curve. See dropdown_menu.rs
+                // for the same rationale across the menu family.
                 .child(user_content)
                 .on_hover_enter(move |_| {
                     if let Ok(mut stack) = overlay_stack().lock() {

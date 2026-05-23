@@ -794,8 +794,8 @@ fn build_menubar_menu_div(
         .lock_corner_shape()
         .shadow_lg()
         .overflow_clip()
-        .h_fit()
-        .py(1.0);
+        .h_fit();
+    // No top/bottom padding — see dropdown_menu.rs for rationale.
 
     // In hover mode the dropdown stays open while the cursor sits inside it.
     // Tooltip dismiss rules drive the countdown; container hover handlers

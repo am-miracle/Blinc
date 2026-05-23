@@ -518,11 +518,16 @@ pub const CN_STYLES: &str = r#"
 .cn-select-content {
     /* Floating dropdown panel → elevation 2.
        Shared overlay-menu chrome — keep `.cn-dropdown-menu`,
-       `.cn-context-menu`, and `.cn-combobox-content` in sync. */
+       `.cn-context-menu`, and `.cn-combobox-content` in sync.
+       No outer padding: items extend edge-to-edge and the rounded
+       overflow_clip on the panel (see `ClipShape::rounded_rect_shaped`)
+       trims their hover bg to the panel's outer curve, so the
+       highlight follows the rounded corner instead of leaving a
+       gap between the item's small radius and the panel's larger
+       one. */
     background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-default);
-    padding: var(--space-1);
     /* Reuse the dropdown keyframes — same top-anchored slide/fade. */
     animation: cn-dropdown-menu-enter var(--duration-fast) var(--ease-state);
     transform-origin: top center;
@@ -532,7 +537,10 @@ pub const CN_STYLES: &str = r#"
     padding: var(--space-2) var(--space-3);
     cursor: pointer;
     color: var(--text-primary);
-    border-radius: var(--radius-sm);
+    /* No `border-radius` — item bg is a clean rectangle so the
+       panel's rounded clip can shape the first/last items into the
+       outer curve. A small radius here would leave a visible band
+       between the item's curve and the panel's curve. */
     /* No CSS `transition` here — same rationale as cn-menubar-item:
        when the cursor slides across rows quickly the bg transition
        leaves multiple rows partially highlighted (each at a different
@@ -911,11 +919,12 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-dropdown-menu {
-    /* Shared overlay-menu chrome with select / context / combobox. */
+    /* Shared overlay-menu chrome with select / context / combobox.
+       No outer padding so item hover bgs run flush with the panel's
+       rounded edge — see `.cn-select-content` for the rationale. */
     background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-default);
-    padding: var(--space-1);
     /* CSS-driven enter — slight scale + fade. Motion FSM workaround. */
     animation: cn-dropdown-menu-enter var(--duration-fast) var(--ease-state);
     transform-origin: top center;
@@ -927,10 +936,10 @@ pub const CN_STYLES: &str = r#"
 }
 .cn-dropdown-item {
     padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-sm);
     cursor: pointer;
     color: var(--text-primary);
     font-size: var(--text-sm);
+    /* No `border-radius` — see `.cn-select-item`. */
     /* No transition — see cn-menubar-item rationale. */
 }
 /* `--accent-subtle` — parent panel sits at `--surface-elevated`,
@@ -951,11 +960,12 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-context-menu {
-    /* Shared overlay-menu chrome with select / dropdown / combobox. */
+    /* Shared overlay-menu chrome with select / dropdown / combobox.
+       No outer padding so item hover bgs run flush with the panel's
+       rounded edge — see `.cn-select-content` for the rationale. */
     background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-default);
-    padding: var(--space-1);
     /* CSS-driven enter — small scale + fade. Motion FSM workaround. */
     animation: cn-context-menu-enter var(--duration-fast) var(--ease-state);
     transform-origin: top left;
@@ -967,7 +977,7 @@ pub const CN_STYLES: &str = r#"
 }
 .cn-context-menu-item {
     padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-sm);
+    /* No `border-radius` — see `.cn-select-item`. */
     cursor: pointer;
     color: var(--text-primary);
     font-size: var(--text-sm);
@@ -1006,10 +1016,10 @@ pub const CN_STYLES: &str = r#"
    instead of the pure-white `Surface` the Rust-side `.bg(...)`
    fallback was painting. */
 .cn-menubar-content {
+    /* No outer padding — see `.cn-select-content`. */
     background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-default);
-    padding: var(--space-1);
     /* Reuse the dropdown keyframes — same top-anchored slide/fade. */
     animation: cn-dropdown-menu-enter var(--duration-fast) var(--ease-state);
     transform-origin: top center;
@@ -1019,9 +1029,9 @@ pub const CN_STYLES: &str = r#"
        menu primitives share the same row chrome. The Rust builder
        applies a smaller `.py / .px` to set a sensible fallback when
        cn_styles isn't loaded; this CSS rule overrides it when the
-       stylesheet IS present. */
+       stylesheet IS present. No `border-radius` — see
+       `.cn-select-item`. */
     padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-primary);
     font-size: var(--text-sm);
@@ -1136,18 +1146,18 @@ pub const CN_STYLES: &str = r#"
     transition: border-color var(--duration-fast) var(--ease-state);
 }
 .cn-combobox-content {
-    /* Shared overlay-menu chrome with select / dropdown / context. */
+    /* Shared overlay-menu chrome with select / dropdown / context.
+       No outer padding — see `.cn-select-content`. */
     background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: var(--radius-default);
-    padding: var(--space-1);
     /* Reuse the dropdown keyframes — same top-anchored slide/fade. */
     animation: cn-dropdown-menu-enter var(--duration-fast) var(--ease-state);
     transform-origin: top center;
 }
 .cn-combobox-item {
     padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-sm);
+    /* No `border-radius` — see `.cn-select-item`. */
     cursor: pointer;
     color: var(--text-primary);
     font-size: var(--text-sm);

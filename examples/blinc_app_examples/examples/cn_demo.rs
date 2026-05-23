@@ -1716,20 +1716,9 @@ fn progress_section(ctx: &WindowedContext, _scroll_ref: &ScrollRef) -> impl Elem
                     .child(cn::label("Animated Progress (auto-animates to 75%)"))
                     .child(cn::progress_animated(animated_progress).w(PROGRESS_WIDTH))
                     .child({
-                        let theme = ThemeState::get();
-                        div()
-                            .w(PROGRESS_WIDTH)
-                            .justify_center()
-                            .py(theme.spacing().space_2)
-                            .px(theme.spacing().space_4)
-                            .bg(theme.color(ColorToken::Primary))
-                            .rounded(theme.radius(RadiusToken::Md))
-                            .cursor_pointer()
-                            .child(
-                                text("Replay Animation")
-                                    .size(theme.typography().text_sm)
-                                    .color(theme.color(ColorToken::TextInverse)),
-                            )
+                        cn::button("Replay Animation")
+                            .size(ButtonSize::Large)
+                            .variant(ButtonVariant::Primary)
                             // Click → snap to 0 (no animation) then re-target
                             // 75%, so the bar visibly plays the 0→75% animation
                             // again. set_immediate clears any active spring so
