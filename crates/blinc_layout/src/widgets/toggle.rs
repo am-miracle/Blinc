@@ -157,16 +157,31 @@ impl ResolvedColors {
     }
 }
 
-/// Mix `top` over `bottom` by `amount` (a poor-man's overlay blend
-/// good enough for the small hover-tint shift the toggle uses).
+/// Composite `top` over `bottom` using Porter-Duff "over" with the
+/// source alpha scaled by `amount`. Picks the right thing in both
+/// regimes the toggle uses:
+///   * bottom transparent (off-state baseline) → result is `top` at
+///     `amount` alpha (a soft tint over whatever surface is behind).
+///   * bottom opaque (on-state baseline) → result is the usual mid-
+///     point between the two RGB at `amount` weight, alpha = 1.
+///
+/// Pre-fix this was a naive `lerp(bottom, top, amount)` with
+/// `alpha = max(bottom.a, top.a)`. When `bottom` was transparent
+/// (`Color::TRANSPARENT`), the RGB became `amount × top.rgb` but
+/// alpha snapped to 1, so a 5 %-`TextPrimary` hover tint over a
+/// transparent off-state painted a near-black opaque rect — the
+/// "hover state is bad" the user reported.
 fn mix(bottom: Color, top: Color, amount: f32) -> Color {
-    let a = amount.clamp(0.0, 1.0);
-    Color::rgba(
-        bottom.r * (1.0 - a) + top.r * a,
-        bottom.g * (1.0 - a) + top.g * a,
-        bottom.b * (1.0 - a) + top.b * a,
-        bottom.a.max(top.a),
-    )
+    let src_a = amount.clamp(0.0, 1.0) * top.a;
+    let bg_a = bottom.a;
+    let out_a = src_a + bg_a * (1.0 - src_a);
+    if out_a < 1.0e-6 {
+        return Color::rgba(0.0, 0.0, 0.0, 0.0);
+    }
+    let r = (top.r * src_a + bottom.r * bg_a * (1.0 - src_a)) / out_a;
+    let g = (top.g * src_a + bottom.g * bg_a * (1.0 - src_a)) / out_a;
+    let b = (top.b * src_a + bottom.b * bg_a * (1.0 - src_a)) / out_a;
+    Color::rgba(r, g, b, out_a)
 }
 
 /// CSS-override pipeline: layered base → :checked → :hover → :disabled,
