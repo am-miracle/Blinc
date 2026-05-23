@@ -50,7 +50,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 | Time picker | Planned | Clock face or dropdown. See §1.5. |
 | Color picker | Planned | HSL/RGB wheel + swatches. See §1.5. |
 | Range slider (dual thumb) | Planned | Extend existing slider. See §1.5. |
-| Number input (stepper) | Planned | text_input + increment/decrement. See §1.5. |
+| Number input (stepper) | Planned | First-class `blinc_layout::widgets::number_input` — typed numeric value (i64 / f64), parse + clamp + commit FSM, increment/decrement keyboard handling (↑/↓/PageUp/PageDown), step/min/max/precision config, wraps `text_input` for the visible field. `cn::number_input` then themes it (see §1.5). |
 | Data grid | Planned | Sortable, filterable table. See §1.5 (depends on cn::table). |
 | Virtualized list | **Done** | `virtual_list(count, builder)` — variable-height items, CSS classes, flexbox layout |
 | Rich text editor | **Done** | `rich_text_editor()` — formatting toolbar, undo/redo, selection, clipboard |
@@ -67,7 +67,7 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 |-----------|----------|--------|--------|-------|
 | `cn::toggle` | P0 | XS | — | Single binary toggle button. Reuse `button` + Stateful with `ToggleState`. Pairs with `:aria-pressed` styling. |
 | `cn::toggle_group` | P0 | XS | `cn::toggle` | Radio-style toggle bar; single- or multi-select variants. |
-| `cn::number_input` | P0 | XS | `cn::input` | Stepper wrapper: `text_input` + chevron up/down. Parse + clamp on commit. Roadmap §1.4 entry. |
+| `cn::number_input` | P0 | XS | `blinc_layout::number_input`, `cn::input` | Themed wrapper around the first-class `number_input` widget — applies cn surface (`.cn-input`-shaped border/focus ring, hover bg) plus the chevron up/down stepper buttons. Parse / clamp / commit logic lives in the layout widget; cn only contributes look + the stepper affordance. Roadmap §1.4 entry. |
 | `cn::table` | P0 | S | `blinc_layout::table` | Themed wrapper exposing `Table` / `TableHeader` / `TableBody` / `TableRow` / `TableCell` / `TableCaption` builders matching the shadcn surface. No sort/filter — that's `data_grid`. |
 | `cn::input_otp` | P0 | S | `cn::input` | Segmented PIN / OTP input (N digits). Focus chain across boxes with auto-advance on type, auto-rewind on backspace, paste fills all slots. |
 | `cn::calendar` | P0 | M | — | Month grid + day cells + range / single selection. Hand-rolled date math (chrono is overkill for a UI calendar). Prereq for date picker. |
