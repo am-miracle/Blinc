@@ -153,7 +153,7 @@ const STYLESHEET: &str = r#"
         }
 "#;
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     if ctx.rebuild_count == 0 {
         ctx.add_css(STYLESHEET);
     }
@@ -191,7 +191,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 }
 
 /// Rebuild trigger button — click to force stateful containers to re-run on_state
-fn rebuild_button(count: State<i32>) -> impl ElementBuilder {
+fn rebuild_button(count: State<i32>) -> impl ElementBuilder + use<> {
     let count_click = count.clone();
     stateful::<NoState>()
         .deps([count.signal_id()])
@@ -215,7 +215,7 @@ fn rebuild_button(count: State<i32>) -> impl ElementBuilder {
 }
 
 /// TEST 1: var() from :root inside stateful
-fn test_var_from_root_stateful(count: State<i32>) -> impl ElementBuilder {
+fn test_var_from_root_stateful(count: State<i32>) -> impl ElementBuilder + use<> {
     stateful::<NoState>()
         .deps([count.signal_id()])
         .on_state(move |_ctx| {
@@ -261,7 +261,7 @@ fn test_var_from_root_stateful(count: State<i32>) -> impl ElementBuilder {
 }
 
 /// TEST 2: Percentage width inside stateful
-fn test_percentage_stateful(count: State<i32>) -> impl ElementBuilder {
+fn test_percentage_stateful(count: State<i32>) -> impl ElementBuilder + use<> {
     stateful::<NoState>()
         .deps([count.signal_id()])
         .on_state(move |_ctx| {
@@ -309,7 +309,7 @@ fn test_percentage_stateful(count: State<i32>) -> impl ElementBuilder {
 }
 
 /// TEST 3: Text color inheritance inside stateful
-fn test_color_inheritance_stateful(count: State<i32>) -> impl ElementBuilder {
+fn test_color_inheritance_stateful(count: State<i32>) -> impl ElementBuilder + use<> {
     stateful::<NoState>()
         .deps([count.signal_id()])
         .on_state(move |_ctx| {
@@ -365,7 +365,7 @@ fn test_color_inheritance_stateful(count: State<i32>) -> impl ElementBuilder {
 }
 
 /// TEST 4: CSS layout properties inside stateful (no hover — pure layout test)
-fn test_layout_stateful() -> impl ElementBuilder {
+fn test_layout_stateful() -> impl ElementBuilder + use<> {
     stateful::<NoState>().on_state(|_ctx| {
         div()
             .class("section")
@@ -432,7 +432,7 @@ fn test_layout_stateful() -> impl ElementBuilder {
 /// callbacks survive when the parent stateful container rebuilds due to
 /// signal changes. The inner buttons should remain clickable after pressing
 /// the main "Rebuild" button.
-fn test_inner_click_persistence(ctx: &WindowedContext, count: State<i32>) -> impl ElementBuilder {
+fn test_inner_click_persistence(ctx: &WindowedContext, count: State<i32>) -> impl ElementBuilder + use<> {
     let inner_count = ctx.use_state_keyed("inner-click-count", || 0i32);
     let inner_count_for_state = inner_count.clone();
     let inner_count_click = inner_count.clone();

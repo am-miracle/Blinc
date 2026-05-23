@@ -314,7 +314,7 @@ const SVG_CSS: &str = r#"
 }
 "#;
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     // Register CSS on the first frame. `add_css` is idempotent for
     // identical sources (the stylesheet deduplicates), but guard with
     // `rebuild_count` to avoid re-parsing every frame.

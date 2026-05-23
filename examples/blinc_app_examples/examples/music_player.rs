@@ -231,7 +231,7 @@ fn main() -> Result<()> {
 // UI STRUCTURE
 // ============================================================================
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     if ctx.rebuild_count == 0 {
         ctx.add_css(STYLESHEET);
     }
@@ -247,7 +247,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         .child(player_card())
 }
 
-fn player_card() -> impl ElementBuilder {
+fn player_card() -> impl ElementBuilder + use<> {
     div()
         .id("card")
         .flex_col()
@@ -260,7 +260,7 @@ fn player_card() -> impl ElementBuilder {
 // ALBUM HEADER: art + title/artist + badge
 // ============================================================================
 
-fn album_header() -> impl ElementBuilder {
+fn album_header() -> impl ElementBuilder + use<> {
     div()
         .flex_row()
         .gap_px(16.0)
@@ -314,7 +314,7 @@ fn album_header() -> impl ElementBuilder {
 // PROGRESS: time labels + track bar
 // ============================================================================
 
-fn progress_section() -> impl ElementBuilder {
+fn progress_section() -> impl ElementBuilder + use<> {
     div()
         .w_full()
         .flex_col()
@@ -343,7 +343,7 @@ fn progress_section() -> impl ElementBuilder {
 // PLAYBACK CONTROLS: shuffle, back, pause, forward, repeat
 // ============================================================================
 
-fn controls_row() -> impl ElementBuilder {
+fn controls_row() -> impl ElementBuilder + use<> {
     div()
         .flex_row()
         .justify_between()

@@ -28,7 +28,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     // Create text input states that persist across rebuilds
     // use_state_keyed returns State<T> which wraps the value; we store SharedTextInputState directly
     let username_state = ctx.use_state_keyed("username", || {
@@ -102,7 +102,7 @@ fn build_input_section(
     username: &SharedTextInputState,
     email: &SharedTextInputState,
     password: &SharedTextInputState,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(4.0)
@@ -130,7 +130,7 @@ fn build_input_section(
 }
 
 /// Build a labeled text input
-fn build_labeled_input(label: &str, state: &SharedTextInputState) -> impl ElementBuilder {
+fn build_labeled_input(label: &str, state: &SharedTextInputState) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(1.0)
@@ -147,7 +147,7 @@ fn build_labeled_input(label: &str, state: &SharedTextInputState) -> impl Elemen
 fn build_values_display(
     username: &SharedTextInputState,
     email: &SharedTextInputState,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     let username_val = username.lock().unwrap().value.clone();
     let email_val = email.lock().unwrap().value.clone();
 
@@ -197,7 +197,7 @@ fn build_values_display(
 fn build_form_section(
     _ctx: &WindowedContext,
     message: &SharedTextAreaState,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(16.0)
@@ -276,7 +276,7 @@ fn build_form_section(
 }
 
 /// Display message preview
-fn build_message_preview(message: &SharedTextAreaState) -> impl ElementBuilder {
+fn build_message_preview(message: &SharedTextAreaState) -> impl ElementBuilder + use<> {
     let msg_val = message.lock().unwrap().value();
 
     div()

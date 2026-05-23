@@ -157,7 +157,7 @@ fn main() -> Result<()> {
     WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     if ctx.rebuild_count == 0 {
         ctx.add_css(STYLESHEET);
     }
@@ -237,7 +237,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 }
 
 /// Label wrapped in a div so pointer-query CSS can apply opacity.
-fn label(name: &str, color: Color) -> impl ElementBuilder {
+fn label(name: &str, color: Color) -> impl ElementBuilder + use<> {
     div()
         .class("label-wrap")
         .child(text(name).size(22.0).weight(FontWeight::Bold).color(color))

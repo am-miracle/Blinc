@@ -100,7 +100,7 @@ fn keyboard_hide_fn() -> Option<extern "C" fn()> {
 /// transmute to `extern "C" fn()` and the templates `@_cdecl`
 /// declarations match exactly.
 unsafe fn lookup_extern_fn(name: &[u8]) -> Option<extern "C" fn()> {
-    extern "C" {
+    unsafe extern "C" {
         fn dlsym(handle: *mut std::ffi::c_void, symbol: *const i8) -> *mut std::ffi::c_void;
     }
     // `RTLD_DEFAULT` on Apple platforms is the magic value
@@ -113,7 +113,12 @@ unsafe fn lookup_extern_fn(name: &[u8]) -> Option<extern "C" fn()> {
     // irrelevant here.
     const RTLD_DEFAULT: *mut std::ffi::c_void = -2isize as *mut std::ffi::c_void;
     debug_assert!(name.last() == Some(&0), "name must be null-terminated");
-    let sym = dlsym(RTLD_DEFAULT, name.as_ptr() as *const i8);
+    // SAFETY: caller-asserted invariants on `name` (null-terminated
+    // and points at a valid exported symbol); `RTLD_DEFAULT` is the
+    // documented sentinel. Edition 2024 makes `unsafe fn` bodies
+    // explicit-only, so the dlsym + transmute calls now need their
+    // own `unsafe` block.
+    let sym = unsafe { dlsym(RTLD_DEFAULT, name.as_ptr() as *const i8) };
     if sym.is_null() {
         None
     } else {
@@ -121,7 +126,12 @@ unsafe fn lookup_extern_fn(name: &[u8]) -> Option<extern "C" fn()> {
         // exported by the linked binary, and the caller has
         // committed to the function having signature
         // `extern "C" fn()`.
-        Some(std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(sym))
+        unsafe {
+            Some(std::mem::transmute::<
+                *mut std::ffi::c_void,
+                extern "C" fn(),
+            >(sym))
+        }
     }
 }
 

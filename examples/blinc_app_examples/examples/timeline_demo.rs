@@ -30,7 +30,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     div()
         .w(ctx.width)
         .h(ctx.height)
@@ -78,7 +78,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 }
 
 /// A bouncing ball - click to toggle position with smooth spring animation
-fn bouncing_ball() -> impl ElementBuilder {
+fn bouncing_ball() -> impl ElementBuilder + use<> {
     use blinc_animation::SpringConfig;
     use blinc_core::events::event_types;
     use blinc_layout::stateful::ButtonState;
@@ -151,7 +151,7 @@ fn bouncing_ball() -> impl ElementBuilder {
 }
 
 /// A pulsing ring - click to start/stop continuous pulsation
-fn pulsing_ring() -> impl ElementBuilder {
+fn pulsing_ring() -> impl ElementBuilder + use<> {
     use blinc_core::events::event_types;
     use blinc_layout::stateful::ButtonState;
 
@@ -249,7 +249,7 @@ fn pulsing_ring() -> impl ElementBuilder {
 }
 
 /// Sliding bars with staggered timing using Timeline
-fn sliding_bars() -> impl ElementBuilder {
+fn sliding_bars() -> impl ElementBuilder + use<> {
     stateful::<NoState>().on_state(|ctx| {
         // Use a single timeline with staggered entries
         // Timeline handles the coordination, ping-pong reverses at the timeline level

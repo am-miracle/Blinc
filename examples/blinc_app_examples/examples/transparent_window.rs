@@ -47,7 +47,7 @@ fn main() -> Result<()> {
 #[cfg(target_arch = "wasm32")]
 fn main() {}
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     div()
         .w(ctx.width)
         .h(ctx.height)

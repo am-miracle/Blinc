@@ -212,7 +212,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     let scene_ready = ctx.use_state_keyed("texture_transform_demo_scene_ready", || false);
     let transform_enabled = ctx.use_state_keyed("texture_transform_demo_enabled", || true);
 

@@ -1192,7 +1192,7 @@ const STYLESHEET: &str = r#"
 
             "#;
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     if ctx.rebuild_count == 0 {
         ctx.add_css(STYLESHEET);
     }
@@ -1278,7 +1278,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         )
 }
 
-fn header() -> impl ElementBuilder {
+fn header() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let surface = theme.color(ColorToken::Surface);
     let text_primary = theme.color(ColorToken::TextPrimary);
@@ -1326,7 +1326,7 @@ fn section_container() -> Div {
         .gap(16.0)
 }
 
-fn section_title(title: &str) -> impl ElementBuilder {
+fn section_title(title: &str) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
 
@@ -1336,14 +1336,14 @@ fn section_title(title: &str) -> impl ElementBuilder {
         .color(text_primary)
 }
 
-fn section_description(desc: &str) -> impl ElementBuilder {
+fn section_description(desc: &str) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
     text(desc).size(14.0).color(text_secondary)
 }
 
-fn code_label(label: &str) -> impl ElementBuilder {
+fn code_label(label: &str) -> impl ElementBuilder + use<> {
     inline_code(label).size(12.0)
 }
 
@@ -1351,7 +1351,7 @@ fn code_label(label: &str) -> impl ElementBuilder {
 // LAYOUT PROPERTY ANIMATION SECTION
 // ============================================================================
 
-fn layout_animation_section() -> impl ElementBuilder {
+fn layout_animation_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Layout Property Animation"))
         .child(section_description(
@@ -1433,7 +1433,7 @@ fn layout_animation_section() -> impl ElementBuilder {
 // CONSTRAINT & POSITION ANIMATION SECTION
 // ============================================================================
 
-fn constraint_position_animation_section() -> impl ElementBuilder {
+fn constraint_position_animation_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Constraint & Position Animation"))
         .child(section_description(
@@ -1552,7 +1552,7 @@ fn constraint_position_animation_section() -> impl ElementBuilder {
 // TEXT COLOR ANIMATION SECTION
 // ============================================================================
 
-fn text_color_animation_section() -> impl ElementBuilder {
+fn text_color_animation_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Text Color Animation"))
         .child(section_description(
@@ -1638,7 +1638,7 @@ fn text_color_animation_section() -> impl ElementBuilder {
 // FONT SIZE ANIMATION SECTION
 // ============================================================================
 
-fn font_size_animation_section() -> impl ElementBuilder {
+fn font_size_animation_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Font Size Animation"))
         .child(section_description(
@@ -1699,7 +1699,7 @@ fn font_size_animation_section() -> impl ElementBuilder {
 // TRANSFORM EXTENSIONS SECTION
 // ============================================================================
 
-fn transform_extensions_section() -> impl ElementBuilder {
+fn transform_extensions_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Transform Extensions"))
         .child(section_description(
@@ -1803,7 +1803,7 @@ fn transform_extensions_section() -> impl ElementBuilder {
 // CSS SELECTOR HIERARCHY SECTION
 // ============================================================================
 
-fn selector_hierarchy_section() -> impl ElementBuilder {
+fn selector_hierarchy_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_color = theme.color(ColorToken::TextPrimary);
 
@@ -1986,7 +1986,7 @@ fn selector_hierarchy_section() -> impl ElementBuilder {
 // ADVANCED SELECTORS SECTION (+, ~, :not(), :empty, *, :root)
 // ============================================================================
 
-fn advanced_selectors_section() -> impl ElementBuilder {
+fn advanced_selectors_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Advanced CSS Selectors"))
         .child(section_description(
@@ -2220,7 +2220,7 @@ fn advanced_selectors_section() -> impl ElementBuilder {
 // :is()/:where() AND *-of-type SELECTORS SECTION
 // ============================================================================
 
-fn is_where_of_type_section() -> impl ElementBuilder {
+fn is_where_of_type_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title(":is() / :where() / *-of-type"))
         .child(section_description(
@@ -2377,7 +2377,7 @@ fn is_where_of_type_section() -> impl ElementBuilder {
 // FILTER BLUR & DROP-SHADOW SECTION
 // ============================================================================
 
-fn filter_blur_section() -> impl ElementBuilder {
+fn filter_blur_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Filter: blur() & drop-shadow()"))
         .child(section_description(
@@ -2479,7 +2479,7 @@ fn filter_blur_section() -> impl ElementBuilder {
 // BACKDROP-FILTER ANIMATION SECTION
 // ============================================================================
 
-fn backdrop_filter_section() -> impl ElementBuilder {
+fn backdrop_filter_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Backdrop-Filter Animation"))
         .child(section_description(
@@ -2610,7 +2610,7 @@ fn backdrop_filter_section() -> impl ElementBuilder {
 // GRADIENT ANIMATION SECTION
 // ============================================================================
 
-fn gradient_animation_section() -> impl ElementBuilder {
+fn gradient_animation_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Gradient Animation"))
         .child(section_description(
@@ -2682,7 +2682,7 @@ fn gradient_animation_section() -> impl ElementBuilder {
 // TEXT SHADOW SECTION
 // ============================================================================
 
-fn text_shadow_section() -> impl ElementBuilder {
+fn text_shadow_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Text Shadow"))
         .child(section_description(
@@ -2766,7 +2766,7 @@ fn text_shadow_section() -> impl ElementBuilder {
 // OUTLINE SECTION
 // ============================================================================
 
-fn outline_section() -> impl ElementBuilder {
+fn outline_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Outline Properties"))
         .child(section_description(
@@ -2870,7 +2870,7 @@ fn outline_section() -> impl ElementBuilder {
 // FORM INPUT CSS STYLING SECTION
 // ============================================================================
 
-fn form_input_section() -> impl ElementBuilder {
+fn form_input_section() -> impl ElementBuilder + use<> {
     use std::sync::OnceLock;
 
     static INPUT_DATA: OnceLock<SharedTextInputState> = OnceLock::new();
@@ -2966,7 +2966,7 @@ fn form_input_section() -> impl ElementBuilder {
 // CHECKBOX & RADIO CSS STYLING SECTION
 // ============================================================================
 
-fn form_controls_section(ctx: &WindowedContext) -> impl ElementBuilder {
+fn form_controls_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let cb_state = ctx.use_state_keyed("demo_checkbox", || false);
     let cb_accent_state = ctx.use_state_keyed("accent_checkbox", || true);
     let cb_disabled_state = ctx.use_state_keyed("disabled_checkbox", || false);
@@ -3068,7 +3068,7 @@ fn form_controls_section(ctx: &WindowedContext) -> impl ElementBuilder {
 // GLOBAL TAG-NAME CSS SELECTORS
 // ============================================================================
 
-fn global_tag_selectors_section() -> impl ElementBuilder {
+fn global_tag_selectors_section() -> impl ElementBuilder + use<> {
     // Simple inline SVG icons for the demo
     let star_svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>"#;
     let heart_svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>"#;
@@ -3167,7 +3167,7 @@ fn global_tag_selectors_section() -> impl ElementBuilder {
         )
 }
 
-fn css_stylesheet_section() -> impl ElementBuilder {
+fn css_stylesheet_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -3228,7 +3228,7 @@ fn css_stylesheet_section() -> impl ElementBuilder {
 // CSS HOVER SECTION (automatic :hover state styles)
 // ============================================================================
 
-fn css_hover_section() -> impl ElementBuilder {
+fn css_hover_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("CSS :hover States"))
         .child(section_description(
@@ -3274,7 +3274,7 @@ fn css_hover_section() -> impl ElementBuilder {
 // CSS ANIMATION SECTION (@keyframes + animation property)
 // ============================================================================
 
-fn css_animation_section() -> impl ElementBuilder {
+fn css_animation_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("CSS @keyframes Animations"))
         .child(section_description(
@@ -3306,7 +3306,7 @@ fn css_animation_section() -> impl ElementBuilder {
 // CSS MACRO SECTION
 // ============================================================================
 
-fn css_macro_section() -> impl ElementBuilder {
+fn css_macro_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("css! Macro"))
         .child(section_description(
@@ -3372,7 +3372,7 @@ fn css_macro_section() -> impl ElementBuilder {
 // STYLE MACRO SECTION
 // ============================================================================
 
-fn style_macro_section() -> impl ElementBuilder {
+fn style_macro_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("style! Macro"))
         .child(section_description(
@@ -3438,7 +3438,7 @@ fn style_macro_section() -> impl ElementBuilder {
 // BUILDER PATTERN SECTION
 // ============================================================================
 
-fn builder_pattern_section() -> impl ElementBuilder {
+fn builder_pattern_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("ElementStyle Builder"))
         .child(section_description(
@@ -3505,7 +3505,7 @@ fn builder_pattern_section() -> impl ElementBuilder {
 // CSS PARSER SECTION
 // ============================================================================
 
-fn css_parser_section() -> impl ElementBuilder {
+fn css_parser_section() -> impl ElementBuilder + use<> {
     // Define CSS as a string using #id selectors
     let css_string = r#"
         #parser-card {
@@ -3586,7 +3586,7 @@ fn css_parser_section() -> impl ElementBuilder {
 // STYLE MERGING SECTION
 // ============================================================================
 
-fn style_merging_section() -> impl ElementBuilder {
+fn style_merging_section() -> impl ElementBuilder + use<> {
     // Base style
     let base = style! {
         bg: Color::BLUE,
@@ -3657,7 +3657,7 @@ fn style_merging_section() -> impl ElementBuilder {
 // BACKGROUNDS SECTION
 // ============================================================================
 
-fn backgrounds_section() -> impl ElementBuilder {
+fn backgrounds_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Backgrounds"))
         .child(section_description(
@@ -3700,7 +3700,7 @@ fn backgrounds_section() -> impl ElementBuilder {
 // CORNER RADIUS SECTION
 // ============================================================================
 
-fn corner_radius_section() -> impl ElementBuilder {
+fn corner_radius_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Corner Radius"))
         .child(section_description(
@@ -3763,7 +3763,7 @@ fn corner_radius_section() -> impl ElementBuilder {
 // CORNER SHAPE SECTION (superellipse)
 // ============================================================================
 
-fn corner_shape_section() -> impl ElementBuilder {
+fn corner_shape_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Corner Shape (Superellipse)"))
         .child(section_description(
@@ -4152,7 +4152,7 @@ fn corner_shape_section() -> impl ElementBuilder {
 // SHADOWS SECTION
 // ============================================================================
 
-fn shadows_section() -> impl ElementBuilder {
+fn shadows_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Box Shadows"))
         .child(section_description(
@@ -4205,7 +4205,7 @@ fn shadows_section() -> impl ElementBuilder {
 // TRANSFORMS SECTION
 // ============================================================================
 
-fn transforms_section() -> impl ElementBuilder {
+fn transforms_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Transforms"))
         .child(section_description(
@@ -4262,7 +4262,7 @@ fn transforms_section() -> impl ElementBuilder {
 // OPACITY SECTION
 // ============================================================================
 
-fn opacity_section() -> impl ElementBuilder {
+fn opacity_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let checkerboard = theme.color(ColorToken::SurfaceElevated);
 
@@ -4315,7 +4315,7 @@ fn opacity_section() -> impl ElementBuilder {
         )
 }
 
-fn opacity_demo_box(label: &str, style: ElementStyle, bg: Color) -> impl ElementBuilder {
+fn opacity_demo_box(label: &str, style: ElementStyle, bg: Color) -> impl ElementBuilder + use<> {
     div().flex_col().gap(8.0).child(code_label(label)).child(
         div()
             .w(80.0)
@@ -4332,7 +4332,7 @@ fn opacity_demo_box(label: &str, style: ElementStyle, bg: Color) -> impl Element
 // MATERIALS SECTION
 // ============================================================================
 
-fn materials_section() -> impl ElementBuilder {
+fn materials_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Materials"))
         .child(section_description(
@@ -4384,7 +4384,7 @@ fn materials_section() -> impl ElementBuilder {
 // 3D TRANSFORMS SECTION
 // ============================================================================
 
-fn transforms_3d_section() -> impl ElementBuilder {
+fn transforms_3d_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("3D Transforms"))
         .child(section_description(
@@ -4448,7 +4448,7 @@ fn transforms_3d_section() -> impl ElementBuilder {
 // 3D SDF SHAPES SECTION
 // ============================================================================
 
-fn sdf_3d_shapes_section() -> impl ElementBuilder {
+fn sdf_3d_shapes_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("3D SDF Shapes"))
         .child(section_description(
@@ -4521,7 +4521,7 @@ fn sdf_3d_shapes_section() -> impl ElementBuilder {
 // 3D LIGHTING SECTION
 // ============================================================================
 
-fn lighting_3d_section() -> impl ElementBuilder {
+fn lighting_3d_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("3D Lighting"))
         .child(section_description(
@@ -4589,7 +4589,7 @@ fn lighting_3d_section() -> impl ElementBuilder {
 // TRANSLATE-Z SECTION
 // ============================================================================
 
-fn translate_z_section() -> impl ElementBuilder {
+fn translate_z_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("translate-z"))
         .child(section_description(
@@ -4651,7 +4651,7 @@ fn translate_z_section() -> impl ElementBuilder {
 // UV MAPPING SECTION
 // ============================================================================
 
-fn uv_mapping_3d_section() -> impl ElementBuilder {
+fn uv_mapping_3d_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("3D UV Mapping"))
         .child(section_description(
@@ -4699,7 +4699,7 @@ fn uv_mapping_3d_section() -> impl ElementBuilder {
 // 3D ANIMATION SECTION
 // ============================================================================
 
-fn animation_3d_section() -> impl ElementBuilder {
+fn animation_3d_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("3D Animations"))
         .child(section_description(
@@ -4738,7 +4738,7 @@ fn animation_3d_section() -> impl ElementBuilder {
 // 3D GROUP COMPOSITION SECTION
 // ============================================================================
 
-fn group_composition_section() -> impl ElementBuilder {
+fn group_composition_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("3D Group Composition"))
         .child(section_description(
@@ -4837,7 +4837,7 @@ fn group_composition_section() -> impl ElementBuilder {
 // CSS POSITION SECTION
 // ============================================================================
 
-fn css_position_section() -> impl ElementBuilder {
+fn css_position_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("CSS Position"))
         .child(section_description(
@@ -4961,7 +4961,7 @@ fn css_position_section() -> impl ElementBuilder {
 // CLIP-PATH SECTION
 // ============================================================================
 
-fn clip_path_section() -> impl ElementBuilder {
+fn clip_path_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("CSS clip-path"))
         .child(section_description(
@@ -5021,7 +5021,7 @@ fn clip_path_section() -> impl ElementBuilder {
 // ANIMATED CLIP-PATH SECTION (hover-triggered clip-path keyframe animations)
 // ============================================================================
 
-fn clip_path_animation_section() -> impl ElementBuilder {
+fn clip_path_animation_section() -> impl ElementBuilder + use<> {
     let dark_blue = Color::from_hex(0x1e3a5f);
     let dark_green = Color::from_hex(0x0f3d2a);
     let dark_purple = Color::from_hex(0x3d1f5e);
@@ -5085,7 +5085,7 @@ fn clip_path_animation_section() -> impl ElementBuilder {
 // API COMPARISON SECTION
 // ============================================================================
 
-fn api_comparison_section() -> impl ElementBuilder {
+fn api_comparison_section() -> impl ElementBuilder + use<> {
     // Same visual result using all three approaches
     let from_css = css! {
         background: Color::from_hex(0x3B82F6);
@@ -5170,7 +5170,7 @@ fn styled_box_with_element_style(es: ElementStyle) -> Div {
 }
 
 /// Create a labeled demo box
-fn labeled_box(label: &str, style: ElementStyle) -> impl ElementBuilder {
+fn labeled_box(label: &str, style: ElementStyle) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(8.0)
@@ -5184,7 +5184,7 @@ fn styled_3d_box(es: ElementStyle) -> Div {
 }
 
 /// Create a labeled 3D demo box (120x120)
-fn labeled_3d_box(label: &str, style: ElementStyle) -> impl ElementBuilder {
+fn labeled_3d_box(label: &str, style: ElementStyle) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(8.0)

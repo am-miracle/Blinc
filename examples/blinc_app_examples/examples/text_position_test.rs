@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     // Use logical pixel values for consistent testing
     // The scale factor is applied at render time
     let scale = ctx.scale_factor;

@@ -61,7 +61,7 @@ fn main() -> Result<()> {
     WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     if ctx.rebuild_count == 0 {
         ctx.add_css(STYLESHEET);
     }
@@ -92,7 +92,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         )
 }
 
-fn header() -> impl ElementBuilder {
+fn header() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let surface = theme.color(ColorToken::Surface);
     let text_primary = theme.color(ColorToken::TextPrimary);
@@ -140,7 +140,7 @@ fn section_container() -> Div {
         .gap(16.0)
 }
 
-fn section_title(title: &str) -> impl ElementBuilder {
+fn section_title(title: &str) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     text(title)
         .size(20.0)
@@ -148,14 +148,14 @@ fn section_title(title: &str) -> impl ElementBuilder {
         .color(theme.color(ColorToken::TextPrimary))
 }
 
-fn section_desc(desc: &str) -> impl ElementBuilder {
+fn section_desc(desc: &str) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     text(desc)
         .size(14.0)
         .color(theme.color(ColorToken::TextSecondary))
 }
 
-fn code_label(label: &str) -> impl ElementBuilder {
+fn code_label(label: &str) -> impl ElementBuilder + use<> {
     inline_code(label).size(12.0)
 }
 
@@ -209,7 +209,7 @@ fn clip_container(w: f32, h: f32) -> Div {
 // Vertical Fade
 // ============================================================================
 
-fn vertical_fade_section() -> impl ElementBuilder {
+fn vertical_fade_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Vertical Fade"))
         .child(section_desc(
@@ -272,7 +272,7 @@ fn vertical_fade_section() -> impl ElementBuilder {
 // Horizontal Fade
 // ============================================================================
 
-fn horizontal_fade_section() -> impl ElementBuilder {
+fn horizontal_fade_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Horizontal Fade"))
         .child(section_desc(
@@ -355,7 +355,7 @@ fn horizontal_chips(count: usize) -> Div {
 // Per-Edge Fade
 // ============================================================================
 
-fn per_edge_fade_section() -> impl ElementBuilder {
+fn per_edge_fade_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Per-Edge Fade"))
         .child(section_desc(
@@ -409,7 +409,7 @@ fn per_edge_fade_section() -> impl ElementBuilder {
 // Scroll + Fade
 // ============================================================================
 
-fn scroll_fade_section() -> impl ElementBuilder {
+fn scroll_fade_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Scroll Container with Fade"))
         .child(section_desc(
@@ -463,7 +463,7 @@ fn scroll_fade_section() -> impl ElementBuilder {
 // CSS Transition
 // ============================================================================
 
-fn css_transition_section() -> impl ElementBuilder {
+fn css_transition_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("CSS Transition"))
         .child(section_desc(
@@ -493,7 +493,7 @@ fn css_transition_section() -> impl ElementBuilder {
 // CSS Animation
 // ============================================================================
 
-fn css_animation_section() -> impl ElementBuilder {
+fn css_animation_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("CSS @keyframes Animation"))
         .child(section_desc(

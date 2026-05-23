@@ -47,7 +47,7 @@ fn main() -> Result<()> {
 /// the cross-target example convention: the same function runs on
 /// desktop (via `WindowedApp::run`) and on web (via `WebApp::run_with_setup`
 /// in the auto-generated wrapper crate under `examples/_generated/scroll/`).
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     // Use reactive state for direction - persists across rebuilds, keyed by string
     let direction_state = ctx.use_state_keyed("scroll_direction", || ScrollDirection::Vertical);
     let current_direction = direction_state.get();
@@ -96,7 +96,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 fn build_direction_toggle(
     _ctx: &WindowedContext,
     current: &State<ScrollDirection>,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     // Get the direction state to update it on click
     let direction_signal_id = current.signal_id();
     let direction_for_label = current.clone();
@@ -161,7 +161,7 @@ fn build_scroll_container(
     ctx: &WindowedContext,
     direction: &State<ScrollDirection>,
     physics: SharedScrollPhysics,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     // Calculate scroll viewport size
     let viewport_width = ctx.width - 80.0;
     let viewport_height = ctx.height - 100.0;
@@ -203,7 +203,7 @@ fn build_scroll_container(
 }
 
 /// Build the scrollable content (cards list)
-fn build_scroll_content(direction: ScrollDirection) -> impl ElementBuilder {
+fn build_scroll_content(direction: ScrollDirection) -> impl ElementBuilder + use<> {
     let is_horizontal = matches!(direction, ScrollDirection::Horizontal);
 
     let container = div().p(20.0).gap(16.0);
@@ -266,7 +266,7 @@ fn content_card(
     description: &str,
     accent: Color,
     is_horizontal: bool,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     let card = div().glass().rounded(16.0).p(20.0).flex_col().gap(8.0);
 
     let card = if is_horizontal {
@@ -295,7 +295,7 @@ fn content_card(
 }
 
 /// Build a simple card without glass effect
-fn simple_card(title: &str, description: &str, is_horizontal: bool) -> impl ElementBuilder {
+fn simple_card(title: &str, description: &str, is_horizontal: bool) -> impl ElementBuilder + use<> {
     let card = div()
         .bg(Color::rgba(0.2, 0.2, 0.25, 1.0))
         .rounded(12.0)

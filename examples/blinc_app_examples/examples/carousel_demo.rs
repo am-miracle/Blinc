@@ -41,7 +41,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     // Create a ScrollRef for programmatic scroll control
     let scroll_ref = ctx.use_scroll_ref();
 
@@ -100,7 +100,7 @@ fn build_carousel(
     _ctx: &WindowedContext,
     scroll_ref: &ScrollRef,
     current_index: &State<usize>,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     // Card data - static, cards don't change
     let cards = [
         (
@@ -198,7 +198,7 @@ fn build_carousel(
         )
 }
 
-fn build_card(index: usize, title: &str, description: &str, accent: Color) -> impl ElementBuilder {
+fn build_card(index: usize, title: &str, description: &str, accent: Color) -> impl ElementBuilder + use<> {
     div()
         // Set element ID for this card - key for the selector API!
         .id(format!("card-{}", index))
@@ -261,7 +261,7 @@ fn build_carousel_dots(
     ctx: &WindowedContext,
     scroll_ref: &ScrollRef,
     current_index: &State<usize>,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     div()
         .w_full()
         .flex_row()
@@ -280,7 +280,7 @@ fn build_dot(
     index: usize,
     scroll_ref: &ScrollRef,
     current_index: &State<usize>,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     let current_index_signal = current_index.signal_id();
     let current_index_clone = current_index.clone();
     let current_index_for_click = current_index.clone();
@@ -347,7 +347,7 @@ fn build_dot(
         .cursor_pointer()
 }
 
-fn build_info_section() -> impl ElementBuilder {
+fn build_info_section() -> impl ElementBuilder + use<> {
     let example_code = r#"let scroll_ref = ScrollRef::new();
 
 scroll()

@@ -10,7 +10,7 @@ use crate::{Handle, RawHandle, Status, channel::ChannelReadResult, channel::Mess
 // Link against libzircon.so
 // Zircon syscall declarations - these match vendor/fuchsia-sdk/arch/*/sysroot/include/zircon/syscalls.h
 #[link(name = "zircon")]
-extern "C" {
+unsafe extern "C" {
     fn zx_handle_close(handle: RawHandle) -> i32;
     fn zx_handle_duplicate(handle: RawHandle, rights: u32, out: *mut RawHandle) -> i32;
     fn zx_handle_replace(handle: RawHandle, rights: u32, out: *mut RawHandle) -> i32;

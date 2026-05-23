@@ -31,7 +31,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     div()
         .w(ctx.width)
         .h(ctx.height)
@@ -78,7 +78,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         ))
 }
 
-fn build_test_section(title: &str, content: impl ElementBuilder + 'static) -> impl ElementBuilder {
+fn build_test_section(title: &str, content: impl ElementBuilder + 'static) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(8.0)

@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     let overlay_mgr = ctx.overlay_manager();
 
     // Create button states via context for persistence across rebuilds
@@ -147,7 +147,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         )
 }
 
-fn instruction(text_content: &str) -> impl ElementBuilder {
+fn instruction(text_content: &str) -> impl ElementBuilder + use<> {
     div()
         .flex_row()
         .gap(8.0)

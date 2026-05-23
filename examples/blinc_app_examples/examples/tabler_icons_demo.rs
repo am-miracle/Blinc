@@ -28,7 +28,7 @@ fn main() -> Result<()> {
     WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let bg = theme.color(ColorToken::Background);
 
@@ -59,7 +59,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 // HEADER
 // ============================================================================
 
-fn demo_header() -> impl ElementBuilder {
+fn demo_header() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let surface = theme.color(ColorToken::Surface);
     let text_primary = theme.color(ColorToken::TextPrimary);
@@ -93,7 +93,7 @@ fn demo_header() -> impl ElementBuilder {
 // OUTLINE ICONS
 // ============================================================================
 
-fn outline_icons_section() -> impl ElementBuilder {
+fn outline_icons_section() -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(4.0)
@@ -181,7 +181,7 @@ fn outline_icons_section() -> impl ElementBuilder {
 // FILLED ICONS
 // ============================================================================
 
-fn filled_icons_section() -> impl ElementBuilder {
+fn filled_icons_section() -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(4.0)
@@ -223,7 +223,7 @@ fn filled_icons_section() -> impl ElementBuilder {
 // SIZE VARIANTS
 // ============================================================================
 
-fn size_variants_section() -> impl ElementBuilder {
+fn size_variants_section() -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(4.0)
@@ -245,7 +245,7 @@ fn size_variants_section() -> impl ElementBuilder {
         )
 }
 
-fn size_sample(icon_data: &str, txt: &str, size: f32) -> impl ElementBuilder {
+fn size_sample(icon_data: &str, txt: &str, size: f32) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
     let text_secondary = theme.color(ColorToken::TextSecondary);
@@ -262,7 +262,7 @@ fn size_sample(icon_data: &str, txt: &str, size: f32) -> impl ElementBuilder {
 // COLOR VARIANTS
 // ============================================================================
 
-fn color_variants_section() -> impl ElementBuilder {
+fn color_variants_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
     let primary = theme.color(ColorToken::Primary);
@@ -306,7 +306,7 @@ fn color_variants_section() -> impl ElementBuilder {
         )
 }
 
-fn color_sample(icon_data: &str, txt: &str, size: f32, color: Color) -> impl ElementBuilder {
+fn color_sample(icon_data: &str, txt: &str, size: f32, color: Color) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -318,7 +318,7 @@ fn color_sample(icon_data: &str, txt: &str, size: f32, color: Color) -> impl Ele
         .child(text(txt).size(10.0).color(text_secondary))
 }
 
-fn filled_color_sample(icon_data: &str, txt: &str, size: f32, color: Color) -> impl ElementBuilder {
+fn filled_color_sample(icon_data: &str, txt: &str, size: f32, color: Color) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -334,7 +334,7 @@ fn filled_color_sample(icon_data: &str, txt: &str, size: f32, color: Color) -> i
 // SIDE BY SIDE: OUTLINE vs FILLED
 // ============================================================================
 
-fn side_by_side_section() -> impl ElementBuilder {
+fn side_by_side_section() -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(4.0)
@@ -366,7 +366,7 @@ fn side_by_side_section() -> impl ElementBuilder {
         )
 }
 
-fn comparison_tile(outline_data: &str, filled_data: &str, name: &str) -> impl ElementBuilder {
+fn comparison_tile(outline_data: &str, filled_data: &str, name: &str) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
     let text_tertiary = theme.color(ColorToken::TextTertiary);
@@ -395,7 +395,7 @@ fn comparison_tile(outline_data: &str, filled_data: &str, name: &str) -> impl El
 // HELPERS
 // ============================================================================
 
-fn section_heading(title: &str, subtitle: &str) -> impl ElementBuilder {
+fn section_heading(title: &str, subtitle: &str) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
     let text_secondary = theme.color(ColorToken::TextSecondary);
@@ -407,7 +407,7 @@ fn section_heading(title: &str, subtitle: &str) -> impl ElementBuilder {
         .child(text(subtitle).size(12.0).color(text_secondary))
 }
 
-fn outline_tile(icon_data: &str, name: &str) -> impl ElementBuilder {
+fn outline_tile(icon_data: &str, name: &str) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
     let text_tertiary = theme.color(ColorToken::TextTertiary);
@@ -425,7 +425,7 @@ fn outline_tile(icon_data: &str, name: &str) -> impl ElementBuilder {
         .child(text(name).size(8.0).color(text_tertiary))
 }
 
-fn filled_tile(icon_data: &str, name: &str) -> impl ElementBuilder {
+fn filled_tile(icon_data: &str, name: &str) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
     let text_tertiary = theme.color(ColorToken::TextTertiary);
@@ -443,12 +443,12 @@ fn filled_tile(icon_data: &str, name: &str) -> impl ElementBuilder {
         .child(text(name).size(8.0).color(text_tertiary))
 }
 
-fn tabler_outline_icon(path_data: &str, size: f32, color: Color) -> impl ElementBuilder {
+fn tabler_outline_icon(path_data: &str, size: f32, color: Color) -> impl ElementBuilder + use<> {
     let svg_str = blinc_tabler_icons::to_svg(path_data, size);
     svg(&svg_str).size(size, size).color(color)
 }
 
-fn tabler_filled_icon(path_data: &str, size: f32, color: Color) -> impl ElementBuilder {
+fn tabler_filled_icon(path_data: &str, size: f32, color: Color) -> impl ElementBuilder + use<> {
     let svg_str = blinc_tabler_icons::to_svg_filled(path_data, size);
     svg(&svg_str).size(size, size).color(color)
 }

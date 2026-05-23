@@ -35,7 +35,7 @@ fn main() -> Result<()> {
 
 /// See [`scroll::build_ui`](../scroll/fn.build_ui.html) for the
 /// cross-target example convention this signature follows.
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let bg = theme.color(ColorToken::Background);
 
@@ -66,7 +66,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 }
 
 /// Header with theme toggle
-fn header(ctx: &WindowedContext) -> impl ElementBuilder {
+fn header(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let surface = theme.color(ColorToken::Surface);
     let text_primary = theme.color(ColorToken::TextPrimary);
@@ -113,7 +113,7 @@ fn header(ctx: &WindowedContext) -> impl ElementBuilder {
 }
 
 /// Theme toggle button
-fn theme_toggle_button(_ctx: &WindowedContext, _label: &str) -> impl ElementBuilder {
+fn theme_toggle_button(_ctx: &WindowedContext, _label: &str) -> impl ElementBuilder + use<> {
     stateful::<ButtonState>()
         .initial(ButtonState::Idle)
         .on_state(|ctx| {
@@ -160,7 +160,7 @@ fn theme_toggle_button(_ctx: &WindowedContext, _label: &str) -> impl ElementBuil
 }
 
 /// Color palette showcase
-fn color_palette_section() -> impl ElementBuilder {
+fn color_palette_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let surface = theme.color(ColorToken::Surface);
     let text_primary = theme.color(ColorToken::TextPrimary);
@@ -240,7 +240,7 @@ fn color_palette_section() -> impl ElementBuilder {
 }
 
 /// Single color swatch
-fn color_swatch(name: &str, token: ColorToken) -> impl ElementBuilder {
+fn color_swatch(name: &str, token: ColorToken) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let color = theme.color(token);
     let text_primary = theme.color(ColorToken::TextPrimary);
@@ -266,7 +266,7 @@ fn color_swatch(name: &str, token: ColorToken) -> impl ElementBuilder {
 }
 
 /// Typography showcase
-fn typography_section() -> impl ElementBuilder {
+fn typography_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let surface = theme.color(ColorToken::Surface);
     let text_primary = theme.color(ColorToken::TextPrimary);
@@ -300,7 +300,7 @@ fn typography_section() -> impl ElementBuilder {
 }
 
 /// Typography sample row
-fn typo_sample(name: &str, size: f32, color: Color) -> impl ElementBuilder {
+fn typo_sample(name: &str, size: f32, color: Color) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_tertiary = theme.color(ColorToken::TextTertiary);
 
@@ -323,7 +323,7 @@ fn typo_sample(name: &str, size: f32, color: Color) -> impl ElementBuilder {
 }
 
 /// Spacing showcase
-fn spacing_section() -> impl ElementBuilder {
+fn spacing_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let surface = theme.color(ColorToken::Surface);
     let border = theme.color(ColorToken::Border);
@@ -358,7 +358,7 @@ fn spacing_section() -> impl ElementBuilder {
 }
 
 /// Spacing visualization block
-fn spacing_block(name: &str, size: f32, color: Color) -> impl ElementBuilder {
+fn spacing_block(name: &str, size: f32, color: Color) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
     let radius = theme.radii().radius_sm;
@@ -376,7 +376,7 @@ fn spacing_block(name: &str, size: f32, color: Color) -> impl ElementBuilder {
 }
 
 /// Component showcase with themed elements
-fn component_showcase(ctx: &WindowedContext) -> impl ElementBuilder {
+fn component_showcase(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let surface = theme.color(ColorToken::Surface);
     let border = theme.color(ColorToken::Border);
@@ -409,7 +409,7 @@ fn themed_button(
     _ctx: &WindowedContext,
     label: &str,
     color_token: ColorToken,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     let label_owned = label.to_string();
     let label_for_click = label.to_string();
 
@@ -457,7 +457,7 @@ fn themed_button(
 }
 
 /// Themed card component
-fn themed_card() -> impl ElementBuilder {
+fn themed_card() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let surface_elevated = theme.color(ColorToken::SurfaceElevated);
     let text_primary = theme.color(ColorToken::TextPrimary);
@@ -487,7 +487,7 @@ fn themed_card() -> impl ElementBuilder {
 }
 
 /// Preview of themed input styling
-fn themed_input_preview() -> impl ElementBuilder {
+fn themed_input_preview() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let input_bg = theme.color(ColorToken::InputBg);
     let border = theme.color(ColorToken::Border);
@@ -547,7 +547,7 @@ fn themed_input_preview() -> impl ElementBuilder {
 }
 
 /// Section title helper
-fn section_title(title: &str) -> impl ElementBuilder {
+fn section_title(title: &str) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
 

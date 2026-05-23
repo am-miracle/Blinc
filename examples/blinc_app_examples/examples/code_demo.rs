@@ -33,7 +33,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     // Create editable code state outside the UI builder so it persists
     let editor_state = code_editor_state(
         r#"use blinc_layout::prelude::*;

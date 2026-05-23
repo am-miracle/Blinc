@@ -247,7 +247,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
 // MENUBAR DEMO
 // ============================================================================
 
-fn menubar_demo() -> impl ElementBuilder {
+fn menubar_demo() -> impl ElementBuilder + use<> {
     section_container().child(section_title("Menubar")).child(
         div().flex_row().flex_wrap().child(
             cn::menubar()
@@ -382,7 +382,7 @@ fn header(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
 }
 
 /// Section title helper
-fn section_title(title: &str) -> impl ElementBuilder {
+fn section_title(title: &str) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
 
@@ -436,7 +436,7 @@ fn section_container() -> Div {
 // CSS OVERRIDE DEMO SECTION
 // ============================================================================
 
-fn css_overrides_section() -> impl ElementBuilder {
+fn css_overrides_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -549,7 +549,7 @@ fn buttons_section(_ctx: &WindowedContext) -> impl ElementBuilder + use<> {
 // BADGES SECTION
 // ============================================================================
 
-fn badges_section() -> impl ElementBuilder {
+fn badges_section() -> impl ElementBuilder + use<> {
     section_container().child(section_title("Badges")).child(
         div()
             .flex_col()
@@ -641,7 +641,7 @@ fn badges_section() -> impl ElementBuilder {
 // CARDS SECTION
 // ============================================================================
 
-fn cards_section() -> impl ElementBuilder {
+fn cards_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
 
     section_container()
@@ -681,7 +681,7 @@ fn cards_section() -> impl ElementBuilder {
 // ALERTS SECTION
 // ============================================================================
 
-fn alerts_section() -> impl ElementBuilder {
+fn alerts_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Alerts"))
         .child(
@@ -996,7 +996,7 @@ fn combobox_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
 // CONTEXT MENU SECTION
 // ============================================================================
 
-fn context_menu_section() -> impl ElementBuilder {
+fn context_menu_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let surface = theme.color(ColorToken::Surface);
     let border = theme.color(ColorToken::Border);
@@ -1140,7 +1140,7 @@ fn context_menu_section() -> impl ElementBuilder {
 // DROPDOWN MENU SECTION
 // ============================================================================
 
-fn dropdown_menu_section() -> impl ElementBuilder {
+fn dropdown_menu_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Dropdown Menu"))
         .child(
@@ -1866,7 +1866,7 @@ fn tabs_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
 // BREADCRUMB SECTION
 // ============================================================================
 
-fn breadcrumb_section() -> impl ElementBuilder {
+fn breadcrumb_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -2055,7 +2055,7 @@ fn pagination_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
 // NAVIGATION MENU SECTION
 // ============================================================================
 
-fn navigation_menu_section() -> impl ElementBuilder {
+fn navigation_menu_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -2230,7 +2230,7 @@ fn sidebar_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
 // RESIZABLE SECTION
 // ============================================================================
 
-fn resizable_section() -> impl ElementBuilder {
+fn resizable_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
     let border = theme.color(ColorToken::Border);
@@ -2440,7 +2440,7 @@ fn resizable_section() -> impl ElementBuilder {
 // ACCORDION SECTION
 // ============================================================================
 
-fn accordion_section() -> impl ElementBuilder {
+fn accordion_section() -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Accordion"))
         .child(
@@ -2609,7 +2609,7 @@ fn toast_section(_ctx: &WindowedContext) -> impl ElementBuilder + use<> {
 // Hover Card Section
 // ============================================================================
 
-fn hover_card_section() -> impl ElementBuilder {
+fn hover_card_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
     let text_secondary = theme.color(ColorToken::TextSecondary);
@@ -2762,7 +2762,7 @@ fn hover_card_section() -> impl ElementBuilder {
 // Popover Section
 // ============================================================================
 
-fn popover_section() -> impl ElementBuilder {
+fn popover_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
     let _text_secondary = theme.color(ColorToken::TextSecondary);
@@ -2943,7 +2943,7 @@ fn popover_section() -> impl ElementBuilder {
 // Tooltip Section
 // ============================================================================
 
-fn tooltip_section() -> impl ElementBuilder {
+fn tooltip_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
 
@@ -3053,7 +3053,7 @@ fn tooltip_section() -> impl ElementBuilder {
     )
 }
 
-fn kbd_section() -> impl ElementBuilder {
+fn kbd_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -3174,7 +3174,7 @@ fn kbd_section() -> impl ElementBuilder {
         )
 }
 
-fn misc_section() -> impl ElementBuilder {
+fn misc_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
 
     section_container()
@@ -3215,7 +3215,7 @@ fn misc_section() -> impl ElementBuilder {
 // Tree View Section
 // ============================================================================
 
-fn tree_view_section() -> impl ElementBuilder {
+fn tree_view_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -3306,7 +3306,7 @@ fn tree_view_section() -> impl ElementBuilder {
 // Charts Section
 // ============================================================================
 
-fn charts_section() -> impl ElementBuilder {
+fn charts_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -3549,7 +3549,7 @@ fn generate_diff_data() -> Vec<f64> {
     data
 }
 
-fn icon_gallery_section() -> impl ElementBuilder {
+fn icon_gallery_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -3694,7 +3694,7 @@ fn icon_gallery_section() -> impl ElementBuilder {
         )
 }
 
-fn icon_tile(icon_data: &'static str, name: &str) -> impl ElementBuilder {
+fn icon_tile(icon_data: &'static str, name: &str) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_tertiary = theme.color(ColorToken::TextTertiary);
     let border = theme.color(ColorToken::Border);
@@ -3715,7 +3715,7 @@ fn icon_tile(icon_data: &'static str, name: &str) -> impl ElementBuilder {
 // SCROLL AREA SECTION
 // ============================================================================
 
-fn scroll_area_section() -> impl ElementBuilder {
+fn scroll_area_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
     let text_primary = theme.color(ColorToken::TextPrimary);
@@ -3842,7 +3842,7 @@ fn scroll_area_section() -> impl ElementBuilder {
 // ASPECT RATIO SECTION
 // ============================================================================
 
-fn aspect_ratio_section() -> impl ElementBuilder {
+fn aspect_ratio_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
     let text_primary = theme.color(ColorToken::TextPrimary);
@@ -3986,7 +3986,7 @@ fn aspect_ratio_section() -> impl ElementBuilder {
         )
 }
 
-fn avatar_section() -> impl ElementBuilder {
+fn avatar_section() -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
     let primary = theme.color(ColorToken::Primary);

@@ -129,7 +129,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -178,7 +178,7 @@ fn labeled_section(
     label: &'static str,
     label_color: Color,
     content: impl ElementBuilder + 'static,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .items_center()
@@ -191,7 +191,7 @@ fn labeled_section(
 // Menu bar + dropdown (the only animated section)
 // =============================================================================
 
-fn menu_bar_section() -> impl ElementBuilder {
+fn menu_bar_section() -> impl ElementBuilder + use<> {
     stateful::<NoState>().on_state(|ctx| {
         let state = ctx.use_signal::<DropdownState, _>("dropdown_state", DropdownState::default);
         let open_gen = ctx.use_signal("open_gen", || 0u32);
@@ -299,7 +299,7 @@ fn menu_bar(state: &State<DropdownState>, bg: Color) -> Div {
 }
 
 /// Single menu-bar icon with hover-scale spring + dropdown trigger.
-fn menu_icon_button(item: MenuItem, state: State<DropdownState>) -> impl ElementBuilder {
+fn menu_icon_button(item: MenuItem, state: State<DropdownState>) -> impl ElementBuilder + use<> {
     let state_for_hover = state.clone();
     stateful::<ButtonState>()
         .initial(ButtonState::Idle)
@@ -521,7 +521,7 @@ fn music_row(text_secondary: Color) -> Div {
 // Navigation bar with center bulge
 // =============================================================================
 
-fn active_nav_bar() -> impl ElementBuilder {
+fn active_nav_bar() -> impl ElementBuilder + use<> {
     let nav_bg = Color::from_hex(0x1e293b); // slate-800
     let active_bg = Color::from_hex(0x3b82f6); // blue-500
     let icon_color = Color::WHITE.with_alpha(0.7);
@@ -576,7 +576,7 @@ fn nav_icon_cell(svg_src: &'static str, color: Color) -> Div {
 // Sharp angle demo (V-cuts and V-peaks)
 // =============================================================================
 
-fn sharp_angle_demo() -> impl ElementBuilder {
+fn sharp_angle_demo() -> impl ElementBuilder + use<> {
     let bar_bg = Color::from_hex(0x374151); // gray-700
     let peak_bg = Color::from_hex(0x059669); // emerald-600
     let cut_bg = Color::from_hex(0xdc2626); // red-600
@@ -651,7 +651,7 @@ fn sharp_angle_demo() -> impl ElementBuilder {
         ))
 }
 
-fn labeled_demo(label: &'static str, demo: impl ElementBuilder + 'static) -> impl ElementBuilder {
+fn labeled_demo(label: &'static str, demo: impl ElementBuilder + 'static) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .items_center()
@@ -664,7 +664,7 @@ fn labeled_demo(label: &'static str, demo: impl ElementBuilder + 'static) -> imp
 // Bottom dock with Dynamic-Island-style centre scoop
 // =============================================================================
 
-fn bottom_dock_bar() -> impl ElementBuilder {
+fn bottom_dock_bar() -> impl ElementBuilder + use<> {
     let dock_bg = Color::rgba(0.1, 0.1, 0.1, 0.95);
     let icon_color = Color::rgba(1.0, 1.0, 1.0, 0.8);
 

@@ -372,7 +372,7 @@ pub extern "system" fn Java_com_blinc_BlincBridge_nativeDestroy(
 
 // FFI declaration for ANativeWindow_fromSurface
 #[cfg(target_os = "android")]
-extern "C" {
+unsafe extern "C" {
     fn ANativeWindow_fromSurface(
         env: *mut std::ffi::c_void,
         surface: *mut std::ffi::c_void,

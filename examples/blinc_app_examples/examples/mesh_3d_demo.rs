@@ -280,7 +280,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     // Scene-ready signal — flipped by the loader once helmet + HDR
     // are resident. The overlay's Stateful subtree watches it.
     let scene_ready = ctx.use_state_keyed("mesh_3d_scene_ready", || false);

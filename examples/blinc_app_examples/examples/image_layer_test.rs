@@ -29,7 +29,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(_ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(_ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     let image_path = "examples/blinc_app_examples/examples/assets/avatar.jpg";
 
     div()
@@ -65,7 +65,7 @@ pub fn build_ui(_ctx: &mut WindowedContext) -> impl ElementBuilder {
 }
 
 /// Test: Border without image - verify border works in general
-fn test_border_no_image() -> impl ElementBuilder {
+fn test_border_no_image() -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(4.0)
@@ -146,7 +146,7 @@ fn test_border_no_image() -> impl ElementBuilder {
 }
 
 /// Test 1: Image with border directly on img()
-fn test_case_1(src: &str) -> impl ElementBuilder {
+fn test_case_1(src: &str) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(4.0)
@@ -166,7 +166,7 @@ fn test_case_1(src: &str) -> impl ElementBuilder {
 }
 
 /// Test 2: Image with sibling overlay using .foreground()
-fn test_case_2(src: &str) -> impl ElementBuilder {
+fn test_case_2(src: &str) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(4.0)
@@ -201,7 +201,7 @@ fn test_case_2(src: &str) -> impl ElementBuilder {
 }
 
 /// Test 3: Image with sibling overlay div using foreground layer + border
-fn test_case_3(src: &str) -> impl ElementBuilder {
+fn test_case_3(src: &str) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(4.0)
@@ -237,7 +237,7 @@ fn test_case_3(src: &str) -> impl ElementBuilder {
 }
 
 /// Test 4: Stack with image first, overlay second
-fn test_case_4(src: &str) -> impl ElementBuilder {
+fn test_case_4(src: &str) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(4.0)
@@ -270,7 +270,7 @@ fn test_case_4(src: &str) -> impl ElementBuilder {
 }
 
 /// Test 5: Plain div background under image
-fn test_case_5(src: &str) -> impl ElementBuilder {
+fn test_case_5(src: &str) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(4.0)
@@ -294,7 +294,7 @@ fn test_case_5(src: &str) -> impl ElementBuilder {
 }
 
 /// Test 6: Text over image (wrapped in div for positioning)
-fn test_case_6(src: &str) -> impl ElementBuilder {
+fn test_case_6(src: &str) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap(4.0)

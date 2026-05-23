@@ -70,7 +70,7 @@ fn main() -> Result<()> {
 
 /// See [`scroll::build_ui`](../scroll/fn.build_ui.html) for the
 /// cross-target example convention this signature follows.
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     div()
         .w(ctx.width)

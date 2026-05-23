@@ -26,7 +26,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     let simple_code = "fn main() {\n    println!(\"Hello\");\n}";
 
     // Debug: print what's being passed to code()

@@ -285,7 +285,7 @@ const STYLESHEET: &str = r#"
 // UI STRUCTURE
 // ============================================================================
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     if ctx.rebuild_count == 0 {
         ctx.add_css(STYLESHEET);
     }
@@ -330,7 +330,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 // HELPER: image card with label
 // ============================================================================
 
-fn img_card(id: &str, label: &str) -> impl ElementBuilder {
+fn img_card(id: &str, label: &str) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .gap_px(6.0)
@@ -364,7 +364,7 @@ fn section(title: &str) -> Div {
 // SECTIONS
 // ============================================================================
 
-fn opacity_section() -> impl ElementBuilder {
+fn opacity_section() -> impl ElementBuilder + use<> {
     section("1. Opacity").child(
         div()
             .flex_row()
@@ -377,7 +377,7 @@ fn opacity_section() -> impl ElementBuilder {
     )
 }
 
-fn border_radius_section() -> impl ElementBuilder {
+fn border_radius_section() -> impl ElementBuilder + use<> {
     section("2. Border Radius").child(
         div()
             .flex_row()
@@ -390,7 +390,7 @@ fn border_radius_section() -> impl ElementBuilder {
     )
 }
 
-fn border_section() -> impl ElementBuilder {
+fn border_section() -> impl ElementBuilder + use<> {
     section("3. Border").child(
         div()
             .flex_row()
@@ -402,7 +402,7 @@ fn border_section() -> impl ElementBuilder {
     )
 }
 
-fn shadow_section() -> impl ElementBuilder {
+fn shadow_section() -> impl ElementBuilder + use<> {
     section("4. Box Shadow").child(
         div()
             .flex_row()
@@ -414,7 +414,7 @@ fn shadow_section() -> impl ElementBuilder {
     )
 }
 
-fn transform_section() -> impl ElementBuilder {
+fn transform_section() -> impl ElementBuilder + use<> {
     section("5. CSS Transform (via parent)").child(
         div()
             .flex_row()
@@ -426,7 +426,7 @@ fn transform_section() -> impl ElementBuilder {
     )
 }
 
-fn hover_section() -> impl ElementBuilder {
+fn hover_section() -> impl ElementBuilder + use<> {
     section("6. Hover Transitions (hover over images)").child(
         div()
             .flex_row()
@@ -439,7 +439,7 @@ fn hover_section() -> impl ElementBuilder {
     )
 }
 
-fn filter_section() -> impl ElementBuilder {
+fn filter_section() -> impl ElementBuilder + use<> {
     section("8. CSS Filters").child(
         div()
             .flex_row()
@@ -457,7 +457,7 @@ fn filter_section() -> impl ElementBuilder {
     )
 }
 
-fn bg_image_section() -> impl ElementBuilder {
+fn bg_image_section() -> impl ElementBuilder + use<> {
     section("7. Background Image (CSS url())").child(
         div().flex_row().gap_px(20.0).items_end().child(
             div()
@@ -475,7 +475,7 @@ fn bg_image_section() -> impl ElementBuilder {
     )
 }
 
-fn mask_section() -> impl ElementBuilder {
+fn mask_section() -> impl ElementBuilder + use<> {
     section("9. Mask Image (CSS Gradients)").child(
         div()
             .flex_row()
@@ -488,7 +488,7 @@ fn mask_section() -> impl ElementBuilder {
     )
 }
 
-fn mask_transition_section() -> impl ElementBuilder {
+fn mask_transition_section() -> impl ElementBuilder + use<> {
     section("10. Mask Transitions (Hover)").child(
         div()
             .flex_row()

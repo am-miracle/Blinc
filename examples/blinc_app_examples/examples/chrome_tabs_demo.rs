@@ -57,7 +57,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(_ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(_ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     stateful::<NoState>().on_state(move |_ctx| {
         let page_bg = Color::from_hex(0xf3f4f6);
         let window_frame_bg = Color::from_hex(0x1f3333); // deep teal — Chrome dark-mode-ish
@@ -348,7 +348,7 @@ fn active_tab(
     h: f32,
     top_r: f32,
     concave_r: f32,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     notch()
         .rounded_top(top_r)
         .concave_bottom(concave_r)

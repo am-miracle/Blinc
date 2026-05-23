@@ -49,7 +49,7 @@ const ARIAL_TTF: &[u8] = include_bytes!("../../../assets/fonts/Arial.ttf");
 
 /// Counter button with stateful hover/press states. Identical to
 /// the mobile example version.
-fn counter_button(label: &str, count: State<i32>, delta: i32) -> impl ElementBuilder {
+fn counter_button(label: &str, count: State<i32>, delta: i32) -> impl ElementBuilder + use<> {
     let label = label.to_string();
 
     let count = count.clone();
@@ -78,7 +78,7 @@ fn counter_button(label: &str, count: State<i32>, delta: i32) -> impl ElementBui
 }
 
 /// Counter display that reacts to count changes.
-fn counter_display(count: State<i32>) -> impl ElementBuilder {
+fn counter_display(count: State<i32>) -> impl ElementBuilder + use<> {
     stateful::<NoState>()
         .deps([count.signal_id()])
         .on_state(move |_ctx| {

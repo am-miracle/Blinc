@@ -33,7 +33,7 @@ fn main() -> Result<()> {
     WindowedApp::run(config, |ctx| build_primary_ui(ctx))
 }
 
-fn build_primary_ui(ctx: &WindowedContext) -> impl ElementBuilder {
+fn build_primary_ui(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let window_count = ctx.use_state_keyed("win_count", || 1u32);
 
     // Color palette for windows

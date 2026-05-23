@@ -57,7 +57,6 @@ manageable.
 - [**KHR_texture_transform**](./example-gallery/texture_transform_demo.md) — Loads Poly Haven's `marble_cliff_02` asset (CC0) — a displaced
 - [**Theme System**](./example-gallery/theme_demo.md) — This example demonstrates the Blinc theming system capabilities:
 - [**Timeline Animation**](./example-gallery/timeline_demo.md) — This example demonstrates timeline-based animations using the stateful API:
-- [**Transparent window — regression test for GH #34.**](./example-gallery/transparent_window.md) — no-web
 - [**Typography**](./example-gallery/typography_demo.md) — This example demonstrates typography helpers:
 - [**Video Player**](./example-gallery/video_demo.md) — Demonstrates the video_player widget with `blinc_media::VideoPlayer` instance and controls.
 - [**Wet Glass**](./example-gallery/wet_glass_demo.md) — Procedural wet-window effect with real light refraction through water drops.

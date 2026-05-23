@@ -108,7 +108,7 @@ fn main() -> Result<()> {
     WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     if ctx.rebuild_count == 0 {
         ctx.add_css(STYLESHEET);
     }
@@ -150,7 +150,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         )
 }
 
-fn flow_card(id: &str, title: &str, desc: &str) -> impl ElementBuilder {
+fn flow_card(id: &str, title: &str, desc: &str) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .flex_shrink_0()

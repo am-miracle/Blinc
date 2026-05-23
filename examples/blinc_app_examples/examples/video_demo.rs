@@ -63,7 +63,7 @@ fn main() -> Result<()> {
     )
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     let player = shared_player();
 
     div()

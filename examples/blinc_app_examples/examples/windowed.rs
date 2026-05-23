@@ -37,7 +37,7 @@ fn main() -> Result<()> {
 }
 
 /// Build the UI based on the current window context
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     // Scale factor based on window size (baseline 800x600)
     // let scale_x = ctx.width / 800.0;
     // let scale_y = ctx.height / 600.0;
@@ -55,7 +55,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 }
 
 /// Build the colorful background blobs, scaled to window size
-fn build_blobs() -> impl ElementBuilder {
+fn build_blobs() -> impl ElementBuilder + use<> {
     let scale = 1.0;
     div()
         .w_full()
@@ -146,7 +146,7 @@ fn blob(size: f32, color: Color) -> Div {
 }
 
 /// Build the main content layer
-fn build_content(ctx: &WindowedContext) -> impl ElementBuilder {
+fn build_content(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let width = ctx.width;
     let height = ctx.height;
     let scale_factor = ctx.scale_factor;
@@ -219,7 +219,7 @@ fn build_info_panel(
     height: f32,
     scale_factor: f64,
     focused: bool,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     // Focus indicator color changes based on window focus state
     let focus_color = if focused {
         Color::rgba(0.3, 1.0, 0.5, 1.0) // Green when focused
@@ -273,7 +273,7 @@ fn build_info_panel(
 }
 
 /// Create an info item with label and value
-fn info_item(label: &str, value: &str) -> impl ElementBuilder {
+fn info_item(label: &str, value: &str) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .items_center()
@@ -285,7 +285,7 @@ fn info_item(label: &str, value: &str) -> impl ElementBuilder {
 /// Create a feature card with reactive hover effects using Stateful<ButtonState>
 ///
 /// Uses the new stateful::<S>() API for automatic key generation.
-fn feature_card(_ctx: &WindowedContext, label: &str, accent: Color) -> impl ElementBuilder {
+fn feature_card(_ctx: &WindowedContext, label: &str, accent: Color) -> impl ElementBuilder + use<> {
     let label_owned = label.to_string();
     let label_for_click = label.to_string();
 
@@ -354,7 +354,7 @@ fn feature_card(_ctx: &WindowedContext, label: &str, accent: Color) -> impl Elem
 }
 
 /// Build the image showcase card with hover effect using Stateful<ButtonState>
-fn build_image_showcase(_ctx: &WindowedContext) -> impl ElementBuilder {
+fn build_image_showcase(_ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     div()
         .glass()
         .shadow_xl()

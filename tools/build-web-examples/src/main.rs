@@ -1025,7 +1025,12 @@ pub fn _start() {{
 {preload_block}
                 Ok(())
             }}),
-            build_ui,
+            // Closure wrapper: on edition 2024, a free fn
+            // `build_ui(ctx) -> impl Element` captures `ctx`'s
+            // lifetime in the return type, which breaks the
+            // higher-ranked `FnMut` bound on `run_with_async_setup`.
+            // The closure form bypasses the inference failure.
+            |ctx| build_ui(ctx),
         )
         .await;
 

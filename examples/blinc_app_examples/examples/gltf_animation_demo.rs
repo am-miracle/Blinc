@@ -324,7 +324,7 @@ fn main() -> Result<()> {
     blinc_app::windowed::WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     // Overlay-dismiss signal — the loader thread flips it once the
     // glTF is parsed and the slot is populated.
     let scene_ready = ctx.use_state_keyed("gltf_scene_ready", || false);

@@ -270,7 +270,7 @@ fn main() {
     // header. A nop `main` keeps the target compilable for tooling.
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     let scene_ready = ctx.use_state_keyed("cutegirl_scene_ready", || false);
     let camera_signal = ctx.use_state_keyed("cutegirl_morph_demo_cam", OrbitCamera::default);
     let kit = SceneKit3D::new("cutegirl_morph_demo")

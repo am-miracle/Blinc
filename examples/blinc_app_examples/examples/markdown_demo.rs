@@ -129,7 +129,7 @@ Line breaks work too:<br>This is on a new line.
 *Edit the markdown on the left to see changes!*
 "#;
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     // Create text area state for editing that persists across rebuilds
     let markdown_state = ctx.use_state_keyed("markdown_source", || {
         let mut state = TextAreaState::new();
@@ -175,7 +175,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
         )
 }
 
-fn build_header() -> impl ElementBuilder {
+fn build_header() -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .w_full()
@@ -209,7 +209,7 @@ fn build_editor_panel(
     text_state: State<Arc<Mutex<TextAreaState>>>,
     width: f32,
     height: f32,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     // Get the signal ID before calling .get() to use for change notifications
     let change_signal = text_state.signal_id();
@@ -263,7 +263,7 @@ fn build_preview_panel(
     change_signal_id: SignalId,
     width: f32,
     height: f32,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     div()
         .w(width)
         .h(height)

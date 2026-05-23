@@ -122,7 +122,7 @@ fn main() -> Result<()> {
     WindowedApp::run(config, build_ui)
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     if ctx.rebuild_count == 0 {
         ctx.add_css(STYLESHEET);
     }
@@ -224,7 +224,7 @@ fn card(
     bg_color: Color,
     label_color: Color,
     sub_color: Color,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .items_center()
@@ -254,7 +254,7 @@ fn flow_macro_card(
     h: f32,
     label_color: Color,
     sub_color: Color,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .items_center()

@@ -33,7 +33,7 @@ fn main() -> Result<()> {
 
 /// See [`scroll::build_ui`](../scroll/fn.build_ui.html) for the
 /// cross-target example convention this signature follows.
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     div()
         .w(ctx.width)
         .h(ctx.height)
@@ -62,7 +62,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 }
 
 /// A counter button demonstrating ctx.use_signal() and ctx.use_spring()
-fn counter_button() -> impl ElementBuilder {
+fn counter_button() -> impl ElementBuilder + use<> {
     stateful::<ButtonState>()
         .initial(ButtonState::Idle)
         .on_state(|ctx| {
@@ -116,7 +116,7 @@ fn counter_button() -> impl ElementBuilder {
 }
 
 /// Display showing event information via ctx.event()
-fn event_info_display() -> impl ElementBuilder {
+fn event_info_display() -> impl ElementBuilder + use<> {
     stateful::<ButtonState>().on_state(|ctx| {
         // Track last event info using scoped signal
         // Automatically registered as dependency - on_state re-runs when it changes
