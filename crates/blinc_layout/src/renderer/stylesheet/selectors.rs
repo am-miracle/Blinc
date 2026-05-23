@@ -379,19 +379,14 @@ impl RenderTree {
         let hovered_nodes: HashSet<LayoutNodeId> = router.hovered_nodes().collect();
         let pressed_nodes: HashSet<LayoutNodeId> =
             router.pressed_target(self).into_iter().collect();
-        let focused_node: Option<LayoutNodeId> = {
-            // Check all registered nodes for focus
-            let mut focused = None;
-            for id in self.element_registry.all_ids() {
-                if let Some(nid) = self.element_registry.get(&id) {
-                    if router.is_focused(nid) {
-                        focused = Some(nid);
-                        break;
-                    }
-                }
-            }
-            focused
-        };
+        // Use the router's focused node directly. Previously we walked
+        // `element_registry.all_ids()` and checked `router.is_focused()`
+        // for each — but that only finds elements with a string `id`.
+        // Class-only widgets (e.g. cn::input, which attaches `.cn-input`
+        // but no id) were invisible to this lookup, so `.cn-input:focus`
+        // never matched in `complex_selector_matches`. The router stores
+        // focus by `LayoutNodeId`, so just ask it directly.
+        let focused_node: Option<LayoutNodeId> = router.focused();
 
         // Collect ALL render node IDs (not just those with IDs — .class selectors can match any node)
         let all_node_ids: Vec<LayoutNodeId> = self.render_nodes.keys().copied().collect();

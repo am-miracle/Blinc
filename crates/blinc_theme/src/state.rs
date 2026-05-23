@@ -564,10 +564,34 @@ impl ThemeState {
             "border-focus".into(),
             hex(self.color(ColorToken::BorderFocus)),
         );
+        // Faded variant of `--border-focus` for the focus *ring* —
+        // the outer `outline` that sits 2 px out from the input
+        // edge. Using the same solid colour as the border makes the
+        // ring read as a second hard stroke; ~35 % alpha gives it
+        // the soft halo the HID expects while keeping the input's
+        // own border the clear, solid focus indicator.
+        let focus_ring = {
+            let c = self.color(ColorToken::BorderFocus);
+            blinc_core::Color::rgba(c.r, c.g, c.b, 0.35)
+        };
+        vars.insert("focus-ring".into(), hex(focus_ring));
         vars.insert(
             "border-error".into(),
             hex(self.color(ColorToken::BorderError)),
         );
+        // Same trick for the error focus state.
+        let error_ring = {
+            let c = self.color(ColorToken::BorderError);
+            blinc_core::Color::rgba(c.r, c.g, c.b, 0.35)
+        };
+        vars.insert("focus-ring-error".into(), hex(error_ring));
+        // …and for any "success-state" widget that wants a green
+        // affirmative ring.
+        let success_ring = {
+            let c = self.color(ColorToken::Success);
+            blinc_core::Color::rgba(c.r, c.g, c.b, 0.35)
+        };
+        vars.insert("focus-ring-success".into(), hex(success_ring));
         vars.insert("input-bg".into(), hex(self.color(ColorToken::InputBg)));
         vars.insert(
             "input-bg-hover".into(),

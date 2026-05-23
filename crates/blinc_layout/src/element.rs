@@ -1433,6 +1433,23 @@ impl RenderProps {
         if other.motion.is_some() {
             self.motion = other.motion.clone();
         }
+        // Override outline if set. Without this the Stateful state-callback's
+        // queue_prop_update path wipes outline_* back to defaults on every
+        // state transition (the callback rebuilds the inner Div with the
+        // outline set, but merge_from doesn't carry it over), which both
+        // dropped the focus ring entirely on focus and — worse — broke
+        // transition replay on the second focus, because the in-flight
+        // CSS transition's interpolated value gets overwritten with the
+        // default (None) on every callback fire.
+        if other.outline_color.is_some() {
+            self.outline_color = other.outline_color;
+        }
+        if other.outline_width > 0.0 {
+            self.outline_width = other.outline_width;
+        }
+        if other.outline_offset != 0.0 {
+            self.outline_offset = other.outline_offset;
+        }
     }
 }
 

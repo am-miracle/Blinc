@@ -317,21 +317,52 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-input {
+    /* No `border:` here — the layout TextInput already sets idle /
+       hover / focused border colours via setters in cn::input
+       (mirroring combobox's search input, which works). Adding a base
+       `border:` rule here parses a `border-color` that
+       apply_complex_selector_styles writes into render_props every
+       frame, clobbering the focused colour the setter chose. The
+       `:focus` rule below still applies the focus colour because
+       state-rules are applied after base rules in the same pass. */
     background: var(--cn-input-bg, var(--input-bg));
-    border: 1px solid var(--cn-input-border, var(--border));
     border-radius: var(--radius-default);
     color: var(--text-primary);
+    /* Idle ring: same width, transparent, gap of 1 px so the focus
+       transition "scales" the gap from 1 → 2 px while the colour fades
+       in. Without a base outline the transition has no starting point
+       and the ring pops in. */
+    outline: 2px solid transparent;
+    outline-offset: 1px;
+    transition: outline-color 160ms ease, outline-offset 160ms ease;
 }
 .cn-input:hover {
     border-color: var(--border-hover);
     background: var(--input-bg-hover);
 }
 .cn-input:focus {
+    /* HID focus affordance: brighten the border AND draw a 2px outer
+       ring offset 2px out from the input edge. The outline uses a
+       fainter `--focus-ring` (alpha-tinted variant token) so the
+       crisp border edge stays distinguishable from the soft halo. */
     border-color: var(--border-focus);
     background: var(--input-bg-focus);
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
 }
 .cn-input--error {
     border-color: var(--border-error);
+}
+.cn-input--error:focus {
+    border-color: var(--border-error);
+    outline: 2px solid var(--focus-ring-error);
+}
+.cn-input--success {
+    border-color: var(--success);
+}
+.cn-input--success:focus {
+    border-color: var(--success);
+    outline: 2px solid var(--focus-ring-success);
 }
 
 .cn-input--sm { font-size: var(--text-xs); }
@@ -343,18 +374,38 @@ pub const CN_STYLES: &str = r#"
    ============================================================================ */
 
 .cn-textarea {
+    /* See `.cn-input` for the rationale on omitting `border:` here. */
     background: var(--cn-textarea-bg, var(--input-bg));
-    border: 1px solid var(--cn-textarea-border, var(--border));
     border-radius: var(--radius-default);
     color: var(--text-primary);
+    outline: 2px solid transparent;
+    outline-offset: 1px;
+    transition: outline-color 160ms ease, outline-offset 160ms ease;
 }
 .cn-textarea:hover {
     border-color: var(--border-hover);
     background: var(--input-bg-hover);
 }
 .cn-textarea:focus {
+    /* HID focus ring — see `.cn-input:focus` for rationale. */
     border-color: var(--border-focus);
     background: var(--input-bg-focus);
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+}
+.cn-textarea--error {
+    border-color: var(--border-error);
+}
+.cn-textarea--error:focus {
+    border-color: var(--border-error);
+    outline: 2px solid var(--focus-ring-error);
+}
+.cn-textarea--success {
+    border-color: var(--success);
+}
+.cn-textarea--success:focus {
+    border-color: var(--success);
+    outline: 2px solid var(--focus-ring-success);
 }
 
 /* ============================================================================

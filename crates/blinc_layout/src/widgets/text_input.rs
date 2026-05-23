@@ -1571,37 +1571,43 @@ fn apply_css_overrides(
         TextFieldState::Idle => None,
     };
 
-    // 1. Apply class-based styles (lowest priority — overridden by ID)
+    // 1. Apply class-based styles (lowest priority — overridden by ID).
+    //
+    // Order for FocusedHovered: base → :hover → :focus. `:focus` must run
+    // LAST so its `border-color` wins over `:hover`'s — without this, a
+    // hovered focused input falls back to the hover (grey) border while
+    // the user is still typing in it. The user's intent on hover-while-
+    // focused is "I'm interacting with this input" → focus colour wins.
     for class in css_classes {
         if let Some(base) = stylesheet.get_class(class) {
             apply_style_to_config(cfg, base, visual);
-        }
-        // For FocusedHovered, apply both :focus and :hover
-        if matches!(visual, TextFieldState::FocusedHovered) {
-            if let Some(s) = stylesheet.get_class_with_state(class, ElementState::Focus) {
-                apply_style_to_config(cfg, s, visual);
-            }
         }
         if let Some(s) = state {
             if let Some(state_style) = stylesheet.get_class_with_state(class, s) {
                 apply_style_to_config(cfg, state_style, visual);
             }
         }
+        if matches!(visual, TextFieldState::FocusedHovered) {
+            if let Some(s) = stylesheet.get_class_with_state(class, ElementState::Focus) {
+                apply_style_to_config(cfg, s, visual);
+            }
+        }
     }
 
-    // 2. Apply ID-based styles (higher priority — overrides class)
+    // 2. Apply ID-based styles (higher priority — overrides class).
+    // Same hover-then-focus ordering as the class branch above.
     if let Some(element_id) = element_id {
         if let Some(base) = stylesheet.get(element_id) {
             apply_style_to_config(cfg, base, visual);
         }
-        if matches!(visual, TextFieldState::FocusedHovered) {
-            if let Some(focus_style) = stylesheet.get_with_state(element_id, ElementState::Focus) {
-                apply_style_to_config(cfg, focus_style, visual);
-            }
-        }
         if let Some(s) = state {
             if let Some(state_style) = stylesheet.get_with_state(element_id, s) {
                 apply_style_to_config(cfg, state_style, visual);
+            }
+        }
+        if matches!(visual, TextFieldState::FocusedHovered) {
+            if let Some(focus_style) = stylesheet.get_with_state(element_id, ElementState::Focus) {
+                apply_style_to_config(cfg, focus_style, visual);
             }
         }
 
@@ -1689,58 +1695,74 @@ fn apply_style_to_config(
 
 /// Extract outline properties from stylesheet for the current state.
 /// Returns (width, color, offset) if any outline is specified.
+///
+/// Walks class selectors first (lowest priority) and then `#id`
+/// selectors (overrides), matching the precedence rules
+/// `apply_css_overrides` uses for the rest of the input's style.
+/// Without the class branch, rules like `.cn-input:focus { outline:
+/// 2px solid var(--border-focus); }` from the cn stylesheet would
+/// silently no-op because cn::input attaches via class, not id.
 fn extract_outline_from_stylesheet(
     stylesheet: &Stylesheet,
-    element_id: &str,
+    element_id: Option<&str>,
+    css_classes: &[std::sync::Arc<str>],
     visual: &TextFieldState,
 ) -> Option<(f32, Color, f32)> {
     let mut width = None;
     let mut color = None;
     let mut offset = None;
 
-    // Check base style
-    if let Some(base) = stylesheet.get(element_id) {
-        if let Some(w) = base.outline_width {
-            width = Some(w);
-        }
-        if let Some(c) = base.outline_color {
-            color = Some(c);
-        }
-        if let Some(o) = base.outline_offset {
-            offset = Some(o);
-        }
-    }
-
-    // Layer state-specific style
     let state = match visual {
         TextFieldState::Hovered | TextFieldState::FocusedHovered => Some(ElementState::Hover),
         TextFieldState::Focused => Some(ElementState::Focus),
         TextFieldState::Disabled => Some(ElementState::Disabled),
         TextFieldState::Idle => None,
     };
-    if matches!(visual, TextFieldState::FocusedHovered) {
-        if let Some(focus_style) = stylesheet.get_with_state(element_id, ElementState::Focus) {
-            if let Some(w) = focus_style.outline_width {
-                width = Some(w);
+
+    let mut absorb = |s: &crate::element_style::ElementStyle| {
+        if let Some(w) = s.outline_width {
+            width = Some(w);
+        }
+        if let Some(c) = s.outline_color {
+            color = Some(c);
+        }
+        if let Some(o) = s.outline_offset {
+            offset = Some(o);
+        }
+    };
+
+    // 1. Class-based styles (lowest priority — overridden by ID).
+    // FocusedHovered order: base → :hover → :focus, so the focus ring
+    // wins over hover (same rationale as apply_css_overrides above).
+    for class in css_classes {
+        if let Some(base) = stylesheet.get_class(class) {
+            absorb(base);
+        }
+        if let Some(s) = state {
+            if let Some(state_style) = stylesheet.get_class_with_state(class, s) {
+                absorb(state_style);
             }
-            if let Some(c) = focus_style.outline_color {
-                color = Some(c);
-            }
-            if let Some(o) = focus_style.outline_offset {
-                offset = Some(o);
+        }
+        if matches!(visual, TextFieldState::FocusedHovered) {
+            if let Some(s) = stylesheet.get_class_with_state(class, ElementState::Focus) {
+                absorb(s);
             }
         }
     }
-    if let Some(s) = state {
-        if let Some(state_style) = stylesheet.get_with_state(element_id, s) {
-            if let Some(w) = state_style.outline_width {
-                width = Some(w);
+
+    // 2. ID-based styles (overrides class)
+    if let Some(element_id) = element_id {
+        if let Some(base) = stylesheet.get(element_id) {
+            absorb(base);
+        }
+        if let Some(s) = state {
+            if let Some(state_style) = stylesheet.get_with_state(element_id, s) {
+                absorb(state_style);
             }
-            if let Some(c) = state_style.outline_color {
-                color = Some(c);
-            }
-            if let Some(o) = state_style.outline_offset {
-                offset = Some(o);
+        }
+        if matches!(visual, TextFieldState::FocusedHovered) {
+            if let Some(focus_style) = stylesheet.get_with_state(element_id, ElementState::Focus) {
+                absorb(focus_style);
             }
         }
     }
@@ -1919,12 +1941,17 @@ impl TextInput {
                                 &data_guard.css_classes,
                                 visual,
                             );
-                            // Extract outline properties for the inner div
-                            if let Some(ref element_id) = data_guard.css_element_id {
-                                extract_outline_from_stylesheet(&stylesheet, element_id, visual)
-                            } else {
-                                None
-                            }
+                            // Extract outline properties for the inner div.
+                            // Pass both classes and the optional id so a
+                            // class-only target (cn::input attaches by
+                            // class) still picks up `.cn-input:focus {
+                            // outline: …; }` from the stylesheet.
+                            extract_outline_from_stylesheet(
+                                &stylesheet,
+                                data_guard.css_element_id.as_deref(),
+                                &data_guard.css_classes,
+                                visual,
+                            )
                         } else {
                             None
                         }

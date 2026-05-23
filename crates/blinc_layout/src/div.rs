@@ -1283,6 +1283,22 @@ impl Div {
             self.cursor = other.cursor;
         }
 
+        // Merge outline (used by focus rings on inputs / textareas, and
+        // anywhere `outline_*` builders are chained on a Div that then
+        // gets `merge()`d into a parent — e.g. TextInput's on_state
+        // callback builds an `inner` div with the focus outline and
+        // merges it onto the Stateful container). Without these, the
+        // outline silently vanishes mid-merge.
+        if other.outline_width != default.outline_width {
+            self.outline_width = other.outline_width;
+        }
+        if other.outline_color.is_some() {
+            self.outline_color = other.outline_color;
+        }
+        if other.outline_offset != default.outline_offset {
+            self.outline_offset = other.outline_offset;
+        }
+
         // Merge element identity (ID and CSS classes)
         // These are critical for event routing (click-outside detection) and
         // CSS selector matching. Without this, Stateful containers lose the
