@@ -721,7 +721,7 @@ fn build_dropdown_content(
         .h(trigger_height)
         .w(width - (width * padding / width)) // Subtract padding from width to account for container padding (since input is direct child of container)
         .text_size(font_size)
-        .rounded(theme.radii().radius_sm)
+        .rounded(theme.radii().radius_md)
         .placeholder(search_placeholder)
         .idle_border_color(theme.color(ColorToken::Border))
         .hover_border_color(theme.color(ColorToken::BorderFocus))
@@ -747,7 +747,8 @@ fn build_dropdown_content(
         .flex_row()
         .items_center()
         .justify_center()
-        .pb(padding / 8.0)
+        .px(padding / 8.0)
+        .py(padding / 8.0)
         .border_bottom(1.0, border)
         .child(search_input);
 

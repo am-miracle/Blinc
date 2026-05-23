@@ -78,6 +78,7 @@ impl Label {
             let required_color = theme.color(ColorToken::Error);
 
             div()
+                .w_fit()
                 .class("cn-label")
                 .class(disabled_class)
                 .flex_row()
@@ -87,16 +88,23 @@ impl Label {
                     text(&config.text)
                         .size(font_size)
                         .color(text_color)
-                        .medium(),
+                        .medium()
+                        .no_wrap(),
                 )
                 .child(text("*").size(font_size).color(required_color).medium())
         } else {
-            div().class("cn-label").class(disabled_class).h_fit().child(
-                text(&config.text)
-                    .size(font_size)
-                    .color(text_color)
-                    .medium(),
-            )
+            div()
+                .w_fit()
+                .class("cn-label")
+                .class(disabled_class)
+                .h_fit()
+                .child(
+                    text(&config.text)
+                        .size(font_size)
+                        .color(text_color)
+                        .medium()
+                        .no_wrap(),
+                )
         };
 
         Self { inner }

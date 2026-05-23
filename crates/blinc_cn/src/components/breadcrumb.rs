@@ -169,45 +169,50 @@ impl Breadcrumb {
                 let icon = item.icon.clone();
                 let on_click = item.on_click.clone();
 
-                let clickable_item =
-                    stateful_with_key::<ButtonState>(&item_key)
-                        .on_state(move |ctx| {
-                            let state = ctx.state();
-                            let theme = ThemeState::get();
+                let clickable_item = stateful_with_key::<ButtonState>(&item_key)
+                    .on_state(move |ctx| {
+                        let state = ctx.state();
+                        let theme = ThemeState::get();
 
-                            let text_color = match state {
-                                ButtonState::Hovered | ButtonState::Pressed => {
-                                    theme.color(ColorToken::Primary)
-                                }
-                                _ => theme.color(ColorToken::TextSecondary),
-                            };
-
-                            let mut item_div = div()
-                                .class("cn-breadcrumb-item")
-                                .flex_row()
-                                .items_center()
-                                .gap(4.0);
-
-                            // Add icon if present
-                            if let Some(ref icon_svg) = icon {
-                                item_div = item_div.child(div().self_center().child(
-                                    svg(icon_svg).size(icon_size, icon_size).color(text_color),
-                                ));
+                        let text_color = match state {
+                            ButtonState::Hovered | ButtonState::Pressed => {
+                                theme.color(ColorToken::Primary)
                             }
+                            _ => theme.color(ColorToken::TextSecondary),
+                        };
 
-                            // Add label
+                        let mut item_div = div()
+                            .class("cn-breadcrumb-item")
+                            .flex_row()
+                            .items_center()
+                            .gap(4.0);
+
+                        // Add icon if present
+                        if let Some(ref icon_svg) = icon {
                             item_div =
                                 item_div.child(div().self_center().child(
-                                    text(&label).size(font_size).color(text_color).no_cursor(),
+                                    svg(icon_svg).size(icon_size, icon_size).color(text_color),
                                 ));
+                        }
 
-                            item_div.cursor(CursorStyle::Pointer)
-                        })
-                        .on_click(move |_| {
-                            if let Some(ref handler) = on_click {
-                                handler();
-                            }
-                        });
+                        // Add label
+                        item_div = item_div.child(
+                            div().self_center().child(
+                                text(&label)
+                                    .size(font_size)
+                                    .color(text_color)
+                                    .no_cursor()
+                                    .no_wrap(),
+                            ),
+                        );
+
+                        item_div.cursor(CursorStyle::Pointer)
+                    })
+                    .on_click(move |_| {
+                        if let Some(ref handler) = on_click {
+                            handler();
+                        }
+                    });
 
                 container = container.child(clickable_item);
             } else {
@@ -234,7 +239,8 @@ impl Breadcrumb {
                         text(&item.label)
                             .size(font_size)
                             .color(text_primary)
-                            .medium(),
+                            .medium()
+                            .no_wrap(),
                     ),
                 );
 
@@ -251,10 +257,10 @@ impl Breadcrumb {
                     ),
                     BreadcrumbSeparator::Slash => div()
                         .items_center()
-                        .child(text("/").size(font_size).color(text_tertiary)),
+                        .child(text("/").size(font_size).color(text_tertiary).no_wrap()),
                     BreadcrumbSeparator::Text(s) => div()
                         .items_center()
-                        .child(text(s).size(font_size).color(text_tertiary)),
+                        .child(text(s).size(font_size).color(text_tertiary).no_wrap()),
                     BreadcrumbSeparator::Svg(svg_str) => div()
                         .items_center()
                         .child(svg(svg_str).size(icon_size, icon_size).color(text_tertiary)),
