@@ -767,31 +767,43 @@ fn form_inputs_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
                                 .rows(4)
                                 .w(300.0),
                         )
-                        .child(cn::label("Labels can be standalone")),
-                )
-                // Column 3: Number inputs
-                .child(
-                    div()
-                        .flex_col()
-                        .h_fit()
-                        .gap_px(16.0)
-                        .child(cn::label("Quantity (integer 0..99)"))
+                        .child(cn::label("Labels can be standalone")) // Column 3: Number inputs. Each label+field pair is a
+                        // tight vertical group (gap 4) — matches the rhythm
+                        // `cn::input(...).label(…)` produces internally — and
+                        // pairs are spaced 16 px apart to match the inter-row
+                        // spacing of the text-input column.
                         .child(
-                            cn::number_input(&qty)
-                                .min(0.0)
-                                .max(99.0)
-                                .step(1.0)
-                                .precision(0)
-                                .w(160.0),
-                        )
-                        .child(cn::label("Temperature °C (step 0.5)"))
-                        .child(
-                            cn::number_input(&temperature)
-                                .min(-50.0)
-                                .max(60.0)
-                                .step(0.5)
-                                .precision(1)
-                                .w(160.0),
+                            div()
+                                .my(8.0)
+                                .flex_col()
+                                .h_fit()
+                                .gap_px(16.0)
+                                .child(
+                                    div()
+                                        .flex_col()
+                                        .gap_px(4.0)
+                                        .child(cn::label("Quantity"))
+                                        .child(
+                                            cn::number_input(&qty)
+                                                .min(0.0)
+                                                .max(99.0)
+                                                .step(1.0)
+                                                .precision(0),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_col()
+                                        .gap_px(4.0)
+                                        .child(cn::label("Temperature °C"))
+                                        .child(
+                                            cn::number_input(&temperature)
+                                                .min(-50.0)
+                                                .max(60.0)
+                                                .step(0.5)
+                                                .precision(1),
+                                        ),
+                                ),
                         ),
                 ),
         )

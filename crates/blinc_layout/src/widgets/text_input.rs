@@ -583,6 +583,34 @@ pub fn decrement_focus_count() {
 /// Use from a parent widget's open-handler when an embedded text input
 /// should grab focus on appearance (e.g. cn::combobox's search field on
 /// dropdown open).
+/// Force the text input's stateful to re-run its on_state callback
+/// and queue the resulting prop / subtree updates. Use this after
+/// mutating [`TextInputData::value`] (or `cursor` / `selection_start`)
+/// from outside the widget — e.g. a `+` / `−` stepper on
+/// `cn::number_input` that updates the underlying state and needs the
+/// visible field to pick up the new value on the next frame.
+///
+/// Pre-fix, this only set `needs_visual_update = true` + requested a
+/// redraw, which marks intent but doesn't actually run the callback —
+/// the visible text stayed stale until something unrelated (mouse
+/// move, animation tick) drove a frame that happened to call
+/// `ensure_callback_invoked`. Now it routes through
+/// [`crate::stateful::refresh_stateful`] which both runs the
+/// callback AND queues the prop updates.
+pub fn refresh_text_input(state: &SharedTextInputData) {
+    let stateful = {
+        let s = match state.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        s.stateful_state.clone()
+    };
+    if let Some(stateful) = stateful {
+        crate::stateful::refresh_stateful(&stateful);
+    }
+    crate::stateful::request_redraw();
+}
+
 pub fn focus_text_input(state: &SharedTextInputData) {
     use blinc_core::events::event_types;
     if let Ok(mut s) = state.lock() {
@@ -913,6 +941,15 @@ pub struct TextInputData {
     pub(crate) stateful_state: Option<SharedState<TextFieldState>>,
     /// Callback invoked when text value changes
     pub(crate) on_change_callback: Option<OnChangeCallback>,
+    /// Optional stepper hook fired when the user presses ↑ / ↓ / + / −
+    /// while focused. Argument is `+1` for increment, `-1` for
+    /// decrement. When set, the keys are *consumed* (the default
+    /// behaviour — character insertion for `+` / `−`, no-op for
+    /// arrows on a single-line field — is suppressed). Used by
+    /// `cn::number_input` to wire keyboard stepping to the bound
+    /// `State<f64>`. Unset by default so a plain text input still
+    /// accepts a typed `-` as the leading sign of a negative number.
+    pub(crate) on_step_callback: Option<Arc<dyn Fn(i32) + Send + Sync>>,
     /// CSS element ID for stylesheet matching (set via TextInput::id())
     pub(crate) css_element_id: Option<String>,
     /// CSS class names for stylesheet matching (set via TextInput::class())
@@ -994,6 +1031,7 @@ impl TextInputData {
             layout_bounds_storage: Arc::new(Mutex::new(None)),
             stateful_state: None,
             on_change_callback: None,
+            on_step_callback: None,
             css_element_id: None,
             css_classes: Vec::new(),
             last_click_time: None,
@@ -1802,6 +1840,11 @@ pub struct TextInputConfig {
     pub border_width: f32,
     pub padding_x: f32,
     pub placeholder: String,
+    /// Horizontal alignment of the visible text inside the field.
+    /// Default `Left`. `Center` is the canonical choice for
+    /// numeric / OTP-style fields where the value should sit
+    /// visually centred in a fixed-width cell.
+    pub text_align: blinc_core::TextAlign,
 }
 
 impl Default for TextInputConfig {
@@ -1827,6 +1870,7 @@ impl Default for TextInputConfig {
             border_width: 1.5,
             padding_x: 12.0,
             placeholder: String::new(),
+            text_align: blinc_core::TextAlign::Left,
         }
     }
 }
@@ -2105,9 +2149,13 @@ impl TextInput {
                     // "H" of "Hello World" lands a cursor position
                     // PAST the H, so a drag-select that starts there
                     // misses the first character.
-                    let (font_size, text_origin_x) = {
+                    let (font_size, text_origin_x, is_centered_align) = {
                         let cfg = config_for_click.lock().unwrap();
-                        (cfg.font_size, cfg.padding_x + cfg.border_width)
+                        (
+                            cfg.font_size,
+                            cfg.padding_x + cfg.border_width,
+                            matches!(cfg.text_align, blinc_core::TextAlign::Center),
+                        )
                     };
 
                     // Update FSM state
@@ -2146,8 +2194,28 @@ impl TextInput {
                     // subtracting the left padding + border, then clamp
                     // to >= 0 so clicks in the padding gutter snap to
                     // the start of the text instead of going negative.
+                    //
+                    // EXCEPTION for centred text: the visible text
+                    // doesn't start at `text_origin_x` — it sits at
+                    // `text_origin_x + (clip_w - text_w) / 2` because
+                    // the layout flex-centres the content. We can't
+                    // know `clip_w - text_w` here without runtime
+                    // measurement, and the value clicked is almost
+                    // always a "select everything then retype" gesture
+                    // anyway (canonical numeric-input UX). So when
+                    // `text_align == Center`, single-clicking the
+                    // field selects the whole value and parks the
+                    // cursor at the end — subsequent typing replaces
+                    // the value. Matches `<input type=number>` in most
+                    // browsers + the HIG numeric-input spec. `text_x`
+                    // is still computed so the touch edit-menu anchors
+                    // and on-drag math below stay correct.
                     let text_x = (ctx.local_x - text_origin_x).max(0.0);
-                    let cursor_pos = d.cursor_position_from_x(text_x, font_size);
+                    let cursor_pos = if is_centered_align {
+                        d.value.chars().count()
+                    } else {
+                        d.cursor_position_from_x(text_x, font_size)
+                    };
 
                     // Double-click detection (select word)
                     let now = web_time::Instant::now();
@@ -2193,6 +2261,18 @@ impl TextInput {
                                     | edit_menu_actions::SELECT_ALL,
                             );
                         }
+                    } else if is_centered_align {
+                        // Centred-align single-click: select everything
+                        // and park the cursor at the end. Matches the
+                        // `<input type=number>` browser convention —
+                        // tapping the field selects the value so the
+                        // next keystroke replaces it. No drag-select
+                        // anchor (centred fields don't support drag
+                        // selection because cursor_position_from_x
+                        // can't be trusted under centred layout).
+                        d.selection_start = Some(0);
+                        d.cursor = cursor_pos;
+                        d.drag_select_anchor = None;
                     } else {
                         // Single click: position cursor. On touch, we
                         // do NOT start a drag-select anchor — touch
@@ -2357,6 +2437,20 @@ impl TextInput {
                     }
 
                     if let Some(c) = ctx.key_char {
+                        // Stepper hook: `+` / `−` (or `=` which sits
+                        // on the same physical key on US layouts) step
+                        // the value when `on_step` is registered.
+                        // Skip the character insert so the field
+                        // doesn't end up with stray `+` chars in the
+                        // value buffer.
+                        if matches!(c, '+' | '-' | '=') {
+                            if let Some(cb) = d.on_step_callback.as_ref().map(Arc::clone) {
+                                let delta = if c == '-' { -1 } else { 1 };
+                                drop(d);
+                                cb(delta);
+                                return;
+                            }
+                        }
                         d.insert(&c.to_string());
                         d.reset_cursor_blink();
                         tracing::debug!("TextInput received char: {:?}, value: {}", c, d.value);
@@ -2433,6 +2527,16 @@ impl TextInput {
                         39 => d.move_right(ctx.shift),                // Right
                         36 => d.move_to_start(ctx.shift),             // Home
                         35 => d.move_to_end(ctx.shift),               // End
+                        // ↑ / ↓: stepper hook if registered, else
+                        // no-op on a single-line input.
+                        38 | 40 if d.on_step_callback.is_some() => {
+                            let delta = if ctx.key_code == 38 { 1 } else { -1 };
+                            if let Some(cb) = d.on_step_callback.as_ref().map(Arc::clone) {
+                                drop(d);
+                                cb(delta);
+                            }
+                            return;
+                        }
                         27 => {
                             should_blur = true;
                         }
@@ -2614,15 +2718,29 @@ impl TextInput {
             .flex_1()
             .min_w(0.0);
 
-        // Text wrapper with absolute positioning
-        // Using left() with negative scroll offset to scroll content
-        let mut text_wrapper = div()
-            .absolute()
-            .left(-scroll_offset)
-            .top(0.0)
-            .h(inner_height)
-            .flex_row()
-            .items_center();
+        // When the field is set to `text_align: Center`, the text
+        // wrapper fills the clip container and centres its content
+        // horizontally — used by number / OTP / code inputs that want
+        // the value visually centred in a fixed-width cell. Otherwise
+        // the wrapper uses absolute positioning so `left(-scroll_offset)`
+        // can scroll long content horizontally.
+        let is_centered = matches!(config.text_align, blinc_core::TextAlign::Center);
+        let mut text_wrapper = if is_centered {
+            div()
+                .w_full()
+                .h(inner_height)
+                .flex_row()
+                .items_center()
+                .justify_center()
+        } else {
+            div()
+                .absolute()
+                .left(-scroll_offset)
+                .top(0.0)
+                .h(inner_height)
+                .flex_row()
+                .items_center()
+        };
 
         if !display.is_empty() {
             if let Some((sel_start, sel_end)) = selection_range {
@@ -2690,8 +2808,20 @@ impl TextInput {
         clip_container = clip_container.child(text_wrapper);
 
         // Add cursor via canvas as a sibling to text_wrapper, also in clip_container
-        // The cursor position is adjusted for scroll offset since it's not inside text_wrapper
-        if is_focused && selection_range.is_none() {
+        // The cursor position is adjusted for scroll offset since it's not inside text_wrapper.
+        //
+        // SKIP the cursor entirely when `text_align == Center` — the
+        // cursor's absolute `left(cursor_x)` math assumes the text
+        // starts at position 0 in the clip area, but a centred text
+        // wrapper sits at `(clip_w - text_w) / 2` (computed at
+        // runtime by the flex layout, not available here). Drawing
+        // the cursor at the un-centred position lands it to the left
+        // of the value, which is the "confused cursor" the user
+        // sees in number-input / OTP-style fields. Centred fields
+        // are predominantly read-only / stepper-driven anyway; a
+        // future text-measure-driven cursor placement can re-enable
+        // the caret if needed.
+        if is_focused && selection_range.is_none() && !is_centered {
             let cursor_left = cursor_x - scroll_offset;
             // Calculate proper vertical margins to center cursor (inner_height already defined above)
             let cursor_margin = (inner_height - cursor_height) / 2.0;
@@ -2798,6 +2928,47 @@ impl TextInput {
     pub fn input_type(self, input_type: InputType) -> Self {
         if let Ok(mut d) = self.data.lock() {
             d.input_type = input_type;
+        }
+        self
+    }
+
+    /// Set horizontal text alignment inside the field. `Left` (default)
+    /// renders the value flush against `padding_x`. `Center` centres
+    /// the value within the available clip area — canonical for
+    /// number / OTP / code inputs where the field is fixed-width.
+    pub fn text_align(self, align: blinc_core::TextAlign) -> Self {
+        if let Ok(mut cfg) = self.config.lock() {
+            cfg.text_align = align;
+        }
+        self
+    }
+
+    /// Set the internal horizontal padding inside the field (left and
+    /// right spacers). Default is 12 px each side, which gives a
+    /// roomy form-input feel. Number / OTP / code inputs that want a
+    /// tight cell hugging the centred value should drop this to
+    /// 4–6 px so the visible field hugs the text instead of carrying
+    /// 24 px of fixed dead space.
+    pub fn padding_x(self, px: f32) -> Self {
+        if let Ok(mut cfg) = self.config.lock() {
+            cfg.padding_x = px.max(0.0);
+        }
+        self
+    }
+
+    /// Register a stepper hook fired on ↑ / ↓ / `+` / `−` keys while
+    /// the field is focused. The argument is `+1` for increment,
+    /// `-1` for decrement. When this is set, the keys are
+    /// *consumed* — the default behaviour (character insertion for
+    /// `+` / `−`, no-op for arrows on a single-line field) is
+    /// skipped. Used by `cn::number_input` to wire keyboard
+    /// stepping to the bound `State<f64>`.
+    pub fn on_step<F>(self, callback: F) -> Self
+    where
+        F: Fn(i32) + Send + Sync + 'static,
+    {
+        if let Ok(mut d) = self.data.lock() {
+            d.on_step_callback = Some(Arc::new(callback));
         }
         self
     }

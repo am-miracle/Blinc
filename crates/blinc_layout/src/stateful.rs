@@ -2822,7 +2822,16 @@ pub fn stateful_with_key<S: StateTransitions + Default>(
 ///
 /// This re-runs the `on_state` callback and queues a prop update.
 /// Called internally by the reactive system when dependencies change.
-pub(crate) fn refresh_stateful<S: StateTransitions>(shared: &SharedState<S>) {
+/// Manually push a refresh through a `Stateful<S>` by its
+/// `SharedState<S>`. Re-runs the on_state callback and queues the
+/// resulting prop / subtree updates against the layout tree.
+///
+/// Internal widget code uses this to rebuild after an event-driven
+/// state mutation (e.g. `text_input` after a keystroke). Widget
+/// authors who need to react to an external signal that the Stateful
+/// itself isn't watching can also call this — see
+/// [`crate::widgets::text_input::refresh_text_input`] for an example.
+pub fn refresh_stateful<S: StateTransitions>(shared: &SharedState<S>) {
     // Data-guarded transition path. Before rebuilding the subtree,
     // give the state machine a chance to transition based on the
     // newly-arrived signal data — the dep change that brought us

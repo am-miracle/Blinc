@@ -176,6 +176,15 @@ impl NumberInputBuilder {
         &self.config
     }
 
+    /// Clone the shared text-input data backing this widget. External
+    /// stepper buttons (notably `cn::number_input`'s `+` / `−`) need
+    /// this to push a re-formatted value into the visible field after
+    /// they mutate `state` — `state.set` alone doesn't reach the text
+    /// input, since `text_input` reads from its own `SharedTextInputData`.
+    pub fn data(&self) -> SharedTextInputData {
+        self.config.data.clone()
+    }
+
     pub fn min(mut self, min: f64) -> Self {
         self.config.min = Some(min);
         self
