@@ -42,6 +42,7 @@ pub mod link;
 pub mod list;
 #[cfg(feature = "media")]
 pub mod media;
+pub mod number_input;
 pub mod overlay;
 pub mod overlay_stack;
 pub mod radio;
@@ -66,6 +67,11 @@ pub use radio::{RadioGroup, RadioGroupBuilder, RadioGroupConfig, RadioLayout, ra
 
 // Re-export toggle widget
 pub use toggle::{Toggle, ToggleBuilder, ToggleConfig, toggle};
+
+// Re-export number_input widget
+pub use number_input::{
+    NumberInput, NumberInputBuilder, NumberInputConfig, number_input, step_down, step_up,
+};
 
 // Re-export text input widget
 pub use text_input::{

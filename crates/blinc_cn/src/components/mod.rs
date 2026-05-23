@@ -30,6 +30,7 @@ pub mod kbd;
 pub mod label;
 pub mod menubar;
 pub mod navigation_menu;
+pub mod number_input;
 pub mod pagination;
 pub mod popover;
 pub mod progress;
@@ -96,6 +97,7 @@ pub use navigation_menu::{
     NavigationLink, NavigationLinkBuilder, NavigationMenu, NavigationMenuBuilder, navigation_link,
     navigation_menu,
 };
+pub use number_input::{NumberInput, NumberInputBuilder, number_input};
 pub use pagination::{Pagination, PaginationBuilder, PaginationSize, pagination};
 pub use popover::{Popover, PopoverAlign, PopoverBuilder, PopoverSide, popover};
 pub use progress::{AnimatedProgress, Progress, ProgressSize, progress, progress_animated};

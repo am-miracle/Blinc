@@ -709,11 +709,15 @@ fn alerts_section() -> impl ElementBuilder + use<> {
 // FORM INPUTS SECTION
 // ============================================================================
 
-fn form_inputs_section(_ctx: &WindowedContext) -> impl ElementBuilder + use<> {
+fn form_inputs_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let username_data = text_input_data();
     let email_data = text_input_data();
     let password_data = text_input_data();
     let bio_state = blinc_layout::widgets::text_area::text_area_state();
+
+    // Number input states for the new cn::number_input row.
+    let qty = ctx.use_state_keyed("number_qty", || 1.0);
+    let temperature = ctx.use_state_keyed("number_temp", || 22.5);
 
     section_container()
         .child(section_title("Form Inputs"))
@@ -764,6 +768,31 @@ fn form_inputs_section(_ctx: &WindowedContext) -> impl ElementBuilder + use<> {
                                 .w(300.0),
                         )
                         .child(cn::label("Labels can be standalone")),
+                )
+                // Column 3: Number inputs
+                .child(
+                    div()
+                        .flex_col()
+                        .h_fit()
+                        .gap_px(16.0)
+                        .child(cn::label("Quantity (integer 0..99)"))
+                        .child(
+                            cn::number_input(&qty)
+                                .min(0.0)
+                                .max(99.0)
+                                .step(1.0)
+                                .precision(0)
+                                .w(160.0),
+                        )
+                        .child(cn::label("Temperature °C (step 0.5)"))
+                        .child(
+                            cn::number_input(&temperature)
+                                .min(-50.0)
+                                .max(60.0)
+                                .step(0.5)
+                                .precision(1)
+                                .w(160.0),
+                        ),
                 ),
         )
 }

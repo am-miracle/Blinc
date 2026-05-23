@@ -5,6 +5,7 @@ All notable changes to `blinc_layout` will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **`blinc_layout::widgets::number_input`** — typed numeric field wrapping `text_input` with `InputType::Number`. Bound to a `State<f64>`; builder methods set `min` / `max` / `step` / `precision`. On every keystroke the visible text parses → clamps → writes back to `state` (empty / mid-edit invalid strings like `""` / `"-"` / `"."` leave state untouched so the user can keep typing). `step_up` / `step_down` helpers operate on `NumberInputConfig` for caller-supplied stepper buttons (notably `cn::number_input`'s `+` / `−`). Keyboard arrow-key stepping is a follow-up — `text_input`'s `on_key_down` already owns the keyboard for cursor / selection / clipboard, and forking it here would require an escape hatch that doesn't exist yet.
 - **`blinc_layout::widgets::toggle`** — first-class binary on/off control. Renders a button-shaped Stateful with theme-token defaults (colours from `ColorToken::Secondary` / `TextSecondary` / `TextPrimary` / `BorderSecondary`, radius from `RadiusToken::Default`, padding / typography from spacing + typography tokens). Pairs an external `State<bool>` with an internal `Stateful<ButtonState>` for hover / pressed detection; `:checked` pseudo-state covers the on-state for CSS overrides. Builder methods cover height, padding, icon, label, font size, custom on/off bg/fg, border-width, bordered-off (outline mode), and `on_change`. `blinc_cn::toggle` wraps this with shadcn-style `.cn-toggle` classes + variant / size ladders.
 
 ### Performance

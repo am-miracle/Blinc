@@ -91,7 +91,7 @@ pub enum InputSize {
 }
 
 impl InputSize {
-    fn height(&self, theme: &ThemeState) -> f32 {
+    pub fn height(&self, theme: &ThemeState) -> f32 {
         // Use spacing tokens for consistent sizing
         match self {
             InputSize::Small => theme.spacing_value(SpacingToken::Space8), // 32px
@@ -100,7 +100,7 @@ impl InputSize {
         }
     }
 
-    fn font_size(&self, typography: &TypographyTokens) -> f32 {
+    pub fn font_size(&self, typography: &TypographyTokens) -> f32 {
         match self {
             InputSize::Small => typography.text_xs,   // 12px
             InputSize::Medium => typography.text_sm,  // 14px

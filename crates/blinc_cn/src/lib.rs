@@ -76,6 +76,7 @@ pub mod cn {
     pub use crate::components::label::label;
     pub use crate::components::menubar::{MenuTriggerMode, MenuTriggerStyle, menubar};
     pub use crate::components::navigation_menu::{navigation_link, navigation_menu};
+    pub use crate::components::number_input::number_input;
     pub use crate::components::pagination::pagination;
     pub use crate::components::popover::{PopoverAlign, PopoverSide, popover};
     pub use crate::components::progress::{progress, progress_animated};
