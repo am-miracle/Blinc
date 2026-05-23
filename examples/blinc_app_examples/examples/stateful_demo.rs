@@ -10,8 +10,8 @@
 use blinc_animation::SpringConfig;
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
-use blinc_core::events::event_types;
 use blinc_core::Transform;
+use blinc_core::events::event_types;
 use blinc_layout::stateful::ButtonState;
 
 #[cfg(not(target_arch = "wasm32"))]

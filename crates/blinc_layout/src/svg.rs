@@ -11,8 +11,8 @@
 //! ```
 
 use std::cell::RefCell;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -370,11 +370,7 @@ impl ElementBuilder for Svg {
     }
 
     fn semantic_type_name(&self) -> Option<&'static str> {
-        if self.is_internal {
-            None
-        } else {
-            Some("svg")
-        }
+        if self.is_internal { None } else { Some("svg") }
     }
 
     fn element_id(&self) -> Option<&str> {

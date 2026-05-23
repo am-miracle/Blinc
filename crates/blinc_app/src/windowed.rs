@@ -24,8 +24,8 @@
 
 use std::hash::Hash;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 use blinc_animation::{
@@ -34,9 +34,9 @@ use blinc_animation::{
 };
 use blinc_core::context_state::{BlincContextState, HookState, SharedHookState, StateKey};
 use blinc_core::reactive::{Derived, ReactiveGraph, Signal, SignalId, State, StatefulDepsCallback};
-use blinc_layout::overlay_state::{get_overlay_manager, OverlayContext};
+use blinc_layout::overlay_state::{OverlayContext, get_overlay_manager};
 use blinc_layout::prelude::*;
-use blinc_layout::widgets::overlay::{overlay_manager, OverlayManager, OverlayManagerExt};
+use blinc_layout::widgets::overlay::{OverlayManager, OverlayManagerExt, overlay_manager};
 use blinc_platform::{
     ControlFlow, Event, EventLoop, InputEvent, Key, KeyState, LifecycleEvent, MouseEvent, Platform,
     TouchEvent, Window, WindowConfig, WindowEvent,
@@ -74,11 +74,7 @@ pub(crate) fn detect_initial_fps_cap() -> u32 {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
-    if cores <= 4 {
-        30
-    } else {
-        60
-    }
+    if cores <= 4 { 30 } else { 60 }
 }
 
 /// Allowed cap values for dynamic adaptation, ascending. The adapter
@@ -2177,7 +2173,7 @@ impl WindowedApp {
     /// On Android, this would use the NDK AssetManager.
     #[cfg(all(feature = "windowed", not(target_os = "android")))]
     fn init_asset_loader() {
-        use blinc_platform::assets::{set_global_asset_loader, FilesystemAssetLoader};
+        use blinc_platform::assets::{FilesystemAssetLoader, set_global_asset_loader};
 
         // Create a filesystem loader (uses current directory as base)
         let loader = FilesystemAssetLoader::new();
@@ -2195,7 +2191,7 @@ impl WindowedApp {
     #[cfg(all(feature = "windowed", not(target_os = "android")))]
     fn init_theme() {
         use blinc_theme::{
-            detect_system_color_scheme, platform_theme_bundle, set_redraw_callback, ThemeState,
+            ThemeState, detect_system_color_scheme, platform_theme_bundle, set_redraw_callback,
         };
 
         // Only seed the platform default if no theme has been
@@ -2246,6 +2242,32 @@ impl WindowedApp {
     ///         )
     /// })
     /// ```
+    ///
+    /// # Passing a named `fn` as the builder
+    ///
+    /// If you've factored your UI out into a free function:
+    /// ```ignore
+    /// fn build_ui(ctx: &mut WindowedContext) -> impl Element { /* … */ }
+    /// WindowedApp::run(config, build_ui)?;
+    /// ```
+    /// you may hit `error: implementation of FnMut is not general enough`
+    /// on **edition 2024** crates (and on some recent rustc releases).
+    /// The `-> impl Element` return type implicitly captures `ctx`'s
+    /// lifetime under the new RPIT capture rules, which makes
+    /// `build_ui` only implement `FnMut` for one specific lifetime —
+    /// the higher-ranked bound `for<'a> FnMut(&'a mut _) -> _` then
+    /// can't be satisfied.
+    ///
+    /// Two fixes:
+    /// 1. Wrap the call in a closure (zero overhead, works in any
+    ///    edition):
+    ///    ```ignore
+    ///    WindowedApp::run(config, |ctx| build_ui(ctx))?;
+    ///    ```
+    /// 2. Opt the function's return type out of capture (Rust 1.82+):
+    ///    ```ignore
+    ///    fn build_ui(ctx: &mut WindowedContext) -> impl Element + use<> { /* … */ }
+    ///    ```
     #[cfg(all(feature = "windowed", not(target_os = "android")))]
     pub fn run<F, E>(config: WindowConfig, ui_builder: F) -> Result<()>
     where
@@ -2279,6 +2301,10 @@ impl WindowedApp {
     ///     |ctx| my_ui(ctx),
     /// )
     /// ```
+    ///
+    /// See [`Self::run`] for the `FnMut is not general enough`
+    /// gotcha when passing a named `fn build_ui(ctx) -> impl Element`
+    /// directly on edition 2024 / recent rustc.
     #[cfg(all(feature = "windowed", not(target_os = "android")))]
     pub fn run_with_theme<F, E>(
         config: WindowConfig,
@@ -2895,7 +2921,7 @@ impl WindowedApp {
                                     .is_some_and(|s| s.has_pointer_state_rules())
                         });
                     if !needs_pointer_dispatch {
-                        if let (Some(ref mut blinc_ctx), Some(ref tree)) =
+                        if let (Some(blinc_ctx), Some(tree)) =
                             (&mut ws.ctx, &ws.render_tree)
                         {
                             if let Event::Input(
@@ -2926,7 +2952,7 @@ impl WindowedApp {
                     match event {
                         Event::Window(_, WindowEvent::Resized { width, height }) => {
                             if let Some(sws) = secondary_windows.get_mut(&wid) {
-                                if let (Some(ref surf), Some(ref mut config)) =
+                                if let (Some(surf), Some(config)) =
                                     (&sws.surface, &mut sws.surface_config)
                                 {
                                     if width > 0 && height > 0 {
@@ -2956,7 +2982,7 @@ impl WindowedApp {
                         Event::Input(_, ref input_event) => {
 
                             if let Some(sws) = secondary_windows.get_mut(&wid) {
-                                if let (Some(ref mut ctx), Some(ref mut tree)) =
+                                if let (Some(ctx), Some(tree)) =
                                     (&mut sws.ctx, &mut sws.render_tree)
                                 {
                                     let sf = ctx.scale_factor as f32;
@@ -3049,7 +3075,7 @@ impl WindowedApp {
                         Event::Frame(_) => {
                             if let Some(sws) = secondary_windows.get_mut(&wid) {
 
-                                if let (Some(ref mut blinc_app), Some(ref surf), Some(ref config)) =
+                                if let (Some(blinc_app), Some(surf), Some(config)) =
                                     (&mut ws.app, &sws.surface, &sws.surface_config)
                                 {
                                     // Build render tree on first frame or after resize
@@ -3106,7 +3132,7 @@ impl WindowedApp {
 
                                     // Render the tree (skip if minimized / zero size)
                                     if config.width > 0 && config.height > 0 {
-                                        if let (Some(ref tree), Some(ref rs)) =
+                                        if let (Some(tree), Some(rs)) =
                                             (&sws.render_tree, &sws.render_state)
                                         {
                                             match surf.get_current_texture() {
@@ -3414,7 +3440,7 @@ impl WindowedApp {
                     }
 
                     Event::Window(_, WindowEvent::Resized { width, height }) => {
-                        if let (Some(ref blinc_app), Some(ref surf), Some(ref mut config)) =
+                        if let (Some(blinc_app), Some(surf), Some(config)) =
                             (&ws.app, &ws.surface, &mut ws.surface_config)
                         {
                             // winit fires a spurious Resized event when the window is first
@@ -3435,7 +3461,7 @@ impl WindowedApp {
                                 ws.needs_relayout = true;
 
                                 // Dispatch RESIZE event to elements (use logical dimensions)
-                                if let (Some(ref mut windowed_ctx), Some(ref tree)) =
+                                if let (Some(windowed_ctx), Some(tree)) =
                                     (&mut ws.ctx, &ws.render_tree)
                                 {
                                     let logical_width = width as f32 / windowed_ctx.scale_factor as f32;
@@ -3493,7 +3519,7 @@ impl WindowedApp {
                             return ControlFlow::Continue;
                         }
 
-                        if let (Some(ref blinc_app), Some(ref surf), Some(ref mut config)) =
+                        if let (Some(blinc_app), Some(surf), Some(config)) =
                             (&ws.app, &ws.surface, &mut ws.surface_config)
                         {
                             if phys_w > 0
@@ -3647,7 +3673,7 @@ impl WindowedApp {
                         }
 
                         // First phase: collect events using immutable borrow
-                        let (pending_events, keyboard_events, scroll_ended, gesture_ended, scroll_info, scroll_cancel_hit) = if let (Some(ref mut windowed_ctx), Some(ref tree)) =
+                        let (pending_events, keyboard_events, scroll_ended, gesture_ended, scroll_info, scroll_cancel_hit) = if let (Some(windowed_ctx), Some(tree)) =
                             (&mut ws.ctx, &ws.render_tree)
                         {
                             let router = &mut windowed_ctx.event_router;
@@ -4769,11 +4795,11 @@ impl WindowedApp {
                         }
 
                         if let (
-                            Some(ref mut blinc_app),
-                            Some(ref surf),
-                            Some(ref config),
-                            Some(ref mut windowed_ctx),
-                            Some(ref mut rs),
+                            Some(blinc_app),
+                            Some(surf),
+                            Some(config),
+                            Some(windowed_ctx),
+                            Some(rs),
                         ) = (&mut ws.app, &ws.surface, &ws.surface_config, &mut ws.ctx, &mut ws.render_state)
                         {
                             // Per-phase frame timing. Cheap when the trace target

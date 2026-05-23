@@ -59,15 +59,15 @@ use blinc_core::{
 };
 use blinc_theme::{ColorToken, ThemeState};
 use nom::{
+    Finish, IResult,
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_until, take_while1},
     character::complete::{char, multispace1},
     combinator::{cut, opt, value},
-    error::{context, ParseError as NomParseError, VerboseError, VerboseErrorKind},
+    error::{ParseError as NomParseError, VerboseError, VerboseErrorKind, context},
     multi::many0,
     number::complete::float,
     sequence::{delimited, preceded, tuple},
-    Finish, IResult,
 };
 use tracing::debug;
 
@@ -8278,11 +8278,7 @@ fn parse_backdrop_filter_functions(value: &str) -> Option<GlassMaterial> {
         }
     }
 
-    if found_any {
-        Some(glass)
-    } else {
-        None
-    }
+    if found_any { Some(glass) } else { None }
 }
 
 /// Parse `liquid-glass(...)` CSS function.
@@ -8544,11 +8540,7 @@ fn parse_css_filter(value: &str) -> Option<crate::element_style::CssFilter> {
         }
     }
 
-    if found_any {
-        Some(filter)
-    } else {
-        None
-    }
+    if found_any { Some(filter) } else { None }
 }
 
 /// Parse a time value (e.g., "300ms", "0.5s", "1s")
@@ -10928,18 +10920,26 @@ mod tests {
         assert_eq!(base.opacity, Some(1.0));
 
         // Check all states exist
-        assert!(result
-            .stylesheet
-            .contains_with_state("button", ElementState::Hover));
-        assert!(result
-            .stylesheet
-            .contains_with_state("button", ElementState::Active));
-        assert!(result
-            .stylesheet
-            .contains_with_state("button", ElementState::Focus));
-        assert!(result
-            .stylesheet
-            .contains_with_state("button", ElementState::Disabled));
+        assert!(
+            result
+                .stylesheet
+                .contains_with_state("button", ElementState::Hover)
+        );
+        assert!(
+            result
+                .stylesheet
+                .contains_with_state("button", ElementState::Active)
+        );
+        assert!(
+            result
+                .stylesheet
+                .contains_with_state("button", ElementState::Focus)
+        );
+        assert!(
+            result
+                .stylesheet
+                .contains_with_state("button", ElementState::Disabled)
+        );
 
         // Verify state styles
         let hover = result
@@ -11311,9 +11311,11 @@ mod tests {
 
         // Rules should also be parsed
         assert!(result.stylesheet.contains("card"));
-        assert!(result
-            .stylesheet
-            .contains_with_state("card", ElementState::Hover));
+        assert!(
+            result
+                .stylesheet
+                .contains_with_state("card", ElementState::Hover)
+        );
     }
 
     // =========================================================================

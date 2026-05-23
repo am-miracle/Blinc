@@ -280,13 +280,15 @@ pub(crate) fn blinc_string_alloc(s: &str) -> *const i32 {
 ///
 /// `ptr` must come from `blinc_string_alloc` (or any producer of the same layout).
 pub(crate) unsafe fn blinc_string_decode<'a>(ptr: *const i32) -> &'a str {
-    if ptr.is_null() {
-        return "";
+    unsafe {
+        if ptr.is_null() {
+            return "";
+        }
+        let len = std::ptr::read_unaligned(ptr) as usize;
+        let body = (ptr as *const u8).add(4);
+        let bytes = std::slice::from_raw_parts(body, len);
+        std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
     }
-    let len = std::ptr::read_unaligned(ptr) as usize;
-    let body = (ptr as *const u8).add(4);
-    let bytes = std::slice::from_raw_parts(body, len);
-    std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
 }
 
 /// `__fstring_format__` for i32 — decimal string of an integer.

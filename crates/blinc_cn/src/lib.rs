@@ -55,7 +55,7 @@ pub use blinc_layout::InstanceKey;
 pub mod cn {
     pub use crate::components::accordion::accordion;
     pub use crate::components::alert::{alert, alert_box};
-    pub use crate::components::badge::{badge, BadgeStyle, BadgeVariant};
+    pub use crate::components::badge::{BadgeStyle, BadgeVariant, badge};
     pub use crate::components::breadcrumb::breadcrumb;
     pub use crate::components::button::button;
     pub use crate::components::card::{card, card_content, card_footer, card_header};
@@ -70,14 +70,14 @@ pub mod cn {
     pub use crate::components::drawer::{drawer, drawer_left, drawer_right};
     pub use crate::components::dropdown_menu::{dropdown_menu, dropdown_menu_custom};
     pub use crate::components::hover_card::hover_card;
-    pub use crate::components::icon::{icon, IconSize};
+    pub use crate::components::icon::{IconSize, icon};
     pub use crate::components::input::input;
-    pub use crate::components::kbd::{kbd, KbdSize};
+    pub use crate::components::kbd::{KbdSize, kbd};
     pub use crate::components::label::label;
-    pub use crate::components::menubar::{menubar, MenuTriggerMode, MenuTriggerStyle};
+    pub use crate::components::menubar::{MenuTriggerMode, MenuTriggerStyle, menubar};
     pub use crate::components::navigation_menu::{navigation_link, navigation_menu};
     pub use crate::components::pagination::pagination;
-    pub use crate::components::popover::{popover, PopoverAlign, PopoverSide};
+    pub use crate::components::popover::{PopoverAlign, PopoverSide, popover};
     pub use crate::components::progress::{progress, progress_animated};
     pub use crate::components::radio::radio_group;
     pub use crate::components::resizable::{resizable_group, resizable_panel};
@@ -89,7 +89,7 @@ pub mod cn {
     pub use crate::components::slider::slider;
     pub use crate::components::spinner::spinner;
     pub use crate::components::switch::switch;
-    pub use crate::components::tabs::{tab_item, tabs, TabsSize, TabsTransition};
+    pub use crate::components::tabs::{TabsSize, TabsTransition, tab_item, tabs};
     pub use crate::components::textarea::textarea;
     pub use crate::components::toast::{
         toast, toast_custom, toast_error, toast_success, toast_warning,
@@ -102,15 +102,15 @@ pub mod cn {
         span, strong,
     };
     // Scroll Area
-    pub use crate::components::scroll_area::{scroll_area, ScrollbarVisibility};
+    pub use crate::components::scroll_area::{ScrollbarVisibility, scroll_area};
     // Aspect Ratio
     pub use crate::components::aspect_ratio::{
-        aspect_ratio, aspect_ratio_16_9, aspect_ratio_21_9, aspect_ratio_4_3, aspect_ratio_9_16,
+        aspect_ratio, aspect_ratio_4_3, aspect_ratio_9_16, aspect_ratio_16_9, aspect_ratio_21_9,
         aspect_ratio_square,
     };
     // Avatar
     pub use crate::components::avatar::{
-        avatar, avatar_group, AvatarShape, AvatarSize, AvatarStatus,
+        AvatarShape, AvatarSize, AvatarStatus, avatar, avatar_group,
     };
 }
 
@@ -118,97 +118,97 @@ pub mod cn {
 pub mod prelude {
     pub use crate::cn;
     // Components
-    pub use crate::components::accordion::{accordion, Accordion, AccordionBuilder, AccordionMode};
-    pub use crate::components::alert::{alert, alert_box, Alert, AlertBox, AlertVariant};
-    pub use crate::components::badge::{badge, Badge, BadgeStyle, BadgeVariant};
+    pub use crate::components::accordion::{Accordion, AccordionBuilder, AccordionMode, accordion};
+    pub use crate::components::alert::{Alert, AlertBox, AlertVariant, alert, alert_box};
+    pub use crate::components::badge::{Badge, BadgeStyle, BadgeVariant, badge};
     pub use crate::components::breadcrumb::{
-        breadcrumb, Breadcrumb, BreadcrumbBuilder, BreadcrumbItem, BreadcrumbSeparator,
-        BreadcrumbSize,
+        Breadcrumb, BreadcrumbBuilder, BreadcrumbItem, BreadcrumbSeparator, BreadcrumbSize,
+        breadcrumb,
     };
     pub use crate::components::button::{
-        button, Button, ButtonBuilder, ButtonSize, ButtonVariant, IconPosition,
+        Button, ButtonBuilder, ButtonSize, ButtonVariant, IconPosition, button,
     };
     // Re-export ButtonState for use with buttons
     pub use crate::components::card::{
-        card, card_content, card_footer, card_header, Card, CardContent, CardFooter, CardHeader,
+        Card, CardContent, CardFooter, CardHeader, card, card_content, card_footer, card_header,
     };
     pub use crate::components::chart::{
-        bar_chart, comparison_bar_chart, histogram, line_chart, spark_line, threshold_line_chart,
         BarChart, BarChartBuilder, ChartGrid, ComparisonBarChart, ComparisonBarChartBuilder,
         DataPoint, DataSeries, Histogram, HistogramBuilder, LineChart, LineChartBuilder, SparkLine,
-        SparkLineBuilder, ThresholdBand, ThresholdLineChart, ThresholdLineChartBuilder,
+        SparkLineBuilder, ThresholdBand, ThresholdLineChart, ThresholdLineChartBuilder, bar_chart,
+        comparison_bar_chart, histogram, line_chart, spark_line, threshold_line_chart,
     };
-    pub use crate::components::checkbox::{checkbox, Checkbox, CheckboxSize};
+    pub use crate::components::checkbox::{Checkbox, CheckboxSize, checkbox};
     pub use crate::components::collapsible::{
-        collapsible, collapsible_section, Collapsible, CollapsibleBuilder, CollapsibleTrigger,
+        Collapsible, CollapsibleBuilder, CollapsibleTrigger, collapsible, collapsible_section,
     };
     pub use crate::components::context_menu::{
-        context_menu, ContextMenuBuilder, ContextMenuItem, SubmenuBuilder,
+        ContextMenuBuilder, ContextMenuItem, SubmenuBuilder, context_menu,
     };
     pub use crate::components::dialog::{
-        alert_dialog, dialog, AlertDialogBuilder, DialogBuilder, DialogSize,
+        AlertDialogBuilder, DialogBuilder, DialogSize, alert_dialog, dialog,
     };
     pub use crate::components::drawer::{
-        drawer, drawer_left, drawer_right, DrawerBuilder, DrawerSide, DrawerSize,
+        DrawerBuilder, DrawerSide, DrawerSize, drawer, drawer_left, drawer_right,
     };
     pub use crate::components::dropdown_menu::{
-        dropdown_menu, dropdown_menu_custom, DropdownAlign, DropdownMenuBuilder, DropdownPosition,
+        DropdownAlign, DropdownMenuBuilder, DropdownPosition, dropdown_menu, dropdown_menu_custom,
     };
     pub use crate::components::hover_card::{
-        hover_card, HoverCard, HoverCardAlign, HoverCardBuilder, HoverCardSide,
+        HoverCard, HoverCardAlign, HoverCardBuilder, HoverCardSide, hover_card,
     };
-    pub use crate::components::icon::{icon, Icon, IconBuilder, IconSize};
-    pub use crate::components::input::{input, Input, InputBgColors, InputBorderColors, InputSize};
-    pub use crate::components::kbd::{kbd, Kbd, KbdBuilder, KbdSize};
-    pub use crate::components::label::{label, Label, LabelBuilder, LabelSize};
+    pub use crate::components::icon::{Icon, IconBuilder, IconSize, icon};
+    pub use crate::components::input::{Input, InputBgColors, InputBorderColors, InputSize, input};
+    pub use crate::components::kbd::{Kbd, KbdBuilder, KbdSize, kbd};
+    pub use crate::components::label::{Label, LabelBuilder, LabelSize, label};
     pub use crate::components::menubar::{
-        menubar, MenuTriggerMode, MenuTriggerStyle, Menubar, MenubarBuilder, MenubarMenu,
-        MenubarTrigger,
+        MenuTriggerMode, MenuTriggerStyle, Menubar, MenubarBuilder, MenubarMenu, MenubarTrigger,
+        menubar,
     };
     pub use crate::components::navigation_menu::{
-        navigation_link, navigation_menu, NavigationLink, NavigationLinkBuilder, NavigationMenu,
-        NavigationMenuBuilder,
+        NavigationLink, NavigationLinkBuilder, NavigationMenu, NavigationMenuBuilder,
+        navigation_link, navigation_menu,
     };
     pub use crate::components::pagination::{
-        pagination, Pagination, PaginationBuilder, PaginationSize,
+        Pagination, PaginationBuilder, PaginationSize, pagination,
     };
     pub use crate::components::popover::{
-        popover, Popover, PopoverAlign, PopoverBuilder, PopoverSide,
+        Popover, PopoverAlign, PopoverBuilder, PopoverSide, popover,
     };
     pub use crate::components::progress::{
-        progress, progress_animated, AnimatedProgress, Progress, ProgressSize,
+        AnimatedProgress, Progress, ProgressSize, progress, progress_animated,
     };
     pub use crate::components::radio::{
-        radio_group, RadioGroup, RadioGroupBuilder, RadioLayout, RadioSize,
+        RadioGroup, RadioGroupBuilder, RadioLayout, RadioSize, radio_group,
     };
     pub use crate::components::resizable::{
-        resizable_group, resizable_panel, ResizableGroup, ResizableGroupBuilder,
-        ResizablePanelBuilder, ResizeDirection,
+        ResizableGroup, ResizableGroupBuilder, ResizablePanelBuilder, ResizeDirection,
+        resizable_group, resizable_panel,
     };
-    pub use crate::components::select::{select, Select, SelectBuilder, SelectOption, SelectSize};
-    pub use crate::components::separator::{separator, Separator, SeparatorOrientation};
+    pub use crate::components::select::{Select, SelectBuilder, SelectOption, SelectSize, select};
+    pub use crate::components::separator::{Separator, SeparatorOrientation, separator};
     pub use crate::components::sheet::{
-        sheet, sheet_bottom, sheet_left, sheet_right, sheet_top, SheetBuilder, SheetSide, SheetSize,
+        SheetBuilder, SheetSide, SheetSize, sheet, sheet_bottom, sheet_left, sheet_right, sheet_top,
     };
     pub use crate::components::sidebar::{
-        sidebar, Sidebar, SidebarBuilder, SidebarItem, SidebarSection,
+        Sidebar, SidebarBuilder, SidebarItem, SidebarSection, sidebar,
     };
-    pub use crate::components::skeleton::{skeleton, skeleton_circle, Skeleton};
-    pub use crate::components::slider::{slider, Slider, SliderBuilder, SliderSize};
-    pub use crate::components::spinner::{spinner, Spinner, SpinnerBuilder, SpinnerSize};
-    pub use crate::components::switch::{switch, Switch, SwitchSize};
+    pub use crate::components::skeleton::{Skeleton, skeleton, skeleton_circle};
+    pub use crate::components::slider::{Slider, SliderBuilder, SliderSize, slider};
+    pub use crate::components::spinner::{Spinner, SpinnerBuilder, SpinnerSize, spinner};
+    pub use crate::components::switch::{Switch, SwitchSize, switch};
     pub use crate::components::tabs::{
-        tab_item, tabs, TabMenuItem, Tabs, TabsBuilder, TabsSize, TabsTransition,
+        TabMenuItem, Tabs, TabsBuilder, TabsSize, TabsTransition, tab_item, tabs,
     };
-    pub use crate::components::textarea::{textarea, Textarea, TextareaSize};
+    pub use crate::components::textarea::{Textarea, TextareaSize, textarea};
     pub use crate::components::toast::{
-        toast, toast_custom, toast_error, toast_success, toast_warning, ToastBuilder, ToastVariant,
+        ToastBuilder, ToastVariant, toast, toast_custom, toast_error, toast_success, toast_warning,
     };
     pub use crate::components::tooltip::{
-        tooltip, Tooltip, TooltipAlign, TooltipBuilder, TooltipSide,
+        Tooltip, TooltipAlign, TooltipBuilder, TooltipSide, tooltip,
     };
     pub use crate::components::tree::{
-        tree_view, TreeNodeConfig, TreeNodeDiff, TreeView, TreeViewBuilder,
+        TreeNodeConfig, TreeNodeDiff, TreeView, TreeViewBuilder, tree_view,
     };
     // Typography helpers (label excluded - use Label component instead)
     pub use crate::components::typography::{
@@ -217,17 +217,17 @@ pub mod prelude {
     };
     // Scroll Area
     pub use crate::components::scroll_area::{
-        scroll_area, ScrollArea, ScrollAreaBuilder, ScrollAreaSize, ScrollbarVisibility,
+        ScrollArea, ScrollAreaBuilder, ScrollAreaSize, ScrollbarVisibility, scroll_area,
     };
     // Aspect Ratio
     pub use crate::components::aspect_ratio::{
-        aspect_ratio, aspect_ratio_16_9, aspect_ratio_21_9, aspect_ratio_4_3, aspect_ratio_9_16,
-        aspect_ratio_square, AspectRatio, AspectRatioBuilder, AspectRatioPreset,
+        AspectRatio, AspectRatioBuilder, AspectRatioPreset, aspect_ratio, aspect_ratio_4_3,
+        aspect_ratio_9_16, aspect_ratio_16_9, aspect_ratio_21_9, aspect_ratio_square,
     };
     // Avatar
     pub use crate::components::avatar::{
-        avatar, avatar_group, Avatar, AvatarBuilder, AvatarGroup, AvatarGroupBuilder, AvatarShape,
-        AvatarSize, AvatarStatus,
+        Avatar, AvatarBuilder, AvatarGroup, AvatarGroupBuilder, AvatarShape, AvatarSize,
+        AvatarStatus, avatar, avatar_group,
     };
     pub use blinc_layout::stateful::ButtonState;
     // Re-export State for checkbox/switch/radio usage
@@ -235,7 +235,7 @@ pub mod prelude {
     // Re-export SchedulerHandle for slider/switch usage
     pub use blinc_animation::SchedulerHandle;
     // Re-export text_area_state for textarea usage
-    pub use blinc_layout::widgets::text_area::{text_area_state, SharedTextAreaState};
+    pub use blinc_layout::widgets::text_area::{SharedTextAreaState, text_area_state};
     // Re-export commonly needed theme types
     pub use blinc_theme::{ColorToken, RadiusToken, ShadowToken, SpacingToken, ThemeState};
     // Re-export icons module + raw SVG generators for inline use

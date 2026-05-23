@@ -28,7 +28,7 @@ The repo's example `serve.sh` scripts auto-pick the first available server (`pyt
 [package]
 name = "my_web_app"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 # `cdylib` is what wasm-pack needs to emit a `.wasm` artifact + JS shim.

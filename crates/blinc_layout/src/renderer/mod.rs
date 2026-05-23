@@ -15,15 +15,15 @@ use blinc_core::{
     BlendMode, BlurQuality, Brush, ClipShape, Color, CornerRadius, DrawContext, GlassStyle,
     LayerConfig, LayerEffect, Point, Rect, Shadow, Stroke, Transform, Vec2,
 };
-use taffy::prelude::*;
 use taffy::Overflow;
+use taffy::prelude::*;
 
 use crate::canvas::CanvasData;
 use crate::css_parser::{
     Combinator, ComplexSelector, CompoundSelector, ElementState, SelectorPart, StructuralPseudo,
     Stylesheet,
 };
-use crate::diff::{render_props_eq, ChangeCategory, DivHash};
+use crate::diff::{ChangeCategory, DivHash, render_props_eq};
 use crate::div::{ElementBuilder, ElementTypeId};
 use crate::element::{ElementBounds, GlassMaterial, Material, RenderLayer, RenderProps};
 use crate::layout_animation::{LayoutAnimationConfig, LayoutAnimationState};

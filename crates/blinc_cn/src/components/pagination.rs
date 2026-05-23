@@ -25,11 +25,11 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use blinc_core::State;
+use blinc_layout::InstanceKey;
 use blinc_layout::div::{Div, ElementBuilder, ElementTypeId};
 use blinc_layout::element::CursorStyle;
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{stateful_with_key, NoState};
-use blinc_layout::InstanceKey;
+use blinc_layout::stateful::{NoState, stateful_with_key};
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
 
 /// Chevron left SVG
@@ -378,7 +378,7 @@ fn build_nav_button<F>(
     text_secondary: blinc_core::Color,
     text_tertiary: blinc_core::Color,
     on_click: F,
-) -> impl ElementBuilder
+) -> impl ElementBuilder + use<F>
 where
     F: Fn() + Send + Sync + 'static,
 {
@@ -437,7 +437,7 @@ fn build_page_button<F>(
     text_primary: blinc_core::Color,
     text_secondary: blinc_core::Color,
     on_click: F,
-) -> impl ElementBuilder
+) -> impl ElementBuilder + use<F>
 where
     F: Fn() + Send + Sync + 'static,
 {

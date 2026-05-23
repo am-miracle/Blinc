@@ -216,7 +216,7 @@ impl Spring {
 
 #[cfg(feature = "zrtl-plugin")]
 mod ffi {
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn blinc_spring_create(
         _stiffness: f32,
         _damping: f32,
@@ -227,18 +227,18 @@ mod ffi {
         std::ptr::null_mut()
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn blinc_spring_set_target(_handle: *mut std::ffi::c_void, _target: f32) {
         // TODO: Implement
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn blinc_spring_value(_handle: *mut std::ffi::c_void) -> f32 {
         // TODO: Implement
         0.0
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "C" fn blinc_spring_velocity(_handle: *mut std::ffi::c_void) -> f32 {
         // TODO: Implement
         0.0

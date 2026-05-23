@@ -37,7 +37,7 @@
 //!     .spring(SpringConfig::wobbly())
 //! ```
 
-use blinc_animation::{get_scheduler, AnimatedValue, SchedulerHandle, SpringConfig};
+use blinc_animation::{AnimatedValue, SchedulerHandle, SpringConfig, get_scheduler};
 use blinc_core::{Color, State, Transform};
 use blinc_layout::div::ElementTypeId;
 use blinc_layout::element::RenderProps;

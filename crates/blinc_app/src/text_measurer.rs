@@ -3,8 +3,8 @@
 //! Provides accurate text measurement for layout by using the same font
 //! as the renderer.
 
-use blinc_layout::text_measure::{TextLayoutOptions, TextMeasurer, TextMetrics};
 use blinc_layout::GenericFont as LayoutGenericFont;
+use blinc_layout::text_measure::{TextLayoutOptions, TextMeasurer, TextMetrics};
 use blinc_text::{FontFace, FontRegistry, GenericFont, LayoutOptions, TextLayoutEngine};
 use std::sync::{Arc, Mutex};
 

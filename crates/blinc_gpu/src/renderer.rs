@@ -1260,8 +1260,8 @@ struct ImagePipeline {
 pub(crate) const SHADOW_MAP_SIZE: u32 = 2048;
 
 use crate::mesh_pipeline::{
-    MeshBufferCacheEntry, MeshPipeline, MAX_MORPH_TARGETS, MESH_CACHE_CAPACITY,
-    MORPH_CACHE_CAPACITY,
+    MAX_MORPH_TARGETS, MESH_CACHE_CAPACITY, MORPH_CACHE_CAPACITY, MeshBufferCacheEntry,
+    MeshPipeline,
 };
 
 struct BindGroupLayouts {

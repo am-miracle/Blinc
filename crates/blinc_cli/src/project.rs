@@ -1068,7 +1068,7 @@ pub fn create_plugin_project(path: &Path, name: &str) -> Result<()> {
             r#"[package]
 name = "{}"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 crate-type = ["cdylib", "staticlib"]
@@ -1092,19 +1092,19 @@ default = []
 //! This plugin can be loaded dynamically or compiled statically.
 
 /// Plugin initialization - called when the plugin is loaded
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn plugin_init() {{
     // Initialize your plugin here
 }}
 
 /// Plugin cleanup - called when the plugin is unloaded
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn plugin_cleanup() {{
     // Clean up resources here
 }}
 
 /// Example exported function
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn hello() -> *const std::ffi::c_char {{
     static HELLO: &[u8] = b"Hello from {}!\0";
     HELLO.as_ptr() as *const std::ffi::c_char
@@ -1322,7 +1322,7 @@ pub fn create_rust_project(path: &Path, name: &str, org: &str) -> Result<()> {
             r#"[package]
 name = "{package_name}"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 name = "{package_name}"
@@ -1488,7 +1488,7 @@ fn main() -> Result<()> {{
 use android_activity::AndroidApp;
 
 #[cfg(target_os = "android")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {{
     use android_logger::Config;
     use log::LevelFilter;

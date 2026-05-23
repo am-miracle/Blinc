@@ -85,7 +85,7 @@ fn style_block_preserves_multiline_and_flow_without_semicolons() {
 /// targets `.btn`.
 #[test]
 fn div_inline_class_attribute_applies_to_widget() {
-    use blinc_dsl_core::{materialize_widget, WidgetBox, ZyntaxValue};
+    use blinc_dsl_core::{WidgetBox, ZyntaxValue, materialize_widget};
 
     let _ = tracing_subscriber::fmt::try_init();
 

@@ -7,8 +7,8 @@
 //! resolves itself as `crate::...` and so can't host this test.
 
 use blinc_dsl_core::{
-    extern_widget, materialize_widget, BlincDsl, BlincStructValue, ExternWidget, WidgetBox,
-    ZyntaxValue,
+    BlincDsl, BlincStructValue, ExternWidget, WidgetBox, ZyntaxValue, extern_widget,
+    materialize_widget,
 };
 use blinc_layout::div::ElementBuilder;
 use std::sync::{Mutex, OnceLock};

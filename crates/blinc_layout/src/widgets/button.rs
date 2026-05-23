@@ -26,12 +26,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use blinc_core::reactive::SignalId;
 use blinc_core::Color;
+use blinc_core::reactive::SignalId;
 use blinc_theme::{ColorToken, ThemeState};
 
-use crate::css_parser::{active_stylesheet, ElementState};
-use crate::div::{div, Div, ElementBuilder};
+use crate::css_parser::{ElementState, active_stylesheet};
+use crate::div::{Div, ElementBuilder, div};
 use crate::element::RenderProps;
 use crate::stateful::{ButtonState, SharedState, Stateful};
 use crate::text::text;

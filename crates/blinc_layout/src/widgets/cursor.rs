@@ -9,7 +9,7 @@ use web_time::Instant;
 
 use blinc_core::{Brush, Color, CornerRadius, DrawContext, Rect};
 
-use crate::canvas::{canvas, Canvas, CanvasBounds};
+use crate::canvas::{Canvas, CanvasBounds, canvas};
 
 /// Cursor animation style
 #[derive(Clone, Copy, Debug, Default)]
@@ -122,18 +122,14 @@ impl CursorState {
             CursorAnimation::Blink => {
                 // Classic on/off blink
                 let phase = (elapsed / period) as u64 % 2;
-                if phase == 0 {
-                    1.0
-                } else {
-                    0.0
-                }
+                if phase == 0 { 1.0 } else { 0.0 }
             }
             CursorAnimation::SmoothFade => {
                 // Smooth sine wave between 0.3 and 1.0
                 // This creates a gentle pulsing effect instead of harsh on/off
                 let t = (elapsed / period) * std::f64::consts::PI;
                 let sine = (t.sin() + 1.0) / 2.0; // 0.0 to 1.0
-                                                  // Map to 0.3-1.0 range for subtle effect (never fully invisible)
+                // Map to 0.3-1.0 range for subtle effect (never fully invisible)
                 0.3 + (sine as f32 * 0.7)
             }
         }

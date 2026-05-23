@@ -33,10 +33,10 @@
 //!     .disabled(true)
 //! ```
 
-use super::label::{label, LabelSize};
+use super::label::{LabelSize, label};
 use blinc_layout::prelude::*;
 use blinc_layout::widgets::text_area::{
-    text_area, SharedTextAreaState, TextArea as LayoutTextArea,
+    SharedTextAreaState, TextArea as LayoutTextArea, text_area,
 };
 use blinc_theme::{ColorToken, RadiusToken, SpacingToken, ThemeState, TypographyTokens};
 

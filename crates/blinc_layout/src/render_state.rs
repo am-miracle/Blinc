@@ -2134,8 +2134,10 @@ mod tests {
         state.tick(100);
 
         assert!(!state.is_stable_motion_active("motion:navmenu_test"));
-        assert!(state
-            .get_stable_motion_values("motion:navmenu_test")
-            .is_some());
+        assert!(
+            state
+                .get_stable_motion_values("motion:navmenu_test")
+                .is_some()
+        );
     }
 }

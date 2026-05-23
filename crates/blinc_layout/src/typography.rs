@@ -52,7 +52,7 @@
 
 use blinc_theme::{ColorToken, ThemeState};
 
-use crate::text::{text, Text};
+use crate::text::{Text, text};
 
 // ============================================================================
 // Heading Sizes Configuration
@@ -325,7 +325,7 @@ pub fn inline_code(content: impl Into<String>) -> Text {
 // Chained Text Helper
 // ============================================================================
 
-use crate::div::{div, Div};
+use crate::div::{Div, div};
 
 /// Create a container for chained inline text elements
 ///

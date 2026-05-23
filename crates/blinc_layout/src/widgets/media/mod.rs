@@ -21,10 +21,10 @@ use blinc_core::Color;
 use blinc_media::{Frame, Player, VideoState};
 use blinc_theme::{ColorToken, ThemeState};
 
-use crate::div::{div, Div, ElementBuilder, ElementTypeId};
+use crate::div::{Div, ElementBuilder, ElementTypeId, div};
 use crate::element::RenderProps;
 use crate::key::InstanceKey;
-use crate::stateful::{stateful_with_key, NoState, Stateful};
+use crate::stateful::{NoState, Stateful, stateful_with_key};
 use crate::text::text;
 use crate::tree::{LayoutNodeId, LayoutTree};
 
@@ -188,11 +188,11 @@ impl VideoPlayerWidget {
         let surface = crate::canvas::canvas(
             move |ctx: &mut dyn blinc_core::DrawContext, bounds: crate::canvas::CanvasBounds| {
                 // Only fetch a new frame from the mutex when generation advances
-                let gen = player_for_canvas.frame_generation();
+                let frame_gen = player_for_canvas.frame_generation();
                 let mut cache = cached.borrow_mut();
-                if gen != cache.0 {
+                if frame_gen != cache.0 {
                     cache.1 = player_for_canvas.current_frame();
-                    cache.0 = gen;
+                    cache.0 = frame_gen;
                 }
 
                 ctx.fill_rect(

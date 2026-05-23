@@ -99,10 +99,10 @@ exclude = [
 
 [workspace.package]
 version = "0.5.1"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/project-blinc/Blinc"
-rust-version = "1.75"
+rust-version = "1.85"
 
 [workspace.dependencies]
 # Krio (async runtime) — Zyntax's `krio_adapter` pins to rev `fe0177c`

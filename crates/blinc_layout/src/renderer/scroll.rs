@@ -544,8 +544,15 @@ impl RenderTree {
 
         tracing::debug!(
             "Scroll bounds: viewport=({:.0}, {:.0}) content=({:.0}, {:.0}) limits_y=({:.0}, {:.0}) delta_y={:.1} current={:.1} new={:.1}",
-            viewport_width, viewport_height, content_width, content_height,
-            max_offset_y, min_offset_y, delta_y, current_y, new_y
+            viewport_width,
+            viewport_height,
+            content_width,
+            content_height,
+            max_offset_y,
+            min_offset_y,
+            delta_y,
+            current_y,
+            new_y
         );
 
         self.scroll_offsets.insert(node_id, (new_x, new_y));

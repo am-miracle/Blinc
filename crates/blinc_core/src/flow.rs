@@ -3272,7 +3272,7 @@ impl FlowGraph {
         let mut queue: VecDeque<usize> = in_degree
             .iter()
             .enumerate()
-            .filter(|(_, &deg)| deg == 0)
+            .filter(|&(_, &deg)| deg == 0)
             .map(|(i, _)| i)
             .collect();
 
@@ -3662,9 +3662,11 @@ mod tests {
         let result = graph.validate(None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, FlowError::CycleDetected { .. })));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, FlowError::CycleDetected { .. }))
+        );
     }
 
     #[test]
@@ -3756,9 +3758,11 @@ mod tests {
         let result = graph.validate(None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, FlowError::UndefinedReference { .. })));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, FlowError::UndefinedReference { .. }))
+        );
     }
 
     #[test]
@@ -3786,9 +3790,11 @@ mod tests {
         let result = graph.validate(None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, FlowError::DuplicateName { .. })));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, FlowError::DuplicateName { .. }))
+        );
     }
 
     #[test]
@@ -3858,9 +3864,11 @@ mod tests {
         let result = graph.validate(None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, FlowError::TypeMismatch { .. })));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, FlowError::TypeMismatch { .. }))
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4304,9 +4312,10 @@ mod tests {
         let result = graph.validate(None);
         assert!(result.is_err());
         let errs = result.unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, FlowError::MissingStepParam { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, FlowError::MissingStepParam { .. }))
+        );
     }
 
     #[test]
@@ -4330,9 +4339,10 @@ mod tests {
         let result = graph.validate(None);
         assert!(result.is_err());
         let errs = result.unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, FlowError::FlowNotFound { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, FlowError::FlowNotFound { .. }))
+        );
     }
 
     #[test]

@@ -2,9 +2,9 @@
 
 use std::cell::OnceCell;
 
-use blinc_cn::components::input::{input, InputSize};
+use blinc_cn::components::input::{InputSize, input};
 use blinc_cn::components::separator::separator;
-use blinc_cn::components::tree::{tree_view, TreeNodeDiff};
+use blinc_cn::components::tree::{TreeNodeDiff, tree_view};
 use blinc_layout::div::{Div, ElementBuilder};
 use blinc_layout::element::RenderProps;
 use blinc_layout::event_handler::EventHandlers;

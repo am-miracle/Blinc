@@ -206,8 +206,8 @@ pub mod __extern_widget_internals {
         ExternWidget, ExternWidgetSpec, RenderPropsOverlay, Styled, WidgetBox,
     };
     pub use blinc_runtime::component::PropDef;
-    pub use zyntax_typed_ast::type_registry::{PrimitiveType, Type};
     pub use zyntax_typed_ast::InternedString;
+    pub use zyntax_typed_ast::type_registry::{PrimitiveType, Type};
 
     /// Reclaim a `RenderPropsOverlay` from `__new_style_overlay__` for macro thunks.
     ///

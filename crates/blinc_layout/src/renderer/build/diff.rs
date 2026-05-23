@@ -20,7 +20,7 @@
 //!   they fall back to `rebuild_children_in_place` (also here)
 //!   which does a clean wipe + recollect under the same parent.
 
-use crate::diff::{render_props_eq, ChangeCategory, DivHash};
+use crate::diff::{ChangeCategory, DivHash, render_props_eq};
 use crate::div::ElementBuilder;
 use crate::element::RenderProps;
 use crate::tree::LayoutNodeId;

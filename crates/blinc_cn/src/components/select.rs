@@ -35,19 +35,19 @@
 use std::cell::OnceCell;
 use std::sync::Arc;
 
-use blinc_core::context_state::BlincContextState;
 use blinc_core::State;
+use blinc_core::context_state::BlincContextState;
 use blinc_layout::click_outside;
 use blinc_layout::div::ElementTypeId;
 use blinc_layout::element::{CursorStyle, RenderProps};
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{stateful_with_key, ButtonState};
+use blinc_layout::stateful::{ButtonState, stateful_with_key};
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_theme::{ColorToken, RadiusToken, SpacingToken, ThemeState};
 
 use crate::ButtonVariant;
 
-use super::label::{label, LabelSize};
+use super::label::{LabelSize, label};
 use blinc_layout::InstanceKey;
 
 /// Select size variants

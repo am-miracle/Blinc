@@ -33,8 +33,8 @@ impl GlobalHotkey {
     pub fn new(accelerator: &str, callback: impl Fn() + Send + Sync + 'static) -> Option<Self> {
         #[cfg(feature = "global-hotkey")]
         {
-            use global_hotkey::hotkey::HotKey;
             use global_hotkey::GlobalHotKeyManager;
+            use global_hotkey::hotkey::HotKey;
 
             let hotkey: HotKey = match accelerator.parse() {
                 Ok(hk) => hk,

@@ -28,7 +28,11 @@ WindowedApp::run_with_theme(
     BlincTheme::bundle(),       // any ThemeBundle — `cn_bundle()`, `BlincTheme::bundle()`,
                                 // or your own
     ColorScheme::Dark,
-    build_ui,
+    // Closure wrapper rather than bare `build_ui`: on edition 2024 a
+    // free fn `-> impl Element` captures its input lifetime in the
+    // return type, which breaks the higher-ranked `FnMut` bound. See
+    // `WindowedApp::run` docs for the alternative (`+ use<>` on the fn).
+    |ctx| build_ui(ctx),
 )
 ```
 
@@ -57,7 +61,7 @@ let bundle = BlincTheme::bundle()
     "#)
     .with_css_file("./styles/overrides.css");
 
-WindowedApp::run_with_theme(config, bundle, ColorScheme::Light, build_ui)
+WindowedApp::run_with_theme(config, bundle, ColorScheme::Light, |ctx| build_ui(ctx))
 ```
 
 Two builder methods on [`ThemeBundle`]:
@@ -81,7 +85,7 @@ WindowedApp::run_with_theme(
     config,
     blinc_cn::cn_bundle(),       // platform theme + CN_STYLES
     ColorScheme::Dark,
-    build_ui,
+    |ctx| build_ui(ctx),
 )
 ```
 
@@ -546,7 +550,7 @@ WindowedApp::run_with_theme(
     config,
     MyTheme::bundle().with_css(MY_STYLES),
     ColorScheme::Dark,
-    build_ui,
+    |ctx| build_ui(ctx),
 )
 ```
 

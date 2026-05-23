@@ -181,7 +181,7 @@ impl ElementBuilder for AnimatedSkeleton {
         let radius = theme.radius(RadiusToken::Default);
 
         use blinc_core::{Brush, CornerRadius, DrawContext, Rect};
-        use blinc_layout::canvas::{canvas, CanvasBounds};
+        use blinc_layout::canvas::{CanvasBounds, canvas};
 
         // Get dimensions from skeleton style
         let skeleton_style = self

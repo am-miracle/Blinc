@@ -1,6 +1,6 @@
 //! Image loading and data management
 
-use crate::decoder::{decode_with_global_registry, DecodedImage};
+use crate::decoder::{DecodedImage, decode_with_global_registry};
 use crate::error::{ImageError, Result};
 use crate::source::ImageSource;
 use base64::Engine;

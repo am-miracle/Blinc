@@ -24,6 +24,15 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
 }
 ```
 
+> **Edition 2024 note**: when calling `WindowedApp::run(config, build_ui)`
+> directly, edition 2024 RPIT capture rules cause `build_ui` to only
+> implement `FnMut` for one specific lifetime — the higher-ranked
+> bound on `run` fails. The fix is to pass the builder via a closure
+> wrapper: `WindowedApp::run(config, |ctx| build_ui(ctx))`. The
+> alternative is to annotate the named fn with `+ use<>` to opt the
+> return type out of lifetime capture, but the closure form is more
+> portable across editions and is what every example uses.
+
 And its `fn main` must be cfg-gated to non-wasm targets:
 
 ```rust
@@ -40,7 +49,11 @@ fn main() -> blinc_app::Result<()> {
         ..Default::default()
     };
 
-    blinc_app::windowed::WindowedApp::run(config, build_ui)
+    // Closure wrapper: on edition 2024 a free fn `-> impl Element`
+    // captures its input lifetime in the return type, which breaks the
+    // higher-ranked `FnMut` bound. The closure form is portable across
+    // editions. See `WindowedApp::run` docs for the `+ use<>` alternative.
+    blinc_app::windowed::WindowedApp::run(config, |ctx| build_ui(ctx))
 }
 ```
 
@@ -86,7 +99,11 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    blinc_app::windowed::WindowedApp::run(config, build_ui)
+    // Closure wrapper: on edition 2024 a free fn `-> impl Element`
+    // captures its input lifetime in the return type, which breaks the
+    // higher-ranked `FnMut` bound. The closure form is portable across
+    // editions. See `WindowedApp::run` docs for the `+ use<>` alternative.
+    blinc_app::windowed::WindowedApp::run(config, |ctx| build_ui(ctx))
 }
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {

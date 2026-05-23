@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use blinc_layout::stateful::{request_redraw, use_fsm_keyed, SharedState};
+use blinc_layout::stateful::{SharedState, request_redraw, use_fsm_keyed};
 
 use super::instance::FsmStateId;
 use super::registry::with_fsm_registry;

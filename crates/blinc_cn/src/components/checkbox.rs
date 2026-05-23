@@ -39,8 +39,8 @@ use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_theme::{ColorToken, ThemeState};
 use std::sync::Arc;
 
-use blinc_layout::stateful::{stateful, ButtonState};
 use blinc_layout::InstanceKey;
+use blinc_layout::stateful::{ButtonState, stateful};
 
 /// SVG checkmark path - simple checkmark that fits in a 16x16 viewBox
 const CHECKMARK_SVG: &str = r#"<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">

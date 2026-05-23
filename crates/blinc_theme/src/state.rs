@@ -10,7 +10,7 @@ use blinc_animation::{AnimatedValue, AnimationScheduler, SchedulerHandle, Spring
 use blinc_core::Color;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
-use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, atomic::AtomicBool, atomic::Ordering};
 
 /// Global theme state instance
 static THEME_STATE: OnceLock<ThemeState> = OnceLock::new();
@@ -324,7 +324,7 @@ impl ThemeState {
         );
 
         // Interpolate colors based on progress
-        if let (Some(ref from), Some(ref to)) = (&transition.from_colors, &transition.to_colors) {
+        if let (Some(from), Some(to)) = (&transition.from_colors, &transition.to_colors) {
             let interpolated = interpolate_color_tokens(from, to, progress);
             drop(transition);
             *self.colors.write().unwrap() = interpolated;

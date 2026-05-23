@@ -46,10 +46,10 @@ pub use edit::{
     split_block,
 };
 pub use editor::rich_text_editor;
-pub use format::{apply_mark_to_selection, Mark};
-pub use render::{compute_line_geometry, render_document, RichTextTheme};
+pub use format::{Mark, apply_mark_to_selection};
+pub use render::{RichTextTheme, compute_line_geometry, render_document};
 pub use state::{
-    rich_text_state, LineGeometry, PickerState, RichTextData, RichTextState, RunGeometry, UndoEntry,
+    LineGeometry, PickerState, RichTextData, RichTextState, RunGeometry, UndoEntry, rich_text_state,
 };
 pub use toolbar::selection_toolbar;
-pub use wrap::{wrap_styled_line, WrappedLine};
+pub use wrap::{WrappedLine, wrap_styled_line};

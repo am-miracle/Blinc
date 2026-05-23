@@ -16,7 +16,7 @@
 use blinc_core::Color;
 use blinc_theme::{ColorToken, ThemeState};
 
-use crate::div::{div, Div};
+use crate::div::{Div, div};
 
 /// Configuration for horizontal rule styling
 #[derive(Clone, Debug)]

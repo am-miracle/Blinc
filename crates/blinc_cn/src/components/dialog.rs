@@ -33,13 +33,13 @@ use std::sync::Arc;
 
 use blinc_animation::{AnimationPreset, MultiKeyframeAnimation};
 use blinc_core::Color;
+use blinc_layout::InstanceKey;
 use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
 use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
-use blinc_layout::InstanceKey;
 use blinc_theme::{ColorToken, RadiusToken, SpacingToken, ThemeState};
 
-use super::button::{button, ButtonVariant};
+use super::button::{ButtonVariant, button};
 
 /// Dialog size variants
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -468,11 +468,11 @@ fn build_dialog_content(
     if title.is_some() || description.is_some() {
         let mut header = div().w_full().flex_col().gap_2(); // 8px gap from theme
 
-        if let Some(ref title_text) = title {
+        if let Some(title_text) = title {
             header = header.child(h3(title_text).color(text_primary));
         }
 
-        if let Some(ref desc_text) = description {
+        if let Some(desc_text) = description {
             header = header.child(
                 text(desc_text)
                     .size(theme.typography().text_sm)
@@ -484,7 +484,7 @@ fn build_dialog_content(
     }
 
     // Custom content
-    if let Some(ref content_fn) = content {
+    if let Some(content_fn) = content {
         inner_content = inner_content.child(
             div()
                 .w_full()
@@ -494,7 +494,7 @@ fn build_dialog_content(
     }
 
     // Footer - either custom or default buttons
-    let footer_content = if let Some(ref footer_fn) = footer {
+    let footer_content = if let Some(footer_fn) = footer {
         footer_fn()
     } else {
         // Default footer with buttons

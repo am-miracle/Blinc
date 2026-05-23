@@ -439,9 +439,9 @@ pub fn use_scroll_ref() -> ScrollRef {
 ///
 /// Panics if [`blinc_core::context_state::BlincContextState`] has not been initialized.
 pub fn use_scroll_ref_keyed<K: std::hash::Hash>(key: K) -> ScrollRef {
+    use blinc_core::BlincContextState;
     use blinc_core::context_state::StateKey;
     use blinc_core::reactive::{Signal, SignalId};
-    use blinc_core::BlincContextState;
 
     let ctx = BlincContextState::get();
     // Type-discriminated like the other hash-keyed constructors —

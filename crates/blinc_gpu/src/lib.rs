@@ -35,24 +35,24 @@ pub mod text;
 
 pub use backbuffer::{Backbuffer, BackbufferConfig, FrameContext};
 pub use custom_pass::{
-    create_buffer, create_compute_pipeline, create_fullscreen_pipeline, BindGroupBuilder,
-    ComputeDispatch, CustomRenderPass, PostProcessChain, PostProcessEffect, RenderPassContext,
-    RenderStage,
+    BindGroupBuilder, ComputeDispatch, CustomRenderPass, PostProcessChain, PostProcessEffect,
+    RenderPassContext, RenderStage, create_buffer, create_compute_pipeline,
+    create_fullscreen_pipeline,
 };
-pub use gradient_texture::{GradientTextureCache, RasterizedGradient, GRADIENT_TEXTURE_WIDTH};
+pub use gradient_texture::{GRADIENT_TEXTURE_WIDTH, GradientTextureCache, RasterizedGradient};
 pub use image::{GpuImage, GpuImageInstance, ImageRenderingContext};
 pub use paint::{GpuPaintContext, PendingMesh};
 pub use path::{
-    extract_brush_info, tessellate_fill, tessellate_stroke, PathBrushInfo, PathBrushType,
-    PathVertex, TessellatedPath,
+    PathBrushInfo, PathBrushType, PathVertex, TessellatedPath, extract_brush_info, tessellate_fill,
+    tessellate_stroke,
 };
 pub use primitives::{
     BlurUniforms, ClipType, ColorMatrixUniforms, CompositeUniforms, DropShadowUniforms, FillType,
     GlassType, GlassUniforms, GlowUniforms, GpuGlassPrimitive, GpuGlyph, GpuPrimitive,
-    LayerCommand, LayerCommandEntry, LayerCompositeUniforms, ParticleViewport3D, PathBatch,
-    PathUniforms, PrimitiveBatch, PrimitiveType, Uniforms, NOTCH_CORNER_CONCAVE,
+    LayerCommand, LayerCommandEntry, LayerCompositeUniforms, NOTCH_CORNER_CONCAVE,
     NOTCH_CORNER_SHARP_OR_CONVEX, NOTCH_MOD_BULGE, NOTCH_MOD_CUT, NOTCH_MOD_NONE, NOTCH_MOD_PEAK,
-    NOTCH_MOD_SCOOP,
+    NOTCH_MOD_SCOOP, ParticleViewport3D, PathBatch, PathUniforms, PrimitiveBatch, PrimitiveType,
+    Uniforms,
 };
 pub use renderer::{
     GpuMemoryBudget, GpuRenderer, LayerTexture, LayerTextureCache, RendererConfig, RendererError,
@@ -67,8 +67,9 @@ pub use text::TextRenderingContext;
 
 // Particle system exports
 pub use particles::{
-    GpuEmitter, GpuForce, GpuParticle, GpuRenderUniforms, GpuSimulationUniforms, ParticleManager,
-    ParticleSystemGpu, ParticleViewport, PARTICLE_COMPUTE_SHADER, PARTICLE_RENDER_SHADER,
+    GpuEmitter, GpuForce, GpuParticle, GpuRenderUniforms, GpuSimulationUniforms,
+    PARTICLE_COMPUTE_SHADER, PARTICLE_RENDER_SHADER, ParticleManager, ParticleSystemGpu,
+    ParticleViewport,
 };
 
 // Flow DAG → WGSL codegen + GPU pipeline cache

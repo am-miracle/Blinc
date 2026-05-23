@@ -43,16 +43,16 @@ pub use replay::{
     VirtualClock,
 };
 pub use server::{
-    start_local_server, start_local_server_named, ClientCommand, DebugServer, DebugServerConfig,
-    ServerHandle, ServerMessage,
+    ClientCommand, DebugServer, DebugServerConfig, ServerHandle, ServerMessage, start_local_server,
+    start_local_server_named,
 };
 pub use session::{
     RecordingConfig, RecordingExport, RecordingSession, SessionState, SessionStats,
     SharedRecordingSession,
 };
 pub use testing::{
-    compare_frames, CapturedFrame, FrameSequence, HeadlessConfig, HeadlessContext,
-    RegressionResult, ScreenshotExporter, TestConfig, TestRunner,
+    CapturedFrame, FrameSequence, HeadlessConfig, HeadlessContext, RegressionResult,
+    ScreenshotExporter, TestConfig, TestRunner, compare_frames,
 };
 
 use parking_lot::RwLock;

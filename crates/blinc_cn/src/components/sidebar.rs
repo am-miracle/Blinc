@@ -38,13 +38,13 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use blinc_core::State;
+use blinc_layout::InstanceKey;
 use blinc_layout::div::{Div, ElementBuilder, ElementTypeId};
 use blinc_layout::element::CursorStyle;
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{stateful_with_key, ButtonState, NoState};
+use blinc_layout::stateful::{ButtonState, NoState, stateful_with_key};
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_layout::visual_animation::VisualAnimationConfig;
-use blinc_layout::InstanceKey;
 use blinc_theme::{ColorToken, ThemeState};
 
 /// Chevron left icon (collapse)

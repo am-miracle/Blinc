@@ -27,4 +27,4 @@ mod config;
 mod renderer;
 
 pub use config::MarkdownConfig;
-pub use renderer::{markdown, markdown_light, markdown_with_config, MarkdownRenderer};
+pub use renderer::{MarkdownRenderer, markdown, markdown_light, markdown_with_config};

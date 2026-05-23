@@ -34,7 +34,7 @@ mod headless;
 mod runner;
 
 pub use framebuffer::{
-    compare_frames, CapturedFrame, FrameSequence, RegressionResult, ScreenshotExporter,
+    CapturedFrame, FrameSequence, RegressionResult, ScreenshotExporter, compare_frames,
 };
 pub use headless::{HeadlessConfig, HeadlessContext};
 pub use runner::{TestConfig, TestRunner};

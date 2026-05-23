@@ -52,7 +52,7 @@ use blinc_layout::widgets::text_input::{
 use blinc_theme::{ColorToken, RadiusToken, SpacingToken, ThemeState, TypographyTokens};
 use std::ops::{Deref, DerefMut};
 
-use super::label::{label, LabelSize};
+use super::label::{LabelSize, label};
 
 /// Border color configuration for different input states
 #[derive(Clone, Debug, Default)]

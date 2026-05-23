@@ -16,7 +16,7 @@
 use blinc_core::Color;
 use blinc_theme::{ColorToken, ThemeState};
 
-use crate::div::{div, Div, ElementBuilder};
+use crate::div::{Div, ElementBuilder, div};
 use crate::element::RenderProps;
 use crate::tree::{LayoutNodeId, LayoutTree};
 

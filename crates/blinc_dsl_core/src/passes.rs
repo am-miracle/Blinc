@@ -219,8 +219,8 @@ pub(crate) fn auto_inject_semicolons(raw: &str) -> String {
 /// Rewrite `<sig>.get()` / `<sig>.set(v)` / `<sig> = v` into `__signal_<get|set>_<T>` calls.
 pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
     use std::collections::HashMap;
-    use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
     use zyntax_typed_ast::InternedString;
+    use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
 
     // Phase 1: collect signal name → return type.
     let mut signals: HashMap<InternedString, Type> = HashMap::new();
@@ -511,8 +511,8 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
 /// Rewrite `<FsmName>.trigger(<path>)` → `__fsm_runtime_trigger__("<FsmName>", <path>)`.
 pub(crate) fn resolve_fsm_trigger_calls(program: &mut TypedProgram) {
     use std::collections::HashSet;
-    use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
     use zyntax_typed_ast::InternedString;
+    use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
 
     // Phase 1: collect declared FSM names from `__fsm_meta__`-bearing impls.
     let mut fsm_names: HashSet<InternedString> = HashSet::new();
@@ -705,8 +705,8 @@ pub(crate) fn resolve_fsm_trigger_calls(program: &mut TypedProgram) {
 /// host-side in `blinc_runtime::fsm::register_subscriber`.
 pub(crate) fn resolve_fsm_subscribe_calls(program: &mut TypedProgram) {
     use std::collections::HashSet;
-    use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
     use zyntax_typed_ast::InternedString;
+    use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
 
     let mut fsm_names: HashSet<InternedString> = HashSet::new();
     for decl in &program.declarations {
@@ -1859,13 +1859,13 @@ pub(crate) fn populate_fsm_registry_pass(
     program: &mut TypedProgram,
     module: zyntax_typed_ast::InternedString,
 ) {
+    use zyntax_typed_ast::InternedString;
     use zyntax_typed_ast::type_registry::{
         TypeDefinition, TypeId, TypeKind, VariantDef, VariantFields, Visibility,
     };
     use zyntax_typed_ast::typed_ast::{
         TypedDeclaration, TypedExpression, TypedLiteral, TypedVariantFields,
     };
-    use zyntax_typed_ast::InternedString;
 
     // Phase 1: scan. Collect (fsm_name, FsmDefinition) tuples.
     let mut found: Vec<(InternedString, FsmDefinition)> = Vec::new();
@@ -2196,10 +2196,10 @@ pub(crate) fn synthesize_fsm_event_enums(program: &mut TypedProgram) {
 /// Desugar `match` marker-statement quads into `if/else if/.../else` chains
 /// over string equality. Wildcard arm becomes the trailing `else`.
 pub(crate) fn lower_match_blocks(program: &mut TypedProgram) {
+    use zyntax_typed_ast::TypedNode;
     use zyntax_typed_ast::typed_ast::{
         BinaryOp, TypedBinary, TypedBlock, TypedDeclaration, TypedExpression, TypedIf, TypedLiteral,
     };
-    use zyntax_typed_ast::TypedNode;
 
     fn is_call_to(stmt: &TypedNode<TypedStatement>, name: &str) -> bool {
         let TypedStatement::Expression(expr) = &stmt.node else {
@@ -2823,11 +2823,7 @@ pub(crate) fn lower_children_arrays_to_blocks(program: &mut TypedProgram) {
                 })
                 .unwrap_or_default()
         });
-        if slots.is_empty() {
-            None
-        } else {
-            Some(slots)
-        }
+        if slots.is_empty() { None } else { Some(slots) }
     }
 
     /// Legacy — unused after refactor.

@@ -5,7 +5,7 @@
 //! This module provides a shared helper for that resolution.
 
 use blinc_core::{Brush, Color};
-use blinc_layout::css_parser::{active_stylesheet, ElementState, Stylesheet};
+use blinc_layout::css_parser::{ElementState, Stylesheet, active_stylesheet};
 use blinc_layout::element_style::ElementStyle;
 
 /// Resolved CSS overrides for a component.

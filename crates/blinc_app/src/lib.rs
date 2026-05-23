@@ -194,7 +194,7 @@ mod tests;
 pub use app::{BlincApp, BlincConfig};
 pub use context::{DebugMode, RenderContext};
 pub use error::{BlincError, Result};
-pub use text_measurer::{init_text_measurer, init_text_measurer_with_registry, FontTextMeasurer};
+pub use text_measurer::{FontTextMeasurer, init_text_measurer, init_text_measurer_with_registry};
 
 /// Register a font face into the process-wide `blinc_text` font
 /// registry. The returned count is the number of faces fontdb
@@ -225,8 +225,8 @@ pub fn register_font(data: Vec<u8>) -> usize {
 }
 
 // Re-export layout API for convenience
-pub use blinc_layout::prelude::*;
 pub use blinc_layout::RenderTree;
+pub use blinc_layout::prelude::*;
 
 // Re-export platform types for windowed applications
 pub use blinc_platform::{AnimationThreadMode, WindowConfig, WindowLevel};
@@ -248,8 +248,8 @@ pub mod prelude {
     pub use crate::text_measurer::{init_text_measurer, init_text_measurer_with_registry};
 
     // Layout builders
-    pub use blinc_layout::prelude::*;
     pub use blinc_layout::RenderTree;
+    pub use blinc_layout::prelude::*;
 
     // Core types
     pub use blinc_core::{Color, Point, Rect, Size};

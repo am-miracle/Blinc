@@ -6,10 +6,10 @@
 use blinc_core::{Brush, Color, Shadow, Transform};
 use taffy::{LengthPercentageAuto, Overflow, Position, Rect, Style};
 
+use crate::ElementBuilder;
 use crate::div::Div;
 use crate::element::{Material, RenderLayer, RenderProps};
 use crate::tree::{LayoutNodeId, LayoutTree};
-use crate::ElementBuilder;
 
 /// A stack container where all children are positioned absolutely and stack over each other.
 ///
@@ -967,11 +967,7 @@ impl Stack {
     where
         F: FnOnce(Self) -> Self,
     {
-        if condition {
-            f(self)
-        } else {
-            self
-        }
+        if condition { f(self) } else { self }
     }
 }
 

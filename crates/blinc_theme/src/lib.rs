@@ -77,12 +77,12 @@ pub mod tokens;
 pub mod watcher;
 
 // Re-export commonly used types
-pub use platform::{detect_system_color_scheme, Platform};
-pub use state::{set_redraw_callback, ThemeState};
+pub use platform::{Platform, detect_system_color_scheme};
+pub use state::{ThemeState, set_redraw_callback};
 pub use theme::{ColorScheme, Theme, ThemeBundle};
 pub use themes::{
-    platform::platform_theme_bundle, BlincTheme, DefaultTheme, ExpressiveTheme, HybridTheme,
-    RestrainedTheme,
+    BlincTheme, DefaultTheme, ExpressiveTheme, HybridTheme, RestrainedTheme,
+    platform::platform_theme_bundle,
 };
 pub use tokens::*;
 

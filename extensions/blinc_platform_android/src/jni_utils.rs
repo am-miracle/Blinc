@@ -6,7 +6,7 @@
 use android_activity::AndroidApp;
 
 #[cfg(target_os = "android")]
-use jni::{objects::JValue, JNIEnv, JavaVM};
+use jni::{JNIEnv, JavaVM, objects::JValue};
 
 #[cfg(target_os = "android")]
 use tracing::{debug, warn};

@@ -40,7 +40,7 @@ use crate::div::{Div, ElementBuilder, ElementTypeId};
 use crate::element::RenderProps;
 use crate::event_handler::{EventContext, EventHandlers};
 use crate::selector::ScrollRef;
-use crate::stateful::{scroll_events, ScrollState, StateTransitions};
+use crate::stateful::{ScrollState, StateTransitions, scroll_events};
 use crate::tree::{LayoutNodeId, LayoutTree};
 
 // ============================================================================
@@ -454,11 +454,7 @@ impl ScrollPhysics {
     /// Minimum vertical scroll offset (negative, at bottom edge)
     pub fn max_offset_y(&self) -> f32 {
         let scrollable = self.content_height - self.viewport_height;
-        if scrollable > 0.0 {
-            -scrollable
-        } else {
-            0.0
-        }
+        if scrollable > 0.0 { -scrollable } else { 0.0 }
     }
 
     /// Maximum horizontal scroll offset (0 = left edge)
@@ -469,11 +465,7 @@ impl ScrollPhysics {
     /// Minimum horizontal scroll offset (negative, at right edge)
     pub fn max_offset_x(&self) -> f32 {
         let scrollable = self.content_width - self.viewport_width;
-        if scrollable > 0.0 {
-            -scrollable
-        } else {
-            0.0
-        }
+        if scrollable > 0.0 { -scrollable } else { 0.0 }
     }
 
     /// Check if currently overscrolling vertically (past bounds)
@@ -611,8 +603,13 @@ impl ScrollPhysics {
 
             tracing::trace!(
                 "scroll_phys delta_y={:.1} offset: {:.1} -> {:.1}, bounds=({:.0}, {:.0}), content={:.0}, viewport={:.0}",
-                delta_y, old_offset_y, self.offset_y, self.max_offset_y(), self.min_offset_y(),
-                self.content_height, self.viewport_height
+                delta_y,
+                old_offset_y,
+                self.offset_y,
+                self.max_offset_y(),
+                self.min_offset_y(),
+                self.content_height,
+                self.viewport_height
             );
         }
 
@@ -2802,7 +2799,7 @@ mod tests {
         // - SETTLED event transitions to Idle
 
         // Simulate spring settling by manually triggering SETTLED event
-        use crate::stateful::{scroll_events, StateTransitions};
+        use crate::stateful::{StateTransitions, scroll_events};
         physics.offset_y = 0.0; // Spring would animate to target (0.0)
         if let Some(new_state) = physics.state.on_event(scroll_events::SETTLED) {
             physics.state = new_state;
@@ -2879,7 +2876,7 @@ mod tests {
         // assert_eq!(physics.state, ScrollState::Decelerating);
 
         // Manually trigger SETTLED to transition to Idle
-        use crate::stateful::{scroll_events, StateTransitions};
+        use crate::stateful::{StateTransitions, scroll_events};
         if let Some(new_state) = physics.state.on_event(scroll_events::SETTLED) {
             physics.state = new_state;
         }

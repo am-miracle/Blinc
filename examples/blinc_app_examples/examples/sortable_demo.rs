@@ -10,10 +10,10 @@
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;
 use blinc_app::windowed::WindowedContext;
+use blinc_core::Color;
 use blinc_core::context_state::BlincContextState;
 use blinc_core::events::event_types;
 use blinc_core::reactive::State;
-use blinc_core::Color;
 
 // ============================================================================
 // FSM State Types

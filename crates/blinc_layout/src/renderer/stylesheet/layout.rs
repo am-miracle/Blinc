@@ -22,8 +22,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use taffy::prelude::*;
 use taffy::Overflow;
+use taffy::prelude::*;
 
 use crate::tree::LayoutNodeId;
 

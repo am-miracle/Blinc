@@ -31,7 +31,7 @@
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;
 use blinc_cn::cn;
-use blinc_router::{use_router, PageTransition, Route, RouteContext, RouterBuilder};
+use blinc_router::{PageTransition, Route, RouteContext, RouterBuilder, use_router};
 
 fn home_page(_ctx: RouteContext) -> Div {
     let router = use_router();

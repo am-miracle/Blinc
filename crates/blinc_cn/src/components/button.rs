@@ -26,12 +26,12 @@
 //! ```
 
 use blinc_core::Color;
+use blinc_layout::InstanceKey;
 use blinc_layout::div::ElementBuilder;
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{use_fsm_keyed, ButtonState, SharedState};
+use blinc_layout::stateful::{ButtonState, SharedState, use_fsm_keyed};
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_layout::widgets::button as layout_button;
-use blinc_layout::InstanceKey;
 use blinc_theme::{ColorToken, ThemeState};
 use std::sync::Arc;
 

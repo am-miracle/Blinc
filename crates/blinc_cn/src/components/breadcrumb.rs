@@ -28,11 +28,11 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
+use blinc_layout::InstanceKey;
 use blinc_layout::div::{Div, ElementBuilder, ElementTypeId};
 use blinc_layout::element::CursorStyle;
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{stateful_with_key, ButtonState};
-use blinc_layout::InstanceKey;
+use blinc_layout::stateful::{ButtonState, stateful_with_key};
 use blinc_theme::{ColorToken, ThemeState};
 
 /// Default separator SVG (chevron right)

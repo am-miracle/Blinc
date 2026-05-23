@@ -85,8 +85,8 @@ impl blinc_runtime::view::ViewRenderer for JitViewRenderer {
 /// substrate's `ComponentRegistry`. Idempotent; called once at `BlincDsl::new()`.
 pub(crate) fn register_blinc_layout_primitives() {
     use blinc_runtime::component::{ComponentDefinition, PropDef, Type};
-    use zyntax_typed_ast::type_registry::PrimitiveType;
     use zyntax_typed_ast::InternedString;
+    use zyntax_typed_ast::type_registry::PrimitiveType;
 
     let string_ty = Type::Primitive(PrimitiveType::String);
     let i64_ty = Type::Primitive(PrimitiveType::I64);

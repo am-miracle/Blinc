@@ -1,11 +1,11 @@
 //! Layout tree management
 
-use slotmap::{new_key_type, Key, SlotMap};
+use slotmap::{Key, SlotMap, new_key_type};
 use std::collections::HashMap;
 use taffy::prelude::*;
 
 use crate::element::ElementBounds;
-use crate::text_measure::{measure_text_with_options, TextLayoutOptions};
+use crate::text_measure::{TextLayoutOptions, measure_text_with_options};
 
 new_key_type! {
     pub struct LayoutNodeId;

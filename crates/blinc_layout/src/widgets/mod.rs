@@ -55,16 +55,23 @@ pub mod toast_tray;
 pub mod virtual_list;
 
 // Re-export button widget
-pub use button::{button, button_with, Button, ButtonConfig, ButtonVisualState};
+pub use button::{Button, ButtonConfig, ButtonVisualState, button, button_with};
 
 // Re-export checkbox widget
-pub use checkbox::{checkbox, checkbox_labeled, Checkbox, CheckboxBuilder, CheckboxConfig};
+pub use checkbox::{Checkbox, CheckboxBuilder, CheckboxConfig, checkbox, checkbox_labeled};
 
 // Re-export radio widget
-pub use radio::{radio_group, RadioGroup, RadioGroupBuilder, RadioGroupConfig, RadioLayout};
+pub use radio::{RadioGroup, RadioGroupBuilder, RadioGroupConfig, RadioLayout, radio_group};
 
 // Re-export text input widget
 pub use text_input::{
+    CURSOR_BLINK_INTERVAL_MS,
+    InputConstraints,
+    InputType,
+    SharedTextInputState,
+    TextInput,
+    TextInputConfig,
+    TextInputState,
     // Blur function for click-outside handling
     blur_all_text_inputs,
     // Cursor blink timing utilities
@@ -83,64 +90,57 @@ pub use text_input::{
     text_input,
     text_input_state,
     text_input_state_with_placeholder,
-    InputConstraints,
-    InputType,
-    SharedTextInputState,
-    TextInput,
-    TextInputConfig,
-    TextInputState,
-    CURSOR_BLINK_INTERVAL_MS,
 };
 
 // Re-export text area widget
 pub use text_area::{
-    text_area, text_area_state, text_area_state_with_placeholder, SharedTextAreaState, TextArea,
-    TextAreaConfig, TextAreaState, TextPosition,
+    SharedTextAreaState, TextArea, TextAreaConfig, TextAreaState, TextPosition, text_area,
+    text_area_state, text_area_state_with_placeholder,
 };
 
 // Re-export scroll widget
 pub use scroll::{
-    scroll, scroll_bouncy, scroll_no_bounce, Scroll, ScrollConfig, ScrollDirection, ScrollPhysics,
-    ScrollRenderInfo, ScrollbarConfig, ScrollbarRenderInfo, ScrollbarSize, ScrollbarState,
-    ScrollbarVisibility, SharedScrollPhysics,
+    Scroll, ScrollConfig, ScrollDirection, ScrollPhysics, ScrollRenderInfo, ScrollbarConfig,
+    ScrollbarRenderInfo, ScrollbarSize, ScrollbarState, ScrollbarVisibility, SharedScrollPhysics,
+    scroll, scroll_bouncy, scroll_no_bounce,
 };
 
 // Re-export cursor widget (canvas-based smooth cursor)
 pub use cursor::{
-    cursor_canvas, cursor_canvas_absolute, cursor_state, CursorAnimation, CursorState,
-    SharedCursorState,
+    CursorAnimation, CursorState, SharedCursorState, cursor_canvas, cursor_canvas_absolute,
+    cursor_state,
 };
 
 // Re-export code widget
 pub use code::{
-    code, code_editor, code_editor_state, code_minimap, pre, Code, CodeConfig, CodeEditor,
-    CodeEditorData, SharedCodeEditorState,
+    Code, CodeConfig, CodeEditor, CodeEditorData, SharedCodeEditorState, code, code_editor,
+    code_editor_state, code_minimap, pre,
 };
 
 // Re-export overlay widget
 pub use overlay::{
-    overlay_events, overlay_manager, BackdropConfig, ContextMenuBuilder, Corner, DialogBuilder,
-    DropdownBuilder, ModalBuilder, OverlayAnimation, OverlayConfig, OverlayHandle, OverlayKind,
-    OverlayManager, OverlayManagerExt, OverlayPosition, OverlayState, ToastBuilder,
+    BackdropConfig, ContextMenuBuilder, Corner, DialogBuilder, DropdownBuilder, ModalBuilder,
+    OverlayAnimation, OverlayConfig, OverlayHandle, OverlayKind, OverlayManager, OverlayManagerExt,
+    OverlayPosition, OverlayState, ToastBuilder, overlay_events, overlay_manager,
 };
 
 // Re-export table widget
 pub use table::{
-    cell, striped_tr, table, tbody, td, td_text, tfoot, th, th_text, thead, tr, TableBuilder,
-    TableCell,
+    TableBuilder, TableCell, cell, striped_tr, table, tbody, td, td_text, tfoot, th, th_text,
+    thead, tr,
 };
 
 // Re-export blockquote widget
-pub use blockquote::{blockquote, blockquote_with_config, Blockquote, BlockquoteConfig};
+pub use blockquote::{Blockquote, BlockquoteConfig, blockquote, blockquote_with_config};
 
 // Re-export horizontal rule widget
-pub use hr::{hr, hr_color, hr_thick, hr_with_bg, hr_with_config, HrConfig};
+pub use hr::{HrConfig, hr, hr_color, hr_thick, hr_with_bg, hr_with_config};
 
 // Re-export link widget
-pub use link::{link, open_url, Link, LinkConfig};
+pub use link::{Link, LinkConfig, link, open_url};
 
 // Re-export list widgets
 pub use list::{
-    li, ol, ol_start, ol_start_with_config, ol_with_config, task_item, task_item_with_config, ul,
-    ul_with_config, ListConfig, ListItem, ListMarker, OrderedList, TaskListItem, UnorderedList,
+    ListConfig, ListItem, ListMarker, OrderedList, TaskListItem, UnorderedList, li, ol, ol_start,
+    ol_start_with_config, ol_with_config, task_item, task_item_with_config, ul, ul_with_config,
 };

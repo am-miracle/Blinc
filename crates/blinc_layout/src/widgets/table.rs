@@ -61,8 +61,8 @@
 use blinc_core::Color;
 use blinc_theme::{ColorToken, ThemeState};
 
-use crate::div::{div, Div};
-use crate::text::{text, Text};
+use crate::div::{Div, div};
+use crate::text::{Text, text};
 
 // ============================================================================
 // Default Table Styling (from Theme)

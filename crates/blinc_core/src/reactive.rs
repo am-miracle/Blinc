@@ -29,7 +29,7 @@
 //! counter.set_rebuild(value + 1);
 //! ```
 
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 use smallvec::SmallVec;
 use std::any::Any;
 use std::cell::{Cell, RefCell};

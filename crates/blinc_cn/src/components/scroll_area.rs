@@ -45,8 +45,8 @@ use blinc_layout::element::RenderProps;
 use blinc_layout::prelude::*;
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_layout::widgets::scroll::{
-    scroll, Scroll, ScrollDirection, ScrollbarSize,
-    ScrollbarVisibility as LayoutScrollbarVisibility,
+    Scroll, ScrollDirection, ScrollbarSize, ScrollbarVisibility as LayoutScrollbarVisibility,
+    scroll,
 };
 use blinc_theme::{ColorToken, ThemeState};
 

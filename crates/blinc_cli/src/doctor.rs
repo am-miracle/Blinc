@@ -712,11 +712,7 @@ fn get_ndk_toolchain_bin(ndk_path: &Path) -> Option<PathBuf> {
         .join(format!("{}-{}", os, arch))
         .join("bin");
 
-    if bin.exists() {
-        Some(bin)
-    } else {
-        None
-    }
+    if bin.exists() { Some(bin) } else { None }
 }
 
 fn check_pkg_config_lib(lib: &str) -> bool {

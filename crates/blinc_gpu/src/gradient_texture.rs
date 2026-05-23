@@ -118,11 +118,7 @@ fn apply_spread_mode(t: f32, spread: SpreadMode) -> f32 {
         SpreadMode::Repeat => t.fract().abs(),
         SpreadMode::Reflect => {
             let t_mod = t.abs() % 2.0;
-            if t_mod > 1.0 {
-                2.0 - t_mod
-            } else {
-                t_mod
-            }
+            if t_mod > 1.0 { 2.0 - t_mod } else { t_mod }
         }
     }
 }

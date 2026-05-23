@@ -5,7 +5,7 @@
 
 use super::headless::{HeadlessConfig, HeadlessContext};
 use crate::{
-    install_recorder, record_event, RecordedEvent, RecordingConfig, SharedRecordingSession,
+    RecordedEvent, RecordingConfig, SharedRecordingSession, install_recorder, record_event,
 };
 use std::sync::Arc;
 

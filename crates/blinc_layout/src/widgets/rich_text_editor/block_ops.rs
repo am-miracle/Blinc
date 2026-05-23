@@ -15,7 +15,7 @@
 use crate::styled_text::StyledLine;
 
 use super::cursor::{DocPosition, Selection};
-use super::document::{char_to_byte, Block, BlockKind, RichDocument};
+use super::document::{Block, BlockKind, RichDocument, char_to_byte};
 use super::edit::split_spans;
 
 // =============================================================================

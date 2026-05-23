@@ -39,8 +39,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use syn::visit::Visit;
 use syn::Lit;
+use syn::visit::Visit;
 
 /// A single codepoint observation with the first file/line where it
 /// was seen. We only store the *first* occurrence to keep the report

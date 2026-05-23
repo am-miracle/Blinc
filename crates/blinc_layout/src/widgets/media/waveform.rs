@@ -5,7 +5,7 @@ use std::sync::Arc;
 use blinc_core::Color;
 
 use crate::canvas::canvas;
-use crate::div::{div, Div};
+use crate::div::{Div, div};
 
 /// Waveform visualization builder
 pub struct Waveform {

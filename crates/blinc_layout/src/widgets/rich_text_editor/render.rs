@@ -14,8 +14,8 @@
 //! is provided ([`RichTextTheme::dark`] / [`RichTextTheme::light`]).
 
 use super::document::{Block, BlockKind, RichDocument};
-use crate::div::{div, Div, FontWeight};
-use crate::rich_text::{rich_text_styled, RichText};
+use crate::div::{Div, FontWeight, div};
+use crate::rich_text::{RichText, rich_text_styled};
 use crate::styled_text::StyledText;
 use blinc_core::Color;
 
@@ -845,7 +845,7 @@ fn build_runs_for_visual_line(
     weight: FontWeight,
     italic: bool,
 ) -> Vec<super::state::RunGeometry> {
-    use super::state::{measure_width, RunGeometry};
+    use super::state::{RunGeometry, measure_width};
 
     let line = &visual.line;
     let text = &line.text;

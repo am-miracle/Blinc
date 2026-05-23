@@ -34,7 +34,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::{atomic::AtomicBool, Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
 use blinc_animation::AnimationScheduler;
 use blinc_core::context_state::{BlincContextState, HookState};
@@ -42,10 +42,10 @@ use blinc_core::reactive::{ReactiveGraph, SignalId};
 use blinc_layout::div::Div;
 use blinc_layout::renderer::RenderTree;
 use blinc_layout::selector::ElementRegistry;
-use blinc_layout::widgets::overlay::overlay_manager;
 use blinc_layout::widgets::OverlayManagerExt;
-use wasm_bindgen::closure::Closure;
+use blinc_layout::widgets::overlay::overlay_manager;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 
 use crate::app::{BlincApp, BlincConfig};
 use crate::error::{BlincError, Result};
@@ -496,7 +496,7 @@ impl WebApp {
     /// without an initialized `ThemeState`.
     fn init_theme() {
         use blinc_theme::{
-            detect_system_color_scheme, platform_theme_bundle, set_redraw_callback, ThemeState,
+            ThemeState, detect_system_color_scheme, platform_theme_bundle, set_redraw_callback,
         };
 
         if ThemeState::try_get().is_none() {

@@ -25,12 +25,12 @@
 //! while its motion plays the exit animation. It is NOT an animation FSM —
 //! the motion system already has one and this stack just observes it.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use blinc_animation::AnimationPreset;
-use blinc_core::context_state::MotionAnimationState;
 use blinc_core::BlincContextState;
+use blinc_core::context_state::MotionAnimationState;
 
 use crate::div::Div;
 use crate::motion::ElementAnimation;
@@ -1613,21 +1613,25 @@ mod tests {
 
         // 1. Simulate hover-leave: pending_close_deadline_ms gets set.
         stack.handle_mouse_leave(h);
-        assert!(stack
-            .iter_bottom_up()
-            .find(|e| e.handle == h)
-            .unwrap()
-            .pending_close_deadline_ms
-            .is_some());
+        assert!(
+            stack
+                .iter_bottom_up()
+                .find(|e| e.handle == h)
+                .unwrap()
+                .pending_close_deadline_ms
+                .is_some()
+        );
 
         // Revive should clear the pending close.
         stack.revive(h);
-        assert!(stack
-            .iter_bottom_up()
-            .find(|e| e.handle == h)
-            .unwrap()
-            .pending_close_deadline_ms
-            .is_none());
+        assert!(
+            stack
+                .iter_bottom_up()
+                .find(|e| e.handle == h)
+                .unwrap()
+                .pending_close_deadline_ms
+                .is_none()
+        );
 
         // 2. Now actually close it.
         stack.close(h);

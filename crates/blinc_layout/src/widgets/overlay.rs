@@ -39,7 +39,7 @@ use blinc_animation::{AnimationPreset, MultiKeyframeAnimation};
 use blinc_core::Color;
 use indexmap::IndexMap;
 
-use crate::div::{div, Div};
+use crate::div::{Div, div};
 use crate::key::InstanceKey;
 use crate::renderer::RenderTree;
 use crate::stack::stack;
@@ -163,8 +163,8 @@ impl OverlayState {
 
 impl StateTransitions for OverlayState {
     fn on_event(&self, event: u32) -> Option<Self> {
-        use overlay_events::*;
         use OverlayState::*;
+        use overlay_events::*;
 
         match (self, event) {
             // Closed -> Opening: Start show animation

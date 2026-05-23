@@ -25,10 +25,10 @@ use std::sync::Arc;
 
 use blinc_core::{Color, State};
 
-use crate::div::{div, Div, FontWeight};
+use crate::div::{Div, FontWeight, div};
 use crate::widgets::rich_text_editor::cursor::ActiveFormat;
 
-use super::format::{apply_mark_to_selection, Mark};
+use super::format::{Mark, apply_mark_to_selection};
 use super::render::RichTextTheme;
 use super::state::{PickerState, RichTextState};
 

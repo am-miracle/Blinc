@@ -65,11 +65,11 @@
 //! ```
 
 #[cfg(target_os = "android")]
+use jni::JNIEnv;
+#[cfg(target_os = "android")]
 use jni::objects::{JClass, JObject};
 #[cfg(target_os = "android")]
-use jni::sys::{jboolean, jfloat, jint, jlong, JNI_FALSE, JNI_TRUE};
-#[cfg(target_os = "android")]
-use jni::JNIEnv;
+use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jfloat, jint, jlong};
 
 #[cfg(target_os = "android")]
 use ndk::native_window::NativeWindow;
@@ -135,7 +135,7 @@ unsafe impl Send for BlincHandle {}
 /// # JNI Signature
 /// `(Landroid/view/Surface;IIF)J`
 #[cfg(target_os = "android")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_blinc_BlincBridge_nativeInit(
     mut env: JNIEnv,
     _class: JClass,
@@ -204,7 +204,7 @@ pub extern "system" fn Java_com_blinc_BlincBridge_nativeInit(
 /// # JNI Signature
 /// `(J)V`
 #[cfg(target_os = "android")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_blinc_BlincBridge_nativeRenderFrame(
     _env: JNIEnv,
     _class: JClass,
@@ -240,7 +240,7 @@ pub extern "system" fn Java_com_blinc_BlincBridge_nativeRenderFrame(
 /// # JNI Signature
 /// `(JIFF)Z`
 #[cfg(target_os = "android")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_blinc_BlincBridge_nativeOnTouch(
     _env: JNIEnv,
     _class: JClass,
@@ -309,7 +309,7 @@ pub extern "system" fn Java_com_blinc_BlincBridge_nativeOnTouch(
 /// # JNI Signature
 /// `(JII)V`
 #[cfg(target_os = "android")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_blinc_BlincBridge_nativeResize(
     _env: JNIEnv,
     _class: JClass,
@@ -339,7 +339,7 @@ pub extern "system" fn Java_com_blinc_BlincBridge_nativeResize(
 /// # JNI Signature
 /// `(J)V`
 #[cfg(target_os = "android")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_blinc_BlincBridge_nativeDestroy(
     _env: JNIEnv,
     _class: JClass,

@@ -25,8 +25,8 @@
 use crate::platform::detect_system_color_scheme;
 use crate::state::ThemeState;
 use crate::theme::ColorScheme;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 

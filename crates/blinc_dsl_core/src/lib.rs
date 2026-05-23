@@ -18,7 +18,7 @@ use zyntax_embed::{
 /// Mirror of `zyntax_compiler::zrtl::MAX_PARAMS` (16). Part of `ZrtlSymbolSig`'s wire ABI.
 const ZRTL_MAX_PARAMS: usize = 16;
 use zyntax_typed_ast::type_registry::{PrimitiveType, Type};
-use zyntax_typed_ast::{typed_node, Span, TypedProgram, TypedStatement};
+use zyntax_typed_ast::{Span, TypedProgram, TypedStatement, typed_node};
 
 /// Embedded Blinc DSL grammar source.
 pub const BLINC_GRAMMAR: &str = include_str!("../grammar/blinc.zyn");
@@ -32,10 +32,10 @@ mod widget_ffi;
 
 use abi::{register_builtins, type_to_native, type_to_tag};
 pub use fsm_registry::{
-    with_fsm_registry, with_fsm_registry_mut, EventTransition, FsmDefinition, FsmId, FsmInstance,
-    FsmRegistry, TickGuard,
+    EventTransition, FsmDefinition, FsmId, FsmInstance, FsmRegistry, TickGuard, with_fsm_registry,
+    with_fsm_registry_mut,
 };
-pub use host::{take_scene_ops, DslOp};
+pub use host::{DslOp, take_scene_ops};
 use passes::{
     bind_component_props, collect_declared, detect_and_strip_stateful_views, ensure_unit_return,
     extract_and_strip_stylesheets, inject_fsm_context_markers, lower_children_arrays_to_blocks,
@@ -47,14 +47,15 @@ use passes::{
     validate_component_calls,
 };
 use runtime_bridge::{
-    publish_components_to_runtime_registry, publish_fsms_to_runtime_registry,
-    register_blinc_layout_primitives, JitGuardDispatcher, JitViewRenderer,
+    JitGuardDispatcher, JitViewRenderer, publish_components_to_runtime_registry,
+    publish_fsms_to_runtime_registry, register_blinc_layout_primitives,
 };
 
 pub use blinc_dsl_macro::extern_widget;
 pub use widget_ffi::{
-    __extern_widget_internals, materialize_overlay, materialize_widget, BlincStructFieldValue,
-    BlincStructValue, ExternWidget, ExternWidgetSpec, RenderPropsOverlay, Styled, WidgetBox,
+    __extern_widget_internals, BlincStructFieldValue, BlincStructValue, ExternWidget,
+    ExternWidgetSpec, RenderPropsOverlay, Styled, WidgetBox, materialize_overlay,
+    materialize_widget,
 };
 pub use zyntax_embed::ZyntaxValue;
 
@@ -503,7 +504,7 @@ impl BlincDsl {
     fn inject_imported_view_externs(&self, program: &mut TypedProgram, entry_filename: &str) {
         use zyntax_typed_ast::type_registry::{CallingConvention, Visibility};
         use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedFunction};
-        use zyntax_typed_ast::{typed_node, InternedString};
+        use zyntax_typed_ast::{InternedString, typed_node};
 
         let entry_path = Path::new(entry_filename);
         let parent = entry_path.parent().unwrap_or_else(|| Path::new("."));

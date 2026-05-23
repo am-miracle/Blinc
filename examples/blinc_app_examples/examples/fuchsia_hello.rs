@@ -115,6 +115,8 @@ fn main() {
 #[cfg(not(target_os = "fuchsia"))]
 fn main() {
     eprintln!("This example can only run on Fuchsia OS.");
-    eprintln!("Build with: cargo build --example fuchsia_hello --target x86_64-unknown-fuchsia --features fuchsia");
+    eprintln!(
+        "Build with: cargo build --example fuchsia_hello --target x86_64-unknown-fuchsia --features fuchsia"
+    );
     std::process::exit(1);
 }

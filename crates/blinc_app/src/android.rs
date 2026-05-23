@@ -20,8 +20,8 @@
 //! ```
 
 use std::sync::{
-    atomic::{AtomicBool, AtomicI32, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, AtomicI32, Ordering},
 };
 
 /// Latest soft-keyboard inset reported by the JVM in **logical pixels**.
@@ -92,10 +92,10 @@ use blinc_core::reactive::{ReactiveGraph, SignalId};
 use blinc_layout::event_router::MouseButton;
 use blinc_layout::overlay_state::OverlayContext;
 use blinc_layout::prelude::*;
-use blinc_layout::widgets::overlay::{overlay_manager, OverlayManager};
+use blinc_layout::widgets::overlay::{OverlayManager, overlay_manager};
 use blinc_platform::assets::set_global_asset_loader;
-use blinc_platform_android::input::{detect_pinch, PinchPhase, PinchState, TouchPointer};
 use blinc_platform_android::AndroidAssetLoader;
+use blinc_platform_android::input::{PinchPhase, PinchState, TouchPointer, detect_pinch};
 
 use crate::app::BlincApp;
 use crate::error::{BlincError, Result};
@@ -120,7 +120,7 @@ impl AndroidApp {
     /// Initialize the theme system
     fn init_theme() {
         use blinc_theme::{
-            detect_system_color_scheme, platform_theme_bundle, set_redraw_callback, ThemeState,
+            ThemeState, detect_system_color_scheme, platform_theme_bundle, set_redraw_callback,
         };
 
         // Only initialize if not already initialized
@@ -1839,7 +1839,7 @@ pub fn dispatch_stream_data(stream_id: u64, data: &[u8]) {
 /// # JNI signature
 /// `(I)V`
 #[cfg(target_os = "android")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_blinc_BlincNativeBridge_nativeDispatchKeyboardInset(
     _env: jni::JNIEnv,
     _class: jni::objects::JClass,
@@ -1876,7 +1876,7 @@ pub extern "system" fn Java_com_blinc_BlincNativeBridge_nativeDispatchKeyboardIn
 /// # JNI signature
 /// `(IIII)V`
 #[cfg(target_os = "android")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_blinc_BlincNativeBridge_nativeDispatchSafeArea(
     _env: jni::JNIEnv,
     _class: jni::objects::JClass,
@@ -1920,7 +1920,7 @@ pub extern "system" fn Java_com_blinc_BlincNativeBridge_nativeDispatchSafeArea(
 /// # JNI signature
 /// `(II)V`
 #[cfg(target_os = "android")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_blinc_BlincNativeBridge_nativeDispatchKeyDownWithModifiers(
     _env: jni::JNIEnv,
     _class: jni::objects::JClass,

@@ -51,8 +51,8 @@ use std::sync::Arc;
 
 #[cfg(target_os = "android")]
 use blinc_core::native_bridge::{
-    parse_native_result_json, NativeBridgeError, NativeBridgeState, NativeResult, NativeValue,
-    PlatformAdapter,
+    NativeBridgeError, NativeBridgeState, NativeResult, NativeValue, PlatformAdapter,
+    parse_native_result_json,
 };
 
 #[cfg(target_os = "android")]
@@ -197,7 +197,7 @@ impl AndroidNativeBridgeAdapter {
                 }
                 NativeValue::Bytes(b) => {
                     // Base64 encode bytes
-                    use base64::{engine::general_purpose::STANDARD, Engine};
+                    use base64::{Engine, engine::general_purpose::STANDARD};
                     format!("\"{}\"", STANDARD.encode(b))
                 }
                 NativeValue::Json(j) => j.clone(),

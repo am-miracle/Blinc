@@ -86,4 +86,4 @@ pub use blinc_core::{
 
 pub use context::PaintContext;
 pub use path::PathBuilder;
-pub use primitives::{shadow_presets, Circle, Ellipse, RoundedRect};
+pub use primitives::{Circle, Ellipse, RoundedRect, shadow_presets};

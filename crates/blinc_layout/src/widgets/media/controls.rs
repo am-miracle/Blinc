@@ -7,7 +7,7 @@ use std::rc::Rc;
 use blinc_core::Color;
 use blinc_media::Player;
 
-use crate::div::{div, Div};
+use crate::div::{Div, div};
 use crate::svg::svg;
 use crate::text::text;
 

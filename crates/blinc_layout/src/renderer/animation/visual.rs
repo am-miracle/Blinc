@@ -83,7 +83,7 @@ impl RenderTree {
         if let Some(key) = self
             .visual_animation_key_to_node
             .iter()
-            .find(|(_, &n)| n == node_id)
+            .find(|&(_, &n)| n == node_id)
             .map(|(k, _)| k.clone())
         {
             if let Some(anim) = self.visual_animations.get(&key) {
@@ -337,7 +337,7 @@ impl RenderTree {
         let stable_key = self
             .visual_animation_key_to_node
             .iter()
-            .find(|(_, &n)| n == node_id)
+            .find(|&(_, &n)| n == node_id)
             .map(|(k, _)| k.clone());
         let animation = stable_key
             .as_ref()
@@ -450,7 +450,7 @@ impl RenderTree {
         // Find the key for this node (reverse lookup)
         self.visual_animation_key_to_node
             .iter()
-            .find(|(_, &n)| n == node_id)
+            .find(|&(_, &n)| n == node_id)
             .and_then(|(key, _)| self.visual_animations.get(key))
             .map(|a| a.is_animating())
             .unwrap_or(false)

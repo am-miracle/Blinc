@@ -4,7 +4,7 @@
 //! animations with precise timing control, staggered offsets, and looping modes.
 
 use crate::easing::Easing;
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 
 new_key_type! {
     pub struct TimelineEntryId;

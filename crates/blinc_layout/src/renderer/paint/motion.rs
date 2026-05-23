@@ -950,11 +950,7 @@ impl RenderTree {
         // push, so the push's own index is `count - 1`.
         let css_anim_layer_push_index = if in_css_subtree && should_push_layer {
             let n = ctx.bg_layer_command_count();
-            if n > 0 {
-                Some(n - 1)
-            } else {
-                None
-            }
+            if n > 0 { Some(n - 1) } else { None }
         } else {
             None
         };
@@ -967,11 +963,7 @@ impl RenderTree {
         let motion_binding_layer_push_index = if motion_bindings_ref.is_some() && should_push_layer
         {
             let n = ctx.bg_layer_command_count();
-            if n > 0 {
-                Some(n - 1)
-            } else {
-                None
-            }
+            if n > 0 { Some(n - 1) } else { None }
         } else {
             None
         };

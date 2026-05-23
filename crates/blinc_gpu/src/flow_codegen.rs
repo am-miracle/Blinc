@@ -1086,7 +1086,9 @@ impl<'a> CodegenContext<'a> {
                         FlowType::Vec2 => "vec2<f32>(0.0)",
                         FlowType::Vec3 => "vec3<f32>(0.0)",
                         FlowType::Vec4 => "vec4<f32>(0.0)",
-                        FlowType::Mat4 => "mat4x4<f32>(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)",
+                        FlowType::Mat4 => {
+                            "mat4x4<f32>(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)"
+                        }
                     };
                     let _ = writeln!(out, "{}let {}: {} = {};", indent, name, wgsl_ty, zero);
                 }
@@ -1471,16 +1473,20 @@ fn func_to_wgsl(func: FlowFunc, args: &[String]) -> Result<String, FlowError> {
             )
         }
         FlowFunc::TranslationMatrix => {
-            format!("mat4x4<f32>(1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, ({}).x,({}).y,({}).z,1.0)",
-                args[0], args[0], args[0])
+            format!(
+                "mat4x4<f32>(1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, ({}).x,({}).y,({}).z,1.0)",
+                args[0], args[0], args[0]
+            )
         }
         FlowFunc::RotationMatrix => {
             // axis (vec3), angle (float) — use Rodrigues' rotation
             format!("flow_rotation_matrix({}, {})", args[0], args[1])
         }
         FlowFunc::ScaleMatrix => {
-            format!("mat4x4<f32>(({}).x,0.0,0.0,0.0, 0.0,({}).y,0.0,0.0, 0.0,0.0,({}).z,0.0, 0.0,0.0,0.0,1.0)",
-                args[0], args[0], args[0])
+            format!(
+                "mat4x4<f32>(({}).x,0.0,0.0,0.0, 0.0,({}).y,0.0,0.0, 0.0,0.0,({}).z,0.0, 0.0,0.0,0.0,1.0)",
+                args[0], args[0], args[0]
+            )
         }
         FlowFunc::PerspectiveMatrix => {
             format!(

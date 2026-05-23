@@ -315,7 +315,7 @@ impl InteractiveContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blinc_core::events::{event_types, EventData};
+    use blinc_core::events::{EventData, event_types};
     use blinc_core::fsm::StateMachine;
     use slotmap::SlotMap;
 

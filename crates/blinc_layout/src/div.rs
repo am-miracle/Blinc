@@ -14,8 +14,8 @@
 //! ```
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 use blinc_core::{
@@ -32,8 +32,8 @@ where
     let shadows = ThemeState::get().shadows();
     pick(&shadows).iter().map(Shadow::from).collect()
 }
-use taffy::prelude::*;
 use taffy::Overflow;
+use taffy::prelude::*;
 
 use crate::element::{
     ElementBounds, GlassMaterial, Material, MetallicMaterial, RenderLayer, RenderProps,
@@ -809,11 +809,7 @@ impl Div {
     where
         F: FnOnce(Self) -> Self,
     {
-        if condition {
-            f(self)
-        } else {
-            self
-        }
+        if condition { f(self) } else { self }
     }
 
     /// Set the background color/brush without consuming self

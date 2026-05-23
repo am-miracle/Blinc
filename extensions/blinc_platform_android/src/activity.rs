@@ -165,7 +165,7 @@ impl Default for BlincAndroidApp {
 /// Applications should typically provide their own android_main and use
 /// blinc_app::AndroidApp::run() instead.
 #[cfg(all(target_os = "android", feature = "default-activity"))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub fn android_main(app: AndroidApp) {
     // Initialize Android logging
     android_logger::init_once(

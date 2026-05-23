@@ -46,11 +46,11 @@
 
 #![cfg(target_arch = "wasm32")]
 
+use blinc_app::BlincError;
 use blinc_app::web::WebApp;
 use blinc_app::windowed::WindowedContext;
-use blinc_app::BlincError;
 use blinc_core::Color;
-use blinc_layout::div::{div, Div};
+use blinc_layout::div::{Div, div};
 use blinc_layout::text::text;
 use blinc_platform_web::WebAssetLoader;
 use wasm_bindgen::prelude::*;

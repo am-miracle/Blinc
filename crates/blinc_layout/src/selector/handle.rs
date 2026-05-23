@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
-use blinc_core::context_state::MotionAnimationState;
 use blinc_core::BlincContextState;
+use blinc_core::context_state::MotionAnimationState;
 
 use crate::element::{ElementBounds, RenderProps};
 use crate::tree::LayoutNodeId;
 
-use super::registry::{ElementRegistry, OnReadyCallback};
 use super::ScrollOptions;
+use super::registry::{ElementRegistry, OnReadyCallback};
 
 /// Handle to a queried element for programmatic manipulation
 ///

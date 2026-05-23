@@ -37,8 +37,7 @@ use blinc_core::{Color, Light, Mat4, MeshData, State, Vec3};
 use blinc_gltf::GltfScene;
 use blinc_input::InputState;
 
-const GLTF_PATH: &str =
-    "examples/blinc_app_examples/examples/assets/3d/marble_cliff_02_2k.gltf/marble_cliff_02_2k.gltf";
+const GLTF_PATH: &str = "examples/blinc_app_examples/examples/assets/3d/marble_cliff_02_2k.gltf/marble_cliff_02_2k.gltf";
 
 const VIEWPORT_ID: &str = "texture-transform-viewport";
 

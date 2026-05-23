@@ -1430,8 +1430,8 @@ impl MotionPresenceState {
 
 impl crate::stateful::StateTransitions for MotionPresenceState {
     fn on_event(&self, event: u32) -> Option<Self> {
-        use motion_events::*;
         use MotionPresenceState::*;
+        use motion_events::*;
 
         match (self, event) {
             // Empty -> Entering: Content mounted

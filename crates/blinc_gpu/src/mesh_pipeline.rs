@@ -214,7 +214,7 @@ pub(crate) struct MeshPipeline {
 // blocks make this split transparent: same crate, same privacy
 // semantics, just a different file.
 
-use crate::renderer::{mat4_inverse_flat, GpuRenderer, SHADOW_MAP_SIZE};
+use crate::renderer::{GpuRenderer, SHADOW_MAP_SIZE, mat4_inverse_flat};
 use crate::shaders::MESH_DT_SHADER;
 
 impl GpuRenderer {

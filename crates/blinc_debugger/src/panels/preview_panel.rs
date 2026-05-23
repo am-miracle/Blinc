@@ -2,11 +2,11 @@
 
 use std::cell::OnceCell;
 
-use blinc_cn::components::select::{select, SelectSize};
+use blinc_cn::components::select::{SelectSize, select};
 use blinc_cn::components::separator::separator;
-use blinc_cn::components::switch::{switch, SwitchSize};
-use blinc_core::context_state::BlincContextState;
+use blinc_cn::components::switch::{SwitchSize, switch};
 use blinc_core::Color;
+use blinc_core::context_state::BlincContextState;
 use blinc_layout::div::{Div, ElementBuilder, FontWeight};
 use blinc_layout::element::RenderProps;
 use blinc_layout::event_handler::EventHandlers;

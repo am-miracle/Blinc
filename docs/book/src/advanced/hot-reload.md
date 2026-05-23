@@ -92,7 +92,7 @@ out of default builds; they only show up when the feature is on.
   fn main() -> blinc_app::Result<()> {
       #[cfg(feature = "hot-reload")]
       blinc_app::hot_reload::watch_dir("assets");
-      WindowedApp::run(WindowConfig::default(), build_ui)
+      WindowedApp::run(WindowConfig::default(), |ctx| build_ui(ctx))
   }
   ```
   The watcher tails the directory recursively. When a file under

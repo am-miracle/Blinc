@@ -3,8 +3,8 @@
 //! The main entry point for Blinc applications.
 
 use blinc_gpu::{FontRegistry, GpuRenderer, RendererConfig, TextRenderingContext};
-use blinc_layout::prelude::*;
 use blinc_layout::RenderTree;
+use blinc_layout::prelude::*;
 use std::sync::{Arc, Mutex};
 
 use crate::context::RenderContext;

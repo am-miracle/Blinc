@@ -2060,8 +2060,8 @@ fn round_trip_text_int() {
 
 // F-string parsing tests — TypedAST shape only.
 
-use zyntax_typed_ast::typed_ast::{TypedExpression, TypedLiteral};
 use zyntax_typed_ast::TypedDeclaration;
+use zyntax_typed_ast::typed_ast::{TypedExpression, TypedLiteral};
 
 /// Body statements of the program's first non-extern function (test-only).
 fn first_user_function_body(
@@ -3889,8 +3889,8 @@ fn parse_fsm_no_transitions() {
 
 // FsmRegistry data-structure tests.
 
-use zyntax_typed_ast::type_registry::TypeId;
 use zyntax_typed_ast::InternedString;
+use zyntax_typed_ast::type_registry::TypeId;
 
 fn fid(module: &str, raw_id: u32) -> FsmId {
     FsmId {

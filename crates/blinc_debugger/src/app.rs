@@ -13,8 +13,8 @@ use crate::panels::{
 };
 use crate::theme::DebuggerColors;
 use anyhow::Result;
-use blinc_app::windowed::{WindowedApp, WindowedContext};
 use blinc_app::WindowConfig;
+use blinc_app::windowed::{WindowedApp, WindowedContext};
 use blinc_layout::prelude::*;
 use blinc_recorder::replay::{ReplayConfig, ReplayPlayer, ReplayState};
 use blinc_recorder::{ElementSnapshot, RecordingExport, TreeSnapshot};
@@ -119,7 +119,10 @@ pub fn run(width: u32, height: u32, file: Option<PathBuf>, connect: Option<Strin
 }
 
 /// Build the debugger UI using WindowedContext
-fn build_debugger_ui(ctx: &WindowedContext, app_state: &SharedAppState) -> impl ElementBuilder {
+fn build_debugger_ui(
+    ctx: &WindowedContext,
+    app_state: &SharedAppState,
+) -> impl ElementBuilder + use<> {
     let state = app_state.read().unwrap();
 
     div()

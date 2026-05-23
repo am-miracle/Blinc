@@ -487,28 +487,32 @@ mod tests {
         let doc = RichDocument::from_markdown("**bold** *italic* ~~strike~~", Color::WHITE);
         let line = &doc.blocks[0].lines[0];
         assert_eq!(line.text, "bold italic strike");
-        assert!(line
-            .spans
-            .iter()
-            .any(|s| s.bold && line.text[s.start..s.end] == *"bold"));
-        assert!(line
-            .spans
-            .iter()
-            .any(|s| s.italic && line.text[s.start..s.end] == *"italic"));
-        assert!(line
-            .spans
-            .iter()
-            .any(|s| s.strikethrough && line.text[s.start..s.end] == *"strike"));
+        assert!(
+            line.spans
+                .iter()
+                .any(|s| s.bold && line.text[s.start..s.end] == *"bold")
+        );
+        assert!(
+            line.spans
+                .iter()
+                .any(|s| s.italic && line.text[s.start..s.end] == *"italic")
+        );
+        assert!(
+            line.spans
+                .iter()
+                .any(|s| s.strikethrough && line.text[s.start..s.end] == *"strike")
+        );
     }
 
     #[test]
     fn parses_inline_code() {
         let doc = RichDocument::from_markdown("Use `print()` here", Color::WHITE);
         let line = &doc.blocks[0].lines[0];
-        assert!(line
-            .spans
-            .iter()
-            .any(|s| s.code && line.text[s.start..s.end] == *"print()"));
+        assert!(
+            line.spans
+                .iter()
+                .any(|s| s.code && line.text[s.start..s.end] == *"print()")
+        );
     }
 
     #[test]
@@ -545,10 +549,11 @@ mod tests {
     #[test]
     fn parses_horizontal_rule() {
         let doc = RichDocument::from_markdown("before\n\n---\n\nafter", Color::WHITE);
-        assert!(doc
-            .blocks
-            .iter()
-            .any(|b| matches!(b.kind, BlockKind::Divider)));
+        assert!(
+            doc.blocks
+                .iter()
+                .any(|b| matches!(b.kind, BlockKind::Divider))
+        );
     }
 
     #[test]

@@ -54,5 +54,5 @@ pub mod registry;
 pub use definition::PropType;
 pub use definition::{ComponentDefinition, PropDef, Type};
 pub use registry::{
-    with_component_registry, with_component_registry_mut, ComponentId, ComponentRegistry,
+    ComponentId, ComponentRegistry, with_component_registry, with_component_registry_mut,
 };

@@ -2,14 +2,14 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use crate::div::{div, Div, ElementBuilder};
+use crate::div::{Div, ElementBuilder, div};
 use crate::image::img;
 use crate::text::text;
 use crate::typography::{h1, h2, h3, h4, h5, h6};
 use crate::widgets::{
-    code, li, link, ol_start_with_config, ol_with_config, striped_tr, table, task_item,
-    task_item_with_config, tbody, td, th, thead, tr, ul_with_config, ListConfig, ListItem,
-    OrderedList, TaskListItem, UnorderedList,
+    ListConfig, ListItem, OrderedList, TaskListItem, UnorderedList, code, li, link,
+    ol_start_with_config, ol_with_config, striped_tr, table, task_item, task_item_with_config,
+    tbody, td, th, thead, tr, ul_with_config,
 };
 
 use super::config::MarkdownConfig;

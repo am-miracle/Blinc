@@ -17,7 +17,7 @@ use blinc_core::Color;
 use crate::styled_text::{StyledLine, TextSpan};
 
 use super::cursor::{DocPosition, Selection};
-use super::document::{char_to_byte, RichDocument};
+use super::document::{RichDocument, char_to_byte};
 
 /// Which attribute an op should rewrite.
 #[derive(Clone, Debug)]
@@ -408,10 +408,11 @@ mod tests {
         let bold = line.spans.iter().find(|s| s.bold).unwrap();
         assert_eq!(bold.start, 0);
         assert_eq!(bold.end, 5);
-        assert!(line
-            .spans
-            .iter()
-            .any(|s| !s.bold && s.start == 5 && s.end == 11));
+        assert!(
+            line.spans
+                .iter()
+                .any(|s| !s.bold && s.start == 5 && s.end == 11)
+        );
     }
 
     #[test]

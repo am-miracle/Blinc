@@ -834,7 +834,11 @@ impl EventRouter {
 
             tracing::debug!(
                 "Drag check: stable_target={:?}, delta=({:.1}, {:.1}), threshold_exceeded={}, is_dragging={}",
-                stable_target, self.drag_delta_x, self.drag_delta_y, delta_exceeds, self.is_dragging
+                stable_target,
+                self.drag_delta_x,
+                self.drag_delta_y,
+                delta_exceeds,
+                self.is_dragging
             );
 
             if !self.is_dragging && delta_exceeds {
@@ -1956,7 +1960,9 @@ impl EventRouter {
             // Block the hit
             tracing::debug!(
                 "hit_test_with_occlusion: blocking hit on {:?} - occluded by overlay at ({:.1}, {:.1})",
-                hit.node, x, y
+                hit.node,
+                x,
+                y
             );
             return None;
         }
@@ -2024,7 +2030,9 @@ impl EventRouter {
             if result.is_empty() {
                 tracing::debug!(
                     "hit_test_with_occlusion: in overlay bounds at ({:.1}, {:.1}), overlay_id={:?}, but no hits pass filter",
-                    x, y, overlay_id
+                    x,
+                    y,
+                    overlay_id
                 );
             }
             result
@@ -2147,9 +2155,11 @@ mod tests {
 
         // Should have POINTER_ENTER events
         let captured = events.borrow();
-        assert!(captured
-            .iter()
-            .any(|(_, e)| *e == event_types::POINTER_ENTER));
+        assert!(
+            captured
+                .iter()
+                .any(|(_, e)| *e == event_types::POINTER_ENTER)
+        );
     }
 
     #[test]
@@ -2306,9 +2316,11 @@ mod tests {
         // Check FOCUS was emitted
         {
             let captured = events.borrow();
-            assert!(captured
-                .iter()
-                .any(|(n, e)| *n == first_focused && *e == event_types::FOCUS));
+            assert!(
+                captured
+                    .iter()
+                    .any(|(n, e)| *n == first_focused && *e == event_types::FOCUS)
+            );
         }
 
         // Click second child - should blur first and focus second
@@ -2317,9 +2329,11 @@ mod tests {
         {
             let captured = events.borrow();
             // Should have BLUR for first element
-            assert!(captured
-                .iter()
-                .any(|(n, e)| *n == first_focused && *e == event_types::BLUR));
+            assert!(
+                captured
+                    .iter()
+                    .any(|(n, e)| *n == first_focused && *e == event_types::BLUR)
+            );
         }
     }
 

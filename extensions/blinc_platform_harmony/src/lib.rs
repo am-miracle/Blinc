@@ -50,7 +50,7 @@ pub mod window;
 pub use app::HarmonyPlatform;
 pub use assets::HarmonyAssetLoader;
 pub use event_loop::{HarmonyEventLoop, HarmonyWakeProxy};
-pub use input::{convert_touch, Touch, TouchPhase};
+pub use input::{Touch, TouchPhase, convert_touch};
 pub use window::HarmonyWindow;
 
 use blinc_platform::PlatformError;

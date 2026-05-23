@@ -39,20 +39,20 @@
 //!     .disabled(true)
 //! ```
 
-use blinc_animation::{get_scheduler, AnimationContext, SpringConfig};
+use blinc_animation::{AnimationContext, SpringConfig, get_scheduler};
 use blinc_core::events::event_types;
 use blinc_core::{BlincContext, BlincContextState, Color, State};
 use blinc_layout::div::ElementTypeId;
 use blinc_layout::element::{CursorStyle, RenderProps};
 use blinc_layout::motion::motion;
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{stateful_with_key, NoState, StateTransitions};
+use blinc_layout::stateful::{NoState, StateTransitions, stateful_with_key};
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_macros::BlincComponent;
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
 use std::sync::{Arc, Mutex};
 
-use super::label::{label, LabelSize};
+use super::label::{LabelSize, label};
 use blinc_layout::InstanceKey;
 
 /// Halo grow / shrink duration in milliseconds. FPS-independent —

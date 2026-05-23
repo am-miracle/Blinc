@@ -3,8 +3,8 @@
 //! Supports multiple windows via `AppCommand::CreateWindow`.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::input;
 use crate::window::DesktopWindow;

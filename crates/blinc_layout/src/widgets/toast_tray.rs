@@ -15,12 +15,12 @@
 //! the tray container handles smooth reorders when a toast in the middle
 //! auto-dismisses.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::ElementAnimation;
-use blinc_core::context_state::MotionAnimationState;
 use blinc_core::BlincContextState;
+use blinc_core::context_state::MotionAnimationState;
 
 use crate::div::Div;
 use crate::widgets::overlay::Corner;
@@ -330,11 +330,11 @@ impl ToastTray {
         // pixels.
         const INSET: f32 = 16.0;
         const TOAST_WIDTH: f32 = 360.0; // matches `cn::toast`'s `.w(360.0)`
-                                        // Height is approximate (we don't know the real per-toast height
-                                        // until layout completes). For first-cut stacking we assume a
-                                        // typical 2-line title+description card. Toasts with action
-                                        // buttons or `body()` content may overlap slightly; revisit when
-                                        // a measured-height feedback pass exists.
+        // Height is approximate (we don't know the real per-toast height
+        // until layout completes). For first-cut stacking we assume a
+        // typical 2-line title+description card. Toasts with action
+        // buttons or `body()` content may overlap slightly; revisit when
+        // a measured-height feedback pass exists.
         const ESTIMATED_TOAST_HEIGHT: f32 = 90.0;
 
         let mut layer = Div::new()

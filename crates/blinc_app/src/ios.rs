@@ -39,8 +39,8 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 use blinc_animation::AnimationScheduler;
@@ -49,7 +49,7 @@ use blinc_core::reactive::{ReactiveGraph, SignalId};
 use blinc_layout::event_router::MouseButton;
 use blinc_layout::overlay_state::OverlayContext;
 use blinc_layout::prelude::*;
-use blinc_layout::widgets::overlay::{overlay_manager, OverlayManager};
+use blinc_layout::widgets::overlay::{OverlayManager, overlay_manager};
 use blinc_platform::assets::set_global_asset_loader;
 use blinc_platform_ios::{Gesture, GestureDetector, IOSAssetLoader, IOSWakeProxy, TouchPhase};
 
@@ -142,7 +142,7 @@ impl IOSApp {
     /// Initialize the theme system
     fn init_theme() {
         use blinc_theme::{
-            detect_system_color_scheme, platform_theme_bundle, set_redraw_callback, ThemeState,
+            ThemeState, detect_system_color_scheme, platform_theme_bundle, set_redraw_callback,
         };
 
         // Only initialize if not already initialized
@@ -869,7 +869,12 @@ impl IOSRenderContext {
             if let Some(bounds) = tree.layout().get_bounds(root, (0.0, 0.0)) {
                 tracing::trace!(
                     "[Blinc] iOS Touch at ({:.1}, {:.1}) - tree root bounds: ({:.1}, {:.1}, {:.1}x{:.1})",
-                    lx, ly, bounds.x, bounds.y, bounds.width, bounds.height
+                    lx,
+                    ly,
+                    bounds.x,
+                    bounds.y,
+                    bounds.width,
+                    bounds.height
                 );
             } else {
                 tracing::debug!("[Blinc] iOS Touch: tree root has no bounds!");
@@ -1182,7 +1187,7 @@ static mut UI_BUILDER: Option<UIBuilderFn> = None;
 ///
 /// # Safety
 /// The function pointer must remain valid for the lifetime of the application.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_set_ui_builder(builder: UIBuilderFn) {
     unsafe {
         UI_BUILDER = Some(builder);
@@ -1206,7 +1211,7 @@ fn get_ui_builder() -> Option<UIBuilderFn> {
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
 /// A UI builder must have been registered via `blinc_set_ui_builder` or `register_rust_ui_builder`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_build_frame(ctx: *mut IOSRenderContext) {
     if ctx.is_null() {
         return;
@@ -1381,7 +1386,7 @@ pub extern "C" fn blinc_build_frame(ctx: *mut IOSRenderContext) {
 ///
 /// # Safety
 /// The returned pointer must be freed with `blinc_destroy_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_create_context(
     width: u32,
     height: u32,
@@ -1403,7 +1408,7 @@ pub extern "C" fn blinc_create_context(
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_needs_render(ctx: *mut IOSRenderContext) -> bool {
     if ctx.is_null() {
         return false;
@@ -1417,7 +1422,7 @@ pub extern "C" fn blinc_needs_render(ctx: *mut IOSRenderContext) -> bool {
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_update_size(
     ctx: *mut IOSRenderContext,
     width: u32,
@@ -1443,7 +1448,7 @@ pub extern "C" fn blinc_update_size(
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_handle_touch(
     ctx: *mut IOSRenderContext,
     touch_id: u64,
@@ -1499,7 +1504,7 @@ pub extern "C" fn blinc_handle_touch(
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
 /// `text` must be a valid NUL-terminated UTF-8 string for the
 /// duration of the call.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_ios_handle_text_input(
     ctx: *mut IOSRenderContext,
     text: *const std::os::raw::c_char,
@@ -1536,7 +1541,7 @@ pub extern "C" fn blinc_ios_handle_text_input(
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_ios_handle_key_down(ctx: *mut IOSRenderContext, key_code: u32) {
     if ctx.is_null() {
         return;
@@ -1565,7 +1570,7 @@ pub extern "C" fn blinc_ios_handle_key_down(ctx: *mut IOSRenderContext, key_code
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_ios_handle_key_down_with_modifiers(
     ctx: *mut IOSRenderContext,
     key_code: u32,
@@ -1592,7 +1597,7 @@ pub extern "C" fn blinc_ios_handle_key_down_with_modifiers(
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_ios_set_keyboard_inset(ctx: *mut IOSRenderContext, inset: f32) {
     if ctx.is_null() {
         return;
@@ -1617,7 +1622,7 @@ pub extern "C" fn blinc_ios_set_keyboard_inset(ctx: *mut IOSRenderContext, inset
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_handle_touch_with_force(
     ctx: *mut IOSRenderContext,
     touch_id: u64,
@@ -1647,7 +1652,7 @@ pub extern "C" fn blinc_handle_touch_with_force(
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_set_focused(ctx: *mut IOSRenderContext, focused: bool) {
     if ctx.is_null() {
         return;
@@ -1664,7 +1669,7 @@ pub extern "C" fn blinc_set_focused(ctx: *mut IOSRenderContext, focused: bool) {
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`,
 /// and must not be used after this call.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_destroy_context(ctx: *mut IOSRenderContext) {
     if !ctx.is_null() {
         unsafe {
@@ -1680,7 +1685,7 @@ pub extern "C" fn blinc_destroy_context(ctx: *mut IOSRenderContext) {
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_tick_animations(ctx: *mut IOSRenderContext) -> bool {
     if ctx.is_null() {
         return false;
@@ -1734,7 +1739,7 @@ pub extern "C" fn blinc_tick_animations(ctx: *mut IOSRenderContext) -> bool {
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_get_width(ctx: *mut IOSRenderContext) -> f32 {
     if ctx.is_null() {
         return 0.0;
@@ -1746,7 +1751,7 @@ pub extern "C" fn blinc_get_width(ctx: *mut IOSRenderContext) -> f32 {
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_get_height(ctx: *mut IOSRenderContext) -> f32 {
     if ctx.is_null() {
         return 0.0;
@@ -1758,7 +1763,7 @@ pub extern "C" fn blinc_get_height(ctx: *mut IOSRenderContext) -> f32 {
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_get_scale_factor(ctx: *mut IOSRenderContext) -> f64 {
     if ctx.is_null() {
         return 1.0;
@@ -1773,7 +1778,7 @@ pub extern "C" fn blinc_get_scale_factor(ctx: *mut IOSRenderContext) -> f64 {
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
 /// The returned pointer is only valid while `ctx` is valid.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_get_windowed_context(ctx: *mut IOSRenderContext) -> *mut WindowedContext {
     if ctx.is_null() {
         return std::ptr::null_mut();
@@ -1787,7 +1792,7 @@ pub extern "C" fn blinc_get_windowed_context(ctx: *mut IOSRenderContext) -> *mut
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_mark_dirty(ctx: *mut IOSRenderContext) {
     if ctx.is_null() {
         return;
@@ -1803,7 +1808,7 @@ pub extern "C" fn blinc_mark_dirty(ctx: *mut IOSRenderContext) {
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_clear_dirty(ctx: *mut IOSRenderContext) {
     if ctx.is_null() {
         return;
@@ -1817,7 +1822,7 @@ pub extern "C" fn blinc_clear_dirty(ctx: *mut IOSRenderContext) {
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_get_physical_width(ctx: *mut IOSRenderContext) -> u32 {
     if ctx.is_null() {
         return 0;
@@ -1832,7 +1837,7 @@ pub extern "C" fn blinc_get_physical_width(ctx: *mut IOSRenderContext) -> u32 {
 ///
 /// # Safety
 /// `ctx` must be a valid pointer returned by `blinc_create_context`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_get_physical_height(ctx: *mut IOSRenderContext) -> u32 {
     if ctx.is_null() {
         return 0;
@@ -1873,7 +1878,7 @@ pub struct IOSGpuRenderer {
 /// # Safety
 /// * `ctx` must be a valid pointer returned by `blinc_create_context`
 /// * `metal_layer` must be a valid pointer to a CAMetalLayer
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_init_gpu(
     ctx: *mut IOSRenderContext,
     metal_layer: *mut std::ffi::c_void,
@@ -2019,7 +2024,7 @@ pub extern "C" fn blinc_init_gpu(
 ///
 /// # Safety
 /// `gpu` must be a valid pointer returned by `blinc_init_gpu`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_gpu_resize(gpu: *mut IOSGpuRenderer, width: u32, height: u32) {
     if gpu.is_null() {
         return;
@@ -2050,7 +2055,7 @@ pub extern "C" fn blinc_gpu_resize(gpu: *mut IOSGpuRenderer, width: u32, height:
 /// # Safety
 /// * `gpu` must be a valid pointer returned by `blinc_init_gpu`
 /// * Must be called on the main thread
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_render_frame(gpu: *mut IOSGpuRenderer) -> bool {
     if gpu.is_null() {
         return false;
@@ -2119,7 +2124,7 @@ pub extern "C" fn blinc_render_frame(gpu: *mut IOSGpuRenderer) -> bool {
 /// # Safety
 /// `gpu` must be a valid pointer returned by `blinc_init_gpu`,
 /// and must not be used after this call.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_destroy_gpu(gpu: *mut IOSGpuRenderer) {
     if !gpu.is_null() {
         unsafe {
@@ -2143,7 +2148,7 @@ pub extern "C" fn blinc_destroy_gpu(gpu: *mut IOSGpuRenderer) {
 /// # Safety
 /// * `gpu` must be a valid pointer returned by `blinc_init_gpu`
 /// * `path` must be a valid null-terminated C string
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_load_bundled_font(
     gpu: *mut IOSGpuRenderer,
     path: *const std::ffi::c_char,
@@ -2204,7 +2209,7 @@ pub extern "C" fn blinc_load_bundled_font(
 ///     return true
 /// }
 /// ```
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_ios_handle_deep_link(uri: *const std::ffi::c_char) {
     if uri.is_null() {
         return;
@@ -2227,7 +2232,7 @@ pub extern "C" fn blinc_ios_handle_deep_link(uri: *const std::ffi::c_char) {
 ///     dataLen: UInt64
 /// ) { ... }
 /// ```
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_dispatch_stream_data(stream_id: u64, data_ptr: *const u8, data_len: u64) {
     if data_ptr.is_null() || data_len == 0 {
         return;

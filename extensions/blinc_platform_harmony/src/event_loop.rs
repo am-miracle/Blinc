@@ -6,8 +6,8 @@ use blinc_platform::{ControlFlow, Event, EventLoop, PlatformError};
 
 use crate::window::HarmonyWindow;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Wake proxy for HarmonyOS event loop
 ///

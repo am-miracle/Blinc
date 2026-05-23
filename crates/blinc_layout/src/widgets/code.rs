@@ -50,21 +50,21 @@ use blinc_core::{Brush, Color, CornerRadius, Rect};
 use blinc_theme::{ColorToken, ThemeState};
 
 use crate::canvas::canvas;
-use crate::div::{div, Div, ElementBuilder, ElementTypeId};
+use crate::div::{Div, ElementBuilder, ElementTypeId, div};
 use crate::element::RenderProps;
 use crate::styled_text::StyledText;
 use crate::syntax::{SyntaxConfig, SyntaxHighlighter, TokenHit};
 use crate::text::text;
 use crate::tree::{LayoutNodeId, LayoutTree};
-use crate::widgets::cursor::{cursor_state, CursorAnimation, SharedCursorState};
+use crate::widgets::cursor::{CursorAnimation, SharedCursorState, cursor_state};
 use crate::widgets::scroll::{ScrollPhysics, SharedScrollPhysics};
 use crate::widgets::text_area::TextPosition;
 use crate::widgets::text_edit;
 use crate::widgets::text_input::{
-    decrement_focus_count, increment_focus_count, request_continuous_redraw_pub,
+    SharedTextInputData, text_input, text_input_state_with_placeholder,
 };
 use crate::widgets::text_input::{
-    text_input, text_input_state_with_placeholder, SharedTextInputData,
+    decrement_focus_count, increment_focus_count, request_continuous_redraw_pub,
 };
 
 // ============================================================================
@@ -1438,8 +1438,8 @@ impl CodeEditor {
     #[track_caller]
     pub fn new(state: &SharedCodeEditorState) -> Self {
         use crate::stateful::{
-            refresh_stateful, SharedState, StateTransitions, Stateful, StatefulInner,
-            TextFieldState,
+            SharedState, StateTransitions, Stateful, StatefulInner, TextFieldState,
+            refresh_stateful,
         };
         use blinc_core::events::event_types;
 

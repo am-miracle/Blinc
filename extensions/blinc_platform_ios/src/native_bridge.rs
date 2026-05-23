@@ -67,8 +67,8 @@ use std::os::raw::c_char;
 use std::sync::Arc;
 
 use blinc_core::native_bridge::{
-    parse_native_result_json, NativeBridgeError, NativeBridgeState, NativeResult, NativeValue,
-    PlatformAdapter,
+    NativeBridgeError, NativeBridgeState, NativeResult, NativeValue, PlatformAdapter,
+    parse_native_result_json,
 };
 
 /// Function pointer type for iOS native call
@@ -84,7 +84,7 @@ pub type IOSNativeCallFn =
 /// Swift's `blinc_free_string` takes precedence. When building
 /// without Swift (e.g., for testing), this provides a fallback
 /// that uses libc free.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
         // Safety: The pointer was allocated by strdup in Swift or C,
@@ -200,7 +200,7 @@ static mut IOS_NATIVE_CALL_FN: Option<IOSNativeCallFn> = None;
 /// # Safety
 ///
 /// Must be called from the main thread before any native calls are made.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn blinc_set_native_call_fn(call_fn: IOSNativeCallFn) {
     unsafe {
         IOS_NATIVE_CALL_FN = Some(call_fn);
@@ -217,7 +217,7 @@ pub extern "C" fn blinc_set_native_call_fn(call_fn: IOSNativeCallFn) {
 }
 
 /// Check if the iOS native bridge is initialized
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(static_mut_refs)]
 pub extern "C" fn blinc_native_bridge_is_ready() -> bool {
     (unsafe { IOS_NATIVE_CALL_FN.is_some() }) && NativeBridgeState::is_initialized()

@@ -29,8 +29,8 @@
 use std::cell::OnceCell;
 use std::sync::Arc;
 
-use blinc_core::context_state::BlincContextState;
 use blinc_core::State;
+use blinc_core::context_state::BlincContextState;
 use blinc_layout::div::ElementTypeId;
 use blinc_layout::element::RenderProps;
 use blinc_layout::overlay_state::overlay_stack;
@@ -496,7 +496,7 @@ mod tests {
         );
         // y uses offset * 6.0 multiplier for top positioning
         assert_eq!(y, 50.0 - (6.0 * 6.0)); // 14.0
-                                           // x should be centered (tooltip_width_estimate = 100.0)
+        // x should be centered (tooltip_width_estimate = 100.0)
         assert_eq!(x, 100.0 + (80.0 - 100.0) / 2.0); // 90.0
     }
 

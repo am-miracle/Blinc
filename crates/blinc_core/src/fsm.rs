@@ -25,7 +25,7 @@
 //! on character animation.
 
 use rustc_hash::FxHashMap;
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 use smallvec::SmallVec;
 
 new_key_type! {

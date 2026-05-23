@@ -47,10 +47,10 @@ use blinc_app::windowed::WindowedContext;
 use blinc_core::context_state::BlincContextState;
 use blinc_core::reactive::State;
 use blinc_core::{Color, Transform};
-use blinc_layout::div::{div, Div};
-use blinc_layout::stateful::{stateful_with_key, Stateful};
-use blinc_layout::text::text;
 use blinc_layout::FontWeight;
+use blinc_layout::div::{Div, div};
+use blinc_layout::stateful::{Stateful, stateful_with_key};
+use blinc_layout::text::text;
 use wasm_bindgen::prelude::*;
 
 /// Bundled font from `assets/fonts/` at the workspace root.

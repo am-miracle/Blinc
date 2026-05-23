@@ -898,7 +898,7 @@ impl RenderContext {
         width: u32,
         height: u32,
     ) -> bool {
-        use blinc_core::{layer::Affine2D, DrawContext, Rect, Transform};
+        use blinc_core::{DrawContext, Rect, Transform, layer::Affine2D};
         use blinc_gpu::GpuPaintContext;
 
         let batch = match self.cached_bg_batch.as_mut() {
@@ -1019,7 +1019,7 @@ impl RenderContext {
         width: u32,
         height: u32,
     ) -> CanvasOverlay {
-        use blinc_core::{layer::Affine2D, DrawContext, Rect, Transform};
+        use blinc_core::{DrawContext, Rect, Transform, layer::Affine2D};
         use blinc_gpu::GpuPaintContext;
 
         let records_ref = tree.canvas_paint_records();
@@ -3907,7 +3907,7 @@ impl RenderContext {
         viewport_height: f32,
         scale_factor: f32,
     ) {
-        use blinc_image::{calculate_fit_rects, src_rect_to_uv, ObjectFit, ObjectPosition};
+        use blinc_image::{ObjectFit, ObjectPosition, calculate_fit_rects, src_rect_to_uv};
 
         for image in images {
             // Get cached GPU image
@@ -4157,7 +4157,7 @@ impl RenderContext {
 
     /// Render images to target from references (images must be preloaded first)
     fn render_images_ref(&mut self, target: &wgpu::TextureView, images: &[&ImageElement]) {
-        use blinc_image::{calculate_fit_rects, src_rect_to_uv, ObjectFit, ObjectPosition};
+        use blinc_image::{ObjectFit, ObjectPosition, calculate_fit_rects, src_rect_to_uv};
 
         for image in images {
             // Get cached GPU image

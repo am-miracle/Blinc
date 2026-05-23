@@ -35,18 +35,18 @@
 use std::cell::OnceCell;
 use std::sync::Arc;
 
-use blinc_core::context_state::BlincContextState;
 use blinc_core::State;
+use blinc_core::context_state::BlincContextState;
+use blinc_layout::InstanceKey;
 use blinc_layout::click_outside;
 use blinc_layout::div::ElementTypeId;
 use blinc_layout::element::{ElementBounds, RenderProps};
 use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{stateful_with_key, ButtonState};
+use blinc_layout::stateful::{ButtonState, stateful_with_key};
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_layout::widgets::overlay::AnchorDirection;
 use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
-use blinc_layout::InstanceKey;
 use blinc_theme::{ColorToken, RadiusToken, SpacingToken, ThemeState};
 
 /// Side where the popover appears relative to the trigger

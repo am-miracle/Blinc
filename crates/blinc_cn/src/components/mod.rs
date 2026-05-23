@@ -52,84 +52,84 @@ pub mod tree;
 pub mod typography;
 
 // Re-export all components
-pub use accordion::{accordion, Accordion, AccordionBuilder, AccordionMode};
-pub use alert::{alert, alert_box, Alert, AlertBox, AlertVariant};
-pub use badge::{badge, Badge, BadgeStyle, BadgeVariant};
+pub use accordion::{Accordion, AccordionBuilder, AccordionMode, accordion};
+pub use alert::{Alert, AlertBox, AlertVariant, alert, alert_box};
+pub use badge::{Badge, BadgeStyle, BadgeVariant, badge};
 pub use breadcrumb::{
-    breadcrumb, Breadcrumb, BreadcrumbBuilder, BreadcrumbItem, BreadcrumbSeparator, BreadcrumbSize,
+    Breadcrumb, BreadcrumbBuilder, BreadcrumbItem, BreadcrumbSeparator, BreadcrumbSize, breadcrumb,
 };
-pub use button::{button, Button, ButtonBuilder, ButtonSize, ButtonVariant, IconPosition};
+pub use button::{Button, ButtonBuilder, ButtonSize, ButtonVariant, IconPosition, button};
 pub use collapsible::{
-    collapsible, collapsible_section, Collapsible, CollapsibleBuilder, CollapsibleTrigger,
+    Collapsible, CollapsibleBuilder, CollapsibleTrigger, collapsible, collapsible_section,
 };
 // Re-export ButtonState for users who need it
 pub use blinc_layout::stateful::ButtonState;
 pub use card::{
-    card, card_content, card_footer, card_header, Card, CardContent, CardFooter, CardHeader,
+    Card, CardContent, CardFooter, CardHeader, card, card_content, card_footer, card_header,
 };
 pub use chart::{
-    bar_chart, comparison_bar_chart, histogram, line_chart, spark_line, threshold_line_chart,
     BarChart, BarChartBuilder, ChartGrid, ComparisonBarChart, ComparisonBarChartBuilder, DataPoint,
     DataSeries, Histogram, HistogramBuilder, LineChart, LineChartBuilder, SparkLine,
-    SparkLineBuilder, ThresholdBand, ThresholdLineChart, ThresholdLineChartBuilder,
+    SparkLineBuilder, ThresholdBand, ThresholdLineChart, ThresholdLineChartBuilder, bar_chart,
+    comparison_bar_chart, histogram, line_chart, spark_line, threshold_line_chart,
 };
-pub use checkbox::{checkbox, Checkbox, CheckboxSize};
-pub use combobox::{combobox, Combobox, ComboboxBuilder, ComboboxOption, ComboboxSize};
-pub use context_menu::{context_menu, ContextMenuBuilder, ContextMenuItem, SubmenuBuilder};
-pub use dialog::{alert_dialog, dialog, AlertDialogBuilder, DialogBuilder, DialogSize};
-pub use drawer::{drawer, drawer_left, drawer_right, DrawerBuilder, DrawerSide, DrawerSize};
+pub use checkbox::{Checkbox, CheckboxSize, checkbox};
+pub use combobox::{Combobox, ComboboxBuilder, ComboboxOption, ComboboxSize, combobox};
+pub use context_menu::{ContextMenuBuilder, ContextMenuItem, SubmenuBuilder, context_menu};
+pub use dialog::{AlertDialogBuilder, DialogBuilder, DialogSize, alert_dialog, dialog};
+pub use drawer::{DrawerBuilder, DrawerSide, DrawerSize, drawer, drawer_left, drawer_right};
 pub use dropdown_menu::{
-    dropdown_menu, dropdown_menu_custom, DropdownAlign, DropdownMenuBuilder, DropdownPosition,
+    DropdownAlign, DropdownMenuBuilder, DropdownPosition, dropdown_menu, dropdown_menu_custom,
 };
-pub use hover_card::{hover_card, HoverCard, HoverCardAlign, HoverCardBuilder, HoverCardSide};
-pub use icon::{icon, Icon, IconBuilder, IconSize};
-pub use input::{input, Input, InputBgColors, InputBorderColors, InputSize};
-pub use kbd::{kbd, Kbd, KbdBuilder, KbdSize};
-pub use label::{label, Label, LabelBuilder, LabelSize};
+pub use hover_card::{HoverCard, HoverCardAlign, HoverCardBuilder, HoverCardSide, hover_card};
+pub use icon::{Icon, IconBuilder, IconSize, icon};
+pub use input::{Input, InputBgColors, InputBorderColors, InputSize, input};
+pub use kbd::{Kbd, KbdBuilder, KbdSize, kbd};
+pub use label::{Label, LabelBuilder, LabelSize, label};
 pub use menubar::{
-    menubar, MenuTriggerMode, MenuTriggerStyle, Menubar, MenubarBuilder, MenubarMenu,
-    MenubarTrigger,
+    MenuTriggerMode, MenuTriggerStyle, Menubar, MenubarBuilder, MenubarMenu, MenubarTrigger,
+    menubar,
 };
 pub use navigation_menu::{
-    navigation_link, navigation_menu, NavigationLink, NavigationLinkBuilder, NavigationMenu,
-    NavigationMenuBuilder,
+    NavigationLink, NavigationLinkBuilder, NavigationMenu, NavigationMenuBuilder, navigation_link,
+    navigation_menu,
 };
-pub use pagination::{pagination, Pagination, PaginationBuilder, PaginationSize};
-pub use popover::{popover, Popover, PopoverAlign, PopoverBuilder, PopoverSide};
-pub use progress::{progress, progress_animated, AnimatedProgress, Progress, ProgressSize};
-pub use radio::{radio_group, RadioGroup, RadioGroupBuilder, RadioLayout, RadioSize};
+pub use pagination::{Pagination, PaginationBuilder, PaginationSize, pagination};
+pub use popover::{Popover, PopoverAlign, PopoverBuilder, PopoverSide, popover};
+pub use progress::{AnimatedProgress, Progress, ProgressSize, progress, progress_animated};
+pub use radio::{RadioGroup, RadioGroupBuilder, RadioLayout, RadioSize, radio_group};
 pub use resizable::{
-    resizable_group, resizable_panel, ResizableGroup, ResizableGroupBuilder, ResizablePanelBuilder,
-    ResizeDirection,
+    ResizableGroup, ResizableGroupBuilder, ResizablePanelBuilder, ResizeDirection, resizable_group,
+    resizable_panel,
 };
-pub use select::{select, Select, SelectBuilder, SelectOption, SelectSize};
-pub use separator::{separator, Separator, SeparatorOrientation};
+pub use select::{Select, SelectBuilder, SelectOption, SelectSize, select};
+pub use separator::{Separator, SeparatorOrientation, separator};
 pub use sheet::{
-    sheet, sheet_bottom, sheet_left, sheet_right, sheet_top, SheetBuilder, SheetSide, SheetSize,
+    SheetBuilder, SheetSide, SheetSize, sheet, sheet_bottom, sheet_left, sheet_right, sheet_top,
 };
-pub use sidebar::{sidebar, Sidebar, SidebarBuilder, SidebarItem, SidebarSection};
-pub use skeleton::{skeleton, skeleton_circle, Skeleton};
-pub use slider::{slider, Slider, SliderSize};
-pub use spinner::{spinner, Spinner, SpinnerBuilder, SpinnerSize};
-pub use switch::{switch, Switch, SwitchSize};
-pub use tabs::{tab_item, tabs, TabMenuItem, Tabs, TabsBuilder, TabsSize, TabsTransition};
-pub use textarea::{textarea, Textarea, TextareaSize};
+pub use sidebar::{Sidebar, SidebarBuilder, SidebarItem, SidebarSection, sidebar};
+pub use skeleton::{Skeleton, skeleton, skeleton_circle};
+pub use slider::{Slider, SliderSize, slider};
+pub use spinner::{Spinner, SpinnerBuilder, SpinnerSize, spinner};
+pub use switch::{Switch, SwitchSize, switch};
+pub use tabs::{TabMenuItem, Tabs, TabsBuilder, TabsSize, TabsTransition, tab_item, tabs};
+pub use textarea::{Textarea, TextareaSize, textarea};
 pub use toast::{
-    toast, toast_custom, toast_error, toast_success, toast_warning, ToastBuilder, ToastVariant,
+    ToastBuilder, ToastVariant, toast, toast_custom, toast_error, toast_success, toast_warning,
 };
-pub use tooltip::{tooltip, Tooltip, TooltipAlign, TooltipBuilder, TooltipSide};
-pub use tree::{tree_view, TreeNodeConfig, TreeNodeDiff, TreeView, TreeViewBuilder};
+pub use tooltip::{Tooltip, TooltipAlign, TooltipBuilder, TooltipSide, tooltip};
+pub use tree::{TreeNodeConfig, TreeNodeDiff, TreeView, TreeViewBuilder, tree_view};
 // Typography helpers (label excluded - use Label component instead)
 pub use aspect_ratio::{
-    aspect_ratio, aspect_ratio_16_9, aspect_ratio_21_9, aspect_ratio_4_3, aspect_ratio_9_16,
-    aspect_ratio_square, AspectRatio, AspectRatioBuilder, AspectRatioPreset,
+    AspectRatio, AspectRatioBuilder, AspectRatioPreset, aspect_ratio, aspect_ratio_4_3,
+    aspect_ratio_9_16, aspect_ratio_16_9, aspect_ratio_21_9, aspect_ratio_square,
 };
 pub use avatar::{
-    avatar, avatar_group, Avatar, AvatarBuilder, AvatarGroup, AvatarGroupBuilder, AvatarShape,
-    AvatarSize, AvatarStatus,
+    Avatar, AvatarBuilder, AvatarGroup, AvatarGroupBuilder, AvatarShape, AvatarSize, AvatarStatus,
+    avatar, avatar_group,
 };
 pub use scroll_area::{
-    scroll_area, ScrollArea, ScrollAreaBuilder, ScrollAreaSize, ScrollbarVisibility,
+    ScrollArea, ScrollAreaBuilder, ScrollAreaSize, ScrollbarVisibility, scroll_area,
 };
 pub use typography::{
     b, caption, chained_text, h1, h2, h3, h4, h5, h6, heading, inline_code, muted, p, small, span,

@@ -34,9 +34,9 @@ pub use keyframe::{
 };
 pub use presets::AnimationPreset;
 pub use scheduler::{
-    get_scheduler, is_scheduler_initialized, set_global_scheduler, try_get_scheduler,
     AnimatedKeyframe, AnimatedTimeline, AnimatedValue, AnimationScheduler, ConfigureResult,
-    KeyframeId, SchedulerHandle, SpringId, TickCallback, TickCallbackId, TimelineId,
+    KeyframeId, SchedulerHandle, SpringId, TickCallback, TickCallbackId, TimelineId, get_scheduler,
+    is_scheduler_initialized, set_global_scheduler, try_get_scheduler,
 };
 pub use spring::{Spring, SpringConfig};
 pub use timeline::{StaggerBuilder, Timeline, TimelineEntryId};

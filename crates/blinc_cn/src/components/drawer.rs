@@ -38,11 +38,11 @@ use std::sync::Arc;
 
 use blinc_animation::AnimationPreset;
 use blinc_core::Color;
+use blinc_layout::InstanceKey;
 use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
 use blinc_layout::widgets::overlay::EdgeSide;
 use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
-use blinc_layout::InstanceKey;
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
 
 /// Drawer side variants
@@ -384,9 +384,9 @@ fn build_drawer_content(
             .items_center()
             .justify_between();
 
-        if let Some(ref header_fn) = header {
+        if let Some(header_fn) = header {
             header_div = header_div.child(header_fn());
-        } else if let Some(ref title_text) = title {
+        } else if let Some(title_text) = title {
             header_div = header_div.child(
                 text(title_text)
                     .size(theme.typography().text_lg)
@@ -444,14 +444,14 @@ fn build_drawer_content(
     }
 
     // Footer section
-    if let Some(ref footer_fn) = footer {
+    if let Some(footer_fn) = footer {
         // Push footer to bottom with spacer if no children
         if children.is_empty() {
             drawer = drawer.child(div().flex_1());
         }
 
         drawer = drawer.child(div().w_full().h(1.0).bg(border)); // Separator
-                                                                 // padding from CSS: .cn-drawer-footer { padding: 16px; }
+        // padding from CSS: .cn-drawer-footer { padding: 16px; }
         drawer = drawer.child(div().class("cn-drawer-footer").w_full().child(footer_fn()));
     }
 

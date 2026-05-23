@@ -16,7 +16,7 @@
 use blinc_layout::stateful::StateTransitions;
 
 use super::dispatch::call_guard;
-use super::registry::{with_fsm_registry, FsmId};
+use super::registry::{FsmId, with_fsm_registry};
 
 /// Widget-side handle for a DSL-defined FSM's current state.
 ///
@@ -117,9 +117,9 @@ impl StateTransitions for FsmStateId {
 mod tests {
     use super::*;
     use crate::fsm::dispatch::{
-        clear_guard_dispatcher, set_guard_dispatcher, GuardDispatcher, DISPATCHER_TEST_LOCK,
+        DISPATCHER_TEST_LOCK, GuardDispatcher, clear_guard_dispatcher, set_guard_dispatcher,
     };
-    use crate::fsm::registry::{with_fsm_registry_mut, EventTransition, FsmDefinition, TickGuard};
+    use crate::fsm::registry::{EventTransition, FsmDefinition, TickGuard, with_fsm_registry_mut};
     use std::sync::{Arc, Mutex};
 
     fn arc(s: &str) -> Arc<str> {

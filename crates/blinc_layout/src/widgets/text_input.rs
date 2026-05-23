@@ -22,16 +22,16 @@ use blinc_core::Color;
 use blinc_theme::{ColorToken, ThemeState};
 
 use crate::canvas::canvas;
-use crate::css_parser::{active_stylesheet, ElementState, Stylesheet};
-use crate::div::{div, Div, ElementBuilder};
+use crate::css_parser::{ElementState, Stylesheet, active_stylesheet};
+use crate::div::{Div, ElementBuilder, div};
 use crate::element::RenderProps;
 use crate::stateful::{
-    refresh_stateful, SharedState, StateTransitions, Stateful, StatefulInner, TextFieldState,
+    SharedState, StateTransitions, Stateful, StatefulInner, TextFieldState, refresh_stateful,
 };
 use crate::text::text;
-use crate::text_selection::{clear_selection, set_selection, SelectionSource};
+use crate::text_selection::{SelectionSource, clear_selection, set_selection};
 use crate::tree::{LayoutNodeId, LayoutTree};
-use crate::widgets::cursor::{cursor_state, CursorAnimation, SharedCursorState};
+use crate::widgets::cursor::{CursorAnimation, SharedCursorState, cursor_state};
 
 /// Get elapsed time in milliseconds since app start (for cursor blinking)
 pub fn elapsed_ms() -> u64 {

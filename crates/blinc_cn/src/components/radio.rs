@@ -40,17 +40,17 @@
 //! ```
 
 use blinc_core::{Color, State, Transform};
-use blinc_layout::css_parser::{active_stylesheet, ElementState, Stylesheet};
+use blinc_layout::css_parser::{ElementState, Stylesheet, active_stylesheet};
 use blinc_layout::div::ElementTypeId;
 use blinc_layout::element::RenderProps;
 use blinc_layout::element_style::ElementStyle;
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{stateful_with_key, ButtonState};
+use blinc_layout::stateful::{ButtonState, stateful_with_key};
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_theme::{ColorToken, SpacingToken, ThemeState};
 use std::sync::Arc;
 
-use super::label::{label, LabelSize};
+use super::label::{LabelSize, label};
 
 /// Radio button size variants
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

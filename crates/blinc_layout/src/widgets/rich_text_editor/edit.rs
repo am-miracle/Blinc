@@ -15,7 +15,7 @@
 use crate::styled_text::{StyledLine, TextSpan};
 
 use super::cursor::{ActiveFormat, DocPosition, Selection};
-use super::document::{char_to_byte, Block, BlockKind, RichDocument};
+use super::document::{Block, BlockKind, RichDocument, char_to_byte};
 
 // =============================================================================
 // Public API

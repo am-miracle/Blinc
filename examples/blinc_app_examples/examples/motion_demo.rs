@@ -18,7 +18,7 @@ use blinc_animation::{AnimationPreset, SpringConfig};
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
 use blinc_core::Color;
-use blinc_layout::motion::{motion, StaggerConfig};
+use blinc_layout::motion::{StaggerConfig, motion};
 use blinc_layout::prelude::stateful_from_handle;
 use blinc_layout::widgets::scroll::Scroll;
 use std::sync::{Arc, Mutex};

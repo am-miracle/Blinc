@@ -18,7 +18,7 @@
 
 use crate::div::FontWeight;
 use crate::styled_text::{StyledLine, TextSpan};
-use crate::text_measure::{measure_text_with_options, TextLayoutOptions};
+use crate::text_measure::{TextLayoutOptions, measure_text_with_options};
 
 /// One visual line produced by [`wrap_styled_line`].
 ///

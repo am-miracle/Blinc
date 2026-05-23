@@ -15,13 +15,13 @@
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
-use blinc_core::context_state::BlincContextState;
 use blinc_core::Color;
+use blinc_core::context_state::BlincContextState;
 use blinc_layout::widgets::rich_text_editor::{
     document::RichDocument,
     editor::rich_text_editor,
     render::RichTextTheme,
-    state::{rich_text_state, RichTextState},
+    state::{RichTextState, rich_text_state},
 };
 
 #[cfg(not(target_arch = "wasm32"))]

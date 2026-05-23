@@ -544,11 +544,7 @@ fn test_rapid_state_changes() {
     );
 
     fn get_scale(s: u32) -> f32 {
-        if s == HOVERED {
-            1.1
-        } else {
-            1.0
-        }
+        if s == HOVERED { 1.1 } else { 1.0 }
     }
 
     // Rapid hover/unhover sequence

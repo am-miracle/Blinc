@@ -3,7 +3,7 @@
 //! Transitions use Blinc's animation system — `MultiKeyframeAnimation`
 //! for preset effects, `SpringConfig` for physics-based custom transitions.
 
-use blinc_animation::{keyframe::MultiKeyframeAnimation, AnimationPreset, SpringConfig};
+use blinc_animation::{AnimationPreset, SpringConfig, keyframe::MultiKeyframeAnimation};
 
 /// Page transition configuration.
 ///

@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use blinc_core::events::{event_types, EventType};
+use blinc_core::events::{EventType, event_types};
 
 use crate::tree::LayoutNodeId;
 
@@ -664,8 +664,8 @@ impl HandlerRegistry {
 mod tests {
     use super::*;
     use slotmap::SlotMap;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     fn create_node_id() -> LayoutNodeId {
         let mut sm: SlotMap<LayoutNodeId, ()> = SlotMap::with_key();

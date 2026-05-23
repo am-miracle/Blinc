@@ -231,7 +231,9 @@ impl RenderTree {
         if child_node_ids.len() != child_builders.len() && !child_node_ids.is_empty() {
             tracing::warn!(
                 "collect_render_props: node {:?} has {} layout children but {} builder children (mismatch!)",
-                node_id, child_node_ids.len(), child_builders.len()
+                node_id,
+                child_node_ids.len(),
+                child_builders.len()
             );
         }
 

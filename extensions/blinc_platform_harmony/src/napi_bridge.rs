@@ -61,7 +61,7 @@ pub struct XComponentCallbacks {
 /// # Safety
 ///
 /// This function is called by the HarmonyOS N-API runtime.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn napi_register_module() -> *mut c_void {
     tracing::info!("blinc_platform_harmony: N-API module registration");
 
@@ -90,7 +90,7 @@ pub extern "C" fn napi_register_module() -> *mut c_void {
 ///
 /// Called by HarmonyOS when the XComponent is loaded.
 /// This is the native entry point specified in the XComponent's libraryname.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn OH_NativeXComponent_Export() -> *mut c_void {
     tracing::info!("blinc_platform_harmony: XComponent export");
 

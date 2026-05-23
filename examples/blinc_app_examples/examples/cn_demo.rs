@@ -57,11 +57,16 @@ fn main() -> Result<()> {
         config,
         theme_bundle(),
         blinc_theme::detect_system_color_scheme(),
-        build_ui,
+        // Closure wrapper rather than passing `build_ui` directly: on
+        // edition 2024, `fn build_ui(ctx) -> impl ElementBuilder`
+        // captures `ctx`'s lifetime in the return type (RPIT capture
+        // rules), which breaks the higher-ranked `FnMut` bound. The
+        // closure infers per-lifetime so the bound is satisfied.
+        |ctx| build_ui(ctx),
     )
 }
 
-pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
+pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     eprintln!("build_ui called");
     let theme = ThemeState::get();
 
@@ -99,7 +104,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder {
                         // Test layout animation
                         // .child(layout_animation_test())
                         // Component sections
-                        .child(progress_section(ctx, &scroll_ref))
+                        .child(progress_section(ctx))
                         .child(buttons_section(ctx))
                         .child(css_overrides_section())
                         .child(badges_section())
@@ -329,7 +334,7 @@ fn menubar_demo() -> impl ElementBuilder {
 }
 
 /// Header with title and theme toggle
-fn header(ctx: &WindowedContext) -> impl ElementBuilder {
+fn header(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let surface = theme.color(ColorToken::Surface);
     let text_primary = theme.color(ColorToken::TextPrimary);
@@ -476,7 +481,7 @@ fn css_overrides_section() -> impl ElementBuilder {
 // BUTTON SECTION
 // ============================================================================
 
-fn buttons_section(_ctx: &WindowedContext) -> impl ElementBuilder {
+fn buttons_section(_ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -705,7 +710,7 @@ fn alerts_section() -> impl ElementBuilder {
 // FORM INPUTS SECTION
 // ============================================================================
 
-fn form_inputs_section(_ctx: &WindowedContext) -> impl ElementBuilder {
+fn form_inputs_section(_ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let username_data = text_input_data();
     let email_data = text_input_data();
     let password_data = text_input_data();
@@ -768,7 +773,7 @@ fn form_inputs_section(_ctx: &WindowedContext) -> impl ElementBuilder {
 // TOGGLES SECTION (Checkbox, Switch)
 // ============================================================================
 
-fn toggles_section(ctx: &WindowedContext) -> impl ElementBuilder {
+fn toggles_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let checkbox1 = ctx.use_state_keyed("checkbox1", || false);
     let checkbox2 = ctx.use_state_keyed("checkbox2", || true);
     let checkbox3 = ctx.use_state_keyed("checkbox3", || false);
@@ -807,7 +812,7 @@ fn toggles_section(ctx: &WindowedContext) -> impl ElementBuilder {
 // SLIDER SECTION
 // ============================================================================
 
-fn slider_section(ctx: &WindowedContext) -> impl ElementBuilder {
+fn slider_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let volume = ctx.use_state_keyed("volume", || 0.5);
     let brightness = ctx.use_state_keyed("brightness", || 75.0);
     let disabled_slider = ctx.use_state_keyed("disabled_slider", || 0.3);
@@ -848,7 +853,7 @@ fn slider_section(ctx: &WindowedContext) -> impl ElementBuilder {
 // RADIO GROUP SECTION
 // ============================================================================
 
-fn radio_section(ctx: &WindowedContext) -> impl ElementBuilder {
+fn radio_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let size_choice = ctx.use_state_keyed("size_choice", || "medium".to_string());
     let color_choice = ctx.use_state_keyed("color_choice", || "blue".to_string());
 
@@ -883,7 +888,7 @@ fn radio_section(ctx: &WindowedContext) -> impl ElementBuilder {
 // SELECT SECTION
 // ============================================================================
 
-fn select_section(ctx: &WindowedContext) -> impl ElementBuilder {
+fn select_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let fruit = ctx.use_state_keyed("fruit_select", || "".to_string());
     let size = ctx.use_state_keyed("size_select", || "medium".to_string());
     let disabled_select = ctx.use_state_keyed("disabled_select", || "option1".to_string());
@@ -931,7 +936,7 @@ fn select_section(ctx: &WindowedContext) -> impl ElementBuilder {
 // COMBOBOX SECTION
 // ============================================================================
 
-fn combobox_section(ctx: &WindowedContext) -> impl ElementBuilder {
+fn combobox_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let country = ctx.use_state_keyed("country_combobox", || "".to_string());
     let framework = ctx.use_state_keyed("framework_combobox", || "".to_string());
     let custom_value = ctx.use_state_keyed("custom_combobox", || "".to_string());
@@ -1193,7 +1198,7 @@ fn dropdown_menu_section() -> impl ElementBuilder {
 // DIALOG SECTION
 // ============================================================================
 
-fn dialog_section(_ctx: &WindowedContext) -> impl ElementBuilder {
+fn dialog_section(_ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let _text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -1275,7 +1280,7 @@ fn dialog_section(_ctx: &WindowedContext) -> impl ElementBuilder {
 // SHEET SECTION
 // ============================================================================
 
-fn sheet_section(_ctx: &WindowedContext) -> impl ElementBuilder {
+fn sheet_section(_ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     section_container().child(section_title("Sheets")).child(
         div()
             .flex_row()
@@ -1468,7 +1473,7 @@ fn sheet_section(_ctx: &WindowedContext) -> impl ElementBuilder {
 // DRAWER SECTION
 // ============================================================================
 
-fn drawer_section(_ctx: &WindowedContext) -> impl ElementBuilder {
+fn drawer_section(_ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     section_container().child(section_title("Drawers")).child(
         div()
             .flex_row()
@@ -1618,7 +1623,7 @@ fn drawer_section(_ctx: &WindowedContext) -> impl ElementBuilder {
 // LOADING SECTION (Skeleton, Spinner)
 // ============================================================================
 
-fn loading_section(_ctx: &WindowedContext) -> impl ElementBuilder {
+fn loading_section(_ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     section_container()
         .child(section_title("Loading States"))
         .child(
@@ -1655,7 +1660,7 @@ fn loading_section(_ctx: &WindowedContext) -> impl ElementBuilder {
 // PROGRESS SECTION
 // ============================================================================
 
-fn progress_section(ctx: &WindowedContext, _scroll_ref: &ScrollRef) -> impl ElementBuilder {
+fn progress_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     const PROGRESS_WIDTH: f32 = 300.0;
 
     // Create animated progress - start at 0. Critically damped (damping ==
@@ -1754,7 +1759,7 @@ fn progress_section(ctx: &WindowedContext, _scroll_ref: &ScrollRef) -> impl Elem
 // TABS SECTION
 // ============================================================================
 
-fn tabs_section(ctx: &WindowedContext) -> impl ElementBuilder {
+fn tabs_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     // Simple tabs state
     let simple_tab = ctx.use_state_keyed("simple_tab", || "tab1".to_string());
 
@@ -1968,7 +1973,7 @@ fn breadcrumb_section() -> impl ElementBuilder {
 // PAGINATION SECTION
 // ============================================================================
 
-fn pagination_section(ctx: &WindowedContext) -> impl ElementBuilder {
+fn pagination_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -2118,7 +2123,7 @@ fn navigation_menu_section() -> impl ElementBuilder {
 // SIDEBAR SECTION
 // ============================================================================
 
-fn sidebar_section(ctx: &WindowedContext) -> impl ElementBuilder {
+fn sidebar_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
     let border = theme.color(ColorToken::Border);
@@ -2522,7 +2527,7 @@ fn accordion_section() -> impl ElementBuilder {
 // TOAST SECTION
 // ============================================================================
 
-fn toast_section(_ctx: &WindowedContext) -> impl ElementBuilder {
+fn toast_section(_ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     section_container().child(section_title("Toasts")).child(
         div()
             .flex_row()

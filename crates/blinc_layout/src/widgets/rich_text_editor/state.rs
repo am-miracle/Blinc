@@ -9,11 +9,11 @@
 use std::sync::{Arc, Mutex};
 use web_time::Instant;
 
-use blinc_animation::{try_get_scheduler, TickCallbackId};
+use blinc_animation::{TickCallbackId, try_get_scheduler};
 
 use crate::div::FontWeight;
 use crate::styled_text::StyledLine;
-use crate::widgets::cursor::{cursor_state, SharedCursorState};
+use crate::widgets::cursor::{SharedCursorState, cursor_state};
 
 use super::cursor::{ActiveFormat, DocPosition, Selection};
 use super::document::RichDocument;

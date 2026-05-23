@@ -47,7 +47,7 @@
 use blinc_app::web::WebApp;
 use blinc_app::windowed::WindowedContext;
 use blinc_core::Color;
-use blinc_layout::div::{div, Div};
+use blinc_layout::div::{Div, div};
 use blinc_layout::text::text;
 use wasm_bindgen::prelude::*;
 

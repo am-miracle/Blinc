@@ -20,13 +20,13 @@
 //!     .duration_ms(2000)
 //! ```
 
-use blinc_animation::{get_scheduler, AnimatedTimeline, SharedAnimatedTimeline};
+use blinc_animation::{AnimatedTimeline, SharedAnimatedTimeline, get_scheduler};
 use blinc_core::{ClipLength, ClipPath, Color};
+use blinc_layout::InstanceKey;
 use blinc_layout::div::{Div, ElementTypeId};
 use blinc_layout::element::RenderProps;
 use blinc_layout::prelude::*;
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
-use blinc_layout::InstanceKey;
 use blinc_theme::{ColorToken, ThemeState};
 use std::cell::{OnceCell, RefCell};
 use std::sync::{Arc, Mutex};

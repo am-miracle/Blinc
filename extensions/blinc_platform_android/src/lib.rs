@@ -45,7 +45,7 @@ pub use window::AndroidWindow;
 
 // Re-export native bridge types
 #[cfg(target_os = "android")]
-pub use native_bridge::{init_android_native_bridge, AndroidNativeBridgeAdapter};
+pub use native_bridge::{AndroidNativeBridgeAdapter, init_android_native_bridge};
 
 use blinc_platform::{Platform, PlatformError};
 

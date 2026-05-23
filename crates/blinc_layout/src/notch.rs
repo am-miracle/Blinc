@@ -56,14 +56,14 @@ use std::rc::Rc;
 use blinc_core::{
     Brush, Color, CornerRadius, DrawContext, Gradient, Path, Rect, Shadow, Transform,
 };
-use taffy::{prelude::*, Overflow};
+use taffy::{Overflow, prelude::*};
 
+use crate::Div;
 use crate::canvas::{CanvasBounds, CanvasRenderFn};
 use crate::div::{ElementBuilder, ElementTypeId};
 use crate::element::{Material, RenderLayer, RenderProps};
 use crate::event_handler::EventHandlers;
 use crate::tree::{LayoutNodeId, LayoutTree};
-use crate::Div;
 
 // =============================================================================
 // Corner Configuration
@@ -1357,11 +1357,7 @@ impl Notch {
     where
         F: FnOnce(Self) -> Self,
     {
-        if condition {
-            f(self)
-        } else {
-            self
-        }
+        if condition { f(self) } else { self }
     }
 
     // =========================================================================

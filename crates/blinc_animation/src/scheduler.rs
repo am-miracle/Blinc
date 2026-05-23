@@ -11,7 +11,7 @@ use crate::keyframe::{Keyframe, KeyframeAnimation};
 use crate::spring::{Spring, SpringConfig};
 use crate::timeline::Timeline;
 use blinc_core::AnimationAccess;
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread::JoinHandle;
@@ -694,8 +694,8 @@ impl AnimationScheduler {
     pub fn start_raf(&self) {
         use std::cell::RefCell;
         use std::rc::Rc;
-        use wasm_bindgen::closure::Closure;
         use wasm_bindgen::JsCast;
+        use wasm_bindgen::closure::Closure;
 
         let window = web_sys::window().expect("AnimationScheduler::start_raf needs `window`");
 
@@ -2661,9 +2661,11 @@ mod tests {
         assert!(!handle.is_alive());
 
         // Operations should safely no-op
-        assert!(handle
-            .register_spring(Spring::new(SpringConfig::stiff(), 0.0))
-            .is_none());
+        assert!(
+            handle
+                .register_spring(Spring::new(SpringConfig::stiff(), 0.0))
+                .is_none()
+        );
     }
 
     #[test]

@@ -72,13 +72,13 @@ use blinc_layout::div::ElementTypeId;
 use blinc_layout::element::{CursorStyle, RenderProps};
 use blinc_layout::motion::motion_derived;
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{stateful_with_key, ButtonState, NoState};
+use blinc_layout::stateful::{ButtonState, NoState, stateful_with_key};
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_theme::{ColorScheme, ColorToken, RadiusToken, ThemeState};
 
+use blinc_layout::InstanceKey;
 use blinc_layout::selector::query_motion;
 use blinc_layout::stateful::request_redraw;
-use blinc_layout::InstanceKey;
 
 // =============================================================================
 // Tab Transition Tracking (simple cross-fade)
@@ -766,7 +766,7 @@ fn build_tab_trigger(
     tab_state: State<String>,
     on_change: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     motion_key: Option<String>,
-) -> impl ElementBuilder {
+) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
     let text_secondary = theme.color(ColorToken::TextSecondary);

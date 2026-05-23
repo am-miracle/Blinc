@@ -635,10 +635,10 @@ impl FlowPipelineCache {
             entries: &entries,
         });
 
-        let gen = self.scene_generation;
+        let scene_id = self.scene_generation;
         let cached = self.pipelines.get_mut(flow_name).unwrap();
         cached.cached_bind_group = Some(bind_group);
-        cached.cached_scene_id = gen;
+        cached.cached_scene_id = scene_id;
         true
     }
 

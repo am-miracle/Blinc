@@ -36,11 +36,11 @@ use std::sync::Arc;
 
 use blinc_animation::{AnimationPreset, MultiKeyframeAnimation};
 use blinc_core::Color;
+use blinc_layout::InstanceKey;
 use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
 use blinc_layout::widgets::overlay::EdgeSide;
 use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
-use blinc_layout::InstanceKey;
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
 
 /// Sheet side variants - which edge the sheet slides from
@@ -433,7 +433,7 @@ fn build_sheet_content(
 
     let mut header_text = div().flex_col().gap_1();
 
-    if let Some(ref title_text) = title {
+    if let Some(title_text) = title {
         header_text = header_text.child(
             text(title_text)
                 .size(theme.typography().text_lg)
@@ -442,7 +442,7 @@ fn build_sheet_content(
         );
     }
 
-    if let Some(ref desc_text) = description {
+    if let Some(desc_text) = description {
         header_text = header_text.child(
             text(desc_text)
                 .size(theme.typography().text_sm)
@@ -480,7 +480,7 @@ fn build_sheet_content(
     sheet = sheet.child(div().w_full().h(1.0).bg(border));
 
     // Content section (scrollable)
-    if let Some(ref content_fn) = content {
+    if let Some(content_fn) = content {
         let content_div = div()
             .flex_1()
             .w_full()
@@ -491,7 +491,7 @@ fn build_sheet_content(
     }
 
     // Footer section
-    if let Some(ref footer_fn) = footer {
+    if let Some(footer_fn) = footer {
         sheet = sheet.child(div().w_full().h(1.0).bg(border)); // Separator
         sheet = sheet.child(div().w_full().p_4().child(footer_fn()));
     }

@@ -32,7 +32,7 @@
 //! [`blinc_theme::ThemeBundle`] and pass it to `run_with_theme` /
 //! `ThemeState::init` directly.
 
-use blinc_theme::{platform_theme_bundle, ThemeBundle};
+use blinc_theme::{ThemeBundle, platform_theme_bundle};
 
 /// The default theme bundle paired with blinc_cn's CSS.
 ///

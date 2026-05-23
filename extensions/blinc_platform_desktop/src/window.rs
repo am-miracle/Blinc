@@ -1,8 +1,8 @@
 //! Desktop window implementation using winit
 
 use blinc_platform::{Cursor, Window, WindowConfig, WindowLevel};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use winit::dpi::LogicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window as WinitWindow, WindowAttributes, WindowLevel as WinitWindowLevel};

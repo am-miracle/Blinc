@@ -30,7 +30,12 @@ fn main() -> Result<()> {
         config,
         cn_bundle(),
         ColorScheme::Light,
-        build_ui,
+        // Closure wrapper: on edition 2024, `fn build_ui(ctx) -> impl Element`
+        // captures `ctx`'s lifetime in the return type, which breaks the
+        // higher-ranked `FnMut` bound when passed by name. The closure
+        // dodges this. See `WindowedApp::run` docs for the alternative
+        // (`+ use<>` on the named fn).
+        |ctx| build_ui(ctx),
     )
 }
 
@@ -65,7 +70,7 @@ let bundle = cn_bundle()
     "#)
     .with_css_file("./styles/brand.css");
 
-WindowedApp::run_with_theme(config, bundle, ColorScheme::Light, build_ui)
+WindowedApp::run_with_theme(config, bundle, ColorScheme::Light, |ctx| build_ui(ctx))
 ```
 
 ### Using a custom theme

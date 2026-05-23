@@ -54,7 +54,7 @@ use blinc_layout::div::ElementTypeId;
 use blinc_layout::element::{CursorStyle, ElementBounds, RenderProps};
 use blinc_layout::overlay_state::overlay_stack;
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{stateful_with_key, ButtonState, Stateful};
+use blinc_layout::stateful::{ButtonState, Stateful, stateful_with_key};
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
 use blinc_layout::widgets::hr::hr;
 use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
@@ -65,8 +65,8 @@ const CHEVRON_DOWN_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width=
 
 /// Icon for chevron up
 const CHEVRON_UP_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>"#;
-use crate::button::use_button_state;
 use crate::ButtonVariant;
+use crate::button::use_button_state;
 use blinc_layout::InstanceKey;
 
 use super::context_menu::{ContextMenuItem, SubmenuBuilder};

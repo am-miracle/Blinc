@@ -1246,9 +1246,18 @@ mod tests {
             Ok(prepared) => {
                 println!("Prepared {} glyphs for 'SF Mono':", prepared.glyphs.len());
                 for (i, glyph) in prepared.glyphs.iter().enumerate() {
-                    println!("  [{}] bounds=[{:.1}, {:.1}, {:.1}, {:.1}], uv=[{:.4}, {:.4}, {:.4}, {:.4}]",
-                        i, glyph.bounds[0], glyph.bounds[1], glyph.bounds[2], glyph.bounds[3],
-                        glyph.uv_bounds[0], glyph.uv_bounds[1], glyph.uv_bounds[2], glyph.uv_bounds[3]);
+                    println!(
+                        "  [{}] bounds=[{:.1}, {:.1}, {:.1}, {:.1}], uv=[{:.4}, {:.4}, {:.4}, {:.4}]",
+                        i,
+                        glyph.bounds[0],
+                        glyph.bounds[1],
+                        glyph.bounds[2],
+                        glyph.bounds[3],
+                        glyph.uv_bounds[0],
+                        glyph.uv_bounds[1],
+                        glyph.uv_bounds[2],
+                        glyph.uv_bounds[3]
+                    );
                 }
             }
             Err(e) => {

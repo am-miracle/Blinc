@@ -24,7 +24,7 @@
 
 use std::sync::Arc;
 
-use crate::div::{div, Div};
+use crate::div::{Div, div};
 use crate::widgets::scroll::ScrollDirection;
 
 /// Builder function that creates a Div for a given item index.

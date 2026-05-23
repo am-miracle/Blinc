@@ -48,14 +48,14 @@
 use std::cell::OnceCell;
 use std::sync::Arc;
 
-use blinc_core::context_state::BlincContextState;
 use blinc_core::State;
+use blinc_core::context_state::BlincContextState;
+use blinc_layout::InstanceKey;
 use blinc_layout::div::{Div, ElementBuilder};
 use blinc_layout::element::{CursorStyle, RenderProps};
 use blinc_layout::prelude::*;
-use blinc_layout::stateful::{stateful_with_key, NoState};
+use blinc_layout::stateful::{NoState, stateful_with_key};
 use blinc_layout::tree::{LayoutNodeId, LayoutTree};
-use blinc_layout::InstanceKey;
 use blinc_theme::{ColorToken, ThemeState};
 
 /// Direction of resize operation

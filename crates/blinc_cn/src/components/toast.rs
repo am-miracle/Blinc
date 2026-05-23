@@ -74,7 +74,7 @@ use blinc_layout::widgets::overlay::Corner;
 use blinc_layout::widgets::toast_tray::{ToastBuilder as TrayBuilder, ToastHandle};
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
 
-use super::button::{button, ButtonSize, ButtonVariant};
+use super::button::{ButtonSize, ButtonVariant, button};
 
 /// Toast visual variants
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -334,7 +334,7 @@ fn build_toast_content(
     let theme = ThemeState::get();
 
     // If fully custom content is provided, use that directly
-    if let Some(ref custom_fn) = custom_content {
+    if let Some(custom_fn) = custom_content {
         return custom_fn()
             .class("cn-toast")
             .w(360.0)
@@ -367,7 +367,7 @@ fn build_toast_content(
 
     let mut inner = div().w_full().flex_row().items_start().gap_3().p_4();
 
-    if let Some(ref svg_str) = icon_svg {
+    if let Some(svg_str) = icon_svg {
         inner = inner.child(
             div()
                 .flex_shrink_0()
@@ -377,7 +377,7 @@ fn build_toast_content(
 
     let mut content = div().flex_1().flex_col().gap_1();
 
-    if let Some(ref title_text) = title {
+    if let Some(title_text) = title {
         content = content.child(
             text(title_text)
                 .size(theme.typography().text_sm)
@@ -386,9 +386,9 @@ fn build_toast_content(
         );
     }
 
-    if let Some(ref body_fn) = body {
+    if let Some(body_fn) = body {
         content = content.child(body_fn());
-    } else if let Some(ref desc) = description {
+    } else if let Some(desc) = description {
         content = content.child(
             text(desc)
                 .size(theme.typography().text_sm)
@@ -398,7 +398,7 @@ fn build_toast_content(
 
     inner = inner.child(content);
 
-    if let Some(ref label) = action_label {
+    if let Some(label) = action_label {
         let callback = action_callback.clone();
         inner = inner.child(
             button(label)

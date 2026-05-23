@@ -9,24 +9,24 @@
 //! - Inherits ALL Div methods for full layout control via Deref
 
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 
-use blinc_core::reactive::SignalId;
 use blinc_core::Color;
+use blinc_core::reactive::SignalId;
 use blinc_theme::{ColorToken, ThemeState};
 
 use crate::canvas::canvas;
-use crate::css_parser::{active_stylesheet, ElementState, Stylesheet};
-use crate::div::{div, Div, ElementBuilder};
+use crate::css_parser::{ElementState, Stylesheet, active_stylesheet};
+use crate::div::{Div, ElementBuilder, div};
 use crate::element::RenderProps;
 use crate::stateful::{
-    refresh_stateful, SharedState, StateTransitions, Stateful, StatefulInner, TextFieldState,
+    SharedState, StateTransitions, Stateful, StatefulInner, TextFieldState, refresh_stateful,
 };
 use crate::text::text;
 use crate::tree::{LayoutNodeId, LayoutTree};
-use crate::widgets::cursor::{cursor_state, CursorAnimation, SharedCursorState};
+use crate::widgets::cursor::{CursorAnimation, SharedCursorState, cursor_state};
 use crate::widgets::scroll::{Scroll, ScrollDirection, ScrollPhysics, SharedScrollPhysics};
 use crate::widgets::text_input::{
     elapsed_ms, increment_focus_count, request_continuous_redraw_pub, set_focused_text_area,
