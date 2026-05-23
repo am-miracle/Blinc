@@ -84,7 +84,16 @@ impl HybridTheme {
                 // Mixed scale: tight for inputs (sm/default/md), bold for surfaces (lg+).
                 radius_none: 0.0,
                 radius_sm: 4.0,
-                radius_default: 8.0,
+                // Sits at `smoothing_threshold` (12.0) so default
+                // corners engage the Hybrid squircle. Below the
+                // threshold every corner falls back to a true
+                // circle, which left buttons / inputs (the most
+                // common surfaces consuming `--radius-default`) on
+                // the circular fallback. `radius_md` (10.0) stays
+                // smaller — default > md is intentional for this
+                // token: `default` is "what unmarked surfaces get",
+                // not a strict ladder step.
+                radius_default: 12.0,
                 radius_md: 10.0,
                 radius_lg: 14.0,
                 radius_xl: 18.0,
@@ -175,7 +184,16 @@ impl HybridTheme {
             radii: RadiusTokens {
                 radius_none: 0.0,
                 radius_sm: 4.0,
-                radius_default: 8.0,
+                // Sits at `smoothing_threshold` (12.0) so default
+                // corners engage the Hybrid squircle. Below the
+                // threshold every corner falls back to a true
+                // circle, which left buttons / inputs (the most
+                // common surfaces consuming `--radius-default`) on
+                // the circular fallback. `radius_md` (10.0) stays
+                // smaller — default > md is intentional for this
+                // token: `default` is "what unmarked surfaces get",
+                // not a strict ladder step.
+                radius_default: 12.0,
                 radius_md: 10.0,
                 radius_lg: 14.0,
                 radius_xl: 18.0,

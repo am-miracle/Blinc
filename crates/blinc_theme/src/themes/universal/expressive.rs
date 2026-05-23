@@ -78,7 +78,16 @@ impl ExpressiveTheme {
                 // Bolder ladder throughout.
                 radius_none: 0.0,
                 radius_sm: 4.0,
-                radius_default: 10.0,
+                // Sits at `smoothing_threshold` (16.0) so default
+                // corners engage the Expressive squircle. Below the
+                // threshold every corner falls back to a true
+                // circle, which left buttons / inputs (the most
+                // common surfaces consuming `--radius-default`) on
+                // the circular fallback. `radius_md` (12.0) stays
+                // smaller — default > md is intentional for this
+                // token: `default` is "what unmarked surfaces get",
+                // not a strict ladder step.
+                radius_default: 16.0,
                 radius_md: 12.0,
                 radius_lg: 16.0,
                 radius_xl: 24.0,
@@ -165,7 +174,16 @@ impl ExpressiveTheme {
             radii: RadiusTokens {
                 radius_none: 0.0,
                 radius_sm: 4.0,
-                radius_default: 10.0,
+                // Sits at `smoothing_threshold` (16.0) so default
+                // corners engage the Expressive squircle. Below the
+                // threshold every corner falls back to a true
+                // circle, which left buttons / inputs (the most
+                // common surfaces consuming `--radius-default`) on
+                // the circular fallback. `radius_md` (12.0) stays
+                // smaller — default > md is intentional for this
+                // token: `default` is "what unmarked surfaces get",
+                // not a strict ladder step.
+                radius_default: 16.0,
                 radius_md: 12.0,
                 radius_lg: 16.0,
                 radius_xl: 24.0,

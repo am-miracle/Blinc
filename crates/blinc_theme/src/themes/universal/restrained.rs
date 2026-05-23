@@ -75,7 +75,16 @@ impl RestrainedTheme {
             radii: RadiusTokens {
                 radius_none: 0.0,
                 radius_sm: 3.0,
-                radius_default: 6.0,
+                // Sits at `smoothing_threshold` (12.0) so default
+                // corners engage the Restrained squircle. Below the
+                // threshold every corner falls back to a true circle
+                // (see `resolve_corner_shape`) and the variant's
+                // signature shape never reaches the most common
+                // surfaces (buttons, inputs). `radius_md` (8.0)
+                // stays smaller — default > md is intentional for
+                // this token: `default` is "what unmarked surfaces
+                // get", not a strict ladder step.
+                radius_default: 12.0,
                 radius_md: 8.0,
                 radius_lg: 10.0,
                 radius_xl: 14.0,
@@ -162,7 +171,16 @@ impl RestrainedTheme {
             radii: RadiusTokens {
                 radius_none: 0.0,
                 radius_sm: 3.0,
-                radius_default: 6.0,
+                // Sits at `smoothing_threshold` (12.0) so default
+                // corners engage the Restrained squircle. Below the
+                // threshold every corner falls back to a true circle
+                // (see `resolve_corner_shape`) and the variant's
+                // signature shape never reaches the most common
+                // surfaces (buttons, inputs). `radius_md` (8.0)
+                // stays smaller — default > md is intentional for
+                // this token: `default` is "what unmarked surfaces
+                // get", not a strict ladder step.
+                radius_default: 12.0,
                 radius_md: 8.0,
                 radius_lg: 10.0,
                 radius_xl: 14.0,
