@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Blinc Book](https://img.shields.io/badge/Blinc_Book-blue.svg?logo=gitbook&logoColor=white)](https://project-blinc.github.io/Blinc)
 [![Live Demos](https://img.shields.io/badge/Live_Demos-WebGPU-orange.svg)](https://project-blinc.github.io/Blinc/web/example-gallery.html)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/4CrVDWcK)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/WXADUBBgzP)
 
 ![Blinc UI](glass_music_player.png)
 
@@ -95,7 +95,7 @@ See [ROADMAP.md](ROADMAP.md) for detailed milestones. Current focus:
 
 ## Community
 
-Join us on **[Discord](https://discord.gg/4CrVDWcK)** — questions, showcases, design discussion, and roadmap chatter. Also feel free to open a [GitHub Discussion](https://github.com/project-blinc/Blinc/discussions) for longer-form conversations.
+Join us on **[Discord](https://discord.gg/WXADUBBgzP)** — questions, showcases, design discussion, and roadmap chatter. Also feel free to open a [GitHub Discussion](https://github.com/project-blinc/Blinc/discussions) for longer-form conversations.
 
 ## License
 
