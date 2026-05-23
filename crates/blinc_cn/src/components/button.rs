@@ -150,7 +150,7 @@ fn darken(color: Color, amount: f32) -> Color {
 }
 
 /// Button size variants
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum ButtonSize {
     /// Small button
     Small,
@@ -161,6 +161,15 @@ pub enum ButtonSize {
     Large,
     /// Icon-only button (square)
     Icon,
+    /// Explicit dimensions in logical pixels — `(width, height)`.
+    ///
+    /// Use when the standard `Small` / `Medium` / `Large` ladder
+    /// doesn't fit (a wide auth-flow CTA, a tight inline action, a
+    /// settings row aligned to a specific column width). Padding /
+    /// font-size / corner radius fall back to the `Medium` defaults
+    /// — drop a per-instance `.id(...)` + CSS rule if you need to
+    /// tweak those independently of the dimensions.
+    Custom(f32, f32),
 }
 
 impl ButtonSize {
@@ -171,6 +180,21 @@ impl ButtonSize {
             ButtonSize::Medium => "cn-button--md",
             ButtonSize::Large => "cn-button--lg",
             ButtonSize::Icon => "cn-button--icon",
+            // `Custom` opts out of size-specific cascade rules — the
+            // explicit dimensions are the source of truth. The
+            // generic `.cn-button` class still applies for variant
+            // colours / hover / etc.
+            ButtonSize::Custom(_, _) => "cn-button--custom",
+        }
+    }
+
+    /// Explicit width in logical pixels when the variant pins one
+    /// (only `Custom`). Other variants are content-driven via
+    /// `w_fit()` and return `None`.
+    fn width(&self) -> Option<f32> {
+        match self {
+            ButtonSize::Custom(w, _) => Some(*w),
+            _ => None,
         }
     }
 
@@ -181,6 +205,7 @@ impl ButtonSize {
             ButtonSize::Medium => 40.0,
             ButtonSize::Large => 44.0,
             ButtonSize::Icon => 40.0,
+            ButtonSize::Custom(_, h) => *h,
         }
     }
 
@@ -191,6 +216,10 @@ impl ButtonSize {
             ButtonSize::Medium => 16.0,
             ButtonSize::Large => 24.0,
             ButtonSize::Icon => 8.0,
+            // Custom: fall back to Medium so a content-with-label
+            // button has sensible breathing room; users can override
+            // via `.cn-button--custom` CSS.
+            ButtonSize::Custom(_, _) => 16.0,
         }
     }
 
@@ -201,6 +230,7 @@ impl ButtonSize {
             ButtonSize::Medium => 8.0,
             ButtonSize::Large => 12.0,
             ButtonSize::Icon => 8.0,
+            ButtonSize::Custom(_, _) => 8.0,
         }
     }
 
@@ -211,6 +241,7 @@ impl ButtonSize {
             ButtonSize::Medium => 14.0,
             ButtonSize::Large => 16.0,
             ButtonSize::Icon => 14.0,
+            ButtonSize::Custom(_, _) => 14.0,
         }
     }
 
@@ -227,6 +258,7 @@ impl ButtonSize {
             ButtonSize::Medium => RadiusToken::Default,
             ButtonSize::Large => RadiusToken::Lg,
             ButtonSize::Icon => RadiusToken::Default,
+            ButtonSize::Custom(_, _) => RadiusToken::Default,
         }
     }
 }
@@ -377,8 +409,15 @@ impl Button {
         // can center the icon. `flex_shrink_0` pins both axes — without it
         // a narrowing parent row would let taffy compress the width while
         // height held, collapsing the square into a vertical oval.
+        // Custom: user-pinned (width, height) wins over the icon-square
+        // and content-fit branches.
         // With-label: shrink-wrap to content.
-        if is_icon_only {
+        if let Some(explicit_w) = config.btn_size.width() {
+            btn = btn
+                .w(explicit_w)
+                .h(config.btn_size.height())
+                .flex_shrink_0();
+        } else if is_icon_only {
             let pad = config.btn_size.padding_y();
             let dim = resolved_icon_size + pad * 2.0;
             btn = btn.w(dim).h(dim).flex_shrink_0();
