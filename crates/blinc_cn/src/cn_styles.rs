@@ -34,7 +34,7 @@ pub const CN_STYLES: &str = r#"
 .cn-button, .cn-card, .cn-card-header, .cn-card-footer,
 .cn-badge, .cn-alert, .cn-alert-box,
 .cn-input, .cn-textarea, .cn-label,
-.cn-checkbox, .cn-switch, .cn-radio,
+.cn-checkbox, .cn-switch, .cn-radio, .cn-toggle,
 .cn-tabs-list, .cn-tabs-trigger,
 .cn-select-trigger, .cn-select-content, .cn-select-item,
 .cn-combobox-trigger, .cn-combobox-content, .cn-combobox-item,
@@ -480,6 +480,27 @@ pub const CN_STYLES: &str = r#"
     opacity: 0.5;
     cursor: not-allowed;
 }
+
+/* ============================================================================
+   Toggle (binary on/off button — shadcn `<Toggle>`)
+   ============================================================================ */
+
+/* Layout widget already paints bg / border / fg from theme tokens.
+   The cn rules here just add the variant + size hooks and the hover /
+   active state-rule wiring users can extend via `.cn-toggle:hover` /
+   `.cn-toggle--pressed` overrides. Don't redeclare bg/border here —
+   the layout widget's setters would get clobbered. */
+.cn-toggle {
+    border-radius: var(--radius-default);
+    cursor: pointer;
+    transition:
+        background var(--duration-fast) var(--ease-state),
+        border-color var(--duration-fast) var(--ease-state),
+        color var(--duration-fast) var(--ease-state);
+}
+.cn-toggle--sm { border-radius: var(--radius-sm); }
+.cn-toggle--md { border-radius: var(--radius-default); }
+.cn-toggle--lg { border-radius: var(--radius-default); }
 
 /* ============================================================================
    Radio

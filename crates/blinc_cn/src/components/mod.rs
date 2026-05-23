@@ -47,6 +47,7 @@ pub mod switch;
 pub mod tabs;
 pub mod textarea;
 pub mod toast;
+pub mod toggle;
 pub mod tooltip;
 pub mod tree;
 pub mod typography;
@@ -117,6 +118,7 @@ pub use textarea::{Textarea, TextareaSize, textarea};
 pub use toast::{
     ToastBuilder, ToastVariant, toast, toast_custom, toast_error, toast_success, toast_warning,
 };
+pub use toggle::{Toggle, ToggleBuilder, ToggleSize, ToggleVariant, toggle};
 pub use tooltip::{Tooltip, TooltipAlign, TooltipBuilder, TooltipSide, tooltip};
 pub use tree::{TreeNodeConfig, TreeNodeDiff, TreeView, TreeViewBuilder, tree_view};
 // Typography helpers (label excluded - use Label component instead)

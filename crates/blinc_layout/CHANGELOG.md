@@ -4,6 +4,9 @@ All notable changes to `blinc_layout` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **`blinc_layout::widgets::toggle`** — first-class binary on/off control. Renders a button-shaped Stateful with theme-token defaults (colours from `ColorToken::Secondary` / `TextSecondary` / `TextPrimary` / `BorderSecondary`, radius from `RadiusToken::Default`, padding / typography from spacing + typography tokens). Pairs an external `State<bool>` with an internal `Stateful<ButtonState>` for hover / pressed detection; `:checked` pseudo-state covers the on-state for CSS overrides. Builder methods cover height, padding, icon, label, font size, custom on/off bg/fg, border-width, bordered-off (outline mode), and `on_change`. `blinc_cn::toggle` wraps this with shadcn-style `.cn-toggle` classes + variant / size ladders.
+
 ### Performance
 - **Stateful layout-prop fast path** — `refresh_props_internal` discriminates three rebuild kinds via paired structural / topology hashes: `Visual` (no children change, no taffy `Style` change → visual-only prop update on existing nodes); `LayoutProps` (taffy `Style` changed, no topology change → patch styles in place + re-`compute_layout`); `Structural` (children added / removed / reordered → full subtree rebuild + mint + collect). The middle path is what keeps spring-driven `.w()` / `.h()` / `.left()` / `.top()` cheap — pre-fix every spring tick on a stateful went through the full Structural rebuild path, tearing down + re-collecting handlers / physics / motion bindings each frame.
 

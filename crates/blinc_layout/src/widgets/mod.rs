@@ -52,6 +52,7 @@ pub mod text_area;
 pub mod text_edit;
 pub mod text_input;
 pub mod toast_tray;
+pub mod toggle;
 pub mod virtual_list;
 
 // Re-export button widget
@@ -62,6 +63,9 @@ pub use checkbox::{Checkbox, CheckboxBuilder, CheckboxConfig, checkbox, checkbox
 
 // Re-export radio widget
 pub use radio::{RadioGroup, RadioGroupBuilder, RadioGroupConfig, RadioLayout, radio_group};
+
+// Re-export toggle widget
+pub use toggle::{Toggle, ToggleBuilder, ToggleConfig, toggle};
 
 // Re-export text input widget
 pub use text_input::{
