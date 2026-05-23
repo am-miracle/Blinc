@@ -432,7 +432,10 @@ fn test_layout_stateful() -> impl ElementBuilder + use<> {
 /// callbacks survive when the parent stateful container rebuilds due to
 /// signal changes. The inner buttons should remain clickable after pressing
 /// the main "Rebuild" button.
-fn test_inner_click_persistence(ctx: &WindowedContext, count: State<i32>) -> impl ElementBuilder + use<> {
+fn test_inner_click_persistence(
+    ctx: &WindowedContext,
+    count: State<i32>,
+) -> impl ElementBuilder + use<> {
     let inner_count = ctx.use_state_keyed("inner-click-count", || 0i32);
     let inner_count_for_state = inner_count.clone();
     let inner_count_click = inner_count.clone();

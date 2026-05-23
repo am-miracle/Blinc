@@ -198,7 +198,12 @@ fn build_carousel(
         )
 }
 
-fn build_card(index: usize, title: &str, description: &str, accent: Color) -> impl ElementBuilder + use<> {
+fn build_card(
+    index: usize,
+    title: &str,
+    description: &str,
+    accent: Color,
+) -> impl ElementBuilder + use<> {
     div()
         // Set element ID for this card - key for the selector API!
         .id(format!("card-{}", index))

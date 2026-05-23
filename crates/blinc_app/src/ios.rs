@@ -126,12 +126,7 @@ unsafe fn lookup_extern_fn(name: &[u8]) -> Option<extern "C" fn()> {
         // exported by the linked binary, and the caller has
         // committed to the function having signature
         // `extern "C" fn()`.
-        unsafe {
-            Some(std::mem::transmute::<
-                *mut std::ffi::c_void,
-                extern "C" fn(),
-            >(sym))
-        }
+        unsafe { Some(std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(sym)) }
     }
 }
 

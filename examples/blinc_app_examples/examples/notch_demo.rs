@@ -211,7 +211,7 @@ fn menu_bar_section() -> impl ElementBuilder + use<> {
                 open_gen.set(open_gen.get() + 1);
             }
         }
-        let gen = open_gen.get();
+        let r#gen = open_gen.get();
 
         let target_width = if is_open {
             DROPDOWN_WIDTH
@@ -221,12 +221,12 @@ fn menu_bar_section() -> impl ElementBuilder + use<> {
         let target_height = if is_open { DROPDOWN_FULL_HEIGHT } else { 0.0 };
 
         let center_x = ctx.use_spring(
-            &format!("dropdown_x_{gen}"),
+            &format!("dropdown_x_{r#gen}"),
             snapshot.center_x,
             SpringConfig::gentle(),
         );
         let dropdown_width = ctx.use_spring(
-            &format!("dropdown_w_{gen}"),
+            &format!("dropdown_w_{r#gen}"),
             target_width,
             SpringConfig::snappy(),
         );
@@ -651,7 +651,10 @@ fn sharp_angle_demo() -> impl ElementBuilder + use<> {
         ))
 }
 
-fn labeled_demo(label: &'static str, demo: impl ElementBuilder + 'static) -> impl ElementBuilder + use<> {
+fn labeled_demo(
+    label: &'static str,
+    demo: impl ElementBuilder + 'static,
+) -> impl ElementBuilder + use<> {
     div()
         .flex_col()
         .items_center()

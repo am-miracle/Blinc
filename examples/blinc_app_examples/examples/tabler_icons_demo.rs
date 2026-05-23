@@ -306,7 +306,12 @@ fn color_variants_section() -> impl ElementBuilder + use<> {
         )
 }
 
-fn color_sample(icon_data: &str, txt: &str, size: f32, color: Color) -> impl ElementBuilder + use<> {
+fn color_sample(
+    icon_data: &str,
+    txt: &str,
+    size: f32,
+    color: Color,
+) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -318,7 +323,12 @@ fn color_sample(icon_data: &str, txt: &str, size: f32, color: Color) -> impl Ele
         .child(text(txt).size(10.0).color(text_secondary))
 }
 
-fn filled_color_sample(icon_data: &str, txt: &str, size: f32, color: Color) -> impl ElementBuilder + use<> {
+fn filled_color_sample(
+    icon_data: &str,
+    txt: &str,
+    size: f32,
+    color: Color,
+) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
@@ -366,7 +376,11 @@ fn side_by_side_section() -> impl ElementBuilder + use<> {
         )
 }
 
-fn comparison_tile(outline_data: &str, filled_data: &str, name: &str) -> impl ElementBuilder + use<> {
+fn comparison_tile(
+    outline_data: &str,
+    filled_data: &str,
+    name: &str,
+) -> impl ElementBuilder + use<> {
     let theme = ThemeState::get();
     let text_primary = theme.color(ColorToken::TextPrimary);
     let text_tertiary = theme.color(ColorToken::TextTertiary);
