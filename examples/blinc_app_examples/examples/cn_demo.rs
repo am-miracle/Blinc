@@ -774,10 +774,10 @@ fn form_inputs_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
                         // spacing of the text-input column.
                         .child(
                             div()
-                                .my(8.0)
+                                .my(6.0)
                                 .flex_col()
                                 .h_fit()
-                                .gap_px(16.0)
+                                .gap_px(8.0)
                                 .child(
                                     div()
                                         .flex_col()

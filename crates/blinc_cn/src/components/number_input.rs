@@ -271,7 +271,7 @@ impl NumberInput {
                 // needs more room (or less). Centred text in a
                 // fixed cell is the canonical numeric-input look —
                 // matches shadcn / HIG / Material specs.
-                const DEFAULT_FIELD_W: f32 = 64.0;
+                const DEFAULT_FIELD_W: f32 = 32.0;
                 let _ = formatted; // formatted is synced into the
                 // visible field above; no longer
                 // used for width calc since width
