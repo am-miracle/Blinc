@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="robots" content="noindex" />
+<title>Not found — Blinc</title>
+<link rel="icon" type="image/png" href="/Blinc/assets/blinc_logo.png" />
+<script>
+  // Old book paths used to live at /Blinc/<topic>/...; the docs book
+  // now lives at /Blinc/docs/<topic>/.... Try to rewrite any path
+  // that looks like a book topic so external links keep resolving.
+  (function () {
+    var BASE = '/Blinc/';
+    var path = location.pathname;
+    if (path.indexOf(BASE) !== 0) return;
+    var rest = path.slice(BASE.length); // e.g. "getting-started/installation.html"
+    if (!rest || rest.indexOf('docs/') === 0) return;
+    var topics = [
+      'introduction', 'getting-started', 'core', 'components', 'cn',
+      'widgets', 'animation', 'canvas-kit', 'web', 'mobile',
+      'architecture', 'advanced', 'contributing'
+    ];
+    var first = rest.split('/')[0].replace(/\.html$/, '');
+    if (topics.indexOf(first) !== -1) {
+      location.replace(BASE + 'docs/' + rest + location.search + location.hash);
+    }
+  })();
+</script>
+<style>
+  :root {
+    --bg: #f6e9eb; --ink: #1a1320; --ink-soft: #5a4a5c; --purple: #7a2bff;
+  }
+  *,*::before,*::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: "Space Grotesk", system-ui, sans-serif;
+    background: var(--bg); color: var(--ink);
+    min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    padding: 40px 24px;
+  }
+  .card { max-width: 480px; text-align: center; }
+  .code {
+    font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  h1 { font-size: clamp(48px, 8vw, 88px); margin: 8px 0 16px; letter-spacing: -0.03em; }
+  p  { font-size: 17px; line-height: 1.5; color: var(--ink-soft); margin: 0 0 28px; }
+  .row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 12px 20px; border-radius: 999px;
+    font-size: 15px; font-weight: 500; text-decoration: none;
+    border: 1px solid transparent;
+  }
+  .btn-primary { background: var(--purple); color: white; }
+  .btn-ghost   { background: transparent; color: var(--ink); border-color: rgba(26,19,32,0.22); }
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="code">Error · 404</div>
+    <h1>Lost in a blinc.</h1>
+    <p>The page you're looking for doesn't exist here. The docs moved to <code>/Blinc/docs/</code> — try one of the links below.</p>
+    <div class="row">
+      <a class="btn btn-primary" href="/Blinc/">Back home</a>
+      <a class="btn btn-ghost" href="/Blinc/docs/">Open the docs</a>
+    </div>
+  </main>
+</body>
+</html>

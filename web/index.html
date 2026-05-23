@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Blinc — a GPU-accelerated reactive UI framework for Rust</title>
+<meta name="description" content="Blinc is a GPU-accelerated, reactive UI framework for Rust. Fine-grained signals, declarative views, and a wgpu renderer that targets desktop, mobile, and the browser from one source tree." />
+<meta name="keywords" content="Blinc, Rust UI framework, wgpu, GPU UI, reactive Rust, declarative UI, cross-platform Rust UI, Rust GUI, Rust signals, fine-grained reactivity" />
+<meta name="author" content="The Blinc Project" />
+<meta name="theme-color" content="#7a2bff" />
+<meta name="color-scheme" content="light dark" />
+<link rel="canonical" href="https://project-blinc.github.io/Blinc/" />
+
+<!-- Icons -->
+<link rel="icon" type="image/png" href="assets/blinc_logo.png" />
+<link rel="apple-touch-icon" href="assets/blinc_logo.png" />
+
+<!-- Open Graph -->
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Blinc" />
+<meta property="og:title" content="Blinc — a GPU-accelerated reactive UI framework for Rust" />
+<meta property="og:description" content="Fine-grained signals, declarative views, and a wgpu renderer that targets desktop, mobile, and the browser from one source tree." />
+<meta property="og:url" content="https://project-blinc.github.io/Blinc/" />
+<meta property="og:image" content="https://project-blinc.github.io/Blinc/assets/blinc_logo.png" />
+<meta property="og:image:alt" content="Blinc — GPU-accelerated reactive UI framework for Rust" />
+<meta property="og:locale" content="en_US" />
+
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Blinc — a GPU-accelerated reactive UI framework for Rust" />
+<meta name="twitter:description" content="Fine-grained signals, declarative views, and a wgpu renderer that targets desktop, mobile, and the browser from one source tree." />
+<meta name="twitter:image" content="https://project-blinc.github.io/Blinc/assets/blinc_logo.png" />
+<meta name="twitter:image:alt" content="Blinc — GPU-accelerated reactive UI framework for Rust" />
+
+<!-- Structured data -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "Blinc",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Cross-platform (Linux, macOS, Windows, iOS, Android, Web)",
+      "description": "A GPU-accelerated, reactive UI framework for Rust. Fine-grained signals, declarative views, and a wgpu renderer that targets desktop, mobile, and the browser from one source tree.",
+      "url": "https://project-blinc.github.io/Blinc/",
+      "image": "https://project-blinc.github.io/Blinc/assets/blinc_logo.png",
+      "downloadUrl": "https://crates.io/crates/blinc_app",
+      "license": "https://opensource.org/licenses/MIT",
+      "programmingLanguage": "Rust",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+    },
+    {
+      "@type": "WebSite",
+      "name": "Blinc",
+      "url": "https://project-blinc.github.io/Blinc/",
+      "publisher": { "@type": "Organization", "name": "The Blinc Project" }
+    }
+  ]
+}
+</script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #f6e9eb;
+    --bg-2: #efdfe2;
+    --ink: #1a1320;
+    --ink-soft: #5a4a5c;
+    --line: #1a1320;
+    --purple: #7a2bff;
+    --purple-deep: #5a14d6;
+    --cyan: #00e5ff;
+    --magenta: #ff2d9b;
+    --code-bg: #14101a;
+    --code-ink: #f4eef8;
+  }
+
+  *,*::before,*::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: "Space Grotesk", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: "";
+    position: fixed; inset: 0;
+    background-image: radial-gradient(rgba(26,19,32,0.10) 1px, transparent 1px);
+    background-size: 22px 22px;
+    background-position: 0 0;
+    pointer-events: none;
+    z-index: 0;
+    mask-image: radial-gradient(ellipse 80% 70% at 50% 40%, #000 40%, transparent 100%);
+  }
+
+  .wrap {
+    position: relative;
+    z-index: 1;
+    max-width: 1240px;
+    margin: 0 auto;
+    padding: 28px 40px 80px;
+  }
+
+  /* nav */
+  nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0 0;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 12px;
+    text-decoration: none; color: inherit;
+  }
+  .brand img { height: 34px; width: auto; display: block; }
+  .brand .ver {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--ink-soft);
+    padding: 3px 8px;
+    border: 1px solid rgba(26,19,32,0.18);
+    border-radius: 999px;
+    margin-left: 2px;
+  }
+  .nav-links {
+    display: flex; gap: 28px; align-items: center;
+    font-size: 15px;
+  }
+  .nav-links a {
+    color: var(--ink);
+    text-decoration: none;
+    opacity: 0.78;
+    transition: opacity .15s ease;
+  }
+  .nav-links a:hover { opacity: 1; }
+  .nav-links .gh {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--ink); color: var(--bg);
+    padding: 8px 14px;
+    border-radius: 999px;
+    opacity: 1;
+    font-weight: 500;
+  }
+  .nav-links .gh:hover { background: var(--purple); }
+
+  /* hero */
+  .hero {
+    display: grid;
+    grid-template-columns: 1.05fr 1fr;
+    gap: 64px;
+    align-items: center;
+    padding: 70px 0 40px;
+  }
+
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-soft);
+    padding: 6px 12px;
+    border: 1px solid rgba(26,19,32,0.18);
+    border-radius: 999px;
+    background: rgba(255,255,255,0.4);
+    margin-bottom: 28px;
+  }
+  .eyebrow .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #2dd47a;
+    box-shadow: 0 0 0 3px rgba(45,212,122,0.18);
+  }
+
+  h1.tagline {
+    font-size: clamp(44px, 6.4vw, 88px);
+    line-height: 0.96;
+    letter-spacing: -0.035em;
+    font-weight: 700;
+    margin: 0 0 24px;
+  }
+  h1.tagline .chr {
+    position: relative;
+    display: inline-block;
+    color: var(--ink);
+  }
+  h1.tagline .chr::before,
+  h1.tagline .chr::after {
+    content: attr(data-text);
+    position: absolute; inset: 0;
+    pointer-events: none;
+    mix-blend-mode: multiply;
+  }
+  h1.tagline .chr::before {
+    color: var(--cyan);
+    transform: translate(-3px, 1px);
+  }
+  h1.tagline .chr::after {
+    color: var(--magenta);
+    transform: translate(3px, -1px);
+  }
+  h1.tagline em {
+    font-style: normal;
+    color: var(--purple);
+  }
+
+  .sub {
+    font-size: 19px;
+    line-height: 1.5;
+    color: var(--ink-soft);
+    max-width: 520px;
+    margin: 0 0 36px;
+  }
+
+  .cta-row {
+    display: flex; gap: 14px; flex-wrap: wrap;
+    align-items: center;
+  }
+  .btn {
+    display: inline-flex; align-items: center; gap: 10px;
+    padding: 14px 22px;
+    border-radius: 12px;
+    font-size: 16px;
+    font-weight: 500;
+    font-family: inherit;
+    text-decoration: none;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: transform .12s ease, box-shadow .15s ease, background .15s ease;
+  }
+  .btn-primary {
+    background: var(--purple);
+    color: white;
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.25) inset,
+      0 8px 0 -2px var(--cyan),
+      0 14px 24px -8px rgba(0,229,255,0.45);
+  }
+  .btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.25) inset,
+      0 9px 0 -2px var(--cyan),
+      0 18px 28px -8px rgba(0,229,255,0.55);
+  }
+  .btn-primary:active {
+    transform: translateY(4px);
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.25) inset,
+      0 4px 0 -2px var(--cyan),
+      0 8px 14px -8px rgba(0,229,255,0.4);
+  }
+  .btn-ghost {
+    background: transparent;
+    color: var(--ink);
+    border-color: rgba(26,19,32,0.22);
+  }
+  .btn-ghost:hover {
+    background: rgba(26,19,32,0.05);
+    border-color: rgba(26,19,32,0.4);
+  }
+  .btn .arrow { transition: transform .15s ease; }
+  .btn:hover .arrow { transform: translateX(3px); }
+
+  .install {
+    margin-top: 22px;
+    display: inline-flex; align-items: center; gap: 10px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 13.5px;
+    color: var(--ink-soft);
+    background: rgba(255,255,255,0.55);
+    border: 1px dashed rgba(26,19,32,0.22);
+    padding: 9px 14px;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .install:hover { background: rgba(255,255,255,0.9); }
+  .install .prompt { color: var(--magenta); }
+  .install .copy {
+    margin-left: 8px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--ink-soft);
+    opacity: 0.7;
+  }
+
+  /* code window */
+  .code-wrap {
+    position: relative;
+    min-width: 0;
+  }
+  .code-wrap::before,
+  .code-wrap::after {
+    content: "";
+    position: absolute;
+    border-radius: 18px;
+    pointer-events: none;
+  }
+  .code-wrap::before {
+    inset: 14px -14px -14px 14px;
+    background: var(--cyan);
+    opacity: 0.85;
+    z-index: 0;
+  }
+  .code-wrap::after {
+    inset: -14px 14px 14px -14px;
+    background: var(--magenta);
+    opacity: 0.85;
+    z-index: 0;
+  }
+
+  .code {
+    position: relative;
+    z-index: 1;
+    background: var(--code-bg);
+    color: var(--code-ink);
+    border-radius: 16px;
+    box-shadow:
+      0 30px 60px -20px rgba(26,19,32,0.4),
+      0 0 0 1px rgba(255,255,255,0.05) inset;
+    overflow: hidden;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 13.5px;
+    line-height: 1.7;
+  }
+  .code-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 16px;
+    background: rgba(255,255,255,0.04);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .code-bar .dots { display: flex; gap: 6px; }
+  .code-bar .dots span {
+    width: 11px; height: 11px; border-radius: 50%;
+    background: rgba(255,255,255,0.18);
+  }
+  .code-bar .dots span:nth-child(1) { background: #ff5f57; }
+  .code-bar .dots span:nth-child(2) { background: #febc2e; }
+  .code-bar .dots span:nth-child(3) { background: #28c840; }
+  .code-bar .file {
+    font-size: 12px;
+    color: rgba(244,238,248,0.55);
+    margin-left: 8px;
+  }
+  .code-bar .tabs {
+    margin-left: auto;
+    display: flex;
+    gap: 4px;
+    padding: 3px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+  .code-bar .tab {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    color: rgba(244,238,248,0.55);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    padding: 5px 11px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: color .15s, background .15s;
+  }
+  .code-bar .tab:hover { color: var(--code-ink); }
+  .code-bar .tab[aria-selected="true"] {
+    background: rgba(122,43,255,0.22);
+    color: var(--cyan);
+    box-shadow: 0 0 0 1px rgba(0,229,255,0.25) inset;
+  }
+  .code-body[hidden] { display: none; }
+  pre.code-body {
+    margin: 0;
+    padding: 22px 26px 26px;
+    overflow-x: auto;
+  }
+  .ln {
+    display: inline-block;
+    width: 22px;
+    color: rgba(244,238,248,0.25);
+    user-select: none;
+    text-align: right;
+    margin-right: 18px;
+  }
+  /* syntax */
+  .k  { color: #c792ea; }
+  .fn { color: #00e5ff; }
+  .ty { color: #ffb86c; }
+  .at { color: #ff79c6; }
+  .st { color: #b6f09c; }
+  .nm { color: #ffd166; }
+  .cm { color: rgba(244,238,248,0.4); font-style: italic; }
+  .mc { color: #ff2d9b; }
+  .pn { color: rgba(244,238,248,0.6); }
+
+  /* proof row */
+  .proof {
+    margin-top: 90px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 28px;
+    border-top: 1px solid rgba(26,19,32,0.1);
+    padding-top: 36px;
+  }
+  .proof .item {
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .proof .key {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--ink-soft);
+  }
+  .proof .val {
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .proof .val .accent { color: var(--purple); }
+
+  /* footer */
+  footer {
+    margin-top: 80px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+    color: var(--ink-soft);
+    border-top: 1px solid rgba(26,19,32,0.1);
+    padding-top: 20px;
+  }
+  footer .links { display: flex; gap: 22px; }
+  footer a { color: inherit; text-decoration: none; opacity: 0.75; }
+  footer a:hover { opacity: 1; }
+
+  @media (max-width: 920px) {
+    .wrap { padding: 22px 18px 60px; overflow: hidden; }
+    .hero { grid-template-columns: 1fr; gap: 48px; padding-top: 40px; }
+    .code-wrap { max-width: 100%; margin: 0 4px; }
+    .code-wrap::before { inset: 8px -8px -8px 8px; }
+    .code-wrap::after { inset: -8px 8px 8px -8px; }
+    pre.code-body { padding: 18px 16px 18px; font-size: 12px; }
+    .ln { width: 18px; margin-right: 12px; }
+    .proof { grid-template-columns: repeat(2, 1fr); }
+    .nav-links a:not(.gh) { display: none; }
+    footer { flex-direction: column; gap: 14px; }
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+
+    <nav>
+      <a class="brand" href="/Blinc/" aria-label="Blinc home">
+        <img src="assets/blinc_logo.svg" alt="Blinc" width="120" height="34" />
+        <span class="ver">v0.5</span>
+      </a>
+      <div class="nav-links">
+        <a href="docs/">Docs</a>
+        <a href="docs/web/example-gallery.html">Examples</a>
+        <a href="https://discord.gg/blinc" style="display:inline-flex;align-items:center;gap:6px;" rel="noopener">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M14.983 3l.123 .006c2.014 .214 3.527 .672 4.966 1.673a1 1 0 0 1 .371 .488c1.876 5.315 2.373 9.987 1.451 12.28c-1.003 2.005 -2.606 3.553 -4.394 3.553c-.732 0 -1.693 -.968 -2.328 -2.045a21.512 21.512 0 0 0 2.103 -.493a1 1 0 1 0 -.55 -1.924c-3.32 .95 -6.13 .95 -9.45 0a1 1 0 0 0 -.55 1.924c.717 .204 1.416 .37 2.103 .494c-.635 1.075 -1.596 2.044 -2.328 2.044c-1.788 0 -3.391 -1.548 -4.428 -3.629c-.888 -2.217 -.39 -6.89 1.485 -12.204a1 1 0 0 1 .371 -.488c1.439 -1.001 2.952 -1.459 4.966 -1.673a1 1 0 0 1 .935 .435l.063 .107l.651 1.285l.137 -.016a12.97 12.97 0 0 1 2.643 0l.134 .016l.65 -1.284a1 1 0 0 1 .754 -.54l.122 -.009zm-5.983 7a2 2 0 0 0 -1.977 1.697l-.018 .154l-.005 .149l.005 .15a2 2 0 1 0 1.995 -2.15zm6 0a2 2 0 0 0 -1.977 1.697l-.018 .154l-.005 .149l.005 .15a2 2 0 1 0 1.995 -2.15z"/></svg>
+          Discord
+        </a>
+        <a class="gh" href="https://github.com/project-blinc/Blinc" aria-label="GitHub repository" rel="noopener">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 19c-4.3 1.4 -4.3 -2.5 -6 -3m12 5v-3.5c0 -1 .1 -1.4 -.5 -2c2.8 -.3 5.5 -1.4 5.5 -6a4.6 4.6 0 0 0 -1.3 -3.2a4.2 4.2 0 0 0 -.1 -3.2s-1.1 -.3 -3.5 1.3a12.3 12.3 0 0 0 -6.2 0c-2.4 -1.6 -3.5 -1.3 -3.5 -1.3a4.2 4.2 0 0 0 -.1 3.2a4.6 4.6 0 0 0 -1.3 3.2c0 4.6 2.7 5.7 5.5 6c-.6 .6 -.6 1.2 -.5 2v3.5"/></svg>
+          GitHub
+          <span style="display:inline-flex;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#ffd166;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="#ffd166" stroke="#ffd166" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17.75l-6.172 3.245l1.179 -6.873l-4.993 -4.867l6.9 -1l3.086 -6.253l3.086 6.253l6.9 1l-4.993 4.867l1.179 6.873z"/></svg>
+            400+
+          </span>
+        </a>
+      </div>
+    </nav>
+
+    <section class="hero">
+      <div class="hero-text">
+        <h1 class="tagline">Nifty Native UIs <span class="chr" data-text="in a">in a</span> <em>blinc</em>.</h1>
+
+        <p class="sub">
+          A GPU-accelerated, reactive UI framework for Rust. Fine-grained signals,
+          declarative views, and a wgpu renderer that targets desktop, mobile,
+          and the browser from one source tree.
+        </p>
+
+        <div class="cta-row">
+          <a class="btn btn-primary" href="docs/web/example-gallery.html">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z"/><path d="M14 4m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z"/><path d="M4 14m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z"/><path d="M14 14m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z"/></svg>
+            Browse the gallery
+          </a>
+          <a class="btn btn-ghost" href="docs/">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 19a9 9 0 0 1 9 0a9 9 0 0 1 9 0"/><path d="M3 6a9 9 0 0 1 9 0a9 9 0 0 1 9 0"/><path d="M3 6l0 13"/><path d="M12 6l0 13"/><path d="M21 6l0 13"/></svg>
+            Read the docs
+          </a>
+        </div>
+
+        <div class="install" onclick="navigator.clipboard && navigator.clipboard.writeText('cargo add blinc_app');this.querySelector('.copy').textContent='copied';setTimeout(()=>this.querySelector('.copy').textContent='copy',1500);">
+          <span class="prompt">$</span>
+          <span>cargo add blinc_app</span>
+          <span class="copy">copy</span>
+        </div>
+      </div>
+
+      <div class="code-wrap">
+        <div class="code">
+          <div class="code-bar">
+            <div class="dots"><span></span><span></span><span></span></div>
+            <div class="file" data-file>src/main.rs</div>
+            <div class="tabs" role="tablist">
+              <button type="button" class="tab" role="tab" aria-selected="true" data-tab="rust">Rust</button>
+              <button type="button" class="tab" role="tab" aria-selected="false" data-tab="dsl">Blinc DSL</button>
+            </div>
+          </div>
+<pre class="code-body" data-lang="rust"><span class="ln"> 1</span><span class="k">use</span> blinc_app<span class="pn">::</span>prelude<span class="pn">::*;</span>
+<span class="ln"> 2</span><span class="k">use</span> blinc_app<span class="pn">::</span>windowed<span class="pn">::{</span><span class="ty">WindowedApp</span><span class="pn">,</span> <span class="ty">WindowedContext</span><span class="pn">};</span>
+<span class="ln"> 3</span>
+<span class="ln"> 4</span><span class="k">fn</span> <span class="fn">main</span><span class="pn">()</span> <span class="pn">-&gt;</span> <span class="ty">Result</span><span class="pn">&lt;()&gt; {</span>
+<span class="ln"> 5</span>    <span class="ty">WindowedApp</span><span class="pn">::</span><span class="fn">run</span><span class="pn">(</span><span class="ty">WindowConfig</span><span class="pn">::</span><span class="fn">default</span><span class="pn">(),</span> <span class="pn">|</span>ctx<span class="pn">| {</span>
+<span class="ln"> 6</span>        <span class="fn">div</span><span class="pn">()</span>
+<span class="ln"> 7</span>            <span class="pn">.</span><span class="fn">w</span><span class="pn">(</span>ctx<span class="pn">.</span>width<span class="pn">)</span>
+<span class="ln"> 8</span>            <span class="pn">.</span><span class="fn">h</span><span class="pn">(</span>ctx<span class="pn">.</span>height<span class="pn">)</span>
+<span class="ln"> 9</span>            <span class="pn">.</span><span class="fn">bg</span><span class="pn">(</span><span class="ty">Color</span><span class="pn">::</span><span class="fn">rgba</span><span class="pn">(</span><span class="nm">0.1</span><span class="pn">,</span> <span class="nm">0.1</span><span class="pn">,</span> <span class="nm">0.15</span><span class="pn">,</span> <span class="nm">1.0</span><span class="pn">))</span>
+<span class="ln">10</span>            <span class="pn">.</span><span class="fn">flex_center</span><span class="pn">()</span>
+<span class="ln">11</span>            <span class="pn">.</span><span class="fn">child</span><span class="pn">(</span>
+<span class="ln">12</span>                <span class="fn">div</span><span class="pn">()</span>
+<span class="ln">13</span>                    <span class="pn">.</span><span class="fn">glass</span><span class="pn">()</span>
+<span class="ln">14</span>                    <span class="pn">.</span><span class="fn">rounded</span><span class="pn">(</span><span class="nm">16.0</span><span class="pn">)</span>
+<span class="ln">15</span>                    <span class="pn">.</span><span class="fn">p</span><span class="pn">(</span><span class="nm">32.0</span><span class="pn">)</span>
+<span class="ln">16</span>                    <span class="pn">.</span><span class="fn">child</span><span class="pn">(</span>
+<span class="ln">17</span>                        <span class="fn">text</span><span class="pn">(</span><span class="st">"Hello, Blinc!"</span><span class="pn">).</span><span class="fn">size</span><span class="pn">(</span><span class="nm">24.0</span><span class="pn">).</span><span class="fn">color</span><span class="pn">(</span><span class="ty">Color</span><span class="pn">::</span><span class="ty">WHITE</span><span class="pn">)</span>
+<span class="ln">18</span>                    <span class="pn">)</span>
+<span class="ln">19</span>            <span class="pn">)</span>
+<span class="ln">20</span>    <span class="pn">})</span>
+<span class="ln">21</span><span class="pn">}</span>
+</pre>
+<pre class="code-body" data-lang="dsl" hidden><span class="ln"> 1</span><span class="k">component</span> <span class="fn">App</span> <span class="pn">{</span>
+<span class="ln"> 2</span>    <span class="k">style</span> <span class="pn">{</span>  <span class="cm">// CSS styles syntax you are already familiar with</span>
+<span class="ln"> 3</span>        <span class="at">.stage</span>  <span class="pn">{</span> width<span class="pn">:</span> <span class="nm">100%</span><span class="pn">;</span> height<span class="pn">:</span> <span class="nm">100%</span><span class="pn">;</span> background<span class="pn">:</span> <span class="nm">#1a1a26</span><span class="pn">;</span>
+<span class="ln"> 4</span>                  align-items<span class="pn">:</span> center<span class="pn">;</span> justify-content<span class="pn">:</span> center <span class="pn">}</span>
+<span class="ln"> 5</span>        <span class="at">.glass</span>  <span class="pn">{</span> backdrop-filter<span class="pn">:</span> glass<span class="pn">;</span> border-radius<span class="pn">:</span> <span class="nm">16</span><span class="pn">;</span> padding<span class="pn">:</span> <span class="nm">32</span> <span class="pn">}</span>
+<span class="ln"> 6</span>        <span class="at">.title</span>  <span class="pn">{</span> color<span class="pn">:</span> <span class="nm">#ffffff</span><span class="pn">;</span> font-size<span class="pn">:</span> <span class="nm">24</span> <span class="pn">}</span>
+<span class="ln"> 7</span>    <span class="pn">}</span>
+<span class="ln"> 8</span>
+<span class="ln"> 9</span>    <span class="k">view</span> <span class="pn">{</span>  <span class="cm">// declarative UI tree — components nest like the rendered output</span>
+<span class="ln">10</span>        <span class="ty">Div</span><span class="pn">(</span>class <span class="pn">=</span> <span class="st">"stage"</span><span class="pn">)</span> <span class="pn">{</span>
+<span class="ln">11</span>            <span class="ty">Div</span><span class="pn">(</span>class <span class="pn">=</span> <span class="st">"glass"</span><span class="pn">)</span> <span class="pn">{</span>
+<span class="ln">12</span>                <span class="ty">Text</span><span class="pn">(</span><span class="st">"Hello, Blinc!"</span><span class="pn">,</span> class <span class="pn">=</span> <span class="st">"title"</span><span class="pn">)</span>
+<span class="ln">13</span>            <span class="pn">}</span>
+<span class="ln">14</span>        <span class="pn">}</span>
+<span class="ln">15</span>    <span class="pn">}</span>
+<span class="ln">16</span><span class="pn">}</span>
+<span class="ln">17</span>
+<span class="ln">18</span><span class="k">view</span> <span class="pn">{</span> <span class="fn">App</span><span class="pn">()</span> <span class="pn">}</span>
+</pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="proof">
+      <div class="item">
+        <span class="key">Renderer</span>
+        <span class="val"><span class="accent">wgpu</span> · Vulkan · Metal</span>
+      </div>
+      <div class="item">
+        <span class="key">Reactivity</span>
+        <span class="val">fine-grained <span class="accent">signals</span></span>
+      </div>
+      <div class="item">
+        <span class="key">Targets</span>
+        <span class="val">desktop · mobile · web</span>
+      </div>
+    </section>
+
+    <footer>
+      <div>© 2026 The Blinc Project · MIT licensed</div>
+      <div class="links">
+        <a href="https://crates.io/crates/blinc_app" rel="noopener">Crates.io</a>
+        <a href="https://discord.gg/blinc" rel="noopener">Discord</a>
+        <a href="https://github.com/project-blinc/Blinc" rel="noopener">GitHub</a>
+        <a href="docs/">Docs</a>
+      </div>
+    </footer>
+
+  </div>
+<script>
+  (function(){
+    const FILES = { rust: 'src/main.rs', dsl: 'src/main.blinc' };
+    document.querySelectorAll('.code').forEach(code => {
+      const tabs = code.querySelectorAll('.tab');
+      const panes = code.querySelectorAll('.code-body');
+      const fileEl = code.querySelector('[data-file]');
+      tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+          const lang = tab.dataset.tab;
+          tabs.forEach(t => t.setAttribute('aria-selected', t === tab));
+          panes.forEach(p => { p.hidden = p.dataset.lang !== lang; });
+          if (fileEl && FILES[lang]) fileEl.textContent = FILES[lang];
+        });
+      });
+    });
+  })();
+</script>
+</body>
+</html>

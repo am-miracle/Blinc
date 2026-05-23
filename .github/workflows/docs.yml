@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'docs/book/**'
+      - 'web/**'
       - '.github/workflows/docs.yml'
       - 'crates/*/src/**'
       - 'examples/blinc_app_examples/examples/**'
@@ -16,6 +17,7 @@ on:
     branches: [main]
     paths:
       - 'docs/book/**'
+      - 'web/**'
       - '.github/workflows/docs.yml'
       - 'crates/*/src/**'
       - 'examples/blinc_app_examples/examples/**'
@@ -169,16 +171,28 @@ jobs:
         with:
           mdbook-version: 'latest'
 
+      # mdBook writes into `target/site/docs/` (see book.toml). The
+      # landing page lives in `web/` at the repo root and gets copied
+      # into `target/site/` after the book is built — together they
+      # form the GitHub Pages tree:
+      #   target/site/index.html        ← landing
+      #   target/site/assets/…          ← landing assets
+      #   target/site/robots.txt        ← SEO
+      #   target/site/sitemap.xml       ← SEO (landing entries)
+      #   target/site/.nojekyll         ← stop Pages running Jekyll
+      #   target/site/docs/             ← mdBook output
+      #   target/site/docs/sitemap.xml  ← SEO (book pages, mdBook-gen)
       - name: Build mdBook
         run: mdbook build docs/book
 
-      # Now that mdBook has populated `target/book/`, copy each
+      # Now that mdBook has populated `target/site/docs/`, copy each
       # wrapper's `index.html` + `pkg/` into
-      # `target/book/examples/<name>/`. The path is chosen so that
-      # mdBook's iframe references under
+      # `target/site/docs/examples/<name>/`. The path keeps mdBook's
+      # iframe references under
       # `docs/book/src/web/example-gallery/<name>.md`
-      # (`src="../../examples/<name>/index.html"`) resolve correctly
-      # against the published book root at serve time.
+      # (`src="../../examples/<name>/index.html"`) resolving
+      # correctly: from `…/docs/web/example-gallery/<name>.html`,
+      # `../../examples/<name>/index.html` → `…/docs/examples/<name>/`.
       #
       # `--no-build` would be nice here to explicitly skip the
       # wasm-pack re-run, but since the previous step already
@@ -188,12 +202,23 @@ jobs:
         run: |
           cargo run -p blinc-build-web-examples -- \
             --no-gallery \
-            --stage-to target/book/examples
+            --stage-to target/site/docs/examples
+
+      # Copy the landing page + SEO files on top of the site tree.
+      # `cp -a` preserves the `.nojekyll` and the dot-files; the
+      # landing's index.html sits alongside `docs/` from the mdBook
+      # step. No mdBook output gets overwritten because `web/` only
+      # carries root-level files (index.html, 404.html, robots.txt,
+      # sitemap.xml, assets/, .nojekyll).
+      - name: Copy landing page (web/) into site root
+        run: |
+          mkdir -p target/site
+          cp -a web/. target/site/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./target/book
+          path: ./target/site
 
   deploy:
     name: Deploy to GitHub Pages
