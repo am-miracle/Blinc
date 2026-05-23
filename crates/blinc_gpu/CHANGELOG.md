@@ -4,6 +4,12 @@ All notable changes to `blinc_gpu` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Per-corner squircle / scoop / bevel support on `ClipShape::RoundedRect` propagated into the SDF clip primitive uniforms — all 12 SDF shader variants (`sdf_core` / `sdf_shadow` / `sdf_3d` / `sdf_notch` × `vb` / `dt` / msaa) now read and apply per-corner `n` when evaluating clip alpha.
+
+### Fixed
+- `pre_warm_pipelines` previously issued `pass.draw(...)` against the Path pipeline (and SDF pipelines on hosts without `VERTEX_STORAGE`) without first calling `set_vertex_buffer(0, ...)`. Both declare a vertex-buffer layout, so a missing slot 0 triggered the Vulkan validation panic `requires vertex buffer 0 to be set` on Linux at startup and prevented apps from launching. Binds a single-vertex dummy buffer for the warm-up draws.
+
 ### Changed
 - `LayerTextureCache::evict_oversized` now also drives idle-frame eviction. After 60 frames without an `acquire()` it drops one texture per pool (largest first); after 120 it flushes all four pools. Reclaims GPU memory held by glass / blur intermediates when the UI is sitting still.
 

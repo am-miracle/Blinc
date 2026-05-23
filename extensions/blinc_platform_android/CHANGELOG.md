@@ -2,6 +2,11 @@
 
 All notable changes to `blinc_platform_android` will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- FFI declaration block for `ANativeWindow_*` (NDK) wrapped as `unsafe extern "C" { … }` to satisfy edition 2024's required-unsafe-on-extern rule. Per-export `#[unsafe(no_mangle)]` syntax applied to every JNI native function in the bridge.
+
 ## [0.4.0] - 2026-04-05
 
 ### Added

@@ -4,7 +4,14 @@ All notable changes to `blinc_layout` will be documented in this file.
 
 ## [Unreleased]
 
+### Performance
+- **Stateful layout-prop fast path** — `refresh_props_internal` discriminates three rebuild kinds via paired structural / topology hashes: `Visual` (no children change, no taffy `Style` change → visual-only prop update on existing nodes); `LayoutProps` (taffy `Style` changed, no topology change → patch styles in place + re-`compute_layout`); `Structural` (children added / removed / reordered → full subtree rebuild + mint + collect). The middle path is what keeps spring-driven `.w()` / `.h()` / `.left()` / `.top()` cheap — pre-fix every spring tick on a stateful went through the full Structural rebuild path, tearing down + re-collecting handlers / physics / motion bindings each frame.
+
 ### Added
+- **Per-corner `CornerShape` on `ClipShape::RoundedRect`** carried end-to-end through the GPU SDF pipeline. `overflow: clip` on a squircle parent now follows the parent's squircle curve at each corner instead of the previous fixed circular arc — fixes the bg-leak between the parent's squircle outline and the clip's circular outline visible on cn::accordion hover.
+- **`router.focused()` lookup** in `apply_complex_selector_styles::focused_node` — replaces the previous `element_registry.all_ids()` walk that only saw elements with a string `id`. Class-only widgets (e.g. `cn::input` attaches by class but has no id) now have `.cn-input:focus` rules apply correctly.
+- **Outline propagation** through `Div::merge` and `RenderProps::merge_from`. The Stateful state-callback's `queue_prop_update` path uses `merge_from`; without carrying outline, every state transition wiped outline back to the defaults and the focus ring would flash off-then-on.
+- `rich_text_editor` return type explicitly opts out of input lifetime capture (`+ use<>`) so callers on edition 2024 can stash it inside a `'static`-bounded `Div::child` without HRTB inference failures.
 - `RenderTree::painted_node_ids()` — set of node ids the paint walker actually rendered this frame (clipped against the window viewport even on scrolls without `viewport_cull` opt-in). Exposes the source of truth for visibility-gated redraw decisions.
 - `RenderTree::has_active_visible_visual_animations(painted)` and `has_active_visible_flip_animations(painted)` — visibility-gated counterparts of the existing `has_active_*` predicates. Used by the windowed redraw chain so off-screen `animate_bounds` / FLIP entries don't pin the chain alive.
 - `RenderTree::css_has_visible_transitions(painted)` — companion to `css_transitions_empty`, returns true when at least one CSS transition has a painted target.

@@ -4,6 +4,9 @@ All notable changes to `blinc_core` will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- `ClipShape::RoundedRect` now carries a `CornerShape` (per-corner superellipse `n`) so clips can follow squircle / scoop / bevel outlines instead of always rounding. Constructors default to the existing `CornerShape::ROUND` so untouched callers behave identically.
+
 ### Added
 - `blinc_core::intern` module with process-wide `Arc<str>` pool. `intern(s: &str) -> Arc<str>` deduplicates repeated identifier strings (CSS class names, type names, stable keys). Pool is append-only; only feed bounded sources into it.
 
