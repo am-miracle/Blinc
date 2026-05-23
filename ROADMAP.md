@@ -46,14 +46,39 @@ Blinc is a GPU-accelerated, cross-platform UI framework that enables developers 
 
 | Widget | Status | Notes |
 |--------|--------|-------|
-| Date picker | Planned | Calendar grid + input |
-| Time picker | Planned | Clock face or dropdown |
-| Color picker | Planned | HSL/RGB wheel + swatches |
-| Range slider (dual thumb) | Planned | Extend existing slider |
-| Number input (stepper) | Planned | text_input + increment/decrement |
-| Data grid | Planned | Sortable, filterable table |
+| Date picker | Planned | Calendar grid + input. See §1.5 for the cn component sizing. |
+| Time picker | Planned | Clock face or dropdown. See §1.5. |
+| Color picker | Planned | HSL/RGB wheel + swatches. See §1.5. |
+| Range slider (dual thumb) | Planned | Extend existing slider. See §1.5. |
+| Number input (stepper) | Planned | text_input + increment/decrement. See §1.5. |
+| Data grid | Planned | Sortable, filterable table. See §1.5 (depends on cn::table). |
 | Virtualized list | **Done** | `virtual_list(count, builder)` — variable-height items, CSS classes, flexbox layout |
 | Rich text editor | **Done** | `rich_text_editor()` — formatting toolbar, undo/redo, selection, clipboard |
+
+### 1.5 cn Component Library — shadcn/ui parity gaps (P1)
+
+> blinc_cn currently ships 45 components. The remaining gaps to reach
+> full shadcn/ui parity, plus the §1.4 widgets re-framed as their
+> intended `cn::*` landing surface. Effort is rough: **XS** < 1 day,
+> **S** 1–3 days, **M** ~1 week, **L** 2+ weeks. Priority follows
+> shadcn parity + common request frequency.
+
+| Component | Priority | Effort | Prereq | Notes |
+|-----------|----------|--------|--------|-------|
+| `cn::toggle` | P0 | XS | — | Single binary toggle button. Reuse `button` + Stateful with `ToggleState`. Pairs with `:aria-pressed` styling. |
+| `cn::toggle_group` | P0 | XS | `cn::toggle` | Radio-style toggle bar; single- or multi-select variants. |
+| `cn::number_input` | P0 | XS | `cn::input` | Stepper wrapper: `text_input` + chevron up/down. Parse + clamp on commit. Roadmap §1.4 entry. |
+| `cn::table` | P0 | S | `blinc_layout::table` | Themed wrapper exposing `Table` / `TableHeader` / `TableBody` / `TableRow` / `TableCell` / `TableCaption` builders matching the shadcn surface. No sort/filter — that's `data_grid`. |
+| `cn::input_otp` | P0 | S | `cn::input` | Segmented PIN / OTP input (N digits). Focus chain across boxes with auto-advance on type, auto-rewind on backspace, paste fills all slots. |
+| `cn::calendar` | P0 | M | — | Month grid + day cells + range / single selection. Hand-rolled date math (chrono is overkill for a UI calendar). Prereq for date picker. |
+| `cn::date_picker` | P0 | M | `cn::calendar`, `cn::popover` | Input + popover-mounted calendar. Roadmap §1.4 entry. |
+| `cn::form` | P0 | M | — | Typed schema + field-binding wrapper. Field `State`s register into a form context; submit collects + validates. Should integrate with `cn::input` / `cn::textarea` / `cn::select` / `cn::checkbox` field variants surfacing error state via CSS class (e.g. `.cn-input--invalid`). |
+| `cn::range_slider` | P1 | S | `cn::slider` | Dual-thumb extension. Most of the work is hit-testing the nearest thumb on drag start + clamping the trailing thumb against the leading one. Roadmap §1.4 entry. |
+| `cn::carousel` | P1 | S | `cn::scroll_area` | Horizontal scroll-snap container + prev/next buttons + dot indicators + optional autoplay. A non-cn `carousel_demo` example exists as a reference. |
+| `cn::command` | P1 | M | `cn::combobox` | `⌘K`-style searchable command palette: fuzzy match, keyboard nav, grouped items, action shortcuts. Lifts the keyboard-driven half of `combobox` into a richer overlay surface. |
+| `cn::time_picker` | P1 | M | `cn::popover`, `cn::input` | Clock face or scrollable hours/minutes/seconds columns. Roadmap §1.4 entry. |
+| `cn::color_picker` | P1 | M | `cn::popover`, `cn::slider` | HSL/RGB wheel (canvas-rendered), saturation/value square, hue slider, hex input, recently-used swatches. Roadmap §1.4 entry. |
+| `cn::data_grid` | P2 | L | `cn::table`, `cn::virtual_list`, `cn::form`, `cn::checkbox`, `cn::dropdown_menu` | Sortable, filterable, paginated, column-resizable, row-selectable table on top of `virtual_list` for performance. Roadmap §1.4 entry. Pulls in column-header sort indicators + filter dropdowns + selection state + per-row context-menu. |
 
 ---
 
