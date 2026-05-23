@@ -781,6 +781,25 @@ fn toggles_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
     let switch2 = ctx.use_state_keyed("switch2", || true);
     let switch3 = ctx.use_state_keyed("switch3", || false);
 
+    // Toggle widget states. `bold_on` / `italic_on` cover the canonical
+    // shadcn icon-only toolbar pattern; `outline_toggle` exercises the
+    // bordered Outline variant; `small_toggle` / `large_toggle`
+    // demonstrate the size ladder.
+    let bold_on = ctx.use_state_keyed("toggle_bold", || true);
+    let italic_on = ctx.use_state_keyed("toggle_italic", || false);
+    let underline_on = ctx.use_state_keyed("toggle_underline", || false);
+    let outline_toggle = ctx.use_state_keyed("toggle_outline", || false);
+    let small_toggle = ctx.use_state_keyed("toggle_small", || false);
+    let large_toggle = ctx.use_state_keyed("toggle_large", || true);
+    let disabled_toggle = ctx.use_state_keyed("toggle_disabled_on", || true);
+
+    // Inline SVG glyphs for the icon-only toggle row. Keeping them
+    // inline avoids pulling in an asset path; canonical Lucide
+    // `bold` / `italic` / `underline` icons.
+    const ICON_BOLD: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12h9a4 4 0 0 1 0 8H7a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h7a4 4 0 0 1 0 8H6"/></svg>"#;
+    const ICON_ITALIC: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" x2="10" y1="4" y2="4"/><line x1="14" x2="5" y1="20" y2="20"/><line x1="15" x2="9" y1="4" y2="20"/></svg>"#;
+    const ICON_UNDERLINE: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4v6a6 6 0 0 0 12 0V4"/><line x1="4" x2="20" y1="20" y2="20"/></svg>"#;
+
     section_container().child(section_title("Toggles")).child(
         div()
             .flex_row()
@@ -803,6 +822,74 @@ fn toggles_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
                     .child(cn::switch(&switch1).label("Notifications"))
                     .child(cn::switch(&switch2).label("Dark mode"))
                     .child(cn::switch(&switch3).label("Disabled").disabled(true)),
+            )
+            // Toggles: icon-only formatting bar + a variant/size showcase
+            .child(
+                div()
+                    .flex_col()
+                    .gap(12.0)
+                    // Icon-only toolbar row — canonical bold / italic / underline.
+                    .child(
+                        div()
+                            .flex_row()
+                            .gap(4.0)
+                            .child(
+                                cn::toggle(&bold_on)
+                                    .icon(ICON_BOLD)
+                                    .aria_label("Toggle bold"),
+                            )
+                            .child(
+                                cn::toggle(&italic_on)
+                                    .icon(ICON_ITALIC)
+                                    .aria_label("Toggle italic"),
+                            )
+                            .child(
+                                cn::toggle(&underline_on)
+                                    .icon(ICON_UNDERLINE)
+                                    .aria_label("Toggle underline"),
+                            ),
+                    )
+                    // Outline variant — bordered when off.
+                    .child(
+                        cn::toggle(&outline_toggle)
+                            .variant(cn::ToggleVariant::Outline)
+                            .label("Outline"),
+                    )
+                    // Size ladder.
+                    .child(
+                        div()
+                            .flex_row()
+                            .gap(8.0)
+                            .items_center()
+                            .child(
+                                cn::toggle(&small_toggle)
+                                    .size(cn::ToggleSize::Small)
+                                    .label("Small"),
+                            )
+                            .child(cn::toggle(&large_toggle).label("Medium"))
+                            .child(
+                                cn::toggle(&large_toggle)
+                                    .size(cn::ToggleSize::Large)
+                                    .label("Large"),
+                            ),
+                    )
+                    // Disabled, both states so the dim treatment is visible.
+                    .child(
+                        div()
+                            .flex_row()
+                            .gap(8.0)
+                            .child(
+                                cn::toggle(&disabled_toggle)
+                                    .label("Disabled on")
+                                    .disabled(true),
+                            )
+                            .child(
+                                cn::toggle(&outline_toggle)
+                                    .variant(cn::ToggleVariant::Outline)
+                                    .label("Disabled off")
+                                    .disabled(true),
+                            ),
+                    ),
             ),
     )
 }
