@@ -814,7 +814,7 @@ fn toggles_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
         div()
             .flex_row()
             .flex_wrap()
-            .gap(48.0)
+            .gap(24.0)
             // Checkboxes
             .child(
                 div()
