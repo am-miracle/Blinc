@@ -300,6 +300,15 @@ pub struct GpuPrimitive {
     pub clip_bounds: [f32; 4],
     /// Clip corner radii (for rounded rect) or (radius_x, radius_y, 0, 0) for ellipse
     pub clip_radius: [f32; 4],
+    /// Per-corner clip superellipse `n` parameter (round=1.0, squircle=2.0,
+    /// bevel=0.0, scoop=-1.0, square=>=100, notch=<=-100). Default
+    /// `[1.0; 4]` keeps the historical circular rounded-rect clip;
+    /// non-default values let the SDF clip evaluator follow a
+    /// squircle / scoop / bevel curve that matches the parent fill,
+    /// so overflow:clip on a squircle parent doesn't leak its bg
+    /// through at the diagonal corner where a circular clip would
+    /// cut children off short.
+    pub clip_corner_shape: [f32; 4],
     /// Gradient parameters: linear (x1, y1, x2, y2), radial (cx, cy, r, 0)
     pub gradient_params: [f32; 4],
     /// Rotation (sin_rz, cos_rz, sin_ry, cos_ry) - pre-computed for GPU efficiency
@@ -350,6 +359,10 @@ impl Default for GpuPrimitive {
             // Default: no clip (large bounds that won't clip anything)
             clip_bounds: [-10000.0, -10000.0, 100000.0, 100000.0],
             clip_radius: [0.0; 4],
+            // Default clip corner shape: round (matches the historical
+            // circular rounded clip — squircle/scoop/bevel only kicks
+            // in when the clip is pushed with a non-round CornerShape).
+            clip_corner_shape: [1.0; 4],
             // Default gradient: horizontal (0,0) to (1,0)
             gradient_params: [0.0, 0.0, 1.0, 0.0],
             // No rotation: sin_rz=0, cos_rz=1, sin_ry=0, cos_ry=1
@@ -613,6 +626,7 @@ impl GpuPrimitive {
             shadow_color: [0.0; 4],
             clip_bounds: glyph.clip_bounds,
             clip_radius: [0.0; 4],
+            clip_corner_shape: [1.0; 4],
             gradient_params: glyph.uv_bounds,
             rotation: [0.0, 1.0, 0.0, 1.0],
             local_affine: [1.0, 0.0, 0.0, 1.0],
@@ -658,6 +672,7 @@ impl GpuPrimitive {
             shadow_color: [0.0; 4],
             clip_bounds: [-10000.0, -10000.0, 100000.0, 100000.0],
             clip_radius: [0.0; 4],
+            clip_corner_shape: [1.0; 4],
             gradient_params: [uv_min_x, uv_min_y, uv_max_x, uv_max_y],
             rotation: [0.0, 1.0, 0.0, 1.0],
             local_affine: [1.0, 0.0, 0.0, 1.0],

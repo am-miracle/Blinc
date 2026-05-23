@@ -384,7 +384,13 @@ impl RenderTree {
                 ctx.set_overflow_fade(render_node.props.overflow_fade.to_array());
             }
             let clip_shape = if inset_radius.top_left > 0.0 {
-                ClipShape::rounded_rect(clip_rect, inset_radius)
+                // Pass the parent's resolved corner_shape so
+                // overflow:clip on a squircle / scoop / bevel parent
+                // follows the same curve as the parent's fill —
+                // otherwise the diagonal-corner pixels between the
+                // parent's outline and a circular clip leak the
+                // parent's bg through where children would paint.
+                ClipShape::rounded_rect_shaped(clip_rect, inset_radius, resolved_corner_shape)
             } else {
                 ClipShape::rect(clip_rect)
             };

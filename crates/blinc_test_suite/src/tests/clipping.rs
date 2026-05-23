@@ -41,6 +41,7 @@ pub fn suite() -> TestSuite {
         c.push_clip(ClipShape::RoundedRect {
             rect: Rect::new(100.0, 100.0, 200.0, 100.0),
             corner_radius: 20.0.into(),
+            corner_shape: blinc_core::CornerShape::ROUND,
         });
 
         // Draw gradient that gets clipped
@@ -211,6 +212,7 @@ pub fn suite() -> TestSuite {
         c.push_clip(ClipShape::RoundedRect {
             rect: image_rect,
             corner_radius: CornerRadius::new(16.0, 16.0, 0.0, 0.0),
+            corner_shape: blinc_core::CornerShape::ROUND,
         });
 
         // Placeholder image (gradient)

@@ -881,6 +881,7 @@ impl<'a> GpuPaintContext<'a> {
             ClipShape::RoundedRect {
                 rect,
                 corner_radius,
+                corner_shape,
             } => {
                 // Transform corners and compute AABB
                 let corners = [
@@ -929,6 +930,7 @@ impl<'a> GpuPaintContext<'a> {
                 ClipShape::RoundedRect {
                     rect: Rect::new(min_x, min_y, max_x - min_x, max_y - min_y),
                     corner_radius: scaled_radius,
+                    corner_shape,
                 }
             }
             ClipShape::Circle { center, radius } => {
@@ -1079,21 +1081,36 @@ impl<'a> GpuPaintContext<'a> {
         }
     }
 
-    /// Get clip data from the current clip stack
-    /// Returns (clip_bounds, clip_radius, clip_type)
+    /// Get clip data from the current clip stack.
     ///
-    /// For multiple rect clips, computes the intersection of all clips.
-    /// For mixed clip types, uses the topmost clip (conservative approximation).
+    /// Returns `(clip_bounds, clip_radius, clip_corner_shape, clip_type)`.
+    /// `clip_corner_shape` is a per-corner superellipse `n` parameter
+    /// matching the [`CornerShape`] encoding (n=1.0 = round, 2.0 =
+    /// squircle, 0.0 = bevel, 100.0 = square, -1.0 = scoop). When the
+    /// active rounded clip was pushed with
+    /// [`ClipShape::rounded_rect_shaped`], the shader's clip
+    /// evaluator uses this to call `sd_shaped_rect` so the clip
+    /// curve matches the parent's fill — otherwise the clip stays
+    /// circular (default `[1.0; 4]`).
     ///
-    /// Corner radius handling: A rectangular clip (non-rounded) will reset the
-    /// corner radius to 0 for any corners it covers. This ensures that a child
-    /// with overflow_clip() doesn't inherit rounded corners from a parent.
-    fn get_clip_data(&self) -> ([f32; 4], [f32; 4], ClipType) {
+    /// For multiple rect clips, computes the intersection of all
+    /// clips. For mixed clip types, uses the topmost clip
+    /// (conservative approximation). Stacked RoundedRect clips with
+    /// different `corner_shape` values currently collapse to the
+    /// last-seen shape — typical UI use is a single squircle parent
+    /// pushing `overflow:clip`, where this is exact.
+    ///
+    /// Corner radius handling: a rectangular clip (non-rounded) will
+    /// reset the corner radius to 0 for any corners it covers, so a
+    /// child with overflow_clip() doesn't inherit rounded corners
+    /// from a parent.
+    fn get_clip_data(&self) -> ([f32; 4], [f32; 4], [f32; 4], ClipType) {
         if self.clip_stack.is_empty() {
             // No clip - use large bounds
             return (
                 [-10000.0, -10000.0, 100000.0, 100000.0],
                 [0.0; 4],
+                [1.0; 4],
                 ClipType::None,
             );
         }
@@ -1143,6 +1160,13 @@ impl<'a> GpuPaintContext<'a> {
         // Track whether the topmost clip is a plain Rect (not rounded)
         let mut topmost_is_plain_rect = false;
 
+        // Track corner_shape (superellipse n) per corner, paired with
+        // the radius source above. Default `1.0` = round; gets
+        // overwritten with the source `ClipShape::RoundedRect`'s
+        // `corner_shape` whenever that source contributes the
+        // dominant radius for the corner.
+        let mut corner_n_sources = [1.0_f32; 4];
+
         for (clip, _poly_meta, _fade) in &self.clip_stack {
             match clip {
                 ClipShape::Rect(rect) => {
@@ -1157,6 +1181,7 @@ impl<'a> GpuPaintContext<'a> {
                 ClipShape::RoundedRect {
                     rect,
                     corner_radius,
+                    corner_shape,
                 } => {
                     let rx = rect.x();
                     let ry = rect.y();
@@ -1170,18 +1195,25 @@ impl<'a> GpuPaintContext<'a> {
                     intersect_max_y = intersect_max_y.min(rmax_y);
 
                     // Track corner radii with their source bounds
-                    // Only update if this corner radius is larger (take max)
+                    // Only update if this corner radius is larger (take max).
+                    // Pair each corner's `n` with the radius it came
+                    // from so the squircle curve survives the
+                    // intersection rebuild below.
                     if corner_radius.top_left > corner_sources[0].0 {
                         corner_sources[0] = (corner_radius.top_left, rx, ry, rmax_x, rmax_y);
+                        corner_n_sources[0] = corner_shape.top_left;
                     }
                     if corner_radius.top_right > corner_sources[1].0 {
                         corner_sources[1] = (corner_radius.top_right, rx, ry, rmax_x, rmax_y);
+                        corner_n_sources[1] = corner_shape.top_right;
                     }
                     if corner_radius.bottom_right > corner_sources[2].0 {
                         corner_sources[2] = (corner_radius.bottom_right, rx, ry, rmax_x, rmax_y);
+                        corner_n_sources[2] = corner_shape.bottom_right;
                     }
                     if corner_radius.bottom_left > corner_sources[3].0 {
                         corner_sources[3] = (corner_radius.bottom_left, rx, ry, rmax_x, rmax_y);
+                        corner_n_sources[3] = corner_shape.bottom_left;
                     }
 
                     has_rect_clips = true;
@@ -1277,9 +1309,36 @@ impl<'a> GpuPaintContext<'a> {
                 }
             }
 
+            // Corner shape: use the source `n` for any corner whose
+            // radius survived the intersection; default to round
+            // (n=1) for corners that intersected away to 0 radius.
+            let corner_shape = [
+                if radii[0] > 0.0 {
+                    corner_n_sources[0]
+                } else {
+                    1.0
+                },
+                if radii[1] > 0.0 {
+                    corner_n_sources[1]
+                } else {
+                    1.0
+                },
+                if radii[2] > 0.0 {
+                    corner_n_sources[2]
+                } else {
+                    1.0
+                },
+                if radii[3] > 0.0 {
+                    corner_n_sources[3]
+                } else {
+                    1.0
+                },
+            ];
+
             return (
                 [intersect_min_x, intersect_min_y, width, height],
                 radii,
+                corner_shape,
                 ClipType::Rect,
             );
         }
@@ -1308,11 +1367,13 @@ impl<'a> GpuPaintContext<'a> {
             ClipShape::Rect(rect) => (
                 [rect.x(), rect.y(), rect.width(), rect.height()],
                 [0.0; 4],
+                [1.0; 4],
                 ClipType::Rect,
             ),
             ClipShape::RoundedRect {
                 rect,
                 corner_radius,
+                corner_shape,
             } => (
                 [rect.x(), rect.y(), rect.width(), rect.height()],
                 [
@@ -1321,18 +1382,26 @@ impl<'a> GpuPaintContext<'a> {
                     corner_radius.bottom_right,
                     corner_radius.bottom_left,
                 ],
+                [
+                    corner_shape.top_left,
+                    corner_shape.top_right,
+                    corner_shape.bottom_right,
+                    corner_shape.bottom_left,
+                ],
                 ClipType::Rect,
             ),
             ClipShape::Circle { center, radius } => (
                 // clip_bounds = rect scissor, clip_radius = [cx, cy, radius, 0]
                 scissor_bounds,
                 [center.x, center.y, *radius, 0.0],
+                [1.0; 4],
                 ClipType::Circle,
             ),
             ClipShape::Ellipse { center, radii } => (
                 // clip_bounds = rect scissor, clip_radius = [cx, cy, rx, ry]
                 scissor_bounds,
                 [center.x, center.y, radii.x, radii.y],
+                [1.0; 4],
                 ClipType::Ellipse,
             ),
             ClipShape::Polygon(_) => {
@@ -1341,6 +1410,7 @@ impl<'a> GpuPaintContext<'a> {
                 (
                     scissor_bounds,
                     [0.0, 0.0, vertex_count as f32, aux_offset as f32],
+                    [1.0; 4],
                     ClipType::Polygon,
                 )
             }
@@ -1349,6 +1419,7 @@ impl<'a> GpuPaintContext<'a> {
                 (
                     [-10000.0, -10000.0, 100000.0, 100000.0],
                     [0.0; 4],
+                    [1.0; 4],
                     ClipType::None,
                 )
             }
@@ -1986,7 +2057,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                     affine.elements[1] * x + affine.elements[3] * y + affine.elements[5];
             }
             if !tessellated.is_empty() {
-                let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+                let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
                 self.push_mesh_primitives_brush(
                     &tessellated,
                     &brush,
@@ -1994,6 +2065,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                     per_vertex_colors.as_deref(),
                     clip_bounds,
                     clip_radius,
+                    clip_corner_shape,
                     clip_type,
                 );
             }
@@ -2018,7 +2090,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         }
 
         if !tessellated.is_empty() {
-            let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+            let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
             if self.is_foreground {
                 self.active_batch_mut()
@@ -2062,7 +2134,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                     affine.elements[1] * x + affine.elements[3] * y + affine.elements[5];
             }
             if !tessellated.is_empty() {
-                let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+                let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
                 self.push_mesh_primitives_brush(
                     &tessellated,
                     &brush,
@@ -2070,6 +2142,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                     per_vertex_colors.as_deref(),
                     clip_bounds,
                     clip_radius,
+                    clip_corner_shape,
                     clip_type,
                 );
             }
@@ -2091,7 +2164,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         }
 
         if !tessellated.is_empty() {
-            let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+            let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
             if self.is_foreground {
                 self.active_batch_mut()
@@ -2159,7 +2232,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             }
 
             // Apply current clip bounds to glass primitive (for scroll containers)
-            let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+            let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
             match clip_type {
                 ClipType::None => {}
                 ClipType::Rect => {
@@ -2237,7 +2310,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             }
 
             // Apply current clip bounds to glass primitive
-            let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+            let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
             match clip_type {
                 ClipType::None => {}
                 ClipType::Rect => {
@@ -2277,7 +2350,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         }
 
         let (color, color2, gradient_params, fill_type) = self.brush_to_colors(&brush);
-        let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+        let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
         // Convert OBB (0..1) gradient coords to rect-local pixel coords
         let gradient_params = Self::obb_to_rect_coords(&brush, gradient_params, rect, fill_type);
@@ -2338,6 +2411,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             shadow_color: [0.0; 4],
             clip_bounds,
             clip_radius,
+            clip_corner_shape,
             gradient_params: transformed_gradient_params,
             rotation: self.current_rotation_sincos(),
             local_affine: self.current_local_affine(),
@@ -2407,7 +2481,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let scaled_bottom_mod = scale_mod(bottom_mod);
 
         let (color, color2, gradient_params, fill_type) = self.brush_to_colors(&brush);
-        let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+        let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
         // Transform gradient params into rect-local then screen space, just
         // like `fill_rect` does.
@@ -2466,6 +2540,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             shadow_color: shadow_color_vec,
             clip_bounds,
             clip_radius,
+            clip_corner_shape,
             gradient_params: transformed_gradient_params,
             rotation: self.current_rotation_sincos(),
             local_affine: self.current_local_affine(),
@@ -2506,7 +2581,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let transformed = self.transform_rect(rect);
         let scaled_radius = self.scale_corner_radius(corner_radius);
         let (color, color2, gradient_params, fill_type) = self.brush_to_colors(&brush);
-        let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+        let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
         // Scale border widths by transform
         let affine = self.current_affine();
@@ -2562,6 +2637,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             shadow_color: [0.0; 4],
             clip_bounds,
             clip_radius,
+            clip_corner_shape,
             gradient_params: transformed_gradient_params,
             rotation: self.current_rotation_sincos(),
             local_affine: self.current_local_affine(),
@@ -2599,7 +2675,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let transformed = self.transform_rect(rect);
         let scaled_radius = self.scale_corner_radius(corner_radius);
         let (color, _color2, gradient_params, fill_type) = self.brush_to_colors(&brush);
-        let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+        let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
         // Scale border width by the current transform's uniform scale (DPI + CSS transforms)
         let scaled_border_width = stroke.width * self.current_uniform_scale();
@@ -2625,6 +2701,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             shadow_color: [0.0; 4],
             clip_bounds,
             clip_radius,
+            clip_corner_shape,
             gradient_params,
             rotation: self.current_rotation_sincos(),
             local_affine: self.current_local_affine(),
@@ -2687,7 +2764,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         }
 
         let (color, color2, gradient_params, fill_type) = self.brush_to_colors(&brush);
-        let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+        let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
         // Convert OBB (0..1) gradient coords to circle bounding rect pixel coords
         let circle_rect = Rect::new(
@@ -2723,6 +2800,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             shadow_color: [0.0; 4],
             clip_bounds,
             clip_radius,
+            clip_corner_shape,
             gradient_params: transformed_gradient_params,
             rotation: [0.0, 1.0, 0.0, 1.0],
             local_affine: [1.0, 0.0, 0.0, 1.0],
@@ -2761,7 +2839,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let transformed_radius = radius * scale;
 
         let (color, _, gradient_params, fill_type) = self.brush_to_colors(&brush);
-        let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+        let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
         // Convert OBB (0..1) gradient coords to circle bounding rect pixel coords
         let circle_rect = Rect::new(
@@ -2797,6 +2875,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             shadow_color: [0.0; 4],
             clip_bounds,
             clip_radius,
+            clip_corner_shape,
             gradient_params: transformed_gradient_params,
             rotation: [0.0, 1.0, 0.0, 1.0],
             local_affine: [1.0, 0.0, 0.0, 1.0],
@@ -2856,7 +2935,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         // clip is active the third element carries its `ClipType`,
         // and we propagate that onto each glyph so the shader's
         // `PRIM_TEXT` branch gates `clip_edge_alpha` properly.
-        let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+        let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
         let clip_kind_u32 = clip_type as u32;
 
         // Convert TextStyle color to [f32; 4] with opacity applied
@@ -2985,7 +3064,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let transformed = self.transform_rect(rect);
         let scaled_radius = self.scale_corner_radius(corner_radius);
         let opacity = self.combined_opacity();
-        let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+        let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
         // Scale shadow values by the current transform's uniform scale (DPI + CSS transforms).
         // Shadow offset, blur, and spread are in logical pixels but the shader
@@ -3023,6 +3102,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
             clip_bounds,
             clip_radius,
+            clip_corner_shape,
             gradient_params: [0.0, 0.0, 1.0, 0.0],
             rotation: self.current_rotation_sincos(),
             local_affine: self.current_local_affine(),
@@ -3054,7 +3134,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let transformed = self.transform_rect(rect);
         let scaled_radius = self.scale_corner_radius(corner_radius);
         let opacity = self.combined_opacity();
-        let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+        let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
         // Scale shadow values by the current transform's uniform scale (DPI + CSS transforms)
         let s = self.current_uniform_scale();
@@ -3090,6 +3170,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
             clip_bounds,
             clip_radius,
+            clip_corner_shape,
             gradient_params: [0.0, 0.0, 1.0, 0.0],
             rotation: self.current_rotation_sincos(),
             local_affine: self.current_local_affine(),
@@ -3120,7 +3201,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
     fn draw_circle_shadow(&mut self, center: Point, radius: f32, shadow: Shadow) {
         let transformed_center = self.transform_point(center);
         let opacity = self.combined_opacity();
-        let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+        let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
         // Store circle as bounds where the circle fits
         let size = radius * 2.0;
@@ -3145,6 +3226,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
             clip_bounds,
             clip_radius,
+            clip_corner_shape,
             gradient_params: [0.0, 0.0, 1.0, 0.0],
             rotation: [0.0, 1.0, 0.0, 1.0],
             local_affine: [1.0, 0.0, 0.0, 1.0],
@@ -3175,7 +3257,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
     fn draw_circle_inner_shadow(&mut self, center: Point, radius: f32, shadow: Shadow) {
         let transformed_center = self.transform_point(center);
         let opacity = self.combined_opacity();
-        let (clip_bounds, clip_radius, clip_type) = self.get_clip_data();
+        let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
 
         let size = radius * 2.0;
         let primitive = GpuPrimitive {
@@ -3199,6 +3281,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             ],
             clip_bounds,
             clip_radius,
+            clip_corner_shape,
             gradient_params: [0.0, 0.0, 1.0, 0.0],
             rotation: [0.0, 1.0, 0.0, 1.0],
             local_affine: [1.0, 0.0, 0.0, 1.0],
@@ -3327,7 +3410,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let transformed = self.transform_rect(rect);
 
         // Get current clip bounds and intersect with the viewport
-        let (clip_bounds, _, _) = self.get_clip_data();
+        let (clip_bounds, _, _, _) = self.get_clip_data();
         let clip_min_x = clip_bounds[0];
         let clip_min_y = clip_bounds[1];
         let clip_max_x = clip_bounds[0] + clip_bounds[2];
@@ -3432,7 +3515,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let transformed = self.transform_rect(rect);
 
         // Get current clip bounds and intersect with the viewport
-        let (clip_bounds, _, _) = self.get_clip_data();
+        let (clip_bounds, _, _, _) = self.get_clip_data();
         let clip_min_x = clip_bounds[0];
         let clip_min_y = clip_bounds[1];
         let clip_max_x = clip_bounds[0] + clip_bounds[2];
@@ -3728,6 +3811,7 @@ impl<'a> GpuPaintContext<'a> {
         per_vertex_colors: Option<&[blinc_core::Color]>,
         clip_bounds: [f32; 4],
         clip_radius: [f32; 4],
+        clip_corner_shape: [f32; 4],
         clip_type: ClipType,
     ) {
         use crate::primitives::PrimitiveType;
@@ -3898,6 +3982,7 @@ impl<'a> GpuPaintContext<'a> {
                 corner_radius: [s01, s12, s20, 0.0],
                 clip_bounds,
                 clip_radius,
+                clip_corner_shape,
                 type_info: [
                     PrimitiveType::Mesh as u32,
                     fill_type,

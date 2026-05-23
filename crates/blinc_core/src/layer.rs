@@ -1567,10 +1567,22 @@ impl LayerProperties {
 pub enum ClipShape {
     /// Axis-aligned rectangle clip
     Rect(Rect),
-    /// Rounded rectangle clip
+    /// Rounded rectangle clip with optional per-corner shape.
+    ///
+    /// `corner_shape` defaults to [`CornerShape::ROUND`] (n = 1 per
+    /// corner) for the canonical "circular rounded clip". Pass the
+    /// parent's effective `CornerShape` via
+    /// [`ClipShape::rounded_rect_shaped`] when the parent fill uses
+    /// a non-circular curve (squircle from the Universal HID theme,
+    /// or any user-set `corner-shape:` CSS) so the clip cuts
+    /// children along the same curve the parent paints — otherwise
+    /// the diagonal-corner pixels between the parent's squircle
+    /// outline and the clip's circular outline leak the parent's
+    /// bg through where children would paint.
     RoundedRect {
         rect: Rect,
         corner_radius: CornerRadius,
+        corner_shape: CornerShape,
     },
     /// Circular clip
     Circle { center: Point, radius: f32 },
@@ -1588,11 +1600,27 @@ impl ClipShape {
         ClipShape::Rect(rect)
     }
 
-    /// Create a rounded rectangle clip
+    /// Create a rounded rectangle clip with circular corners.
     pub fn rounded_rect(rect: Rect, corner_radius: impl Into<CornerRadius>) -> Self {
         ClipShape::RoundedRect {
             rect,
             corner_radius: corner_radius.into(),
+            corner_shape: CornerShape::ROUND,
+        }
+    }
+
+    /// Create a rounded rectangle clip with a per-corner shape (e.g.
+    /// squircle / scoop / bevel) — use this when pushing the clip
+    /// for an element whose own fill uses a non-circular corner.
+    pub fn rounded_rect_shaped(
+        rect: Rect,
+        corner_radius: impl Into<CornerRadius>,
+        corner_shape: CornerShape,
+    ) -> Self {
+        ClipShape::RoundedRect {
+            rect,
+            corner_radius: corner_radius.into(),
+            corner_shape,
         }
     }
 

@@ -4101,6 +4101,7 @@ impl RenderContext {
                             bottom_right: image.clip_radius[2],
                             bottom_left: image.clip_radius[3],
                         },
+                        corner_shape: blinc_core::CornerShape::ROUND,
                     });
                 }
                 let shadow_rect =

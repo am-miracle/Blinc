@@ -59,6 +59,11 @@ struct Primitive {
     clip_bounds: vec4<f32>,
     // Clip corner radii (for rounded rect) or (radius_x, radius_y, 0, 0) for ellipse
     clip_radius: vec4<f32>,
+    // Clip corner shape (superellipse n per corner) for the rounded
+    // rect clip — n=1.0 = round (default), 2.0 = squircle, 0.0 = bevel,
+    // -1.0 = scoop. Lets overflow:clip on a squircle parent follow
+    // the same curve as the parent fill instead of a circular cut.
+    clip_corner_shape: vec4<f32>,
     // Gradient parameters: linear (x1, y1, x2, y2), radial (cx, cy, r, 0) in user space
     gradient_params: vec4<f32>,
     // Rotation (sin_rz, cos_rz, sin_ry, cos_ry) - for rotated SDF evaluation
@@ -352,7 +357,7 @@ fn shadow_circle(p: vec2<f32>, center: vec2<f32>, radius: f32, sigma: f32) -> f3
 //   clip_radius = shape-specific data
 // The shader applies BOTH the rect scissor AND the shape clip.
 // clip_fade = (top, right, bottom, left) overflow fade distances in pixels
-fn calculate_clip_alpha(p: vec2<f32>, clip_bounds: vec4<f32>, clip_radius: vec4<f32>, clip_type: u32, clip_fade: vec4<f32>) -> f32 {
+fn calculate_clip_alpha(p: vec2<f32>, clip_bounds: vec4<f32>, clip_radius: vec4<f32>, clip_corner_shape: vec4<f32>, clip_type: u32, clip_fade: vec4<f32>) -> f32 {
     var alpha: f32 = 1.0;
 
     if clip_type != 0u {
@@ -361,7 +366,7 @@ fn calculate_clip_alpha(p: vec2<f32>, clip_bounds: vec4<f32>, clip_radius: vec4<
             case 1u /* CLIP_RECT */: {
                 let clip_origin = clip_bounds.xy;
                 let clip_size = clip_bounds.zw;
-                let clip_d = sd_rounded_rect(p, clip_origin, clip_size, clip_radius);
+                let clip_d = sd_shaped_rect(p, clip_origin, clip_size, clip_radius, clip_corner_shape);
                 alpha = 1.0 - smoothstep(-aa_width, aa_width, clip_d);
             }
             case 2u /* CLIP_CIRCLE */: {
@@ -506,7 +511,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Early clip test - discard if completely outside clip region (screen space).
     // Polygon shape test deferred until sp is known — see sdf_core.wgsl.
-    var clip_alpha = calculate_clip_alpha(p, prim.clip_bounds, prim.clip_radius, clip_type, prim.clip_fade);
+    var clip_alpha = calculate_clip_alpha(p, prim.clip_bounds, prim.clip_radius, prim.clip_corner_shape, clip_type, prim.clip_fade);
     if clip_alpha < 0.001 {
         discard;
     }

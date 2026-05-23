@@ -1776,7 +1776,10 @@ impl RenderTree {
             };
 
             let clip_shape = if inset_radius.top_left > 0.0 {
-                ClipShape::rounded_rect(clip_rect, inset_radius)
+                // Use the resolved shape so the overflow:clip on a
+                // squircle / scoop / bevel parent follows the same
+                // curve as the parent's fill.
+                ClipShape::rounded_rect_shaped(clip_rect, inset_radius, resolved_corner_shape_m)
             } else {
                 ClipShape::rect(clip_rect)
             };
