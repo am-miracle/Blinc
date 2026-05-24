@@ -45,6 +45,7 @@ pub mod interactive;
 pub mod layout_animation;
 pub mod binding;
 pub mod motion;
+pub mod motion_texture_cache;
 pub mod property;
 pub mod render_state;
 pub mod state_style_table;
@@ -111,6 +112,11 @@ pub use binding::{
 
 // Pre-resolved CSS state-style cascade table (reactive architecture v2, Phase 5)
 pub use state_style_table::StateStyleTable;
+
+// Motion-subtree texture bake registry (reactive architecture v2, Phase 4.2)
+pub use motion_texture_cache::{
+    MotionBakeState, MotionSubtreeBakeRecord, MotionSubtreeBakeRegistry,
+};
 
 // Core types
 pub use element::{

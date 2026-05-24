@@ -628,6 +628,21 @@ pub struct RenderTree {
     /// detection is observable only via [`Self::subtree_texture_candidates`]
     /// for tracing / testing.
     subtree_texture_candidates: RefCell<std::collections::HashSet<LayoutNodeId>>,
+    /// Motion-subtree texture bake registry — Phase 4.2 of the
+    /// unified property channel ([[project-reactive-architecture-v2]]).
+    ///
+    /// Tracks which P4.1 candidates have actually been baked into a
+    /// GPU `LayerTexture` (the texture itself lives on the
+    /// platform-specific `WindowedContext`-equivalent under a parallel
+    /// key map). State machine: Pending → Baked → Invalidated → re-Pending.
+    /// Demoted by [`Self::compute_subtree_texture_candidates`] when a
+    /// node leaves the candidate set; the returned demotion list lets
+    /// the GPU side release the corresponding pooled texture.
+    ///
+    /// P4.2 ships the bookkeeping with no callers — P4.3 plugs the
+    /// bake call, P4.4 plugs invalidation triggers.
+    motion_subtree_bake_registry:
+        RefCell<crate::motion_texture_cache::MotionSubtreeBakeRegistry>,
     /// Hysteresis counter — frames spent classified as `Static`
     /// since the node last appeared `Animating`. Once the count
     /// reaches `SETTLED_STREAK_THRESHOLD`, the node is allowed to
@@ -854,6 +869,9 @@ impl RenderTree {
             current_animation_status: RefCell::new(HashMap::new()),
             composite_promotion: RefCell::new(std::collections::HashSet::new()),
             subtree_texture_candidates: RefCell::new(std::collections::HashSet::new()),
+            motion_subtree_bake_registry: RefCell::new(
+                crate::motion_texture_cache::MotionSubtreeBakeRegistry::empty(),
+            ),
             settled_streak: RefCell::new(HashMap::new()),
             last_scroll_tick_ms: None,
             scale_factor: 1.0,
@@ -1574,8 +1592,12 @@ impl RenderTree {
 
         if animating_roots.is_empty() {
             // Common case (truly static UI). Skip the lock + alloc and
-            // just clear the live map.
+            // just clear the live map. Fall through to the demote
+            // pass so any lingering P4.2 bake records get cleaned up
+            // (e.g. motion ended last frame, the candidate set is now
+            // empty, but the registry still carries a Baked entry).
             self.subtree_texture_candidates.borrow_mut().clear();
+            let _demoted = self.demote_lapsed_motion_bake_records();
             return;
         }
 
@@ -1611,6 +1633,14 @@ impl RenderTree {
 
         let mut writer = self.subtree_texture_candidates.borrow_mut();
         *writer = candidates;
+        drop(writer);
+
+        // Phase 4.2 — prune motion-subtree bake records whose node is
+        // no longer a candidate. Demoted ids are intentionally
+        // dropped here (P4.3 wires the GPU-release callback). Until
+        // then, the bookkeeping cleans itself up cleanly even though
+        // no GPU textures actually exist yet.
+        let _demoted = self.demote_lapsed_motion_bake_records();
     }
 
     /// Return true when no descendant of `root` (excluding `root`
@@ -1674,6 +1704,90 @@ impl RenderTree {
     /// dynamism. See [`Self::compute_subtree_texture_candidates`].
     pub fn is_subtree_texture_candidate(&self, node: LayoutNodeId) -> bool {
         self.subtree_texture_candidates.borrow().contains(&node)
+    }
+
+    /// Phase 4.2 — insert (or refresh) a `Pending` bake record for
+    /// `node`. The walker treats Pending nodes the same as
+    /// non-candidates: emits primitives normally. The end-of-paint
+    /// hook (P4.3) rasterizes those primitives and flips the record
+    /// to [`MotionBakeState::Baked`](crate::motion_texture_cache::MotionBakeState::Baked).
+    ///
+    /// Idempotent on already-Pending records — refreshes bounds /
+    /// generation but doesn't reset state. Use
+    /// [`Self::invalidate_motion_subtree_bake`] to force a re-bake.
+    pub fn prepare_motion_subtree_bake(
+        &self,
+        node: LayoutNodeId,
+        bounds: crate::element::ElementBounds,
+    ) -> bool {
+        self.motion_subtree_bake_registry.borrow_mut().prepare(
+            node,
+            bounds,
+            self.build_generation,
+        )
+    }
+
+    /// Phase 4.2 — flip a bake record to `Baked` after the GPU
+    /// rasterization succeeds. P4.3 plugs the call site once the
+    /// offscreen render pass + `LayerTextureCache.acquire` wiring
+    /// lands. No-op when no record exists for `node` (caller's bake
+    /// fired on a stale candidate).
+    pub fn mark_motion_subtree_baked(&self, node: LayoutNodeId) -> bool {
+        self.motion_subtree_bake_registry
+            .borrow_mut()
+            .mark_baked(node)
+    }
+
+    /// Phase 4.2 — flip a bake record to `Invalidated`. P4.4
+    /// invalidation triggers (descendant structural rebuild,
+    /// non-transform binding fire, descendant CSS animation toggle,
+    /// bounds change, etc.) call this; the walker reverts to normal
+    /// emission on the next paint. If the node is still a candidate
+    /// on the next frame, the bake hook re-rasterizes and flips back
+    /// to `Baked`.
+    pub fn invalidate_motion_subtree_bake(&self, node: LayoutNodeId) -> bool {
+        self.motion_subtree_bake_registry
+            .borrow_mut()
+            .invalidate(node)
+    }
+
+    /// Phase 4.2 — read a bake record. Returns `None` when no record
+    /// exists (the walker should emit primitives normally) or `Some`
+    /// with the current state.
+    pub fn motion_subtree_bake_record(
+        &self,
+        node: LayoutNodeId,
+    ) -> Option<crate::motion_texture_cache::MotionSubtreeBakeRecord> {
+        self.motion_subtree_bake_registry.borrow().get(node)
+    }
+
+    /// Phase 4.2 — number of tracked bake records. Diagnostics +
+    /// P4.5 LRU pressure heuristics.
+    pub fn motion_subtree_bake_count(&self) -> usize {
+        self.motion_subtree_bake_registry.borrow().len()
+    }
+
+    /// Phase 4.2 — drop every bake record whose node is no longer in
+    /// the live `subtree_texture_candidates` set. Called once per
+    /// frame as the tail of
+    /// [`Self::compute_subtree_texture_candidates`]; returns the
+    /// demoted node ids so the GPU-side caller can release the
+    /// corresponding pooled textures back to the
+    /// [`LayerTextureCache`](https://docs.rs/wgpu).
+    ///
+    /// Borrows the candidate set and the registry separately, so the
+    /// detection pass's `RefCell` guards don't overlap with this
+    /// borrow.
+    pub fn demote_lapsed_motion_bake_records(&self) -> Vec<LayoutNodeId> {
+        // Clone the candidate ids out of the RefCell guard first so
+        // the borrow ends before we take the registry's `borrow_mut`.
+        // The clone is bounded by the count of actively-animating
+        // motion-bound roots — typically 0-3 in cn_demo scenarios.
+        let active: std::collections::HashSet<LayoutNodeId> =
+            self.subtree_texture_candidates.borrow().iter().copied().collect();
+        self.motion_subtree_bake_registry
+            .borrow_mut()
+            .demote_lapsed(&active)
     }
 
     /// Borrow the previous frame's animation status map. Used by
@@ -2836,6 +2950,104 @@ mod tests {
         assert!(
             tree.is_subtree_texture_candidate(root),
             "compute_animation_status must populate texture candidates as a side-effect"
+        );
+    }
+
+    // =====================================================================
+    // Phase 4.2 — motion-subtree bake registry integration with RenderTree
+    // =====================================================================
+
+    use crate::element::ElementBounds;
+    use crate::motion_texture_cache::MotionBakeState;
+
+    fn fake_bounds() -> ElementBounds {
+        ElementBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+        }
+    }
+
+    #[test]
+    fn motion_bake_registry_starts_empty() {
+        let tree = RenderTree::from_element(&div());
+        assert_eq!(tree.motion_subtree_bake_count(), 0);
+    }
+
+    #[test]
+    fn prepare_bake_inserts_pending_record_with_tree_generation() {
+        let tree = RenderTree::from_element(&div().child(div()));
+        let root = tree.root().unwrap();
+        let tree_generation = tree.build_generation();
+        assert!(tree.prepare_motion_subtree_bake(root, fake_bounds()));
+        let record = tree.motion_subtree_bake_record(root).unwrap();
+        assert_eq!(record.state, MotionBakeState::Pending);
+        assert_eq!(record.build_generation, tree_generation);
+        assert_eq!(tree.motion_subtree_bake_count(), 1);
+    }
+
+    #[test]
+    fn mark_bake_then_invalidate_state_transitions() {
+        let tree = RenderTree::from_element(&div());
+        let root = tree.root().unwrap();
+        tree.prepare_motion_subtree_bake(root, fake_bounds());
+
+        assert!(tree.mark_motion_subtree_baked(root));
+        assert_eq!(
+            tree.motion_subtree_bake_record(root).unwrap().state,
+            MotionBakeState::Baked
+        );
+
+        assert!(tree.invalidate_motion_subtree_bake(root));
+        assert_eq!(
+            tree.motion_subtree_bake_record(root).unwrap().state,
+            MotionBakeState::Invalidated
+        );
+    }
+
+    #[test]
+    fn demote_lapsed_runs_inside_compute_subtree_texture_candidates() {
+        // Prepare a bake record for a node that has NO motion binding
+        // (so the detection pass will produce an empty candidate set
+        // and the demote step must drop the record).
+        let tree = RenderTree::from_element(&div().child(div()));
+        let root = tree.root().unwrap();
+        tree.prepare_motion_subtree_bake(root, fake_bounds());
+        assert_eq!(tree.motion_subtree_bake_count(), 1);
+
+        // No motion bindings installed → no candidates → record drops.
+        tree.compute_subtree_texture_candidates();
+        assert_eq!(
+            tree.motion_subtree_bake_count(),
+            0,
+            "compute_subtree_texture_candidates must auto-demote lapsed bake records"
+        );
+    }
+
+    #[test]
+    fn demote_lapsed_keeps_records_for_active_candidates() {
+        let mut tree = RenderTree::from_element(&div().child(div()));
+        let root = tree.root().unwrap();
+        let (sv, _scheduler) = animating_shared();
+        tree.motion_bindings.insert(
+            root,
+            MotionBindings {
+                translate_x: Some(sv),
+                ..Default::default()
+            },
+        );
+        tree.prepare_motion_subtree_bake(root, fake_bounds());
+        tree.mark_motion_subtree_baked(root);
+
+        // root is animating → still a candidate → record preserved.
+        tree.compute_subtree_texture_candidates();
+        assert!(tree.is_subtree_texture_candidate(root));
+        assert_eq!(tree.motion_subtree_bake_count(), 1);
+        assert_eq!(
+            tree.motion_subtree_bake_record(root).unwrap().state,
+            MotionBakeState::Baked,
+            "Baked state must survive the demote pass when the node stays a candidate"
         );
     }
 }
