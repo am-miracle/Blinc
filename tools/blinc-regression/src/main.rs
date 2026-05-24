@@ -75,9 +75,17 @@ enum Cmd {
     /// Spawn a target subprocess (default: cn_demo release), sample its
     /// CPU% at 100ms intervals, dump JSON timeseries on exit.
     Record {
-        /// Output JSON path.
-        #[arg(long, default_value = "baselines/main.json")]
-        out: PathBuf,
+        /// Output JSON path. If omitted, defaults to
+        /// `baselines/<UTC-timestamp>[-<label>].json` so progression
+        /// captures don't overwrite each other.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Optional short label appended to the auto-generated filename
+        /// (only honoured when `--out` is not given). Useful for
+        /// per-scenario captures: `--label slider-drag` →
+        /// `baselines/20260524-104728Z-slider-drag.json`.
+        #[arg(long)]
+        label: Option<String>,
         /// Command + args to run. Default = `cargo run -p
         /// blinc_app_examples --example cn_demo --release --features cn`.
         #[arg(last = true)]
@@ -317,13 +325,53 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::List => cmd_list(),
-        Cmd::Record { out, cmd } => cmd_record(&out, &cmd),
+        Cmd::Record { out, label, cmd } => {
+            let out = out.unwrap_or_else(|| default_out_path(label.as_deref()));
+            cmd_record(&out, &cmd)
+        }
         Cmd::Compare {
             baseline,
             after,
             phase,
         } => cmd_compare(&baseline, &after, phase),
     }
+}
+
+/// Default output path when `--out` isn't provided. Format:
+///   baselines/<compact-UTC-timestamp>[-<label>].json
+///
+/// Compact form avoids colons (Windows reserves them) and keeps the
+/// filename naturally sortable by capture time.
+fn default_out_path(label: Option<&str>) -> PathBuf {
+    let ts = format_utc_compact(std::time::SystemTime::now());
+    let stem = match label {
+        Some(l) if !l.is_empty() => format!("{ts}-{}", sanitize_label(l)),
+        _ => ts,
+    };
+    PathBuf::from("baselines").join(format!("{stem}.json"))
+}
+
+/// Squash a label down to filename-safe characters.
+fn sanitize_label(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Filename-friendly UTC timestamp (no colons, no spaces, terminal `Z`).
+/// Example: `20260524-104728Z`.
+fn format_utc_compact(t: std::time::SystemTime) -> String {
+    // Reuses `format_utc`'s civil-calendar math then strips the
+    // separators that browsers and shells dislike on filenames.
+    format_utc(t)
+        .replace(['-', ':'], "")
+        .replace('T', "-")
 }
 
 fn cmd_list() -> anyhow::Result<()> {
