@@ -2578,19 +2578,35 @@ impl RenderTree {
         // Phase 5.3 — populate the state-style table so subsequent
         // `apply_state_styles` calls consult the pre-resolved cascade
         // instead of walking the stylesheet's rule list per lookup.
+        // `set_stylesheet` always allocates a fresh Arc, so we
+        // unconditionally rebuild.
         self.rebuild_state_style_table();
     }
 
-    /// Set a shared stylesheet reference
+    /// Set a shared stylesheet reference.
+    ///
+    /// Skips the Phase 5.3 state-style table rebuild when the
+    /// supplied Arc points to the SAME stylesheet that's already
+    /// bound. This guard matters because the windowed runner re-calls
+    /// `set_stylesheet_arc` every incremental-update frame with the
+    /// cached stylesheet pointer — without the guard the entire
+    /// cascade rebuilds per frame, turning the supposed P5.3 win into
+    /// a hot-path regression. The guard is correct because the only
+    /// way to *change* the stylesheet is to allocate a new Arc
+    /// (`set_stylesheet(...)` does that; the parser path produces a
+    /// fresh `Arc<Stylesheet>` on rebuild).
     pub fn set_stylesheet_arc(&mut self, stylesheet: Arc<Stylesheet>) {
+        let same = self
+            .stylesheet
+            .as_ref()
+            .is_some_and(|cur| Arc::ptr_eq(cur, &stylesheet));
         // Also update the global stylesheet for form widget CSS override resolution
         crate::css_parser::set_active_stylesheet(Arc::clone(&stylesheet));
         self.stylesheet = Some(stylesheet);
         self.invalidate_mouse_move_pipeline_cache();
-        // Phase 5.3 — populate the state-style table so subsequent
-        // `apply_state_styles` calls consult the pre-resolved cascade
-        // instead of walking the stylesheet's rule list per lookup.
-        self.rebuild_state_style_table();
+        if !same {
+            self.rebuild_state_style_table();
+        }
     }
 
     /// Phase 5.3 — (re)build the pre-resolved state-style cascade

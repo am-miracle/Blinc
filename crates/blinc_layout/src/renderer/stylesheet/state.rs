@@ -642,6 +642,47 @@ mod p5_2_table_consumer_tests {
     }
 
     #[test]
+    fn set_stylesheet_arc_skips_rebuild_for_same_pointer() {
+        // Phase 5.3 hot-path guard: the windowed runner re-binds the
+        // cached stylesheet Arc on every incremental-update frame.
+        // Without the Arc::ptr_eq guard inside `set_stylesheet_arc`
+        // the entire ~500-rule cn cascade rebuilds per frame and the
+        // P5.3 win flips to a regression (observed +30% p95 on
+        // cn_demo before this guard landed).
+        //
+        // We don't have a direct hook to count rebuilds, but we can
+        // mutate the table's contents after binding once and then
+        // re-bind with the SAME Arc; if the guard works, our mutation
+        // survives.
+        use std::sync::Arc;
+
+        let mut tree = build_btn_tree(1.0);
+        let stylesheet = Arc::new(parse("#btn { opacity: 0.5; }"));
+        tree.set_stylesheet_arc(stylesheet.clone());
+
+        // Wipe the table so we can detect a rebuild firing.
+        tree.state_style_table.borrow_mut().clear();
+        assert!(!tree.state_style_table.borrow().is_populated());
+
+        // Re-bind the SAME Arc — guard must short-circuit so the
+        // empty table is preserved (no rebuild fires).
+        tree.set_stylesheet_arc(stylesheet.clone());
+        assert!(
+            !tree.state_style_table.borrow().is_populated(),
+            "same-Arc re-bind must NOT trigger rebuild (would be a hot-path regression)"
+        );
+
+        // Re-bind with a FRESH Arc → guard fails → rebuild fires.
+        let fresh = Arc::new(parse("#btn { opacity: 0.5; }"));
+        assert!(!Arc::ptr_eq(&stylesheet, &fresh));
+        tree.set_stylesheet_arc(fresh);
+        assert!(
+            tree.state_style_table.borrow().is_populated(),
+            "fresh-Arc bind must rebuild the table"
+        );
+    }
+
+    #[test]
     fn auto_populated_table_makes_apply_state_styles_consult_it() {
         // Combined wiring test: with no manual table install, the
         // pre-resolved cascade must be consulted by apply_state_styles
