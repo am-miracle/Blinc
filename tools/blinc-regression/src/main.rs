@@ -338,7 +338,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Default output path when `--out` isn't provided. Format:
-///   baselines/<compact-UTC-timestamp>[-<label>].json
+///   `baselines/<compact-UTC-timestamp>[-<label>].json`
 ///
 /// Compact form avoids colons (Windows reserves them) and keeps the
 /// filename naturally sortable by capture time.

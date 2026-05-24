@@ -612,6 +612,22 @@ pub struct RenderTree {
     /// into the bg batch (the composited-layer path rasterizes it
     /// into a `LayerTexture` instead).
     composite_promotion: RefCell<std::collections::HashSet<LayoutNodeId>>,
+    /// Subtree-as-texture candidates — Phase 4.1 of the unified property
+    /// channel ([[project-reactive-architecture-v2]]).
+    ///
+    /// A node `R` ends up here when (a) `R` itself has an active motion
+    /// binding (transform / opacity — the only properties `MotionBindings`
+    /// can drive), and (b) no descendant of `R` has an independent
+    /// animation source: own motion binding, CSS keyframe / transition
+    /// playing, or a `Canvas` element (which is unconditionally dynamic).
+    ///
+    /// Foundation only. The set is populated as a side-effect of
+    /// [`Self::compute_animation_status`] but no consumer reads it yet —
+    /// Phase 4.2 (texture-baking infrastructure) and Phase 4.3
+    /// (bake-at-motion-start) are the first consumers. Until then the
+    /// detection is observable only via [`Self::subtree_texture_candidates`]
+    /// for tracing / testing.
+    subtree_texture_candidates: RefCell<std::collections::HashSet<LayoutNodeId>>,
     /// Hysteresis counter — frames spent classified as `Static`
     /// since the node last appeared `Animating`. Once the count
     /// reaches `SETTLED_STREAK_THRESHOLD`, the node is allowed to
@@ -821,6 +837,7 @@ impl RenderTree {
             previous_animation_status: RefCell::new(HashMap::new()),
             current_animation_status: RefCell::new(HashMap::new()),
             composite_promotion: RefCell::new(std::collections::HashSet::new()),
+            subtree_texture_candidates: RefCell::new(std::collections::HashSet::new()),
             settled_streak: RefCell::new(HashMap::new()),
             last_scroll_tick_ms: None,
             scale_factor: 1.0,
@@ -1478,7 +1495,168 @@ impl RenderTree {
             }
         }
 
+        // Phase 4.1: subtree-as-texture detection runs alongside the
+        // animation-status classification so every caller picks up
+        // both maps off the same compute pass. Cheap — bounded by
+        // the actively-animating motion-binding count, not the tree
+        // size.
+        self.compute_subtree_texture_candidates();
+
         result
+    }
+
+    /// Phase 4.1 — Detect subtree roots that are safe to bake into a
+    /// GPU texture and animate as a single primitive.
+    ///
+    /// A node `R` is a *texture-safe* candidate when:
+    ///
+    /// 1. `R` has motion bindings currently mid-flight. `MotionBindings`
+    ///    only exposes transform / opacity properties, so the
+    ///    "transform-or-opacity-only motion" predicate of the v2 design
+    ///    is satisfied by definition for any animating root.
+    /// 2. Every descendant of `R` (excluding `R` itself) has *no*
+    ///    independent dynamic source:
+    ///    - no own motion binding mid-flight,
+    ///    - no `ElementType::Canvas` (unconditionally dynamic),
+    ///    - no CSS keyframe animation playing,
+    ///    - no CSS transition playing.
+    ///
+    /// When `R` qualifies, its rendered output is stable across frames
+    /// modulo the parent transform/opacity — exactly the case where
+    /// re-rasterizing the subtree every frame is wasted work and
+    /// blitting a cached texture suffices.
+    ///
+    /// Phase 4.1 is foundation only: the resulting set is observable
+    /// via [`Self::subtree_texture_candidates`] / [`Self::is_subtree_texture_candidate`]
+    /// but no consumer reads it yet. Phase 4.2 (texture-baking
+    /// infrastructure) and Phase 4.3 (bake-at-motion-start hook) are
+    /// the first consumers.
+    ///
+    /// Cost: O(animating_roots × avg_subtree_size). For typical UIs
+    /// (toast / drawer / dialog enter, switch thumb translate) the
+    /// animating root count is 1-3 and the subtree size is dozens of
+    /// nodes — sub-microsecond at the scale that matters. Called once
+    /// per frame as a side-effect of [`Self::compute_animation_status`].
+    pub fn compute_subtree_texture_candidates(&self) {
+        let mut candidates = std::collections::HashSet::new();
+
+        // Step 1: gather actively-animating motion-binding roots. The
+        // disqualifier walk below short-circuits on the first bad
+        // descendant, so this filter keeps the walk count tight.
+        let animating_roots: Vec<LayoutNodeId> = self
+            .motion_bindings
+            .iter()
+            .filter_map(|(node, bindings)| {
+                if bindings.is_any_animating() {
+                    Some(*node)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if animating_roots.is_empty() {
+            // Common case (truly static UI). Skip the lock + alloc and
+            // just clear the live map.
+            self.subtree_texture_candidates.borrow_mut().clear();
+            return;
+        }
+
+        // Step 2: snapshot the CSS animation store once for the whole
+        // pass. Locking per-descendant would serialise the walk against
+        // the scheduler's tick thread; one lock per pass is the right
+        // granularity.
+        let css_store = self.css_anim_store.lock().ok();
+        let css_animations_playing: std::collections::HashSet<crate::tree::StableNodeId> =
+            css_store
+                .as_ref()
+                .map(|s| {
+                    s.animations
+                        .iter()
+                        .filter_map(|(stable, anim)| anim.is_playing.then_some(*stable))
+                        .chain(
+                            s.transitions
+                                .iter()
+                                .filter_map(|(stable, t)| t.is_playing.then_some(*stable)),
+                        )
+                        .collect()
+                })
+                .unwrap_or_default();
+        drop(css_store);
+
+        // Step 3: for each animating root, walk its layout-tree
+        // descendants and disqualify on any independent source.
+        for root in animating_roots {
+            if self.subtree_has_no_independent_animation(root, &css_animations_playing) {
+                candidates.insert(root);
+            }
+        }
+
+        let mut writer = self.subtree_texture_candidates.borrow_mut();
+        *writer = candidates;
+    }
+
+    /// Return true when no descendant of `root` (excluding `root`
+    /// itself) carries an independent dynamic source.
+    ///
+    /// "Independent" means a source that would invalidate the texture
+    /// every frame even though the root's motion binding is the only
+    /// thing the caller expected to change. Triple disqualifier: own
+    /// motion binding mid-flight, Canvas element type, or active CSS
+    /// keyframe / transition (looked up via the supplied stable-id
+    /// set so a single store-lock covers the whole pass).
+    fn subtree_has_no_independent_animation(
+        &self,
+        root: LayoutNodeId,
+        css_animations_playing: &std::collections::HashSet<crate::tree::StableNodeId>,
+    ) -> bool {
+        // Iterative DFS over the layout tree. Reusable Vec keeps the
+        // hot per-frame call from re-allocating on small subtrees.
+        let mut stack: Vec<LayoutNodeId> = self.layout_tree.children(root);
+        while let Some(node) = stack.pop() {
+            // Disqualifier 1: own motion binding mid-flight.
+            if let Some(bindings) = self.motion_bindings.get(&node)
+                && bindings.is_any_animating()
+            {
+                return false;
+            }
+            // Disqualifier 2: Canvas — content changes every frame
+            // regardless of motion-binding state, so a cached texture
+            // would go stale immediately.
+            if let Some(render_node) = self.render_nodes.get(&node)
+                && matches!(render_node.element_type, ElementType::Canvas(_))
+            {
+                return false;
+            }
+            // Disqualifier 3: CSS keyframe / transition playing on
+            // this node. Looked up via the pre-built stable-id set so
+            // we don't relock the store per descendant.
+            if let Some(stable) = self.layout_to_stable.get(&node).copied()
+                && css_animations_playing.contains(&stable)
+            {
+                return false;
+            }
+            // Continue walking down.
+            stack.extend(self.layout_tree.children(node));
+        }
+        true
+    }
+
+    /// Borrow the current frame's subtree-as-texture candidate set —
+    /// populated as a side-effect of [`Self::compute_animation_status`]
+    /// via [`Self::compute_subtree_texture_candidates`]. Phase 4.1 is
+    /// foundation only; no in-tree consumer reads this yet.
+    pub fn subtree_texture_candidates(
+        &self,
+    ) -> std::cell::Ref<'_, std::collections::HashSet<LayoutNodeId>> {
+        self.subtree_texture_candidates.borrow()
+    }
+
+    /// Phase 4.1 helper — true when `node` is the root of a
+    /// transform/opacity-only motion-bound subtree with no descendant
+    /// dynamism. See [`Self::compute_subtree_texture_candidates`].
+    pub fn is_subtree_texture_candidate(&self, node: LayoutNodeId) -> bool {
+        self.subtree_texture_candidates.borrow().contains(&node)
     }
 
     /// Borrow the previous frame's animation status map. Used by
@@ -2413,5 +2591,234 @@ mod tests {
         assert!(!tree.layout_tree.node_exists(stale_child));
 
         let _ = crate::stateful::take_pending_subtree_rebuilds();
+    }
+
+    // =====================================================================
+    // Phase 4.1 — subtree-as-texture detection ([[project-reactive-architecture-v2]])
+    // =====================================================================
+
+    use crate::motion::{MotionBindings, SharedAnimatedValue};
+
+    /// Build an `AnimatedValue` with an active spring so
+    /// `is_any_animating()` returns true. Returns the scheduler too —
+    /// the test MUST keep it alive, because `SchedulerHandle` holds a
+    /// `Weak<...>` and the spring storage disappears the moment the
+    /// scheduler drops (`is_spring_settled` then returns true and the
+    /// binding looks settled to the detection pass).
+    fn animating_shared() -> (SharedAnimatedValue, AnimationScheduler) {
+        let scheduler = AnimationScheduler::new();
+        let handle = scheduler.handle();
+        let mut av = blinc_animation::AnimatedValue::with_default(handle, 0.0);
+        av.set_target(100.0);
+        (std::sync::Arc::new(std::sync::Mutex::new(av)), scheduler)
+    }
+
+    /// Build an `AnimatedValue` whose spring has never been pushed —
+    /// `is_animating()` returns false because the spring was never
+    /// registered (`set_target` would create it on first divergence).
+    fn settled_shared() -> (SharedAnimatedValue, AnimationScheduler) {
+        let scheduler = AnimationScheduler::new();
+        let handle = scheduler.handle();
+        let av = blinc_animation::AnimatedValue::with_default(handle, 0.0);
+        (std::sync::Arc::new(std::sync::Mutex::new(av)), scheduler)
+    }
+
+    /// Build a one-keyframe `MultiKeyframeAnimation` and wrap it in
+    /// `ActiveCssAnimation::new` so `is_playing` is true.
+    fn playing_css_animation() -> crate::render_state::ActiveCssAnimation {
+        let anim = blinc_animation::MultiKeyframeAnimation::new(1000);
+        crate::render_state::ActiveCssAnimation::new(anim)
+    }
+
+    #[test]
+    fn subtree_texture_no_motion_no_candidates() {
+        let ui = div().child(div()).child(div());
+        let tree = RenderTree::from_element(&ui);
+        tree.compute_subtree_texture_candidates();
+        assert!(tree.subtree_texture_candidates().is_empty());
+    }
+
+    #[test]
+    fn subtree_texture_settled_binding_is_not_candidate() {
+        let ui = div().child(div()).child(div());
+        let mut tree = RenderTree::from_element(&ui);
+        let root = tree.root().unwrap();
+        let (sv, _scheduler) = settled_shared();
+        tree.motion_bindings.insert(
+            root,
+            MotionBindings {
+                translate_x: Some(sv),
+                ..Default::default()
+            },
+        );
+        tree.compute_subtree_texture_candidates();
+        assert!(
+            !tree.is_subtree_texture_candidate(root),
+            "settled spring (not mid-flight) must not promote a root"
+        );
+    }
+
+    #[test]
+    fn subtree_texture_animating_root_clean_subtree_is_candidate() {
+        let ui = div().child(div()).child(div().child(div()));
+        let mut tree = RenderTree::from_element(&ui);
+        let root = tree.root().unwrap();
+        let (sv, _scheduler) = animating_shared();
+        tree.motion_bindings.insert(
+            root,
+            MotionBindings {
+                translate_x: Some(sv),
+                ..Default::default()
+            },
+        );
+        tree.compute_subtree_texture_candidates();
+        assert!(
+            tree.is_subtree_texture_candidate(root),
+            "root with active transform binding + plain descendants must promote"
+        );
+    }
+
+    #[test]
+    fn subtree_texture_opacity_only_animating_root_is_candidate() {
+        let ui = div().child(div());
+        let mut tree = RenderTree::from_element(&ui);
+        let root = tree.root().unwrap();
+        let (sv, _scheduler) = animating_shared();
+        tree.motion_bindings.insert(
+            root,
+            MotionBindings {
+                opacity: Some(sv),
+                ..Default::default()
+            },
+        );
+        tree.compute_subtree_texture_candidates();
+        assert!(
+            tree.is_subtree_texture_candidate(root),
+            "opacity-only motion must qualify too — MotionBindings can only carry transform/opacity"
+        );
+    }
+
+    #[test]
+    fn subtree_texture_descendant_motion_disqualifies_root() {
+        let ui = div().child(div().child(div()));
+        let mut tree = RenderTree::from_element(&ui);
+        let root = tree.root().unwrap();
+        let child = tree.layout_tree.children(root)[0];
+
+        let (root_sv, _root_sched) = animating_shared();
+        let (child_sv, _child_sched) = animating_shared();
+        tree.motion_bindings.insert(
+            root,
+            MotionBindings {
+                translate_x: Some(root_sv),
+                ..Default::default()
+            },
+        );
+        tree.motion_bindings.insert(
+            child,
+            MotionBindings {
+                scale: Some(child_sv),
+                ..Default::default()
+            },
+        );
+
+        tree.compute_subtree_texture_candidates();
+
+        assert!(
+            !tree.is_subtree_texture_candidate(root),
+            "root disqualified because descendant carries its own animating binding"
+        );
+        assert!(
+            tree.is_subtree_texture_candidate(child),
+            "descendant qualifies on its own (it's the only animation in its own subtree)"
+        );
+    }
+
+    #[test]
+    fn subtree_texture_descendant_css_animation_disqualifies_root() {
+        let ui = div().child(div());
+        let mut tree = RenderTree::from_element(&ui);
+        let root = tree.root().unwrap();
+        let child = tree.layout_tree.children(root)[0];
+        let child_stable = tree
+            .stable_id(child)
+            .expect("child should have a stable id after from_element");
+
+        let (sv, _scheduler) = animating_shared();
+        tree.motion_bindings.insert(
+            root,
+            MotionBindings {
+                translate_x: Some(sv),
+                ..Default::default()
+            },
+        );
+        tree.css_anim_store
+            .lock()
+            .unwrap()
+            .animations
+            .insert(child_stable, playing_css_animation());
+
+        tree.compute_subtree_texture_candidates();
+
+        assert!(
+            !tree.is_subtree_texture_candidate(root),
+            "active CSS keyframe on descendant disqualifies the root"
+        );
+    }
+
+    #[test]
+    fn subtree_texture_descendant_css_transition_disqualifies_root() {
+        let ui = div().child(div());
+        let mut tree = RenderTree::from_element(&ui);
+        let root = tree.root().unwrap();
+        let child = tree.layout_tree.children(root)[0];
+        let child_stable = tree
+            .stable_id(child)
+            .expect("child should have a stable id after from_element");
+
+        let (sv, _scheduler) = animating_shared();
+        tree.motion_bindings.insert(
+            root,
+            MotionBindings {
+                translate_x: Some(sv),
+                ..Default::default()
+            },
+        );
+        tree.css_anim_store
+            .lock()
+            .unwrap()
+            .transitions
+            .insert(child_stable, playing_css_animation());
+
+        tree.compute_subtree_texture_candidates();
+
+        assert!(
+            !tree.is_subtree_texture_candidate(root),
+            "active CSS transition on descendant disqualifies the root"
+        );
+    }
+
+    #[test]
+    fn subtree_texture_compute_animation_status_populates_candidates() {
+        let ui = div().child(div());
+        let mut tree = RenderTree::from_element(&ui);
+        let root = tree.root().unwrap();
+        let (sv, _scheduler) = animating_shared();
+        tree.motion_bindings.insert(
+            root,
+            MotionBindings {
+                translate_x: Some(sv),
+                ..Default::default()
+            },
+        );
+
+        // Call compute_animation_status — the detection pass must
+        // piggyback so callers (try_render_with_compositor) pick up
+        // both maps from one pass without explicit wiring.
+        let _ = tree.compute_animation_status();
+        assert!(
+            tree.is_subtree_texture_candidate(root),
+            "compute_animation_status must populate texture candidates as a side-effect"
+        );
     }
 }
