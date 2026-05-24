@@ -3876,9 +3876,22 @@ impl WindowedApp {
                                                 && !router.is_press_in_flight()
                                                 && !has_move_subscriber
                                             {
-                                                // Cursor stays accurate.
+                                                // Cursor resolution reuses the cached
+                                                // hit chain from the previous full
+                                                // dispatch (`get_cursor_for_last_hit`)
+                                                // instead of a fresh `hit_test`. The
+                                                // whole point of this gate is to skip
+                                                // dispatch cost; running a fresh
+                                                // hit_test for cursor would burn most
+                                                // of the savings — see
+                                                // `get_cursor_for_last_hit`'s docstring
+                                                // ("ate ~10 % CPU on its own").
+                                                // Tradeoff: cursor style is up to
+                                                // 8 ms stale when the user crosses an
+                                                // element boundary mid-skip-window —
+                                                // half-frame at 60 Hz, imperceptible.
                                                 let cursor = tree
-                                                    .get_cursor_at(router, lx, ly)
+                                                    .get_cursor_for_last_hit(router)
                                                     .unwrap_or(CursorStyle::Default);
                                                 let want = convert_cursor_style(cursor);
                                                 if ws.last_cursor != Some(want) {
