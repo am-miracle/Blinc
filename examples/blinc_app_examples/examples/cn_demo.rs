@@ -106,6 +106,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
                         .child(progress_section(ctx))
                         .child(buttons_section(ctx))
                         .child(css_overrides_section())
+                        .child(signal_bound_modifier_section(ctx))
                         .child(badges_section())
                         .child(cards_section())
                         .child(alerts_section())
@@ -473,6 +474,98 @@ fn css_overrides_section() -> impl ElementBuilder + use<> {
                             .size(t_sm())
                             .color(text_secondary),
                     ),
+                ),
+        )
+}
+
+// ============================================================================
+// SIGNAL-BOUND MODIFIER SECTION (reactive-architecture-v2 P2)
+// ============================================================================
+
+/// Demonstrates `.bg(&state)` / `.opacity(&state)` — signal-bound
+/// modifiers that patch a single `RenderProps` cell on `state.set()`
+/// without a `Stateful` wrap or closure re-run. This is the Phase 2
+/// proof-of-concept; cn components will migrate to this pattern over
+/// substeps 2.3 / 2.4.
+fn signal_bound_modifier_section(ctx: &WindowedContext) -> impl ElementBuilder + use<> {
+    let theme = ThemeState::get();
+    let text_secondary = theme.color(ColorToken::TextSecondary);
+
+    // The swatch's color + opacity live as plain State<T>. No Stateful
+    // wraps the swatch. The button on_click handlers call .set(...) and
+    // the framework patches the swatch directly via the property channel.
+    let bg = ctx.use_state_keyed("p2_demo_bg", || Color::from_hex(0x7a2bff));
+    let op = ctx.use_state_keyed("p2_demo_op", || 1.0_f32);
+
+    section_container()
+        .child(section_title("Signal-bound .bg() / .opacity() (Phase 2)"))
+        .child(
+            text(
+                "The swatch below has `.bg(&bg)` and `.opacity(&op)`. Click \
+                 a button — the swatch updates without a Stateful subtree \
+                 rebuild; only the affected RenderProps cell is patched.",
+            )
+            .size(t_sm())
+            .color(text_secondary),
+        )
+        .child(
+            div()
+                .flex_row()
+                .gap(16.0)
+                .items_center()
+                .child(
+                    // The reactive swatch — no Stateful wrapper.
+                    div()
+                        .w(120.0)
+                        .h(120.0)
+                        .bg(&bg)
+                        .opacity(&op)
+                        .rounded(16.0),
+                )
+                .child(
+                    div()
+                        .flex_col()
+                        .gap(8.0)
+                        .child(
+                            div()
+                                .flex_row()
+                                .gap(8.0)
+                                .child(
+                                    cn::button("Purple").on_click({
+                                        let bg = bg.clone();
+                                        move |_| bg.set(Color::from_hex(0x7a2bff))
+                                    }),
+                                )
+                                .child(
+                                    cn::button("Cyan").on_click({
+                                        let bg = bg.clone();
+                                        move |_| bg.set(Color::from_hex(0x00e5ff))
+                                    }),
+                                )
+                                .child(
+                                    cn::button("Magenta").on_click({
+                                        let bg = bg.clone();
+                                        move |_| bg.set(Color::from_hex(0xff2d9b))
+                                    }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_row()
+                                .gap(8.0)
+                                .child(cn::button("Opacity 1.0").on_click({
+                                    let op = op.clone();
+                                    move |_| op.set(1.0)
+                                }))
+                                .child(cn::button("Opacity 0.5").on_click({
+                                    let op = op.clone();
+                                    move |_| op.set(0.5)
+                                }))
+                                .child(cn::button("Opacity 0.25").on_click({
+                                    let op = op.clone();
+                                    move |_| op.set(0.25)
+                                })),
+                        ),
                 ),
         )
 }

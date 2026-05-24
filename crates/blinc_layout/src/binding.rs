@@ -42,7 +42,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use blinc_core::reactive::SignalId;
+use blinc_core::reactive::{SignalId, State};
 
 use crate::element::RenderProps;
 use crate::property::{PropertyId, SideEffects};
@@ -57,30 +57,20 @@ pub type ReadFn = Arc<dyn Fn() -> Option<BoundValue> + Send + Sync>;
 /// once at `Bound` construction; reused on every fire.
 pub type WriteFn = Arc<dyn Fn(&mut RenderProps, &BoundValue) + Send + Sync>;
 
-/// A reactive value source — what a `IntoReactive<T>` impl resolves to.
+/// A reactive value source — what an [`IntoReactive<T>`] impl resolves to.
 ///
-/// Builder methods examine this variant: `Const` becomes an immediate
-/// `RenderProps` write at build time; `Bound` schedules a registry
-/// registration after the node's `LayoutNodeId` is minted.
+/// Builder methods examine the variant: `Const` becomes an immediate
+/// `RenderProps` write at build time; `Bound` keeps a cheap `State<T>`
+/// clone that the builder uses to (a) read the initial value and (b)
+/// register a subscription against the minted `LayoutNodeId`.
 pub enum Reactive<T> {
     /// Eager value — no subscription, written directly into the element
     /// state at build time.
     Const(T),
-    /// Signal-bound — subscribe to the signal at build time, write the
-    /// value via the supplied closure on every signal change.
-    ///
-    /// The closure takes `&mut RenderProps` and the new value, and is
-    /// what gets handed to [`queue_prop_update_partial`] when the signal
-    /// fires. Type-erased so the registry can store heterogeneous
-    /// subscribers in one collection.
-    Bound {
-        /// The reactive source the binding subscribes to.
-        signal_id: SignalId,
-        /// Reads the current value from the reactive graph.
-        read: ReadFn,
-        /// Writes a [`BoundValue`] into the right `RenderProps` field.
-        write: WriteFn,
-    },
+    /// Signal-bound — register a subscription against the State's
+    /// signal id at build time. The builder method supplies the
+    /// `PropertyId` + writer; this just carries the data source.
+    Bound(State<T>),
 }
 
 /// Type-erased value carrier for reactive bindings.
@@ -130,6 +120,86 @@ pub trait IntoReactive<T> {
 impl<T> IntoReactive<T> for T {
     fn into_reactive(self) -> Reactive<T> {
         Reactive::Const(self)
+    }
+}
+
+// Signal-bound: a `&State<T>` produces a Bound reactive. `State<T>::clone`
+// is cheap (Arc internals) so capturing it here doesn't allocate the
+// underlying graph again.
+impl<T: Clone + Send + 'static> IntoReactive<T> for &State<T> {
+    fn into_reactive(self) -> Reactive<T> {
+        Reactive::Bound(self.clone())
+    }
+}
+
+// Owned `State<T>` also works — convenient for `.bg(state.clone())`
+// patterns where the caller doesn't want to type a reference.
+impl<T: Clone + Send + 'static> IntoReactive<T> for State<T> {
+    fn into_reactive(self) -> Reactive<T> {
+        Reactive::Bound(self)
+    }
+}
+
+// =========================================================================
+// PendingBinding — what Div / other element builders hold between method
+// chaining and `build()`. Each represents a deferred registration: at
+// build time, after the `LayoutNodeId` is minted, every pending binding
+// gets `register(node_id)` called on it.
+// =========================================================================
+
+/// Type-erased pending binding stored on `Div` (and other builders).
+/// Each element collects these as `.bg(&signal)` / `.opacity(&signal)` /
+/// etc. are called, then drains them in `build()` once the node id
+/// exists.
+pub trait PendingBinding: Send + Sync {
+    /// Register this binding against `node_id` in the global registry.
+    /// Called once during the element's `build()` after the layout node
+    /// is minted.
+    fn register(&self, node_id: LayoutNodeId);
+}
+
+/// Concrete typed-binding writer — `Arc<dyn Fn(&mut RenderProps, T)>`,
+/// generic over the value type. Lifted to a type alias so clippy's
+/// `type_complexity` lint doesn't fire on the `TypedPendingBinding`
+/// struct field.
+pub type TypedWriteFn<T> = Arc<dyn Fn(&mut RenderProps, T) + Send + Sync>;
+
+/// Concrete `PendingBinding` for a typed `(State<T>, write: fn(&mut
+/// RenderProps, T))` pair. Held on the element builder via
+/// `Box<dyn PendingBinding>`.
+pub struct TypedPendingBinding<T: Clone + Send + Sync + 'static> {
+    state: State<T>,
+    property: PropertyId,
+    write: TypedWriteFn<T>,
+}
+
+impl<T: Clone + Send + Sync + 'static> TypedPendingBinding<T> {
+    /// Build a pending binding that, when registered against a node,
+    /// will subscribe to `state` and write its values into `RenderProps`
+    /// via `write` whenever the signal fires.
+    pub fn new(
+        state: State<T>,
+        property: PropertyId,
+        write: impl Fn(&mut RenderProps, T) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            state,
+            property,
+            write: Arc::new(write),
+        }
+    }
+}
+
+impl<T: Clone + Send + Sync + 'static> PendingBinding for TypedPendingBinding<T> {
+    fn register(&self, node_id: LayoutNodeId) {
+        let write = Arc::clone(&self.write);
+        register_typed(
+            self.state.signal_id(),
+            node_id,
+            self.property,
+            self.state.clone(),
+            move |p, v| write(p, v),
+        );
     }
 }
 
@@ -479,7 +549,128 @@ mod tests {
         let r = 42_i32.into_reactive();
         match r {
             Reactive::Const(v) => assert_eq!(v, 42),
-            Reactive::Bound { .. } => panic!("expected Const"),
+            Reactive::Bound(_) => panic!("expected Const"),
         }
+    }
+
+    #[test]
+    fn into_reactive_bound_path_from_state_ref() {
+        let _guard = lock_and_reset();
+        let state = fresh_state::<i32>(7);
+        let r = (&state).into_reactive();
+        match r {
+            Reactive::Const(_) => panic!("expected Bound"),
+            Reactive::Bound(s) => assert_eq!(s.try_get(), Some(7)),
+        }
+    }
+
+    #[test]
+    fn pending_binding_registers_and_fires() {
+        let _guard = lock_and_reset();
+        let state = fresh_state::<i32>(0);
+
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = mint_node(&mut tree);
+
+        // Pretend this is what a builder method does at chain time.
+        let pending = TypedPendingBinding::new(
+            state.clone(),
+            PropertyId::Opacity,
+            |_p, _v: i32| {},
+        );
+
+        // And this is what `build()` does after minting node_id.
+        pending.register(node_id);
+
+        // Fire the signal — the binding should queue an update.
+        state.set(123);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].node_id, node_id);
+        assert_eq!(updates[0].property, PropertyId::Opacity);
+    }
+
+    #[test]
+    fn div_bg_eager_path_unchanged() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+        use blinc_core::Color;
+
+        // Eager `.bg(Color)` — exercises the Const branch. No binding
+        // should be registered.
+        let mut tree = crate::tree::LayoutTree::new();
+        let element = div().bg(Color::from_hex(0xff0000));
+        let _node_id = element.build(&mut tree);
+
+        // No signal-bound bindings → registry stays empty.
+        assert_eq!(with_registry(|r| r.signal_count()), 0);
+    }
+
+    #[test]
+    fn div_bg_bound_path_fires_on_state_set() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+        use blinc_core::Color;
+
+        let bg_state = fresh_state::<Color>(Color::from_hex(0xff0000));
+        let element = div().bg(&bg_state);
+
+        // Initial value seeded into the builder before build.
+        let props = element.render_props();
+        assert!(props.background.is_some());
+
+        // Build the element — registration fires inside build().
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        assert_eq!(
+            with_registry(|r| r.subscriber_count(bg_state.signal_id())),
+            1,
+            "exactly one binding registered for this state"
+        );
+
+        // Drain any updates queued during build (none expected) so the
+        // fire check below measures cleanly.
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+
+        // Set the state — the binding fires → queue gets a partial update.
+        bg_state.set(Color::from_hex(0x00ff00));
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].node_id, node_id);
+        assert_eq!(updates[0].property, PropertyId::Background);
+
+        // Apply the queued update — RenderProps.background should reflect
+        // the new colour.
+        let mut props = RenderProps::default();
+        (updates.into_iter().next().unwrap().write)(&mut props);
+        match props.background {
+            Some(blinc_core::Brush::Solid(c)) => {
+                assert_eq!(c, Color::from_hex(0x00ff00));
+            }
+            other => panic!("expected Solid green, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn div_opacity_bound_path_fires_on_state_set() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+
+        let opacity_state = fresh_state::<f32>(1.0);
+        let element = div().opacity(&opacity_state);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        opacity_state.set(0.5);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].node_id, node_id);
+        assert_eq!(updates[0].property, PropertyId::Opacity);
+
+        let mut props = RenderProps::default();
+        (updates.into_iter().next().unwrap().write)(&mut props);
+        assert!((props.opacity - 0.5).abs() < 1e-6);
     }
 }

@@ -462,6 +462,12 @@ pub struct Div {
     /// When set, motion containers and layout animations will use this key
     /// as a prefix for auto-generated stable keys.
     pub(crate) stateful_context_key: Option<String>,
+    /// Pending signal-bound property bindings. Accumulated as `.bg(&signal)`,
+    /// `.opacity(&signal)`, etc. are called; drained in `build()` once
+    /// the `LayoutNodeId` is minted. Each entry registers itself against
+    /// the new node id in the global property-binding registry.
+    /// ([[project-reactive-architecture-v2]] Phase 2.)
+    pub(crate) pending_bindings: Vec<Box<dyn crate::binding::PendingBinding>>,
 }
 
 impl Default for Div {
@@ -524,6 +530,7 @@ impl Div {
             layout_animation: None,
             visual_animation: None,
             stateful_context_key: None,
+            pending_bindings: Vec::new(),
         }
     }
 
@@ -583,6 +590,7 @@ impl Div {
             layout_animation: None,
             visual_animation: None,
             stateful_context_key: None,
+            pending_bindings: Vec::new(),
         }
     }
 
@@ -1380,6 +1388,12 @@ impl Div {
         if !other.event_handlers.is_empty() {
             self.event_handlers.merge(other.event_handlers);
         }
+
+        // Append signal-bound property bindings. Both sides keep their
+        // subscriptions; merge concatenates rather than replaces so a
+        // cn widget that mixes its own bindings with the user's
+        // `.bg(&signal)` doesn't drop either set.
+        self.pending_bindings.extend(other.pending_bindings);
     }
 
     /// Merge taffy Style fields from other if they differ from default
@@ -2448,9 +2462,43 @@ impl Div {
     // Visual Properties
     // =========================================================================
 
-    /// Set background color
-    pub fn bg(mut self, color: Color) -> Self {
-        self.background = Some(Brush::Solid(color));
+    /// Set background colour.
+    ///
+    /// Accepts either an eager `Color` or a `&State<Color>` /
+    /// `State<Color>` for signal-bound reactivity. When passed a
+    /// signal, changes to the state fire a property-channel patch via
+    /// the global binding registry — no `Stateful` wrap, no closure
+    /// re-run, no subtree rebuild.
+    /// ([[project-reactive-architecture-v2]] Phase 2.)
+    ///
+    /// ```ignore
+    /// // Eager (compiles unchanged from pre-Phase-2 code)
+    /// div().bg(Color::RED)
+    ///
+    /// // Signal-bound — `.set()` triggers a direct field patch
+    /// let bg = State::new(...);
+    /// div().bg(&bg)
+    /// ```
+    pub fn bg(mut self, value: impl crate::binding::IntoReactive<Color>) -> Self {
+        use crate::binding::{Reactive, TypedPendingBinding};
+        match value.into_reactive() {
+            Reactive::Const(color) => {
+                self.background = Some(Brush::Solid(color));
+            }
+            Reactive::Bound(state) => {
+                // Seed the initial value so the first paint matches.
+                if let Some(c) = state.try_get() {
+                    self.background = Some(Brush::Solid(c));
+                }
+                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
+                    state,
+                    crate::property::PropertyId::Background,
+                    |props, color: Color| {
+                        props.background = Some(Brush::Solid(color));
+                    },
+                )));
+            }
+        }
         self
     }
 
@@ -3025,9 +3073,29 @@ impl Div {
     // Opacity
     // =========================================================================
 
-    /// Set opacity (0.0 = transparent, 1.0 = opaque)
-    pub fn opacity(mut self, opacity: f32) -> Self {
-        self.opacity = opacity.clamp(0.0, 1.0);
+    /// Set opacity (0.0 = transparent, 1.0 = opaque).
+    ///
+    /// Accepts either an eager `f32` or a `&State<f32>` / `State<f32>`
+    /// for signal-bound reactivity. Same mechanism as [`Self::bg`].
+    pub fn opacity(mut self, value: impl crate::binding::IntoReactive<f32>) -> Self {
+        use crate::binding::{Reactive, TypedPendingBinding};
+        match value.into_reactive() {
+            Reactive::Const(o) => {
+                self.opacity = o.clamp(0.0, 1.0);
+            }
+            Reactive::Bound(state) => {
+                if let Some(o) = state.try_get() {
+                    self.opacity = o.clamp(0.0, 1.0);
+                }
+                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
+                    state,
+                    crate::property::PropertyId::Opacity,
+                    |props, o: f32| {
+                        props.opacity = o.clamp(0.0, 1.0);
+                    },
+                )));
+            }
+        }
         self
     }
 
@@ -4195,6 +4263,16 @@ impl ElementBuilder for Div {
         for child in &self.children {
             let child_node = child.build(tree);
             tree.add_child(node, child_node);
+        }
+
+        // Register signal-bound property bindings against the freshly
+        // minted node id. Each pending binding installs a subscription
+        // in the global property-binding registry; subsequent
+        // `State<T>::set` calls fire writers that queue partial updates
+        // through the unified property channel.
+        // ([[project-reactive-architecture-v2]] Phase 2.)
+        for binding in &self.pending_bindings {
+            binding.register(node);
         }
 
         node

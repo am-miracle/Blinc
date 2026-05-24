@@ -103,8 +103,9 @@ pub use property::{PropertyId, SideEffects, TransformEquivalent};
 
 // Signal-bound property bindings (reactive architecture v2, Phase 2)
 pub use binding::{
-    BoundValue, IntoReactive, PropertyBindingRegistry, Reactive, register_typed,
-    unregister_node as unregister_property_bindings, with_registry,
+    BoundValue, IntoReactive, PendingBinding, PropertyBindingRegistry, Reactive,
+    TypedPendingBinding, register_typed, unregister_node as unregister_property_bindings,
+    with_registry,
 };
 
 // Core types
