@@ -47,6 +47,7 @@ pub mod binding;
 pub mod motion;
 pub mod property;
 pub mod render_state;
+pub mod state_style_table;
 pub mod renderer;
 pub mod rich_text;
 pub mod scroll;
@@ -107,6 +108,9 @@ pub use binding::{
     Reactive, TypedPendingBinding, register_typed, register_typed_layout,
     unregister_node as unregister_property_bindings, with_registry,
 };
+
+// Pre-resolved CSS state-style cascade table (reactive architecture v2, Phase 5)
+pub use state_style_table::StateStyleTable;
 
 // Core types
 pub use element::{
