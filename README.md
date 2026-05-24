@@ -15,11 +15,11 @@
 
 ## Highlights
 
-- **GPU-Accelerated** — SDF rendering, glassmorphism, spring physics, @flow custom shaders
-- **Cross-Platform** — Desktop (macOS/Windows/Linux), Android, iOS, Web (WebGPU)
-- **Builder API** — Declarative, chainable: `div().flex_col().gap(16.0).child(text("Hello"))`
-- **40+ Components** — shadcn/ui-style library with CSS-overridable theming
-- **40+ Live Demos** — [Try them in your browser](https://project-blinc.github.io/Blinc/web/example-gallery.html) (WebGPU required)
+- **GPU-Accelerated**: SDF rendering, glassmorphism, spring physics, @flow custom shaders
+- **Cross-Platform**: Desktop (macOS/Windows/Linux), Android, iOS, Web (WebGPU)
+- **Builder API**: Declarative, chainable: `div().flex_col().gap(16.0).child(text("Hello"))`
+- **40+ Components**: shadcn/ui-style library with CSS-overridable theming
+- **40+ Live Demos**: [Try them in your browser](https://project-blinc.github.io/Blinc/web/example-gallery.html) (WebGPU required)
 
 ## Quick Start
 
@@ -38,7 +38,7 @@ fn main() -> Result<()> {
 }
 ```
 
-The same `build_ui` function runs on desktop and web — no separate codebase.
+The same `build_ui` function runs on desktop and web and no separate codebase.
 
 ## Platform Support
 
@@ -54,13 +54,13 @@ The same `build_ui` function runs on desktop and web — no separate codebase.
 
 ## Documentation
 
-**[Blinc Book](https://project-blinc.github.io/Blinc)** — comprehensive guide covering layout, styling, animation, widgets, routing, media, and more.
+**[Blinc Book](https://project-blinc.github.io/Blinc)**: comprehensive guide covering layout, styling, animation, widgets, routing, media, and more.
 
-**[Live Example Gallery](https://project-blinc.github.io/Blinc/web/example-gallery.html)** — 40+ interactive WebGPU demos running in your browser.
+**[Live Example Gallery](https://project-blinc.github.io/Blinc/web/example-gallery.html)**: 40+ interactive WebGPU demos running in your browser.
 
-**[API Reference](https://docs.rs/blinc_app)** — rustdoc for all crates.
+**[API Reference](https://docs.rs/blinc_app)**: rustdoc for all crates.
 
-**[Skills.md](Skills.md)** — concise, example-driven reference for AI code agents.
+**[Skills.md](Skills.md)**: concise, example-driven reference for AI code agents.
 
 ## Crates
 
@@ -89,14 +89,14 @@ The same `build_ui` function runs on desktop and web — no separate codebase.
 See [ROADMAP.md](ROADMAP.md) for detailed milestones. Current focus:
 
 1. Missing widgets (date/time/color picker, data grid)
-2. Zyntax DSL — `.blinc` file syntax compiled to Rust
+2. Zyntax DSL: `.blinc` domain specific language for UI definitions, with support for live editing and hot reload in the future
 3. Accessibility (screen reader, keyboard navigation)
 4. Developer tooling (hot reload, visual inspector)
 
 ## Community
 
-Join us on **[Discord](https://discord.gg/WXADUBBgzP)** — questions, showcases, design discussion, and roadmap chatter. Also feel free to open a [GitHub Discussion](https://github.com/project-blinc/Blinc/discussions) for longer-form conversations.
+Join us on **[Discord](https://discord.gg/WXADUBBgzP)**: questions, showcases, design discussion, and roadmap chatter. Also feel free to open a [GitHub Discussion](https://github.com/project-blinc/Blinc/discussions) for longer-form conversations.
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE)
+Apache License 2.0 - see [LICENSE](LICENSE)
