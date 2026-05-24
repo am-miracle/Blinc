@@ -55,6 +55,11 @@ members = [
     # `default-members` — regular `cargo build` does not pull it.
     # Run with `cargo run -p blinc-build-web-examples`.
     "tools/build-web-examples",
+    # Regression harness for the reactive-architecture-v2 phase work
+    # (see `project_reactive_architecture_v2.md` in dev memory). Scripts
+    # cn_demo interactions + captures CPU/visual baselines. Not in
+    # `default-members`; run via `cargo run -p blinc-regression`.
+    "tools/blinc-regression",
     # Scanner that extracts the non-ASCII codepoint set from workspace
     # Rust sources. Feeds the emoji font subsetter so Blinc only
     # bundles glyphs the application actually uses. Not in

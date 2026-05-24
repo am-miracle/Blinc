@@ -1280,10 +1280,23 @@ impl AndroidApp {
             // Check if stateful elements requested a redraw (hover/press/state changes)
             let has_stateful_updates = blinc_layout::take_needs_redraw();
             let has_pending_rebuilds = blinc_layout::has_pending_subtree_rebuilds();
+            let has_partial_updates = blinc_layout::has_pending_partial_prop_updates();
 
-            if has_stateful_updates || has_pending_rebuilds {
+            if has_stateful_updates || has_pending_rebuilds || has_partial_updates {
                 if has_stateful_updates {
                     tracing::debug!("Redraw requested by: stateful state change");
+                }
+
+                // Drain the partial-form (closure) queue — Phase 1 of the
+                // unified property channel ([[project-reactive-architecture-v2]]).
+                let partial_updates = blinc_layout::take_pending_partial_prop_updates();
+                let mut partial_effects = blinc_layout::SideEffects::default();
+                if let Some(ref mut tree) = render_tree {
+                    for upd in partial_updates {
+                        partial_effects = partial_effects.or(upd.effects);
+                        let write = upd.write;
+                        tree.update_render_props(upd.node_id, |p| write(p));
+                    }
                 }
 
                 // Get all pending prop updates
@@ -1298,9 +1311,9 @@ impl AndroidApp {
                 }
 
                 // Process subtree rebuilds
-                let mut needs_layout = false;
+                let mut needs_layout = partial_effects.needs_layout;
                 if let Some(ref mut tree) = render_tree {
-                    needs_layout = tree.process_pending_subtree_rebuilds();
+                    needs_layout |= tree.process_pending_subtree_rebuilds();
                 }
 
                 if needs_layout {

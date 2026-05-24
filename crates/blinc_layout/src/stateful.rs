@@ -315,6 +315,31 @@ pub fn peek_needs_redraw() -> bool {
 static PENDING_PROP_UPDATES: LazyLock<Mutex<Vec<(LayoutNodeId, RenderProps)>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
+/// A queued partial-form property update — closure that mutates the
+/// target node's `RenderProps` in place, plus side-effect metadata so the
+/// drain step knows whether to schedule layout / text remeasure / clip work.
+///
+/// Part of the Phase 1 foundation of the unified property channel
+/// ([[project-reactive-architecture-v2]]). Signal-bound modifiers (P2),
+/// CSS state table writes (P5), animation tickers (P6), and any future
+/// reactive source land here instead of in the full-replace queue above.
+pub struct PartialPropertyUpdate {
+    pub node_id: LayoutNodeId,
+    pub property: crate::property::PropertyId,
+    pub effects: crate::property::SideEffects,
+    /// Closure that mutates the target's `RenderProps` in place.
+    /// `FnOnce` because a queued update is consumed once during drain.
+    pub write: Box<dyn FnOnce(&mut RenderProps) + Send>,
+}
+
+/// Queue of pending partial property updates — the closure-form parallel
+/// to `PENDING_PROP_UPDATES`. Coexists during P1 plumbing; later phases
+/// migrate full-replace callers onto this form and the original queue
+/// shrinks to a deprecated fallback.
+#[allow(clippy::incompatible_msrv)]
+static PENDING_PARTIAL_PROP_UPDATES: LazyLock<Mutex<Vec<PartialPropertyUpdate>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
 /// Queue of pending subtree rebuilds
 ///
 /// Each entry contains the parent node ID and the children to rebuild.
@@ -789,6 +814,65 @@ pub fn take_pending_prop_updates() -> Vec<(LayoutNodeId, RenderProps)> {
 pub fn queue_prop_update(node_id: LayoutNodeId, props: RenderProps) {
     PENDING_PROP_UPDATES.lock().unwrap().push((node_id, props));
     request_redraw();
+}
+
+/// Drain all queued partial property updates. Counterpart to
+/// [`take_pending_prop_updates`] for the closure-form queue.
+pub fn take_pending_partial_prop_updates() -> Vec<PartialPropertyUpdate> {
+    std::mem::take(&mut *PENDING_PARTIAL_PROP_UPDATES.lock().unwrap())
+}
+
+/// Queue a partial (in-place, closure-form) property update.
+///
+/// Unlike [`queue_prop_update`] (which replaces the full `RenderProps`),
+/// this writes a single field via the supplied closure and carries
+/// side-effect metadata so the drain step knows whether the change
+/// requires layout recomputation, text remeasurement, or clip-cascade
+/// invalidation.
+///
+/// Used by the Phase 1 plumbing of the unified property channel.
+/// Future phases — signal-bound modifiers (P2), CSS state-style table
+/// (P5), animation tickers' value-changed bit (P6), etc. — emit through
+/// this entry point rather than synthesising a full `RenderProps`.
+///
+/// # Example
+///
+/// ```ignore
+/// use blinc_layout::{queue_prop_update_partial, property::{PropertyId, SideEffects}};
+///
+/// queue_prop_update_partial(
+///     node_id,
+///     PropertyId::Background,
+///     SideEffects::VISUAL,
+///     move |props| {
+///         props.background = Some(new_color);
+///     },
+/// );
+/// ```
+pub fn queue_prop_update_partial<F>(
+    node_id: LayoutNodeId,
+    property: crate::property::PropertyId,
+    effects: crate::property::SideEffects,
+    write: F,
+) where
+    F: FnOnce(&mut RenderProps) + Send + 'static,
+{
+    PENDING_PARTIAL_PROP_UPDATES
+        .lock()
+        .unwrap()
+        .push(PartialPropertyUpdate {
+            node_id,
+            property,
+            effects,
+            write: Box::new(write),
+        });
+    request_redraw();
+}
+
+/// Whether any partial-form updates are queued. Cheap check for the
+/// frame loop to short-circuit drain.
+pub fn has_pending_partial_prop_updates() -> bool {
+    !PENDING_PARTIAL_PROP_UPDATES.lock().unwrap().is_empty()
 }
 
 // =========================================================================

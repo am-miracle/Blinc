@@ -44,6 +44,7 @@ pub mod image;
 pub mod interactive;
 pub mod layout_animation;
 pub mod motion;
+pub mod property;
 pub mod render_state;
 pub mod renderer;
 pub mod rich_text;
@@ -95,6 +96,9 @@ pub mod window_actions;
 
 // Re-export InstanceKey and reset function at crate root
 pub use key::{InstanceKey, reset_call_counters};
+
+// Property channel foundation (reactive architecture v2, Phase 1)
+pub use property::{PropertyId, SideEffects, TransformEquivalent};
 
 // Core types
 pub use element::{
@@ -160,8 +164,10 @@ pub use stateful::{
     check_stateful_deps, clear_stateful_animations, clear_stateful_base_updaters,
     clear_stateful_deps, has_animating_statefuls, has_pending_subtree_rebuilds,
     has_stateful_base_updater, has_visible_animating_statefuls, peek_needs_redraw,
-    queue_prop_update, queue_subtree_rebuild, request_redraw, take_needs_redraw,
-    take_pending_prop_updates, take_pending_subtree_rebuilds, update_stateful_base_props, use_fsm,
+    PartialPropertyUpdate, has_pending_partial_prop_updates, queue_prop_update,
+    queue_prop_update_partial, queue_subtree_rebuild, request_redraw, take_needs_redraw,
+    take_pending_partial_prop_updates, take_pending_prop_updates, take_pending_subtree_rebuilds,
+    update_stateful_base_props, use_fsm,
     use_fsm_keyed, use_shared_state, use_shared_state_with, use_state_for, use_state_for_keyed,
 };
 

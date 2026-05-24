@@ -2478,16 +2478,30 @@ impl WebApp {
         // ─── Phase 2: drain stateful prop/subtree updates ────────
         let has_stateful_updates = blinc_layout::take_needs_redraw();
         let has_pending_rebuilds = blinc_layout::has_pending_subtree_rebuilds();
-        if has_stateful_updates || has_pending_rebuilds {
+        let has_partial_updates = blinc_layout::has_pending_partial_prop_updates();
+        if has_stateful_updates || has_pending_rebuilds || has_partial_updates {
+            // Drain the partial-form (closure) queue first — Phase 1 of
+            // the unified property channel. Accumulate side effects so
+            // a layout-affecting partial forces relayout even when no
+            // subtree rebuild was queued.
+            let partial_updates = blinc_layout::take_pending_partial_prop_updates();
+            let mut partial_effects = blinc_layout::SideEffects::default();
+            if let Some(ref mut tree) = self.current_tree {
+                for upd in partial_updates {
+                    partial_effects = partial_effects.or(upd.effects);
+                    let write = upd.write;
+                    tree.update_render_props(upd.node_id, |p| write(p));
+                }
+            }
             let prop_updates = blinc_layout::take_pending_prop_updates();
             if let Some(ref mut tree) = self.current_tree {
                 for (node_id, props) in &prop_updates {
                     tree.update_render_props(*node_id, |p| *p = props.clone());
                 }
             }
-            let mut needs_relayout = false;
+            let mut needs_relayout = partial_effects.needs_layout;
             if let Some(ref mut tree) = self.current_tree {
-                needs_relayout = tree.process_pending_subtree_rebuilds();
+                needs_relayout |= tree.process_pending_subtree_rebuilds();
             }
             if needs_relayout {
                 if let Some(ref mut tree) = self.current_tree {
@@ -2645,16 +2659,30 @@ impl WebApp {
         // `check_stateful_animations` above — they need to land
         // on the current tree before we render this frame.
         {
+            // Partial-form (closure) queue drain — Phase 1 of the
+            // unified property channel. Mirror of the windowed-runner
+            // pattern above.
+            let partial_updates = blinc_layout::take_pending_partial_prop_updates();
+            let mut partial_effects_animation = blinc_layout::SideEffects::default();
+            if let Some(ref mut tree) = self.current_tree {
+                for upd in partial_updates {
+                    partial_effects_animation = partial_effects_animation.or(upd.effects);
+                    let write = upd.write;
+                    tree.update_render_props(upd.node_id, |p| write(p));
+                }
+            }
             let prop_updates = blinc_layout::take_pending_prop_updates();
             if let Some(ref mut tree) = self.current_tree {
                 for (node_id, props) in &prop_updates {
                     tree.update_render_props(*node_id, |p| *p = props.clone());
                 }
             }
-            if blinc_layout::has_pending_subtree_rebuilds() {
-                let mut needs_relayout = false;
+            if blinc_layout::has_pending_subtree_rebuilds()
+                || partial_effects_animation.needs_layout
+            {
+                let mut needs_relayout = partial_effects_animation.needs_layout;
                 if let Some(ref mut tree) = self.current_tree {
-                    needs_relayout = tree.process_pending_subtree_rebuilds();
+                    needs_relayout |= tree.process_pending_subtree_rebuilds();
                 }
                 if needs_relayout {
                     if let Some(ref mut tree) = self.current_tree {

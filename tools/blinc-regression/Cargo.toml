@@ -1,0 +1,20 @@
+[package]
+name = "blinc-regression"
+description = "Regression harness for reactive-architecture-v2 phase work. Scripts cn_demo interactions, captures CPU/visual baselines, diffs against per-phase targets."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Intentionally NOT in `default-members`. Run explicitly via:
+#   cargo run -p blinc-regression -- baseline           (capture current main)
+#   cargo run -p blinc-regression -- phase <N> compare  (after phase landing)
+[[bin]]
+name = "blinc-regression"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
