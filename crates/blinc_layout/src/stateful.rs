@@ -306,23 +306,15 @@ pub fn peek_needs_redraw() -> bool {
 // Pending Prop Updates Queue
 // =========================================================================
 
-/// Queue of pending render prop updates (node_id, new_props)
+/// A queued property update — closure that mutates the target node's
+/// `RenderProps` in place, plus side-effect metadata so the drain step
+/// knows whether to schedule layout / text remeasure / clip work.
 ///
-/// When a stateful element's state changes, it computes new RenderProps
-/// and queues the update here. The windowed app applies these updates
-/// directly to the RenderTree, avoiding a full tree rebuild.
-#[allow(clippy::incompatible_msrv)]
-static PENDING_PROP_UPDATES: LazyLock<Mutex<Vec<(LayoutNodeId, RenderProps)>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
-
-/// A queued partial-form property update — closure that mutates the
-/// target node's `RenderProps` in place, plus side-effect metadata so the
-/// drain step knows whether to schedule layout / text remeasure / clip work.
-///
-/// Part of the Phase 1 foundation of the unified property channel
-/// ([[project-reactive-architecture-v2]]). Signal-bound modifiers (P2),
-/// CSS state table writes (P5), animation tickers (P6), and any future
-/// reactive source land here instead of in the full-replace queue above.
+/// Foundation of the unified property channel
+/// ([[project-reactive-architecture-v2]]). Every source — stateful
+/// animation refresh, ElementHandle visual mutations, signal-bound
+/// modifiers (P2), CSS state-style table writes (P5), animation
+/// lifecycle tickers (P6) — emits through this queue.
 pub struct PartialPropertyUpdate {
     pub node_id: LayoutNodeId,
     pub property: crate::property::PropertyId,
@@ -332,10 +324,9 @@ pub struct PartialPropertyUpdate {
     pub write: Box<dyn FnOnce(&mut RenderProps) + Send>,
 }
 
-/// Queue of pending partial property updates — the closure-form parallel
-/// to `PENDING_PROP_UPDATES`. Coexists during P1 plumbing; later phases
-/// migrate full-replace callers onto this form and the original queue
-/// shrinks to a deprecated fallback.
+/// Process-global queue of pending property updates. Drained by every
+/// platform runner once per frame after stateful animation ticks and
+/// before paint.
 #[allow(clippy::incompatible_msrv)]
 static PENDING_PARTIAL_PROP_UPDATES: LazyLock<Mutex<Vec<PartialPropertyUpdate>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
@@ -796,28 +787,34 @@ pub fn has_visible_animating_statefuls(painted: &std::collections::HashSet<Layou
         })
 }
 
-/// Take all pending prop updates
+/// Queue a render props update for a node — full-replace form.
 ///
-/// Called by the windowed app to apply incremental updates to the RenderTree.
-/// Returns the queued updates and clears the queue.
-pub fn take_pending_prop_updates() -> Vec<(LayoutNodeId, RenderProps)> {
-    std::mem::take(&mut *PENDING_PROP_UPDATES.lock().unwrap())
-}
-
-/// Queue a render props update for a node
+/// Routes through the unified property channel tagged as
+/// `PropertyId::Compound` with `SideEffects::VISUAL`; the closure
+/// replaces `RenderProps` wholesale. Visual-only semantics are
+/// preserved (no relayout).
 ///
 /// Called by stateful elements when their state changes, or by
 /// `ElementHandle::mark_visual_dirty()` for explicit visual updates.
 ///
-/// This queues a visual-only update that skips layout recomputation.
-/// Use this for changes to background, opacity, shadows, etc.
+/// New code should prefer [`queue_prop_update_partial`] with an explicit
+/// `PropertyId` so the drain step can classify side effects per-property
+/// (background-only updates skip even the visual-only invalidation cost
+/// that the `Compound` classification implies).
 pub fn queue_prop_update(node_id: LayoutNodeId, props: RenderProps) {
-    PENDING_PROP_UPDATES.lock().unwrap().push((node_id, props));
-    request_redraw();
+    queue_prop_update_partial(
+        node_id,
+        crate::property::PropertyId::Compound,
+        // Historical convention: full-replace updates are visual-only.
+        // Layout changes flow through `queue_subtree_rebuild` /
+        // `process_pending_subtree_rebuilds` separately.
+        crate::property::SideEffects::VISUAL,
+        move |p| *p = props,
+    );
 }
 
-/// Drain all queued partial property updates. Counterpart to
-/// [`take_pending_prop_updates`] for the closure-form queue.
+/// Drain all queued property updates. The platform runners call this
+/// once per frame after stateful animation ticks and before paint.
 pub fn take_pending_partial_prop_updates() -> Vec<PartialPropertyUpdate> {
     std::mem::take(&mut *PENDING_PARTIAL_PROP_UPDATES.lock().unwrap())
 }

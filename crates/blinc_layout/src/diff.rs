@@ -225,7 +225,8 @@ pub enum ChildDiff {
 #[derive(Default)]
 pub struct ReconcileActions {
     /// Prop updates to queue (visual-only changes).
-    /// These go via `PENDING_PROP_UPDATES`.
+    /// Routed through `queue_prop_update` → the unified property channel
+    /// drained by every platform runner.
     pub prop_updates: Vec<(LayoutNodeId, RenderProps)>,
 
     /// Node IDs of subtrees that need rebuilding.

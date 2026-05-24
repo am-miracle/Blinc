@@ -1280,38 +1280,28 @@ impl AndroidApp {
             // Check if stateful elements requested a redraw (hover/press/state changes)
             let has_stateful_updates = blinc_layout::take_needs_redraw();
             let has_pending_rebuilds = blinc_layout::has_pending_subtree_rebuilds();
-            let has_partial_updates = blinc_layout::has_pending_partial_prop_updates();
+            let has_prop_updates = blinc_layout::has_pending_partial_prop_updates();
 
-            if has_stateful_updates || has_pending_rebuilds || has_partial_updates {
+            if has_stateful_updates || has_pending_rebuilds || has_prop_updates {
                 if has_stateful_updates {
                     tracing::debug!("Redraw requested by: stateful state change");
                 }
 
-                // Drain the partial-form (closure) queue — Phase 1 of the
-                // unified property channel ([[project-reactive-architecture-v2]]).
-                let partial_updates = blinc_layout::take_pending_partial_prop_updates();
-                let mut partial_effects = blinc_layout::SideEffects::default();
+                // Drain the unified property channel
+                // ([[project-reactive-architecture-v2]]).
+                let prop_updates = blinc_layout::take_pending_partial_prop_updates();
+                let had_prop_updates = !prop_updates.is_empty();
+                let mut prop_effects = blinc_layout::SideEffects::default();
                 if let Some(ref mut tree) = render_tree {
-                    for upd in partial_updates {
-                        partial_effects = partial_effects.or(upd.effects);
+                    for upd in prop_updates {
+                        prop_effects = prop_effects.or(upd.effects);
                         let write = upd.write;
                         tree.update_render_props(upd.node_id, |p| write(p));
                     }
                 }
 
-                // Get all pending prop updates
-                let prop_updates = blinc_layout::take_pending_prop_updates();
-                let had_prop_updates = !prop_updates.is_empty();
-
-                // Apply prop updates to the tree
-                if let Some(ref mut tree) = render_tree {
-                    for (node_id, props) in &prop_updates {
-                        tree.update_render_props(*node_id, |p| *p = props.clone());
-                    }
-                }
-
                 // Process subtree rebuilds
-                let mut needs_layout = partial_effects.needs_layout;
+                let mut needs_layout = prop_effects.needs_layout;
                 if let Some(ref mut tree) = render_tree {
                     needs_layout |= tree.process_pending_subtree_rebuilds();
                 }

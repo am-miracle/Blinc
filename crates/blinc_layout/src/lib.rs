@@ -166,8 +166,8 @@ pub use stateful::{
     has_stateful_base_updater, has_visible_animating_statefuls, peek_needs_redraw,
     PartialPropertyUpdate, has_pending_partial_prop_updates, queue_prop_update,
     queue_prop_update_partial, queue_subtree_rebuild, request_redraw, take_needs_redraw,
-    take_pending_partial_prop_updates, take_pending_prop_updates, take_pending_subtree_rebuilds,
-    update_stateful_base_props, use_fsm,
+    take_pending_partial_prop_updates, take_pending_subtree_rebuilds, update_stateful_base_props,
+    use_fsm,
     use_fsm_keyed, use_shared_state, use_shared_state_with, use_state_for, use_state_for_keyed,
 };
 

@@ -8,10 +8,12 @@
 //! does it invalidate text measurement? does it affect clip geometry? —
 //! without the drain having to read the value or know the closure body.
 //!
-//! Phase 1 lands the foundation without forcing every call site to switch.
-//! Existing `queue_prop_update(node_id, full_RenderProps)` stays. A new
-//! `queue_prop_update_partial(node_id, side_effects, closure)` form coexists
-//! and is the API every later phase routes through.
+//! Phase 1 lands the foundation. `queue_prop_update_partial(node_id,
+//! property, side_effects, closure)` is the canonical entry point.
+//! Existing `queue_prop_update(node_id, full_RenderProps)` is preserved
+//! as a backward-compat shim that routes through the same channel with
+//! `PropertyId::Compound + SideEffects::VISUAL` so user code calling
+//! `ElementHandle::mark_visual_dirty` and similar stays source-compatible.
 
 /// Identifier for a single visual / layout / text property.
 ///

@@ -5061,36 +5061,24 @@ impl WindowedApp {
                                     tracing::debug!("Redraw requested by: stateful state change");
                                 }
 
-                                // Get all pending prop updates
-                                let prop_updates = blinc_layout::take_pending_prop_updates();
-                                let had_prop_updates = !prop_updates.is_empty();
-
-                                // Drain the partial-form (closure) queue — Phase 1 of the
-                                // unified property channel ([[project-reactive-architecture-v2]]).
-                                // Accumulated side effects decide whether the drain forces a
-                                // layout pass even when no full-replace updates arrived.
-                                let partial_updates =
+                                // Drain the unified property channel
+                                // ([[project-reactive-architecture-v2]]). Accumulated
+                                // side effects decide whether the drain forces a layout
+                                // pass.
+                                let prop_updates =
                                     blinc_layout::take_pending_partial_prop_updates();
-                                let had_partial_updates = !partial_updates.is_empty();
-                                let mut partial_effects = blinc_layout::SideEffects::default();
+                                let had_prop_updates = !prop_updates.is_empty();
+                                let mut prop_effects = blinc_layout::SideEffects::default();
                                 if let Some(ref mut tree) = ws.render_tree {
-                                    for upd in partial_updates {
-                                        partial_effects = partial_effects.or(upd.effects);
+                                    for upd in prop_updates {
+                                        prop_effects = prop_effects.or(upd.effects);
                                         let write = upd.write;
                                         tree.update_render_props(upd.node_id, |p| write(p));
                                     }
                                 }
 
-                                // Apply prop updates to the main tree
-                                // (Overlays are now part of the main tree, so all nodes are here)
-                                if let Some(ref mut tree) = ws.render_tree {
-                                    for (node_id, props) in &prop_updates {
-                                        tree.update_render_props(*node_id, |p| *p = props.clone());
-                                    }
-                                }
-
                                 // Process subtree rebuilds (from stateful changes OR overlay changes)
-                                let mut needs_layout = partial_effects.needs_layout;
+                                let mut needs_layout = prop_effects.needs_layout;
                                 if let Some(ref mut tree) = ws.render_tree {
                                     needs_layout |= tree.process_pending_subtree_rebuilds();
                                 }
@@ -5128,7 +5116,7 @@ impl WindowedApp {
                                         }
                                     }
                                 }
-                                if (had_prop_updates || had_partial_updates) && !needs_layout {
+                                if had_prop_updates && !needs_layout {
                                     tracing::trace!("Visual-only prop updates, skipping layout");
                                 }
 
@@ -5150,7 +5138,7 @@ impl WindowedApp {
                                 // `handle_event_internal` already covers
                                 // event-fired transitions via `state_changed`
                                 // above; this catches the scheduler-driven half.
-                                if had_prop_updates || had_partial_updates {
+                                if had_prop_updates {
                                     blinc_app.invalidate_render_cache_tagged(
                                         "stateful_prop_update",
                                     );
