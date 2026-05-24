@@ -24,14 +24,65 @@
 //! state still in flight?" check is what gates the frame-loop redraw
 //! after this pass writes new transitions.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
-use crate::css_parser::ElementState;
+use crate::css_parser::{ElementState, Stylesheet};
+use crate::element_style::ElementStyle;
 use crate::tree::LayoutNodeId;
 
 use super::super::RenderTree;
 
 impl RenderTree {
+    /// Resolve the base `#id { ... }` style for a node — Phase 5.2 of
+    /// the unified property channel ([[project-reactive-architecture-v2]]).
+    ///
+    /// Prefers the pre-resolved [`StateStyleTable`] when populated AND
+    /// fresh against the current tree's `build_generation`; falls back
+    /// to the stylesheet rule walk otherwise. The borrow case is
+    /// zero-cost (just a reference into the supplied `stylesheet`);
+    /// the table-hit case clones the stored [`ElementStyle`] out from
+    /// behind the table's `RefCell` borrow so the caller can release
+    /// the guard and freely mutate `render_nodes` afterwards.
+    ///
+    /// Phase 5.2 wires the consumer-side: the table is always empty
+    /// at this point so behaviour is exactly preserved. Phase 5.3
+    /// wires the build trigger (stylesheet-bind / class-set change)
+    /// and the win lands.
+    fn resolve_base_style<'a>(
+        &self,
+        node_id: LayoutNodeId,
+        element_id: &str,
+        stylesheet: &'a Stylesheet,
+    ) -> Option<Cow<'a, ElementStyle>> {
+        if let Some(stable) = self.stable_id(node_id) {
+            let table = self.state_style_table.borrow();
+            if table.is_populated() && table.build_generation() == self.build_generation() {
+                return table.get_base(stable).cloned().map(Cow::Owned);
+            }
+        }
+        stylesheet.get(element_id).map(Cow::Borrowed)
+    }
+
+    /// Stateful sibling of [`Self::resolve_base_style`]. Looks up
+    /// `#id:state { ... }` cascades in the table first, falls back to
+    /// `stylesheet.get_with_state`.
+    fn resolve_state_style<'a>(
+        &self,
+        node_id: LayoutNodeId,
+        element_id: &str,
+        state: ElementState,
+        stylesheet: &'a Stylesheet,
+    ) -> Option<Cow<'a, ElementStyle>> {
+        if let Some(stable) = self.stable_id(node_id) {
+            let table = self.state_style_table.borrow();
+            if table.is_populated() && table.build_generation() == self.build_generation() {
+                return table.get_state(stable, state).cloned().map(Cow::Owned);
+            }
+        }
+        stylesheet.get_with_state(element_id, state).map(Cow::Borrowed)
+    }
+
     /// Apply state-specific styles from the stylesheet to a node.
     ///
     /// This is called when a node's interaction state changes (hover, pressed, focused).
@@ -83,10 +134,36 @@ impl RenderTree {
             None => return false,
         };
 
-        // Check if this element has transitions defined
-        let transition_set = stylesheet
-            .get(&element_id)
+        // Check if this element has transitions defined. Phase 5.2:
+        // routed through `resolve_base_style` so the lookup hits the
+        // pre-resolved table when populated (P5.3 wires the build);
+        // today the table is always empty and the call falls through
+        // to `stylesheet.get` for behaviour-preserving migration.
+        let transition_set = self
+            .resolve_base_style(node_id, &element_id, &stylesheet)
             .and_then(|s| s.transition.clone());
+
+        // Pre-resolve every state-style cascade BEFORE taking the
+        // `&mut` borrow on render_nodes below. Each Cow either holds
+        // a borrow into `stylesheet` (lifetime independent of self)
+        // or an owned clone from the state-style table (no borrow on
+        // self), so they coexist freely with `self.render_nodes.get_mut`.
+        let base_lookup = self.resolve_base_style(node_id, &element_id, &stylesheet);
+        let hover_lookup = if hovered {
+            self.resolve_state_style(node_id, &element_id, ElementState::Hover, &stylesheet)
+        } else {
+            None
+        };
+        let active_lookup = if pressed {
+            self.resolve_state_style(node_id, &element_id, ElementState::Active, &stylesheet)
+        } else {
+            None
+        };
+        let focus_lookup = if focused {
+            self.resolve_state_style(node_id, &element_id, ElementState::Focus, &stylesheet)
+        } else {
+            None
+        };
 
         // Snapshot before-props for transition detection (visual + layout).
         // Uses snapshot_before_keyframe_properties to avoid QR decomposition
@@ -113,7 +190,7 @@ impl RenderTree {
         }
 
         // Apply base stylesheet style (if any)
-        if let Some(base_style) = stylesheet.get(&element_id) {
+        if let Some(base_style) = base_lookup.as_deref() {
             Self::apply_element_style_to_props(&mut render_node.props, base_style);
             if base_style.has_layout_props() {
                 if let Some(mut taffy_style) = self.layout_tree.get_style(node_id) {
@@ -125,46 +202,39 @@ impl RenderTree {
         }
 
         // Apply hover style
-        if hovered {
-            if let Some(hover_style) = stylesheet.get_with_state(&element_id, ElementState::Hover) {
-                Self::apply_element_style_to_props(&mut render_node.props, hover_style);
-                if hover_style.has_layout_props() {
-                    if let Some(mut taffy_style) = self.layout_tree.get_style(node_id) {
-                        Self::apply_element_style_to_taffy(&mut taffy_style, hover_style);
-                        self.layout_tree.set_style(node_id, taffy_style);
-                    }
+        if let Some(hover_style) = hover_lookup.as_deref() {
+            Self::apply_element_style_to_props(&mut render_node.props, hover_style);
+            if hover_style.has_layout_props() {
+                if let Some(mut taffy_style) = self.layout_tree.get_style(node_id) {
+                    Self::apply_element_style_to_taffy(&mut taffy_style, hover_style);
+                    self.layout_tree.set_style(node_id, taffy_style);
                 }
-                applied = true;
             }
+            applied = true;
         }
 
         // Apply active/pressed style (takes precedence over hover)
-        if pressed {
-            if let Some(active_style) = stylesheet.get_with_state(&element_id, ElementState::Active)
-            {
-                Self::apply_element_style_to_props(&mut render_node.props, active_style);
-                if active_style.has_layout_props() {
-                    if let Some(mut taffy_style) = self.layout_tree.get_style(node_id) {
-                        Self::apply_element_style_to_taffy(&mut taffy_style, active_style);
-                        self.layout_tree.set_style(node_id, taffy_style);
-                    }
+        if let Some(active_style) = active_lookup.as_deref() {
+            Self::apply_element_style_to_props(&mut render_node.props, active_style);
+            if active_style.has_layout_props() {
+                if let Some(mut taffy_style) = self.layout_tree.get_style(node_id) {
+                    Self::apply_element_style_to_taffy(&mut taffy_style, active_style);
+                    self.layout_tree.set_style(node_id, taffy_style);
                 }
-                applied = true;
             }
+            applied = true;
         }
 
         // Apply focus style
-        if focused {
-            if let Some(focus_style) = stylesheet.get_with_state(&element_id, ElementState::Focus) {
-                Self::apply_element_style_to_props(&mut render_node.props, focus_style);
-                if focus_style.has_layout_props() {
-                    if let Some(mut taffy_style) = self.layout_tree.get_style(node_id) {
-                        Self::apply_element_style_to_taffy(&mut taffy_style, focus_style);
-                        self.layout_tree.set_style(node_id, taffy_style);
-                    }
+        if let Some(focus_style) = focus_lookup.as_deref() {
+            Self::apply_element_style_to_props(&mut render_node.props, focus_style);
+            if focus_style.has_layout_props() {
+                if let Some(mut taffy_style) = self.layout_tree.get_style(node_id) {
+                    Self::apply_element_style_to_taffy(&mut taffy_style, focus_style);
+                    self.layout_tree.set_style(node_id, taffy_style);
                 }
-                applied = true;
             }
+            applied = true;
         }
 
         // Detect and start transitions for changed properties (visual + layout)
@@ -265,13 +335,17 @@ impl RenderTree {
                 );
             }
 
-            // Trigger/stop hover CSS animations
-            let stylesheet = self.stylesheet.as_ref().unwrap();
+            // Trigger/stop hover CSS animations. Phase 5.2 routes the
+            // "does this state have an animation?" probe through the
+            // pre-resolved table when populated; today the table is
+            // always empty, so the call falls back to the stylesheet
+            // rule walk — behaviour preserved.
+            let stylesheet = self.stylesheet.as_ref().unwrap().clone();
             if hovered && !self.hover_css_animations.contains(&node_id) {
-                let has_hover_anim = stylesheet
-                    .get_with_state(&element_id, ElementState::Hover)
-                    .and_then(|s| s.animation.as_ref())
-                    .is_some();
+                let has_hover_anim = self
+                    .resolve_state_style(node_id, &element_id, ElementState::Hover, &stylesheet)
+                    .as_deref()
+                    .is_some_and(|s| s.animation.is_some());
                 if has_hover_anim {
                     self.start_css_animation_for_state(node_id, ElementState::Hover);
                     self.hover_css_animations.insert(node_id);
@@ -279,10 +353,10 @@ impl RenderTree {
                 }
             } else if !hovered && self.hover_css_animations.remove(&node_id) {
                 // Hover left — remove hover animation if no base animation exists
-                let base_has_anim = stylesheet
-                    .get(&element_id)
-                    .and_then(|s| s.animation.as_ref())
-                    .is_some();
+                let base_has_anim = self
+                    .resolve_base_style(node_id, &element_id, &stylesheet)
+                    .as_deref()
+                    .is_some_and(|s| s.animation.is_some());
                 if base_has_anim {
                     self.start_css_animation_for_element(node_id);
                 } else if let Some(stable) = self.stable_id(node_id) {
@@ -419,5 +493,139 @@ impl RenderTree {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod p5_2_table_consumer_tests {
+    //! Phase 5.2 of the unified property channel
+    //! ([[project-reactive-architecture-v2]]):
+    //! `apply_state_styles` must consult `StateStyleTable` when it's
+    //! populated and fresh against `build_generation`, otherwise fall
+    //! back to the rule-walk via `stylesheet.get` / `.get_with_state`.
+    //!
+    //! These tests discriminate the two paths by building the table
+    //! from one stylesheet and binding a DIFFERENT stylesheet to the
+    //! tree: the table-hit path applies the table's value, the
+    //! fallback path applies the bound stylesheet's value.
+    use super::*;
+    use crate::div::div;
+    use crate::renderer::RenderTree;
+    use crate::state_style_table::StateStyleTable;
+
+    fn parse(css: &str) -> Stylesheet {
+        Stylesheet::parse_with_errors(css).stylesheet
+    }
+
+    fn build_btn_tree(initial_opacity: f32) -> RenderTree {
+        let ui = div().id("btn").opacity(initial_opacity);
+        RenderTree::from_element(&ui)
+    }
+
+    #[test]
+    fn fallback_path_runs_when_table_empty() {
+        // Empty table → resolve_base_style walks the bound stylesheet.
+        let mut tree = build_btn_tree(1.0);
+        tree.set_stylesheet(parse("#btn { opacity: 0.5; }"));
+        let root = tree.root().unwrap();
+
+        assert!(tree.apply_state_styles(root, false, false, false));
+        let props = &tree.render_nodes.get(&root).unwrap().props;
+        assert!(
+            (props.opacity - 0.5).abs() < 0.001,
+            "fallback path must produce the bound stylesheet's opacity, got {}",
+            props.opacity
+        );
+    }
+
+    #[test]
+    fn table_path_wins_when_populated_and_fresh() {
+        // Bound stylesheet says 0.5, table says 0.25. Table should win.
+        let mut tree = build_btn_tree(1.0);
+        tree.set_stylesheet(parse("#btn { opacity: 0.5; }"));
+        let root = tree.root().unwrap();
+
+        // Build the table from a different stylesheet — same id, distinct value.
+        let table_source = parse("#btn { opacity: 0.25; }");
+        let table = StateStyleTable::build(
+            &table_source,
+            std::iter::once(("btn".to_string(), tree.stable_id(root).unwrap())),
+            tree.build_generation(),
+        );
+        assert!(table.is_populated(), "table must be populated");
+        *tree.state_style_table.borrow_mut() = table;
+
+        assert!(tree.apply_state_styles(root, false, false, false));
+        let props = &tree.render_nodes.get(&root).unwrap().props;
+        assert!(
+            (props.opacity - 0.25).abs() < 0.001,
+            "table path must produce the table's opacity, got {}",
+            props.opacity
+        );
+    }
+
+    #[test]
+    fn stale_table_generation_falls_back_to_stylesheet() {
+        // Table built at generation X, but tree's build_generation is
+        // Y. Lookup must reject the stale table and walk the
+        // stylesheet.
+        let mut tree = build_btn_tree(1.0);
+        tree.set_stylesheet(parse("#btn { opacity: 0.5; }"));
+        let root = tree.root().unwrap();
+
+        let table_source = parse("#btn { opacity: 0.25; }");
+        // Bump the build_generation in the supplied table so it
+        // doesn't match the tree's current generation. The tree
+        // starts at 0; we hand the table a stale 999.
+        let mut stale = StateStyleTable::build(
+            &table_source,
+            std::iter::once(("btn".to_string(), tree.stable_id(root).unwrap())),
+            999,
+        );
+        assert!(stale.is_populated());
+        // The tree's build_generation hasn't moved past 0, so 999
+        // counts as the future / wrong generation either way — the
+        // freshness check is equality, not >=.
+        assert_ne!(stale.build_generation(), tree.build_generation());
+        std::mem::swap(&mut *tree.state_style_table.borrow_mut(), &mut stale);
+
+        assert!(tree.apply_state_styles(root, false, false, false));
+        let props = &tree.render_nodes.get(&root).unwrap().props;
+        assert!(
+            (props.opacity - 0.5).abs() < 0.001,
+            "stale table must be ignored, fallback opacity expected, got {}",
+            props.opacity
+        );
+    }
+
+    #[test]
+    fn table_path_resolves_hover_state() {
+        // Bound stylesheet: only base. Table: base + hover. Apply
+        // with hovered=true and confirm the hover style was layered
+        // — proving resolve_state_style consulted the table.
+        let mut tree = build_btn_tree(1.0);
+        tree.set_stylesheet(parse("#btn { opacity: 0.9; }"));
+        let root = tree.root().unwrap();
+
+        let table_source = parse(
+            "
+            #btn { opacity: 0.9; }
+            #btn:hover { opacity: 0.25; }
+            ",
+        );
+        let table = StateStyleTable::build(
+            &table_source,
+            std::iter::once(("btn".to_string(), tree.stable_id(root).unwrap())),
+            tree.build_generation(),
+        );
+        *tree.state_style_table.borrow_mut() = table;
+
+        assert!(tree.apply_state_styles(root, true, false, false));
+        let props = &tree.render_nodes.get(&root).unwrap().props;
+        assert!(
+            (props.opacity - 0.25).abs() < 0.001,
+            "hover-state table entry must override base, got {}",
+            props.opacity
+        );
     }
 }

@@ -677,6 +677,22 @@ pub struct RenderTree {
     /// Optional stylesheet for automatic state modifier application
     /// When set, elements with IDs will automatically get :hover, :active, :focus, :disabled styles
     stylesheet: Option<Arc<Stylesheet>>,
+    /// Pre-resolved CSS state-style cascade table — Phase 5 of the
+    /// unified property channel ([[project-reactive-architecture-v2]]).
+    ///
+    /// Consulted by [`Self::apply_state_styles`] /
+    /// [`Self::apply_stylesheet_state_styles`] in preference to the
+    /// stylesheet rule walk when [`StateStyleTable::is_populated`] is
+    /// true AND the table's `build_generation` matches the current
+    /// tree generation. Empty / stale → callers fall back to
+    /// `stylesheet.get` / `stylesheet.get_with_state` and the existing
+    /// rule-walk path runs.
+    ///
+    /// Phase 5.2 wires the consumer path with the table held in an
+    /// empty default state (so every lookup hits the fallback —
+    /// behaviour preserved). Phase 5.3 wires the build trigger on
+    /// stylesheet-bind and the win lands.
+    state_style_table: RefCell<crate::state_style_table::StateStyleTable>,
     /// Base styles for elements (before state modifiers)
     /// Used to restore original styles when state changes
     base_styles: HashMap<LayoutNodeId, RenderProps>,
@@ -851,6 +867,7 @@ impl RenderTree {
             last_scroll_target: None,
             on_ready_callbacks: HashMap::new(),
             stylesheet: None,
+            state_style_table: RefCell::new(crate::state_style_table::StateStyleTable::empty()),
             base_styles: HashMap::new(),
             base_taffy_styles: HashMap::new(),
             layout_animation_configs: HashMap::new(),
