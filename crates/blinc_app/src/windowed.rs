@@ -396,6 +396,17 @@ pub(crate) struct WindowState {
     /// `None` until the first state-style pass runs (forces the first
     /// frame to execute).
     pub last_router_state_fp: Option<u64>,
+    /// Wall-clock instant of the most recent heavy pointer-move
+    /// dispatch (the `on_mouse_move_with_occlusion` / `on_mouse_drag_fast`
+    /// path). High-rate mice (1000 Hz polling) fire moves at >> the
+    /// display refresh rate; once dispatched, subsequent moves within
+    /// ~8 ms add no useful information (no element bound can have
+    /// changed; the next paint still reads the latest cursor position).
+    /// The Moved-arm uses this to skip the heavy dispatch when the
+    /// previous one fired very recently — sub-frame coalescing without
+    /// the full event-buffer refactor.
+    /// ([[project-reactive-architecture-v2]] Phase 3.1.)
+    pub last_pointer_dispatch: Option<std::time::Instant>,
 }
 
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
@@ -425,6 +436,7 @@ impl WindowState {
             transparent: false,
             last_cursor: None,
             last_router_state_fp: None,
+            last_pointer_dispatch: None,
         }
     }
 }
@@ -3824,6 +3836,65 @@ impl WindowedApp {
                                             return ControlFlow::Continue;
                                         }
 
+                                        // Sub-frame coalescing — Phase 3.1 of
+                                        // [[project-reactive-architecture-v2]]. High-rate
+                                        // mice (1000 Hz Linux gaming mice in particular)
+                                        // fire `MouseEvent::Moved` at >> display refresh,
+                                        // and each event runs the full hit_test + hover
+                                        // diff + handler dispatch path below — overkill
+                                        // since at most one paint per vsync interval can
+                                        // surface a visible result. Skip the heavy path
+                                        // when the previous dispatch was very recent AND
+                                        // dropping this event is safe:
+                                        //   - No press in flight (drag handlers need
+                                        //     every move to track velocity / position).
+                                        //   - No `POINTER_MOVE` subscriber on the tree
+                                        //     (continuous-tracking handlers like
+                                        //     scroll-velocity tracking, sketch coords).
+                                        //   - No pointer_query consumer (flow shaders,
+                                        //     calc(env(...)) — already check this in
+                                        //     the short-circuit a few branches up).
+                                        // The window is conservative — half a vsync at
+                                        // 60 Hz. At 1000 Hz mouse rate this turns ~16
+                                        // dispatches/frame into 2; at 144 Hz display +
+                                        // 1000 Hz mouse, ~7 → 1. Cursor + frame_dirty
+                                        // are still updated inline so the next paint
+                                        // reflects the latest cursor position.
+                                        //
+                                        // The last move before a stop won't be lost
+                                        // because: any new event after the 8ms window
+                                        // dispatches with its own (current) (lx, ly).
+                                        // The "user moved fast then stopped exactly
+                                        // mid-window" edge case leaves hover state up
+                                        // to 8 ms stale until the next event — half a
+                                        // 60 Hz frame, imperceptible.
+                                        if let Some(last) = ws.last_pointer_dispatch {
+                                            const COALESCE_WINDOW: std::time::Duration =
+                                                std::time::Duration::from_millis(8);
+                                            let elapsed = last.elapsed();
+                                            if elapsed < COALESCE_WINDOW
+                                                && !router.is_press_in_flight()
+                                                && !has_move_subscriber
+                                            {
+                                                // Cursor stays accurate.
+                                                let cursor = tree
+                                                    .get_cursor_at(router, lx, ly)
+                                                    .unwrap_or(CursorStyle::Default);
+                                                let want = convert_cursor_style(cursor);
+                                                if ws.last_cursor != Some(want) {
+                                                    window.set_cursor(want);
+                                                    ws.last_cursor = Some(want);
+                                                }
+                                                // Router-internal cursor tracking
+                                                // stays current so
+                                                // `cursor_inside_last_leaf` and
+                                                // other queries see the latest pos.
+                                                router.set_mouse_position(lx, ly);
+                                                router.clear_event_callback();
+                                                return ControlFlow::Continue;
+                                            }
+                                        }
+
                                         // Get overlay bounds and layer ID for occlusion-aware hit testing
                                         // This prevents background elements from receiving hover events
                                         // when they are visually occluded by overlay content
@@ -3854,6 +3925,12 @@ impl WindowedApp {
                                                 overlay_layer_id,
                                             );
                                         }
+
+                                        // Stamp the dispatch timestamp so the
+                                        // sub-frame coalescing gate above can
+                                        // skip subsequent moves within the
+                                        // next 8 ms. Phase 3.1.
+                                        ws.last_pointer_dispatch = Some(std::time::Instant::now());
 
                                         // Crossing an element boundary changes CSS `:hover`
                                         // styling and may switch which Stateful is in
