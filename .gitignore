@@ -64,6 +64,11 @@ logs/
 coverage/
 .nyc_output/
 
+# Reactive-arch-v2 regression harness — CPU trace captures.
+# Local-only; phase work measures against these but they don't ship.
+/baselines/
+/regression-reports/
+
 # Temporary
 *.tmp
 *.temp

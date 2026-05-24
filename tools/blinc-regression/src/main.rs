@@ -45,6 +45,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
@@ -247,6 +249,11 @@ struct Trace {
     command: Vec<String>,
     /// Total elapsed time the subprocess ran.
     duration_ms: u64,
+    /// How the run ended — `"subprocess_exit"` (clean window close)
+    /// or `"interrupted"` (Ctrl+C). Lets a reader tell whether the
+    /// trace covers the user's intended scenario set in full.
+    #[serde(default)]
+    exit_reason: String,
     /// One sample per `SAMPLE_INTERVAL`.
     samples: Vec<Sample>,
     /// Aggregate stats over the post-warmup samples.
@@ -368,13 +375,21 @@ fn cmd_record(out: &Path, user_cmd: &[String]) -> anyhow::Result<()> {
         )
     };
 
+    // Resolve the output path up-front and print it so the user sees
+    // exactly where the trace will land (helps when running from a
+    // surprising cwd).
+    let out_abs = out
+        .canonicalize()
+        .ok()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join(out));
     eprintln!("→ spawning: {}", command_display.join(" "));
     eprintln!(
         "→ sampling CPU% every {}ms; first {}ms tagged as warmup",
         SAMPLE_INTERVAL.as_millis(),
         WARMUP_MS
     );
-    eprintln!("→ drive your scenarios manually; close the window when done.\n");
+    eprintln!("→ will write trace to {}", out_abs.display());
+    eprintln!("→ drive your scenarios manually; close the window OR press Ctrl+C when done.\n");
 
     let start_wall = std::time::SystemTime::now();
     let captured_at = format_utc(start_wall);
@@ -393,14 +408,33 @@ fn cmd_record(out: &Path, user_cmd: &[String]) -> anyhow::Result<()> {
     // before cpu_usage() returns meaningful numbers.
     sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
 
+    // Ctrl+C handler — graceful break so we still kill the subprocess
+    // AND write the trace. Without this, Ctrl+C SIGINT killed the
+    // harness mid-loop and the JSON was never written.
+    let interrupted = Arc::new(AtomicBool::new(false));
+    {
+        let flag = Arc::clone(&interrupted);
+        ctrlc::set_handler(move || {
+            flag.store(true, Ordering::SeqCst);
+        })
+        .map_err(|e| anyhow::anyhow!("failed to install Ctrl+C handler: {e}"))?;
+    }
+
     let mut samples: Vec<Sample> = Vec::new();
-    loop {
+    let exit_reason = loop {
         std::thread::sleep(SAMPLE_INTERVAL);
 
-        // Exit if the subprocess has finished.
+        if interrupted.load(Ordering::SeqCst) {
+            eprintln!("\n→ Ctrl+C received; killing subprocess and writing trace");
+            let _ = child.kill();
+            let _ = child.wait();
+            break "interrupted";
+        }
+
+        // Exit if the subprocess has finished on its own.
         if let Some(status) = child.try_wait()? {
             eprintln!("\n→ subprocess exited (status: {status})");
-            break;
+            break "subprocess_exit";
         }
 
         sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
@@ -412,7 +446,7 @@ fn cmd_record(out: &Path, user_cmd: &[String]) -> anyhow::Result<()> {
                 warmup: t_ms < WARMUP_MS,
             });
         }
-    }
+    };
 
     let duration_ms = started.elapsed().as_millis() as u64;
     let post_warmup: Vec<f32> = samples
@@ -426,6 +460,7 @@ fn cmd_record(out: &Path, user_cmd: &[String]) -> anyhow::Result<()> {
         captured_at,
         command: command_display,
         duration_ms,
+        exit_reason: exit_reason.to_string(),
         summary: Stats::from_samples(&post_warmup),
         summary_with_warmup: Stats::from_samples(&all),
         samples,
