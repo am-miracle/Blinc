@@ -997,4 +997,120 @@ mod tests {
             other => panic!("expected Length, got {other:?}"),
         }
     }
+
+    // ============================================================
+    // Phase 8.1 — transform_origin + animated_width_fraction +
+    // bind_transform_from. Layout-property animation helpers that
+    // route per-frame visual changes through a GPU scale transform
+    // instead of taffy::Style mutation, skipping compute_layout.
+    // ============================================================
+
+    #[test]
+    fn div_transform_origin_propagates_to_render_props() {
+        use crate::div::{ElementBuilder, div};
+        let element = div().transform_origin(0.0, 50.0);
+        let props = element.render_props();
+        assert_eq!(props.transform_origin, Some([0.0, 50.0]));
+    }
+
+    /// Pull `(sx, sy)` from a `Transform::scale(sx, sy)` value. Panics
+    /// if the supplied transform isn't a 2D affine produced by
+    /// `Transform::scale` (the only shape `animated_width_fraction`
+    /// and the cn::progress mapper emit).
+    fn affine_scale(t: &blinc_core::Transform) -> (f32, f32) {
+        match t {
+            blinc_core::Transform::Affine2D(a) => (a.elements[0], a.elements[3]),
+            blinc_core::Transform::Mat4(_) => {
+                panic!("expected 2D affine scale, got Mat4")
+            }
+        }
+    }
+
+    #[test]
+    fn div_animated_width_fraction_const_sets_scale_and_left_origin() {
+        use crate::div::{ElementBuilder, div};
+        let element = div().animated_width_fraction(0.75_f32);
+        let props = element.render_props();
+        assert_eq!(
+            props.transform_origin,
+            Some([0.0, 50.0]),
+            "animated_width_fraction must pivot at the left edge"
+        );
+        let t = props.transform.expect("transform set");
+        let (sx, sy) = affine_scale(&t);
+        assert!((sx - 0.75).abs() < 1e-5, "scale_x must be 0.75, got {sx}");
+        assert!((sy - 1.0).abs() < 1e-5, "scale_y must be 1.0, got {sy}");
+    }
+
+    #[test]
+    fn div_animated_width_fraction_bound_fires_partial_update_on_set() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+
+        let frac_state = fresh_state::<f32>(0.0);
+        let element = div().animated_width_fraction(&frac_state);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        frac_state.set(0.5);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        let upd = updates.into_iter().next().unwrap();
+        assert_eq!(upd.node_id, node_id);
+        assert_eq!(upd.property, PropertyId::Transform);
+        assert!(upd.render_write.is_some(), "must write to RenderProps");
+        assert!(upd.layout_write.is_none(), "must NOT mutate taffy::Style");
+        assert!(
+            !upd.effects.needs_layout,
+            "animated_width_fraction is GPU-only — must not request relayout"
+        );
+
+        // Apply the render write — render_props.transform should now be scale(0.5, 1.0).
+        let mut props = RenderProps::default();
+        (upd.render_write.unwrap())(&mut props);
+        let t = props.transform.expect("transform written");
+        let (sx, sy) = affine_scale(&t);
+        assert!((sx - 0.5).abs() < 1e-5);
+        assert!((sy - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn div_bind_transform_from_maps_arbitrary_signal_to_transform() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+        use blinc_core::Transform;
+
+        // State carries a 0..=100 progress value. Mapper produces a
+        // scale-x transform matching what cn::progress's reactive
+        // path does internally — exercises the same primitive.
+        let value_state = fresh_state::<f32>(25.0);
+        let element = div().bind_transform_from(value_state.clone(), |v: f32| {
+            let f = (v / 100.0).clamp(0.0, 1.0);
+            Transform::scale(f, 1.0)
+        });
+        // Seeded transform reflects the initial value (25/100 = 0.25 scale).
+        let initial_props = element.render_props();
+        let initial_t = initial_props.transform.expect("seeded transform");
+        let (initial_sx, _) = affine_scale(&initial_t);
+        assert!((initial_sx - 0.25).abs() < 1e-5);
+
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        value_state.set(80.0);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        let upd = updates.into_iter().next().unwrap();
+        assert_eq!(upd.node_id, node_id);
+        assert_eq!(upd.property, PropertyId::Transform);
+
+        let mut props = RenderProps::default();
+        (upd.render_write.unwrap())(&mut props);
+        let t = props.transform.expect("mapper applied");
+        // 80 / 100 = 0.8
+        let (sx, _) = affine_scale(&t);
+        assert!((sx - 0.8).abs() < 1e-5, "got {sx}");
+    }
 }

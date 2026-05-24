@@ -397,6 +397,12 @@ pub struct Div {
     pub(crate) material: Option<Material>,
     pub(crate) shadow: Vec<Shadow>,
     pub(crate) transform: Option<Transform>,
+    /// Per-element transform origin in percentages `[x, y]` (0 = top-left,
+    /// 100 = bottom-right, 50 = centre on each axis). Default `None`
+    /// keeps the renderer's centre-pivot semantics. Set via
+    /// [`Self::transform_origin`] or implicitly by helpers like
+    /// [`Self::animated_width_fraction`] that need a left-edge pivot.
+    pub(crate) transform_origin: Option<[f32; 2]>,
     pub(crate) opacity: f32,
     pub(crate) cursor: Option<crate::element::CursorStyle>,
     pub(crate) pointer_events_none: bool,
@@ -494,6 +500,7 @@ impl Div {
             material: None,
             shadow: Vec::new(),
             transform: None,
+            transform_origin: None,
             opacity: 1.0,
             cursor: None,
             pointer_events_none: false,
@@ -554,6 +561,7 @@ impl Div {
             material: None,
             shadow: Vec::new(),
             transform: None,
+            transform_origin: None,
             opacity: 1.0,
             cursor: None,
             pointer_events_none: false,
@@ -3237,6 +3245,114 @@ impl Div {
         self
     }
 
+    /// Set the per-element transform origin in percentages — `(0.0, 0.0)`
+    /// is the top-left corner, `(100.0, 100.0)` is the bottom-right,
+    /// `(50.0, 50.0)` is the centre (the renderer's default when no
+    /// origin is set explicitly).
+    ///
+    /// Phase 8.1 of the unified property channel
+    /// ([[project-reactive-architecture-v2]]) added this builder so
+    /// [`Self::animated_width_fraction`] can pivot a scale transform
+    /// at the left edge (origin `(0.0, 50.0)`); useful independently
+    /// for any caller that needs non-centre transforms.
+    pub fn transform_origin(mut self, x_percent: f32, y_percent: f32) -> Self {
+        self.transform_origin = Some([x_percent, y_percent]);
+        self
+    }
+
+    /// Bind a transform that's derived from an arbitrary signal type
+    /// via a caller-supplied mapper. Phase 8.1 of the unified
+    /// property channel ([[project-reactive-architecture-v2]]).
+    ///
+    /// The general primitive that [`Self::animated_width_fraction`]
+    /// sugars over. Useful when the source signal's value type isn't
+    /// `Transform` but a derivation produces one: e.g. a `State<f32>`
+    /// in `0..=100` mapped to `Transform::scale((v/100).clamp(0,1), 1.0)`,
+    /// or a `State<Pose>` mapped to a translate + rotate compound.
+    ///
+    /// Seeds the initial value via `mapper(state.try_get().unwrap_or_default())`
+    /// and subscribes to the signal so future writes patch
+    /// `props.transform` through the unified property channel —
+    /// identical wiring to [`Self::transform`] but with the inline
+    /// derivation closure.
+    pub fn bind_transform_from<T>(
+        mut self,
+        state: blinc_core::reactive::State<T>,
+        mapper: impl Fn(T) -> Transform + Send + Sync + 'static,
+    ) -> Self
+    where
+        T: Clone + Default + Send + Sync + 'static,
+    {
+        use crate::binding::TypedPendingBinding;
+        let initial = state.try_get().unwrap_or_default();
+        let mapper = std::sync::Arc::new(mapper);
+        self.transform = Some(mapper(initial));
+        self.pending_bindings.push(Box::new(TypedPendingBinding::new(
+            state,
+            crate::property::PropertyId::Transform,
+            move |props, v: T| {
+                props.transform = Some(mapper(v));
+            },
+        )));
+        self
+    }
+
+    /// Animate the visual width of this element by scaling along the
+    /// X axis from the left edge. Phase 8.1 of the unified property
+    /// channel ([[project-reactive-architecture-v2]]).
+    ///
+    /// The element's layout slot stays full-size — only the GPU
+    /// scale transform changes per frame as the bound signal moves.
+    /// Skipping `compute_layout()` is the win: width-bound animations
+    /// previously had to either rebuild the subtree (`Stateful`) or
+    /// route through the taffy style path (`.w(&signal)` — Phase 2.4
+    /// works but triggers a relayout per signal-set). The scale-x
+    /// path is GPU-only.
+    ///
+    /// `fraction` is a 0.0..=1.0 multiplier on the element's layout
+    /// width: `0.0` collapses the element to invisible, `1.0` is the
+    /// full width, `0.5` is half. Values outside `[0.0, 1.0]` are
+    /// accepted (over-shooting / negative scales are legitimate for
+    /// spring overshoot or mirroring).
+    ///
+    /// Sets the transform origin to `(0.0, 50.0)` so the scale grows
+    /// from the left edge instead of the centre. If you've also set
+    /// a custom [`Self::transform_origin`], call
+    /// `.transform_origin(...)` AFTER this method to keep your value.
+    ///
+    /// Hit-testing is unaffected: the element still claims its full
+    /// layout-width bounding box for pointer events. This matches
+    /// the slider/progress-fill use case where the fill is a
+    /// non-interactive visual indicator clipped by a parent track.
+    pub fn animated_width_fraction(
+        mut self,
+        fraction: impl crate::binding::IntoReactive<f32>,
+    ) -> Self {
+        use crate::binding::{Reactive, TypedPendingBinding};
+        // Pin the pivot to the left edge so the scale visibly grows /
+        // shrinks from the start of the element rather than its centre.
+        // Caller can override afterwards via `.transform_origin(...)`.
+        self.transform_origin = Some([0.0, 50.0]);
+        match fraction.into_reactive() {
+            Reactive::Const(f) => {
+                self.transform = Some(Transform::scale(f, 1.0));
+            }
+            Reactive::Bound(state) => {
+                if let Some(f) = state.try_get() {
+                    self.transform = Some(Transform::scale(f, 1.0));
+                }
+                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
+                    state,
+                    crate::property::PropertyId::Transform,
+                    |props, f: f32| {
+                        props.transform = Some(Transform::scale(f, 1.0));
+                    },
+                )));
+            }
+        }
+        self
+    }
+
     /// Translate this element by the given x and y offset
     pub fn translate(self, x: f32, y: f32) -> Self {
         self.transform(Transform::translate(x, y))
@@ -4491,6 +4607,7 @@ impl ElementBuilder for Div {
             material: self.material.clone(),
             shadow: self.shadow.clone(),
             transform: self.transform.clone(),
+            transform_origin: self.transform_origin,
             opacity: self.opacity,
             clips_content,
             is_stack_layer: self.is_stack_layer,

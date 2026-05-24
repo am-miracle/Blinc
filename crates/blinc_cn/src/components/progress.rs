@@ -49,6 +49,7 @@
 
 use blinc_animation::SharedAnimatedValue;
 use blinc_core::Color;
+use blinc_layout::binding::{IntoReactive, Reactive};
 use blinc_layout::prelude::*;
 use blinc_theme::{ColorToken, RadiusToken, ThemeState};
 
@@ -74,11 +75,17 @@ impl ProgressSize {
     }
 }
 
-/// Configuration for building a Progress bar
-#[derive(Clone)]
+/// Configuration for building a Progress bar.
+///
+/// `value` is a [`Reactive<f32>`] in the 0..=100 range. When `Const`,
+/// the indicator is built with a fixed fractional width (the legacy
+/// behaviour). When `Bound`, the indicator is rendered at full track
+/// width and animated via [`Div::animated_width_fraction`] — signal
+/// updates patch a GPU scale transform without rebuilding the
+/// subtree (Phase 8.1 of the unified property channel,
+/// [[project-reactive-architecture-v2]]).
 struct ProgressConfig {
-    /// Progress value from 0.0 to 100.0
-    value: f32,
+    value: Reactive<f32>,
     size: ProgressSize,
     width: f32,
     indicator_color: Option<Color>,
@@ -86,12 +93,36 @@ struct ProgressConfig {
     corner_radius: Option<f32>,
 }
 
-impl ProgressConfig {
-    fn new(value: f32) -> Self {
+impl Clone for ProgressConfig {
+    fn clone(&self) -> Self {
         Self {
-            value: value.clamp(0.0, 100.0),
+            value: match &self.value {
+                Reactive::Const(v) => Reactive::Const(*v),
+                Reactive::Bound(state) => Reactive::Bound(state.clone()),
+            },
+            size: self.size,
+            width: self.width,
+            indicator_color: self.indicator_color,
+            track_color: self.track_color,
+            corner_radius: self.corner_radius,
+        }
+    }
+}
+
+impl ProgressConfig {
+    fn new(value: impl IntoReactive<f32>) -> Self {
+        let value = match value.into_reactive() {
+            Reactive::Const(v) => Reactive::Const(v.clamp(0.0, 100.0)),
+            // Signal-bound values aren't pre-clamped — the bound
+            // closure handles clamping per-update so a signal can
+            // legitimately overshoot for a frame (spring overshoot)
+            // and the scale renders as-is.
+            other => other,
+        };
+        Self {
+            value,
             size: ProgressSize::default(),
-            width: 200.0, // Default width
+            width: 200.0,
             indicator_color: None,
             track_color: None,
             corner_radius: None,
@@ -120,26 +151,59 @@ impl Progress {
             .track_color
             .unwrap_or_else(|| theme.color(ColorToken::Border));
 
-        // Calculate fill width in pixels
-        let fill_ratio = config.value / 100.0;
-        let fill_width = config.width * fill_ratio;
-
         let size_class = match config.size {
             ProgressSize::Small => "cn-progress--sm",
             ProgressSize::Medium => "cn-progress--md",
             ProgressSize::Large => "cn-progress--lg",
         };
 
-        // Build the indicator (filled portion) - absolutely positioned
-        let indicator = div()
-            .class("cn-progress-bar")
-            .absolute()
-            .left(0.0)
-            .top(0.0)
-            .w(fill_width)
-            .h(height)
-            .rounded(radius)
-            .bg(indicator_color);
+        // Phase 8.1: split const vs bound at the indicator level.
+        //
+        // - Const path keeps the legacy approach (indicator sized by
+        //   `width * fill_ratio`) so simple `cn::progress(75.0)` calls
+        //   have identical paint output and zero per-frame work.
+        // - Bound path renders a full-width indicator and binds the
+        //   GPU scale via `animated_width_fraction`. Signal sets patch
+        //   the transform cell via the unified property channel — no
+        //   subtree rebuild, no compute_layout.
+        let indicator = match &config.value {
+            Reactive::Const(v) => {
+                let fill_ratio = (*v / 100.0).clamp(0.0, 1.0);
+                let fill_width = config.width * fill_ratio;
+                div()
+                    .class("cn-progress-bar")
+                    .absolute()
+                    .left(0.0)
+                    .top(0.0)
+                    .w(fill_width)
+                    .h(height)
+                    .rounded(radius)
+                    .bg(indicator_color)
+            }
+            Reactive::Bound(state) => {
+                // Render the indicator at FULL track width and drive
+                // its visible extent via a GPU scale transform that
+                // pivots at the left edge. The state's value is in
+                // the user's 0..=100 range — we map it through
+                // `bind_transform_from`'s mapper closure so each
+                // signal-set patches `props.transform` directly with
+                // no Stateful rebuild, no `compute_layout`.
+                div()
+                    .class("cn-progress-bar")
+                    .absolute()
+                    .left(0.0)
+                    .top(0.0)
+                    .w(config.width)
+                    .h(height)
+                    .rounded(radius)
+                    .bg(indicator_color)
+                    .transform_origin(0.0, 50.0)
+                    .bind_transform_from(state.clone(), |v: f32| {
+                        let f = (v / 100.0).clamp(0.0, 1.0);
+                        Transform::scale(f, 1.0)
+                    })
+            }
+        };
 
         // Track container with overflow clipping
         let track = div()
@@ -202,8 +266,15 @@ pub struct ProgressBuilder {
 }
 
 impl ProgressBuilder {
-    /// Create a new progress builder with the given value (0-100)
-    pub fn new(value: f32) -> Self {
+    /// Create a new progress builder with the given value.
+    ///
+    /// Accepts either an eager `f32` in the 0..=100 range or a
+    /// `&State<f32>` / `State<f32>` for signal-bound reactivity.
+    /// Bound values flow through Phase 8.1's
+    /// [`Div::animated_width_fraction`]-style GPU scale path, so
+    /// signal updates patch the indicator transform without rebuilding
+    /// the progress subtree or recomputing layout.
+    pub fn new(value: impl IntoReactive<f32>) -> Self {
         Self {
             config: ProgressConfig::new(value),
             built: std::cell::OnceCell::new(),
@@ -278,22 +349,33 @@ impl ElementBuilder for ProgressBuilder {
     }
 }
 
-/// Create a progress bar with the given value (0-100)
+/// Create a progress bar with the given value (0-100).
+///
+/// Accepts either an eager `f32` or a `&State<f32>` for signal-bound
+/// reactivity (Phase 8.1 of the unified property channel,
+/// [[project-reactive-architecture-v2]]). Bound values drive the
+/// indicator via a GPU scale transform — no Stateful rebuild, no
+/// per-frame layout recompute.
 ///
 /// # Example
 ///
 /// ```ignore
 /// use blinc_cn::prelude::*;
+/// use blinc_layout::binding::State;
 ///
-/// // 75% complete
+/// // 75% complete (eager)
 /// cn::progress(75.0)
 ///
 /// // With size and width
 /// cn::progress(50.0)
 ///     .size(ProgressSize::Large)
 ///     .w(300.0)
+///
+/// // Signal-bound (no Stateful needed)
+/// let value: State<f32> = ctx.use_state(0.0);
+/// cn::progress(&value).w(300.0)
 /// ```
-pub fn progress(value: f32) -> ProgressBuilder {
+pub fn progress(value: impl IntoReactive<f32>) -> ProgressBuilder {
     ProgressBuilder::new(value)
 }
 
@@ -532,16 +614,29 @@ mod tests {
         assert_eq!(ProgressSize::Large.height(), 12.0);
     }
 
+    /// Pull the inner `f32` out of a `Reactive::Const` value for
+    /// assertions. Phase 8.1 made `ProgressConfig.value` polymorphic;
+    /// every existing test built with a literal still produces
+    /// `Reactive::Const(f)`.
+    fn const_value(cfg: &ProgressConfig) -> f32 {
+        match cfg.value {
+            Reactive::Const(v) => v,
+            Reactive::Bound(_) => {
+                panic!("test expected a Const value but got a Bound state")
+            }
+        }
+    }
+
     #[test]
     fn test_progress_value_clamping() {
         let config = ProgressConfig::new(150.0);
-        assert_eq!(config.value, 100.0);
+        assert_eq!(const_value(&config), 100.0);
 
         let config = ProgressConfig::new(-10.0);
-        assert_eq!(config.value, 0.0);
+        assert_eq!(const_value(&config), 0.0);
 
         let config = ProgressConfig::new(50.0);
-        assert_eq!(config.value, 50.0);
+        assert_eq!(const_value(&config), 50.0);
     }
 
     #[test]
@@ -551,7 +646,7 @@ mod tests {
             .size(ProgressSize::Large)
             .w(300.0);
 
-        assert_eq!(pb.config.value, 75.0);
+        assert_eq!(const_value(&pb.config), 75.0);
         assert_eq!(pb.config.size, ProgressSize::Large);
         assert_eq!(pb.config.width, 300.0);
     }
@@ -561,6 +656,25 @@ mod tests {
         init_theme();
         // At 50%, with 200px width, fill should be 100px
         let config = ProgressConfig::new(50.0);
-        assert_eq!(config.width * (config.value / 100.0), 100.0);
+        assert_eq!(config.width * (const_value(&config) / 100.0), 100.0);
+    }
+
+    #[test]
+    fn test_progress_bound_value_is_reactive_bound() {
+        // Phase 8.1 contract: passing a State<f32> produces a
+        // Reactive::Bound config so the build path takes the GPU
+        // scale-transform branch instead of the static-width branch.
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+        init_theme();
+        let graph = Arc::new(Mutex::new(blinc_core::reactive::ReactiveGraph::new()));
+        let signal = graph.lock().unwrap().create_signal(42.0_f32);
+        let dirty = Arc::new(AtomicBool::new(false));
+        let state = blinc_core::reactive::State::new(signal, graph, dirty);
+        let pb = ProgressBuilder::new(&state);
+        assert!(
+            matches!(pb.config.value, Reactive::Bound(_)),
+            "bound state must produce Reactive::Bound config"
+        );
     }
 }
