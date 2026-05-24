@@ -42,11 +42,33 @@
 //! OS-level input injection (X11 / Cocoa / Wayland) which is bigger
 //! than the current scope and arguably less reliable than human-driven
 //! "do these N gestures in this order" runs.
+//!
+//! ## 3. Phase markers
+//!
+//! `cn_demo` listens for digit keys 0..9 at its root and prints
+//! `BLINC_MARK key=N` to stderr on each press. The harness captures
+//! these and stamps each with the elapsed time it was received, then
+//! `compare` produces per-phase deltas instead of a single global
+//! aggregate (which is noisy when capture durations don't match).
+//!
+//! Convention from the v2 chain checklist:
+//!
+//! ```text
+//! 0=idle  2=p2_hovers  3=p3_drags  4=p4_overlays
+//! 5=p5_menus  6=p6_spinner  7=p7_scroll  9=compound
+//! ```
+//!
+//! During a capture: press `0`, idle 30s; press `2`, sweep button
+//! hovers; press `3`, drag sliders; press `5`, hover menus; etc. The
+//! marker key segments the timeseries — `compare` then reports each
+//! phase separately, immune to capture-duration variance.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
@@ -262,12 +284,41 @@ struct Trace {
     /// trace covers the user's intended scenario set in full.
     #[serde(default)]
     exit_reason: String,
+    /// Phase markers emitted by the target subprocess on stderr.
+    ///
+    /// The target writes lines of the form `BLINC_MARK key=N` (N in
+    /// 0..=9) when a digit key is pressed; the harness timestamps
+    /// each line on receive and pushes a [`Marker`]. Markers segment
+    /// the timeseries by user-declared phase ("now P5 hovers", "now
+    /// P4 overlays", etc.), letting `compare` produce per-phase
+    /// deltas instead of a single global aggregate that's at the
+    /// mercy of capture-duration variance.
+    ///
+    /// Default empty for backward compat with traces captured before
+    /// markers landed — `compare` falls back to the global aggregate
+    /// when both traces have no markers.
+    #[serde(default)]
+    markers: Vec<Marker>,
     /// One sample per `SAMPLE_INTERVAL`.
     samples: Vec<Sample>,
     /// Aggregate stats over the post-warmup samples.
     summary: Stats,
     /// Same stats including warmup samples, for reference.
     summary_with_warmup: Stats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Marker {
+    /// Milliseconds since recording start when the marker line
+    /// arrived on stderr (NOT when the user pressed the key — there's
+    /// a few ms of pipe-buffering drift, which is negligible at the
+    /// phase-boundary granularity we segment on).
+    t_ms: u64,
+    /// Phase key the user pressed (0..=9). Convention from the v2
+    /// chain checklist: 0=idle 2=p2_hovers 3=p3_drags 4=p4_overlays
+    /// 5=p5_menus 6=p6_spinner 7=p7_scroll 9=compound. Other keys
+    /// are accepted but not interpreted by `compare`.
+    key: u8,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -445,12 +496,54 @@ fn cmd_record(out: &Path, user_cmd: &[String]) -> anyhow::Result<()> {
     let mut child = Command::new(&cmd_name)
         .args(&cmd_args)
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        // Pipe stderr so we can parse `BLINC_MARK key=N` phase markers
+        // emitted by the target subprocess. Non-marker lines are
+        // mirrored back to the harness's stderr so the user still
+        // sees normal log output.
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to spawn `{}`: {e}", cmd_name))?;
 
     let pid = sysinfo::Pid::from_u32(child.id());
     let started = Instant::now();
+
+    // Background marker-reader thread. Owns the child's stderr pipe,
+    // reads line-by-line, splits each into (mark | passthrough), and
+    // timestamps marker arrivals with the SAME `started` clock the
+    // sampler uses so they share a frame of reference.
+    let markers: Arc<Mutex<Vec<Marker>>> = Arc::new(Mutex::new(Vec::new()));
+    let marker_thread = {
+        let markers = Arc::clone(&markers);
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("failed to capture subprocess stderr"))?;
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                if let Some(rest) = line.strip_prefix("BLINC_MARK ") {
+                    // Expected: `key=N` (single decimal digit). Tolerate
+                    // extra whitespace / trailing fields; just grab the
+                    // first `key=` token.
+                    if let Some(k) = parse_marker_key(rest) {
+                        let t_ms = started.elapsed().as_millis() as u64;
+                        // Echo so the user sees the marker land in
+                        // their terminal — confirms the keypress was
+                        // received.
+                        let _ = writeln!(std::io::stderr(), "→ marker key={k} at {t_ms}ms");
+                        if let Ok(mut m) = markers.lock() {
+                            m.push(Marker { t_ms, key: k });
+                        }
+                        continue;
+                    }
+                }
+                // Passthrough: not a marker → mirror to our stderr so
+                // normal subprocess logs are still visible.
+                let _ = writeln!(std::io::stderr(), "{line}");
+            }
+        })
+    };
     let mut sys = sysinfo::System::new();
     // First refresh seeds the CPU baseline — sysinfo needs two refreshes
     // before cpu_usage() returns meaningful numbers.
@@ -504,11 +597,21 @@ fn cmd_record(out: &Path, user_cmd: &[String]) -> anyhow::Result<()> {
         .collect();
     let all: Vec<f32> = samples.iter().map(|s| s.cpu_pct).collect();
 
+    // Reader thread should exit naturally on stderr-pipe close (the
+    // subprocess has died by this point). Bounded wait so a hung
+    // pipe doesn't block the harness from writing the trace.
+    let _ = marker_thread.join();
+    let collected_markers = markers
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+
     let trace = Trace {
         captured_at,
         command: command_display,
         duration_ms,
         exit_reason: exit_reason.to_string(),
+        markers: collected_markers,
         summary: Stats::from_samples(&post_warmup),
         summary_with_warmup: Stats::from_samples(&all),
         samples,
@@ -521,14 +624,30 @@ fn cmd_record(out: &Path, user_cmd: &[String]) -> anyhow::Result<()> {
     std::fs::write(out, json)?;
 
     eprintln!(
-        "\n→ wrote {} ({} samples, {}ms total)",
+        "\n→ wrote {} ({} samples, {} markers, {}ms total)",
         out.display(),
         trace.samples.len(),
+        trace.markers.len(),
         trace.duration_ms
     );
     print_stats("summary (post-warmup)", &trace.summary);
     print_stats("summary (with warmup)", &trace.summary_with_warmup);
+    if !trace.markers.is_empty() {
+        eprintln!("\nphase markers (use `compare` to see per-phase deltas):");
+        for m in &trace.markers {
+            eprintln!("  key={} t={:.1}s", m.key, m.t_ms as f64 / 1000.0);
+        }
+    }
     Ok(())
+}
+
+/// Extract the digit after `key=` in a `BLINC_MARK key=N` line tail.
+/// Returns `None` if the format doesn't match or the value isn't 0..=9.
+fn parse_marker_key(rest: &str) -> Option<u8> {
+    // Tail after stripping the `BLINC_MARK ` prefix; expected `key=N`.
+    let after_eq = rest.split_whitespace().next()?.strip_prefix("key=")?;
+    let n: u8 = after_eq.parse().ok()?;
+    if n <= 9 { Some(n) } else { None }
 }
 
 fn cmd_compare(baseline: &Path, after: &Path, phase: Option<u32>) -> anyhow::Result<()> {
@@ -586,7 +705,122 @@ fn cmd_compare(baseline: &Path, after: &Path, phase: Option<u32>) -> anyhow::Res
             println!("  - {}: {}", s.id, s.description);
         }
     }
+
+    // Per-phase segmentation. Phase markers in the trace let us
+    // segment the timeseries by the user's declared gesture phase,
+    // collapsing capture-duration variance — the failure mode that
+    // burned the P5.3 capture comparison (see
+    // `feedback_blinc_regression_compare_duration_mismatch`).
+    if !base.markers.is_empty() && !aft.markers.is_empty() {
+        println!("\nper-phase segments (markers present in both traces):");
+        compare_phases(&base, &aft);
+    } else if !base.markers.is_empty() || !aft.markers.is_empty() {
+        println!(
+            "\n[per-phase segmentation skipped — only {} has markers; \
+             re-record the other capture with the same phase markers \
+             pressed during gestures]",
+            if base.markers.is_empty() { "after" } else { "baseline" }
+        );
+    }
     Ok(())
+}
+
+/// Walk the marker list of each trace, segment the timeseries by
+/// `(marker_i, marker_i+1]`, and report per-segment stats + delta for
+/// every phase key that appears in BOTH traces.
+fn compare_phases(base: &Trace, aft: &Trace) {
+    use std::collections::BTreeSet;
+
+    // Build a key set that appears in both traces. We compare keys
+    // (not (key, time) pairs) because the user's wall-clock for
+    // pressing the same key is different between captures.
+    let base_keys: BTreeSet<u8> = base.markers.iter().map(|m| m.key).collect();
+    let aft_keys: BTreeSet<u8> = aft.markers.iter().map(|m| m.key).collect();
+    let shared: BTreeSet<u8> = base_keys.intersection(&aft_keys).copied().collect();
+
+    let extras_base: Vec<u8> = base_keys.difference(&aft_keys).copied().collect();
+    let extras_aft: Vec<u8> = aft_keys.difference(&base_keys).copied().collect();
+    if !extras_base.is_empty() {
+        println!("  [keys only in baseline: {extras_base:?}]");
+    }
+    if !extras_aft.is_empty() {
+        println!("  [keys only in after:    {extras_aft:?}]");
+    }
+
+    for key in shared {
+        let base_seg = segment_for_key(base, key);
+        let aft_seg = segment_for_key(aft, key);
+        let (Some(base_seg), Some(aft_seg)) = (base_seg, aft_seg) else {
+            continue;
+        };
+        let delta_mean = aft_seg.stats.mean - base_seg.stats.mean;
+        let delta_p50 = aft_seg.stats.p50 - base_seg.stats.p50;
+        let delta_p95 = aft_seg.stats.p95 - base_seg.stats.p95;
+        let pct = |d: f32, b: f32| if b.abs() > 0.001 { d / b * 100.0 } else { 0.0 };
+
+        println!(
+            "\n  phase key={key}  ({} samples baseline / {} after)",
+            base_seg.stats.n, aft_seg.stats.n
+        );
+        println!(
+            "    baseline ({:.1}s window): mean={:6.2}%  p50={:6.2}%  p95={:6.2}%  max={:6.2}%",
+            (base_seg.window_end_ms - base_seg.window_start_ms) as f64 / 1000.0,
+            base_seg.stats.mean,
+            base_seg.stats.p50,
+            base_seg.stats.p95,
+            base_seg.stats.max,
+        );
+        println!(
+            "    after    ({:.1}s window): mean={:6.2}%  p50={:6.2}%  p95={:6.2}%  max={:6.2}%",
+            (aft_seg.window_end_ms - aft_seg.window_start_ms) as f64 / 1000.0,
+            aft_seg.stats.mean,
+            aft_seg.stats.p50,
+            aft_seg.stats.p95,
+            aft_seg.stats.max,
+        );
+        println!(
+            "    delta:   mean {:+.2}% ({:+.1}%)  p50 {:+.2}% ({:+.1}%)  p95 {:+.2}% ({:+.1}%)",
+            delta_mean,
+            pct(delta_mean, base_seg.stats.mean),
+            delta_p50,
+            pct(delta_p50, base_seg.stats.p50),
+            delta_p95,
+            pct(delta_p95, base_seg.stats.p95),
+        );
+    }
+}
+
+#[derive(Debug)]
+struct PhaseSegment {
+    window_start_ms: u64,
+    window_end_ms: u64,
+    stats: Stats,
+}
+
+/// The segment for a given phase key spans from that key's marker to
+/// the next marker in the trace (whatever its key). The trace's
+/// `duration_ms` bounds the final segment.
+fn segment_for_key(trace: &Trace, key: u8) -> Option<PhaseSegment> {
+    let start_idx = trace.markers.iter().position(|m| m.key == key)?;
+    let start = trace.markers[start_idx].t_ms;
+    let end = trace
+        .markers
+        .get(start_idx + 1)
+        .map(|m| m.t_ms)
+        .unwrap_or(trace.duration_ms);
+    // Defensive: empty / single-sample windows should still produce
+    // a stats record with n=0 so the caller can detect them.
+    let values: Vec<f32> = trace
+        .samples
+        .iter()
+        .filter(|s| !s.warmup && s.t_ms >= start && s.t_ms < end)
+        .map(|s| s.cpu_pct)
+        .collect();
+    Some(PhaseSegment {
+        window_start_ms: start,
+        window_end_ms: end,
+        stats: Stats::from_samples(&values),
+    })
 }
 
 fn print_stats(label: &str, s: &Stats) {
