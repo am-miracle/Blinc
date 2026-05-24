@@ -491,19 +491,24 @@ fn signal_bound_modifier_section(ctx: &WindowedContext) -> impl ElementBuilder +
     let theme = ThemeState::get();
     let text_secondary = theme.color(ColorToken::TextSecondary);
 
-    // The swatch's color + opacity live as plain State<T>. No Stateful
-    // wraps the swatch. The button on_click handlers call .set(...) and
-    // the framework patches the swatch directly via the property channel.
+    // The swatch's color + opacity + corner radius + border live as plain
+    // State<T>. No Stateful wraps the swatch. The button on_click handlers
+    // call .set(...) and the framework patches the swatch directly via
+    // the property channel.
     let bg = ctx.use_state_keyed("p2_demo_bg", || Color::from_hex(0x7a2bff));
     let op = ctx.use_state_keyed("p2_demo_op", || 1.0_f32);
+    let radius = ctx.use_state_keyed("p2_demo_radius", || 16.0_f32);
+    let bc = ctx.use_state_keyed("p2_demo_border", || Color::from_hex(0x1a1320));
 
     section_container()
         .child(section_title("Signal-bound .bg() / .opacity() (Phase 2)"))
         .child(
             text(
-                "The swatch below has `.bg(&bg)` and `.opacity(&op)`. Click \
-                 a button — the swatch updates without a Stateful subtree \
-                 rebuild; only the affected RenderProps cell is patched.",
+                "The swatch below binds `.bg`, `.opacity`, `.rounded`, and \
+                 `.border_color` directly to signals. Each button calls \
+                 `state.set(...)` — the swatch updates without a Stateful \
+                 subtree rebuild; only the affected RenderProps cell is \
+                 patched and the next frame paints.",
             )
             .size(t_sm())
             .color(text_secondary),
@@ -520,7 +525,9 @@ fn signal_bound_modifier_section(ctx: &WindowedContext) -> impl ElementBuilder +
                         .h(120.0)
                         .bg(&bg)
                         .opacity(&op)
-                        .rounded(16.0),
+                        .rounded(&radius)
+                        .border(2.0, Color::TRANSPARENT) // border-width is Tier-2
+                        .border_color(&bc),
                 )
                 .child(
                     div()
@@ -564,6 +571,40 @@ fn signal_bound_modifier_section(ctx: &WindowedContext) -> impl ElementBuilder +
                                 .child(cn::button("Opacity 0.25").on_click({
                                     let op = op.clone();
                                     move |_| op.set(0.25)
+                                })),
+                        )
+                        .child(
+                            div()
+                                .flex_row()
+                                .gap(8.0)
+                                .child(cn::button("Radius 4").on_click({
+                                    let radius = radius.clone();
+                                    move |_| radius.set(4.0)
+                                }))
+                                .child(cn::button("Radius 16").on_click({
+                                    let radius = radius.clone();
+                                    move |_| radius.set(16.0)
+                                }))
+                                .child(cn::button("Radius 60 (pill)").on_click({
+                                    let radius = radius.clone();
+                                    move |_| radius.set(60.0)
+                                })),
+                        )
+                        .child(
+                            div()
+                                .flex_row()
+                                .gap(8.0)
+                                .child(cn::button("Border dark").on_click({
+                                    let bc = bc.clone();
+                                    move |_| bc.set(Color::from_hex(0x1a1320))
+                                }))
+                                .child(cn::button("Border cyan").on_click({
+                                    let bc = bc.clone();
+                                    move |_| bc.set(Color::from_hex(0x00e5ff))
+                                }))
+                                .child(cn::button("Border magenta").on_click({
+                                    let bc = bc.clone();
+                                    move |_| bc.set(Color::from_hex(0xff2d9b))
                                 })),
                         ),
                 ),

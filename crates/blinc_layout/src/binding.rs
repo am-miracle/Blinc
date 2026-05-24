@@ -673,4 +673,100 @@ mod tests {
         (updates.into_iter().next().unwrap().write)(&mut props);
         assert!((props.opacity - 0.5).abs() < 1e-6);
     }
+
+    #[test]
+    fn div_rounded_bound_path_fires_on_state_set() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+
+        let radius_state = fresh_state::<f32>(4.0);
+        let element = div().rounded(&radius_state);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        radius_state.set(16.0);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].node_id, node_id);
+        assert_eq!(updates[0].property, PropertyId::CornerRadius);
+
+        let mut props = RenderProps::default();
+        (updates.into_iter().next().unwrap().write)(&mut props);
+        assert!((props.border_radius.top_left - 16.0).abs() < 1e-6);
+        assert!((props.border_radius.bottom_right - 16.0).abs() < 1e-6);
+        assert!(props.border_radius_explicit);
+    }
+
+    #[test]
+    fn div_border_color_bound_path_fires_on_state_set() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+        use blinc_core::Color;
+
+        let bc_state = fresh_state::<Color>(Color::from_hex(0x000000));
+        let element = div().border_color(&bc_state);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        bc_state.set(Color::from_hex(0xff8800));
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].node_id, node_id);
+        assert_eq!(updates[0].property, PropertyId::BorderColor);
+
+        let mut props = RenderProps::default();
+        (updates.into_iter().next().unwrap().write)(&mut props);
+        assert_eq!(props.border_color, Some(Color::from_hex(0xff8800)));
+    }
+
+    #[test]
+    fn div_shadow_bound_path_fires_on_state_set() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+        use blinc_core::{Color, Shadow};
+
+        let initial = Shadow::new(0.0, 2.0, 4.0, Color::from_hex(0x000000));
+        let next = Shadow::new(0.0, 8.0, 16.0, Color::from_hex(0x222222));
+        let shadow_state = fresh_state::<Shadow>(initial);
+        let element = div().shadow(&shadow_state);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        shadow_state.set(next);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].node_id, node_id);
+        assert_eq!(updates[0].property, PropertyId::Shadow);
+
+        let mut props = RenderProps::default();
+        (updates.into_iter().next().unwrap().write)(&mut props);
+        assert_eq!(props.shadow.len(), 1);
+        assert_eq!(props.shadow[0], next);
+    }
+
+    #[test]
+    fn div_transform_bound_path_fires_on_state_set() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+        use blinc_core::Transform;
+
+        let t_state = fresh_state::<Transform>(Transform::translate(0.0, 0.0));
+        let element = div().transform(&t_state);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        t_state.set(Transform::translate(10.0, 20.0));
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].node_id, node_id);
+        assert_eq!(updates[0].property, PropertyId::Transform);
+
+        let mut props = RenderProps::default();
+        (updates.into_iter().next().unwrap().write)(&mut props);
+        assert!(props.transform.is_some());
+    }
 }

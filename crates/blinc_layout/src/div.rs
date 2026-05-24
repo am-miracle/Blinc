@@ -2625,10 +2625,34 @@ impl Div {
     // Corner Radius
     // -------------------------------------------------------------------------
 
-    /// Set corner radius (all corners)
-    pub fn rounded(mut self, radius: f32) -> Self {
-        self.border_radius = CornerRadius::uniform(radius);
-        self.border_radius_explicit = true;
+    /// Set corner radius (all corners).
+    ///
+    /// Accepts either an eager `f32` or a `&State<f32>` / `State<f32>` for
+    /// signal-bound reactivity. Signal updates patch the corner radius
+    /// directly via the property channel — no `Stateful` wrap.
+    /// ([[project-reactive-architecture-v2]] Phase 2.)
+    pub fn rounded(mut self, value: impl crate::binding::IntoReactive<f32>) -> Self {
+        use crate::binding::{Reactive, TypedPendingBinding};
+        match value.into_reactive() {
+            Reactive::Const(radius) => {
+                self.border_radius = CornerRadius::uniform(radius);
+                self.border_radius_explicit = true;
+            }
+            Reactive::Bound(state) => {
+                if let Some(r) = state.try_get() {
+                    self.border_radius = CornerRadius::uniform(r);
+                    self.border_radius_explicit = true;
+                }
+                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
+                    state,
+                    crate::property::PropertyId::CornerRadius,
+                    |props, r: f32| {
+                        props.border_radius = CornerRadius::uniform(r);
+                        props.border_radius_explicit = true;
+                    },
+                )));
+            }
+        }
         self
     }
 
@@ -2784,9 +2808,30 @@ impl Div {
         self
     }
 
-    /// Set border color only
-    pub fn border_color(mut self, color: Color) -> Self {
-        self.border_color = Some(color);
+    /// Set border colour only.
+    ///
+    /// Accepts either an eager `Color` or a `&State<Color>` /
+    /// `State<Color>` for signal-bound reactivity. Same pattern as
+    /// [`Self::bg`].
+    pub fn border_color(mut self, value: impl crate::binding::IntoReactive<Color>) -> Self {
+        use crate::binding::{Reactive, TypedPendingBinding};
+        match value.into_reactive() {
+            Reactive::Const(color) => {
+                self.border_color = Some(color);
+            }
+            Reactive::Bound(state) => {
+                if let Some(c) = state.try_get() {
+                    self.border_color = Some(c);
+                }
+                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
+                    state,
+                    crate::property::PropertyId::BorderColor,
+                    |props, c: Color| {
+                        props.border_color = Some(c);
+                    },
+                )));
+            }
+        }
         self
     }
 
@@ -2998,8 +3043,28 @@ impl Div {
     // =========================================================================
 
     /// Apply a single drop shadow to this element (replaces any existing stack).
-    pub fn shadow(mut self, shadow: Shadow) -> Self {
-        self.shadow = vec![shadow];
+    ///
+    /// Accepts either an eager `Shadow` or a `&State<Shadow>` /
+    /// `State<Shadow>` for signal-bound reactivity.
+    pub fn shadow(mut self, value: impl crate::binding::IntoReactive<Shadow>) -> Self {
+        use crate::binding::{Reactive, TypedPendingBinding};
+        match value.into_reactive() {
+            Reactive::Const(shadow) => {
+                self.shadow = vec![shadow];
+            }
+            Reactive::Bound(state) => {
+                if let Some(s) = state.try_get() {
+                    self.shadow = vec![s];
+                }
+                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
+                    state,
+                    crate::property::PropertyId::Shadow,
+                    |props, s: Shadow| {
+                        props.shadow = vec![s];
+                    },
+                )));
+            }
+        }
         self
     }
 
@@ -3038,9 +3103,32 @@ impl Div {
     // Transform
     // =========================================================================
 
-    /// Apply a transform to this element
-    pub fn transform(mut self, transform: Transform) -> Self {
-        self.transform = Some(transform);
+    /// Apply a transform to this element.
+    ///
+    /// Accepts either an eager `Transform` or a `&State<Transform>` /
+    /// `State<Transform>` for signal-bound reactivity. Animated
+    /// translate / rotate / scale should use this path — patches the
+    /// transform cell per frame via the property channel without
+    /// rebuilding the subtree.
+    pub fn transform(mut self, value: impl crate::binding::IntoReactive<Transform>) -> Self {
+        use crate::binding::{Reactive, TypedPendingBinding};
+        match value.into_reactive() {
+            Reactive::Const(transform) => {
+                self.transform = Some(transform);
+            }
+            Reactive::Bound(state) => {
+                if let Some(t) = state.try_get() {
+                    self.transform = Some(t);
+                }
+                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
+                    state,
+                    crate::property::PropertyId::Transform,
+                    |props, t: Transform| {
+                        props.transform = Some(t);
+                    },
+                )));
+            }
+        }
         self
     }
 
