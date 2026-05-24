@@ -57,7 +57,17 @@ impl RenderTree {
     ) -> Option<Cow<'a, ElementStyle>> {
         if let Some(stable) = self.stable_id(node_id) {
             let table = self.state_style_table.borrow();
-            if table.is_populated() && table.build_generation() == self.build_generation() {
+            // Phase 5.3 — populated-table check is sufficient. The
+            // `build_generation` stamp on the table is kept as
+            // debugging metadata, but freshness now relies on the
+            // stable-id contract: entries for surviving nodes stay
+            // correct across structural rebuilds because their
+            // `StableNodeId` is preserved; missing entries (newly
+            // added nodes) fall through to the rule walk below;
+            // orphaned entries (removed nodes) are never queried.
+            // The table is rebuilt on `set_stylesheet*` — the only
+            // event that invalidates content.
+            if table.is_populated() {
                 return table.get_base(stable).cloned().map(Cow::Owned);
             }
         }
@@ -76,7 +86,17 @@ impl RenderTree {
     ) -> Option<Cow<'a, ElementStyle>> {
         if let Some(stable) = self.stable_id(node_id) {
             let table = self.state_style_table.borrow();
-            if table.is_populated() && table.build_generation() == self.build_generation() {
+            // Phase 5.3 — populated-table check is sufficient. The
+            // `build_generation` stamp on the table is kept as
+            // debugging metadata, but freshness now relies on the
+            // stable-id contract: entries for surviving nodes stay
+            // correct across structural rebuilds because their
+            // `StableNodeId` is preserved; missing entries (newly
+            // added nodes) fall through to the rule walk below;
+            // orphaned entries (removed nodes) are never queried.
+            // The table is rebuilt on `set_stylesheet*` — the only
+            // event that invalidates content.
+            if table.is_populated() {
                 return table.get_state(stable, state).cloned().map(Cow::Owned);
             }
         }
@@ -565,36 +585,90 @@ mod p5_2_table_consumer_tests {
     }
 
     #[test]
-    fn stale_table_generation_falls_back_to_stylesheet() {
-        // Table built at generation X, but tree's build_generation is
-        // Y. Lookup must reject the stale table and walk the
-        // stylesheet.
+    fn set_stylesheet_rebinds_clear_stale_table_entries() {
+        // Phase 5.3 contract: `set_stylesheet` rebuilds the table
+        // against the new rules, so a follow-up `apply_state_styles`
+        // never observes stale entries from the previous stylesheet.
         let mut tree = build_btn_tree(1.0);
+
+        // First bind: stylesheet says opacity 0.5.
         tree.set_stylesheet(parse("#btn { opacity: 0.5; }"));
         let root = tree.root().unwrap();
-
-        let table_source = parse("#btn { opacity: 0.25; }");
-        // Bump the build_generation in the supplied table so it
-        // doesn't match the tree's current generation. The tree
-        // starts at 0; we hand the table a stale 999.
-        let mut stale = StateStyleTable::build(
-            &table_source,
-            std::iter::once(("btn".to_string(), tree.stable_id(root).unwrap())),
-            999,
-        );
-        assert!(stale.is_populated());
-        // The tree's build_generation hasn't moved past 0, so 999
-        // counts as the future / wrong generation either way — the
-        // freshness check is equality, not >=.
-        assert_ne!(stale.build_generation(), tree.build_generation());
-        std::mem::swap(&mut *tree.state_style_table.borrow_mut(), &mut stale);
-
         assert!(tree.apply_state_styles(root, false, false, false));
-        let props = &tree.render_nodes.get(&root).unwrap().props;
         assert!(
-            (props.opacity - 0.5).abs() < 0.001,
-            "stale table must be ignored, fallback opacity expected, got {}",
-            props.opacity
+            (tree.render_nodes.get(&root).unwrap().props.opacity - 0.5).abs() < 0.001,
+            "first bind must produce 0.5"
+        );
+
+        // Rebind: stylesheet now says 0.75. The table rebuild fired
+        // inside `set_stylesheet` so the next apply must observe the
+        // new value — no manual cache flush needed.
+        tree.set_stylesheet(parse("#btn { opacity: 0.75; }"));
+        assert!(tree.apply_state_styles(root, false, false, false));
+        let after = tree.render_nodes.get(&root).unwrap().props.opacity;
+        assert!(
+            (after - 0.75).abs() < 0.001,
+            "second bind must produce 0.75 (table rebuilt against new rules), got {}",
+            after
+        );
+    }
+
+    #[test]
+    fn set_stylesheet_auto_populates_table() {
+        // Phase 5.3 contract: simply binding a stylesheet to a tree
+        // with registered ids triggers a table build. No manual
+        // install required.
+        let mut tree = build_btn_tree(1.0);
+        assert!(
+            !tree.state_style_table.borrow().is_populated(),
+            "pre-bind: table empty"
+        );
+
+        tree.set_stylesheet(parse(
+            "
+            #btn { opacity: 0.5; }
+            #btn:hover { opacity: 0.3; }
+            ",
+        ));
+
+        let table = tree.state_style_table.borrow();
+        assert!(
+            table.is_populated(),
+            "post-bind: table must be populated automatically"
+        );
+        // Should have one base + one hover entry.
+        assert_eq!(table.base_entry_count(), 1);
+        assert_eq!(table.state_entry_count(), 1);
+    }
+
+    #[test]
+    fn auto_populated_table_makes_apply_state_styles_consult_it() {
+        // Combined wiring test: with no manual table install, the
+        // pre-resolved cascade must be consulted by apply_state_styles
+        // after set_stylesheet. This is the headline P5.3 behaviour
+        // — the table goes from "never populated" to "populated on
+        // every cn_demo session".
+        let mut tree = build_btn_tree(1.0);
+        tree.set_stylesheet(parse(
+            "
+            #btn { opacity: 0.5; }
+            #btn:hover { opacity: 0.3; }
+            ",
+        ));
+        let root = tree.root().unwrap();
+
+        // The discriminator here is indirect: if the table was NOT
+        // consulted, this still passes because the bound stylesheet
+        // produces the same values. Direct table-consultation
+        // discrimination is covered by
+        // `table_path_wins_when_populated_and_fresh`; this test
+        // ensures the end-to-end wiring stays glued.
+        assert!(tree.apply_state_styles(root, true, false, false));
+        let opacity = tree.render_nodes.get(&root).unwrap().props.opacity;
+        assert!(
+            (opacity - 0.3).abs() < 0.001,
+            "hover style must apply, got {}",
+            opacity
         );
     }
 

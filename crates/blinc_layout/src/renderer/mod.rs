@@ -2575,6 +2575,10 @@ impl RenderTree {
     pub fn set_stylesheet(&mut self, stylesheet: Stylesheet) {
         self.stylesheet = Some(Arc::new(stylesheet));
         self.invalidate_mouse_move_pipeline_cache();
+        // Phase 5.3 — populate the state-style table so subsequent
+        // `apply_state_styles` calls consult the pre-resolved cascade
+        // instead of walking the stylesheet's rule list per lookup.
+        self.rebuild_state_style_table();
     }
 
     /// Set a shared stylesheet reference
@@ -2583,6 +2587,49 @@ impl RenderTree {
         crate::css_parser::set_active_stylesheet(Arc::clone(&stylesheet));
         self.stylesheet = Some(stylesheet);
         self.invalidate_mouse_move_pipeline_cache();
+        // Phase 5.3 — populate the state-style table so subsequent
+        // `apply_state_styles` calls consult the pre-resolved cascade
+        // instead of walking the stylesheet's rule list per lookup.
+        self.rebuild_state_style_table();
+    }
+
+    /// Phase 5.3 — (re)build the pre-resolved state-style cascade
+    /// table ([[project-reactive-architecture-v2]]).
+    ///
+    /// Iterates every element registered in `element_registry`,
+    /// resolves each to its `StableNodeId`, and pre-computes the
+    /// base + 5 `ElementState` styles via the existing rule walk.
+    /// Stamps the table's `build_generation` with the tree's
+    /// current generation so consumers can detect staleness; today
+    /// `apply_state_styles` accepts any populated table per the
+    /// stable-id correctness contract (see `resolve_base_style` in
+    /// `renderer/stylesheet/state.rs`).
+    ///
+    /// Called automatically by [`Self::set_stylesheet`] /
+    /// [`Self::set_stylesheet_arc`]. When no stylesheet is bound the
+    /// table is cleared so the fallback rule walk continues to run.
+    pub fn rebuild_state_style_table(&mut self) {
+        let Some(stylesheet) = self.stylesheet.clone() else {
+            // No stylesheet bound → empty table, fallback path runs.
+            self.state_style_table.borrow_mut().clear();
+            return;
+        };
+        let elements: Vec<(String, crate::tree::StableNodeId)> = self
+            .element_registry
+            .all_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let layout = self.element_registry.get(&id)?;
+                let stable = self.layout_to_stable.get(&layout).copied()?;
+                Some((id, stable))
+            })
+            .collect();
+        let table = crate::state_style_table::StateStyleTable::build(
+            &stylesheet,
+            elements,
+            self.build_generation,
+        );
+        *self.state_style_table.borrow_mut() = table;
     }
 
     /// Get the current stylesheet, if any
