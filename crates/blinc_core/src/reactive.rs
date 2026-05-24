@@ -597,6 +597,38 @@ pub type DirtyFlag = Arc<AtomicBool>;
 /// Callback for notifying stateful elements of signal changes
 pub type StatefulDepsCallback = Arc<dyn Fn(&[SignalId]) + Send + Sync>;
 
+/// Global notifier for property-binding subscribers
+/// ([[project-reactive-architecture-v2]] Phase 2). Registered once by
+/// `blinc_layout::binding` on first use; fires on every `State<T>::set`
+/// in addition to the per-State `stateful_deps_callback`.
+///
+/// blinc_core can't depend on blinc_layout (cyclic dep), so the binding
+/// registry lives in blinc_layout and the core just exposes this hook.
+/// `OnceLock` means a single notifier is installed for the process
+/// lifetime; subsequent `set_property_binding_notifier` calls are
+/// silently ignored — matches the singleton lifecycle of the binding
+/// registry.
+static PROPERTY_BINDING_NOTIFIER: std::sync::OnceLock<
+    Box<dyn Fn(SignalId) + Send + Sync + 'static>,
+> = std::sync::OnceLock::new();
+
+/// Install the global property-binding notifier. Called by
+/// `blinc_layout` on first access of its registry. Idempotent: only the
+/// first call wins.
+pub fn set_property_binding_notifier(
+    notifier: impl Fn(SignalId) + Send + Sync + 'static,
+) {
+    let _ = PROPERTY_BINDING_NOTIFIER.set(Box::new(notifier));
+}
+
+/// Fire the property-binding notifier for a signal that just changed.
+/// No-op if no notifier is installed (binding registry never accessed).
+pub(crate) fn notify_property_bindings(id: SignalId) {
+    if let Some(notifier) = PROPERTY_BINDING_NOTIFIER.get() {
+        notifier(id);
+    }
+}
+
 /// A bound state value with direct get/set methods
 ///
 /// This is the primary API for component state management. It wraps a signal
@@ -684,6 +716,9 @@ impl<T: Clone + Send + 'static> State<T> {
         if let Some(ref callback) = self.stateful_deps_callback {
             callback(&[self.signal.id()]);
         }
+        // Fire any property-binding subscribers (P2 signal-bound modifiers).
+        // No-op when no bindings exist on this signal.
+        notify_property_bindings(self.signal.id());
     }
 
     /// Set a new value AND trigger a UI tree rebuild
@@ -697,6 +732,9 @@ impl<T: Clone + Send + 'static> State<T> {
     pub fn set_rebuild(&self, value: T) {
         self.reactive.lock().unwrap().set(self.signal, value);
         self.dirty_flag.store(true, Ordering::SeqCst);
+        // Property bindings still fire even on the rebuild path — a
+        // signal-bound `.bg(&state)` should patch alongside the rebuild.
+        notify_property_bindings(self.signal.id());
     }
 
     /// Update the value using a function
@@ -708,12 +746,14 @@ impl<T: Clone + Send + 'static> State<T> {
         if let Some(ref callback) = self.stateful_deps_callback {
             callback(&[self.signal.id()]);
         }
+        notify_property_bindings(self.signal.id());
     }
 
     /// Update the value AND trigger a UI tree rebuild
     pub fn update_rebuild(&self, f: impl FnOnce(T) -> T) {
         self.reactive.lock().unwrap().update(self.signal, f);
         self.dirty_flag.store(true, Ordering::SeqCst);
+        notify_property_bindings(self.signal.id());
     }
 
     /// Get the underlying signal (for advanced use cases)

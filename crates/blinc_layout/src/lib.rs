@@ -43,6 +43,7 @@ pub mod event_router;
 pub mod image;
 pub mod interactive;
 pub mod layout_animation;
+pub mod binding;
 pub mod motion;
 pub mod property;
 pub mod render_state;
@@ -99,6 +100,12 @@ pub use key::{InstanceKey, reset_call_counters};
 
 // Property channel foundation (reactive architecture v2, Phase 1)
 pub use property::{PropertyId, SideEffects, TransformEquivalent};
+
+// Signal-bound property bindings (reactive architecture v2, Phase 2)
+pub use binding::{
+    BoundValue, IntoReactive, PropertyBindingRegistry, Reactive, register_typed,
+    unregister_node as unregister_property_bindings, with_registry,
+};
 
 // Core types
 pub use element::{

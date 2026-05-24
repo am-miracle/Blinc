@@ -208,6 +208,13 @@ impl RenderTree {
         self.hover_css_animations.remove(&node_id);
         self.complex_state_affected.remove(&node_id);
 
+        // Evict any signal-bound property bindings registered against
+        // this node. Without this, a removed node's bindings would
+        // still fire on signal changes and queue updates against a
+        // dead LayoutNodeId. See [[project-reactive-architecture-v2]]
+        // Phase 2.
+        crate::binding::unregister_node(node_id);
+
         // Remove CSS animations/transitions for this node from the
         // shared store. The store is now stable-keyed (Phase 5), so
         // we look up the stable id before dropping the mapping
