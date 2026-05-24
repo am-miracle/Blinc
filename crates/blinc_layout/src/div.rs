@@ -1778,9 +1778,33 @@ impl Div {
     // Sizing (pixel values)
     // =========================================================================
 
-    /// Set width in pixels
-    pub fn w(mut self, px: f32) -> Self {
-        self.style.size.width = Dimension::Length(px);
+    /// Set width in pixels.
+    ///
+    /// Accepts either an eager `f32` or a `&State<f32>` / `State<f32>`
+    /// for signal-bound reactivity. Signal updates patch the taffy
+    /// `Style.size.width` directly via the property channel and trigger
+    /// `compute_layout` next frame — no `Stateful` wrap, no subtree
+    /// rebuild for visual-only ancestors.
+    /// ([[project-reactive-architecture-v2]] Phase 2.4.)
+    pub fn w(mut self, value: impl crate::binding::IntoReactive<f32>) -> Self {
+        use crate::binding::{LayoutPendingBinding, Reactive};
+        match value.into_reactive() {
+            Reactive::Const(px) => {
+                self.style.size.width = Dimension::Length(px);
+            }
+            Reactive::Bound(state) => {
+                if let Some(px) = state.try_get() {
+                    self.style.size.width = Dimension::Length(px);
+                }
+                self.pending_bindings.push(Box::new(LayoutPendingBinding::new(
+                    state,
+                    crate::property::PropertyId::Width,
+                    |style, px: f32| {
+                        style.size.width = Dimension::Length(px);
+                    },
+                )));
+            }
+        }
         self
     }
 
@@ -1815,9 +1839,29 @@ impl Div {
         self
     }
 
-    /// Set height in pixels
-    pub fn h(mut self, px: f32) -> Self {
-        self.style.size.height = Dimension::Length(px);
+    /// Set height in pixels.
+    ///
+    /// Accepts either an eager `f32` or a `&State<f32>` / `State<f32>`
+    /// for signal-bound reactivity. Same shape as [`Self::w`].
+    pub fn h(mut self, value: impl crate::binding::IntoReactive<f32>) -> Self {
+        use crate::binding::{LayoutPendingBinding, Reactive};
+        match value.into_reactive() {
+            Reactive::Const(px) => {
+                self.style.size.height = Dimension::Length(px);
+            }
+            Reactive::Bound(state) => {
+                if let Some(px) = state.try_get() {
+                    self.style.size.height = Dimension::Length(px);
+                }
+                self.pending_bindings.push(Box::new(LayoutPendingBinding::new(
+                    state,
+                    crate::property::PropertyId::Height,
+                    |style, px: f32| {
+                        style.size.height = Dimension::Length(px);
+                    },
+                )));
+            }
+        }
         self
     }
 
@@ -1908,14 +1952,42 @@ impl Div {
     // Spacing (4px base unit like Tailwind)
     // =========================================================================
 
-    /// Set gap between children (in 4px units)
-    /// gap(4) = 16px
-    pub fn gap(mut self, units: f32) -> Self {
-        let px = units * 4.0;
-        self.style.gap = taffy::Size {
-            width: LengthPercentage::Length(px),
-            height: LengthPercentage::Length(px),
-        };
+    /// Set gap between children (in 4px units).
+    /// `gap(4)` = 16 px.
+    ///
+    /// Accepts either an eager `f32` or a `&State<f32>` / `State<f32>`.
+    /// Signal updates patch the taffy `Style.gap` and trigger relayout.
+    pub fn gap(mut self, value: impl crate::binding::IntoReactive<f32>) -> Self {
+        use crate::binding::{LayoutPendingBinding, Reactive};
+        match value.into_reactive() {
+            Reactive::Const(units) => {
+                let px = units * 4.0;
+                self.style.gap = taffy::Size {
+                    width: LengthPercentage::Length(px),
+                    height: LengthPercentage::Length(px),
+                };
+            }
+            Reactive::Bound(state) => {
+                if let Some(units) = state.try_get() {
+                    let px = units * 4.0;
+                    self.style.gap = taffy::Size {
+                        width: LengthPercentage::Length(px),
+                        height: LengthPercentage::Length(px),
+                    };
+                }
+                self.pending_bindings.push(Box::new(LayoutPendingBinding::new(
+                    state,
+                    crate::property::PropertyId::Gap,
+                    |style, units: f32| {
+                        let px = units * 4.0;
+                        style.gap = taffy::Size {
+                            width: LengthPercentage::Length(px),
+                            height: LengthPercentage::Length(px),
+                        };
+                    },
+                )));
+            }
+        }
         self
     }
 
@@ -1993,16 +2065,49 @@ impl Div {
     // Padding
     // -------------------------------------------------------------------------
 
-    /// Set padding on all sides (in 4px units)
-    /// p(4) = 16px padding
-    pub fn p(mut self, units: f32) -> Self {
-        let px = LengthPercentage::Length(units * 4.0);
-        self.style.padding = Rect {
-            left: px,
-            right: px,
-            top: px,
-            bottom: px,
-        };
+    /// Set padding on all sides (in 4px units).
+    /// `p(4)` = 16 px padding.
+    ///
+    /// Accepts either an eager `f32` or a `&State<f32>` / `State<f32>`.
+    /// Signal updates patch the taffy `Style.padding` and trigger
+    /// relayout.
+    pub fn p(mut self, value: impl crate::binding::IntoReactive<f32>) -> Self {
+        use crate::binding::{LayoutPendingBinding, Reactive};
+        match value.into_reactive() {
+            Reactive::Const(units) => {
+                let px = LengthPercentage::Length(units * 4.0);
+                self.style.padding = Rect {
+                    left: px,
+                    right: px,
+                    top: px,
+                    bottom: px,
+                };
+            }
+            Reactive::Bound(state) => {
+                if let Some(units) = state.try_get() {
+                    let px = LengthPercentage::Length(units * 4.0);
+                    self.style.padding = Rect {
+                        left: px,
+                        right: px,
+                        top: px,
+                        bottom: px,
+                    };
+                }
+                self.pending_bindings.push(Box::new(LayoutPendingBinding::new(
+                    state,
+                    crate::property::PropertyId::Padding,
+                    |style, units: f32| {
+                        let px = LengthPercentage::Length(units * 4.0);
+                        style.padding = Rect {
+                            left: px,
+                            right: px,
+                            top: px,
+                            bottom: px,
+                        };
+                    },
+                )));
+            }
+        }
         self
     }
 

@@ -57,6 +57,10 @@ pub type ReadFn = Arc<dyn Fn() -> Option<BoundValue> + Send + Sync>;
 /// once at `Bound` construction; reused on every fire.
 pub type WriteFn = Arc<dyn Fn(&mut RenderProps, &BoundValue) + Send + Sync>;
 
+/// Writes a [`BoundValue`] into the right taffy `Style` field. Mirror
+/// of [`WriteFn`] for layout-affecting bindings.
+pub type LayoutWriteFn = Arc<dyn Fn(&mut taffy::Style, &BoundValue) + Send + Sync>;
+
 /// A reactive value source — what an [`IntoReactive<T>`] impl resolves to.
 ///
 /// Builder methods examine the variant: `Const` becomes an immediate
@@ -203,15 +207,72 @@ impl<T: Clone + Send + Sync + 'static> PendingBinding for TypedPendingBinding<T>
     }
 }
 
+/// Closure type for taffy-style writes — `Arc<dyn Fn(&mut taffy::Style,
+/// T)>`. Mirror of [`TypedWriteFn`] for the layout-binding path.
+pub type TypedLayoutWriteFn<T> = Arc<dyn Fn(&mut taffy::Style, T) + Send + Sync>;
+
+/// Layout-binding variant of [`TypedPendingBinding`]. Fires
+/// `queue_layout_update_partial` on every signal change, which patches
+/// the live taffy `Style` and triggers relayout next frame.
+///
+/// Used by Phase 2.4 layout-affecting builder methods (`.w(&signal)`,
+/// `.h(&signal)`, `.padding(&signal)`, etc.).
+pub struct LayoutPendingBinding<T: Clone + Send + Sync + 'static> {
+    state: State<T>,
+    property: PropertyId,
+    write: TypedLayoutWriteFn<T>,
+}
+
+impl<T: Clone + Send + Sync + 'static> LayoutPendingBinding<T> {
+    /// Build a layout-targeting pending binding. When registered against
+    /// a node, every `state.set(...)` fires a partial update whose
+    /// `layout_write` closure mutates the taffy `Style` via `write`.
+    pub fn new(
+        state: State<T>,
+        property: PropertyId,
+        write: impl Fn(&mut taffy::Style, T) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            state,
+            property,
+            write: Arc::new(write),
+        }
+    }
+}
+
+impl<T: Clone + Send + Sync + 'static> PendingBinding for LayoutPendingBinding<T> {
+    fn register(&self, node_id: LayoutNodeId) {
+        let write = Arc::clone(&self.write);
+        let state = self.state.clone();
+        let property = self.property;
+        register_typed_layout(
+            self.state.signal_id(),
+            node_id,
+            property,
+            state,
+            move |style, v| write(style, v),
+        );
+    }
+}
+
 // =========================================================================
 // Registry
 // =========================================================================
+
+/// What target a subscriber writes into when its signal fires.
+/// Visual props write `RenderProps`; layout props write the taffy
+/// `Style` (and trigger `compute_layout` next frame via the side-effect
+/// metadata).
+enum SubscriberWrite {
+    Render(WriteFn),
+    Layout(LayoutWriteFn),
+}
 
 struct Subscriber {
     node_id: LayoutNodeId,
     property: PropertyId,
     read: ReadFn,
-    write: WriteFn,
+    write: SubscriberWrite,
 }
 
 /// Process-global registry of signal-bound property subscribers.
@@ -252,7 +313,28 @@ impl PropertyBindingRegistry {
             node_id,
             property,
             read,
-            write,
+            write: SubscriberWrite::Render(write),
+        });
+        self.by_node.entry(node_id).or_default().push(signal_id);
+    }
+
+    /// Register a layout-targeting subscription. The `write` closure
+    /// mutates the live taffy `Style` (instead of `RenderProps`) on
+    /// every signal fire; the side-effect metadata on `property` tells
+    /// the drain step to schedule `compute_layout` next frame.
+    pub fn register_layout(
+        &mut self,
+        signal_id: SignalId,
+        node_id: LayoutNodeId,
+        property: PropertyId,
+        read: ReadFn,
+        write: LayoutWriteFn,
+    ) {
+        self.bindings.entry(signal_id).or_default().push(Subscriber {
+            node_id,
+            property,
+            read,
+            write: SubscriberWrite::Layout(write),
         });
         self.by_node.entry(node_id).or_default().push(signal_id);
     }
@@ -286,13 +368,26 @@ impl PropertyBindingRegistry {
             let Some(value) = (sub.read)() else {
                 continue;
             };
-            let write = Arc::clone(&sub.write);
-            queue_prop_update_partial(
-                sub.node_id,
-                sub.property,
-                sub.property.side_effects(),
-                move |props| write(props, &value),
-            );
+            match &sub.write {
+                SubscriberWrite::Render(write) => {
+                    let write = Arc::clone(write);
+                    queue_prop_update_partial(
+                        sub.node_id,
+                        sub.property,
+                        sub.property.side_effects(),
+                        move |props| write(props, &value),
+                    );
+                }
+                SubscriberWrite::Layout(write) => {
+                    let write = Arc::clone(write);
+                    crate::stateful::queue_layout_update_partial(
+                        sub.node_id,
+                        sub.property,
+                        sub.property.side_effects(),
+                        move |style| write(style, &value),
+                    );
+                }
+            }
         }
     }
 
@@ -367,6 +462,33 @@ pub fn register_typed<T>(
         })
     };
     with_registry(|reg| reg.register(signal_id, node_id, property, read, write_dyn));
+}
+
+/// Convenience: register a layout-targeting signal-bound subscription.
+/// Counterpart to [`register_typed`] for layout-affecting properties.
+/// The supplied `write` closure mutates the live taffy `Style` (instead
+/// of `RenderProps`) on every signal fire.
+pub fn register_typed_layout<T>(
+    signal_id: SignalId,
+    node_id: LayoutNodeId,
+    property: PropertyId,
+    state: blinc_core::reactive::State<T>,
+    write: impl Fn(&mut taffy::Style, T) + Send + Sync + 'static,
+) where
+    T: Clone + Send + Sync + 'static,
+{
+    let write = Arc::new(write);
+    let state_for_read = state.clone();
+    let read: ReadFn = Arc::new(move || state_for_read.try_get().map(BoundValue::new));
+    let write_dyn: LayoutWriteFn = {
+        let write = Arc::clone(&write);
+        Arc::new(move |style: &mut taffy::Style, val: &BoundValue| {
+            if let Some(v) = val.downcast_ref::<T>() {
+                write(style, v.clone());
+            }
+        })
+    };
+    with_registry(|reg| reg.register_layout(signal_id, node_id, property, read, write_dyn));
 }
 
 /// Convenience: unregister all bindings for a node. Called by
@@ -446,7 +568,7 @@ mod tests {
 
         // Apply it to a RenderProps to invoke the writer.
         let mut props = RenderProps::default();
-        (updates.into_iter().next().unwrap().write)(&mut props);
+        (updates.into_iter().next().unwrap().render_write.unwrap())(&mut props);
         assert_eq!(fire_count.load(Ordering::SeqCst), 1);
     }
 
@@ -643,7 +765,7 @@ mod tests {
         // Apply the queued update — RenderProps.background should reflect
         // the new colour.
         let mut props = RenderProps::default();
-        (updates.into_iter().next().unwrap().write)(&mut props);
+        (updates.into_iter().next().unwrap().render_write.unwrap())(&mut props);
         match props.background {
             Some(blinc_core::Brush::Solid(c)) => {
                 assert_eq!(c, Color::from_hex(0x00ff00));
@@ -670,7 +792,7 @@ mod tests {
         assert_eq!(updates[0].property, PropertyId::Opacity);
 
         let mut props = RenderProps::default();
-        (updates.into_iter().next().unwrap().write)(&mut props);
+        (updates.into_iter().next().unwrap().render_write.unwrap())(&mut props);
         assert!((props.opacity - 0.5).abs() < 1e-6);
     }
 
@@ -692,7 +814,7 @@ mod tests {
         assert_eq!(updates[0].property, PropertyId::CornerRadius);
 
         let mut props = RenderProps::default();
-        (updates.into_iter().next().unwrap().write)(&mut props);
+        (updates.into_iter().next().unwrap().render_write.unwrap())(&mut props);
         assert!((props.border_radius.top_left - 16.0).abs() < 1e-6);
         assert!((props.border_radius.bottom_right - 16.0).abs() < 1e-6);
         assert!(props.border_radius_explicit);
@@ -717,7 +839,7 @@ mod tests {
         assert_eq!(updates[0].property, PropertyId::BorderColor);
 
         let mut props = RenderProps::default();
-        (updates.into_iter().next().unwrap().write)(&mut props);
+        (updates.into_iter().next().unwrap().render_write.unwrap())(&mut props);
         assert_eq!(props.border_color, Some(Color::from_hex(0xff8800)));
     }
 
@@ -742,7 +864,7 @@ mod tests {
         assert_eq!(updates[0].property, PropertyId::Shadow);
 
         let mut props = RenderProps::default();
-        (updates.into_iter().next().unwrap().write)(&mut props);
+        (updates.into_iter().next().unwrap().render_write.unwrap())(&mut props);
         assert_eq!(props.shadow.len(), 1);
         assert_eq!(props.shadow[0], next);
     }
@@ -766,7 +888,113 @@ mod tests {
         assert_eq!(updates[0].property, PropertyId::Transform);
 
         let mut props = RenderProps::default();
-        (updates.into_iter().next().unwrap().write)(&mut props);
+        (updates.into_iter().next().unwrap().render_write.unwrap())(&mut props);
         assert!(props.transform.is_some());
+    }
+
+    /// Layout-binding path — `.w(&state)` should emit a `layout_write`
+    /// (not `render_write`) with `needs_layout = true`.
+    #[test]
+    fn div_w_bound_path_emits_layout_write() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+
+        let w_state = fresh_state::<f32>(100.0);
+        let element = div().w(&w_state);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        // Sanity: initial value seeded into taffy style.
+        let style = tree.get_style(node_id).expect("style");
+        assert!(matches!(style.size.width, taffy::Dimension::Length(v) if (v - 100.0).abs() < 1e-6));
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        w_state.set(250.0);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        let upd = updates.into_iter().next().unwrap();
+        assert_eq!(upd.node_id, node_id);
+        assert_eq!(upd.property, PropertyId::Width);
+        assert!(upd.effects.needs_layout, "Width changes must trigger layout");
+        assert!(upd.render_write.is_none(), "Width is layout-only, no RenderProps write");
+        assert!(upd.layout_write.is_some(), "Width must have a layout_write");
+
+        // Apply the layout write — the taffy Style should pick up the new width.
+        let mut style = tree.get_style(node_id).unwrap();
+        (upd.layout_write.unwrap())(&mut style);
+        assert!(matches!(style.size.width, taffy::Dimension::Length(v) if (v - 250.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn div_h_bound_path_emits_layout_write() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+
+        let h_state = fresh_state::<f32>(50.0);
+        let element = div().h(&h_state);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        h_state.set(75.0);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        let upd = updates.into_iter().next().unwrap();
+        assert_eq!(upd.property, PropertyId::Height);
+        assert!(upd.effects.needs_layout);
+        assert!(upd.layout_write.is_some());
+    }
+
+    #[test]
+    fn div_gap_bound_path_emits_layout_write() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+
+        let gap_state = fresh_state::<f32>(2.0); // 8px
+        let element = div().gap(&gap_state);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        gap_state.set(4.0); // 16px
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        let upd = updates.into_iter().next().unwrap();
+        assert_eq!(upd.property, PropertyId::Gap);
+        assert!(upd.effects.needs_layout);
+
+        let mut style = tree.get_style(node_id).unwrap();
+        (upd.layout_write.unwrap())(&mut style);
+        // gap units are 4px each — gap(4.0) → 16.0
+        match style.gap.width {
+            taffy::LengthPercentage::Length(v) => assert!((v - 16.0).abs() < 1e-6),
+            other => panic!("expected Length, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn div_padding_bound_path_emits_layout_write() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+
+        let p_state = fresh_state::<f32>(2.0);
+        let element = div().p(&p_state);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        p_state.set(6.0); // 24px
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        let upd = updates.into_iter().next().unwrap();
+        assert_eq!(upd.property, PropertyId::Padding);
+        assert!(upd.effects.needs_layout);
+
+        let mut style = tree.get_style(node_id).unwrap();
+        (upd.layout_write.unwrap())(&mut style);
+        match style.padding.left {
+            taffy::LengthPercentage::Length(v) => assert!((v - 24.0).abs() < 1e-6),
+            other => panic!("expected Length, got {other:?}"),
+        }
     }
 }

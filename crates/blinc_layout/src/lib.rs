@@ -103,9 +103,9 @@ pub use property::{PropertyId, SideEffects, TransformEquivalent};
 
 // Signal-bound property bindings (reactive architecture v2, Phase 2)
 pub use binding::{
-    BoundValue, IntoReactive, PendingBinding, PropertyBindingRegistry, Reactive,
-    TypedPendingBinding, register_typed, unregister_node as unregister_property_bindings,
-    with_registry,
+    BoundValue, IntoReactive, LayoutPendingBinding, PendingBinding, PropertyBindingRegistry,
+    Reactive, TypedPendingBinding, register_typed, register_typed_layout,
+    unregister_node as unregister_property_bindings, with_registry,
 };
 
 // Core types
@@ -172,10 +172,10 @@ pub use stateful::{
     check_stateful_deps, clear_stateful_animations, clear_stateful_base_updaters,
     clear_stateful_deps, has_animating_statefuls, has_pending_subtree_rebuilds,
     has_stateful_base_updater, has_visible_animating_statefuls, peek_needs_redraw,
-    PartialPropertyUpdate, has_pending_partial_prop_updates, queue_prop_update,
-    queue_prop_update_partial, queue_subtree_rebuild, request_redraw, take_needs_redraw,
-    take_pending_partial_prop_updates, take_pending_subtree_rebuilds, update_stateful_base_props,
-    use_fsm,
+    PartialPropertyUpdate, RenderPropsWrite, TaffyStyleWrite, has_pending_partial_prop_updates,
+    queue_layout_update_partial, queue_prop_update, queue_prop_update_partial,
+    queue_subtree_rebuild, request_redraw, take_needs_redraw, take_pending_partial_prop_updates,
+    take_pending_subtree_rebuilds, update_stateful_base_props, use_fsm,
     use_fsm_keyed, use_shared_state, use_shared_state_with, use_state_for, use_state_for_keyed,
 };
 

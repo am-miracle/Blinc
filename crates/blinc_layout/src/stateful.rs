@@ -306,22 +306,38 @@ pub fn peek_needs_redraw() -> bool {
 // Pending Prop Updates Queue
 // =========================================================================
 
-/// A queued property update — closure that mutates the target node's
-/// `RenderProps` in place, plus side-effect metadata so the drain step
-/// knows whether to schedule layout / text remeasure / clip work.
+/// Closure type that mutates a node's `RenderProps`. Used by Tier-1
+/// visual-only property bindings (`.bg`, `.opacity`, `.shadow`, etc.).
+pub type RenderPropsWrite = Box<dyn FnOnce(&mut RenderProps) + Send>;
+
+/// Closure type that mutates a node's taffy `Style`. Used by Tier-2
+/// layout-affecting property bindings (`.w`, `.h`, `.padding`, etc.).
+pub type TaffyStyleWrite = Box<dyn FnOnce(&mut taffy::Style) + Send>;
+
+/// A queued property update — at least one of `render_write` /
+/// `layout_write` must be `Some`. Side-effect metadata tells the drain
+/// step whether to schedule layout / text remeasure / clip work.
 ///
 /// Foundation of the unified property channel
 /// ([[project-reactive-architecture-v2]]). Every source — stateful
 /// animation refresh, ElementHandle visual mutations, signal-bound
 /// modifiers (P2), CSS state-style table writes (P5), animation
 /// lifecycle tickers (P6) — emits through this queue.
+///
+/// Both writes are `Option<Box<dyn FnOnce>>` so a single update can
+/// target RenderProps only (Tier 1), taffy `Style` only (Tier 2 layout
+/// props that aren't mirrored in RenderProps), or both (compound props
+/// whose visual + layout cells diverge).
 pub struct PartialPropertyUpdate {
     pub node_id: LayoutNodeId,
     pub property: crate::property::PropertyId,
     pub effects: crate::property::SideEffects,
-    /// Closure that mutates the target's `RenderProps` in place.
-    /// `FnOnce` because a queued update is consumed once during drain.
-    pub write: Box<dyn FnOnce(&mut RenderProps) + Send>,
+    /// Closure that mutates `RenderProps` in place. Present for
+    /// Tier-1 visual props; absent for pure layout props.
+    pub render_write: Option<RenderPropsWrite>,
+    /// Closure that mutates the live taffy `Style` in place. Present
+    /// for Tier-2 layout props; absent for visual-only props.
+    pub layout_write: Option<TaffyStyleWrite>,
 }
 
 /// Process-global queue of pending property updates. Drained by every
@@ -861,7 +877,40 @@ pub fn queue_prop_update_partial<F>(
             node_id,
             property,
             effects,
-            write: Box::new(write),
+            render_write: Some(Box::new(write)),
+            layout_write: None,
+        });
+    request_redraw();
+}
+
+/// Queue a partial taffy-style update.
+///
+/// Counterpart to [`queue_prop_update_partial`] for layout-affecting
+/// properties (width / height / padding / margin / gap / flex_*).
+/// The closure mutates the node's taffy `Style` in place; the drain
+/// step in each platform runner reads the live style, applies the
+/// closure, writes it back, and (because `effects.needs_layout` is
+/// set by the caller) triggers `compute_layout` on the next frame.
+///
+/// Used by Phase 2.4's Tier-2 signal-bound modifiers (`.w(&signal)`,
+/// `.h(&signal)`, etc.).
+pub fn queue_layout_update_partial<F>(
+    node_id: LayoutNodeId,
+    property: crate::property::PropertyId,
+    effects: crate::property::SideEffects,
+    write: F,
+) where
+    F: FnOnce(&mut taffy::Style) + Send + 'static,
+{
+    PENDING_PARTIAL_PROP_UPDATES
+        .lock()
+        .unwrap()
+        .push(PartialPropertyUpdate {
+            node_id,
+            property,
+            effects,
+            render_write: None,
+            layout_write: Some(Box::new(write)),
         });
     request_redraw();
 }

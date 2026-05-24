@@ -1295,8 +1295,15 @@ impl AndroidApp {
                 if let Some(ref mut tree) = render_tree {
                     for upd in prop_updates {
                         prop_effects = prop_effects.or(upd.effects);
-                        let write = upd.write;
-                        tree.update_render_props(upd.node_id, |p| write(p));
+                        if let Some(write) = upd.render_write {
+                            tree.update_render_props(upd.node_id, |p| write(p));
+                        }
+                        if let Some(write) = upd.layout_write {
+                            if let Some(mut style) = tree.layout_tree.get_style(upd.node_id) {
+                                write(&mut style);
+                                tree.layout_tree.set_style(upd.node_id, style);
+                            }
+                        }
                     }
                 }
 

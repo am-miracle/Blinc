@@ -499,6 +499,9 @@ fn signal_bound_modifier_section(ctx: &WindowedContext) -> impl ElementBuilder +
     let op = ctx.use_state_keyed("p2_demo_op", || 1.0_f32);
     let radius = ctx.use_state_keyed("p2_demo_radius", || 16.0_f32);
     let bc = ctx.use_state_keyed("p2_demo_border", || Color::from_hex(0x1a1320));
+    // P2.4 layout-bound state: signal-bound .w() goes through the
+    // taffy-write path → relayout next frame, no Stateful wrap.
+    let width = ctx.use_state_keyed("p2_demo_width", || 120.0_f32);
 
     section_container()
         .child(section_title("Signal-bound .bg() / .opacity() (Phase 2)"))
@@ -520,8 +523,10 @@ fn signal_bound_modifier_section(ctx: &WindowedContext) -> impl ElementBuilder +
                 .items_center()
                 .child(
                     // The reactive swatch — no Stateful wrapper.
+                    // .w(&width) goes through the layout-bound path: signal
+                    // updates patch the taffy Style + trigger relayout.
                     div()
-                        .w(120.0)
+                        .w(&width)
                         .h(120.0)
                         .bg(&bg)
                         .opacity(&op)
@@ -605,6 +610,25 @@ fn signal_bound_modifier_section(ctx: &WindowedContext) -> impl ElementBuilder +
                                 .child(cn::button("Border magenta").on_click({
                                     let bc = bc.clone();
                                     move |_| bc.set(Color::from_hex(0xff2d9b))
+                                })),
+                        )
+                        // Layout-bound row: signal updates trigger relayout
+                        // via the taffy-write path (no Stateful, no rebuild).
+                        .child(
+                            div()
+                                .flex_row()
+                                .gap(8.0)
+                                .child(cn::button("Width 80").on_click({
+                                    let width = width.clone();
+                                    move |_| width.set(80.0)
+                                }))
+                                .child(cn::button("Width 120").on_click({
+                                    let width = width.clone();
+                                    move |_| width.set(120.0)
+                                }))
+                                .child(cn::button("Width 240").on_click({
+                                    let width = width.clone();
+                                    move |_| width.set(240.0)
                                 })),
                         ),
                 ),
