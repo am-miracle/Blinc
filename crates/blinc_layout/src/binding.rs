@@ -1113,4 +1113,118 @@ mod tests {
         let (sx, _) = affine_scale(&t);
         assert!((sx - 0.8).abs() < 1e-5, "got {sx}");
     }
+
+    // ============================================================
+    // Single-input transform sugars made reactive (P8.1 follow-up).
+    // `.scale` / `.rotate` / `.rotate_deg` each take impl IntoReactive<f32>;
+    // eager values stay zero-cost via the blanket `IntoReactive for T`,
+    // bound values subscribe + patch props.transform per signal-set.
+    // ============================================================
+
+    #[test]
+    fn div_scale_const_path_unchanged() {
+        use crate::div::{ElementBuilder, div};
+        let element = div().scale(0.5_f32);
+        let t = element.render_props().transform.expect("transform set");
+        let (sx, sy) = affine_scale(&t);
+        assert!((sx - 0.5).abs() < 1e-5 && (sy - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn div_scale_bound_path_fires_partial_update_on_set() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+
+        let s = fresh_state::<f32>(1.0);
+        let element = div().scale(&s);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        s.set(2.0);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        let upd = updates.into_iter().next().unwrap();
+        assert_eq!(upd.node_id, node_id);
+        assert_eq!(upd.property, PropertyId::Transform);
+        assert!(upd.layout_write.is_none(), "GPU-only path, no taffy write");
+
+        let mut props = RenderProps::default();
+        (upd.render_write.unwrap())(&mut props);
+        let (sx, sy) = affine_scale(&props.transform.unwrap());
+        // Uniform scale on both axes from a single f32 — matches the
+        // legacy eager .scale(f) shape.
+        assert!((sx - 2.0).abs() < 1e-5 && (sy - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn div_rotate_const_path_unchanged() {
+        use crate::div::{ElementBuilder, div};
+        // PI/4 (45°) — affine elements [cos, sin, -sin, cos, 0, 0].
+        let element = div().rotate(std::f32::consts::FRAC_PI_4);
+        let t = element.render_props().transform.expect("transform set");
+        if let blinc_core::Transform::Affine2D(a) = t {
+            let expected = std::f32::consts::FRAC_1_SQRT_2;
+            assert!((a.elements[0] - expected).abs() < 1e-5);
+            assert!((a.elements[1] - expected).abs() < 1e-5);
+        } else {
+            panic!("expected affine 2d");
+        }
+    }
+
+    #[test]
+    fn div_rotate_bound_path_fires_partial_update_on_set() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+
+        let angle_state = fresh_state::<f32>(0.0);
+        let element = div().rotate(&angle_state);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        // PI/2 (90°): cos=0, sin=1.
+        angle_state.set(std::f32::consts::FRAC_PI_2);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1);
+        let upd = updates.into_iter().next().unwrap();
+        assert_eq!(upd.node_id, node_id);
+        assert_eq!(upd.property, PropertyId::Transform);
+
+        let mut props = RenderProps::default();
+        (upd.render_write.unwrap())(&mut props);
+        if let blinc_core::Transform::Affine2D(a) = props.transform.unwrap() {
+            assert!(a.elements[0].abs() < 1e-5, "cos(90°) ~ 0");
+            assert!((a.elements[1] - 1.0).abs() < 1e-5, "sin(90°) ~ 1");
+        } else {
+            panic!("expected affine 2d");
+        }
+    }
+
+    #[test]
+    fn div_rotate_deg_bound_path_converts_degrees_to_radians() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+
+        let deg_state = fresh_state::<f32>(0.0);
+        let element = div().rotate_deg(&deg_state);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        deg_state.set(90.0);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        let upd = updates.into_iter().next().unwrap();
+        assert_eq!(upd.node_id, node_id);
+
+        let mut props = RenderProps::default();
+        (upd.render_write.unwrap())(&mut props);
+        if let blinc_core::Transform::Affine2D(a) = props.transform.unwrap() {
+            // 90° should produce the same affine as π/2 rad.
+            assert!(a.elements[0].abs() < 1e-5, "cos(90°) ~ 0");
+            assert!((a.elements[1] - 1.0).abs() < 1e-5, "sin(90°) ~ 1");
+        } else {
+            panic!("expected affine 2d");
+        }
+    }
 }

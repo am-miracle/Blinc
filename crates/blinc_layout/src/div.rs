@@ -3353,29 +3353,68 @@ impl Div {
         self
     }
 
-    /// Translate this element by the given x and y offset
+    /// Translate this element by the given x and y offset.
+    ///
+    /// Eager-only — multi-axis composition with separate reactive
+    /// signals would need a read-modify-write binding shape that
+    /// hasn't landed yet. For animated translation, build a
+    /// `State<Transform>` and bind via [`Self::transform`].
     pub fn translate(self, x: f32, y: f32) -> Self {
         self.transform(Transform::translate(x, y))
     }
 
-    /// Scale this element uniformly
-    pub fn scale(self, factor: f32) -> Self {
-        self.transform(Transform::scale(factor, factor))
+    /// Scale this element uniformly.
+    ///
+    /// Accepts an eager `f32` or a `&State<f32>` / `State<f32>` for
+    /// signal-bound reactivity — signal updates patch
+    /// `props.transform` via the unified property channel per set.
+    pub fn scale(self, factor: impl crate::binding::IntoReactive<f32>) -> Self {
+        use crate::binding::Reactive;
+        match factor.into_reactive() {
+            Reactive::Const(f) => self.transform(Transform::scale(f, f)),
+            Reactive::Bound(state) => {
+                self.bind_transform_from(state, |f: f32| Transform::scale(f, f))
+            }
+        }
     }
 
-    /// Scale this element with different x and y factors
+    /// Scale this element with different x and y factors.
+    ///
+    /// Eager-only — see [`Self::translate`] for the multi-axis
+    /// composition rationale.
     pub fn scale_xy(self, sx: f32, sy: f32) -> Self {
         self.transform(Transform::scale(sx, sy))
     }
 
-    /// Rotate this element by the given angle in radians
-    pub fn rotate(self, angle: f32) -> Self {
-        self.transform(Transform::rotate(angle))
+    /// Rotate this element by the given angle in radians.
+    ///
+    /// Accepts an eager `f32` or a `&State<f32>` / `State<f32>` for
+    /// signal-bound reactivity.
+    pub fn rotate(self, angle: impl crate::binding::IntoReactive<f32>) -> Self {
+        use crate::binding::Reactive;
+        match angle.into_reactive() {
+            Reactive::Const(a) => self.transform(Transform::rotate(a)),
+            Reactive::Bound(state) => {
+                self.bind_transform_from(state, |a: f32| Transform::rotate(a))
+            }
+        }
     }
 
-    /// Rotate this element by the given angle in degrees
-    pub fn rotate_deg(self, degrees: f32) -> Self {
-        self.rotate(degrees * std::f32::consts::PI / 180.0)
+    /// Rotate this element by the given angle in degrees.
+    ///
+    /// Accepts an eager `f32` or a `&State<f32>` / `State<f32>` for
+    /// signal-bound reactivity (the value is multiplied by π/180 on
+    /// every fire to produce the radians the underlying transform
+    /// uses).
+    pub fn rotate_deg(self, degrees: impl crate::binding::IntoReactive<f32>) -> Self {
+        use crate::binding::Reactive;
+        const DEG_TO_RAD: f32 = std::f32::consts::PI / 180.0;
+        match degrees.into_reactive() {
+            Reactive::Const(d) => self.transform(Transform::rotate(d * DEG_TO_RAD)),
+            Reactive::Bound(state) => {
+                self.bind_transform_from(state, |d: f32| Transform::rotate(d * DEG_TO_RAD))
+            }
+        }
     }
 
     // =========================================================================
