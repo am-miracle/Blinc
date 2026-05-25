@@ -401,7 +401,7 @@ pub struct Div {
     /// 100 = bottom-right, 50 = centre on each axis). Default `None`
     /// keeps the renderer's centre-pivot semantics. Set via
     /// [`Self::transform_origin`] or implicitly by helpers like
-    /// [`Self::animated_width_fraction`] that need a left-edge pivot.
+    /// [`Self::transform_width`] that need a left-edge pivot.
     pub(crate) transform_origin: Option<[f32; 2]>,
     pub(crate) opacity: f32,
     pub(crate) cursor: Option<crate::element::CursorStyle>,
@@ -3252,7 +3252,7 @@ impl Div {
     ///
     /// Phase 8.1 of the unified property channel
     /// ([[project-reactive-architecture-v2]]) added this builder so
-    /// [`Self::animated_width_fraction`] can pivot a scale transform
+    /// [`Self::transform_width`] can pivot a scale transform
     /// at the left edge (origin `(0.0, 50.0)`); useful independently
     /// for any caller that needs non-centre transforms.
     pub fn transform_origin(mut self, x_percent: f32, y_percent: f32) -> Self {
@@ -3264,7 +3264,7 @@ impl Div {
     /// via a caller-supplied mapper. Phase 8.1 of the unified
     /// property channel ([[project-reactive-architecture-v2]]).
     ///
-    /// The general primitive that [`Self::animated_width_fraction`]
+    /// The general primitive that [`Self::transform_width`]
     /// sugars over. Useful when the source signal's value type isn't
     /// `Transform` but a derivation produces one: e.g. a `State<f32>`
     /// in `0..=100` mapped to `Transform::scale((v/100).clamp(0,1), 1.0)`,
@@ -3324,7 +3324,7 @@ impl Div {
     /// layout-width bounding box for pointer events. This matches
     /// the slider/progress-fill use case where the fill is a
     /// non-interactive visual indicator clipped by a parent track.
-    pub fn animated_width_fraction(
+    pub fn transform_width(
         mut self,
         fraction: impl crate::binding::IntoReactive<f32>,
     ) -> Self {

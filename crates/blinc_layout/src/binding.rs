@@ -999,7 +999,7 @@ mod tests {
     }
 
     // ============================================================
-    // Phase 8.1 — transform_origin + animated_width_fraction +
+    // Phase 8.1 — transform_origin + transform_width +
     // bind_transform_from. Layout-property animation helpers that
     // route per-frame visual changes through a GPU scale transform
     // instead of taffy::Style mutation, skipping compute_layout.
@@ -1015,7 +1015,7 @@ mod tests {
 
     /// Pull `(sx, sy)` from a `Transform::scale(sx, sy)` value. Panics
     /// if the supplied transform isn't a 2D affine produced by
-    /// `Transform::scale` (the only shape `animated_width_fraction`
+    /// `Transform::scale` (the only shape `transform_width`
     /// and the cn::progress mapper emit).
     fn affine_scale(t: &blinc_core::Transform) -> (f32, f32) {
         match t {
@@ -1027,14 +1027,14 @@ mod tests {
     }
 
     #[test]
-    fn div_animated_width_fraction_const_sets_scale_and_left_origin() {
+    fn div_transform_width_const_sets_scale_and_left_origin() {
         use crate::div::{ElementBuilder, div};
-        let element = div().animated_width_fraction(0.75_f32);
+        let element = div().transform_width(0.75_f32);
         let props = element.render_props();
         assert_eq!(
             props.transform_origin,
             Some([0.0, 50.0]),
-            "animated_width_fraction must pivot at the left edge"
+            "transform_width must pivot at the left edge"
         );
         let t = props.transform.expect("transform set");
         let (sx, sy) = affine_scale(&t);
@@ -1043,12 +1043,12 @@ mod tests {
     }
 
     #[test]
-    fn div_animated_width_fraction_bound_fires_partial_update_on_set() {
+    fn div_transform_width_bound_fires_partial_update_on_set() {
         let _guard = lock_and_reset();
         use crate::div::{ElementBuilder, div};
 
         let frac_state = fresh_state::<f32>(0.0);
-        let element = div().animated_width_fraction(&frac_state);
+        let element = div().transform_width(&frac_state);
         let mut tree = crate::tree::LayoutTree::new();
         let node_id = element.build(&mut tree);
 
@@ -1063,7 +1063,7 @@ mod tests {
         assert!(upd.layout_write.is_none(), "must NOT mutate taffy::Style");
         assert!(
             !upd.effects.needs_layout,
-            "animated_width_fraction is GPU-only — must not request relayout"
+            "transform_width is GPU-only — must not request relayout"
         );
 
         // Apply the render write — render_props.transform should now be scale(0.5, 1.0).

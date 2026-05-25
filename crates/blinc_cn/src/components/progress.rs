@@ -80,7 +80,7 @@ impl ProgressSize {
 /// `value` is a [`Reactive<f32>`] in the 0..=100 range. When `Const`,
 /// the indicator is built with a fixed fractional width (the legacy
 /// behaviour). When `Bound`, the indicator is rendered at full track
-/// width and animated via [`Div::animated_width_fraction`] — signal
+/// width and animated via [`Div::transform_width`] — signal
 /// updates patch a GPU scale transform without rebuilding the
 /// subtree (Phase 8.1 of the unified property channel,
 /// [[project-reactive-architecture-v2]]).
@@ -163,7 +163,7 @@ impl Progress {
         //   `width * fill_ratio`) so simple `cn::progress(75.0)` calls
         //   have identical paint output and zero per-frame work.
         // - Bound path renders a full-width indicator and binds the
-        //   GPU scale via `animated_width_fraction`. Signal sets patch
+        //   GPU scale via `transform_width`. Signal sets patch
         //   the transform cell via the unified property channel — no
         //   subtree rebuild, no compute_layout.
         let indicator = match &config.value {
@@ -271,7 +271,7 @@ impl ProgressBuilder {
     /// Accepts either an eager `f32` in the 0..=100 range or a
     /// `&State<f32>` / `State<f32>` for signal-bound reactivity.
     /// Bound values flow through Phase 8.1's
-    /// [`Div::animated_width_fraction`]-style GPU scale path, so
+    /// [`Div::transform_width`]-style GPU scale path, so
     /// signal updates patch the indicator transform without rebuilding
     /// the progress subtree or recomputing layout.
     pub fn new(value: impl IntoReactive<f32>) -> Self {
