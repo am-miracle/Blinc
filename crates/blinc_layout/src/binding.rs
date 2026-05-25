@@ -42,7 +42,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use blinc_core::reactive::{SignalId, State};
+use blinc_core::reactive::{Computed, DerivedId, SignalId, State};
 
 use crate::element::RenderProps;
 use crate::property::{PropertyId, SideEffects};
@@ -75,6 +75,14 @@ pub enum Reactive<T> {
     /// signal id at build time. The builder method supplies the
     /// `PropertyId` + writer; this just carries the data source.
     Bound(State<T>),
+    /// Computed (derived) value — register a subscription against the
+    /// Computed's [`DerivedId`] at build time. Fires when ANY of the
+    /// derived's dependencies set, via the derived-binding notifier.
+    /// Bridge from [`blinc_core::reactive::Computed`] to the builder
+    /// surface. Multi-source reactivity (e.g. multi-axis transforms)
+    /// composes naturally here — the compute closure inside the
+    /// Computed combines as many source signals as needed.
+    Computed(Computed<T>),
 }
 
 /// Type-erased value carrier for reactive bindings.
@@ -144,6 +152,22 @@ impl<T: Clone + Send + 'static> IntoReactive<T> for State<T> {
     }
 }
 
+// Derived (computed) values — `&Computed<T>` produces a Computed
+// reactive. The Computed<T> wrapper bundles the DerivedId with the
+// reactive graph, so the binding has everything it needs to read
+// the current value on every fire.
+impl<T: Clone + Send + 'static> IntoReactive<T> for &Computed<T> {
+    fn into_reactive(self) -> Reactive<T> {
+        Reactive::Computed(self.clone())
+    }
+}
+
+impl<T: Clone + Send + 'static> IntoReactive<T> for Computed<T> {
+    fn into_reactive(self) -> Reactive<T> {
+        Reactive::Computed(self)
+    }
+}
+
 // =========================================================================
 // PendingBinding — what Div / other element builders hold between method
 // chaining and `build()`. Each represents a deferred registration: at
@@ -168,11 +192,24 @@ pub trait PendingBinding: Send + Sync {
 /// struct field.
 pub type TypedWriteFn<T> = Arc<dyn Fn(&mut RenderProps, T) + Send + Sync>;
 
-/// Concrete `PendingBinding` for a typed `(State<T>, write: fn(&mut
-/// RenderProps, T))` pair. Held on the element builder via
-/// `Box<dyn PendingBinding>`.
+/// Source of a typed pending binding — either a single-signal
+/// `State<T>` (subscribed under a `SignalId`) or a derived
+/// `Computed<T>` (subscribed under a `DerivedId`). The PendingBinding
+/// impl dispatches on this enum at register-time so a single
+/// [`TypedPendingBinding`] type handles both surfaces.
+enum BindingSource<T: Clone + Send + Sync + 'static> {
+    Signal(State<T>),
+    Derived(Computed<T>),
+}
+
+/// Concrete `PendingBinding` for a typed `(BindingSource<T>, write:
+/// fn(&mut RenderProps, T))` triple. Held on the element builder via
+/// `Box<dyn PendingBinding>`. Originally only carried `State<T>`;
+/// extended in the Phase 8 follow-up (Derived ↔ IntoReactive bridge)
+/// to also carry `Computed<T>` so `Reactive::Computed` arms reuse the
+/// same struct.
 pub struct TypedPendingBinding<T: Clone + Send + Sync + 'static> {
-    state: State<T>,
+    source: BindingSource<T>,
     property: PropertyId,
     write: TypedWriteFn<T>,
 }
@@ -187,7 +224,21 @@ impl<T: Clone + Send + Sync + 'static> TypedPendingBinding<T> {
         write: impl Fn(&mut RenderProps, T) + Send + Sync + 'static,
     ) -> Self {
         Self {
-            state,
+            source: BindingSource::Signal(state),
+            property,
+            write: Arc::new(write),
+        }
+    }
+
+    /// Build a pending binding backed by a `Computed<T>` — fires when
+    /// any of the computed's dependencies (recursive) change.
+    pub fn from_computed(
+        computed: Computed<T>,
+        property: PropertyId,
+        write: impl Fn(&mut RenderProps, T) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            source: BindingSource::Derived(computed),
             property,
             write: Arc::new(write),
         }
@@ -197,13 +248,26 @@ impl<T: Clone + Send + Sync + 'static> TypedPendingBinding<T> {
 impl<T: Clone + Send + Sync + 'static> PendingBinding for TypedPendingBinding<T> {
     fn register(&self, node_id: LayoutNodeId) {
         let write = Arc::clone(&self.write);
-        register_typed(
-            self.state.signal_id(),
-            node_id,
-            self.property,
-            self.state.clone(),
-            move |p, v| write(p, v),
-        );
+        match &self.source {
+            BindingSource::Signal(state) => {
+                register_typed(
+                    state.signal_id(),
+                    node_id,
+                    self.property,
+                    state.clone(),
+                    move |p, v| write(p, v),
+                );
+            }
+            BindingSource::Derived(computed) => {
+                register_typed_computed(
+                    computed.derived_id(),
+                    node_id,
+                    self.property,
+                    computed.clone(),
+                    move |p, v| write(p, v),
+                );
+            }
+        }
     }
 }
 
@@ -218,7 +282,7 @@ pub type TypedLayoutWriteFn<T> = Arc<dyn Fn(&mut taffy::Style, T) + Send + Sync>
 /// Used by Phase 2.4 layout-affecting builder methods (`.w(&signal)`,
 /// `.h(&signal)`, `.padding(&signal)`, etc.).
 pub struct LayoutPendingBinding<T: Clone + Send + Sync + 'static> {
-    state: State<T>,
+    source: BindingSource<T>,
     property: PropertyId,
     write: TypedLayoutWriteFn<T>,
 }
@@ -233,7 +297,22 @@ impl<T: Clone + Send + Sync + 'static> LayoutPendingBinding<T> {
         write: impl Fn(&mut taffy::Style, T) + Send + Sync + 'static,
     ) -> Self {
         Self {
-            state,
+            source: BindingSource::Signal(state),
+            property,
+            write: Arc::new(write),
+        }
+    }
+
+    /// Build a layout-targeting pending binding backed by a
+    /// `Computed<T>` — fires when any of the computed's dependencies
+    /// set. Symmetric with [`TypedPendingBinding::from_computed`].
+    pub fn from_computed(
+        computed: Computed<T>,
+        property: PropertyId,
+        write: impl Fn(&mut taffy::Style, T) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            source: BindingSource::Derived(computed),
             property,
             write: Arc::new(write),
         }
@@ -243,15 +322,27 @@ impl<T: Clone + Send + Sync + 'static> LayoutPendingBinding<T> {
 impl<T: Clone + Send + Sync + 'static> PendingBinding for LayoutPendingBinding<T> {
     fn register(&self, node_id: LayoutNodeId) {
         let write = Arc::clone(&self.write);
-        let state = self.state.clone();
         let property = self.property;
-        register_typed_layout(
-            self.state.signal_id(),
-            node_id,
-            property,
-            state,
-            move |style, v| write(style, v),
-        );
+        match &self.source {
+            BindingSource::Signal(state) => {
+                register_typed_layout(
+                    state.signal_id(),
+                    node_id,
+                    property,
+                    state.clone(),
+                    move |style, v| write(style, v),
+                );
+            }
+            BindingSource::Derived(computed) => {
+                register_typed_layout_computed(
+                    computed.derived_id(),
+                    node_id,
+                    property,
+                    computed.clone(),
+                    move |style, v| write(style, v),
+                );
+            }
+        }
     }
 }
 
@@ -275,21 +366,37 @@ struct Subscriber {
     write: SubscriberWrite,
 }
 
-/// Process-global registry of signal-bound property subscribers.
+/// Process-global registry of signal-bound + derived-bound property
+/// subscribers.
+///
+/// Two parallel index tables — one keyed by `SignalId` (driven by
+/// `State<T>::set` → `notify_property_bindings`) and one keyed by
+/// `DerivedId` (driven by `ReactiveGraph::set`'s dirty propagation →
+/// `notify_property_bindings_for_derived`). Both go through the same
+/// `Subscriber` struct + `fire` dispatch logic; only the key namespace
+/// differs.
 pub struct PropertyBindingRegistry {
     /// `signal_id → list of subscribers waiting on that signal`.
     bindings: HashMap<SignalId, Vec<Subscriber>>,
+    /// `derived_id → list of subscribers waiting on that derived`.
+    /// Parallels `bindings` for `Computed<T>`-backed subscriptions.
+    derived_bindings: HashMap<DerivedId, Vec<Subscriber>>,
     /// `node_id → list of signal_ids that node subscribed to`.
     /// Used by `unregister_node` to evict in O(per-binding-on-that-node)
     /// time instead of scanning every signal's subscriber list.
     by_node: HashMap<LayoutNodeId, Vec<SignalId>>,
+    /// Parallel reverse index for derived subscriptions — same role
+    /// as `by_node` but for the `derived_bindings` map.
+    derived_by_node: HashMap<LayoutNodeId, Vec<DerivedId>>,
 }
 
 impl PropertyBindingRegistry {
     fn new() -> Self {
         Self {
             bindings: HashMap::new(),
+            derived_bindings: HashMap::new(),
             by_node: HashMap::new(),
+            derived_by_node: HashMap::new(),
         }
     }
 
@@ -318,6 +425,61 @@ impl PropertyBindingRegistry {
         self.by_node.entry(node_id).or_default().push(signal_id);
     }
 
+    /// Register a derived-bound subscription. The `read` closure
+    /// reads the current value of a `Derived<T>` via the supplied
+    /// graph; fired by `notify_property_bindings_for_derived` when
+    /// any of the derived's dependencies set. Otherwise identical to
+    /// [`Self::register`].
+    pub fn register_derived(
+        &mut self,
+        derived_id: DerivedId,
+        node_id: LayoutNodeId,
+        property: PropertyId,
+        read: ReadFn,
+        write: WriteFn,
+    ) {
+        self.derived_bindings
+            .entry(derived_id)
+            .or_default()
+            .push(Subscriber {
+                node_id,
+                property,
+                read,
+                write: SubscriberWrite::Render(write),
+            });
+        self.derived_by_node
+            .entry(node_id)
+            .or_default()
+            .push(derived_id);
+    }
+
+    /// Register a derived-bound *layout-targeting* subscription —
+    /// `register_derived` is for `RenderProps` writes; this is the
+    /// taffy-Style sibling. Fires the same way (via the derived
+    /// notifier) but the write closure mutates `taffy::Style`.
+    pub fn register_derived_layout(
+        &mut self,
+        derived_id: DerivedId,
+        node_id: LayoutNodeId,
+        property: PropertyId,
+        read: ReadFn,
+        write: LayoutWriteFn,
+    ) {
+        self.derived_bindings
+            .entry(derived_id)
+            .or_default()
+            .push(Subscriber {
+                node_id,
+                property,
+                read,
+                write: SubscriberWrite::Layout(write),
+            });
+        self.derived_by_node
+            .entry(node_id)
+            .or_default()
+            .push(derived_id);
+    }
+
     /// Register a layout-targeting subscription. The `write` closure
     /// mutates the live taffy `Style` (instead of `RenderProps`) on
     /// every signal fire; the side-effect metadata on `property` tells
@@ -343,14 +505,23 @@ impl PropertyBindingRegistry {
     /// `remove_subtree_nodes` so stale subscribers can't fire on the
     /// next signal change after a structural rebuild dropped the node.
     pub fn unregister_node(&mut self, node_id: LayoutNodeId) {
-        let Some(signal_ids) = self.by_node.remove(&node_id) else {
-            return;
-        };
-        for sig_id in signal_ids {
-            if let Some(subs) = self.bindings.get_mut(&sig_id) {
-                subs.retain(|s| s.node_id != node_id);
-                if subs.is_empty() {
-                    self.bindings.remove(&sig_id);
+        if let Some(signal_ids) = self.by_node.remove(&node_id) {
+            for sig_id in signal_ids {
+                if let Some(subs) = self.bindings.get_mut(&sig_id) {
+                    subs.retain(|s| s.node_id != node_id);
+                    if subs.is_empty() {
+                        self.bindings.remove(&sig_id);
+                    }
+                }
+            }
+        }
+        if let Some(derived_ids) = self.derived_by_node.remove(&node_id) {
+            for d_id in derived_ids {
+                if let Some(subs) = self.derived_bindings.get_mut(&d_id) {
+                    subs.retain(|s| s.node_id != node_id);
+                    if subs.is_empty() {
+                        self.derived_bindings.remove(&d_id);
+                    }
                 }
             }
         }
@@ -364,6 +535,21 @@ impl PropertyBindingRegistry {
         let Some(subs) = self.bindings.get(&signal_id) else {
             return;
         };
+        Self::dispatch_subscribers(subs);
+    }
+
+    /// Walk every subscriber waiting on `derived_id` and queue a
+    /// partial property update for each. Called by the parallel
+    /// derived-binding notifier when `ReactiveGraph::set` propagates
+    /// dirty markers through derived chains.
+    pub fn fire_derived(&self, derived_id: DerivedId) {
+        let Some(subs) = self.derived_bindings.get(&derived_id) else {
+            return;
+        };
+        Self::dispatch_subscribers(subs);
+    }
+
+    fn dispatch_subscribers(subs: &[Subscriber]) {
         for sub in subs {
             let Some(value) = (sub.read)() else {
                 continue;
@@ -397,9 +583,24 @@ impl PropertyBindingRegistry {
         self.bindings.len()
     }
 
+    /// Number of unique derived values currently subscribed to.
+    /// For diagnostics / tests.
+    pub fn derived_count(&self) -> usize {
+        self.derived_bindings.len()
+    }
+
     /// Number of subscribers for `signal_id`. For diagnostics / tests.
     pub fn subscriber_count(&self, signal_id: SignalId) -> usize {
         self.bindings.get(&signal_id).map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Number of subscribers for `derived_id`. For diagnostics /
+    /// tests.
+    pub fn derived_subscriber_count(&self, derived_id: DerivedId) -> usize {
+        self.derived_bindings
+            .get(&derived_id)
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 
     /// Drop every binding. Test-only: each test creates a fresh
@@ -409,7 +610,9 @@ impl PropertyBindingRegistry {
     #[cfg(test)]
     pub fn clear_for_tests(&mut self) {
         self.bindings.clear();
+        self.derived_bindings.clear();
         self.by_node.clear();
+        self.derived_by_node.clear();
     }
 }
 
@@ -424,6 +627,14 @@ static REGISTRY: LazyLock<Mutex<PropertyBindingRegistry>> = LazyLock::new(|| {
         // thread (platform runner main thread) so contention is minimal.
         if let Ok(reg) = REGISTRY.lock() {
             reg.fire(signal_id);
+        }
+    });
+    // Pair: when a Computed<T>'s underlying derived flips dirty
+    // inside ReactiveGraph::set's dirty walk, the core fires this
+    // notifier. We dispatch to the parallel derived_bindings map.
+    blinc_core::reactive::set_derived_binding_notifier(|derived_id| {
+        if let Ok(reg) = REGISTRY.lock() {
+            reg.fire_derived(derived_id);
         }
     });
     Mutex::new(PropertyBindingRegistry::new())
@@ -462,6 +673,61 @@ pub fn register_typed<T>(
         })
     };
     with_registry(|reg| reg.register(signal_id, node_id, property, read, write_dyn));
+}
+
+/// Convenience: register a derived-bound subscription using a typed
+/// `Computed<T>` + a typed writer. Mirror of [`register_typed`] for
+/// the derived path — sits behind `TypedPendingBinding::from_computed`
+/// and the `Reactive::Computed` arm of every reactive builder.
+pub fn register_typed_computed<T>(
+    derived_id: DerivedId,
+    node_id: LayoutNodeId,
+    property: PropertyId,
+    computed: Computed<T>,
+    write: impl Fn(&mut RenderProps, T) + Send + Sync + 'static,
+) where
+    T: Clone + Send + Sync + 'static,
+{
+    let write = Arc::new(write);
+    let computed_for_read = computed.clone();
+    let read: ReadFn = Arc::new(move || computed_for_read.try_get().map(BoundValue::new));
+    let write_dyn: WriteFn = {
+        let write = Arc::clone(&write);
+        Arc::new(move |props: &mut RenderProps, val: &BoundValue| {
+            if let Some(v) = val.downcast_ref::<T>() {
+                write(props, v.clone());
+            }
+        })
+    };
+    with_registry(|reg| reg.register_derived(derived_id, node_id, property, read, write_dyn));
+}
+
+/// Convenience: register a derived-bound layout-targeting
+/// subscription. Mirror of [`register_typed_layout`] for the derived
+/// path — sits behind `LayoutPendingBinding::from_computed`.
+pub fn register_typed_layout_computed<T>(
+    derived_id: DerivedId,
+    node_id: LayoutNodeId,
+    property: PropertyId,
+    computed: Computed<T>,
+    write: impl Fn(&mut taffy::Style, T) + Send + Sync + 'static,
+) where
+    T: Clone + Send + Sync + 'static,
+{
+    let write = Arc::new(write);
+    let computed_for_read = computed.clone();
+    let read: ReadFn = Arc::new(move || computed_for_read.try_get().map(BoundValue::new));
+    let write_dyn: LayoutWriteFn = {
+        let write = Arc::clone(&write);
+        Arc::new(move |style: &mut taffy::Style, val: &BoundValue| {
+            if let Some(v) = val.downcast_ref::<T>() {
+                write(style, v.clone());
+            }
+        })
+    };
+    with_registry(|reg| {
+        reg.register_derived_layout(derived_id, node_id, property, read, write_dyn)
+    });
 }
 
 /// Convenience: register a layout-targeting signal-bound subscription.
@@ -672,6 +938,7 @@ mod tests {
         match r {
             Reactive::Const(v) => assert_eq!(v, 42),
             Reactive::Bound(_) => panic!("expected Const"),
+            Reactive::Computed(_) => panic!("expected Const"),
         }
     }
 
@@ -683,6 +950,7 @@ mod tests {
         match r {
             Reactive::Const(_) => panic!("expected Bound"),
             Reactive::Bound(s) => assert_eq!(s.try_get(), Some(7)),
+            Reactive::Computed(_) => panic!("&State must produce Bound, not Computed"),
         }
     }
 
@@ -1226,5 +1494,172 @@ mod tests {
         } else {
             panic!("expected affine 2d");
         }
+    }
+
+    // =====================================================================
+    // Derived ↔ IntoReactive bridge (Phase 8 follow-up). The substrate:
+    //   blinc_core::reactive::ReactiveGraph::set fires
+    //   `notify_property_bindings_for_derived` for every derived that
+    //   flipped dirty during the dirty-propagation walk; the binding
+    //   registry's parallel `derived_bindings` map dispatches that into
+    //   subscriber fires.
+    // The end-to-end test: build a Div with a Computed-bound transform,
+    // set a source signal, observe the partial update.
+    // =====================================================================
+
+    /// Shared-graph fresh State<T> — produces a State backed by a
+    /// caller-supplied SharedReactiveGraph so multiple states + a
+    /// derived can all coexist in the same graph.
+    fn state_in_graph<T: Clone + Send + 'static>(
+        graph: &Arc<Mutex<ReactiveGraph>>,
+        initial: T,
+    ) -> State<T> {
+        let signal = graph.lock().unwrap().create_signal(initial);
+        let dirty: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        State::new(signal, Arc::clone(graph), dirty)
+    }
+
+    #[test]
+    fn computed_into_reactive_produces_computed_variant() {
+        let _guard = lock_and_reset();
+        with_registry(|_| {});
+        let graph: Arc<Mutex<ReactiveGraph>> = Arc::new(Mutex::new(ReactiveGraph::new()));
+        let x_signal = graph.lock().unwrap().create_signal(0.0f32);
+        let derived = graph
+            .lock()
+            .unwrap()
+            .create_derived(move |g| g.get(x_signal).unwrap_or(0.0));
+        let computed = blinc_core::Computed::new(derived, Arc::clone(&graph));
+
+        // The IntoReactive impl should resolve to Reactive::Computed.
+        let r: Reactive<f32> = (&computed).into_reactive();
+        assert!(matches!(r, Reactive::Computed(_)));
+    }
+
+    #[test]
+    fn computed_bound_transform_fires_on_dep_signal_set() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+        use blinc_core::Transform;
+
+        with_registry(|_| {});
+        let graph: Arc<Mutex<ReactiveGraph>> = Arc::new(Mutex::new(ReactiveGraph::new()));
+
+        let x_state = state_in_graph::<f32>(&graph, 10.0);
+        let y_state = state_in_graph::<f32>(&graph, 20.0);
+        let x_signal = x_state.signal();
+        let y_signal = y_state.signal();
+
+        // Build a derived that depends on BOTH x and y. The first
+        // `get_derived` call (inside .transform()'s initial-value
+        // seed) records both signals as dependencies via the
+        // auto-tracking system; future sets on either fire the
+        // derived's dirty bit and the parallel binding notifier.
+        let derived = graph
+            .lock()
+            .unwrap()
+            .create_derived(move |g: &ReactiveGraph| {
+                let x = g.get(x_signal).unwrap_or(0.0);
+                let y = g.get(y_signal).unwrap_or(0.0);
+                Transform::translate(x, y)
+            });
+        let computed = blinc_core::Computed::new(derived, Arc::clone(&graph));
+
+        let element = div().transform(&computed);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+
+        // Force initial dep-tracking by reading the computed's value.
+        // Without this, the auto-tracking deps list is empty and the
+        // first `x.set` won't propagate dirty to the derived.
+        let _ = computed.try_get();
+
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        // Set x → derived flips dirty → notifier fires → binding
+        // queues a partial update with the recomputed transform.
+        x_state.set(100.0);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1, "x.set must fire one partial update via the derived binding");
+        let upd = updates.into_iter().next().unwrap();
+        assert_eq!(upd.node_id, node_id);
+        assert_eq!(upd.property, PropertyId::Transform);
+        assert!(upd.render_write.is_some());
+        assert!(upd.layout_write.is_none());
+
+        let mut props = RenderProps::default();
+        (upd.render_write.unwrap())(&mut props);
+        // Computed should have recomputed: x=100, y=20 → translate(100, 20)
+        if let blinc_core::Transform::Affine2D(a) = props.transform.unwrap() {
+            assert!((a.elements[4] - 100.0).abs() < 1e-5, "tx must be 100, got {}", a.elements[4]);
+            assert!((a.elements[5] - 20.0).abs() < 1e-5, "ty must be 20, got {}", a.elements[5]);
+        } else {
+            panic!("expected 2d affine");
+        }
+
+        // Set y → derived flips dirty AGAIN → another partial update.
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        y_state.set(200.0);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert_eq!(updates.len(), 1, "y.set must also fire one partial update");
+        let upd = updates.into_iter().next().unwrap();
+        let mut props = RenderProps::default();
+        (upd.render_write.unwrap())(&mut props);
+        if let blinc_core::Transform::Affine2D(a) = props.transform.unwrap() {
+            assert!((a.elements[4] - 100.0).abs() < 1e-5);
+            assert!((a.elements[5] - 200.0).abs() < 1e-5);
+        } else {
+            panic!("expected 2d affine");
+        }
+    }
+
+    #[test]
+    fn computed_unregister_node_drops_derived_subscriber() {
+        let _guard = lock_and_reset();
+        use crate::div::{ElementBuilder, div};
+        use blinc_core::Transform;
+
+        with_registry(|_| {});
+        let graph: Arc<Mutex<ReactiveGraph>> = Arc::new(Mutex::new(ReactiveGraph::new()));
+        let x_state = state_in_graph::<f32>(&graph, 0.0);
+        let x_signal = x_state.signal();
+        let derived = graph
+            .lock()
+            .unwrap()
+            .create_derived(move |g: &ReactiveGraph| {
+                Transform::translate(g.get(x_signal).unwrap_or(0.0), 0.0)
+            });
+        let computed = blinc_core::Computed::new(derived, Arc::clone(&graph));
+        let derived_id = computed.derived_id();
+
+        let element = div().transform(&computed);
+        let mut tree = crate::tree::LayoutTree::new();
+        let node_id = element.build(&mut tree);
+        let _ = computed.try_get(); // force dep tracking
+
+        // One subscriber on the derived after build.
+        with_registry(|reg| {
+            assert_eq!(reg.derived_subscriber_count(derived_id), 1);
+        });
+
+        // Drop subscribers for the node.
+        unregister_node(node_id);
+        with_registry(|reg| {
+            assert_eq!(
+                reg.derived_subscriber_count(derived_id),
+                0,
+                "unregister_node must drop derived subscribers too"
+            );
+        });
+
+        // Set x — derived dirty fires the notifier, but the registry
+        // has no subscribers for this derived → no partial update
+        // queued.
+        let _ = crate::stateful::take_pending_partial_prop_updates();
+        x_state.set(123.0);
+        let updates = crate::stateful::take_pending_partial_prop_updates();
+        assert!(
+            updates.is_empty(),
+            "no subscribers → no partial updates after node unregister"
+        );
     }
 }

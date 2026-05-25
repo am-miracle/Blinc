@@ -2093,6 +2093,29 @@ impl<S: StateTransitions> StateContext<S> {
         state
     }
 
+    /// Create a derived/computed value scoped to this stateful's
+    /// reactive graph (Phase 8 follow-up: `Derived<T>` ↔ property-binding
+    /// bridge, [[project-reactive-architecture-v2]]).
+    ///
+    /// Pass `&computed` to any reactive `Div` builder
+    /// (`div().transform(&computed)`, `cn::progress(&computed)`, etc.)
+    /// to bind through the unified property channel — fires when any
+    /// signal touched inside `compute` sets, reads the recomputed
+    /// value lazily on each fire.
+    ///
+    /// Each call mints a fresh [`blinc_core::Derived`]; persistence
+    /// across rebuilds is not yet handled (a future
+    /// `use_computed_keyed` would mirror `use_signal`'s keyed-by-name
+    /// shape). For most cases the recreation cost is negligible — the
+    /// recompute closure runs lazily on first read regardless.
+    pub fn use_computed<T, F>(&self, compute: F) -> blinc_core::Computed<T>
+    where
+        T: Clone + Send + 'static,
+        F: Fn(&blinc_core::ReactiveGraph) -> T + Send + 'static,
+    {
+        blinc_core::context_state::use_computed(compute)
+    }
+
     /// Derive a stable key for a child element
     ///
     /// Format: `{stateful_key}:{element_type}:{index}`

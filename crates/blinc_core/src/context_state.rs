@@ -34,7 +34,7 @@
 //! let open_state = use_state_keyed("my_component_open", || false);
 //! ```
 
-use crate::reactive::{ReactiveGraph, Signal, SignalId, State};
+use crate::reactive::{Computed, ReactiveGraph, Signal, SignalId, State};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -579,6 +579,32 @@ impl BlincContextState {
         self.use_state_keyed(&key, || initial)
     }
 
+    /// Create a derived/computed value that auto-tracks its
+    /// dependencies. Phase 8 follow-up: `Derived<T>` ↔ property-binding
+    /// bridge ([[project-reactive-architecture-v2]]).
+    ///
+    /// The returned [`Computed<T>`] bundles the underlying `Derived<T>`
+    /// handle with the reactive graph, mirroring `State<T>`'s shape.
+    /// Pass `&computed` to any reactive `Div` builder
+    /// (`div().transform(&computed)`, `cn::progress(&computed)`, etc.)
+    /// to bind the derived value through the unified property channel —
+    /// it fires every time any tracked dependency sets, lazily reading
+    /// the recomputed value on each fire.
+    ///
+    /// Each call mints a fresh [`crate::reactive::Derived`] in the reactive graph. The
+    /// derived is owned by the `Computed` wrapper; when the wrapper
+    /// drops, the derived stays in the graph (slotmap keys aren't
+    /// reclaimed until the graph itself drops). Future enhancement:
+    /// keyed `use_computed_keyed` for persistence across rebuilds.
+    pub fn use_computed<T, F>(&self, compute: F) -> Computed<T>
+    where
+        T: Clone + Send + 'static,
+        F: Fn(&ReactiveGraph) -> T + Send + 'static,
+    {
+        let derived = self.reactive.lock().unwrap().create_derived(compute);
+        Computed::new(derived, Arc::clone(&self.reactive))
+    }
+
     /// Get the current value of a signal
     pub fn get_signal<T: Clone + 'static>(&self, signal: Signal<T>) -> Option<T> {
         self.reactive.lock().unwrap().get(signal)
@@ -1119,6 +1145,20 @@ where
     T: Clone + Send + 'static,
 {
     BlincContextState::get().use_state(initial)
+}
+
+/// Create a derived/computed value that auto-tracks its dependencies.
+/// Free-function wrapper around [`BlincContextState::use_computed`].
+///
+/// # Panics
+///
+/// Panics if `BlincContextState::init()` has not been called.
+pub fn use_computed<T, F>(compute: F) -> Computed<T>
+where
+    T: Clone + Send + 'static,
+    F: Fn(&ReactiveGraph) -> T + Send + 'static,
+{
+    BlincContextState::get().use_computed(compute)
 }
 
 /// Request a UI rebuild

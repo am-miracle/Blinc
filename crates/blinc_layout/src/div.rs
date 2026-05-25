@@ -1812,6 +1812,19 @@ impl Div {
                     },
                 )));
             }
+            Reactive::Computed(computed) => {
+                if let Some(px) = computed.try_get() {
+                    self.style.size.width = Dimension::Length(px);
+                }
+                self.pending_bindings
+                    .push(Box::new(LayoutPendingBinding::from_computed(
+                        computed,
+                        crate::property::PropertyId::Width,
+                        |style, px: f32| {
+                            style.size.width = Dimension::Length(px);
+                        },
+                    )));
+            }
         }
         self
     }
@@ -1868,6 +1881,19 @@ impl Div {
                         style.size.height = Dimension::Length(px);
                     },
                 )));
+            }
+            Reactive::Computed(computed) => {
+                if let Some(px) = computed.try_get() {
+                    self.style.size.height = Dimension::Length(px);
+                }
+                self.pending_bindings
+                    .push(Box::new(LayoutPendingBinding::from_computed(
+                        computed,
+                        crate::property::PropertyId::Height,
+                        |style, px: f32| {
+                            style.size.height = Dimension::Length(px);
+                        },
+                    )));
             }
         }
         self
@@ -1995,6 +2021,27 @@ impl Div {
                     },
                 )));
             }
+            Reactive::Computed(computed) => {
+                if let Some(units) = computed.try_get() {
+                    let px = units * 4.0;
+                    self.style.gap = taffy::Size {
+                        width: LengthPercentage::Length(px),
+                        height: LengthPercentage::Length(px),
+                    };
+                }
+                self.pending_bindings
+                    .push(Box::new(LayoutPendingBinding::from_computed(
+                        computed,
+                        crate::property::PropertyId::Gap,
+                        |style, units: f32| {
+                            let px = units * 4.0;
+                            style.gap = taffy::Size {
+                                width: LengthPercentage::Length(px),
+                                height: LengthPercentage::Length(px),
+                            };
+                        },
+                    )));
+            }
         }
         self
     }
@@ -2114,6 +2161,31 @@ impl Div {
                         };
                     },
                 )));
+            }
+            Reactive::Computed(computed) => {
+                if let Some(units) = computed.try_get() {
+                    let px = LengthPercentage::Length(units * 4.0);
+                    self.style.padding = Rect {
+                        left: px,
+                        right: px,
+                        top: px,
+                        bottom: px,
+                    };
+                }
+                self.pending_bindings
+                    .push(Box::new(LayoutPendingBinding::from_computed(
+                        computed,
+                        crate::property::PropertyId::Padding,
+                        |style, units: f32| {
+                            let px = LengthPercentage::Length(units * 4.0);
+                            style.padding = Rect {
+                                left: px,
+                                right: px,
+                                top: px,
+                                bottom: px,
+                            };
+                        },
+                    )));
             }
         }
         self
@@ -2611,6 +2683,19 @@ impl Div {
                     },
                 )));
             }
+            Reactive::Computed(computed) => {
+                if let Some(c) = computed.try_get() {
+                    self.background = Some(Brush::Solid(c));
+                }
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::from_computed(
+                        computed,
+                        crate::property::PropertyId::Background,
+                        |props, color: Color| {
+                            props.background = Some(Brush::Solid(color));
+                        },
+                    )));
+            }
         }
         self
     }
@@ -2764,6 +2849,21 @@ impl Div {
                         props.border_radius_explicit = true;
                     },
                 )));
+            }
+            Reactive::Computed(computed) => {
+                if let Some(r) = computed.try_get() {
+                    self.border_radius = CornerRadius::uniform(r);
+                    self.border_radius_explicit = true;
+                }
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::from_computed(
+                        computed,
+                        crate::property::PropertyId::CornerRadius,
+                        |props, r: f32| {
+                            props.border_radius = CornerRadius::uniform(r);
+                            props.border_radius_explicit = true;
+                        },
+                    )));
             }
         }
         self
@@ -2943,6 +3043,19 @@ impl Div {
                         props.border_color = Some(c);
                     },
                 )));
+            }
+            Reactive::Computed(computed) => {
+                if let Some(c) = computed.try_get() {
+                    self.border_color = Some(c);
+                }
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::from_computed(
+                        computed,
+                        crate::property::PropertyId::BorderColor,
+                        |props, c: Color| {
+                            props.border_color = Some(c);
+                        },
+                    )));
             }
         }
         self
@@ -3177,6 +3290,19 @@ impl Div {
                     },
                 )));
             }
+            Reactive::Computed(computed) => {
+                if let Some(s) = computed.try_get() {
+                    self.shadow = vec![s];
+                }
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::from_computed(
+                        computed,
+                        crate::property::PropertyId::Shadow,
+                        |props, s: Shadow| {
+                            props.shadow = vec![s];
+                        },
+                    )));
+            }
         }
         self
     }
@@ -3241,6 +3367,19 @@ impl Div {
                     },
                 )));
             }
+            Reactive::Computed(computed) => {
+                if let Some(t) = computed.try_get() {
+                    self.transform = Some(t);
+                }
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::from_computed(
+                        computed,
+                        crate::property::PropertyId::Transform,
+                        |props, t: Transform| {
+                            props.transform = Some(t);
+                        },
+                    )));
+            }
         }
         self
     }
@@ -3277,23 +3416,42 @@ impl Div {
     /// derivation closure.
     pub fn bind_transform_from<T>(
         mut self,
-        state: blinc_core::reactive::State<T>,
+        source: impl crate::binding::IntoReactive<T>,
         mapper: impl Fn(T) -> Transform + Send + Sync + 'static,
     ) -> Self
     where
         T: Clone + Default + Send + Sync + 'static,
     {
-        use crate::binding::TypedPendingBinding;
-        let initial = state.try_get().unwrap_or_default();
+        use crate::binding::{Reactive, TypedPendingBinding};
         let mapper = std::sync::Arc::new(mapper);
-        self.transform = Some(mapper(initial));
-        self.pending_bindings.push(Box::new(TypedPendingBinding::new(
-            state,
-            crate::property::PropertyId::Transform,
-            move |props, v: T| {
-                props.transform = Some(mapper(v));
-            },
-        )));
+        match source.into_reactive() {
+            Reactive::Const(v) => {
+                self.transform = Some(mapper(v));
+            }
+            Reactive::Bound(state) => {
+                let initial = state.try_get().unwrap_or_default();
+                self.transform = Some(mapper(initial));
+                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
+                    state,
+                    crate::property::PropertyId::Transform,
+                    move |props, v: T| {
+                        props.transform = Some(mapper(v));
+                    },
+                )));
+            }
+            Reactive::Computed(computed) => {
+                let initial = computed.try_get().unwrap_or_default();
+                self.transform = Some(mapper(initial));
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::from_computed(
+                        computed,
+                        crate::property::PropertyId::Transform,
+                        move |props, v: T| {
+                            props.transform = Some(mapper(v));
+                        },
+                    )));
+            }
+        }
         self
     }
 
@@ -3349,6 +3507,19 @@ impl Div {
                     },
                 )));
             }
+            Reactive::Computed(computed) => {
+                if let Some(f) = computed.try_get() {
+                    self.transform = Some(Transform::scale(f, 1.0));
+                }
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::from_computed(
+                        computed,
+                        crate::property::PropertyId::Transform,
+                        |props, f: f32| {
+                            props.transform = Some(Transform::scale(f, 1.0));
+                        },
+                    )));
+            }
         }
         self
     }
@@ -3375,6 +3546,9 @@ impl Div {
             Reactive::Bound(state) => {
                 self.bind_transform_from(state, |f: f32| Transform::scale(f, f))
             }
+            Reactive::Computed(computed) => {
+                self.bind_transform_from(computed, |f: f32| Transform::scale(f, f))
+            }
         }
     }
 
@@ -3397,6 +3571,9 @@ impl Div {
             Reactive::Bound(state) => {
                 self.bind_transform_from(state, |a: f32| Transform::rotate(a))
             }
+            Reactive::Computed(computed) => {
+                self.bind_transform_from(computed, |a: f32| Transform::rotate(a))
+            }
         }
     }
 
@@ -3413,6 +3590,9 @@ impl Div {
             Reactive::Const(d) => self.transform(Transform::rotate(d * DEG_TO_RAD)),
             Reactive::Bound(state) => {
                 self.bind_transform_from(state, |d: f32| Transform::rotate(d * DEG_TO_RAD))
+            }
+            Reactive::Computed(computed) => {
+                self.bind_transform_from(computed, |d: f32| Transform::rotate(d * DEG_TO_RAD))
             }
         }
     }
@@ -3442,6 +3622,19 @@ impl Div {
                         props.opacity = o.clamp(0.0, 1.0);
                     },
                 )));
+            }
+            Reactive::Computed(computed) => {
+                if let Some(o) = computed.try_get() {
+                    self.opacity = o.clamp(0.0, 1.0);
+                }
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::from_computed(
+                        computed,
+                        crate::property::PropertyId::Opacity,
+                        |props, o: f32| {
+                            props.opacity = o.clamp(0.0, 1.0);
+                        },
+                    )));
             }
         }
         self

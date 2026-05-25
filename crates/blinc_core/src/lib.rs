@@ -68,8 +68,8 @@ pub use layer::{
     UiNode, Vec2, Vec3,
 };
 pub use reactive::{
-    Derived, DerivedId, DirtyFlag, Effect, EffectId, ReactiveGraph, SharedReactiveGraph, Signal,
-    SignalId, State, StatefulDepsCallback,
+    Computed, Derived, DerivedId, DirtyFlag, Effect, EffectId, ReactiveGraph, SharedReactiveGraph,
+    Signal, SignalId, State, StatefulDepsCallback,
 };
 pub use runtime::BlincReactiveRuntime;
 pub use value::{

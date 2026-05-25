@@ -99,6 +99,7 @@ impl Clone for ProgressConfig {
             value: match &self.value {
                 Reactive::Const(v) => Reactive::Const(*v),
                 Reactive::Bound(state) => Reactive::Bound(state.clone()),
+                Reactive::Computed(computed) => Reactive::Computed(computed.clone()),
             },
             size: self.size,
             width: self.width,
@@ -199,6 +200,27 @@ impl Progress {
                     .bg(indicator_color)
                     .transform_origin(0.0, 50.0)
                     .bind_transform_from(state.clone(), |v: f32| {
+                        let f = (v / 100.0).clamp(0.0, 1.0);
+                        Transform::scale(f, 1.0)
+                    })
+            }
+            Reactive::Computed(computed) => {
+                // Derived-driven progress — same scale-x pattern as
+                // the Bound arm, just sourced from a `Computed<f32>`
+                // (e.g. one combining multiple state signals via the
+                // ReactiveGraph). Same no-rebuild / no-relayout
+                // contract.
+                div()
+                    .class("cn-progress-bar")
+                    .absolute()
+                    .left(0.0)
+                    .top(0.0)
+                    .w(config.width)
+                    .h(height)
+                    .rounded(radius)
+                    .bg(indicator_color)
+                    .transform_origin(0.0, 50.0)
+                    .bind_transform_from(computed.clone(), |v: f32| {
                         let f = (v / 100.0).clamp(0.0, 1.0);
                         Transform::scale(f, 1.0)
                     })
@@ -623,6 +645,9 @@ mod tests {
             Reactive::Const(v) => v,
             Reactive::Bound(_) => {
                 panic!("test expected a Const value but got a Bound state")
+            }
+            Reactive::Computed(_) => {
+                panic!("test expected a Const value but got a Computed source")
             }
         }
     }

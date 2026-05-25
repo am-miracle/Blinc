@@ -187,6 +187,12 @@ pub struct ReactiveGraph {
     tracking: RefCell<Option<Vec<SignalId>>>,
     /// Global version counter
     global_version: Cell<u64>,
+    /// Per-set buffer of derived ids that just transitioned from
+    /// clean to dirty. Drained at the end of every [`Self::set`] call
+    /// to fire `notify_property_bindings_for_derived` once per
+    /// affected derived (Phase 8 follow-up: Derived ↔ property-binding
+    /// bridge, [[project-reactive-architecture-v2]]).
+    derived_dirty_buffer: RefCell<SmallVec<[DerivedId; 4]>>,
 }
 
 impl ReactiveGraph {
@@ -200,6 +206,7 @@ impl ReactiveGraph {
             batch_depth: Cell::new(0),
             tracking: RefCell::new(None),
             global_version: Cell::new(0),
+            derived_dirty_buffer: RefCell::new(SmallVec::new()),
         }
     }
 
@@ -251,7 +258,16 @@ impl ReactiveGraph {
             node.version += 1;
             self.global_version.set(self.global_version.get() + 1);
 
-            // Mark all subscribers as dirty
+            // Mark all subscribers as dirty. mark_dirty recursively
+            // walks derived -> derived chains, collecting every
+            // derived that flipped from clean to dirty into
+            // `derived_dirty_buffer`. The buffer is drained by
+            // `State::set` AFTER it releases its lock on the graph
+            // and fires `notify_property_bindings_for_derived` per
+            // id — firing inline here would deadlock, because the
+            // binding registry's read closures call
+            // `Computed::try_get` which re-acquires this same
+            // mutex.
             let subscribers: SmallVec<[SubscriberId; 4]> = node.subscribers.clone();
             for sub in subscribers {
                 self.mark_dirty(sub);
@@ -262,6 +278,18 @@ impl ReactiveGraph {
                 self.flush_effects();
             }
         }
+    }
+
+    /// Drain the per-set list of derived ids that flipped to dirty
+    /// during the most recent `set` (or chain of effects following
+    /// it). Returns ids in the order they were dirtied. Empty if
+    /// nothing flipped.
+    ///
+    /// Called by `State::set` immediately AFTER dropping its lock on
+    /// the graph, so the property-binding registry's read closures
+    /// can re-enter the lock safely while firing.
+    pub fn take_dirty_derived(&self) -> SmallVec<[DerivedId; 4]> {
+        std::mem::take(&mut *self.derived_dirty_buffer.borrow_mut())
     }
 
     /// Update a signal using a function
@@ -463,14 +491,19 @@ impl ReactiveGraph {
     fn mark_dirty(&mut self, sub: SubscriberId) {
         match sub {
             SubscriberId::Derived(id) => {
-                if let Some(node) = self.derived.get(id) {
-                    if !node.dirty.get() {
-                        node.dirty.set(true);
-                        // Propagate to derived's subscribers
-                        let subscribers: SmallVec<[SubscriberId; 4]> = node.subscribers.clone();
-                        for sub in subscribers {
-                            self.mark_dirty(sub);
-                        }
+                if let Some(node) = self.derived.get(id)
+                    && !node.dirty.get()
+                {
+                    node.dirty.set(true);
+                    // Record for the per-set property-binding fire
+                    // (drained at the end of `set`). Each derived can
+                    // only flip once per set (we're inside the
+                    // `!dirty.get()` arm), so no dedup is needed.
+                    self.derived_dirty_buffer.borrow_mut().push(id);
+                    // Propagate to derived's subscribers
+                    let subscribers: SmallVec<[SubscriberId; 4]> = node.subscribers.clone();
+                    for sub in subscribers {
+                        self.mark_dirty(sub);
                     }
                 }
             }
@@ -711,14 +744,27 @@ impl<T: Clone + Send + 'static> State<T> {
     /// Use `set_rebuild()` only when the change affects tree structure
     /// (adding/removing elements, changing text content, etc.)
     pub fn set(&self, value: T) {
-        self.reactive.lock().unwrap().set(self.signal, value);
+        // Set + drain the dirty-derived list in one lock window so the
+        // ids the *just-completed* set produced are the ones we fire
+        // for. Drop the lock BEFORE invoking notifiers — the binding
+        // registry's read closures re-enter this mutex.
+        let dirty_derived = {
+            let mut g = self.reactive.lock().unwrap();
+            g.set(self.signal, value);
+            g.take_dirty_derived()
+        };
         // Notify stateful elements if callback is set
         if let Some(ref callback) = self.stateful_deps_callback {
             callback(&[self.signal.id()]);
         }
-        // Fire any property-binding subscribers (P2 signal-bound modifiers).
-        // No-op when no bindings exist on this signal.
+        // Fire signal-bound property-binding subscribers (P2).
         notify_property_bindings(self.signal.id());
+        // Fire derived-bound property-binding subscribers for every
+        // derived that flipped to dirty during this set (Phase 8
+        // follow-up: Derived ↔ IntoReactive bridge).
+        for d_id in dirty_derived {
+            notify_property_bindings_for_derived(d_id);
+        }
     }
 
     /// Set a new value AND trigger a UI tree rebuild
@@ -730,30 +776,51 @@ impl<T: Clone + Send + 'static> State<T> {
     ///
     /// For visual-only changes (colors, opacity, animations), use `set()`.
     pub fn set_rebuild(&self, value: T) {
-        self.reactive.lock().unwrap().set(self.signal, value);
+        let dirty_derived = {
+            let mut g = self.reactive.lock().unwrap();
+            g.set(self.signal, value);
+            g.take_dirty_derived()
+        };
         self.dirty_flag.store(true, Ordering::SeqCst);
         // Property bindings still fire even on the rebuild path — a
         // signal-bound `.bg(&state)` should patch alongside the rebuild.
         notify_property_bindings(self.signal.id());
+        for d_id in dirty_derived {
+            notify_property_bindings_for_derived(d_id);
+        }
     }
 
     /// Update the value using a function
     ///
     /// Does not trigger rebuild. Use `update_rebuild()` for structural changes.
     pub fn update(&self, f: impl FnOnce(T) -> T) {
-        self.reactive.lock().unwrap().update(self.signal, f);
+        let dirty_derived = {
+            let mut g = self.reactive.lock().unwrap();
+            g.update(self.signal, f);
+            g.take_dirty_derived()
+        };
         // Notify stateful elements if callback is set
         if let Some(ref callback) = self.stateful_deps_callback {
             callback(&[self.signal.id()]);
         }
         notify_property_bindings(self.signal.id());
+        for d_id in dirty_derived {
+            notify_property_bindings_for_derived(d_id);
+        }
     }
 
     /// Update the value AND trigger a UI tree rebuild
     pub fn update_rebuild(&self, f: impl FnOnce(T) -> T) {
-        self.reactive.lock().unwrap().update(self.signal, f);
+        let dirty_derived = {
+            let mut g = self.reactive.lock().unwrap();
+            g.update(self.signal, f);
+            g.take_dirty_derived()
+        };
         self.dirty_flag.store(true, Ordering::SeqCst);
         notify_property_bindings(self.signal.id());
+        for d_id in dirty_derived {
+            notify_property_bindings_for_derived(d_id);
+        }
     }
 
     /// Get the underlying signal (for advanced use cases)
@@ -764,6 +831,133 @@ impl<T: Clone + Send + 'static> State<T> {
     /// Get the signal ID (for dependency tracking)
     pub fn signal_id(&self) -> SignalId {
         self.signal.id()
+    }
+}
+
+/// Global notifier for derived-driven property-binding subscribers.
+/// Parallels [`PROPERTY_BINDING_NOTIFIER`] but keyed by `DerivedId`
+/// instead of `SignalId`. Fires from inside [`ReactiveGraph::set`]
+/// after the dirty propagation walk completes, for every derived
+/// that was freshly dirtied this set.
+///
+/// blinc_core can't depend on blinc_layout (cyclic dep), so the
+/// property-binding registry installs both notifiers as a pair on
+/// first access. Same OnceLock idempotence story.
+static DERIVED_BINDING_NOTIFIER: std::sync::OnceLock<
+    Box<dyn Fn(DerivedId) + Send + Sync + 'static>,
+> = std::sync::OnceLock::new();
+
+/// Install the global derived-binding notifier. Paired with
+/// [`set_property_binding_notifier`] — `blinc_layout::binding`
+/// installs both on first registry access.
+pub fn set_derived_binding_notifier(
+    notifier: impl Fn(DerivedId) + Send + Sync + 'static,
+) {
+    let _ = DERIVED_BINDING_NOTIFIER.set(Box::new(notifier));
+}
+
+/// Fire the derived-binding notifier for a derived whose value
+/// might have changed (i.e. its dirty bit was just flipped). No-op
+/// if no notifier is installed.
+pub(crate) fn notify_property_bindings_for_derived(id: DerivedId) {
+    if let Some(notifier) = DERIVED_BINDING_NOTIFIER.get() {
+        notifier(id);
+    }
+}
+
+/// Ergonomic wrapper around [`Derived<T>`] that also carries the
+/// reactive graph reference. Same shape as [`State<T>`] — both bundle
+/// a handle (Signal / Derived) with a `SharedReactiveGraph` so
+/// readers don't need to plumb the graph through every call site.
+///
+/// `Computed<T>` is the public binding-friendly form of the lazy
+/// computed value. The underlying [`Derived<T>`] handle is exposed
+/// via [`Self::derived`] for advanced uses that need raw access to
+/// `ReactiveGraph::get_derived` etc.
+///
+/// # Reactivity
+///
+/// Reads call `get_derived` on the underlying graph, which:
+/// 1. Recomputes the value if the cache is stale (dirty bit set).
+/// 2. Auto-tracks dependencies — any signal touched inside the
+///    compute closure subscribes this derived for future dirty
+///    notifications.
+///
+/// When any tracked dependency fires via `State::set`, this
+/// derived's dirty bit flips and the property-binding registry is
+/// notified via `notify_property_bindings_for_derived` — bindings
+/// that subscribed to this `Computed<T>` re-fire and read the
+/// recomputed value.
+///
+/// # Example
+///
+/// ```ignore
+/// let graph: SharedReactiveGraph = ...;
+/// let x = State::new(...);
+/// let y = State::new(...);
+/// let x_sig = x.signal_id();
+/// let y_sig = y.signal_id();
+/// // create_derived auto-tracks signal reads
+/// let pos = {
+///     let mut g = graph.lock().unwrap();
+///     let d = g.create_derived(move |g| {
+///         let x = g.get::<f32>(Signal::from_id(x_sig)).unwrap_or(0.0);
+///         let y = g.get::<f32>(Signal::from_id(y_sig)).unwrap_or(0.0);
+///         (x, y)
+///     });
+///     Computed::new(d, graph.clone())
+/// };
+/// ```
+pub struct Computed<T> {
+    derived: Derived<T>,
+    reactive: SharedReactiveGraph,
+}
+
+impl<T> Clone for Computed<T> {
+    fn clone(&self) -> Self {
+        Self {
+            derived: self.derived,
+            reactive: Arc::clone(&self.reactive),
+        }
+    }
+}
+
+impl<T: Clone + Send + 'static> Computed<T> {
+    /// Create a new `Computed<T>` bundling a `Derived<T>` handle with
+    /// the reactive graph it lives in.
+    pub fn new(derived: Derived<T>, reactive: SharedReactiveGraph) -> Self {
+        Self { derived, reactive }
+    }
+
+    /// Get the current value, recomputing if stale. Always returns
+    /// `Some` unless the derived handle is invalid (i.e. the graph
+    /// was rebuilt and the derived id no longer resolves).
+    pub fn try_get(&self) -> Option<T> {
+        self.reactive.lock().unwrap().get_derived(self.derived)
+    }
+
+    /// Get the current value, panicking on failure. Matches
+    /// [`State<T>::get`]'s ergonomic shape.
+    pub fn get(&self) -> T {
+        self.try_get()
+            .expect("Computed::get: derived handle does not resolve in its graph")
+    }
+
+    /// The underlying `Derived<T>` handle, for advanced use.
+    pub fn derived(&self) -> Derived<T> {
+        self.derived
+    }
+
+    /// The derived's id — used by the property-binding registry to
+    /// key subscriptions.
+    pub fn derived_id(&self) -> DerivedId {
+        self.derived.id
+    }
+
+    /// The shared reactive graph this computed lives in. Cloned to
+    /// give callers an independent `Arc<Mutex<…>>` handle.
+    pub fn graph(&self) -> SharedReactiveGraph {
+        Arc::clone(&self.reactive)
     }
 }
 
