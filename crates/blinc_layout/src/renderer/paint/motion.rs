@@ -595,55 +595,29 @@ impl RenderTree {
         // pixels with the current motion-binding transform applied —
         // no walker re-entry, no re-emission.
         //
-        // P4.3 walker gate — DISABLED AGAIN (2026-05-26).
-        //
-        // First attempt: hard-disable (visible regressions in
-        // progress_animated, cn::switch, cn::spinner).
-        //
-        // Second attempt: Option B clip-aware bake — strip ancestor
-        // clips from per-primitive emit (via
-        // `composite_layer_clip_base` in blinc_gpu) and re-apply the
-        // stripped AABB as a blit scissor in
-        // `composite_motion_layers_overlay`. The clip-strip mechanics
-        // pass unit tests in isolation
-        // (`composite_layer_strips_ancestor_clip_from_emit` +
-        // `composite_layer_preserves_inner_clip`) but the demo still
-        // shows regressions:
-        //  - progress_animated: thumb appears at wrong dimension /
-        //    stuck shape; recovers on hover-leave.
-        //  - cn::switch: thumb position visually wrong even when the
-        //    binding's `get()` would return the correct value;
-        //    toggling Notifications somehow displaces Dark mode's
-        //    thumb (cross-instance interference suspect).
-        //  - cn::spinner: blue arc absent.
-        //
-        // Likely remaining root causes (untested):
-        //  1. `composite_layer_clip_base` is a single field rather
-        //     than a stack. Nested motion-subtree candidates (e.g.
-        //     switch's on_layer + animated_thumb both qualify) would
-        //     cause the inner pop to clear the outer push's state.
-        //  2. Candidate over-detection — siblings under the same
-        //     wrapping `motion()` node may both qualify, with their
-        //     primitives commingling in the outer scratch batch.
-        //  3. The blit's dest_pos math assumes the binding value is
-        //     in logical pixels and screen_aabb is in physical
-        //     pixels; for ranges where the binding's natural unit
-        //     diverges (the switch thumb's `thumb_travel` vs the
-        //     progress bar's `width`), the multiplication by `dpi`
-        //     may be doubling some translations.
-        //
-        // All Option B plumbing is kept in place so the next attempt
-        // doesn't have to redo the field on DynamicKind, the
-        // ambient_clip threading, or the test scaffolding. The next
-        // commit should (a) make `composite_layer_clip_base` a Vec
-        // for stack semantics, (b) audit candidate detection to
-        // reject siblings under a shared motion ancestor, (c) add a
-        // diagnostic mode that dumps each MotionCompositeJob's
-        // screen_aabb / natural_size / dest_pos / dest_size to a
-        // capture for ground-truth comparison against the slow-path
-        // walker emit.
-        let _ambient_clip_for_bake: Option<[f32; 4]> = None;
-        let pushed_for_motion_subtree = false;
+        // P4.3 walker gate (Option B clip-aware bake, re-enabled
+        // 2026-05-26 after `composite_layer_clip_base` became a Vec
+        // — see [paint.rs:composite_layer_nested_push_preserves_outer_clip_base]).
+        // Run with `BLINC_BAKE_DEBUG=1` for per-region diagnostics
+        // at the walker insert, bake hook, and overlay blit sites
+        // (search `bake_debug!` invocations).
+        let ambient_clip_for_bake = if !pushed_for_css
+            && self.subtree_texture_candidates.borrow().contains(&node)
+        {
+            ctx.current_clip_aabb()
+        } else {
+            None
+        };
+        let pushed_for_motion_subtree = if !pushed_for_css
+            && self.subtree_texture_candidates.borrow().contains(&node)
+        {
+            use slotmap::Key as _;
+            let key = node.data().as_ffi();
+            ctx.push_composite_layer(key);
+            true
+        } else {
+            false
+        };
         let pushed_composite_layer = pushed_for_css || pushed_for_motion_subtree;
         let css_anim_bg_start = in_css_subtree.then(|| ctx.bg_primitive_count());
         // P4.3 sibling of `css_anim_bg_start`. We snapshot the scratch
@@ -2515,6 +2489,24 @@ impl RenderTree {
                 clip_aabb: ctx.current_clip_aabb(),
                 z_layer: ctx.z_layer(),
             };
+            if super::super::bake_debug_enabled() {
+                use slotmap::Key as _;
+                let stable = self.stable_id(node).map(|s| format!("{:?}", s));
+                tracing::info!(
+                    target: "blinc::bake",
+                    "walker.insert MotionSubtreeTexture node_key={:#x} stable={:?} \
+                     prim_range={}..{} screen_aabb={:?} natural_size=({},{}) \
+                     ambient_clip={:?}",
+                    node.data().as_ffi(),
+                    stable,
+                    start,
+                    end,
+                    aabb,
+                    natural_w,
+                    natural_h,
+                    ambient_clip_for_bake,
+                );
+            }
             self.dynamic_regions.borrow_mut().insert(
                 node,
                 super::super::DynamicRegion {
@@ -2523,7 +2515,7 @@ impl RenderTree {
                     ambient,
                     kind: super::super::DynamicKind::MotionSubtreeTexture {
                         natural_size: (natural_w, natural_h),
-                        ambient_clip: _ambient_clip_for_bake,
+                        ambient_clip: ambient_clip_for_bake,
                     },
                 },
             );

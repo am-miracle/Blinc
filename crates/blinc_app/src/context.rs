@@ -1539,6 +1539,25 @@ impl RenderContext {
             // overflow_clip track region).
             let blit_clip = job.ambient_clip.map(|aabb| (aabb, [0.0_f32; 4]));
 
+            if blinc_layout::renderer::bake_debug_enabled() {
+                tracing::info!(
+                    target: "blinc::bake",
+                    "overlay.blit node_key={:#x} screen_aabb={:?} \
+                     natural_size={:?} translate={:?} scale={:?} opacity={:.3} \
+                     dpi={:.2} dest_pos={:?} dest_size={:?} ambient_clip={:?}",
+                    job.key,
+                    job.screen_aabb,
+                    job.natural_size,
+                    translate,
+                    scale,
+                    opacity,
+                    dpi,
+                    dest_pos,
+                    dest_size,
+                    job.ambient_clip,
+                );
+            }
+
             self.renderer.blit_tight_texture_to_target(
                 &texture.view,
                 job.natural_size,
@@ -8136,10 +8155,31 @@ impl RenderContext {
                         && self.motion_subtree_scratch_hash.get(&key).copied()
                             == Some(scratch_hash)
                     {
+                        if blinc_layout::renderer::bake_debug_enabled() {
+                            tracing::info!(
+                                target: "blinc::bake",
+                                "bake.skip-cached node_key={:#x} hash={:#x} natural_size={:?}",
+                                key,
+                                scratch_hash,
+                                natural_size,
+                            );
+                        }
                         continue;
                     }
                     let layer_pos = (region.screen_aabb[0], region.screen_aabb[1]);
                     let layer_size = (natural_size.0 as f32, natural_size.1 as f32);
+                    if blinc_layout::renderer::bake_debug_enabled() {
+                        tracing::info!(
+                            target: "blinc::bake",
+                            "bake.rasterize node_key={:#x} hash={:#x} \
+                             prim_count={} layer_pos={:?} layer_size={:?}",
+                            key,
+                            scratch_hash,
+                            scratch_batch.primitives.len(),
+                            layer_pos,
+                            layer_size,
+                        );
+                    }
                     let (layer_texture, _content_size) = self
                         .renderer
                         .render_subtree_to_layer_texture(scratch_batch, layer_pos, layer_size);

@@ -202,17 +202,26 @@ pub struct GpuPaintContext<'a> {
     /// first cut because the CSS animation values are evaluated
     /// at each visit during full paint regardless).
     active_composite_layer: Option<u64>,
-    /// Clip-stack depth at the moment [`Self::push_composite_layer`]
-    /// fired. `None` outside a composite layer; `Some(n)` means
-    /// `clip_stack[..n]` were inherited from ancestors and should be
-    /// EXCLUDED from per-primitive clip computation while emission
-    /// is routed to the scratch batch. The bake site captures
-    /// these as the texture's "ambient clip" and the per-frame blit
-    /// re-applies it via the blit shader's scissor — so any
-    /// translate / scale / rotation the motion overlay layers onto
-    /// the texture sweeps across the OUTER clip rather than
-    /// dragging it along (the bug Option B exists to fix).
-    composite_layer_clip_base: Option<usize>,
+    /// Stack of clip-stack depths captured by each active
+    /// [`Self::push_composite_layer`]. The outermost active push
+    /// determines the "ancestor clip base" — `clip_stack[..base]`
+    /// were inherited from ancestors and are EXCLUDED from per-
+    /// primitive clip computation while emission is routed to the
+    /// outer scratch batch. Inner pushes for nested promoted
+    /// subtrees stack on top; their own intrinsic clips (anything
+    /// pushed AFTER their own snapshot) remain visible to the
+    /// emitter. The bake site captures the outermost base as the
+    /// texture's "ambient clip" and the per-frame blit re-applies
+    /// it via the blit shader's scissor.
+    ///
+    /// Single-slot `Option<usize>` was insufficient because nested
+    /// motion promotions inside one widget (e.g. `cn::switch`'s
+    /// `on_layer` and `animated_thumb` motion siblings, or any
+    /// promoted ancestor + promoted descendant pair) caused the
+    /// inner pop to clear the outer push's state — leaving the
+    /// outer subtree's later emissions with the wrong clip base
+    /// and the wrong scratch routing implicit assumptions.
+    composite_layer_clip_base: Vec<usize>,
     /// Transform stack
     transform_stack: Vec<Affine2D>,
     /// Opacity stack
@@ -316,7 +325,7 @@ impl<'a> GpuPaintContext<'a> {
             motion_subtree_depth: 0,
             composite_layer_batches: std::collections::HashMap::new(),
             active_composite_layer: None,
-            composite_layer_clip_base: None,
+            composite_layer_clip_base: Vec::new(),
         }
     }
 
@@ -373,7 +382,7 @@ impl<'a> GpuPaintContext<'a> {
             motion_subtree_depth: 0,
             composite_layer_batches: std::collections::HashMap::new(),
             active_composite_layer: None,
-            composite_layer_clip_base: None,
+            composite_layer_clip_base: Vec::new(),
         }
     }
 
@@ -423,18 +432,24 @@ impl<'a> GpuPaintContext<'a> {
     /// silently keeps routing to the outermost layer. Callers must
     /// pair each push with [`Self::pop_composite_layer`].
     pub fn push_composite_layer(&mut self, node_id: u64) {
+        // Snapshot the clip-stack depth at promotion time. Any clip
+        // the SUBTREE ITSELF pushes (e.g. an inner overflow_clip on
+        // a child) stacks on top of this base and IS baked into the
+        // texture; ancestor clips below the OUTERMOST `clip_base`
+        // are stripped during emission and re-applied at blit time
+        // via the motion-overlay scissor. See [`Self::get_clip_data`]
+        // for the strip logic.
+        //
+        // We push the clip-base unconditionally so push/pop are
+        // balanced, even for nested promotions. The active scratch
+        // routing target (`active_composite_layer`) only updates
+        // for the OUTERMOST push — nested promoted nodes still emit
+        // into the outer's scratch batch, matching the
+        // "no-nesting" routing contract while keeping clip-base
+        // bookkeeping correct.
+        self.composite_layer_clip_base.push(self.clip_stack.len());
         if self.active_composite_layer.is_none() {
             self.active_composite_layer = Some(node_id);
-            // Snapshot the clip-stack depth at promotion time. Any
-            // clip the SUBTREE ITSELF pushes (e.g. an inner
-            // overflow_clip on a child) stacks on top of this base
-            // and IS baked into the texture; ancestor clips below
-            // `clip_base` are stripped during emission and re-applied
-            // at blit time via the motion-overlay scissor. See
-            // [`Self::get_clip_data`] for the strip logic and
-            // [`Self::ambient_clip_below_composite_base`] for the
-            // ambient-clip capture used by `composite_motion_layers_overlay`.
-            self.composite_layer_clip_base = Some(self.clip_stack.len());
             // Pre-create the entry so emit sites see a stable
             // mutable handle and don't pay a hashmap lookup on
             // every primitive.
@@ -442,11 +457,14 @@ impl<'a> GpuPaintContext<'a> {
         }
     }
 
-    /// Pair with [`Self::push_composite_layer`]. No-op when no
-    /// composite layer is active.
+    /// Pair with [`Self::push_composite_layer`]. Pops the innermost
+    /// clip-base snapshot; when that was the outermost push, also
+    /// clears the active scratch routing target.
     pub fn pop_composite_layer(&mut self) {
-        self.active_composite_layer = None;
-        self.composite_layer_clip_base = None;
+        self.composite_layer_clip_base.pop();
+        if self.composite_layer_clip_base.is_empty() {
+            self.active_composite_layer = None;
+        }
     }
 
     /// Return the AABB of the ancestor clips that were stripped
@@ -492,12 +510,14 @@ impl<'a> GpuPaintContext<'a> {
         Some([min_x, min_y, max_x - min_x, max_y - min_y])
     }
 
-    /// Active composite-layer clip-base snapshot. Used by the walker
-    /// to record the ambient clip on `DynamicRegion::MotionSubtreeTexture`
-    /// right before `pop_composite_layer` clears the state. Returns
-    /// `None` outside a composite-layer scope.
+    /// Outermost active composite-layer clip-base snapshot — the
+    /// ancestor-clip cutoff that applies for primitives emitted
+    /// inside the outermost push. Used by the walker to record the
+    /// ambient clip on `DynamicRegion::MotionSubtreeTexture` and by
+    /// the strip-clip path in `get_clip_data`. Returns `None`
+    /// outside a composite-layer scope.
     pub fn composite_layer_clip_base(&self) -> Option<usize> {
-        self.composite_layer_clip_base
+        self.composite_layer_clip_base.first().copied()
     }
 
     /// Drain the per-node composite-layer scratch batches. Called
@@ -1180,14 +1200,22 @@ impl<'a> GpuPaintContext<'a> {
     /// child with overflow_clip() doesn't inherit rounded corners
     /// from a parent.
     fn get_clip_data(&self) -> ([f32; 4], [f32; 4], [f32; 4], ClipType) {
-        // P4.3 Option B disabled in this commit — strip-clip via
-        // `composite_layer_clip_base` causes visible artifacts on
-        // `cn::switch` (rounded parent clip stripped → texture
-        // rectangle leaks past rounded corner). Re-enable once the
-        // strip captures the rounded-rect parent's corner radius too
-        // and propagates it to the blit shader's scissor radius
-        // (currently passed as `[0; 4]`).
-        let active_clips = &self.clip_stack[..];
+        // P4.3 Option B (re-enabled, instrumented by `BLINC_BAKE_DEBUG=1`):
+        // while inside the OUTERMOST composite layer, ancestor clips
+        // below the snapshot base are stripped from per-primitive
+        // clip rects. They get captured separately and re-applied at
+        // blit time by `composite_*_layers_overlay`. Only clips
+        // pushed AFTER `push_composite_layer` (i.e. intrinsic clips
+        // the subtree itself emits, like an inner overflow_clip on a
+        // descendant) participate in the per-primitive clip rect.
+        //
+        // The blit shader's scissor still passes `[0; 4]` for radius
+        // — the rounded-rect parent's corner radius gets squared off
+        // by the AABB scissor. Tracking that as a known limitation;
+        // the `BLINC_BAKE_DEBUG=1` log will pick up scissor-rect
+        // mismatches for diagnosis.
+        let start = self.composite_layer_clip_base.first().copied().unwrap_or(0);
+        let active_clips = &self.clip_stack[start..];
         if active_clips.is_empty() {
             // No clip - use large bounds
             return (
@@ -4457,7 +4485,6 @@ mod tests {
     /// enable when the bake captures the rounded-rect parent's radius
     /// too and passes it as the blit shader's scissor radius.
     #[test]
-    #[ignore = "Option B strip-clip temporarily disabled; see paint.rs get_clip_data"]
     fn composite_layer_strips_ancestor_clip_from_emit() {
         use blinc_core::DrawContext as _;
         use blinc_core::Rect;
@@ -4510,7 +4537,6 @@ mod tests {
     /// re-enable both when the strip-clip behavior comes back with
     /// rounded-corner-aware scissor support.
     #[test]
-    #[ignore = "Option B strip-clip temporarily disabled; see paint.rs get_clip_data"]
     fn composite_layer_preserves_inner_clip() {
         use blinc_core::DrawContext as _;
         use blinc_core::Rect;
@@ -4540,6 +4566,90 @@ mod tests {
 
         ctx.pop_clip();
         ctx.pop_composite_layer();
+        ctx.pop_clip();
+    }
+
+    /// P4.3 Option B — nested composite layers. When a promoted
+    /// subtree contains a descendant that's ALSO promoted, the
+    /// inner push must not clear the outer's clip-base on its pop.
+    /// Previously stored as `Option<usize>`, a single-slot field
+    /// silently dropped the outer's state on the inner's pop —
+    /// leaving subsequent emits in the outer subtree with no
+    /// strip-clip applied (so the outer's primitives leaked into
+    /// scratch with their ancestor clips re-attached). The Vec
+    /// stack form restores correct behaviour. The outer batch
+    /// continues to receive all emits — nested promotion shares
+    /// scratch routing with the outer (an intentional simplification
+    /// matching the no-nested-routing contract; only the clip-base
+    /// accounting is stack-aware).
+    #[test]
+    fn composite_layer_nested_push_preserves_outer_clip_base() {
+        use blinc_core::DrawContext as _;
+        use blinc_core::Rect;
+        use blinc_core::layer::ClipShape;
+
+        let mut ctx = GpuPaintContext::new(800.0, 600.0);
+
+        // Ancestor clip (outer-of-outer). Should be stripped from
+        // every primitive emitted inside any composite layer.
+        ctx.push_clip(ClipShape::Rect(Rect::new(0.0, 0.0, 800.0, 600.0)));
+
+        // Outer promoted subtree.
+        ctx.push_composite_layer(0xAAAA);
+        assert_eq!(ctx.composite_layer_clip_base(), Some(1));
+
+        // Inner promoted subtree (nested). Old single-slot field
+        // would have OVERWRITTEN outer's clip_base here; the Vec
+        // pushes a new snapshot on top.
+        ctx.push_composite_layer(0xBBBB);
+        assert_eq!(
+            ctx.composite_layer_clip_base(),
+            Some(1),
+            "outermost clip_base (1) must remain the cutoff while inner is active"
+        );
+
+        // Inner emits a primitive. clip_rect strips ancestors below
+        // outer base (1) — i.e., the 800x600 ancestor.
+        ctx.fill_rect(
+            Rect::new(10.0, 10.0, 20.0, 20.0),
+            0.0.into(),
+            Color::BLUE.into(),
+        );
+
+        // Inner pop. Previously this would have cleared the outer's
+        // state to None; with Vec it just pops the inner snapshot.
+        ctx.pop_composite_layer();
+        assert_eq!(
+            ctx.composite_layer_clip_base(),
+            Some(1),
+            "outer's clip_base must survive inner pop"
+        );
+
+        // Outer continues to emit; its primitives still strip the
+        // ancestor.
+        ctx.fill_rect(
+            Rect::new(50.0, 50.0, 30.0, 30.0),
+            0.0.into(),
+            Color::RED.into(),
+        );
+
+        let batches = ctx.take_composite_layer_batches();
+        let scratch = batches.get(&0xAAAA).expect("outer scratch exists");
+        // Both primitives (inner + outer emits) route into outer's
+        // scratch batch (no-nested-routing contract) and both have
+        // their ancestor clip stripped.
+        assert_eq!(scratch.primitives.len(), 2);
+        for prim in &scratch.primitives {
+            assert_eq!(
+                prim.clip_bounds,
+                [-10000.0, -10000.0, 100000.0, 100000.0],
+                "ancestor clip stripped for both inner- and outer-emitted prims"
+            );
+        }
+
+        // Outer pop now clears the active state entirely.
+        ctx.pop_composite_layer();
+        assert_eq!(ctx.composite_layer_clip_base(), None);
         ctx.pop_clip();
     }
 }

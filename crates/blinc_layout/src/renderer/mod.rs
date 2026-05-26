@@ -54,6 +54,17 @@ mod stylesheet;
 mod transfers;
 mod types;
 
+/// Cached `BLINC_BAKE_DEBUG=1` flag. Read once via `OnceLock` to
+/// avoid env-var lookup overhead on every per-region log call. When
+/// false, `bake_debug_enabled()` returns false in ~1ns and every
+/// `if bake_debug_enabled() { tracing::info!(...) }` site costs the
+/// price of the branch only.
+pub fn bake_debug_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| std::env::var("BLINC_BAKE_DEBUG").as_deref() == Ok("1"))
+}
+
 // Re-export the type surface so existing `crate::renderer::TextData`
 // / `::ElementType` / `::RenderNode` paths keep resolving without
 // any change to the rest of the crate or external callers.
