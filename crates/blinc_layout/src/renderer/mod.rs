@@ -169,6 +169,31 @@ pub enum DynamicKind {
     /// binding values pushed by the walker's normal binding-
     /// transform logic.
     MotionSubtree,
+    /// Motion-bound subtree that's been promoted to a baked GPU
+    /// texture (Phase 4.3 of the unified property channel,
+    /// [[project-reactive-architecture-v2]]). The compositor bakes
+    /// the subtree's primitives into a `LayerTexture` once at
+    /// motion-start and blits the cached pixels each frame with the
+    /// current motion-binding transform / opacity applied at
+    /// composite time — no walker re-entry, no re-emission.
+    ///
+    /// `natural_size` is the physical-pixel bounds the subtree was
+    /// rasterized at (no motion transform applied). The GPU side
+    /// holds the actual `LayerTexture` in a separate map keyed by
+    /// `root` (parallel to `css_composited_textures`).
+    ///
+    /// `ambient_clip` carries the intersected AABB of ancestor clips
+    /// that were stripped from per-primitive clip rects during bake
+    /// (P4.3 Option B clip-aware bake). The per-frame motion overlay
+    /// re-applies this clip via the blit shader's scissor — so the
+    /// translate/scale/rotation the overlay layers onto the texture
+    /// SWEEPS across the ancestor clip rather than dragging it
+    /// along. `None` when the subtree had no ancestor clips active
+    /// at promotion time (whole-screen blit is fine).
+    MotionSubtreeTexture {
+        natural_size: (u32, u32),
+        ambient_clip: Option<[f32; 4]>,
+    },
     /// CSS-animated node, distinguished so the compositor can route
     /// it through the composited-layer path when its
     /// `KeyframeProperties::is_composite_promotable()` predicate
@@ -183,7 +208,16 @@ pub enum DynamicKind {
     /// emits a region with this value when it records a CSS-animated
     /// node that didn't make it through promotion (kept for forwards
     /// compatibility with the non-composited PR #47 path).
-    CssAnimated { natural_size: (u32, u32) },
+    ///
+    /// `ambient_clip` carries the ancestor clip AABB the bake stripped
+    /// off — same role as on [`Self::MotionSubtreeTexture`]. The CSS
+    /// overlay re-applies it via the blit shader's scissor so the
+    /// animation transform sweeps across (not through) the ancestor
+    /// clip.
+    CssAnimated {
+        natural_size: (u32, u32),
+        ambient_clip: Option<[f32; 4]>,
+    },
 }
 
 impl Clone for DynamicKind {
@@ -199,8 +233,19 @@ impl Clone for DynamicKind {
                 bounds_wh: *bounds_wh,
             },
             DynamicKind::MotionSubtree => DynamicKind::MotionSubtree,
-            DynamicKind::CssAnimated { natural_size } => DynamicKind::CssAnimated {
+            DynamicKind::MotionSubtreeTexture {
+                natural_size,
+                ambient_clip,
+            } => DynamicKind::MotionSubtreeTexture {
                 natural_size: *natural_size,
+                ambient_clip: *ambient_clip,
+            },
+            DynamicKind::CssAnimated {
+                natural_size,
+                ambient_clip,
+            } => DynamicKind::CssAnimated {
+                natural_size: *natural_size,
+                ambient_clip: *ambient_clip,
             },
         }
     }
@@ -219,9 +264,21 @@ impl std::fmt::Debug for DynamicKind {
                 .field("bounds_wh", bounds_wh)
                 .finish(),
             DynamicKind::MotionSubtree => write!(f, "MotionSubtree"),
-            DynamicKind::CssAnimated { natural_size } => f
+            DynamicKind::MotionSubtreeTexture {
+                natural_size,
+                ambient_clip,
+            } => f
+                .debug_struct("MotionSubtreeTexture")
+                .field("natural_size", natural_size)
+                .field("ambient_clip", ambient_clip)
+                .finish(),
+            DynamicKind::CssAnimated {
+                natural_size,
+                ambient_clip,
+            } => f
                 .debug_struct("CssAnimated")
                 .field("natural_size", natural_size)
+                .field("ambient_clip", ambient_clip)
                 .finish(),
         }
     }

@@ -474,6 +474,35 @@ pub struct RenderContext {
     /// non-promotable sibling driving the slow path that's ~200 µs
     /// GPU time per frame.
     css_composited_scratch_hash: std::collections::HashMap<u64, u64>,
+    /// Per-node `LayerTexture` cache for motion-bound subtrees that the
+    /// P4.1 predicate promoted into the `subtree_texture_candidates`
+    /// set. Mirror of [`Self::css_composited_textures`] for the motion
+    /// path — the walker peels each promoted motion-bound subtree's
+    /// primitives into a per-node scratch batch (the walker pushes the
+    /// composite layer at the same site that the CSS path uses), and
+    /// the end-of-paint bake hook below rasterizes each batch into a
+    /// tight texture and stashes it here keyed by the node's slotmap
+    /// key.
+    ///
+    /// On motion-driven animation frames the per-frame motion overlay
+    /// (`composite_motion_layers_overlay`) blits each texture with the
+    /// current `MotionBindings` (translate / scale / rotation /
+    /// opacity) applied at composite time — no walker re-entry, no
+    /// SDF re-emission. Textures stay resident across frames until the
+    /// subtree's intrinsic content changes or the node demotes out of
+    /// the bake registry (see
+    /// `RenderTree::demote_lapsed_motion_bake_records`).
+    motion_subtree_textures: std::collections::HashMap<u64, blinc_gpu::renderer::LayerTexture>,
+    /// Hash of the scratch `PrimitiveBatch` that produced the texture
+    /// currently in [`Self::motion_subtree_textures`] for each node.
+    /// Same dirty-skip mechanism the CSS path uses: on every paint the
+    /// walker re-emits the subtree's intrinsic content into a fresh
+    /// scratch batch; if the hash matches we skip the GPU rasterize
+    /// and reuse the existing texture. Steady-state motion frames — a
+    /// `cn::switch` thumb at a stable colour, a toast at its base
+    /// background — pay zero raster cost per frame; only the blit
+    /// runs.
+    motion_subtree_scratch_hash: std::collections::HashMap<u64, u64>,
     // Collected text / SVG / image elements from the most recent
     // full paint. Lives alongside `cached_bg_batch` so the
     // compositor fast path can skip `collect_render_elements_with_state`
@@ -765,6 +794,8 @@ impl RenderContext {
             in_compositor_inner_call: false,
             css_composited_textures: std::collections::HashMap::new(),
             css_composited_scratch_hash: std::collections::HashMap::new(),
+            motion_subtree_textures: std::collections::HashMap::new(),
+            motion_subtree_scratch_hash: std::collections::HashMap::new(),
             cached_texts: None,
             cached_svgs: None,
             cached_images: None,
@@ -1312,22 +1343,23 @@ impl RenderContext {
             screen_aabb: [f32; 4],
             natural_size: (u32, u32),
             stable_id: Option<blinc_layout::tree::StableNodeId>,
+            ambient_clip: Option<[f32; 4]>,
         }
         let jobs: Vec<CompositeJob> = {
             let regions = tree.dynamic_regions();
             regions
                 .iter()
                 .filter_map(|(node, region)| match region.kind {
-                    blinc_layout::renderer::DynamicKind::CssAnimated { natural_size }
-                        if natural_size.0 > 0 && natural_size.1 > 0 =>
-                    {
-                        Some(CompositeJob {
-                            key: node.data().as_ffi(),
-                            screen_aabb: region.screen_aabb,
-                            natural_size,
-                            stable_id: tree.stable_id(*node),
-                        })
-                    }
+                    blinc_layout::renderer::DynamicKind::CssAnimated {
+                        natural_size,
+                        ambient_clip,
+                    } if natural_size.0 > 0 && natural_size.1 > 0 => Some(CompositeJob {
+                        key: node.data().as_ffi(),
+                        screen_aabb: region.screen_aabb,
+                        natural_size,
+                        stable_id: tree.stable_id(*node),
+                        ambient_clip,
+                    }),
                     _ => None,
                 })
                 .collect()
@@ -1391,6 +1423,13 @@ impl RenderContext {
                 job.natural_size.1 as f32 * scale.1,
             );
 
+            // P4.3 Option B: ancestor clip captured at promotion time
+            // gets re-applied here as the blit scissor. Without it,
+            // CSS animations on subtrees inside an `overflow_clip`
+            // ancestor would leak past the clip as their transform
+            // sweeps the texture across the screen.
+            let blit_clip = job.ambient_clip.map(|aabb| (aabb, [0.0_f32; 4]));
+
             self.renderer.blit_tight_texture_to_target(
                 &texture.view,
                 job.natural_size,
@@ -1399,7 +1438,116 @@ impl RenderContext {
                 dest_size,
                 opacity,
                 blinc_core::BlendMode::Normal,
+                blit_clip,
                 None,
+            );
+        }
+    }
+
+    /// Phase 4.3 motion sibling of [`Self::composite_css_layers_overlay`].
+    /// Blits each baked motion-subtree texture onto the surface with
+    /// the current `MotionBindings` (translate / scale / opacity)
+    /// applied at composite time — no walker re-entry, no SDF re-
+    /// emission for the steady-state motion case.
+    ///
+    /// 2D rotation from `MotionBindings::get_rotation()` is read here
+    /// for the dirty-skip predicate path (P4.4) but NOT applied to
+    /// the blit until the shader gains a `rotate_z` path — same gap
+    /// as the CSS overlay. Rotation-bound subtrees still bake; the
+    /// rotation is just elided until the shader update lands.
+    ///
+    /// Skips silently for any region whose texture isn't yet in
+    /// `motion_subtree_textures` (first-frame race: the bake hook
+    /// ran at end of paint but the very first motion-driven frame
+    /// after promotion may not have the texture yet — next frame
+    /// catches up).
+    fn composite_motion_layers_overlay(
+        &mut self,
+        tree: &blinc_layout::RenderTree,
+        target_view: &wgpu::TextureView,
+    ) {
+        use slotmap::Key as _;
+
+        struct MotionCompositeJob {
+            key: u64,
+            node: blinc_layout::tree::LayoutNodeId,
+            screen_aabb: [f32; 4],
+            natural_size: (u32, u32),
+            ambient_clip: Option<[f32; 4]>,
+        }
+        let jobs: Vec<MotionCompositeJob> = {
+            let regions = tree.dynamic_regions();
+            regions
+                .iter()
+                .filter_map(|(node, region)| match region.kind {
+                    blinc_layout::renderer::DynamicKind::MotionSubtreeTexture {
+                        natural_size,
+                        ambient_clip,
+                    } if natural_size.0 > 0 && natural_size.1 > 0 => Some(MotionCompositeJob {
+                        key: node.data().as_ffi(),
+                        node: *node,
+                        screen_aabb: region.screen_aabb,
+                        natural_size,
+                        ambient_clip,
+                    }),
+                    _ => None,
+                })
+                .collect()
+        };
+        if jobs.is_empty() {
+            return;
+        }
+        let bindings_map = tree.motion_bindings_map().clone();
+        for job in jobs {
+            let Some(texture) = self.motion_subtree_textures.get(&job.key) else {
+                continue;
+            };
+
+            // Default to identity if the node lost its bindings
+            // between paint and overlay (shouldn't happen — bindings
+            // are stable across the frame — but stay defensive so a
+            // missing entry produces a static blit rather than panic).
+            let (translate, scale, opacity) =
+                if let Some(bindings) = bindings_map.get(&job.node) {
+                    let translate = match bindings.get_transform() {
+                        Some(blinc_core::Transform::Affine2D(a)) => (a.elements[4], a.elements[5]),
+                        _ => (0.0, 0.0),
+                    };
+                    let scale = bindings.get_scale().unwrap_or((1.0, 1.0));
+                    let opacity = bindings.get_opacity().unwrap_or(1.0);
+                    (translate, scale, opacity)
+                } else {
+                    ((0.0, 0.0), (1.0, 1.0), 1.0)
+                };
+
+            let dpi = tree.scale_factor().max(1.0);
+            let dest_pos = (
+                job.screen_aabb[0] + translate.0 * dpi,
+                job.screen_aabb[1] + translate.1 * dpi,
+            );
+            let dest_size = (
+                job.natural_size.0 as f32 * scale.0,
+                job.natural_size.1 as f32 * scale.1,
+            );
+
+            // Ambient clip → blit scissor. The blit's `clip` arg is
+            // `(bounds, corner_radius)` — we pass the captured AABB
+            // and zero radius (square scissor). Without this, the
+            // motion overlay would paint clipped pixels through the
+            // ancestor clip when the texture's dest_pos lies inside
+            // it (e.g. progress_animated indicator sliding into the
+            // overflow_clip track region).
+            let blit_clip = job.ambient_clip.map(|aabb| (aabb, [0.0_f32; 4]));
+
+            self.renderer.blit_tight_texture_to_target(
+                &texture.view,
+                job.natural_size,
+                target_view,
+                dest_pos,
+                dest_size,
+                opacity,
+                blinc_core::BlendMode::Normal,
+                blit_clip,
                 None,
             );
         }
@@ -7109,6 +7257,8 @@ impl RenderContext {
                 // Composited CSS layers — blit each promoted subtree's
                 // texture with the current animation transform.
                 self.composite_css_layers_overlay(tree, target_view);
+                // P4.3 sibling: motion-subtree textures.
+                self.composite_motion_layers_overlay(tree, target_view);
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
                         .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -7448,6 +7598,8 @@ impl RenderContext {
                 // Composited CSS layers — blit each promoted subtree's
                 // texture with the current animation transform.
                 self.composite_css_layers_overlay(tree, target_view);
+                // P4.3 sibling: motion-subtree textures.
+                self.composite_motion_layers_overlay(tree, target_view);
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
                         .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -7716,6 +7868,8 @@ impl RenderContext {
         // freshly-promoted region gets visible content on the very
         // first frame after promotion.
         self.composite_css_layers_overlay(tree, target_view);
+        // P4.3 sibling: motion-subtree textures.
+        self.composite_motion_layers_overlay(tree, target_view);
         if !overlay.dynamic_images.is_empty() {
             self.renderer
                 .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -7864,9 +8018,9 @@ impl RenderContext {
                         continue;
                     };
                     let natural_size = match region.kind {
-                        blinc_layout::renderer::DynamicKind::CssAnimated { natural_size } => {
-                            natural_size
-                        }
+                        blinc_layout::renderer::DynamicKind::CssAnimated {
+                            natural_size, ..
+                        } => natural_size,
                         _ => continue,
                     };
                     if natural_size.0 == 0 || natural_size.1 == 0 {
@@ -7945,6 +8099,91 @@ impl RenderContext {
                     self.renderer.layer_texture_cache_mut().release(old);
                 }
                 self.css_composited_scratch_hash.remove(&key);
+            }
+
+            // P4.3 — motion-subtree texture bake. Same draining +
+            // dirty-skip + release-on-demote pattern as the CssAnimated
+            // block above, but routed by `DynamicKind::MotionSubtreeTexture`
+            // and stashed on `motion_subtree_textures`. The walker
+            // gated its motion-binding transform pushes on
+            // `pushed_for_motion_subtree` (`bake_skip`), so the scratch
+            // batch captures the subtree at base state — the per-frame
+            // motion overlay applies the current `MotionBindings`
+            // (translate / scale / rotation / opacity) at blit time.
+            //
+            // After a successful raster we flip the bake record to
+            // `Baked` so subsequent paints know the texture is ready
+            // (consumed by P4.4 invalidation triggers).
+            if !scratch_batches.is_empty() {
+                let regions = tree.dynamic_regions();
+                for (region_node, region) in regions.iter() {
+                    let key = region_node.data().as_ffi();
+                    let Some(scratch_batch) = scratch_batches.get(&key) else {
+                        continue;
+                    };
+                    let natural_size = match region.kind {
+                        blinc_layout::renderer::DynamicKind::MotionSubtreeTexture {
+                            natural_size,
+                            ..
+                        } => natural_size,
+                        _ => continue,
+                    };
+                    if natural_size.0 == 0 || natural_size.1 == 0 {
+                        continue;
+                    }
+                    let scratch_hash = Self::hash_composite_scratch(scratch_batch);
+                    if self.motion_subtree_textures.contains_key(&key)
+                        && self.motion_subtree_scratch_hash.get(&key).copied()
+                            == Some(scratch_hash)
+                    {
+                        continue;
+                    }
+                    let layer_pos = (region.screen_aabb[0], region.screen_aabb[1]);
+                    let layer_size = (natural_size.0 as f32, natural_size.1 as f32);
+                    let (layer_texture, _content_size) = self
+                        .renderer
+                        .render_subtree_to_layer_texture(scratch_batch, layer_pos, layer_size);
+                    if let Some(old) = self.motion_subtree_textures.remove(&key) {
+                        self.renderer.layer_texture_cache_mut().release(old);
+                    }
+                    self.motion_subtree_textures.insert(key, layer_texture);
+                    self.motion_subtree_scratch_hash.insert(key, scratch_hash);
+                    tree.mark_motion_subtree_baked(*region_node);
+                }
+            }
+            // Demotion cleanup for the motion-subtree path. Demote
+            // lapsed bake records (returns the node ids that fell out
+            // of `subtree_texture_candidates`) and release any pooled
+            // textures for nodes that are no longer in
+            // `dynamic_regions` as a `MotionSubtreeTexture`.
+            let _demoted = tree.demote_lapsed_motion_bake_records();
+            let live_motion_keys: std::collections::HashSet<u64> = {
+                let regions = tree.dynamic_regions();
+                regions
+                    .iter()
+                    .filter_map(|(node, region)| {
+                        if matches!(
+                            region.kind,
+                            blinc_layout::renderer::DynamicKind::MotionSubtreeTexture { .. }
+                        ) {
+                            Some(node.data().as_ffi())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+            let stale_motion_keys: Vec<u64> = self
+                .motion_subtree_textures
+                .keys()
+                .copied()
+                .filter(|k| !live_motion_keys.contains(k))
+                .collect();
+            for key in stale_motion_keys {
+                if let Some(old) = self.motion_subtree_textures.remove(&key) {
+                    self.renderer.layer_texture_cache_mut().release(old);
+                }
+                self.motion_subtree_scratch_hash.remove(&key);
             }
         }
 
@@ -9188,6 +9427,8 @@ impl RenderContext {
         // styling_demo's `anim-pulse` / `anim-glow` (and any other
         // composite-promotable CSS animation) on wasm / mobile.
         self.composite_css_layers_overlay(tree, target);
+        // P4.3 sibling: motion-subtree textures.
+        self.composite_motion_layers_overlay(tree, target);
 
         // Dispatch 3D mesh draws captured during `tree.render_with_motion`.
         // Each `PendingMesh` carries a snapshot of the camera and lights

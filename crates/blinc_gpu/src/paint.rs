@@ -202,6 +202,17 @@ pub struct GpuPaintContext<'a> {
     /// first cut because the CSS animation values are evaluated
     /// at each visit during full paint regardless).
     active_composite_layer: Option<u64>,
+    /// Clip-stack depth at the moment [`Self::push_composite_layer`]
+    /// fired. `None` outside a composite layer; `Some(n)` means
+    /// `clip_stack[..n]` were inherited from ancestors and should be
+    /// EXCLUDED from per-primitive clip computation while emission
+    /// is routed to the scratch batch. The bake site captures
+    /// these as the texture's "ambient clip" and the per-frame blit
+    /// re-applies it via the blit shader's scissor — so any
+    /// translate / scale / rotation the motion overlay layers onto
+    /// the texture sweeps across the OUTER clip rather than
+    /// dragging it along (the bug Option B exists to fix).
+    composite_layer_clip_base: Option<usize>,
     /// Transform stack
     transform_stack: Vec<Affine2D>,
     /// Opacity stack
@@ -305,6 +316,7 @@ impl<'a> GpuPaintContext<'a> {
             motion_subtree_depth: 0,
             composite_layer_batches: std::collections::HashMap::new(),
             active_composite_layer: None,
+            composite_layer_clip_base: None,
         }
     }
 
@@ -361,6 +373,7 @@ impl<'a> GpuPaintContext<'a> {
             motion_subtree_depth: 0,
             composite_layer_batches: std::collections::HashMap::new(),
             active_composite_layer: None,
+            composite_layer_clip_base: None,
         }
     }
 
@@ -412,6 +425,16 @@ impl<'a> GpuPaintContext<'a> {
     pub fn push_composite_layer(&mut self, node_id: u64) {
         if self.active_composite_layer.is_none() {
             self.active_composite_layer = Some(node_id);
+            // Snapshot the clip-stack depth at promotion time. Any
+            // clip the SUBTREE ITSELF pushes (e.g. an inner
+            // overflow_clip on a child) stacks on top of this base
+            // and IS baked into the texture; ancestor clips below
+            // `clip_base` are stripped during emission and re-applied
+            // at blit time via the motion-overlay scissor. See
+            // [`Self::get_clip_data`] for the strip logic and
+            // [`Self::ambient_clip_below_composite_base`] for the
+            // ambient-clip capture used by `composite_motion_layers_overlay`.
+            self.composite_layer_clip_base = Some(self.clip_stack.len());
             // Pre-create the entry so emit sites see a stable
             // mutable handle and don't pay a hashmap lookup on
             // every primitive.
@@ -423,6 +446,58 @@ impl<'a> GpuPaintContext<'a> {
     /// composite layer is active.
     pub fn pop_composite_layer(&mut self) {
         self.active_composite_layer = None;
+        self.composite_layer_clip_base = None;
+    }
+
+    /// Return the AABB of the ancestor clips that were stripped
+    /// from primitive emission while a composite layer was active.
+    /// Returns `None` when no composite layer ever pushed in this
+    /// paint, or when the layer was pushed at clip depth 0 (no
+    /// ancestor clips to strip).
+    ///
+    /// Called from the per-frame motion overlay AFTER pop: the saved
+    /// `composite_layer_clip_base` is consumed by the walker's record
+    /// site (which copies it onto the `DynamicRegion`); this getter
+    /// answers the snapshot itself for callers that need to peek mid-
+    /// paint without copying the stack.
+    pub fn ambient_clip_aabb(&self, clip_base: usize) -> Option<[f32; 4]> {
+        if clip_base == 0 {
+            return None;
+        }
+        let mut min_x = f32::NEG_INFINITY;
+        let mut min_y = f32::NEG_INFINITY;
+        let mut max_x = f32::INFINITY;
+        let mut max_y = f32::INFINITY;
+        let mut any = false;
+        for (shape, _, _) in &self.clip_stack[..clip_base] {
+            let (x0, y0, x1, y1) = match shape {
+                ClipShape::Rect(r) => (r.x(), r.y(), r.x() + r.width(), r.y() + r.height()),
+                ClipShape::RoundedRect { rect, .. } => (
+                    rect.x(),
+                    rect.y(),
+                    rect.x() + rect.width(),
+                    rect.y() + rect.height(),
+                ),
+                _ => continue,
+            };
+            min_x = min_x.max(x0);
+            min_y = min_y.max(y0);
+            max_x = max_x.min(x1);
+            max_y = max_y.min(y1);
+            any = true;
+        }
+        if !any || max_x <= min_x || max_y <= min_y {
+            return None;
+        }
+        Some([min_x, min_y, max_x - min_x, max_y - min_y])
+    }
+
+    /// Active composite-layer clip-base snapshot. Used by the walker
+    /// to record the ambient clip on `DynamicRegion::MotionSubtreeTexture`
+    /// right before `pop_composite_layer` clears the state. Returns
+    /// `None` outside a composite-layer scope.
+    pub fn composite_layer_clip_base(&self) -> Option<usize> {
+        self.composite_layer_clip_base
     }
 
     /// Drain the per-node composite-layer scratch batches. Called
@@ -1105,7 +1180,15 @@ impl<'a> GpuPaintContext<'a> {
     /// child with overflow_clip() doesn't inherit rounded corners
     /// from a parent.
     fn get_clip_data(&self) -> ([f32; 4], [f32; 4], [f32; 4], ClipType) {
-        if self.clip_stack.is_empty() {
+        // P4.3 Option B disabled in this commit — strip-clip via
+        // `composite_layer_clip_base` causes visible artifacts on
+        // `cn::switch` (rounded parent clip stripped → texture
+        // rectangle leaks past rounded corner). Re-enable once the
+        // strip captures the rounded-rect parent's corner radius too
+        // and propagates it to the blit shader's scissor radius
+        // (currently passed as `[0; 4]`).
+        let active_clips = &self.clip_stack[..];
+        if active_clips.is_empty() {
             // No clip - use large bounds
             return (
                 [-10000.0, -10000.0, 100000.0, 100000.0],
@@ -1167,7 +1250,7 @@ impl<'a> GpuPaintContext<'a> {
         // dominant radius for the corner.
         let mut corner_n_sources = [1.0_f32; 4];
 
-        for (clip, _poly_meta, _fade) in &self.clip_stack {
+        for (clip, _poly_meta, _fade) in active_clips {
             match clip {
                 ClipShape::Rect(rect) => {
                     // Intersect with this rect
@@ -1242,7 +1325,7 @@ impl<'a> GpuPaintContext<'a> {
         // matted layer was a precomp. The GPU still only evaluates one
         // non-rect shape per primitive, so we stop at the first one
         // found walking top-down.
-        let topmost_non_rect_idx = self.clip_stack.iter().rposition(|(c, _, _)| {
+        let topmost_non_rect_idx = active_clips.iter().rposition(|(c, _, _)| {
             matches!(
                 c,
                 ClipShape::Circle { .. }
@@ -1361,8 +1444,8 @@ impl<'a> GpuPaintContext<'a> {
         // intersection branches below). Scanning instead of just
         // `last()` is what lets a rect clip stacked on top of a
         // polygon matte still resolve to the polygon as the shape.
-        let shape_idx = topmost_non_rect_idx.unwrap_or(self.clip_stack.len() - 1);
-        let (clip, poly_meta, _fade) = &self.clip_stack[shape_idx];
+        let shape_idx = topmost_non_rect_idx.unwrap_or(active_clips.len() - 1);
+        let (clip, poly_meta, _fade) = &active_clips[shape_idx];
         match clip {
             ClipShape::Rect(rect) => (
                 [rect.x(), rect.y(), rect.width(), rect.height()],
@@ -4359,5 +4442,104 @@ mod tests {
         ctx.pop_layer();
         assert_eq!(ctx.layer_stack.len(), 0);
         assert_eq!(ctx.current_opacity(), 1.0);
+    }
+
+    /// P4.3 Option B — when a composite layer is active, primitives
+    /// emitted into the scratch batch must NOT carry the ancestor
+    /// clip rect; that ancestor clip is re-applied at blit time. A
+    /// primitive emitted inside the layer should report
+    /// `ClipType::None` even though an ancestor clip is on the stack.
+    ///
+    /// IGNORED 2026-05-26 — strip-clip behavior temporarily disabled
+    /// because the AABB scissor passed to the blit doesn't preserve
+    /// the parent's corner radius, producing visible artifacts on
+    /// `cn::switch` (rounded track corners get squared off). Re-
+    /// enable when the bake captures the rounded-rect parent's radius
+    /// too and passes it as the blit shader's scissor radius.
+    #[test]
+    #[ignore = "Option B strip-clip temporarily disabled; see paint.rs get_clip_data"]
+    fn composite_layer_strips_ancestor_clip_from_emit() {
+        use blinc_core::DrawContext as _;
+        use blinc_core::Rect;
+        use blinc_core::layer::ClipShape;
+
+        let mut ctx = GpuPaintContext::new(800.0, 600.0);
+
+        // Outer clip simulating an `.overflow_clip()` track at
+        // [100, 100, 200, 50].
+        ctx.push_clip(ClipShape::Rect(Rect::new(100.0, 100.0, 200.0, 50.0)));
+        let outer_clip_aabb = ctx.current_clip_aabb();
+        assert_eq!(outer_clip_aabb, Some([100.0, 100.0, 200.0, 50.0]));
+
+        // Promote the subtree to a composite layer.
+        ctx.push_composite_layer(0xDEAD_BEEF);
+        assert_eq!(ctx.composite_layer_clip_base(), Some(1));
+
+        // Emit a primitive INSIDE the composite layer. Its
+        // `clip_rect` should be the "no clip" sentinel because the
+        // ancestor clip is stripped.
+        ctx.fill_rect(
+            Rect::new(0.0, 0.0, 50.0, 50.0),
+            0.0.into(),
+            Color::BLUE.into(),
+        );
+        let batches = ctx.take_composite_layer_batches();
+        let scratch = batches
+            .get(&0xDEAD_BEEF)
+            .expect("scratch batch should exist for promoted node");
+        assert_eq!(scratch.primitives.len(), 1);
+        let prim_clip = scratch.primitives[0].clip_bounds;
+        // Sentinel "no clip" bounds from `get_clip_data`.
+        assert_eq!(prim_clip, [-10000.0, -10000.0, 100000.0, 100000.0]);
+
+        // `ambient_clip_aabb` peels the ancestor for the overlay.
+        let ambient = ctx.ambient_clip_aabb(1);
+        assert_eq!(ambient, Some([100.0, 100.0, 200.0, 50.0]));
+
+        ctx.pop_composite_layer();
+        assert_eq!(ctx.composite_layer_clip_base(), None);
+        ctx.pop_clip();
+    }
+
+    /// P4.3 Option B — clips pushed INSIDE the composite layer (i.e.
+    /// the subtree's own intrinsic clips) still apply to primitives
+    /// emitted within them. Only ancestors below the snapshot are
+    /// stripped.
+    ///
+    /// IGNORED 2026-05-26 — paired with the strip-clip test above;
+    /// re-enable both when the strip-clip behavior comes back with
+    /// rounded-corner-aware scissor support.
+    #[test]
+    #[ignore = "Option B strip-clip temporarily disabled; see paint.rs get_clip_data"]
+    fn composite_layer_preserves_inner_clip() {
+        use blinc_core::DrawContext as _;
+        use blinc_core::Rect;
+        use blinc_core::layer::ClipShape;
+
+        let mut ctx = GpuPaintContext::new(800.0, 600.0);
+
+        // Outer ancestor clip (stripped).
+        ctx.push_clip(ClipShape::Rect(Rect::new(0.0, 0.0, 50.0, 50.0)));
+        ctx.push_composite_layer(42);
+
+        // Inner clip pushed by the subtree itself (e.g. a descendant
+        // overflow_clip). This MUST land in per-primitive clip rect
+        // because the bake is supposed to capture intrinsic clipping.
+        ctx.push_clip(ClipShape::Rect(Rect::new(200.0, 200.0, 100.0, 100.0)));
+
+        ctx.fill_rect(
+            Rect::new(0.0, 0.0, 1000.0, 1000.0),
+            0.0.into(),
+            Color::RED.into(),
+        );
+        let batches = ctx.take_composite_layer_batches();
+        let scratch = batches.get(&42).expect("scratch batch exists");
+        let prim_clip = scratch.primitives[0].clip_bounds;
+        // Inner clip (NOT the outer ancestor) lands on the primitive.
+        assert_eq!(prim_clip, [200.0, 200.0, 100.0, 100.0]);
+
+        ctx.pop_clip();
+        ctx.pop_composite_layer();
+        ctx.pop_clip();
     }
 }

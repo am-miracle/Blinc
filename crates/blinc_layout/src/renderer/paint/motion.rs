@@ -555,7 +555,23 @@ impl RenderTree {
         // `bg_primitive_count` reads the ACTIVE batch (scratch when
         // composite_layer is pushed), so both `start` and `end` need
         // to come from the same batch.
-        let pushed_composite_layer =
+        // Composite-layer push for promoted CSS-animated subtrees
+        // (transform / opacity / scale animations whose
+        // `is_composite_promotable()` predicate matched).
+        // P4.3 Option B: capture the ancestor clip AABB BEFORE the
+        // composite layer push so the bake can re-apply it at blit
+        // time. The push strips ancestor clips from per-primitive
+        // emit (so scale/translate animations don't drag a baked
+        // ancestor clip along with them). The overlay reapplies the
+        // captured AABB as a scissor.
+        let css_anim_ancestor_clip = if in_css_subtree
+            && self.composite_promotion.borrow().contains(&node)
+        {
+            ctx.current_clip_aabb()
+        } else {
+            None
+        };
+        let pushed_for_css =
             if in_css_subtree && self.composite_promotion.borrow().contains(&node) {
                 // Use the slotmap key bits as the routing key — stable
                 // for the duration of the paint (slotmap version doesn't
@@ -568,7 +584,74 @@ impl RenderTree {
             } else {
                 false
             };
+        // Phase 4.3 — composite-layer push for motion-bound subtrees
+        // detected as texture-safe by `compute_subtree_texture_candidates`
+        // (root has animating transform/opacity binding AND no descendant
+        // carries an independent animation source). The walker emits the
+        // subtree's primitives into a per-node scratch batch on the
+        // first paint after detection; the end-of-paint hook
+        // (`try_render_with_compositor`) rasterizes it into a
+        // `LayerTexture` and the per-frame compositor blits the cached
+        // pixels with the current motion-binding transform applied —
+        // no walker re-entry, no re-emission.
+        //
+        // P4.3 walker gate — DISABLED AGAIN (2026-05-26).
+        //
+        // First attempt: hard-disable (visible regressions in
+        // progress_animated, cn::switch, cn::spinner).
+        //
+        // Second attempt: Option B clip-aware bake — strip ancestor
+        // clips from per-primitive emit (via
+        // `composite_layer_clip_base` in blinc_gpu) and re-apply the
+        // stripped AABB as a blit scissor in
+        // `composite_motion_layers_overlay`. The clip-strip mechanics
+        // pass unit tests in isolation
+        // (`composite_layer_strips_ancestor_clip_from_emit` +
+        // `composite_layer_preserves_inner_clip`) but the demo still
+        // shows regressions:
+        //  - progress_animated: thumb appears at wrong dimension /
+        //    stuck shape; recovers on hover-leave.
+        //  - cn::switch: thumb position visually wrong even when the
+        //    binding's `get()` would return the correct value;
+        //    toggling Notifications somehow displaces Dark mode's
+        //    thumb (cross-instance interference suspect).
+        //  - cn::spinner: blue arc absent.
+        //
+        // Likely remaining root causes (untested):
+        //  1. `composite_layer_clip_base` is a single field rather
+        //     than a stack. Nested motion-subtree candidates (e.g.
+        //     switch's on_layer + animated_thumb both qualify) would
+        //     cause the inner pop to clear the outer push's state.
+        //  2. Candidate over-detection — siblings under the same
+        //     wrapping `motion()` node may both qualify, with their
+        //     primitives commingling in the outer scratch batch.
+        //  3. The blit's dest_pos math assumes the binding value is
+        //     in logical pixels and screen_aabb is in physical
+        //     pixels; for ranges where the binding's natural unit
+        //     diverges (the switch thumb's `thumb_travel` vs the
+        //     progress bar's `width`), the multiplication by `dpi`
+        //     may be doubling some translations.
+        //
+        // All Option B plumbing is kept in place so the next attempt
+        // doesn't have to redo the field on DynamicKind, the
+        // ambient_clip threading, or the test scaffolding. The next
+        // commit should (a) make `composite_layer_clip_base` a Vec
+        // for stack semantics, (b) audit candidate detection to
+        // reject siblings under a shared motion ancestor, (c) add a
+        // diagnostic mode that dumps each MotionCompositeJob's
+        // screen_aabb / natural_size / dest_pos / dest_size to a
+        // capture for ground-truth comparison against the slow-path
+        // walker emit.
+        let _ambient_clip_for_bake: Option<[f32; 4]> = None;
+        let pushed_for_motion_subtree = false;
+        let pushed_composite_layer = pushed_for_css || pushed_for_motion_subtree;
         let css_anim_bg_start = in_css_subtree.then(|| ctx.bg_primitive_count());
+        // P4.3 sibling of `css_anim_bg_start`. We snapshot the scratch
+        // batch index AFTER `push_composite_layer` so the AABB at the
+        // insert site below covers exactly the primitives this subtree
+        // emitted into its scratch batch.
+        let motion_subtree_bg_start =
+            pushed_for_motion_subtree.then(|| ctx.bg_primitive_count());
 
         // Compositor v2 ambient snapshot for motion-bound subtrees.
         // Captured BEFORE this node pushes any of its own transforms
@@ -654,9 +737,20 @@ impl RenderTree {
         }
 
         // Calculate this node's motion opacity (combine motion values, bindings, and element opacity)
+        //
+        // Phase 4.3: bake mode skips the binding_opacity contribution
+        // so the cached texture is invariant to opacity changes. The
+        // per-frame blit (`composite_motion_layers_overlay`) reads
+        // the current binding opacity and applies it at composite
+        // time. Matches the binding-transform skip above.
+        let binding_opacity_for_bake = if pushed_for_motion_subtree {
+            None
+        } else {
+            binding_opacity
+        };
         let node_motion_opacity = motion_values
             .and_then(|m| m.opacity)
-            .unwrap_or_else(|| binding_opacity.unwrap_or(1.0))
+            .unwrap_or_else(|| binding_opacity_for_bake.unwrap_or(1.0))
             * render_node.props.opacity;
 
         // Combine with inherited opacity from parent motion containers
@@ -729,16 +823,28 @@ impl RenderTree {
 
         // Apply motion binding transform if present (continuous AnimatedValue-driven animation)
         // Translation is NOT centered (moves element from its position)
-        let has_binding_transform = binding_transform.is_some();
-        if let Some(ref transform) = binding_transform {
+        //
+        // Phase 4.3: when this node was promoted to a baked texture
+        // (`pushed_for_motion_subtree`), skip pushing the motion-binding
+        // transforms — we want the scratch primitives at the subtree's
+        // base position so the cached texture is invariant to binding
+        // values. The per-frame `composite_motion_layers_overlay` reads
+        // the current binding values and applies them at blit time.
+        let bake_skip = pushed_for_motion_subtree;
+        let has_binding_transform = binding_transform.is_some() && !bake_skip;
+        if has_binding_transform
+            && let Some(ref transform) = binding_transform
+        {
             ctx.push_transform(transform.clone());
         }
 
         // Apply motion binding scale if present (centered around element).
         // Reuses the bindings reference fetched above — no extra HashMap lookup.
         let binding_scale = motion_bindings_ref.and_then(|b| b.get_scale());
-        let has_binding_scale = binding_scale.is_some();
-        if let Some((sx, sy)) = binding_scale {
+        let has_binding_scale = binding_scale.is_some() && !bake_skip;
+        if let Some((sx, sy)) = binding_scale
+            && has_binding_scale
+        {
             let center_x = bounds.width / 2.0;
             let center_y = bounds.height / 2.0;
             ctx.push_transform(Transform::translate(center_x, center_y));
@@ -749,8 +855,10 @@ impl RenderTree {
         // Apply motion binding rotation if present (centered around element).
         // Reuses the bindings reference fetched above — no extra HashMap lookup.
         let binding_rotation = motion_bindings_ref.and_then(|b| b.get_rotation());
-        let has_binding_rotation = binding_rotation.is_some();
-        if let Some(deg) = binding_rotation {
+        let has_binding_rotation = binding_rotation.is_some() && !bake_skip;
+        if let Some(deg) = binding_rotation
+            && has_binding_rotation
+        {
             let center_x = bounds.width / 2.0;
             let center_y = bounds.height / 2.0;
             ctx.push_transform(Transform::translate(center_x, center_y));
@@ -2175,6 +2283,7 @@ impl RenderTree {
                         // values from a separate insertion site in
                         // the CSS bracket below.
                         natural_size: (0, 0),
+                        ambient_clip: None,
                     }),
                     _ => None,
                 };
@@ -2360,7 +2469,7 @@ impl RenderTree {
                     // bracket above) so we don't need
                     // `v2_motion_ambient` to be Some — pure-CSS
                     // animated nodes have no motion bindings.
-                    if pushed_composite_layer {
+                    if pushed_for_css {
                         let aabb = last_screen_aabb.unwrap_or([0.0, 0.0, 0.0, 0.0]);
                         let natural_w = aabb[2].max(1.0).ceil() as u32;
                         let natural_h = aabb[3].max(1.0).ceil() as u32;
@@ -2378,12 +2487,46 @@ impl RenderTree {
                                 ambient,
                                 kind: super::super::DynamicKind::CssAnimated {
                                     natural_size: (natural_w, natural_h),
+                                    ambient_clip: css_anim_ancestor_clip,
                                 },
                             },
                         );
                     }
                 }
             }
+        }
+        // Phase 4.3 sibling of the CssAnimated record above. For
+        // motion-bound texture candidates the in_css_subtree gate
+        // doesn't fire, so we record outside that block. The bake
+        // hook in `try_render_with_compositor` looks up `screen_aabb`
+        // + `natural_size` here exactly like it does for the CSS
+        // path.
+        if pushed_for_motion_subtree {
+            let start = motion_subtree_bg_start.unwrap_or(0);
+            let end = ctx.bg_primitive_count();
+            let aabb = ctx
+                .bg_primitive_aabb(start, end)
+                .unwrap_or([0.0, 0.0, 0.0, 0.0]);
+            let natural_w = aabb[2].max(1.0).ceil() as u32;
+            let natural_h = aabb[3].max(1.0).ceil() as u32;
+            let ambient = super::super::AmbientPaintState {
+                affine: ctx.current_affine_elements(),
+                opacity: ctx.current_opacity(),
+                clip_aabb: ctx.current_clip_aabb(),
+                z_layer: ctx.z_layer(),
+            };
+            self.dynamic_regions.borrow_mut().insert(
+                node,
+                super::super::DynamicRegion {
+                    root: node,
+                    screen_aabb: aabb,
+                    ambient,
+                    kind: super::super::DynamicKind::MotionSubtreeTexture {
+                        natural_size: (natural_w, natural_h),
+                        ambient_clip: _ambient_clip_for_bake,
+                    },
+                },
+            );
         }
 
         // Pop children inset clip (pushed before scroll, so popped after)
