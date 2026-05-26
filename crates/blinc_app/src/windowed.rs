@@ -2255,31 +2255,54 @@ impl WindowedApp {
     /// })
     /// ```
     ///
-    /// # Passing a named `fn` as the builder
+    /// # Passing a named `fn` as the builder (edition 2024)
     ///
     /// If you've factored your UI out into a free function:
     /// ```ignore
     /// fn build_ui(ctx: &mut WindowedContext) -> impl Element { /* … */ }
     /// WindowedApp::run(config, build_ui)?;
     /// ```
-    /// you may hit `error: implementation of FnMut is not general enough`
-    /// on **edition 2024** crates (and on some recent rustc releases).
-    /// The `-> impl Element` return type implicitly captures `ctx`'s
-    /// lifetime under the new RPIT capture rules, which makes
-    /// `build_ui` only implement `FnMut` for one specific lifetime —
-    /// the higher-ranked bound `for<'a> FnMut(&'a mut _) -> _` then
-    /// can't be satisfied.
+    /// you'll hit one of these errors on **edition 2024** crates:
+    /// - `error: implementation of FnMut is not general enough`
+    ///   (direct call: `WindowedApp::run(config, build_ui)`)
+    /// - `error: lifetime may not live long enough … return type of
+    ///   closure … contains a lifetime …` (closure wrap:
+    ///   `|cx| build_ui(cx)`)
     ///
-    /// Two fixes:
-    /// 1. Wrap the call in a closure (zero overhead, works in any
-    ///    edition):
-    ///    ```ignore
-    ///    WindowedApp::run(config, |ctx| build_ui(ctx))?;
-    ///    ```
-    /// 2. Opt the function's return type out of capture (Rust 1.82+):
-    ///    ```ignore
-    ///    fn build_ui(ctx: &mut WindowedContext) -> impl Element + use<> { /* … */ }
-    ///    ```
+    /// **Root cause.** Edition 2024 RPIT capture rules: `-> impl Element`
+    /// in a free fn implicitly captures every in-scope input lifetime
+    /// (i.e. it's `impl Element + use<'_>`). That makes `build_ui` a
+    /// `for<'a> FnMut(&'a mut _) -> impl Element + 'a` — the return
+    /// type *depends on the input lifetime*, which can't satisfy the
+    /// higher-ranked `FnMut` bound that requires a single return type
+    /// valid for all lifetimes.
+    ///
+    /// **The fix that always works** — opt the function's return type
+    /// out of capture (Rust 1.82+):
+    /// ```ignore
+    /// fn build_ui(ctx: &mut WindowedContext) -> impl Element + use<> { /* … */ }
+    /// WindowedApp::run(config, build_ui)?;  // now compiles
+    /// ```
+    /// `+ use<>` means "capture nothing" — the return type is
+    /// independent of `ctx`'s lifetime. This is the right signature
+    /// for every UI builder in practice, since the returned element
+    /// never borrows from `ctx` (it stores data the builder reads
+    /// out, not references into `ctx`).
+    ///
+    /// **What does NOT work** on edition 2024:
+    /// - Wrapping in a closure (`|cx| build_ui(cx)`) — the closure
+    ///   inherits the inner fn's lifetime capture.
+    /// - Type-erasing inside the closure (`|cx| -> Box<dyn Element + 'static>
+    ///   { Box::new(build_ui(cx)) }`) — same root cause, the boxed
+    ///   trait object inherits the captured lifetime from the inner
+    ///   `impl Element`.
+    ///
+    /// **Edition 2021 callers** don't hit this — free-fn RPIT didn't
+    /// capture input lifetimes before edition 2024. The fix is still
+    /// correct + harmless there.
+    ///
+    /// See `gotcha-run-with-theme-hrtb-fnmut` in the dev memory for the
+    /// long-form analysis + reproduction.
     #[cfg(all(feature = "windowed", not(target_os = "android")))]
     pub fn run<F, E>(config: WindowConfig, ui_builder: F) -> Result<()>
     where

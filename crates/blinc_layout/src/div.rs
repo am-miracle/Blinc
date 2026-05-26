@@ -4805,6 +4805,126 @@ pub trait ElementBuilder {
     }
 }
 
+/// Forwarding impl so `Box<dyn ElementBuilder>` itself satisfies
+/// `ElementBuilder`. Important for the edition-2024 HRTB workaround
+/// documented on [`crate::renderer::RenderTree::from_element`] (and on
+/// `WindowedApp::run` / `run_with_theme`): downstream crates whose
+/// `fn build_ui(ctx) -> impl Element` lacks `+ use<>` cannot satisfy
+/// the higher-ranked `FnMut` bound that runs the UI builder. The
+/// type-erased escape hatch — wrapping the call site in
+/// `|cx| -> Box<dyn ElementBuilder> { Box::new(build_ui(cx)) }` —
+/// only works if the boxed trait object itself implements
+/// `ElementBuilder`, hence this blanket. Forwards every method (incl.
+/// the two `&mut self` ones) through the box's auto-deref.
+///
+/// See [[gotcha-run-with-theme-hrtb-fnmut]] for the full reasoning.
+impl<T: ?Sized + ElementBuilder> ElementBuilder for Box<T> {
+    fn build(&self, tree: &mut LayoutTree) -> LayoutNodeId {
+        (**self).build(tree)
+    }
+    fn render_props(&self) -> RenderProps {
+        (**self).render_props()
+    }
+    fn children_builders(&self) -> &[Box<dyn ElementBuilder>] {
+        (**self).children_builders()
+    }
+    fn element_type_id(&self) -> ElementTypeId {
+        (**self).element_type_id()
+    }
+    fn text_render_info(&self) -> Option<TextRenderInfo> {
+        (**self).text_render_info()
+    }
+    fn styled_text_render_info(&self) -> Option<StyledTextRenderInfo> {
+        (**self).styled_text_render_info()
+    }
+    fn svg_render_info(&self) -> Option<SvgRenderInfo> {
+        (**self).svg_render_info()
+    }
+    fn image_render_info(&self) -> Option<ImageRenderInfo> {
+        (**self).image_render_info()
+    }
+    fn canvas_render_info(&self) -> Option<crate::canvas::CanvasRenderFn> {
+        (**self).canvas_render_info()
+    }
+    fn is_static_canvas(&self) -> bool {
+        (**self).is_static_canvas()
+    }
+    fn effective_layout_style(&self) -> Option<taffy::Style> {
+        (**self).effective_layout_style()
+    }
+    fn event_handlers(&self) -> Option<&crate::event_handler::EventHandlers> {
+        (**self).event_handlers()
+    }
+    fn scroll_info(&self) -> Option<crate::scroll::ScrollRenderInfo> {
+        (**self).scroll_info()
+    }
+    fn scroll_physics(&self) -> Option<crate::scroll::SharedScrollPhysics> {
+        (**self).scroll_physics()
+    }
+    fn viewport_cull(&self) -> bool {
+        (**self).viewport_cull()
+    }
+    fn motion_animation_for_child(
+        &self,
+        child_index: usize,
+    ) -> Option<crate::element::MotionAnimation> {
+        (**self).motion_animation_for_child(child_index)
+    }
+    fn motion_bindings(&self) -> Option<crate::motion::MotionBindings> {
+        (**self).motion_bindings()
+    }
+    fn motion_stable_id(&self) -> Option<&str> {
+        (**self).motion_stable_id()
+    }
+    fn motion_should_replay(&self) -> bool {
+        (**self).motion_should_replay()
+    }
+    fn motion_is_suspended(&self) -> bool {
+        (**self).motion_is_suspended()
+    }
+    fn motion_is_exiting(&self) -> bool {
+        (**self).motion_is_exiting()
+    }
+    fn layout_style(&self) -> Option<&taffy::Style> {
+        (**self).layout_style()
+    }
+    fn layout_bounds_storage(&self) -> Option<crate::renderer::LayoutBoundsStorage> {
+        (**self).layout_bounds_storage()
+    }
+    fn layout_bounds_callback(&self) -> Option<crate::renderer::LayoutBoundsCallback> {
+        (**self).layout_bounds_callback()
+    }
+    fn semantic_type_name(&self) -> Option<&'static str> {
+        (**self).semantic_type_name()
+    }
+    fn element_id(&self) -> Option<&str> {
+        (**self).element_id()
+    }
+    fn set_auto_id(&mut self, id: String) -> bool {
+        (**self).set_auto_id(id)
+    }
+    fn children_builders_mut(&mut self) -> &mut [Box<dyn ElementBuilder>] {
+        (**self).children_builders_mut()
+    }
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
+        (**self).element_classes()
+    }
+    fn bound_scroll_ref(&self) -> Option<&crate::selector::ScrollRef> {
+        (**self).bound_scroll_ref()
+    }
+    fn motion_on_ready_callback(
+        &self,
+    ) -> Option<std::sync::Arc<dyn Fn(crate::element::ElementBounds) + Send + Sync>> {
+        (**self).motion_on_ready_callback()
+    }
+    fn layout_animation_config(&self) -> Option<crate::layout_animation::LayoutAnimationConfig> {
+        (**self).layout_animation_config()
+    }
+    fn visual_animation_config(&self) -> Option<crate::visual_animation::VisualAnimationConfig> {
+        (**self).visual_animation_config()
+    }
+}
+
 impl ElementBuilder for Div {
     fn build(&self, tree: &mut LayoutTree) -> LayoutNodeId {
         let node = tree.create_node(self.style.clone());
