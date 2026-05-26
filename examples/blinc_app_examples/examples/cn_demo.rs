@@ -84,20 +84,6 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
         .h(ctx.height)
         .bg(bg)
         .flex_col()
-        // Phase-marker handler for the `blinc-regression` capture tool.
-        // Press a digit key 0-9 (broadcast key event, no focus needed)
-        // to drop a labelled phase marker into the regression trace.
-        // The harness timestamps each marker on stderr-receive and
-        // `compare` segments the capture by markers when present.
-        // Convention from the v2 chain checklist (in memory):
-        //   0=idle  2=p2_hovers  3=p3_drags  4=p4_overlays
-        //   5=p5_menus  6=p6_spinner  7=p7_scroll  9=compound
-        .on_key_down(|ev| {
-            let code = ev.key_code;
-            if (0x30..=0x39).contains(&code) {
-                eprintln!("BLINC_MARK key={}", code - 0x30);
-            }
-        })
         .child(header(ctx))
         .child(
             scroll()
