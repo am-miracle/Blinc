@@ -2255,54 +2255,40 @@ impl WindowedApp {
     /// })
     /// ```
     ///
-    /// # Passing a named `fn` as the builder (edition 2024)
+    /// # Named-fn signature (edition 2024)
     ///
-    /// If you've factored your UI out into a free function:
+    /// On edition 2024, your `build_ui` function needs `+ use<>` on
+    /// its return type:
     /// ```ignore
-    /// fn build_ui(ctx: &mut WindowedContext) -> impl Element { /* … */ }
+    /// fn build_ui(ctx: &mut WindowedContext) -> impl Element + use<> {
+    ///     /* … */
+    /// }
     /// WindowedApp::run(config, build_ui)?;
     /// ```
-    /// you'll hit one of these errors on **edition 2024** crates:
-    /// - `error: implementation of FnMut is not general enough`
-    ///   (direct call: `WindowedApp::run(config, build_ui)`)
-    /// - `error: lifetime may not live long enough … return type of
-    ///   closure … contains a lifetime …` (closure wrap:
-    ///   `|cx| build_ui(cx)`)
     ///
-    /// **Root cause.** Edition 2024 RPIT capture rules: `-> impl Element`
-    /// in a free fn implicitly captures every in-scope input lifetime
-    /// (i.e. it's `impl Element + use<'_>`). That makes `build_ui` a
-    /// `for<'a> FnMut(&'a mut _) -> impl Element + 'a` — the return
-    /// type *depends on the input lifetime*, which can't satisfy the
-    /// higher-ranked `FnMut` bound that requires a single return type
-    /// valid for all lifetimes.
+    /// **Why `+ use<>` is required and not just a workaround.** The
+    /// runner stores the built tree across frames and incrementally
+    /// updates it — every element inside the tree therefore has to be
+    /// `'static` (it can't borrow from `ctx`, which is re-borrowed
+    /// mutably on every frame). Edition 2024 changed RPIT capture
+    /// rules so that `-> impl Element` in a free fn *implicitly*
+    /// captures input lifetimes (it means `-> impl Element + use<'_>`),
+    /// which the compiler reads as "may borrow from `ctx`". `+ use<>`
+    /// explicitly says "captures nothing", restoring `'static`.
     ///
-    /// **The fix that always works** — opt the function's return type
-    /// out of capture (Rust 1.82+):
-    /// ```ignore
-    /// fn build_ui(ctx: &mut WindowedContext) -> impl Element + use<> { /* … */ }
-    /// WindowedApp::run(config, build_ui)?;  // now compiles
-    /// ```
-    /// `+ use<>` means "capture nothing" — the return type is
-    /// independent of `ctx`'s lifetime. This is the right signature
-    /// for every UI builder in practice, since the returned element
-    /// never borrows from `ctx` (it stores data the builder reads
-    /// out, not references into `ctx`).
+    /// This is the right signature for every UI builder in practice —
+    /// they construct new owned elements from values read out of
+    /// `ctx`, never references into it.
     ///
-    /// **What does NOT work** on edition 2024:
-    /// - Wrapping in a closure (`|cx| build_ui(cx)`) — the closure
-    ///   inherits the inner fn's lifetime capture.
-    /// - Type-erasing inside the closure (`|cx| -> Box<dyn Element + 'static>
-    ///   { Box::new(build_ui(cx)) }`) — same root cause, the boxed
-    ///   trait object inherits the captured lifetime from the inner
-    ///   `impl Element`.
+    /// Edition 2021 callers don't need the annotation (free-fn RPIT
+    /// didn't capture by default there), but adding it is harmless
+    /// and forward-compatible with the 2024 migration.
     ///
-    /// **Edition 2021 callers** don't hit this — free-fn RPIT didn't
-    /// capture input lifetimes before edition 2024. The fix is still
-    /// correct + harmless there.
-    ///
-    /// See `gotcha-run-with-theme-hrtb-fnmut` in the dev memory for the
-    /// long-form analysis + reproduction.
+    /// See `gotcha-run-with-theme-hrtb-fnmut` in dev memory for
+    /// reproduction, full error shapes, and why a closure wrap
+    /// (`|cx| build_ui(cx)`) and a `Box` wrap don't help — both inherit
+    /// the named fn's RPIT capture and produce the same error in a
+    /// different shape.
     #[cfg(all(feature = "windowed", not(target_os = "android")))]
     pub fn run<F, E>(config: WindowConfig, ui_builder: F) -> Result<()>
     where
@@ -2337,9 +2323,12 @@ impl WindowedApp {
     /// )
     /// ```
     ///
-    /// See [`Self::run`] for the `FnMut is not general enough`
-    /// gotcha when passing a named `fn build_ui(ctx) -> impl Element`
-    /// directly on edition 2024 / recent rustc.
+    /// # Named-fn signature (edition 2024)
+    ///
+    /// Same requirement as [`Self::run`]: on edition 2024 your
+    /// `build_ui` function needs `+ use<>` on the return type, e.g.
+    /// `fn build_ui(ctx: &mut WindowedContext) -> impl Element + use<>`.
+    /// See [`Self::run`]'s doc for the soundness rationale.
     #[cfg(all(feature = "windowed", not(target_os = "android")))]
     pub fn run_with_theme<F, E>(
         config: WindowConfig,
