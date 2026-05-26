@@ -157,6 +157,10 @@ name = "spinner_test"
 required-features = ["cn"]
 
 [[example]]
+name = "stateful_demo"
+required-features = ["cn"]
+
+[[example]]
 name = "router_navigation"
 required-features = ["cn"]
 

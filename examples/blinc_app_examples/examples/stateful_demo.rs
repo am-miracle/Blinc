@@ -91,20 +91,17 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
                 ),
         )
         .child(
-            scroll()
-                .w_full()
-                .h(ctx.height - 90.0)
-                .child(
-                    div()
-                        .w_full()
-                        .p(theme.spacing().space_3)
-                        .flex_col()
-                        .gap(theme.spacing().space_6)
-                        .items_center()
-                        .child(counter_button())
-                        .child(event_info_display())
-                        .child(signal_bound_modifier_section(ctx)),
-                ),
+            scroll().w_full().h(ctx.height - 90.0).child(
+                div()
+                    .w_full()
+                    .p(theme.spacing().space_3)
+                    .flex_col()
+                    .gap(theme.spacing().space_6)
+                    .items_center()
+                    .child(counter_button())
+                    .child(event_info_display())
+                    .child(signal_bound_modifier_section(ctx)),
+            ),
         )
 }
 
@@ -344,24 +341,18 @@ fn signal_bound_modifier_section(ctx: &WindowedContext) -> impl ElementBuilder +
                             div()
                                 .flex_row()
                                 .gap(8.0)
-                                .child(
-                                    cn::button("Purple").on_click({
-                                        let bg = bg.clone();
-                                        move |_| bg.set(Color::from_hex(0x7a2bff))
-                                    }),
-                                )
-                                .child(
-                                    cn::button("Cyan").on_click({
-                                        let bg = bg.clone();
-                                        move |_| bg.set(Color::from_hex(0x00e5ff))
-                                    }),
-                                )
-                                .child(
-                                    cn::button("Magenta").on_click({
-                                        let bg = bg.clone();
-                                        move |_| bg.set(Color::from_hex(0xff2d9b))
-                                    }),
-                                ),
+                                .child(cn::button("Purple").on_click({
+                                    let bg = bg.clone();
+                                    move |_| bg.set(Color::from_hex(0x7a2bff))
+                                }))
+                                .child(cn::button("Cyan").on_click({
+                                    let bg = bg.clone();
+                                    move |_| bg.set(Color::from_hex(0x00e5ff))
+                                }))
+                                .child(cn::button("Magenta").on_click({
+                                    let bg = bg.clone();
+                                    move |_| bg.set(Color::from_hex(0xff2d9b))
+                                })),
                         )
                         .child(
                             div()
