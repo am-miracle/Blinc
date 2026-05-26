@@ -416,12 +416,15 @@ impl PropertyBindingRegistry {
         read: ReadFn,
         write: WriteFn,
     ) {
-        self.bindings.entry(signal_id).or_default().push(Subscriber {
-            node_id,
-            property,
-            read,
-            write: SubscriberWrite::Render(write),
-        });
+        self.bindings
+            .entry(signal_id)
+            .or_default()
+            .push(Subscriber {
+                node_id,
+                property,
+                read,
+                write: SubscriberWrite::Render(write),
+            });
         self.by_node.entry(node_id).or_default().push(signal_id);
     }
 
@@ -492,12 +495,15 @@ impl PropertyBindingRegistry {
         read: ReadFn,
         write: LayoutWriteFn,
     ) {
-        self.bindings.entry(signal_id).or_default().push(Subscriber {
-            node_id,
-            property,
-            read,
-            write: SubscriberWrite::Layout(write),
-        });
+        self.bindings
+            .entry(signal_id)
+            .or_default()
+            .push(Subscriber {
+                node_id,
+                property,
+                read,
+                write: SubscriberWrite::Layout(write),
+            });
         self.by_node.entry(node_id).or_default().push(signal_id);
     }
 
@@ -963,11 +969,8 @@ mod tests {
         let node_id = mint_node(&mut tree);
 
         // Pretend this is what a builder method does at chain time.
-        let pending = TypedPendingBinding::new(
-            state.clone(),
-            PropertyId::Opacity,
-            |_p, _v: i32| {},
-        );
+        let pending =
+            TypedPendingBinding::new(state.clone(), PropertyId::Opacity, |_p, _v: i32| {});
 
         // And this is what `build()` does after minting node_id.
         pending.register(node_id);
@@ -1174,7 +1177,9 @@ mod tests {
 
         // Sanity: initial value seeded into taffy style.
         let style = tree.get_style(node_id).expect("style");
-        assert!(matches!(style.size.width, taffy::Dimension::Length(v) if (v - 100.0).abs() < 1e-6));
+        assert!(
+            matches!(style.size.width, taffy::Dimension::Length(v) if (v - 100.0).abs() < 1e-6)
+        );
 
         let _ = crate::stateful::take_pending_partial_prop_updates();
         w_state.set(250.0);
@@ -1183,14 +1188,22 @@ mod tests {
         let upd = updates.into_iter().next().unwrap();
         assert_eq!(upd.node_id, node_id);
         assert_eq!(upd.property, PropertyId::Width);
-        assert!(upd.effects.needs_layout, "Width changes must trigger layout");
-        assert!(upd.render_write.is_none(), "Width is layout-only, no RenderProps write");
+        assert!(
+            upd.effects.needs_layout,
+            "Width changes must trigger layout"
+        );
+        assert!(
+            upd.render_write.is_none(),
+            "Width is layout-only, no RenderProps write"
+        );
         assert!(upd.layout_write.is_some(), "Width must have a layout_write");
 
         // Apply the layout write — the taffy Style should pick up the new width.
         let mut style = tree.get_style(node_id).unwrap();
         (upd.layout_write.unwrap())(&mut style);
-        assert!(matches!(style.size.width, taffy::Dimension::Length(v) if (v - 250.0).abs() < 1e-6));
+        assert!(
+            matches!(style.size.width, taffy::Dimension::Length(v) if (v - 250.0).abs() < 1e-6)
+        );
     }
 
     #[test]
@@ -1579,7 +1592,11 @@ mod tests {
         // queues a partial update with the recomputed transform.
         x_state.set(100.0);
         let updates = crate::stateful::take_pending_partial_prop_updates();
-        assert_eq!(updates.len(), 1, "x.set must fire one partial update via the derived binding");
+        assert_eq!(
+            updates.len(),
+            1,
+            "x.set must fire one partial update via the derived binding"
+        );
         let upd = updates.into_iter().next().unwrap();
         assert_eq!(upd.node_id, node_id);
         assert_eq!(upd.property, PropertyId::Transform);
@@ -1590,8 +1607,16 @@ mod tests {
         (upd.render_write.unwrap())(&mut props);
         // Computed should have recomputed: x=100, y=20 → translate(100, 20)
         if let blinc_core::Transform::Affine2D(a) = props.transform.unwrap() {
-            assert!((a.elements[4] - 100.0).abs() < 1e-5, "tx must be 100, got {}", a.elements[4]);
-            assert!((a.elements[5] - 20.0).abs() < 1e-5, "ty must be 20, got {}", a.elements[5]);
+            assert!(
+                (a.elements[4] - 100.0).abs() < 1e-5,
+                "tx must be 100, got {}",
+                a.elements[4]
+            );
+            assert!(
+                (a.elements[5] - 20.0).abs() < 1e-5,
+                "ty must be 20, got {}",
+                a.elements[5]
+            );
         } else {
             panic!("expected 2d affine");
         }

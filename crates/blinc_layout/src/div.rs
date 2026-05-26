@@ -1804,13 +1804,14 @@ impl Div {
                 if let Some(px) = state.try_get() {
                     self.style.size.width = Dimension::Length(px);
                 }
-                self.pending_bindings.push(Box::new(LayoutPendingBinding::new(
-                    state,
-                    crate::property::PropertyId::Width,
-                    |style, px: f32| {
-                        style.size.width = Dimension::Length(px);
-                    },
-                )));
+                self.pending_bindings
+                    .push(Box::new(LayoutPendingBinding::new(
+                        state,
+                        crate::property::PropertyId::Width,
+                        |style, px: f32| {
+                            style.size.width = Dimension::Length(px);
+                        },
+                    )));
             }
             Reactive::Computed(computed) => {
                 if let Some(px) = computed.try_get() {
@@ -1874,13 +1875,14 @@ impl Div {
                 if let Some(px) = state.try_get() {
                     self.style.size.height = Dimension::Length(px);
                 }
-                self.pending_bindings.push(Box::new(LayoutPendingBinding::new(
-                    state,
-                    crate::property::PropertyId::Height,
-                    |style, px: f32| {
-                        style.size.height = Dimension::Length(px);
-                    },
-                )));
+                self.pending_bindings
+                    .push(Box::new(LayoutPendingBinding::new(
+                        state,
+                        crate::property::PropertyId::Height,
+                        |style, px: f32| {
+                            style.size.height = Dimension::Length(px);
+                        },
+                    )));
             }
             Reactive::Computed(computed) => {
                 if let Some(px) = computed.try_get() {
@@ -2009,17 +2011,18 @@ impl Div {
                         height: LengthPercentage::Length(px),
                     };
                 }
-                self.pending_bindings.push(Box::new(LayoutPendingBinding::new(
-                    state,
-                    crate::property::PropertyId::Gap,
-                    |style, units: f32| {
-                        let px = units * 4.0;
-                        style.gap = taffy::Size {
-                            width: LengthPercentage::Length(px),
-                            height: LengthPercentage::Length(px),
-                        };
-                    },
-                )));
+                self.pending_bindings
+                    .push(Box::new(LayoutPendingBinding::new(
+                        state,
+                        crate::property::PropertyId::Gap,
+                        |style, units: f32| {
+                            let px = units * 4.0;
+                            style.gap = taffy::Size {
+                                width: LengthPercentage::Length(px),
+                                height: LengthPercentage::Length(px),
+                            };
+                        },
+                    )));
             }
             Reactive::Computed(computed) => {
                 if let Some(units) = computed.try_get() {
@@ -2148,19 +2151,20 @@ impl Div {
                         bottom: px,
                     };
                 }
-                self.pending_bindings.push(Box::new(LayoutPendingBinding::new(
-                    state,
-                    crate::property::PropertyId::Padding,
-                    |style, units: f32| {
-                        let px = LengthPercentage::Length(units * 4.0);
-                        style.padding = Rect {
-                            left: px,
-                            right: px,
-                            top: px,
-                            bottom: px,
-                        };
-                    },
-                )));
+                self.pending_bindings
+                    .push(Box::new(LayoutPendingBinding::new(
+                        state,
+                        crate::property::PropertyId::Padding,
+                        |style, units: f32| {
+                            let px = LengthPercentage::Length(units * 4.0);
+                            style.padding = Rect {
+                                left: px,
+                                right: px,
+                                top: px,
+                                bottom: px,
+                            };
+                        },
+                    )));
             }
             Reactive::Computed(computed) => {
                 if let Some(units) = computed.try_get() {
@@ -2675,13 +2679,14 @@ impl Div {
                 if let Some(c) = state.try_get() {
                     self.background = Some(Brush::Solid(c));
                 }
-                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
-                    state,
-                    crate::property::PropertyId::Background,
-                    |props, color: Color| {
-                        props.background = Some(Brush::Solid(color));
-                    },
-                )));
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::new(
+                        state,
+                        crate::property::PropertyId::Background,
+                        |props, color: Color| {
+                            props.background = Some(Brush::Solid(color));
+                        },
+                    )));
             }
             Reactive::Computed(computed) => {
                 if let Some(c) = computed.try_get() {
@@ -2841,14 +2846,15 @@ impl Div {
                     self.border_radius = CornerRadius::uniform(r);
                     self.border_radius_explicit = true;
                 }
-                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
-                    state,
-                    crate::property::PropertyId::CornerRadius,
-                    |props, r: f32| {
-                        props.border_radius = CornerRadius::uniform(r);
-                        props.border_radius_explicit = true;
-                    },
-                )));
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::new(
+                        state,
+                        crate::property::PropertyId::CornerRadius,
+                        |props, r: f32| {
+                            props.border_radius = CornerRadius::uniform(r);
+                            props.border_radius_explicit = true;
+                        },
+                    )));
             }
             Reactive::Computed(computed) => {
                 if let Some(r) = computed.try_get() {
@@ -3036,13 +3042,14 @@ impl Div {
                 if let Some(c) = state.try_get() {
                     self.border_color = Some(c);
                 }
-                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
-                    state,
-                    crate::property::PropertyId::BorderColor,
-                    |props, c: Color| {
-                        props.border_color = Some(c);
-                    },
-                )));
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::new(
+                        state,
+                        crate::property::PropertyId::BorderColor,
+                        |props, c: Color| {
+                            props.border_color = Some(c);
+                        },
+                    )));
             }
             Reactive::Computed(computed) => {
                 if let Some(c) = computed.try_get() {
@@ -3282,13 +3289,14 @@ impl Div {
                 if let Some(s) = state.try_get() {
                     self.shadow = vec![s];
                 }
-                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
-                    state,
-                    crate::property::PropertyId::Shadow,
-                    |props, s: Shadow| {
-                        props.shadow = vec![s];
-                    },
-                )));
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::new(
+                        state,
+                        crate::property::PropertyId::Shadow,
+                        |props, s: Shadow| {
+                            props.shadow = vec![s];
+                        },
+                    )));
             }
             Reactive::Computed(computed) => {
                 if let Some(s) = computed.try_get() {
@@ -3359,13 +3367,14 @@ impl Div {
                 if let Some(t) = state.try_get() {
                     self.transform = Some(t);
                 }
-                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
-                    state,
-                    crate::property::PropertyId::Transform,
-                    |props, t: Transform| {
-                        props.transform = Some(t);
-                    },
-                )));
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::new(
+                        state,
+                        crate::property::PropertyId::Transform,
+                        |props, t: Transform| {
+                            props.transform = Some(t);
+                        },
+                    )));
             }
             Reactive::Computed(computed) => {
                 if let Some(t) = computed.try_get() {
@@ -3431,13 +3440,14 @@ impl Div {
             Reactive::Bound(state) => {
                 let initial = state.try_get().unwrap_or_default();
                 self.transform = Some(mapper(initial));
-                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
-                    state,
-                    crate::property::PropertyId::Transform,
-                    move |props, v: T| {
-                        props.transform = Some(mapper(v));
-                    },
-                )));
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::new(
+                        state,
+                        crate::property::PropertyId::Transform,
+                        move |props, v: T| {
+                            props.transform = Some(mapper(v));
+                        },
+                    )));
             }
             Reactive::Computed(computed) => {
                 let initial = computed.try_get().unwrap_or_default();
@@ -3482,10 +3492,7 @@ impl Div {
     /// layout-width bounding box for pointer events. This matches
     /// the slider/progress-fill use case where the fill is a
     /// non-interactive visual indicator clipped by a parent track.
-    pub fn transform_width(
-        mut self,
-        fraction: impl crate::binding::IntoReactive<f32>,
-    ) -> Self {
+    pub fn transform_width(mut self, fraction: impl crate::binding::IntoReactive<f32>) -> Self {
         use crate::binding::{Reactive, TypedPendingBinding};
         // Pin the pivot to the left edge so the scale visibly grows /
         // shrinks from the start of the element rather than its centre.
@@ -3499,13 +3506,14 @@ impl Div {
                 if let Some(f) = state.try_get() {
                     self.transform = Some(Transform::scale(f, 1.0));
                 }
-                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
-                    state,
-                    crate::property::PropertyId::Transform,
-                    |props, f: f32| {
-                        props.transform = Some(Transform::scale(f, 1.0));
-                    },
-                )));
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::new(
+                        state,
+                        crate::property::PropertyId::Transform,
+                        |props, f: f32| {
+                            props.transform = Some(Transform::scale(f, 1.0));
+                        },
+                    )));
             }
             Reactive::Computed(computed) => {
                 if let Some(f) = computed.try_get() {
@@ -3615,13 +3623,14 @@ impl Div {
                 if let Some(o) = state.try_get() {
                     self.opacity = o.clamp(0.0, 1.0);
                 }
-                self.pending_bindings.push(Box::new(TypedPendingBinding::new(
-                    state,
-                    crate::property::PropertyId::Opacity,
-                    |props, o: f32| {
-                        props.opacity = o.clamp(0.0, 1.0);
-                    },
-                )));
+                self.pending_bindings
+                    .push(Box::new(TypedPendingBinding::new(
+                        state,
+                        crate::property::PropertyId::Opacity,
+                        |props, o: f32| {
+                            props.opacity = o.clamp(0.0, 1.0);
+                        },
+                    )));
             }
             Reactive::Computed(computed) => {
                 if let Some(o) = computed.try_get() {

@@ -99,11 +99,7 @@ impl StateStyleTable {
 
     /// Look up the state style for `(node, state)`. `None` if no
     /// `#id:state { ... }` rule matched at build time.
-    pub fn get_state(
-        &self,
-        stable_id: StableNodeId,
-        state: ElementState,
-    ) -> Option<&ElementStyle> {
+    pub fn get_state(&self, stable_id: StableNodeId, state: ElementState) -> Option<&ElementStyle> {
         self.by_state.get(&(stable_id, state))
     }
 
@@ -132,8 +128,7 @@ impl StateStyleTable {
         ];
 
         let mut base: HashMap<StableNodeId, ElementStyle> = HashMap::new();
-        let mut by_state: HashMap<(StableNodeId, ElementState), ElementStyle> =
-            HashMap::new();
+        let mut by_state: HashMap<(StableNodeId, ElementState), ElementStyle> = HashMap::new();
 
         for (element_id, stable_id) in elements {
             if let Some(style) = stylesheet.get(&element_id) {
@@ -208,11 +203,7 @@ mod tests {
             ",
         );
         let nid = fake_stable(0);
-        let table = StateStyleTable::build(
-            &ss,
-            std::iter::once(("btn".to_string(), nid)),
-            1,
-        );
+        let table = StateStyleTable::build(&ss, std::iter::once(("btn".to_string(), nid)), 1);
         assert!(table.is_populated());
         assert!(table.get_base(nid).is_some(), "base style present");
         assert!(
@@ -237,11 +228,7 @@ mod tests {
             ",
         );
         let nid = fake_stable(0);
-        let table = StateStyleTable::build(
-            &ss,
-            std::iter::once(("btn".to_string(), nid)),
-            1,
-        );
+        let table = StateStyleTable::build(&ss, std::iter::once(("btn".to_string(), nid)), 1);
         for state in [
             ElementState::Hover,
             ElementState::Active,
@@ -269,11 +256,7 @@ mod tests {
         );
         let a = fake_stable(0);
         let b = fake_stable(1);
-        let table = StateStyleTable::build(
-            &ss,
-            [("a".to_string(), a), ("b".to_string(), b)],
-            1,
-        );
+        let table = StateStyleTable::build(&ss, [("a".to_string(), a), ("b".to_string(), b)], 1);
         assert_eq!(table.base_entry_count(), 2);
         assert_eq!(table.state_entry_count(), 2);
         assert!(table.get_state(a, ElementState::Hover).is_some());
@@ -284,11 +267,8 @@ mod tests {
     fn element_without_matching_rule_produces_no_entry() {
         let ss = parse("#known { background: red; } #known:hover { opacity: 0.8; }");
         let unknown = fake_stable(0);
-        let table = StateStyleTable::build(
-            &ss,
-            std::iter::once(("unknown".to_string(), unknown)),
-            1,
-        );
+        let table =
+            StateStyleTable::build(&ss, std::iter::once(("unknown".to_string(), unknown)), 1);
         assert!(!table.is_populated());
         assert!(table.get_base(unknown).is_none());
         assert!(table.get_state(unknown, ElementState::Hover).is_none());
@@ -298,11 +278,7 @@ mod tests {
     fn clear_resets_table() {
         let ss = parse("#btn { background: red; }");
         let nid = fake_stable(0);
-        let mut table = StateStyleTable::build(
-            &ss,
-            std::iter::once(("btn".to_string(), nid)),
-            1,
-        );
+        let mut table = StateStyleTable::build(&ss, std::iter::once(("btn".to_string(), nid)), 1);
         assert!(table.is_populated());
         table.clear();
         assert!(!table.is_populated());
@@ -313,11 +289,7 @@ mod tests {
     fn build_generation_watermark_preserved() {
         let ss = parse("#btn { background: red; }");
         let nid = fake_stable(0);
-        let table = StateStyleTable::build(
-            &ss,
-            std::iter::once(("btn".to_string(), nid)),
-            42,
-        );
+        let table = StateStyleTable::build(&ss, std::iter::once(("btn".to_string(), nid)), 42);
         assert_eq!(table.build_generation(), 42);
     }
 }

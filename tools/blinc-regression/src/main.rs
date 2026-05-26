@@ -67,8 +67,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
@@ -420,9 +420,7 @@ fn sanitize_label(s: &str) -> String {
 fn format_utc_compact(t: std::time::SystemTime) -> String {
     // Reuses `format_utc`'s civil-calendar math then strips the
     // separators that browsers and shells dislike on filenames.
-    format_utc(t)
-        .replace(['-', ':'], "")
-        .replace('T', "-")
+    format_utc(t).replace(['-', ':'], "").replace('T', "-")
 }
 
 fn cmd_list() -> anyhow::Result<()> {
@@ -430,12 +428,7 @@ fn cmd_list() -> anyhow::Result<()> {
     println!("({} scenarios)\n", SCENARIOS.len());
     for s in SCENARIOS {
         let phases: Vec<String> = s.targets_phases.iter().map(|p| p.to_string()).collect();
-        println!(
-            "  {:32}  P{:18}  {}",
-            s.id,
-            phases.join(","),
-            s.description
-        );
+        println!("  {:32}  P{:18}  {}", s.id, phases.join(","), s.description);
     }
     println!(
         "\nCoverage map + per-phase regression watchlist: see Testing\n\
@@ -601,10 +594,7 @@ fn cmd_record(out: &Path, user_cmd: &[String]) -> anyhow::Result<()> {
     // subprocess has died by this point). Bounded wait so a hung
     // pipe doesn't block the harness from writing the trace.
     let _ = marker_thread.join();
-    let collected_markers = markers
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or_default();
+    let collected_markers = markers.lock().map(|g| g.clone()).unwrap_or_default();
 
     let trace = Trace {
         captured_at,
@@ -656,12 +646,20 @@ fn cmd_compare(baseline: &Path, after: &Path, phase: Option<u32>) -> anyhow::Res
 
     println!("baseline: {}", baseline.display());
     println!("  captured: {}", base.captured_at);
-    println!("  duration: {}ms, samples: {}", base.duration_ms, base.samples.len());
+    println!(
+        "  duration: {}ms, samples: {}",
+        base.duration_ms,
+        base.samples.len()
+    );
     println!("  command:  {}", base.command.join(" "));
     println!();
     println!("after:    {}", after.display());
     println!("  captured: {}", aft.captured_at);
-    println!("  duration: {}ms, samples: {}", aft.duration_ms, aft.samples.len());
+    println!(
+        "  duration: {}ms, samples: {}",
+        aft.duration_ms,
+        aft.samples.len()
+    );
     println!("  command:  {}", aft.command.join(" "));
     println!();
 
@@ -719,7 +717,11 @@ fn cmd_compare(baseline: &Path, after: &Path, phase: Option<u32>) -> anyhow::Res
             "\n[per-phase segmentation skipped — only {} has markers; \
              re-record the other capture with the same phase markers \
              pressed during gestures]",
-            if base.markers.is_empty() { "after" } else { "baseline" }
+            if base.markers.is_empty() {
+                "after"
+            } else {
+                "baseline"
+            }
         );
     }
     Ok(())

@@ -641,8 +641,7 @@ pub struct RenderTree {
     ///
     /// P4.2 ships the bookkeeping with no callers — P4.3 plugs the
     /// bake call, P4.4 plugs invalidation triggers.
-    motion_subtree_bake_registry:
-        RefCell<crate::motion_texture_cache::MotionSubtreeBakeRegistry>,
+    motion_subtree_bake_registry: RefCell<crate::motion_texture_cache::MotionSubtreeBakeRegistry>,
     /// Hysteresis counter — frames spent classified as `Static`
     /// since the node last appeared `Animating`. Once the count
     /// reaches `SETTLED_STREAK_THRESHOLD`, the node is allowed to
@@ -1720,11 +1719,9 @@ impl RenderTree {
         node: LayoutNodeId,
         bounds: crate::element::ElementBounds,
     ) -> bool {
-        self.motion_subtree_bake_registry.borrow_mut().prepare(
-            node,
-            bounds,
-            self.build_generation,
-        )
+        self.motion_subtree_bake_registry
+            .borrow_mut()
+            .prepare(node, bounds, self.build_generation)
     }
 
     /// Phase 4.2 — flip a bake record to `Baked` after the GPU
@@ -1783,8 +1780,12 @@ impl RenderTree {
         // the borrow ends before we take the registry's `borrow_mut`.
         // The clone is bounded by the count of actively-animating
         // motion-bound roots — typically 0-3 in cn_demo scenarios.
-        let active: std::collections::HashSet<LayoutNodeId> =
-            self.subtree_texture_candidates.borrow().iter().copied().collect();
+        let active: std::collections::HashSet<LayoutNodeId> = self
+            .subtree_texture_candidates
+            .borrow()
+            .iter()
+            .copied()
+            .collect();
         self.motion_subtree_bake_registry
             .borrow_mut()
             .demote_lapsed(&active)

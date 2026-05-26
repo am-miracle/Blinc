@@ -2679,9 +2679,7 @@ impl WebApp {
                     }
                 }
             }
-            if blinc_layout::has_pending_subtree_rebuilds()
-                || animation_prop_effects.needs_layout
-            {
+            if blinc_layout::has_pending_subtree_rebuilds() || animation_prop_effects.needs_layout {
                 let mut needs_relayout = animation_prop_effects.needs_layout;
                 if let Some(ref mut tree) = self.current_tree {
                     needs_relayout |= tree.process_pending_subtree_rebuilds();

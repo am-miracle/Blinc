@@ -100,7 +100,9 @@ impl RenderTree {
                 return table.get_state(stable, state).cloned().map(Cow::Owned);
             }
         }
-        stylesheet.get_with_state(element_id, state).map(Cow::Borrowed)
+        stylesheet
+            .get_with_state(element_id, state)
+            .map(Cow::Borrowed)
     }
 
     /// Apply state-specific styles from the stylesheet to a node.

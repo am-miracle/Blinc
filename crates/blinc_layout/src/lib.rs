@@ -37,22 +37,22 @@ pub mod element;
 pub mod notch;
 
 // Layout animation systems
+pub mod binding;
 pub mod element_style;
 pub mod event_handler;
 pub mod event_router;
 pub mod image;
 pub mod interactive;
 pub mod layout_animation;
-pub mod binding;
 pub mod motion;
 pub mod motion_texture_cache;
 pub mod property;
 pub mod render_state;
-pub mod state_style_table;
 pub mod renderer;
 pub mod rich_text;
 pub mod scroll;
 pub mod stack;
+pub mod state_style_table;
 pub mod stateful;
 pub mod style;
 pub mod styled_text;
@@ -178,15 +178,15 @@ pub use render_state::{
 
 // Stateful elements
 pub use stateful::{
-    PendingSubtreeRebuild, SharedState, StateTransitions, StatefulInner, check_stateful_animations,
-    check_stateful_deps, clear_stateful_animations, clear_stateful_base_updaters,
-    clear_stateful_deps, has_animating_statefuls, has_pending_subtree_rebuilds,
+    PartialPropertyUpdate, PendingSubtreeRebuild, RenderPropsWrite, SharedState, StateTransitions,
+    StatefulInner, TaffyStyleWrite, check_stateful_animations, check_stateful_deps,
+    clear_stateful_animations, clear_stateful_base_updaters, clear_stateful_deps,
+    has_animating_statefuls, has_pending_partial_prop_updates, has_pending_subtree_rebuilds,
     has_stateful_base_updater, has_visible_animating_statefuls, peek_needs_redraw,
-    PartialPropertyUpdate, RenderPropsWrite, TaffyStyleWrite, has_pending_partial_prop_updates,
     queue_layout_update_partial, queue_prop_update, queue_prop_update_partial,
     queue_subtree_rebuild, request_redraw, take_needs_redraw, take_pending_partial_prop_updates,
-    take_pending_subtree_rebuilds, update_stateful_base_props, use_fsm,
-    use_fsm_keyed, use_shared_state, use_shared_state_with, use_state_for, use_state_for_keyed,
+    take_pending_subtree_rebuilds, update_stateful_base_props, use_fsm, use_fsm_keyed,
+    use_shared_state, use_shared_state_with, use_state_for, use_state_for_keyed,
 };
 
 // Animation integration

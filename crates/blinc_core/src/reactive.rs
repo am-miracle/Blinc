@@ -648,9 +648,7 @@ static PROPERTY_BINDING_NOTIFIER: std::sync::OnceLock<
 /// Install the global property-binding notifier. Called by
 /// `blinc_layout` on first access of its registry. Idempotent: only the
 /// first call wins.
-pub fn set_property_binding_notifier(
-    notifier: impl Fn(SignalId) + Send + Sync + 'static,
-) {
+pub fn set_property_binding_notifier(notifier: impl Fn(SignalId) + Send + Sync + 'static) {
     let _ = PROPERTY_BINDING_NOTIFIER.set(Box::new(notifier));
 }
 
@@ -850,9 +848,7 @@ static DERIVED_BINDING_NOTIFIER: std::sync::OnceLock<
 /// Install the global derived-binding notifier. Paired with
 /// [`set_property_binding_notifier`] — `blinc_layout::binding`
 /// installs both on first registry access.
-pub fn set_derived_binding_notifier(
-    notifier: impl Fn(DerivedId) + Send + Sync + 'static,
-) {
+pub fn set_derived_binding_notifier(notifier: impl Fn(DerivedId) + Send + Sync + 'static) {
     let _ = DERIVED_BINDING_NOTIFIER.set(Box::new(notifier));
 }
 

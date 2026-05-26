@@ -220,7 +220,10 @@ impl MotionSubtreeBakeRegistry {
     /// textures back to the [`LayerTextureCache`](https://docs.rs/wgpu)
     /// pool. Returns the demoted node ids so callers (eventually the
     /// `WindowedContext` GPU-release pass) can act on them.
-    pub fn demote_lapsed(&mut self, active_candidates: &HashSet<LayoutNodeId>) -> Vec<LayoutNodeId> {
+    pub fn demote_lapsed(
+        &mut self,
+        active_candidates: &HashSet<LayoutNodeId>,
+    ) -> Vec<LayoutNodeId> {
         let mut demoted = Vec::new();
         self.records.retain(|node, _| {
             if active_candidates.contains(node) {
@@ -286,10 +289,7 @@ mod tests {
         assert!(!inserted, "repeat prepare on Pending refreshes in place");
         assert_eq!(reg.len(), 1);
         let record = reg.get(node).unwrap();
-        assert_eq!(
-            record.bounds.width, 200.0,
-            "bounds must update on refresh"
-        );
+        assert_eq!(record.bounds.width, 200.0, "bounds must update on refresh");
         assert_eq!(record.build_generation, 2);
     }
 
