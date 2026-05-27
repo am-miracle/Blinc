@@ -3997,8 +3997,12 @@ struct LayerUniforms {
     cos_rx: f32,
     sin_ry: f32,
     cos_ry: f32,
-    // Padding
-    _pad: vec2<f32>,
+    // In-plane (Z-axis) rotation, applied to the flat composite path.
+    // Identity = (0.0, 1.0). Used by motion-bound subtrees whose
+    // cached texture must rotate per frame (e.g. cn::spinner's
+    // rotate_timeline) without re-baking.
+    sin_rz: f32,
+    cos_rz: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: LayerUniforms;
@@ -4101,8 +4105,21 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
         out.position = vec4<f32>(ndc.x * w, -ndc.y * w, 0.0, w);
         out.frag_pos = screen;
     } else {
-        // Standard flat compositing (no perspective)
-        let dest_pos = uniforms.dest_rect.xy + local_pos * uniforms.dest_rect.zw;
+        // Standard flat compositing (no perspective). Apply in-plane
+        // Z rotation around the dest rect's center: shift local_pos
+        // into a centered (-0.5..0.5) frame, rotate by (sin_rz,
+        // cos_rz), then scale by dest_size and shift back to the
+        // destination origin. Identity rotation (sin=0, cos=1) leaves
+        // local_pos unchanged, so the existing non-rotating paths see
+        // no behavioural change.
+        let centered = local_pos - vec2<f32>(0.5, 0.5);
+        let half_size = uniforms.dest_rect.zw * 0.5;
+        let centered_px = centered * uniforms.dest_rect.zw;
+        let rotated_px = vec2<f32>(
+            centered_px.x * uniforms.cos_rz - centered_px.y * uniforms.sin_rz,
+            centered_px.x * uniforms.sin_rz + centered_px.y * uniforms.cos_rz,
+        );
+        let dest_pos = uniforms.dest_rect.xy + half_size + rotated_px;
         let ndc = (dest_pos / uniforms.viewport_size) * 2.0 - 1.0;
         out.position = vec4<f32>(ndc.x, -ndc.y, 0.0, 1.0);
         out.frag_pos = dest_pos;

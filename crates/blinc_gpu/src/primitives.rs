@@ -1090,7 +1090,9 @@ pub struct CompositeUniforms {
 /// - cos_rx: f32 (4 bytes) - cos(rotate-x angle)
 /// - sin_ry: f32 (4 bytes) - sin(rotate-y angle)
 /// - cos_ry: f32 (4 bytes) - cos(rotate-y angle)
-/// - _pad: 8 bytes alignment
+/// - sin_rz: f32 (4 bytes) - sin(rotate-z angle), used by the flat
+///   composite path for in-plane rotation (motion-bound bake-and-blit)
+/// - cos_rz: f32 (4 bytes) - cos(rotate-z angle)
 ///   Total: 112 bytes
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1121,8 +1123,13 @@ pub struct LayerCompositeUniforms {
     pub sin_ry: f32,
     /// cos(rotate-y angle)
     pub cos_ry: f32,
-    /// Padding for alignment
-    pub _pad: [f32; 2],
+    /// sin(rotate-z angle) — in-plane rotation applied to the flat
+    /// (non-perspective) composite path. Lets motion-bound subtrees
+    /// (e.g. cn::spinner's rotate_timeline) rotate the cached layer
+    /// texture per-frame without re-baking. Identity = (0.0, 1.0).
+    pub sin_rz: f32,
+    /// cos(rotate-z angle) — see [`Self::sin_rz`].
+    pub cos_rz: f32,
 }
 
 impl LayerCompositeUniforms {
@@ -1149,7 +1156,8 @@ impl LayerCompositeUniforms {
             cos_rx: 1.0,
             sin_ry: 0.0,
             cos_ry: 1.0,
-            _pad: [0.0; 2],
+            sin_rz: 0.0,
+            cos_rz: 1.0,
         }
     }
 
@@ -1175,7 +1183,8 @@ impl LayerCompositeUniforms {
             cos_rx: 1.0,
             sin_ry: 0.0,
             cos_ry: 1.0,
-            _pad: [0.0; 2],
+            sin_rz: 0.0,
+            cos_rz: 1.0,
         }
     }
 

@@ -1702,6 +1702,29 @@ impl RenderTree {
         *writer = candidates;
         drop(writer);
 
+        // P4.3 diagnostics: capture the per-frame candidate set so a
+        // flickering predicate is visible in the log alongside the
+        // walker.insert / bake.rasterize / overlay.blit lines. Each
+        // frame's candidate set should be STICKY across a single
+        // spring animation; flicker shows up as keys appearing /
+        // disappearing in adjacent frames, which would explain the
+        // re-rasterize-every-paint pattern we're trying to pin down.
+        if bake_debug_enabled() {
+            use slotmap::Key as _;
+            let live = self.subtree_texture_candidates.borrow();
+            let mut keys: Vec<String> = live
+                .iter()
+                .map(|n| format!("{:#x}", n.data().as_ffi()))
+                .collect();
+            keys.sort();
+            tracing::info!(
+                target: "blinc::bake",
+                "candidates.compute count={} keys=[{}]",
+                live.len(),
+                keys.join(", "),
+            );
+        }
+
         // Phase 4.2 — prune motion-subtree bake records whose node is
         // no longer a candidate. Demoted ids are intentionally
         // dropped here (P4.3 wires the GPU-release callback). Until

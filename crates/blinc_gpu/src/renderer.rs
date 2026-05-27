@@ -5185,6 +5185,7 @@ impl GpuRenderer {
                         config.blend_mode,
                         layer_clip,
                         config.transform_3d,
+                        0.0,
                     );
                     self.layer_texture_cache.release(layer_texture);
                 } else {
@@ -5200,6 +5201,7 @@ impl GpuRenderer {
                         config.blend_mode,
                         layer_clip,
                         config.transform_3d,
+                        0.0,
                     );
                     self.layer_texture_cache.release(effected);
                 }
@@ -5825,6 +5827,7 @@ impl GpuRenderer {
                     config.blend_mode,
                     layer_clip,
                     config.transform_3d,
+                    0.0,
                 );
                 self.layer_texture_cache.release(layer_texture);
             } else {
@@ -5844,6 +5847,7 @@ impl GpuRenderer {
                     config.blend_mode,
                     layer_clip,
                     config.transform_3d,
+                    0.0,
                 );
                 self.layer_texture_cache.release(effected);
             }
@@ -7396,6 +7400,7 @@ impl GpuRenderer {
                     config.blend_mode,
                     layer_clip,
                     config.transform_3d,
+                    0.0,
                 );
                 self.layer_texture_cache.release(layer_texture);
             } else {
@@ -7413,6 +7418,7 @@ impl GpuRenderer {
                     config.blend_mode,
                     layer_clip,
                     config.transform_3d,
+                    0.0,
                 );
                 self.layer_texture_cache.release(effected);
             }
@@ -11079,6 +11085,34 @@ impl GpuRenderer {
             needs_aux_upload = true;
         }
 
+        // Polygon-clip vertices in `aux_data` are NOT offset here.
+        // `transform_clip_shape` (in paint.rs) stores polygon
+        // vertices in ELEMENT-LOCAL coords (DPI-scaled, but no
+        // rotation / translation applied), specifically so the
+        // fragment shader's `sp - prim.bounds.xy` test ends up in
+        // local space — the same space the vertices are in. When we
+        // shift `prim.bounds.xy` to (0, 0) for the tight render, the
+        // shader's `sp - 0` is already local-space, and the vertices
+        // need no shift. Mesh-primitive aux_data above DOES need
+        // shifting because mesh vertices are stored in screen-space.
+        //
+        // HOWEVER we still need to FLAG that aux_data must be
+        // re-uploaded — without this, the tight render's polygon test
+        // reads from a stale aux_data buffer that the previous main
+        // pass populated with BG-batch data (which doesn't contain
+        // the scratch batch's polygon vertices). The shader would
+        // index aux_data at the scratch's `aux_offset` and find
+        // garbage from BG, rejecting all fragments → empty texture.
+        // The cn::spinner's arc hit this: the bordered-circle stroke
+        // has a polygon clip in its `clip_radius`, but the bake
+        // produced an invisible texture until the upload fired.
+        for op in &offset_primitives {
+            if op.type_info[2] == crate::primitives::ClipType::Polygon as u32 {
+                needs_aux_upload = true;
+                break;
+            }
+        }
+
         // Build the offset PathVertex slice + rebased index buffer.
         // Indices in the source batch reference vertices in
         // `batch.paths.vertices` directly; after slicing, the local
@@ -11119,19 +11153,21 @@ impl GpuRenderer {
         // primitive needed translation. Same `self.buffers.aux_data`
         // the main pass uses — we restore it after `queue.submit`
         // so subsequent passes see the original screen-space data.
-        // The buffer is already sized for `batch.aux_data`'s length
-        // (the main pass uploaded the same vec earlier), so the
-        // write fits without resizing or rebinding.
+        //
+        // Use the resize-aware slice path rather than a raw
+        // `write_buffer`: the comment used to claim "the buffer is
+        // already sized for batch.aux_data's length" but that's only
+        // true when the immediately-preceding main pass wrote at
+        // least as many entries as we're about to write. The bake-
+        // texture path (P4.3 composite-layer scratch batches) often
+        // carries polygon-clip vertices or mesh aux that the main
+        // pass's bg-batch didn't, so the shared aux buffer is sized
+        // for the smaller bg vec (e.g., 16 bytes / 1 vec4) while we
+        // need to write 32+ bytes — wgpu errors with "Copy of 0..N
+        // would end up overrunning the bounds of the Destination
+        // buffer of size M" (cn::spinner bake hit this).
         if needs_aux_upload {
-            if self.has_storage_buffers {
-                self.queue.write_buffer(
-                    &self.buffers.aux_data,
-                    0,
-                    bytemuck::cast_slice(&tight_aux_data),
-                );
-            } else {
-                self.update_aux_data_texture(&tight_aux_data);
-            }
+            self.update_aux_data_slice(&tight_aux_data);
         }
 
         // Upload offset path geometry to a transient buffer pair so
@@ -11238,18 +11274,11 @@ impl GpuRenderer {
 
         // Restore the screen-space `aux_data` so subsequent passes
         // (next layer's tight render, post-effect overlays, etc.)
-        // see the original mesh vertex positions instead of the
-        // tight-translated copy we wrote above.
+        // see the original mesh / polygon vertex positions instead of
+        // the tight-translated copy we wrote above. Resize-aware path
+        // for the same reason as the upload above.
         if needs_aux_upload {
-            if self.has_storage_buffers {
-                self.queue.write_buffer(
-                    &self.buffers.aux_data,
-                    0,
-                    bytemuck::cast_slice(&batch.aux_data),
-                );
-            } else {
-                self.update_aux_data_texture(&batch.aux_data);
-            }
+            self.update_aux_data_slice(&batch.aux_data);
         }
 
         (layer_texture, content_size)
@@ -11311,6 +11340,7 @@ impl GpuRenderer {
         blend_mode: blinc_core::BlendMode,
         clip: Option<([f32; 4], [f32; 4])>, // (clip_bounds, clip_radius)
         transform_3d: Option<blinc_core::Transform3DParams>,
+        rotate_z_rad: f32,
     ) {
         use crate::primitives::LayerCompositeUniforms;
 
@@ -11432,6 +11462,14 @@ impl GpuRenderer {
         } else {
             (0.0, 0.0, 1.0, 0.0, 1.0)
         };
+        // 2D in-plane rotation. The flat (non-perspective) path in
+        // LAYER_COMPOSITE_SHADER rotates `local_pos - (0.5, 0.5)`
+        // around the center, then maps into dest_rect — so motion-
+        // bound subtrees that need to spin (cn::spinner's
+        // rotate_timeline) can rotate their cached texture per-frame
+        // without re-baking.
+        let sin_rz = rotate_z_rad.sin();
+        let cos_rz = rotate_z_rad.cos();
 
         let uniforms = LayerCompositeUniforms {
             source_rect,
@@ -11447,7 +11485,8 @@ impl GpuRenderer {
             cos_rx,
             sin_ry,
             cos_ry,
-            _pad: [0.0; 2],
+            sin_rz,
+            cos_rz,
         };
 
         let uniform_buffer = self
@@ -11690,7 +11729,8 @@ impl GpuRenderer {
             cos_rx: 1.0,
             sin_ry: 0.0,
             cos_ry: 1.0,
-            _pad: [0.0; 2],
+            sin_rz: 0.0,
+            cos_rz: 1.0,
         };
 
         let uniform_buffer = self
@@ -11815,7 +11855,8 @@ impl GpuRenderer {
             cos_rx: 1.0,
             sin_ry: 0.0,
             cos_ry: 1.0,
-            _pad: [0.0; 2],
+            sin_rz: 0.0,
+            cos_rz: 1.0,
         };
 
         if let Some((bounds, radii)) = clip {

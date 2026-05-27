@@ -460,7 +460,18 @@ pub struct RenderContext {
     /// frames until the subtree's intrinsic content changes (Phase
     /// 5 dirty tracking) or the node demotes out of the dynamic
     /// set.
-    css_composited_textures: std::collections::HashMap<u64, blinc_gpu::renderer::LayerTexture>,
+    /// The `(u32, u32)` is the ALLOCATED texture size — bucket-rounded
+    /// up from the natural content size by `render_subtree_to_layer_texture`
+    /// (64-px increments for atlas reuse). The blit's `source_size`
+    /// argument must be this allocated size, NOT the natural content
+    /// size, because the layer-composite shader's `source_rect` is in
+    /// normalized 0–1 UVs of the ALLOCATED texture. Passing natural
+    /// size collapses the bucket padding into the dest rect — a 16-px
+    /// indicator in a 64-px bucket renders at 25% height (the visible
+    /// thin-bar artefact users hit when the dest happens to land at a
+    /// dimension below the bucket granularity).
+    css_composited_textures:
+        std::collections::HashMap<u64, (blinc_gpu::renderer::LayerTexture, (u32, u32))>,
     /// Hash of the scratch `PrimitiveBatch` that produced the texture
     /// currently in [`Self::css_composited_textures`] for each node.
     /// On every slow-path frame the walker re-emits primitives into a
@@ -492,7 +503,8 @@ pub struct RenderContext {
     /// subtree's intrinsic content changes or the node demotes out of
     /// the bake registry (see
     /// `RenderTree::demote_lapsed_motion_bake_records`).
-    motion_subtree_textures: std::collections::HashMap<u64, blinc_gpu::renderer::LayerTexture>,
+    motion_subtree_textures:
+        std::collections::HashMap<u64, (blinc_gpu::renderer::LayerTexture, (u32, u32))>,
     /// Hash of the scratch `PrimitiveBatch` that produced the texture
     /// currently in [`Self::motion_subtree_textures`] for each node.
     /// Same dirty-skip mechanism the CSS path uses: on every paint the
@@ -1398,9 +1410,10 @@ impl RenderContext {
         // 2D rotation is in the predicate but skipped in the blit
         // until the shader gains a `rotate_z` path (next follow-up).
         for job in jobs {
-            let Some(texture) = self.css_composited_textures.get(&job.key) else {
+            let Some((texture, content_size)) = self.css_composited_textures.get(&job.key) else {
                 continue;
             };
+            let allocated_size = *content_size;
             let props = job
                 .stable_id
                 .and_then(|sid| anim_props.get(&sid))
@@ -1430,9 +1443,14 @@ impl RenderContext {
             // sweeps the texture across the screen.
             let blit_clip = job.ambient_clip.map(|aabb| (aabb, [0.0_f32; 4]));
 
+            // `source_size` must be the ALLOCATED texture size (the
+            // bucket-rounded content_size returned by
+            // `render_subtree_to_layer_texture`), NOT the natural
+            // content area — see `css_composited_textures` doc for
+            // the squeezed-bar artefact this prevents.
             self.renderer.blit_tight_texture_to_target(
                 &texture.view,
-                job.natural_size,
+                allocated_size,
                 target_view,
                 dest_pos,
                 dest_size,
@@ -1440,6 +1458,7 @@ impl RenderContext {
                 blinc_core::BlendMode::Normal,
                 blit_clip,
                 None,
+                0.0,
             );
         }
     }
@@ -1499,15 +1518,17 @@ impl RenderContext {
         }
         let bindings_map = tree.motion_bindings_map().clone();
         for job in jobs {
-            let Some(texture) = self.motion_subtree_textures.get(&job.key) else {
+            let Some((texture, content_size)) = self.motion_subtree_textures.get(&job.key)
+            else {
                 continue;
             };
+            let allocated_size = *content_size;
 
             // Default to identity if the node lost its bindings
             // between paint and overlay (shouldn't happen — bindings
             // are stable across the frame — but stay defensive so a
             // missing entry produces a static blit rather than panic).
-            let (translate, scale, opacity) =
+            let (translate, scale, opacity, rotate_deg) =
                 if let Some(bindings) = bindings_map.get(&job.node) {
                     let translate = match bindings.get_transform() {
                         Some(blinc_core::Transform::Affine2D(a)) => (a.elements[4], a.elements[5]),
@@ -1515,10 +1536,16 @@ impl RenderContext {
                     };
                     let scale = bindings.get_scale().unwrap_or((1.0, 1.0));
                     let opacity = bindings.get_opacity().unwrap_or(1.0);
-                    (translate, scale, opacity)
+                    // Rotation is in DEGREES from MotionBindings
+                    // (covers both spring-based `rotation` and
+                    // continuous `rotation_timeline`). Shader takes
+                    // sin/cos radians, so convert at the blit site.
+                    let rotate = bindings.get_rotation().unwrap_or(0.0);
+                    (translate, scale, opacity, rotate)
                 } else {
-                    ((0.0, 0.0), (1.0, 1.0), 1.0)
+                    ((0.0, 0.0), (1.0, 1.0), 1.0, 0.0)
                 };
+            let rotate_z_rad = rotate_deg.to_radians();
 
             let dpi = tree.scale_factor().max(1.0);
             let dest_pos = (
@@ -1558,9 +1585,13 @@ impl RenderContext {
                 );
             }
 
+            // `source_size` is the ALLOCATED texture size (bucket-
+            // rounded), not natural_size — see the analogous comment
+            // in `composite_css_layers_overlay` for the squeeze
+            // artefact this prevents.
             self.renderer.blit_tight_texture_to_target(
                 &texture.view,
-                job.natural_size,
+                allocated_size,
                 target_view,
                 dest_pos,
                 dest_size,
@@ -1568,6 +1599,7 @@ impl RenderContext {
                 blinc_core::BlendMode::Normal,
                 blit_clip,
                 None,
+                rotate_z_rad,
             );
         }
     }
@@ -7997,6 +8029,14 @@ impl RenderContext {
             && self.redraw_canvases(tree, width, height)
             && self.apply_binding_deltas(tree, scale_factor);
 
+        if blinc_layout::renderer::bake_debug_enabled() {
+            tracing::info!(
+                target: "blinc::bake",
+                "frame.start fast_paint={} (slow path runs walker + bake hook)",
+                used_fast_paint,
+            );
+        }
+
         // Create a single paint context for all layers with text rendering support
         let mut ctx =
             GpuPaintContext::with_text_context(width as f32, height as f32, &mut self.text_ctx);
@@ -8069,17 +8109,18 @@ impl RenderContext {
                     }
                     let layer_pos = (region.screen_aabb[0], region.screen_aabb[1]);
                     let layer_size = (natural_size.0 as f32, natural_size.1 as f32);
-                    let (layer_texture, _content_size) = self
+                    let (layer_texture, content_size) = self
                         .renderer
                         .render_subtree_to_layer_texture(scratch_batch, layer_pos, layer_size);
                     // Release any previous texture for this node
                     // back to the pool before installing the new
                     // one (saves the cache one acquire on the next
                     // promotion of the same node).
-                    if let Some(old) = self.css_composited_textures.remove(&key) {
+                    if let Some((old, _)) = self.css_composited_textures.remove(&key) {
                         self.renderer.layer_texture_cache_mut().release(old);
                     }
-                    self.css_composited_textures.insert(key, layer_texture);
+                    self.css_composited_textures
+                        .insert(key, (layer_texture, content_size));
                     self.css_composited_scratch_hash.insert(key, scratch_hash);
                 }
             }
@@ -8114,7 +8155,7 @@ impl RenderContext {
                 .filter(|k| !live_keys.contains(k))
                 .collect();
             for key in stale_keys {
-                if let Some(old) = self.css_composited_textures.remove(&key) {
+                if let Some((old, _)) = self.css_composited_textures.remove(&key) {
                     self.renderer.layer_texture_cache_mut().release(old);
                 }
                 self.css_composited_scratch_hash.remove(&key);
@@ -8180,13 +8221,14 @@ impl RenderContext {
                             layer_size,
                         );
                     }
-                    let (layer_texture, _content_size) = self
+                    let (layer_texture, content_size) = self
                         .renderer
                         .render_subtree_to_layer_texture(scratch_batch, layer_pos, layer_size);
-                    if let Some(old) = self.motion_subtree_textures.remove(&key) {
+                    if let Some((old, _)) = self.motion_subtree_textures.remove(&key) {
                         self.renderer.layer_texture_cache_mut().release(old);
                     }
-                    self.motion_subtree_textures.insert(key, layer_texture);
+                    self.motion_subtree_textures
+                        .insert(key, (layer_texture, content_size));
                     self.motion_subtree_scratch_hash.insert(key, scratch_hash);
                     tree.mark_motion_subtree_baked(*region_node);
                 }
@@ -8219,8 +8261,31 @@ impl RenderContext {
                 .copied()
                 .filter(|k| !live_motion_keys.contains(k))
                 .collect();
+            if blinc_layout::renderer::bake_debug_enabled() {
+                let mut held: Vec<String> = self
+                    .motion_subtree_textures
+                    .keys()
+                    .map(|k| format!("{:#x}", k))
+                    .collect();
+                held.sort();
+                let mut live: Vec<String> =
+                    live_motion_keys.iter().map(|k| format!("{:#x}", k)).collect();
+                live.sort();
+                let mut stale: Vec<String> = stale_motion_keys
+                    .iter()
+                    .map(|k| format!("{:#x}", k))
+                    .collect();
+                stale.sort();
+                tracing::info!(
+                    target: "blinc::bake",
+                    "cleanup.summary held=[{}] live_regions=[{}] releasing=[{}]",
+                    held.join(", "),
+                    live.join(", "),
+                    stale.join(", "),
+                );
+            }
             for key in stale_motion_keys {
-                if let Some(old) = self.motion_subtree_textures.remove(&key) {
+                if let Some((old, _)) = self.motion_subtree_textures.remove(&key) {
                     self.renderer.layer_texture_cache_mut().release(old);
                 }
                 self.motion_subtree_scratch_hash.remove(&key);
@@ -9466,9 +9531,22 @@ impl RenderContext {
         // Skips silently when nothing is promoted. Needed for
         // styling_demo's `anim-pulse` / `anim-glow` (and any other
         // composite-promotable CSS animation) on wasm / mobile.
-        self.composite_css_layers_overlay(tree, target);
-        // P4.3 sibling: motion-subtree textures.
-        self.composite_motion_layers_overlay(tree, target);
+        //
+        // Gate on `!in_compositor_inner_call` for the same reason
+        // the dynamic-batch dispatch below is gated: when we're the
+        // inner static-layer paint of `try_render_with_compositor`,
+        // the caller runs its OWN overlay call after `composite_frame`
+        // — running it here too composites the overlay into the
+        // static cache (where it stays baked across subsequent
+        // frames), then the outer call composites it AGAIN onto the
+        // surface, producing a visible double-paint. The non-
+        // compositor path (wasm / iOS / fuchsia) still needs both
+        // calls since it never reaches `composite_frame`.
+        if !self.in_compositor_inner_call {
+            self.composite_css_layers_overlay(tree, target);
+            // P4.3 sibling: motion-subtree textures.
+            self.composite_motion_layers_overlay(tree, target);
+        }
 
         // Dispatch 3D mesh draws captured during `tree.render_with_motion`.
         // Each `PendingMesh` carries a snapshot of the camera and lights
@@ -9680,6 +9758,7 @@ impl RenderContext {
             blinc_core::BlendMode::Normal,
             None,
             Some(info.transform_3d),
+            0.0,
         );
 
         self.renderer.release_layer_texture(layer_tex);
