@@ -203,7 +203,10 @@ pub enum DynamicKind {
     /// at promotion time (whole-screen blit is fine).
     MotionSubtreeTexture {
         natural_size: (u32, u32),
-        ambient_clip: Option<[f32; 4]>,
+        /// `(aabb_xywh, corner_radius_tl_tr_br_bl)`. Radius is
+        /// `[0; 4]` when the ancestor chain has no rounded-rect clip
+        /// (the blit shader treats that as a plain AABB scissor).
+        ambient_clip: Option<([f32; 4], [f32; 4])>,
     },
     /// CSS-animated node, distinguished so the compositor can route
     /// it through the composited-layer path when its
@@ -227,7 +230,10 @@ pub enum DynamicKind {
     /// clip.
     CssAnimated {
         natural_size: (u32, u32),
-        ambient_clip: Option<[f32; 4]>,
+        /// `(aabb_xywh, corner_radius_tl_tr_br_bl)`. Radius is
+        /// `[0; 4]` when the ancestor chain has no rounded-rect clip
+        /// (the blit shader treats that as a plain AABB scissor).
+        ambient_clip: Option<([f32; 4], [f32; 4])>,
     },
 }
 

@@ -1794,6 +1794,20 @@ pub trait DrawContext {
         None
     }
 
+    /// Snapshot the current ancestor clip as
+    /// `(aabb_xywh, corner_radius_tl_tr_br_bl)`. Used by P4.3's
+    /// motion-subtree bake to capture the parent's rounded-rect clip
+    /// alongside the AABB so the per-frame blit can use the blit
+    /// shader's rounded-rect scissor — without it, a progress
+    /// indicator inside an `overflow_clip`-rounded track gets its
+    /// left rounded corner squared off by the AABB-only scissor.
+    /// Radius is `[0; 4]` when the ancestor chain has no rounded-
+    /// rect clip. Default returns `None` for contexts without a
+    /// clip stack (mock tests).
+    fn current_clip_rounded(&self) -> Option<([f32; 4], [f32; 4])> {
+        None
+    }
+
     /// Snapshot the current composed affine transform as
     /// `[a, b, c, d, tx, ty]`.
     ///

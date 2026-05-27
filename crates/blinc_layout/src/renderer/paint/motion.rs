@@ -567,7 +567,7 @@ impl RenderTree {
         let css_anim_ancestor_clip = if in_css_subtree
             && self.composite_promotion.borrow().contains(&node)
         {
-            ctx.current_clip_aabb()
+            ctx.current_clip_rounded()
         } else {
             None
         };
@@ -604,7 +604,7 @@ impl RenderTree {
         let ambient_clip_for_bake = if !pushed_for_css
             && self.subtree_texture_candidates.borrow().contains(&node)
         {
-            ctx.current_clip_aabb()
+            ctx.current_clip_rounded()
         } else {
             None
         };

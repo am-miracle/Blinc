@@ -479,6 +479,30 @@ impl<'a> GpuPaintContext<'a> {
     /// answers the snapshot itself for callers that need to peek mid-
     /// paint without copying the stack.
     pub fn ambient_clip_aabb(&self, clip_base: usize) -> Option<[f32; 4]> {
+        self.ambient_clip_rounded(clip_base).map(|(aabb, _)| aabb)
+    }
+
+    /// Capture the ambient clip as both its intersected AABB AND the
+    /// topmost rounded-rect corner radius if one exists in the
+    /// ancestor stack. The compositor overlay uses this to drive the
+    /// blit shader's rounded-rect scissor — without the radius, a
+    /// motion-bound subtree blitted across a rounded ancestor (the
+    /// progress indicator inside an overflow_clip-rounded track, the
+    /// switch thumb inside a rounded pill) gets its corners squared
+    /// off by an AABB scissor.
+    ///
+    /// Returns `(aabb_xywh, corner_radius_tl_tr_br_bl)`. The radius
+    /// is `[0; 4]` when no rounded-rect clip is present in the
+    /// ancestor chain (plain rects, polygons, no clip) — semantically
+    /// "square corners," which the blit shader handles as a normal
+    /// AABB scissor.
+    ///
+    /// For multiple stacked rounded-rect clips the TOPMOST one wins
+    /// — same heuristic `get_clip_data` uses for its scissor's corner
+    /// radius. Robust handling of arbitrary intersections is
+    /// follow-up work; the topmost-wins fallback matches what users
+    /// see when the bake path is OFF.
+    pub fn ambient_clip_rounded(&self, clip_base: usize) -> Option<([f32; 4], [f32; 4])> {
         if clip_base == 0 {
             return None;
         }
@@ -487,15 +511,30 @@ impl<'a> GpuPaintContext<'a> {
         let mut max_x = f32::INFINITY;
         let mut max_y = f32::INFINITY;
         let mut any = false;
+        // Walk top-down so the LAST RoundedRect we see is the
+        // outermost — but we want the TOPMOST (innermost), which is
+        // the LAST entry in the iteration order. Track the most-
+        // recent rounded-rect we've seen and let later iterations
+        // overwrite it.
+        let mut topmost_rounded: Option<([f32; 4], [f32; 4])> = None;
         for (shape, _, _) in &self.clip_stack[..clip_base] {
             let (x0, y0, x1, y1) = match shape {
                 ClipShape::Rect(r) => (r.x(), r.y(), r.x() + r.width(), r.y() + r.height()),
-                ClipShape::RoundedRect { rect, .. } => (
-                    rect.x(),
-                    rect.y(),
-                    rect.x() + rect.width(),
-                    rect.y() + rect.height(),
-                ),
+                ClipShape::RoundedRect {
+                    rect,
+                    corner_radius,
+                    ..
+                } => {
+                    let bounds = [rect.x(), rect.y(), rect.width(), rect.height()];
+                    let radii = [
+                        corner_radius.top_left,
+                        corner_radius.top_right,
+                        corner_radius.bottom_right,
+                        corner_radius.bottom_left,
+                    ];
+                    topmost_rounded = Some((bounds, radii));
+                    (rect.x(), rect.y(), rect.x() + rect.width(), rect.y() + rect.height())
+                }
                 _ => continue,
             };
             min_x = min_x.max(x0);
@@ -507,7 +546,20 @@ impl<'a> GpuPaintContext<'a> {
         if !any || max_x <= min_x || max_y <= min_y {
             return None;
         }
-        Some([min_x, min_y, max_x - min_x, max_y - min_y])
+        let aabb = [min_x, min_y, max_x - min_x, max_y - min_y];
+        // If a rounded-rect exists in the ancestor chain AND the
+        // intersected AABB equals its bounds, return its radii. When
+        // the intersection trims the rounded-rect's edges (a tighter
+        // ancestor rect cuts into it), the rounded corners may no
+        // longer be at the intersection's edge — fall back to square
+        // scissor in that case. This matches `get_clip_data`'s
+        // dominant-corner logic conservatively without re-implementing
+        // it here.
+        let radius = match topmost_rounded {
+            Some((bounds, radii)) if aabb == bounds => radii,
+            _ => [0.0; 4],
+        };
+        Some((aabb, radius))
     }
 
     /// Outermost active composite-layer clip-base snapshot — the
@@ -2022,6 +2074,16 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             return Some([min_x, min_y, 0.0, 0.0]);
         }
         Some([min_x, min_y, max_x - min_x, max_y - min_y])
+    }
+
+    fn current_clip_rounded(&self) -> Option<([f32; 4], [f32; 4])> {
+        // Same heuristic the inherent `ambient_clip_rounded` uses:
+        // walk the full clip stack, intersect AABBs, and track the
+        // topmost rounded-rect's radius. Only return the radius when
+        // the topmost rounded-rect's bounds equal the intersected
+        // AABB — otherwise an ancestor rect has trimmed it and the
+        // radius no longer maps cleanly to the scissor edge.
+        self.ambient_clip_rounded(self.clip_stack.len())
     }
 
     fn set_3d_transform(&mut self, rx_rad: f32, ry_rad: f32, perspective_d: f32) {

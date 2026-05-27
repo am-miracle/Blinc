@@ -1355,7 +1355,7 @@ impl RenderContext {
             screen_aabb: [f32; 4],
             natural_size: (u32, u32),
             stable_id: Option<blinc_layout::tree::StableNodeId>,
-            ambient_clip: Option<[f32; 4]>,
+            ambient_clip: Option<([f32; 4], [f32; 4])>,
         }
         let jobs: Vec<CompositeJob> = {
             let regions = tree.dynamic_regions();
@@ -1437,11 +1437,14 @@ impl RenderContext {
             );
 
             // P4.3 Option B: ancestor clip captured at promotion time
-            // gets re-applied here as the blit scissor. Without it,
-            // CSS animations on subtrees inside an `overflow_clip`
-            // ancestor would leak past the clip as their transform
-            // sweeps the texture across the screen.
-            let blit_clip = job.ambient_clip.map(|aabb| (aabb, [0.0_f32; 4]));
+            // gets re-applied here as the blit scissor. The captured
+            // tuple is `(aabb, radius)` — radius is `[0; 4]` when the
+            // ancestor chain has no rounded-rect clip (the blit
+            // shader treats that as a plain AABB scissor). Without
+            // the rounded radius path, a CSS animation on a subtree
+            // inside an `overflow_clip` rounded ancestor would get
+            // its corners squared off at every blit.
+            let blit_clip = job.ambient_clip;
 
             // `source_size` must be the ALLOCATED texture size (the
             // bucket-rounded content_size returned by
@@ -1492,7 +1495,7 @@ impl RenderContext {
             node: blinc_layout::tree::LayoutNodeId,
             screen_aabb: [f32; 4],
             natural_size: (u32, u32),
-            ambient_clip: Option<[f32; 4]>,
+            ambient_clip: Option<([f32; 4], [f32; 4])>,
         }
         let jobs: Vec<MotionCompositeJob> = {
             let regions = tree.dynamic_regions();
@@ -1557,14 +1560,14 @@ impl RenderContext {
                 job.natural_size.1 as f32 * scale.1,
             );
 
-            // Ambient clip → blit scissor. The blit's `clip` arg is
-            // `(bounds, corner_radius)` — we pass the captured AABB
-            // and zero radius (square scissor). Without this, the
-            // motion overlay would paint clipped pixels through the
-            // ancestor clip when the texture's dest_pos lies inside
-            // it (e.g. progress_animated indicator sliding into the
-            // overflow_clip track region).
-            let blit_clip = job.ambient_clip.map(|aabb| (aabb, [0.0_f32; 4]));
+            // Ambient clip → blit scissor. The captured tuple is
+            // `(aabb, radius)` — the blit shader applies the rounded-
+            // rect SDF clip when radius is non-zero. This keeps a
+            // motion-bound subtree inside a rounded ancestor (e.g.
+            // progress_animated indicator inside an overflow_clip
+            // rounded track) clipped along the parent's actual
+            // outline instead of getting its corners squared off.
+            let blit_clip = job.ambient_clip;
 
             if blinc_layout::renderer::bake_debug_enabled() {
                 tracing::info!(
