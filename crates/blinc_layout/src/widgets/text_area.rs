@@ -2911,6 +2911,19 @@ impl ElementBuilder for TextArea {
         self.inner.layout_style()
     }
 
+    // Forward CSS class list / id from the inner Stateful so the
+    // selector matcher can match `.foo` / `#bar` rules added via
+    // `text_area(...).class(..)` / `.id(..)`. Same gotcha as
+    // text_input — the setters update inner state but without
+    // these forwards the renderer queries the default `&[]` / `None`.
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
+        self.inner.element_classes()
+    }
+
+    fn element_id(&self) -> Option<&str> {
+        self.inner.element_id()
+    }
+
     fn layout_bounds_storage(&self) -> Option<crate::renderer::LayoutBoundsStorage> {
         // Return the layout bounds storage from the state so it gets updated after layout
         if let Ok(data) = self.state.lock() {

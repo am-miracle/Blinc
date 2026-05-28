@@ -3227,6 +3227,21 @@ impl ElementBuilder for TextInput {
         self.inner.layout_style()
     }
 
+    // Forward CSS class list / id from the inner Stateful so
+    // `text_input(...).class("foo")` / `.id("bar")` are visible to
+    // the renderer's selector matcher. Without these, the setters
+    // update the inner widget but the matcher queries the default
+    // `&[]` / `None`, so `.foo` or `#bar` stylesheet rules never
+    // match the input element. Same gotcha as the cn-wrapped
+    // versions had.
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
+        self.inner.element_classes()
+    }
+
+    fn element_id(&self) -> Option<&str> {
+        self.inner.element_id()
+    }
+
     fn layout_bounds_storage(&self) -> Option<crate::renderer::LayoutBoundsStorage> {
         // Return the layout bounds storage from the data so it gets updated after layout
         if let Ok(data) = self.data.lock() {

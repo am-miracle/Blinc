@@ -330,6 +330,25 @@ impl ElementBuilder for Input {
     fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
     }
+
+    // Forward layout_style / event_handlers / element_id to the inner
+    // div so user-set width / height / event handlers / id reach the
+    // renderer. Without these forwards the default trait impls return
+    // `None` / `&[]`, so a `cn::input(&data).w(200.0)` chain sets
+    // `config.width = Some(200.0)` and builds the inner div with the
+    // correct taffy width — but the parent's layout query never sees
+    // it and the input still stretches to fill its flex container.
+    fn layout_style(&self) -> Option<&taffy::Style> {
+        ElementBuilder::layout_style(&self.inner)
+    }
+
+    fn event_handlers(&self) -> Option<&blinc_layout::event_handler::EventHandlers> {
+        ElementBuilder::event_handlers(&self.inner)
+    }
+
+    fn element_id(&self) -> Option<&str> {
+        ElementBuilder::element_id(&self.inner)
+    }
 }
 
 /// Internal configuration for building an Input
@@ -646,6 +665,18 @@ impl ElementBuilder for InputBuilder {
 
     fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.get_or_build().element_classes()
+    }
+
+    fn layout_style(&self) -> Option<&taffy::Style> {
+        ElementBuilder::layout_style(self.get_or_build())
+    }
+
+    fn event_handlers(&self) -> Option<&blinc_layout::event_handler::EventHandlers> {
+        ElementBuilder::event_handlers(self.get_or_build())
+    }
+
+    fn element_id(&self) -> Option<&str> {
+        ElementBuilder::element_id(self.get_or_build())
     }
 }
 

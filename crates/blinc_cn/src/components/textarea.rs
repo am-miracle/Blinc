@@ -182,7 +182,19 @@ impl Textarea {
         // If no label, description, or error, wrap in a minimal container
         let inner =
             if config.label.is_none() && config.description.is_none() && config.error.is_none() {
-                div().child(ta)
+                // Apply width to the wrapper div too — without this,
+                // a user's `.w(N)` setter constrains the inner ta but
+                // the wrapper stretches to fill its flex parent. The
+                // layout_style forward on Textarea/TextareaBuilder
+                // surfaces the wrapper's style to the parent, so the
+                // wrapper must carry the width for it to take effect.
+                let mut wrapper = div().child(ta);
+                if let Some(w) = config.width {
+                    wrapper = wrapper.w(w);
+                } else if config.full_width {
+                    wrapper = wrapper.w_full();
+                }
+                wrapper
             } else {
                 // Build a container with label, textarea, and description/error
                 let spacing = theme.spacing_value(SpacingToken::Space2);
@@ -263,6 +275,14 @@ impl ElementBuilder for Textarea {
 
     fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.inner.element_classes()
+    }
+
+    fn event_handlers(&self) -> Option<&blinc_layout::event_handler::EventHandlers> {
+        ElementBuilder::event_handlers(&self.inner)
+    }
+
+    fn element_id(&self) -> Option<&str> {
+        ElementBuilder::element_id(&self.inner)
     }
 }
 
@@ -421,6 +441,14 @@ impl ElementBuilder for TextareaBuilder {
 
     fn element_classes(&self) -> &[std::sync::Arc<str>] {
         self.get_or_build().element_classes()
+    }
+
+    fn event_handlers(&self) -> Option<&blinc_layout::event_handler::EventHandlers> {
+        ElementBuilder::event_handlers(self.get_or_build())
+    }
+
+    fn element_id(&self) -> Option<&str> {
+        ElementBuilder::element_id(self.get_or_build())
     }
 }
 
