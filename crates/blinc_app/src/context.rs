@@ -1356,8 +1356,9 @@ impl RenderContext {
             natural_size: (u32, u32),
             stable_id: Option<blinc_layout::tree::StableNodeId>,
             ambient_clip: Option<([f32; 4], [f32; 4])>,
+            visit_seq: u32,
         }
-        let jobs: Vec<CompositeJob> = {
+        let mut jobs: Vec<CompositeJob> = {
             let regions = tree.dynamic_regions();
             regions
                 .iter()
@@ -1371,11 +1372,17 @@ impl RenderContext {
                         natural_size,
                         stable_id: tree.stable_id(*node),
                         ambient_clip,
+                        visit_seq: region.visit_seq,
                     }),
                     _ => None,
                 })
                 .collect()
         };
+        // HashMap iteration is non-deterministic; sort by walker
+        // visit order so overlapping subtrees composite back-to-front
+        // (matches tree paint order). z_layer alone is insufficient
+        // because flex siblings share the same z_layer.
+        jobs.sort_by_key(|j| j.visit_seq);
         if jobs.is_empty() {
             return;
         }
@@ -1496,8 +1503,9 @@ impl RenderContext {
             screen_aabb: [f32; 4],
             natural_size: (u32, u32),
             ambient_clip: Option<([f32; 4], [f32; 4])>,
+            visit_seq: u32,
         }
-        let jobs: Vec<MotionCompositeJob> = {
+        let mut jobs: Vec<MotionCompositeJob> = {
             let regions = tree.dynamic_regions();
             regions
                 .iter()
@@ -1511,11 +1519,25 @@ impl RenderContext {
                         screen_aabb: region.screen_aabb,
                         natural_size,
                         ambient_clip,
+                        visit_seq: region.visit_seq,
                     }),
                     _ => None,
                 })
                 .collect()
         };
+        // `dynamic_regions` is a HashMap → iteration order is non-
+        // deterministic. Sort by walker visit_seq so the blit
+        // sequence matches tree paint order — children later in the
+        // parent's child list have higher visit_seq and paint on top.
+        // Symptom this fixes: cn::switch's on_layer (earlier child)
+        // and thumb (later sibling) both promote; HashMap order may
+        // blit on_layer AFTER the thumb, covering it. As on_layer's
+        // opacity ramps 0→1 (OFF→ON), the thumb visibly "fades off"
+        // — but only on OFF→ON; the inverse animation hides the bug
+        // because the on_layer fades OUT, revealing the thumb. Flex
+        // siblings share the same z_layer (no stack context), so
+        // z_layer alone can't distinguish them — visit_seq must.
+        jobs.sort_by_key(|j| j.visit_seq);
         if jobs.is_empty() {
             return;
         }
@@ -1568,25 +1590,6 @@ impl RenderContext {
             // rounded track) clipped along the parent's actual
             // outline instead of getting its corners squared off.
             let blit_clip = job.ambient_clip;
-
-            if blinc_layout::renderer::bake_debug_enabled() {
-                tracing::info!(
-                    target: "blinc::bake",
-                    "overlay.blit node_key={:#x} screen_aabb={:?} \
-                     natural_size={:?} translate={:?} scale={:?} opacity={:.3} \
-                     dpi={:.2} dest_pos={:?} dest_size={:?} ambient_clip={:?}",
-                    job.key,
-                    job.screen_aabb,
-                    job.natural_size,
-                    translate,
-                    scale,
-                    opacity,
-                    dpi,
-                    dest_pos,
-                    dest_size,
-                    job.ambient_clip,
-                );
-            }
 
             // `source_size` is the ALLOCATED texture size (bucket-
             // rounded), not natural_size — see the analogous comment
@@ -8032,14 +8035,6 @@ impl RenderContext {
             && self.redraw_canvases(tree, width, height)
             && self.apply_binding_deltas(tree, scale_factor);
 
-        if blinc_layout::renderer::bake_debug_enabled() {
-            tracing::info!(
-                target: "blinc::bake",
-                "frame.start fast_paint={} (slow path runs walker + bake hook)",
-                used_fast_paint,
-            );
-        }
-
         // Create a single paint context for all layers with text rendering support
         let mut ctx =
             GpuPaintContext::with_text_context(width as f32, height as f32, &mut self.text_ctx);
@@ -8199,31 +8194,10 @@ impl RenderContext {
                         && self.motion_subtree_scratch_hash.get(&key).copied()
                             == Some(scratch_hash)
                     {
-                        if blinc_layout::renderer::bake_debug_enabled() {
-                            tracing::info!(
-                                target: "blinc::bake",
-                                "bake.skip-cached node_key={:#x} hash={:#x} natural_size={:?}",
-                                key,
-                                scratch_hash,
-                                natural_size,
-                            );
-                        }
                         continue;
                     }
                     let layer_pos = (region.screen_aabb[0], region.screen_aabb[1]);
                     let layer_size = (natural_size.0 as f32, natural_size.1 as f32);
-                    if blinc_layout::renderer::bake_debug_enabled() {
-                        tracing::info!(
-                            target: "blinc::bake",
-                            "bake.rasterize node_key={:#x} hash={:#x} \
-                             prim_count={} layer_pos={:?} layer_size={:?}",
-                            key,
-                            scratch_hash,
-                            scratch_batch.primitives.len(),
-                            layer_pos,
-                            layer_size,
-                        );
-                    }
                     let (layer_texture, content_size) = self
                         .renderer
                         .render_subtree_to_layer_texture(scratch_batch, layer_pos, layer_size);
@@ -8264,29 +8238,6 @@ impl RenderContext {
                 .copied()
                 .filter(|k| !live_motion_keys.contains(k))
                 .collect();
-            if blinc_layout::renderer::bake_debug_enabled() {
-                let mut held: Vec<String> = self
-                    .motion_subtree_textures
-                    .keys()
-                    .map(|k| format!("{:#x}", k))
-                    .collect();
-                held.sort();
-                let mut live: Vec<String> =
-                    live_motion_keys.iter().map(|k| format!("{:#x}", k)).collect();
-                live.sort();
-                let mut stale: Vec<String> = stale_motion_keys
-                    .iter()
-                    .map(|k| format!("{:#x}", k))
-                    .collect();
-                stale.sort();
-                tracing::info!(
-                    target: "blinc::bake",
-                    "cleanup.summary held=[{}] live_regions=[{}] releasing=[{}]",
-                    held.join(", "),
-                    live.join(", "),
-                    stale.join(", "),
-                );
-            }
             for key in stale_motion_keys {
                 if let Some((old, _)) = self.motion_subtree_textures.remove(&key) {
                     self.renderer.layer_texture_cache_mut().release(old);

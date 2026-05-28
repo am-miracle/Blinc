@@ -1252,20 +1252,17 @@ impl<'a> GpuPaintContext<'a> {
     /// child with overflow_clip() doesn't inherit rounded corners
     /// from a parent.
     fn get_clip_data(&self) -> ([f32; 4], [f32; 4], [f32; 4], ClipType) {
-        // P4.3 Option B (re-enabled, instrumented by `BLINC_BAKE_DEBUG=1`):
-        // while inside the OUTERMOST composite layer, ancestor clips
-        // below the snapshot base are stripped from per-primitive
-        // clip rects. They get captured separately and re-applied at
-        // blit time by `composite_*_layers_overlay`. Only clips
-        // pushed AFTER `push_composite_layer` (i.e. intrinsic clips
-        // the subtree itself emits, like an inner overflow_clip on a
-        // descendant) participate in the per-primitive clip rect.
-        //
-        // The blit shader's scissor still passes `[0; 4]` for radius
-        // — the rounded-rect parent's corner radius gets squared off
-        // by the AABB scissor. Tracking that as a known limitation;
-        // the `BLINC_BAKE_DEBUG=1` log will pick up scissor-rect
-        // mismatches for diagnosis.
+        // P4.3 Option B clip-aware bake: while inside the OUTERMOST
+        // composite layer, ancestor clips below the snapshot base
+        // are stripped from per-primitive clip rects. They get
+        // captured separately and re-applied at blit time by
+        // `composite_*_layers_overlay` (the rounded radius is
+        // threaded through via `current_clip_rounded` so flex-
+        // siblings sitting inside a rounded-rect parent get their
+        // scissor rounded too). Only clips pushed AFTER
+        // `push_composite_layer` (i.e. intrinsic clips the subtree
+        // itself emits, like an inner overflow_clip on a descendant)
+        // participate in the per-primitive clip rect.
         let start = self.composite_layer_clip_base.first().copied().unwrap_or(0);
         let active_clips = &self.clip_stack[start..];
         if active_clips.is_empty() {

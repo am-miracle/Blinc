@@ -54,17 +54,6 @@ mod stylesheet;
 mod transfers;
 mod types;
 
-/// Cached `BLINC_BAKE_DEBUG=1` flag. Read once via `OnceLock` to
-/// avoid env-var lookup overhead on every per-region log call. When
-/// false, `bake_debug_enabled()` returns false in ~1ns and every
-/// `if bake_debug_enabled() { tracing::info!(...) }` site costs the
-/// price of the branch only.
-pub fn bake_debug_enabled() -> bool {
-    use std::sync::OnceLock;
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| std::env::var("BLINC_BAKE_DEBUG").as_deref() == Ok("1"))
-}
-
 // Re-export the type surface so existing `crate::renderer::TextData`
 // / `::ElementType` / `::RenderNode` paths keep resolving without
 // any change to the rest of the crate or external callers.
@@ -332,6 +321,21 @@ pub struct DynamicRegion {
     /// What kind of dynamic content this region holds + the data
     /// needed to re-emit it.
     pub kind: DynamicKind,
+    /// Walker-visit sequence number. `dynamic_regions` is a HashMap
+    /// — iteration order is non-deterministic, so the per-frame
+    /// motion / CSS overlays sort their jobs by this counter to
+    /// preserve tree paint order (back-to-front sibling stacking).
+    /// Sibling motion subtrees often share the same `z_layer`
+    /// (children of a flex container don't create new stacking
+    /// contexts), so z_layer alone is insufficient as a tiebreaker.
+    /// Symptom this fixes: cn::switch's on_layer (earlier child) and
+    /// thumb (later child) both promote; without the seq sort the
+    /// HashMap may blit on_layer AFTER the thumb, covering it as the
+    /// on_layer's opacity ramps in — the thumb visibly "fades off"
+    /// as Notifications animates OFF→ON. The walker writes this
+    /// monotonically from a per-paint counter so the order matches
+    /// tree-walk order.
+    pub visit_seq: u32,
 }
 
 ///
@@ -1707,29 +1711,6 @@ impl RenderTree {
         let mut writer = self.subtree_texture_candidates.borrow_mut();
         *writer = candidates;
         drop(writer);
-
-        // P4.3 diagnostics: capture the per-frame candidate set so a
-        // flickering predicate is visible in the log alongside the
-        // walker.insert / bake.rasterize / overlay.blit lines. Each
-        // frame's candidate set should be STICKY across a single
-        // spring animation; flicker shows up as keys appearing /
-        // disappearing in adjacent frames, which would explain the
-        // re-rasterize-every-paint pattern we're trying to pin down.
-        if bake_debug_enabled() {
-            use slotmap::Key as _;
-            let live = self.subtree_texture_candidates.borrow();
-            let mut keys: Vec<String> = live
-                .iter()
-                .map(|n| format!("{:#x}", n.data().as_ffi()))
-                .collect();
-            keys.sort();
-            tracing::info!(
-                target: "blinc::bake",
-                "candidates.compute count={} keys=[{}]",
-                live.len(),
-                keys.join(", "),
-            );
-        }
 
         // Phase 4.2 — prune motion-subtree bake records whose node is
         // no longer a candidate. Demoted ids are intentionally

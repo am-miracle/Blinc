@@ -595,12 +595,9 @@ impl RenderTree {
         // pixels with the current motion-binding transform applied —
         // no walker re-entry, no re-emission.
         //
-        // P4.3 walker gate (Option B clip-aware bake, re-enabled
-        // 2026-05-26 after `composite_layer_clip_base` became a Vec
-        // — see [paint.rs:composite_layer_nested_push_preserves_outer_clip_base]).
-        // Run with `BLINC_BAKE_DEBUG=1` for per-region diagnostics
-        // at the walker insert, bake hook, and overlay blit sites
-        // (search `bake_debug!` invocations).
+        // P4.3 walker gate (Option B clip-aware bake) — see
+        // [paint.rs:composite_layer_nested_push_preserves_outer_clip_base]
+        // for the clip-stack stack semantics this depends on.
         let ambient_clip_for_bake = if !pushed_for_css
             && self.subtree_texture_candidates.borrow().contains(&node)
         {
@@ -1734,6 +1731,7 @@ impl RenderTree {
                             self.scale_factor,
                         );
                         let region_clip_aabb = saved_ancestor_clip;
+                        let visit_seq = self.dynamic_regions.borrow().len() as u32;
                         self.dynamic_regions.borrow_mut().insert(
                             node,
                             super::super::DynamicRegion {
@@ -1750,6 +1748,7 @@ impl RenderTree {
                                     clips_content: should_clip,
                                     bounds_wh: (bounds.width, bounds.height),
                                 },
+                                visit_seq,
                             },
                         );
                     }
@@ -2213,7 +2212,27 @@ impl RenderTree {
                 // on every frame. The Compositor v2 dynamic-regions
                 // path below still records them so they're visible to
                 // the per-region dispatch.
-                if motion_bindings_ref.is_some() {
+                //
+                // Also skip for P4.3 motion-subtree candidates: their
+                // primitives were routed to a per-node SCRATCH batch
+                // (not `cached_dynamic_batch`), so the `start..end`
+                // range above indexes into scratch — not the dynamic
+                // batch that `apply_binding_deltas` patches. Without
+                // this gate the fast-path patcher walks scratch-range
+                // indices against `cached_dynamic_batch`, corrupting
+                // unrelated motion-bound primitives at those indices.
+                // The symptom (cn::switch Dark mode distortion when
+                // Notifications is toggled): Notifications becomes a
+                // P4.3 candidate, scratch indices `[0..1]` get
+                // recorded as Notifications' `primitive_range`,
+                // `apply_binding_deltas` patches `cached_dynamic_batch[0..1]`
+                // every fast-paint frame with deltas computed from
+                // Notifications' spring — and those indices happen to
+                // be Dark mode's `on_layer` / thumb primitives in the
+                // dynamic batch, so Dark mode visibly drifts. P4.3's
+                // bake-and-blit overlay handles motion updates for
+                // candidates instead.
+                if motion_bindings_ref.is_some() && !pushed_for_motion_subtree {
                     self.composite_bindings.borrow_mut().insert(
                         node,
                         super::super::CompositeBindingMeta {
@@ -2292,6 +2311,7 @@ impl RenderTree {
                         region_screen_aabb[2] + offset_x,
                         region_screen_aabb[3] + offset_y,
                     ];
+                    let visit_seq = self.dynamic_regions.borrow().len() as u32;
                     self.dynamic_regions.borrow_mut().insert(
                         node,
                         super::super::DynamicRegion {
@@ -2304,6 +2324,7 @@ impl RenderTree {
                                 z_layer: amb_z,
                             },
                             kind,
+                            visit_seq,
                         },
                     );
                 }
@@ -2453,6 +2474,7 @@ impl RenderTree {
                             clip_aabb: ctx.current_clip_aabb(),
                             z_layer: ctx.z_layer(),
                         };
+                        let visit_seq = self.dynamic_regions.borrow().len() as u32;
                         self.dynamic_regions.borrow_mut().insert(
                             node,
                             super::super::DynamicRegion {
@@ -2463,6 +2485,7 @@ impl RenderTree {
                                     natural_size: (natural_w, natural_h),
                                     ambient_clip: css_anim_ancestor_clip,
                                 },
+                                visit_seq,
                             },
                         );
                     }
@@ -2489,24 +2512,7 @@ impl RenderTree {
                 clip_aabb: ctx.current_clip_aabb(),
                 z_layer: ctx.z_layer(),
             };
-            if super::super::bake_debug_enabled() {
-                use slotmap::Key as _;
-                let stable = self.stable_id(node).map(|s| format!("{:?}", s));
-                tracing::info!(
-                    target: "blinc::bake",
-                    "walker.insert MotionSubtreeTexture node_key={:#x} stable={:?} \
-                     prim_range={}..{} screen_aabb={:?} natural_size=({},{}) \
-                     ambient_clip={:?}",
-                    node.data().as_ffi(),
-                    stable,
-                    start,
-                    end,
-                    aabb,
-                    natural_w,
-                    natural_h,
-                    ambient_clip_for_bake,
-                );
-            }
+            let visit_seq = self.dynamic_regions.borrow().len() as u32;
             self.dynamic_regions.borrow_mut().insert(
                 node,
                 super::super::DynamicRegion {
@@ -2517,6 +2523,7 @@ impl RenderTree {
                         natural_size: (natural_w, natural_h),
                         ambient_clip: ambient_clip_for_bake,
                     },
+                    visit_seq,
                 },
             );
         }
