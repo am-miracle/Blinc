@@ -533,7 +533,12 @@ impl<'a> GpuPaintContext<'a> {
                         corner_radius.bottom_left,
                     ];
                     topmost_rounded = Some((bounds, radii));
-                    (rect.x(), rect.y(), rect.x() + rect.width(), rect.y() + rect.height())
+                    (
+                        rect.x(),
+                        rect.y(),
+                        rect.x() + rect.width(),
+                        rect.y() + rect.height(),
+                    )
                 }
                 _ => continue,
             };

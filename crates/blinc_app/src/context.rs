@@ -1543,8 +1543,7 @@ impl RenderContext {
         }
         let bindings_map = tree.motion_bindings_map().clone();
         for job in jobs {
-            let Some((texture, content_size)) = self.motion_subtree_textures.get(&job.key)
-            else {
+            let Some((texture, content_size)) = self.motion_subtree_textures.get(&job.key) else {
                 continue;
             };
             let allocated_size = *content_size;
@@ -8191,8 +8190,7 @@ impl RenderContext {
                     }
                     let scratch_hash = Self::hash_composite_scratch(scratch_batch);
                     if self.motion_subtree_textures.contains_key(&key)
-                        && self.motion_subtree_scratch_hash.get(&key).copied()
-                            == Some(scratch_hash)
+                        && self.motion_subtree_scratch_hash.get(&key).copied() == Some(scratch_hash)
                     {
                         continue;
                     }

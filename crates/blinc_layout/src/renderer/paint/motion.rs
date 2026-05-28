@@ -564,26 +564,25 @@ impl RenderTree {
         // emit (so scale/translate animations don't drag a baked
         // ancestor clip along with them). The overlay reapplies the
         // captured AABB as a scissor.
-        let css_anim_ancestor_clip = if in_css_subtree
-            && self.composite_promotion.borrow().contains(&node)
-        {
-            ctx.current_clip_rounded()
-        } else {
-            None
-        };
-        let pushed_for_css =
+        let css_anim_ancestor_clip =
             if in_css_subtree && self.composite_promotion.borrow().contains(&node) {
-                // Use the slotmap key bits as the routing key — stable
-                // for the duration of the paint (slotmap version doesn't
-                // bump within a single paint pass). `Key::data().as_ffi()`
-                // packs (index, version) into a single u64.
-                use slotmap::Key as _;
-                let key = node.data().as_ffi();
-                ctx.push_composite_layer(key);
-                true
+                ctx.current_clip_rounded()
             } else {
-                false
+                None
             };
+        let pushed_for_css = if in_css_subtree && self.composite_promotion.borrow().contains(&node)
+        {
+            // Use the slotmap key bits as the routing key — stable
+            // for the duration of the paint (slotmap version doesn't
+            // bump within a single paint pass). `Key::data().as_ffi()`
+            // packs (index, version) into a single u64.
+            use slotmap::Key as _;
+            let key = node.data().as_ffi();
+            ctx.push_composite_layer(key);
+            true
+        } else {
+            false
+        };
         // Phase 4.3 — composite-layer push for motion-bound subtrees
         // detected as texture-safe by `compute_subtree_texture_candidates`
         // (root has animating transform/opacity binding AND no descendant
@@ -598,31 +597,28 @@ impl RenderTree {
         // P4.3 walker gate (Option B clip-aware bake) — see
         // [paint.rs:composite_layer_nested_push_preserves_outer_clip_base]
         // for the clip-stack stack semantics this depends on.
-        let ambient_clip_for_bake = if !pushed_for_css
-            && self.subtree_texture_candidates.borrow().contains(&node)
-        {
-            ctx.current_clip_rounded()
-        } else {
-            None
-        };
-        let pushed_for_motion_subtree = if !pushed_for_css
-            && self.subtree_texture_candidates.borrow().contains(&node)
-        {
-            use slotmap::Key as _;
-            let key = node.data().as_ffi();
-            ctx.push_composite_layer(key);
-            true
-        } else {
-            false
-        };
+        let ambient_clip_for_bake =
+            if !pushed_for_css && self.subtree_texture_candidates.borrow().contains(&node) {
+                ctx.current_clip_rounded()
+            } else {
+                None
+            };
+        let pushed_for_motion_subtree =
+            if !pushed_for_css && self.subtree_texture_candidates.borrow().contains(&node) {
+                use slotmap::Key as _;
+                let key = node.data().as_ffi();
+                ctx.push_composite_layer(key);
+                true
+            } else {
+                false
+            };
         let pushed_composite_layer = pushed_for_css || pushed_for_motion_subtree;
         let css_anim_bg_start = in_css_subtree.then(|| ctx.bg_primitive_count());
         // P4.3 sibling of `css_anim_bg_start`. We snapshot the scratch
         // batch index AFTER `push_composite_layer` so the AABB at the
         // insert site below covers exactly the primitives this subtree
         // emitted into its scratch batch.
-        let motion_subtree_bg_start =
-            pushed_for_motion_subtree.then(|| ctx.bg_primitive_count());
+        let motion_subtree_bg_start = pushed_for_motion_subtree.then(|| ctx.bg_primitive_count());
 
         // Compositor v2 ambient snapshot for motion-bound subtrees.
         // Captured BEFORE this node pushes any of its own transforms
@@ -803,9 +799,7 @@ impl RenderTree {
         // the current binding values and applies them at blit time.
         let bake_skip = pushed_for_motion_subtree;
         let has_binding_transform = binding_transform.is_some() && !bake_skip;
-        if has_binding_transform
-            && let Some(ref transform) = binding_transform
-        {
+        if has_binding_transform && let Some(ref transform) = binding_transform {
             ctx.push_transform(transform.clone());
         }
 
