@@ -428,7 +428,7 @@ impl BlincDsl {
         // MUST validate BEFORE lower_component_calls — validator reads the marker shape.
         validate_component_calls(&typed_program)
             .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
-        lower_component_calls(&mut typed_program);
+        lower_component_calls(&mut typed_program, filename);
         bind_component_props(&mut typed_program);
 
         // Module hardcoded to "main" — Zyntax compiles each source into one module.
@@ -752,7 +752,7 @@ impl BlincDsl {
             .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
 
         // MUST run after validation — validator reads the marker shape.
-        lower_component_calls(&mut program);
+        lower_component_calls(&mut program, filename);
 
         bind_component_props(&mut program);
 

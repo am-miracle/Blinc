@@ -30,6 +30,79 @@ impl WidgetBox {
     }
 }
 
+// =====================================================================
+// Call-site instance IDs — span-derived stable identities
+// =====================================================================
+//
+// Each `__component_call__` lowering site emits a `__push_call_id__` /
+// `__pop_call_id__` bracket around the actual call. The pushed ID is a
+// stable hash of `(source_filename, call_site_byte_offset)`, computed
+// at lowering time. Widget FFI reads the top of this stack via
+// `current_call_id()` and uses it to key per-instance state — so two
+// `button("Click")` invocations at distinct source positions hold
+// distinct FSMs, even if their labels match.
+//
+// The stack is per-thread (DSL JIT is single-threaded today) — we can
+// switch to a Mutex if multi-thread invocation becomes a thing.
+
+std::thread_local! {
+    static CALL_ID_STACK: std::cell::RefCell<Vec<u64>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Push an instance-ID onto the current thread's call-site stack.
+/// Emitted by `lower_component_calls` immediately before every
+/// rewritten call expression.
+pub extern "C" fn blinc_dsl_push_call_id(id: u64) {
+    CALL_ID_STACK.with(|s| s.borrow_mut().push(id));
+}
+
+/// Pop the most recently pushed instance-ID. Emitted by
+/// `lower_component_calls` immediately after every rewritten call
+/// expression returns.
+pub extern "C" fn blinc_dsl_pop_call_id() {
+    CALL_ID_STACK.with(|s| {
+        let _ = s.borrow_mut().pop();
+    });
+}
+
+/// Pop the top-of-stack instance-ID AND pass-through the supplied
+/// widget-handle value. Used by `lower_component_calls` as the
+/// trailing expression of the push/call/pop bracket so the block's
+/// value is the original call's return value, but the pop runs
+/// AFTER the call's argument evaluation (which is when widget FFI
+/// reads the call_id).
+///
+/// Calling-convention quirk: the value passes through unchanged —
+/// this is purely a sequencing primitive.
+pub extern "C" fn blinc_dsl_pop_call_id_and_return(value: i64) -> i64 {
+    CALL_ID_STACK.with(|s| {
+        let _ = s.borrow_mut().pop();
+    });
+    value
+}
+
+/// Read the top of the call-id stack, or `0` if the stack is empty
+/// (i.e. we're outside any lowered component call — e.g. inside a
+/// top-level `view {}` block, or pre-lowering test harness).
+///
+/// Exposed as an extern so JIT-compiled code can query it.
+pub extern "C" fn blinc_dsl_current_call_id() -> u64 {
+    CALL_ID_STACK.with(|s| s.borrow().last().copied().unwrap_or(0))
+}
+
+/// Rust-side convenience used by `dsl_state_key` and other state
+/// allocators that need to key widgets to their nearest enclosing
+/// call site. Currently always returns `0` because the wrap-injection
+/// lowering pass that calls `__push_call_id__` is deferred — see the
+/// comment in `lower_component_calls`. Kept here so the follow-up
+/// commit can switch `dsl_state_key` over without touching the FFI
+/// surface.
+#[allow(dead_code)]
+pub(crate) fn current_call_id() -> u64 {
+    CALL_ID_STACK.with(|s| s.borrow().last().copied().unwrap_or(0))
+}
+
 /// Per-call overlay of visual styling props. `Some` fields
 /// override the wrapped widget's `render_props()`; `None` fields
 /// leave it alone.

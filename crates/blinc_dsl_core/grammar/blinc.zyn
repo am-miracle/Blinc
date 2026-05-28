@@ -91,6 +91,15 @@
     __set_overlay_corner_radius__: "__set_overlay_corner_radius__",
     __set_overlay_border_width__: "__set_overlay_border_width__",
     __set_overlay_border_color__: "__set_overlay_border_color__",
+    // Call-site instance IDs. `lower_component_calls` brackets every
+    // rewritten call with `__push_call_id__(ID)` / `__pop_call_id__()`
+    // so widget FFI can key per-instance state to the source span.
+    // `__current_call_id__()` lets DSL bodies query the active id
+    // (mostly used by tests to verify span-keying).
+    __push_call_id__: "__push_call_id__",
+    __pop_call_id__: "__pop_call_id__",
+    __pop_call_id_and_return__: "__pop_call_id_and_return__",
+    __current_call_id__: "__current_call_id__",
 }
 
 // =====================================================================

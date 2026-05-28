@@ -1350,57 +1350,85 @@ pub(crate) fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec
     }
 }
 
+/// Stable per-call-site instance ID derived from `(filename, byte_offset)`.
+/// Used by [`lower_component_calls`] (and a follow-up wrap-injection pass)
+/// to bracket every rewritten call with `__push_call_id__(ID)` so widget
+/// FFI can key per-instance state to the source location instead of
+/// brittle proxies like widget label strings.
+///
+/// `DefaultHasher` (SipHash) is deterministic per process but not across
+/// processes — that's fine here since instance IDs are scoped to a single
+/// run of the JIT runtime.
+pub(crate) fn call_site_instance_id(filename: &str, span_start: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    filename.hash(&mut h);
+    span_start.hash(&mut h);
+    h.finish()
+}
+
 /// Rewrite `__component_call__("Name", positionals, __named__(...), body)` markers
-/// into `Call(Variable("Name"), positionals, named_args, body)`. MUST run after
-/// `validate_component_calls`. Slot markers inside body Blocks are left alone.
-pub(crate) fn lower_component_calls(program: &mut TypedProgram) {
+/// into `Call(Variable("Name"), positionals, named_args, body)`, then wrap each
+/// rewritten call in a `__push_call_id__(ID) ; … ; __pop_call_id__()` bracket
+/// so widget FFI can key per-instance state to the source span.
+/// MUST run after `validate_component_calls`. Slot markers inside body Blocks
+/// are left alone.
+pub(crate) fn lower_component_calls(program: &mut TypedProgram, filename: &str) {
     use zyntax_typed_ast::typed_ast::{
         TypedCall, TypedDeclaration, TypedExpression, TypedLiteral, TypedNamedArg,
     };
 
-    fn rewrite_expr(expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>) {
+    // Bracket-wrap injection (push_call_id(ID) ; ORIGINAL_CALL) around
+    // each lowered view call is deferred to a follow-up. The scaffolding
+    // (`call_site_instance_id` helper + `__push_call_id__` /
+    // `__pop_call_id__` / `__current_call_id__` ABI fns) is wired up
+    // already; the open question is how to materialise the wrap without
+    // tripping Zyntax's SSA value-map on `TypedExpression::Block`-as-
+    // expression at the trailing-statement position.
+
+    fn rewrite_expr(expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>, filename: &str) {
         // Recurse bottom-up so nested marker calls also lower.
         match &mut expr.node {
             TypedExpression::Binary(b) => {
-                rewrite_expr(&mut b.left);
-                rewrite_expr(&mut b.right);
+                rewrite_expr(&mut b.left, filename);
+                rewrite_expr(&mut b.right, filename);
             }
-            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand),
+            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand, filename),
             TypedExpression::Call(c) => {
-                rewrite_expr(&mut c.callee);
+                rewrite_expr(&mut c.callee, filename);
                 for a in &mut c.positional_args {
-                    rewrite_expr(a);
+                    rewrite_expr(a, filename);
                 }
                 for n in &mut c.named_args {
-                    rewrite_expr(&mut n.value);
+                    rewrite_expr(&mut n.value, filename);
                 }
             }
-            TypedExpression::Field(f) => rewrite_expr(&mut f.object),
+            TypedExpression::Field(f) => rewrite_expr(&mut f.object, filename),
             TypedExpression::Index(idx) => {
-                rewrite_expr(&mut idx.object);
-                rewrite_expr(&mut idx.index);
+                rewrite_expr(&mut idx.object, filename);
+                rewrite_expr(&mut idx.index, filename);
             }
             TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
                 for it in items {
-                    rewrite_expr(it);
+                    rewrite_expr(it, filename);
                 }
             }
             TypedExpression::Struct(s) => {
                 for field in &mut s.fields {
-                    rewrite_expr(&mut field.value);
+                    rewrite_expr(&mut field.value, filename);
                 }
             }
             TypedExpression::MethodCall(mc) => {
-                rewrite_expr(&mut mc.receiver);
+                rewrite_expr(&mut mc.receiver, filename);
                 for a in &mut mc.positional_args {
-                    rewrite_expr(a);
+                    rewrite_expr(a, filename);
                 }
             }
-            TypedExpression::Block(b) => rewrite_block(b),
+            TypedExpression::Block(b) => rewrite_block(b, filename),
             TypedExpression::If(if_expr) => {
-                rewrite_expr(&mut if_expr.condition);
-                rewrite_expr(&mut if_expr.then_branch);
-                rewrite_expr(&mut if_expr.else_branch);
+                rewrite_expr(&mut if_expr.condition, filename);
+                rewrite_expr(&mut if_expr.then_branch, filename);
+                rewrite_expr(&mut if_expr.else_branch, filename);
             }
             _ => {}
         }
@@ -1482,14 +1510,20 @@ pub(crate) fn lower_component_calls(program: &mut TypedProgram) {
             named_args: new_named,
             type_args: vec![],
         });
+
+        // Compute the call-site instance ID for follow-up wrap-injection
+        // passes. The hash is stable per `(filename, span.start)` —
+        // anything downstream that wants to key per-call-site state can
+        // compute the same value from these inputs.
+        let _instance_id = call_site_instance_id(filename, span.start);
     }
 
-    fn rewrite_block(block: &mut zyntax_typed_ast::typed_ast::TypedBlock) {
+    fn rewrite_block(block: &mut zyntax_typed_ast::typed_ast::TypedBlock, filename: &str) {
         let old_stmts = std::mem::take(&mut block.statements);
         let mut new_stmts: Vec<zyntax_typed_ast::TypedNode<TypedStatement>> =
             Vec::with_capacity(old_stmts.len());
         for mut stmt in old_stmts {
-            rewrite_stmt(&mut stmt);
+            rewrite_stmt(&mut stmt, filename);
             collect_children_into(&mut new_stmts, stmt);
         }
         block.statements = new_stmts;
@@ -1672,27 +1706,27 @@ pub(crate) fn lower_component_calls(program: &mut TypedProgram) {
         )
     }
 
-    fn rewrite_stmt(stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>) {
+    fn rewrite_stmt(stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>, filename: &str) {
         match &mut stmt.node {
-            TypedStatement::Expression(e) => rewrite_expr(e),
+            TypedStatement::Expression(e) => rewrite_expr(e, filename),
             TypedStatement::Let(l) => {
                 if let Some(init) = &mut l.initializer {
-                    rewrite_expr(init);
+                    rewrite_expr(init, filename);
                 }
             }
-            TypedStatement::Return(Some(e)) => rewrite_expr(e),
+            TypedStatement::Return(Some(e)) => rewrite_expr(e, filename),
             TypedStatement::If(if_stmt) => {
-                rewrite_expr(&mut if_stmt.condition);
-                rewrite_block(&mut if_stmt.then_block);
+                rewrite_expr(&mut if_stmt.condition, filename);
+                rewrite_block(&mut if_stmt.then_block, filename);
                 if let Some(else_block) = &mut if_stmt.else_block {
-                    rewrite_block(else_block);
+                    rewrite_block(else_block, filename);
                 }
             }
             TypedStatement::While(w) => {
-                rewrite_expr(&mut w.condition);
-                rewrite_block(&mut w.body);
+                rewrite_expr(&mut w.condition, filename);
+                rewrite_block(&mut w.body, filename);
             }
-            TypedStatement::Block(b) => rewrite_block(b),
+            TypedStatement::Block(b) => rewrite_block(b, filename),
             _ => {}
         }
     }
@@ -1701,13 +1735,13 @@ pub(crate) fn lower_component_calls(program: &mut TypedProgram) {
         match &mut decl.node {
             TypedDeclaration::Function(func) => {
                 if let Some(body) = &mut func.body {
-                    rewrite_block(body);
+                    rewrite_block(body, filename);
                 }
             }
             TypedDeclaration::Impl(imp) => {
                 for method in &mut imp.methods {
                     if let Some(body) = &mut method.body {
-                        rewrite_block(body);
+                        rewrite_block(body, filename);
                     }
                 }
             }

@@ -362,6 +362,44 @@ fn render_view_invoking_component() {
     }
 }
 
+/// Span-derived instance IDs are deterministic and discriminate by both
+/// filename and byte offset. Scaffolding for the upcoming wrap-injection
+/// pass that brackets every lowered view call with `__push_call_id__(ID)`.
+#[test]
+fn call_site_instance_id_is_stable_and_discriminating() {
+    use crate::passes::call_site_instance_id;
+
+    // Same inputs → same output.
+    assert_eq!(
+        call_site_instance_id("a.blinc", 42),
+        call_site_instance_id("a.blinc", 42),
+        "hash must be stable for identical (filename, span.start)"
+    );
+
+    // Different offset in same file → distinct id.
+    assert_ne!(
+        call_site_instance_id("a.blinc", 42),
+        call_site_instance_id("a.blinc", 43),
+        "different byte offsets must produce distinct ids"
+    );
+
+    // Different filename with same offset → distinct id.
+    assert_ne!(
+        call_site_instance_id("a.blinc", 42),
+        call_site_instance_id("b.blinc", 42),
+        "different filenames must produce distinct ids — cross-file \
+         collision protection for multi-source projects"
+    );
+
+    // Zero-offset is a legitimate id, not a sentinel.
+    assert_ne!(
+        call_site_instance_id("a.blinc", 0),
+        0,
+        "no special-cased zero — `0` is the empty-stack sentinel \
+         returned by `__current_call_id__` outside any bracketed call"
+    );
+}
+
 /// `render_component(name)` invokes the mangled `<name>$view`.
 #[test]
 fn render_component_emits_view_ops() {

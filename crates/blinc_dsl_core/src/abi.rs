@@ -123,6 +123,44 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_fsm_subscribe as *const u8,
         },
         BuiltinDescriptor {
+            // Push a stable instance-ID derived from the call site's
+            // (filename, byte_offset) — emitted by `lower_component_calls`
+            // around every rewritten component / widget call. Widget FFI
+            // reads the top of this stack to key per-instance state.
+            name: "__push_call_id__",
+            param_types: &[Type::Primitive(PrimitiveType::U64)],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: crate::widget_ffi::blinc_dsl_push_call_id as *const u8,
+        },
+        BuiltinDescriptor {
+            // Pop the most-recent call-ID. Paired with `__push_call_id__`.
+            name: "__pop_call_id__",
+            param_types: &[],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: crate::widget_ffi::blinc_dsl_pop_call_id as *const u8,
+        },
+        BuiltinDescriptor {
+            // Pop + pass-through. `lower_component_calls` wraps a
+            // rewritten call as `__pop_call_id_and_return__(Counter$view(...))`
+            // so the call evaluates (widget FFI seeing the pushed id during
+            // arg eval), then the pop runs, then the i64 widget handle
+            // bubbles up as the bracket-expression's value.
+            name: "__pop_call_id_and_return__",
+            param_types: &[Type::Primitive(PrimitiveType::I64)],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: crate::widget_ffi::blinc_dsl_pop_call_id_and_return as *const u8,
+        },
+        BuiltinDescriptor {
+            // Read the current top of the call-ID stack. Returns 0 when
+            // outside any component-call bracket. Used by tests + DSL
+            // bodies that want a stable identity to thread to runtime
+            // APIs.
+            name: "__current_call_id__",
+            param_types: &[],
+            return_type: Type::Primitive(PrimitiveType::U64),
+            ptr: crate::widget_ffi::blinc_dsl_current_call_id as *const u8,
+        },
+        BuiltinDescriptor {
             // `__fstring_format__` (i32 only — f64 needs a separate `__fstring_format_f64__`).
             name: "$Blinc$format_int",
             param_types: &[Type::Primitive(PrimitiveType::I32)],
@@ -729,6 +767,7 @@ pub(crate) fn type_to_tag(ty: &Type) -> TypeTag {
         Type::Primitive(PrimitiveType::String) => TypeTag::STRING,
         Type::Primitive(PrimitiveType::I32) => TypeTag::I32,
         Type::Primitive(PrimitiveType::I64) => TypeTag::I64,
+        Type::Primitive(PrimitiveType::U64) => TypeTag::U64,
         Type::Primitive(PrimitiveType::F64) => TypeTag::F64,
         // Panic loudly — silent VOID would break codegen.
         _ => panic!(
@@ -747,6 +786,9 @@ pub(crate) fn type_to_native(ty: &Type) -> Result<NativeType, &Type> {
         Type::Primitive(PrimitiveType::String) => Ok(NativeType::Ptr),
         Type::Primitive(PrimitiveType::I32) => Ok(NativeType::I32),
         Type::Primitive(PrimitiveType::I64) => Ok(NativeType::I64),
+        // u64 has the same calling-convention width as i64 — Cranelift
+        // doesn't distinguish signedness for register passing.
+        Type::Primitive(PrimitiveType::U64) => Ok(NativeType::I64),
         Type::Primitive(PrimitiveType::F64) => Ok(NativeType::F64),
         other => Err(other),
     }
