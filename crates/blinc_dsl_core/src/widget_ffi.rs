@@ -441,12 +441,22 @@ fn ensure_context_state() {
     blinc_core::BlincContextState::init(reactive, hooks, dirty);
 }
 
-fn dsl_state_key(kind: &str, label: &str) -> String {
-    let mut key = String::with_capacity(kind.len() + label.len() + 16);
+/// Build a per-call-site state key for DSL widgets. The `call_id` is
+/// the span-derived `u64` injected by `crate::passes::inject_call_site_keys`
+/// at the lowering stage — every substrate-primitive widget call carries
+/// it as the leading positional arg, so two `Button("Play")` invocations
+/// at distinct source positions get distinct keys even though their
+/// labels match.
+///
+/// The format `blinc-dsl:<kind>:<call_id_hex>` is opaque but stable;
+/// `dsl_state_key` consumers don't parse it.
+fn dsl_state_key(kind: &str, call_id: u64) -> String {
+    let mut key = String::with_capacity(kind.len() + 32);
     key.push_str("blinc-dsl:");
     key.push_str(kind);
     key.push(':');
-    key.push_str(label);
+    use std::fmt::Write as _;
+    let _ = write!(&mut key, "{call_id:016x}");
     key
 }
 
@@ -565,6 +575,7 @@ fn finish_custom_widget(
 macro_rules! typography_view {
     ($fn_name:ident, $builder:path) => {
         pub(crate) extern "C" fn $fn_name(
+            _call_id: u64,
             content_ptr: *const i32,
             style: i64,
             class_str: *const i32,
@@ -600,6 +611,7 @@ typography_view!(
 ///
 /// `content_ptr` must point at a Zyntax length-prefixed UTF-8 buffer.
 pub(crate) extern "C" fn blinc_text_view(
+    _call_id: u64,
     content_ptr: *const i32,
     style: i64,
     class_str: *const i32,
@@ -613,11 +625,16 @@ pub(crate) extern "C" fn blinc_text_view(
     finish_text_widget(blinc_layout::text::Text::new(content), style, class_str)
 }
 
-pub(crate) extern "C" fn blinc_hr_view(style: i64, class_str: *const i32) -> WidgetHandle {
+pub(crate) extern "C" fn blinc_hr_view(
+    _call_id: u64,
+    style: i64,
+    class_str: *const i32,
+) -> WidgetHandle {
     finish_div_widget(blinc_layout::widgets::hr(), style, class_str)
 }
 
 pub(crate) extern "C" fn blinc_blockquote_view(
+    _call_id: u64,
     children: WidgetHandle,
     style: i64,
     class_str: *const i32,
@@ -633,6 +650,7 @@ pub(crate) extern "C" fn blinc_blockquote_view(
 }
 
 pub(crate) extern "C" fn blinc_link_view(
+    _call_id: u64,
     label_ptr: *const i32,
     url_ptr: *const i32,
     style: i64,
@@ -648,6 +666,7 @@ pub(crate) extern "C" fn blinc_link_view(
 }
 
 pub(crate) extern "C" fn blinc_ul_view(
+    _call_id: u64,
     children: WidgetHandle,
     style: i64,
     class_str: *const i32,
@@ -663,6 +682,7 @@ pub(crate) extern "C" fn blinc_ul_view(
 }
 
 pub(crate) extern "C" fn blinc_ol_view(
+    _call_id: u64,
     children: WidgetHandle,
     start: i32,
     style: i64,
@@ -678,7 +698,11 @@ pub(crate) extern "C" fn blinc_ol_view(
     finish_custom_widget(widget, style)
 }
 
-pub(crate) extern "C" fn blinc_li_view(children: WidgetHandle, style: i64) -> WidgetHandle {
+pub(crate) extern "C" fn blinc_li_view(
+    _call_id: u64,
+    children: WidgetHandle,
+    style: i64,
+) -> WidgetHandle {
     let mut widget = blinc_layout::widgets::li();
     for child in materialize_children(children) {
         widget = widget.child_box(child);
@@ -687,6 +711,7 @@ pub(crate) extern "C" fn blinc_li_view(children: WidgetHandle, style: i64) -> Wi
 }
 
 pub(crate) extern "C" fn blinc_task_item_view(
+    _call_id: u64,
     children: WidgetHandle,
     checked: i32,
     style: i64,
@@ -699,6 +724,7 @@ pub(crate) extern "C" fn blinc_task_item_view(
 }
 
 pub(crate) extern "C" fn blinc_table_view(
+    _call_id: u64,
     children: WidgetHandle,
     style: i64,
     class_str: *const i32,
@@ -711,6 +737,7 @@ pub(crate) extern "C" fn blinc_table_view(
 }
 
 pub(crate) extern "C" fn blinc_thead_view(
+    _call_id: u64,
     children: WidgetHandle,
     style: i64,
     class_str: *const i32,
@@ -723,6 +750,7 @@ pub(crate) extern "C" fn blinc_thead_view(
 }
 
 pub(crate) extern "C" fn blinc_tbody_view(
+    _call_id: u64,
     children: WidgetHandle,
     style: i64,
     class_str: *const i32,
@@ -735,6 +763,7 @@ pub(crate) extern "C" fn blinc_tbody_view(
 }
 
 pub(crate) extern "C" fn blinc_tfoot_view(
+    _call_id: u64,
     children: WidgetHandle,
     style: i64,
     class_str: *const i32,
@@ -747,6 +776,7 @@ pub(crate) extern "C" fn blinc_tfoot_view(
 }
 
 pub(crate) extern "C" fn blinc_tr_view(
+    _call_id: u64,
     children: WidgetHandle,
     style: i64,
     class_str: *const i32,
@@ -758,17 +788,29 @@ pub(crate) extern "C" fn blinc_tr_view(
     finish_div_widget(widget, style, class_str)
 }
 
-pub(crate) extern "C" fn blinc_th_view(content_ptr: *const i32, style: i64) -> WidgetHandle {
+pub(crate) extern "C" fn blinc_th_view(
+    _call_id: u64,
+    content_ptr: *const i32,
+    style: i64,
+) -> WidgetHandle {
     let content = decode_string_arg(content_ptr);
     finish_custom_widget(blinc_layout::widgets::th(content), style)
 }
 
-pub(crate) extern "C" fn blinc_td_view(content_ptr: *const i32, style: i64) -> WidgetHandle {
+pub(crate) extern "C" fn blinc_td_view(
+    _call_id: u64,
+    content_ptr: *const i32,
+    style: i64,
+) -> WidgetHandle {
     let content = decode_string_arg(content_ptr);
     finish_custom_widget(blinc_layout::widgets::td(content), style)
 }
 
-pub(crate) extern "C" fn blinc_cell_view(children: WidgetHandle, style: i64) -> WidgetHandle {
+pub(crate) extern "C" fn blinc_cell_view(
+    _call_id: u64,
+    children: WidgetHandle,
+    style: i64,
+) -> WidgetHandle {
     let mut widget = blinc_layout::widgets::cell();
     for child in materialize_children(children) {
         widget = widget.child_box(child);
@@ -777,6 +819,7 @@ pub(crate) extern "C" fn blinc_cell_view(children: WidgetHandle, style: i64) -> 
 }
 
 pub(crate) extern "C" fn blinc_button_view(
+    call_id: u64,
     label_ptr: *const i32,
     style: i64,
     class_str: *const i32,
@@ -784,7 +827,9 @@ pub(crate) extern "C" fn blinc_button_view(
     ensure_theme_state();
     ensure_context_state();
     let label = decode_string_arg(label_ptr);
-    let key = dsl_state_key("button", &label);
+    // Key by call_id (span-derived) so dup-labelled buttons at distinct
+    // call sites hold distinct FSM state.
+    let key = dsl_state_key("button", call_id);
     let state = blinc_layout::use_fsm_keyed::<_, blinc_layout::stateful::ButtonState>(
         &key,
         blinc_layout::stateful::ButtonState::Idle,
@@ -797,6 +842,7 @@ pub(crate) extern "C" fn blinc_button_view(
 }
 
 pub(crate) extern "C" fn blinc_checkbox_view(
+    call_id: u64,
     label_ptr: *const i32,
     checked: i32,
     style: i64,
@@ -804,13 +850,15 @@ pub(crate) extern "C" fn blinc_checkbox_view(
     ensure_theme_state();
     ensure_context_state();
     let label = decode_string_arg(label_ptr);
-    let key = dsl_state_key("checkbox", &label);
+    // Same call_id keying as Button — see comment there.
+    let key = dsl_state_key("checkbox", call_id);
     let state = blinc_core::use_state_keyed(&key, || checked != 0);
     let widget = blinc_layout::widgets::checkbox_labeled(&state, label);
     finish_custom_widget(widget, style)
 }
 
 pub(crate) extern "C" fn blinc_text_input_view(
+    _call_id: u64,
     placeholder_ptr: *const i32,
     style: i64,
     class_str: *const i32,
@@ -826,6 +874,7 @@ pub(crate) extern "C" fn blinc_text_input_view(
 }
 
 pub(crate) extern "C" fn blinc_text_area_view(
+    _call_id: u64,
     placeholder_ptr: *const i32,
     rows: i32,
     style: i64,
@@ -844,6 +893,7 @@ pub(crate) extern "C" fn blinc_text_area_view(
 }
 
 pub(crate) extern "C" fn blinc_code_view(
+    _call_id: u64,
     content_ptr: *const i32,
     line_numbers: i32,
     style: i64,
@@ -856,7 +906,11 @@ pub(crate) extern "C" fn blinc_code_view(
     )
 }
 
-pub(crate) extern "C" fn blinc_pre_view(content_ptr: *const i32, style: i64) -> WidgetHandle {
+pub(crate) extern "C" fn blinc_pre_view(
+    _call_id: u64,
+    content_ptr: *const i32,
+    style: i64,
+) -> WidgetHandle {
     ensure_theme_state();
     let content = decode_string_arg(content_ptr);
     finish_custom_widget(blinc_layout::widgets::pre(content), style)
@@ -865,6 +919,7 @@ pub(crate) extern "C" fn blinc_pre_view(content_ptr: *const i32, style: i64) -> 
 /// `$Blinc$Div$view(children, style, class_str, on_click) -> WidgetHandle`.
 /// Consumes the child-list and each child handle exactly once.
 pub(crate) extern "C" fn blinc_div_view(
+    _call_id: u64,
     children: WidgetHandle,
     style: i64,
     class_str: *const i32,
@@ -897,7 +952,11 @@ pub(crate) extern "C" fn blinc_div_view(
 }
 
 /// `$Blinc$Stack$view(children, style) -> WidgetHandle`.
-pub(crate) extern "C" fn blinc_stack_view(children: WidgetHandle, style: i64) -> WidgetHandle {
+pub(crate) extern "C" fn blinc_stack_view(
+    _call_id: u64,
+    children: WidgetHandle,
+    style: i64,
+) -> WidgetHandle {
     let mut widget = blinc_layout::stack::Stack::new();
     for child in materialize_children(children) {
         widget = widget.child_box(child);
@@ -907,7 +966,11 @@ pub(crate) extern "C" fn blinc_stack_view(children: WidgetHandle, style: i64) ->
 }
 
 /// `$Blinc$Image$view(source, style) -> WidgetHandle`.
-pub(crate) extern "C" fn blinc_image_view(source_ptr: *const i32, style: i64) -> WidgetHandle {
+pub(crate) extern "C" fn blinc_image_view(
+    _call_id: u64,
+    source_ptr: *const i32,
+    style: i64,
+) -> WidgetHandle {
     if source_ptr.is_null() {
         tracing::warn!("$Blinc$Image$view called with null source pointer");
         return 0;
@@ -920,6 +983,7 @@ pub(crate) extern "C" fn blinc_image_view(source_ptr: *const i32, style: i64) ->
 
 /// `$Blinc$Svg$view(source, style, class) -> WidgetHandle`.
 pub(crate) extern "C" fn blinc_svg_view(
+    _call_id: u64,
     source_ptr: *const i32,
     style: i64,
     class_str: *const i32,
@@ -938,14 +1002,18 @@ pub(crate) extern "C" fn blinc_svg_view(
 }
 
 /// `$Blinc$Canvas$view(style) -> WidgetHandle`.
-pub(crate) extern "C" fn blinc_canvas_view(style: i64) -> WidgetHandle {
+pub(crate) extern "C" fn blinc_canvas_view(_call_id: u64, style: i64) -> WidgetHandle {
     let widget = blinc_layout::canvas::Canvas::new();
     let overlay = unsafe { materialize_overlay(style) };
     leak_custom(Styled::new(widget, overlay))
 }
 
 /// `$Blinc$RichText$view(markup, style) -> WidgetHandle`.
-pub(crate) extern "C" fn blinc_rich_text_view(markup_ptr: *const i32, style: i64) -> WidgetHandle {
+pub(crate) extern "C" fn blinc_rich_text_view(
+    _call_id: u64,
+    markup_ptr: *const i32,
+    style: i64,
+) -> WidgetHandle {
     if markup_ptr.is_null() {
         tracing::warn!("$Blinc$RichText$view called with null markup pointer");
         return 0;
@@ -957,7 +1025,11 @@ pub(crate) extern "C" fn blinc_rich_text_view(markup_ptr: *const i32, style: i64
 }
 
 /// `$Blinc$Motion$view(children, style) -> WidgetHandle`.
-pub(crate) extern "C" fn blinc_motion_view(children: WidgetHandle, style: i64) -> WidgetHandle {
+pub(crate) extern "C" fn blinc_motion_view(
+    _call_id: u64,
+    children: WidgetHandle,
+    style: i64,
+) -> WidgetHandle {
     let mut widget = blinc_layout::motion::motion();
     for child in materialize_children(children) {
         widget = widget.child_box(child);
@@ -967,7 +1039,11 @@ pub(crate) extern "C" fn blinc_motion_view(children: WidgetHandle, style: i64) -
 }
 
 /// `$Blinc$Notch$view(children, style) -> WidgetHandle`.
-pub(crate) extern "C" fn blinc_notch_view(children: WidgetHandle, style: i64) -> WidgetHandle {
+pub(crate) extern "C" fn blinc_notch_view(
+    _call_id: u64,
+    children: WidgetHandle,
+    style: i64,
+) -> WidgetHandle {
     let mut widget = blinc_layout::notch::Notch::new();
     for child in materialize_children(children) {
         widget = widget.child_box(child);

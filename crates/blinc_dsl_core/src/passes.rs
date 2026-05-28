@@ -3878,3 +3878,168 @@ pub(crate) fn ensure_unit_return(program: &mut TypedProgram) {
         }
     }
 }
+
+/// Prepend a span-derived `u64` call-site key as the leading positional
+/// argument to every substrate-primitive widget call (`$Blinc$<X>$view`).
+///
+/// The injected key is `call_site_instance_id(filename, span.start)` —
+/// a stable hash of the source location. Widget FFIs receive it as the
+/// first arg and use it as the seed for per-instance state allocation
+/// (replacing the old label-based `dsl_state_key("button", &label)`
+/// pattern that collided on duplicate labels).
+///
+/// Scope: substrate primitives only in this pass. User-component view
+/// calls (`<X>$view`) keep their existing signature — adding a leading
+/// `__instance_id__: u64` to user views (so the body can compose a
+/// hierarchical id with each child's local span) is a follow-up that
+/// also needs `bind_component_props` to mint the param.
+///
+/// MUST run AFTER `lower_children_arrays_to_blocks` so we walk the
+/// final shape of widget calls including those that were moved into
+/// `__push_child__` arg positions during children-array expansion.
+pub(crate) fn inject_call_site_keys(program: &mut TypedProgram, filename: &str) {
+    use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedExpression, TypedLiteral};
+
+    /// Is `callee_name` a substrate-primitive view symbol that the
+    /// widget FFI side expects to receive a leading u64 call-id?
+    /// Delegates to `abi.rs`'s authoritative set populated by
+    /// `register_builtins`, so external widgets registered via
+    /// `register_extern_widget_spec` are correctly excluded.
+    fn is_substrate_view_symbol(callee_name: &str) -> bool {
+        crate::abi::is_substrate_widget_view_public(callee_name)
+    }
+
+    /// Recurse into the expression first (so nested calls get their
+    /// own keys), then prepend a `u64` literal to THIS call's args if
+    /// its callee is a substrate-primitive view. Post-order matters
+    /// for idempotence — we look at the rewritten args before deciding
+    /// whether to inject.
+    fn rewrite_expr(expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>, filename: &str) {
+        match &mut expr.node {
+            TypedExpression::Call(call) => {
+                rewrite_expr(&mut call.callee, filename);
+                for a in &mut call.positional_args {
+                    rewrite_expr(a, filename);
+                }
+                for n in &mut call.named_args {
+                    rewrite_expr(&mut n.value, filename);
+                }
+            }
+            TypedExpression::MethodCall(mc) => {
+                rewrite_expr(&mut mc.receiver, filename);
+                for a in &mut mc.positional_args {
+                    rewrite_expr(a, filename);
+                }
+            }
+            TypedExpression::Binary(b) => {
+                rewrite_expr(&mut b.left, filename);
+                rewrite_expr(&mut b.right, filename);
+            }
+            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand, filename),
+            TypedExpression::Field(f) => rewrite_expr(&mut f.object, filename),
+            TypedExpression::Index(idx) => {
+                rewrite_expr(&mut idx.object, filename);
+                rewrite_expr(&mut idx.index, filename);
+            }
+            TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
+                for it in items {
+                    rewrite_expr(it, filename);
+                }
+            }
+            TypedExpression::Struct(s) => {
+                for field in &mut s.fields {
+                    rewrite_expr(&mut field.value, filename);
+                }
+            }
+            TypedExpression::Block(b) => rewrite_block(b, filename),
+            TypedExpression::If(if_expr) => {
+                rewrite_expr(&mut if_expr.condition, filename);
+                rewrite_expr(&mut if_expr.then_branch, filename);
+                rewrite_expr(&mut if_expr.else_branch, filename);
+            }
+            _ => {}
+        }
+
+        // Inject leading u64 key if this Call's callee is a substrate
+        // view symbol. Use the call expression's OWN span as the key
+        // source — that's the unique source-location of this invocation.
+        let span = expr.span;
+        let TypedExpression::Call(call) = &mut expr.node else {
+            return;
+        };
+        let TypedExpression::Variable(callee_name) = &call.callee.node else {
+            return;
+        };
+        let Some(resolved) = callee_name.resolve_global() else {
+            return;
+        };
+        if !is_substrate_view_symbol(resolved.as_ref()) {
+            return;
+        }
+
+        // Cranelift backend (zyntax-compiler) doesn't handle
+        // `HirConstant::U64` in its `value_map` population step — the
+        // match at `cranelift_backend.rs:1471-1499` only knows about
+        // I8/I16/I32/U32/I64/Bool/F32/F64 and silently `continue`s
+        // for anything else. We type the literal as I64 (same bit-
+        // width, same calling-convention slot) and let the abi.rs side
+        // tag the param as TypeTag::U64 — the int is reinterpreted as
+        // u64 on the Rust receive side without any value mangling.
+        let key = call_site_instance_id(filename, span.start);
+        let key_arg = zyntax_typed_ast::TypedNode::new(
+            TypedExpression::Literal(TypedLiteral::Integer(key as i64 as i128)),
+            Type::Primitive(PrimitiveType::I64),
+            span,
+        );
+        call.positional_args.insert(0, key_arg);
+    }
+
+    fn rewrite_block(block: &mut zyntax_typed_ast::typed_ast::TypedBlock, filename: &str) {
+        for stmt in &mut block.statements {
+            rewrite_stmt(stmt, filename);
+        }
+    }
+
+    fn rewrite_stmt(stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>, filename: &str) {
+        match &mut stmt.node {
+            TypedStatement::Expression(e) => rewrite_expr(e, filename),
+            TypedStatement::Let(l) => {
+                if let Some(init) = &mut l.initializer {
+                    rewrite_expr(init, filename);
+                }
+            }
+            TypedStatement::Return(Some(e)) => rewrite_expr(e, filename),
+            TypedStatement::If(if_stmt) => {
+                rewrite_expr(&mut if_stmt.condition, filename);
+                rewrite_block(&mut if_stmt.then_block, filename);
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    rewrite_block(else_block, filename);
+                }
+            }
+            TypedStatement::While(w) => {
+                rewrite_expr(&mut w.condition, filename);
+                rewrite_block(&mut w.body, filename);
+            }
+            TypedStatement::Block(b) => rewrite_block(b, filename),
+            _ => {}
+        }
+    }
+
+    for decl in &mut program.declarations {
+        match &mut decl.node {
+            TypedDeclaration::Function(func) => {
+                if let Some(body) = &mut func.body {
+                    rewrite_block(body, filename);
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                for method in &mut imp.methods {
+                    if let Some(body) = &mut method.body {
+                        rewrite_block(body, filename);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}

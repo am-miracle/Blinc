@@ -794,23 +794,75 @@ pub(crate) fn type_to_native(ty: &Type) -> Result<NativeType, &Type> {
     }
 }
 
+/// Process-global set of widget-view symbols built into this crate
+/// (substrate primitives). Populated by [`register_builtins`] at
+/// `BlincDsl::new()` time; consulted both here ([`descriptor_to_sig`]
+/// auto-inflates their signatures with a leading `U64`) and by
+/// [`crate::passes::inject_call_site_keys`] (which prepends the matching
+/// `i64` literal arg at every call site).
+///
+/// External widgets registered via
+/// [`crate::BlincDsl::register_extern_widget_spec`] are NOT added here —
+/// they keep the caller-supplied signature exactly. The auto-injection
+/// is a built-in convention, not a contract imposed on the user.
+static SUBSTRATE_WIDGET_NAMES: std::sync::OnceLock<
+    std::sync::RwLock<std::collections::HashSet<&'static str>>,
+> = std::sync::OnceLock::new();
+
+fn substrate_widget_names() -> &'static std::sync::RwLock<std::collections::HashSet<&'static str>> {
+    SUBSTRATE_WIDGET_NAMES.get_or_init(|| std::sync::RwLock::new(std::collections::HashSet::new()))
+}
+
+/// Returns `true` if `name` is a built-in substrate widget view that
+/// receives the auto-injected `u64` call-site key as a leading arg.
+/// Internal helper — the public-facing query goes through
+/// [`is_substrate_widget_view_public`] so callers outside this module
+/// don't reach into the OnceLock directly.
+fn is_substrate_widget_view(name: &str) -> bool {
+    is_substrate_widget_view_public(name)
+}
+
+/// Same as [`is_substrate_widget_view`] but pub(crate) so the lowering
+/// pass can consult the set without touching the OnceLock.
+pub(crate) fn is_substrate_widget_view_public(name: &str) -> bool {
+    substrate_widget_names()
+        .read()
+        .map(|set| set.contains(name))
+        .unwrap_or(false)
+}
+
 /// Build the ZRTL signature for a builtin (stored in `backend.symbol_signatures`).
 fn descriptor_to_sig(b: &BuiltinDescriptor) -> ZrtlSymbolSig {
+    // Widget views auto-receive a leading u64 call-site key — see
+    // [`crate::passes::inject_call_site_keys`]. We inflate the signature
+    // here so each Rust impl can be written with `_call_id: u64` as its
+    // first param without touching ~30 inline abi.rs descriptors.
+    let extra_lead = if is_substrate_widget_view(b.name) {
+        1usize
+    } else {
+        0
+    };
+    let total_params = b.param_types.len() + extra_lead;
+
     assert!(
-        b.param_types.len() <= ZRTL_MAX_PARAMS,
-        "{}: parameter count {} exceeds ZRTL_MAX_PARAMS ({})",
+        total_params <= ZRTL_MAX_PARAMS,
+        "{}: parameter count {} (incl. {} auto-injected widget-call-id) exceeds ZRTL_MAX_PARAMS ({})",
         b.name,
-        b.param_types.len(),
+        total_params,
+        extra_lead,
         ZRTL_MAX_PARAMS
     );
 
     let mut params = [TypeTag::VOID; ZRTL_MAX_PARAMS];
+    if extra_lead > 0 {
+        params[0] = TypeTag::U64;
+    }
     for (i, ty) in b.param_types.iter().enumerate() {
-        params[i] = type_to_tag(ty);
+        params[i + extra_lead] = type_to_tag(ty);
     }
 
     ZrtlSymbolSig {
-        param_count: b.param_types.len() as u8,
+        param_count: total_params as u8,
         flags: ZrtlSigFlags::NONE,
         return_type: type_to_tag(&b.return_type),
         params,
@@ -818,7 +870,21 @@ fn descriptor_to_sig(b: &BuiltinDescriptor) -> ZrtlSymbolSig {
 }
 
 /// Register all `$Blinc$*` builtins on the runtime with full signatures.
+/// Also populates [`SUBSTRATE_WIDGET_NAMES`] with every widget-view
+/// builtin so the lowering pass + sig inflation share a single source
+/// of truth.
 pub(crate) fn register_builtins(runtime: &mut ZyntaxRuntime) {
+    // Populate the substrate-widget-name set FIRST so `descriptor_to_sig`
+    // sees it when inflating each widget's signature with the leading
+    // `U64` call-site key.
+    {
+        let mut set = substrate_widget_names().write().expect("RwLock poisoned");
+        for b in builtins() {
+            if b.name.starts_with("$Blinc$") && b.name.ends_with("$view") {
+                set.insert(b.name);
+            }
+        }
+    }
     for b in builtins() {
         let sig = descriptor_to_sig(&b);
         runtime.register_function_typed(b.name, b.ptr, sig);

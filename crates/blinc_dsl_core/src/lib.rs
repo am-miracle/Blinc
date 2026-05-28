@@ -36,6 +36,7 @@ pub use fsm_registry::{
     with_fsm_registry_mut,
 };
 pub use host::{DslOp, take_scene_ops};
+use passes::inject_call_site_keys;
 use passes::{
     bind_component_props, collect_declared, detect_and_strip_stateful_views, ensure_unit_return,
     extract_and_strip_stylesheets, inject_fsm_context_markers, lower_children_arrays_to_blocks,
@@ -462,6 +463,16 @@ impl BlincDsl {
         // Resolve named args against our component registry — Zyntax's auto-injected
         // extern decls carry synthetic `p0`, `p1`, … param names that can't bind by name.
         resolve_extern_widget_named_args(&mut typed_program);
+
+        // Inject span-derived `u64` call-site keys as the leading arg to
+        // every substrate-primitive widget call. Widget FFIs use it as
+        // the state-key seed so dup-labelled widgets at distinct call
+        // sites hold distinct state. MUST run AFTER
+        // `resolve_extern_widget_named_args` (which rebuilds positional
+        // args from the registry's prop list — the registry doesn't
+        // know about the auto-injected u64, so prepending earlier would
+        // get our literal dropped into the wrong slot).
+        inject_call_site_keys(&mut typed_program, filename);
 
         // Defensive `Return(None)` so the body classifier can't infer a value-bearing return.
         ensure_unit_return(&mut typed_program);
