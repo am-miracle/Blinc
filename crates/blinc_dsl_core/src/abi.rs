@@ -1,8 +1,9 @@
 use super::*;
 use crate::host::{
-    blinc_format_int, blinc_fsm_runtime_trigger, blinc_fsm_subscribe, blinc_signal_get_f64,
-    blinc_signal_get_i32, blinc_signal_get_string, blinc_signal_set_f64, blinc_signal_set_i32,
-    blinc_signal_set_string, blinc_string_concat, blinc_text, blinc_text_int,
+    blinc_format_int, blinc_fsm_runtime_trigger, blinc_fsm_subscribe, blinc_signal_get_by_id_f64,
+    blinc_signal_get_by_id_i32, blinc_signal_get_by_id_string, blinc_signal_set_by_id_f64,
+    blinc_signal_set_by_id_i32, blinc_signal_set_by_id_string, blinc_string_concat, blinc_text,
+    blinc_text_int,
 };
 use crate::widget_ffi::{
     blinc_b_view, blinc_blockquote_view, blinc_button_view, blinc_canvas_view, blinc_caption_view,
@@ -51,54 +52,55 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_text_int as *const u8,
         },
         BuiltinDescriptor {
-            // `<name>.get()` lowered by `resolve_signal_calls`.
-            name: "__signal_get_i32",
-            param_types: &[Type::Primitive(PrimitiveType::String)],
+            // Id-keyed signal externs (Phase 1A). The DSL lowering pass
+            // bakes the `SignalId.to_raw()` as an i64 literal at compile
+            // time; these externs reconstruct `Signal::<T>::from_id` and
+            // delegate to `blinc_core::reactive::Signal::get`/`set`.
+            // No name lookup at runtime, no parallel storage facade —
+            // the DSL signal IS the reactive primitive.
+            name: "__signal_get_by_id_i32",
+            param_types: &[Type::Primitive(PrimitiveType::I64)],
             return_type: Type::Primitive(PrimitiveType::I32),
-            ptr: blinc_signal_get_i32 as *const u8,
+            ptr: blinc_signal_get_by_id_i32 as *const u8,
         },
         BuiltinDescriptor {
-            name: "__signal_get_f64",
-            param_types: &[Type::Primitive(PrimitiveType::String)],
+            name: "__signal_get_by_id_f64",
+            param_types: &[Type::Primitive(PrimitiveType::I64)],
             return_type: Type::Primitive(PrimitiveType::F64),
-            ptr: blinc_signal_get_f64 as *const u8,
+            ptr: blinc_signal_get_by_id_f64 as *const u8,
         },
         BuiltinDescriptor {
-            name: "__signal_get_string",
-            param_types: &[Type::Primitive(PrimitiveType::String)],
+            name: "__signal_get_by_id_string",
+            param_types: &[Type::Primitive(PrimitiveType::I64)],
             return_type: Type::Primitive(PrimitiveType::String),
-            ptr: blinc_signal_get_string as *const u8,
+            ptr: blinc_signal_get_by_id_string as *const u8,
         },
         BuiltinDescriptor {
-            // `<sig> = <expr>` inside a function / closure body
-            // lowers via `resolve_signal_calls` to a call here
-            // with the LHS's interned name and the (already
-            // signal-rewritten) RHS value.
-            name: "__signal_set_i32",
+            name: "__signal_set_by_id_i32",
             param_types: &[
-                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
                 Type::Primitive(PrimitiveType::I32),
             ],
             return_type: Type::Primitive(PrimitiveType::Unit),
-            ptr: blinc_signal_set_i32 as *const u8,
+            ptr: blinc_signal_set_by_id_i32 as *const u8,
         },
         BuiltinDescriptor {
-            name: "__signal_set_f64",
+            name: "__signal_set_by_id_f64",
             param_types: &[
-                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
                 Type::Primitive(PrimitiveType::F64),
             ],
             return_type: Type::Primitive(PrimitiveType::Unit),
-            ptr: blinc_signal_set_f64 as *const u8,
+            ptr: blinc_signal_set_by_id_f64 as *const u8,
         },
         BuiltinDescriptor {
-            name: "__signal_set_string",
+            name: "__signal_set_by_id_string",
             param_types: &[
-                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
                 Type::Primitive(PrimitiveType::String),
             ],
             return_type: Type::Primitive(PrimitiveType::Unit),
-            ptr: blinc_signal_set_string as *const u8,
+            ptr: blinc_signal_set_by_id_string as *const u8,
         },
         BuiltinDescriptor {
             // `<FsmName>.trigger("State.Event")` lowered by `resolve_fsm_trigger_calls`.

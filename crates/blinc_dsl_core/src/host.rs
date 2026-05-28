@@ -57,85 +57,38 @@ pub(crate) extern "C" fn blinc_text(s_ptr: *const i32) {
     push_op(DslOp::Text(stripped.to_string()));
 }
 
-/// `__signal_get_i32` — i32 signal accessor synthesised by `resolve_signal_calls`.
-/// Returns `0` for unset signals.
-///
-/// # Safety
-///
-/// Same contract as [`blinc_text`]: `name_ptr` points at a length-prefixed UTF-8 buffer.
-pub(crate) extern "C" fn blinc_signal_get_i32(name_ptr: *const i32) -> i32 {
-    if name_ptr.is_null() {
-        tracing::warn!("__signal_get_i32 called with null name pointer");
-        return 0;
-    }
-
-    // SAFETY: length-prefixed string layout for String params.
-    let name = unsafe {
-        let len = std::ptr::read_unaligned(name_ptr) as usize;
-        let body = (name_ptr as *const u8).add(std::mem::size_of::<i32>());
-        let bytes = std::slice::from_raw_parts(body, len);
-        std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
-    };
-
-    // Defensive quote-strip — the rewrite normally hands us unquoted names.
-    let stripped = name
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(name);
-
-    blinc_runtime::signal::get_i32_or_default(stripped)
+/// Reconstruct a typed `Signal<T>` from a raw `SignalId.to_raw()`
+/// integer (i64 over the wire — Cranelift doesn't carry u64
+/// constants through its value-map; see commit 54dc831b's notes for
+/// why the DSL bakes ids as i64 even though the underlying type is
+/// u64). Used by every `__signal_*_by_id_*` extern.
+fn reconstruct_signal<T>(id_raw: i64) -> blinc_core::reactive::Signal<T> {
+    let id = blinc_core::reactive::SignalId::from_raw(id_raw as u64);
+    blinc_core::reactive::Signal::<T>::from_id(id)
 }
 
-/// `__signal_get_f64` — f64 signal accessor. Returns `0.0` for unset signals.
-///
-/// # Safety
-///
-/// Same contract as [`blinc_signal_get_i32`].
-pub(crate) extern "C" fn blinc_signal_get_f64(name_ptr: *const i32) -> f64 {
-    if name_ptr.is_null() {
-        tracing::warn!("__signal_get_f64 called with null name pointer");
-        return 0.0;
-    }
-
-    let name = unsafe {
-        let len = std::ptr::read_unaligned(name_ptr) as usize;
-        let body = (name_ptr as *const u8).add(std::mem::size_of::<i32>());
-        let bytes = std::slice::from_raw_parts(body, len);
-        std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
-    };
-    let stripped = name
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(name);
-
-    blinc_runtime::signal::get_f64_or_default(stripped)
+/// `__signal_get_by_id_i32(id_raw)` — read an i32 signal by its
+/// process-global `SignalId.to_raw()`. The DSL lowering pass
+/// (`resolve_signal_calls`) bakes the id into the JIT code at compile
+/// time, so this extern is the canonical reactive-read path — no name
+/// lookup, no parallel storage. Returns `0` if the id no longer
+/// resolves in the graph (graph reset between tests, etc.).
+pub(crate) extern "C" fn blinc_signal_get_by_id_i32(id_raw: i64) -> i32 {
+    reconstruct_signal::<i32>(id_raw).try_get().unwrap_or(0)
 }
 
-/// `__signal_get_string` — string signal accessor. Returns a Zyntax length-prefixed
-/// pointer; the buffer leaks via `blinc_string_alloc`.
-///
-/// # Safety
-///
-/// Same contract as [`blinc_signal_get_i32`].
-pub(crate) extern "C" fn blinc_signal_get_string(name_ptr: *const i32) -> *const i32 {
-    if name_ptr.is_null() {
-        tracing::warn!("__signal_get_string called with null name pointer");
-        return blinc_string_alloc("");
-    }
+/// `__signal_get_by_id_f64(id_raw)` — f64 mirror.
+pub(crate) extern "C" fn blinc_signal_get_by_id_f64(id_raw: i64) -> f64 {
+    reconstruct_signal::<f64>(id_raw).try_get().unwrap_or(0.0)
+}
 
-    // SAFETY: length-prefixed string layout for String params.
-    let name = unsafe {
-        let len = std::ptr::read_unaligned(name_ptr) as usize;
-        let body = (name_ptr as *const u8).add(std::mem::size_of::<i32>());
-        let bytes = std::slice::from_raw_parts(body, len);
-        std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
-    };
-    let stripped = name
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(name);
-
-    let value = blinc_runtime::signal::get_str_or_default(stripped);
+/// `__signal_get_by_id_string(id_raw)` — string mirror. Returns a
+/// Zyntax length-prefixed pointer; the buffer leaks via
+/// `blinc_string_alloc`.
+pub(crate) extern "C" fn blinc_signal_get_by_id_string(id_raw: i64) -> *const i32 {
+    let value = reconstruct_signal::<String>(id_raw)
+        .try_get()
+        .unwrap_or_default();
     blinc_string_alloc(&value)
 }
 
@@ -158,32 +111,23 @@ fn decode_signal_name<'a>(name_ptr: *const i32) -> Option<&'a str> {
     )
 }
 
-/// `__signal_set_i32("<name>", value)` — i32 signal write side.
-pub(crate) extern "C" fn blinc_signal_set_i32(name_ptr: *const i32, value: i32) {
-    let Some(name) = decode_signal_name(name_ptr) else {
-        tracing::warn!("__signal_set_i32 called with null name pointer");
-        return;
-    };
-    blinc_runtime::signal::set_i32(name, value);
+/// `__signal_set_by_id_i32(id_raw, value)` — i32 signal write side.
+/// Calls `Signal::<i32>::set(value)` directly on the reactive primitive
+/// — that fires the property-binding registry the same way native
+/// Rust `.set()` does, so any `.bg(&signal)` binding repaints.
+pub(crate) extern "C" fn blinc_signal_set_by_id_i32(id_raw: i64, value: i32) {
+    reconstruct_signal::<i32>(id_raw).set(value);
 }
 
-/// `__signal_set_f64("<name>", value)` — f64 signal write side.
-pub(crate) extern "C" fn blinc_signal_set_f64(name_ptr: *const i32, value: f64) {
-    let Some(name) = decode_signal_name(name_ptr) else {
-        tracing::warn!("__signal_set_f64 called with null name pointer");
-        return;
-    };
-    blinc_runtime::signal::set_f64(name, value);
+/// `__signal_set_by_id_f64(id_raw, value)` — f64 mirror.
+pub(crate) extern "C" fn blinc_signal_set_by_id_f64(id_raw: i64, value: f64) {
+    reconstruct_signal::<f64>(id_raw).set(value);
 }
 
-/// `__signal_set_string("<name>", value)` — string signal write side.
-pub(crate) extern "C" fn blinc_signal_set_string(name_ptr: *const i32, value_ptr: *const i32) {
-    let Some(name) = decode_signal_name(name_ptr) else {
-        tracing::warn!("__signal_set_string called with null name pointer");
-        return;
-    };
+/// `__signal_set_by_id_string(id_raw, value_ptr)` — string mirror.
+pub(crate) extern "C" fn blinc_signal_set_by_id_string(id_raw: i64, value_ptr: *const i32) {
     let value = decode_signal_name(value_ptr).unwrap_or("");
-    blinc_runtime::signal::set_str(name, value);
+    reconstruct_signal::<String>(id_raw).set(value.to_string());
 }
 
 /// `__fsm_runtime_trigger__("<FsmName>", "<state.event>")` — dispatches `event`

@@ -215,13 +215,34 @@ pub(crate) fn auto_inject_semicolons(raw: &str) -> String {
 }
 
 /// Rewrite `<sig>.get()` / `<sig>.set(v)` / `<sig> = v` into `__signal_<get|set>_<T>` calls.
+/// One entry in the per-compile signal map: the declared type plus the
+/// stable `SignalId.to_raw()` minted via the process-global signal
+/// registry. Lives at module scope so the inner helper `fn` items in
+/// [`resolve_signal_calls`] can name the type in their signatures.
+#[derive(Clone)]
+struct SignalEntry {
+    ty: Type,
+    /// `SignalId.to_raw()` cast to i64 — Cranelift's value-map population
+    /// doesn't handle `HirConstant::U64`, so we stay in i64-land.
+    id_raw: i64,
+}
+
 pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
     use std::collections::HashMap;
     use zyntax_typed_ast::InternedString;
     use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
 
-    // Phase 1: collect signal name → return type.
-    let mut signals: HashMap<InternedString, Type> = HashMap::new();
+    // Phase 1: collect signal name → (type, id_raw). The id_raw is
+    // minted on first encounter via the process-global
+    // `blinc_dsl_core::signal_registry` — that calls
+    // `blinc_core::reactive::signal(default)` and caches the resulting
+    // `SignalId.to_raw()`. Subsequent compiles of the same source reuse
+    // the existing id.
+    //
+    // `SignalEntry` declared above this fn so the helper `fn` items
+    // (`rewrite_expr`, `rewrite_block`, `rewrite_stmt`) can name the
+    // type in their signatures without lifting it to module scope.
+    let mut signals: HashMap<InternedString, SignalEntry> = HashMap::new();
     for decl in &program.declarations {
         let TypedDeclaration::Function(func) = &decl.node else {
             continue;
@@ -229,51 +250,74 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
         if !is_signal_decl(func) {
             continue;
         }
-        signals.insert(func.name, func.return_type.clone());
+        let Type::Primitive(prim) = &func.return_type else {
+            continue;
+        };
+        let sig_ty = match prim {
+            PrimitiveType::I32 => blinc_runtime::signal::SignalType::I32,
+            PrimitiveType::F64 => blinc_runtime::signal::SignalType::F64,
+            PrimitiveType::String => blinc_runtime::signal::SignalType::String,
+            _ => continue,
+        };
+        let Some(name_str) = func.name.resolve_global() else {
+            continue;
+        };
+        let id_raw_u64 = blinc_runtime::signal::mint_or_get(name_str.as_ref(), sig_ty);
+        signals.insert(
+            func.name,
+            SignalEntry {
+                ty: func.return_type.clone(),
+                // i64 over the wire — the Cranelift backend lacks a
+                // `HirConstant::U64` case in its value_map population
+                // (see commit 54dc831b for context). Re-cast back to
+                // u64 inside the extern.
+                id_raw: id_raw_u64 as i64,
+            },
+        );
     }
 
     if signals.is_empty() {
         return;
     }
 
-    // Phase 2: rewrite `<sig>.get()` → `__signal_get_<T>("<name>")`.
+    // Phase 2: rewrite `<sig>.get()` → `__signal_get_by_id_<T>(<id_literal>)`.
     fn typed_signal_extern_name(ty: &Type) -> Option<&'static str> {
         match ty {
-            Type::Primitive(PrimitiveType::I32) => Some("__signal_get_i32"),
-            Type::Primitive(PrimitiveType::F64) => Some("__signal_get_f64"),
-            Type::Primitive(PrimitiveType::String) => Some("__signal_get_string"),
+            Type::Primitive(PrimitiveType::I32) => Some("__signal_get_by_id_i32"),
+            Type::Primitive(PrimitiveType::F64) => Some("__signal_get_by_id_f64"),
+            Type::Primitive(PrimitiveType::String) => Some("__signal_get_by_id_string"),
             _ => None,
         }
     }
 
     fn typed_signal_setter_extern_name(ty: &Type) -> Option<&'static str> {
         match ty {
-            Type::Primitive(PrimitiveType::I32) => Some("__signal_set_i32"),
-            Type::Primitive(PrimitiveType::F64) => Some("__signal_set_f64"),
-            Type::Primitive(PrimitiveType::String) => Some("__signal_set_string"),
+            Type::Primitive(PrimitiveType::I32) => Some("__signal_set_by_id_i32"),
+            Type::Primitive(PrimitiveType::F64) => Some("__signal_set_by_id_f64"),
+            Type::Primitive(PrimitiveType::String) => Some("__signal_set_by_id_string"),
             _ => None,
         }
     }
 
     fn rewrite_expr(
         expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>,
-        signals: &HashMap<InternedString, Type>,
+        signals: &HashMap<InternedString, SignalEntry>,
     ) {
         // MUST intercept `<signal> = <expr>` BEFORE the recursive walk — the
         // LHS `Variable` doesn't otherwise trigger a rewrite.
         if let TypedExpression::Binary(b) = &expr.node
             && b.op == zyntax_typed_ast::typed_ast::BinaryOp::Assign
             && let TypedExpression::Variable(name) = &b.left.node
-            && let Some(sig_ty) = signals.get(name).cloned()
-            && let Some(setter) = typed_signal_setter_extern_name(&sig_ty)
+            && let Some(entry) = signals.get(name).cloned()
+            && let Some(setter) = typed_signal_setter_extern_name(&entry.ty)
         {
             // Rewrite RHS first so nested signal reads route through getters.
             let mut rhs = (*b.right).clone();
             rewrite_expr(&mut rhs, signals);
 
-            let name_arg = zyntax_typed_ast::TypedNode::new(
-                TypedExpression::Literal(TypedLiteral::String(*name)),
-                Type::Primitive(PrimitiveType::String),
+            let id_arg = zyntax_typed_ast::TypedNode::new(
+                TypedExpression::Literal(TypedLiteral::Integer(entry.id_raw as i128)),
+                Type::Primitive(PrimitiveType::I64),
                 expr.span,
             );
             let callee = zyntax_typed_ast::TypedNode::new(
@@ -283,7 +327,7 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
             );
             expr.node = TypedExpression::Call(TypedCall {
                 callee: Box::new(callee),
-                positional_args: vec![name_arg, rhs],
+                positional_args: vec![id_arg, rhs],
                 named_args: vec![],
                 type_args: vec![],
             });
@@ -382,7 +426,7 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
         let Some((receiver_name, method, args, span)) = method_call else {
             return;
         };
-        let Some(sig_ty) = signals.get(&receiver_name).cloned() else {
+        let Some(entry) = signals.get(&receiver_name).cloned() else {
             return;
         };
         let method_name = method.resolve_global().map(|s| s.to_string());
@@ -390,7 +434,7 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
             // `count.get()` — read. Zero args, returns the
             // signal's value type.
             Some("get") if args.is_empty() => {
-                let Some(extern_name) = typed_signal_extern_name(&sig_ty) else {
+                let Some(extern_name) = typed_signal_extern_name(&entry.ty) else {
                     return;
                 };
                 expr.node = TypedExpression::Call(TypedCall {
@@ -400,18 +444,18 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
                         span,
                     )),
                     positional_args: vec![zyntax_typed_ast::TypedNode::new(
-                        TypedExpression::Literal(TypedLiteral::String(receiver_name)),
-                        Type::Primitive(PrimitiveType::String),
+                        TypedExpression::Literal(TypedLiteral::Integer(entry.id_raw as i128)),
+                        Type::Primitive(PrimitiveType::I64),
                         span,
                     )],
                     named_args: vec![],
                     type_args: vec![],
                 });
-                expr.ty = sig_ty;
+                expr.ty = entry.ty;
             }
             // `count.set(value)` — write. Arg already child-rewritten.
             Some("set") if args.len() == 1 => {
-                let Some(setter) = typed_signal_setter_extern_name(&sig_ty) else {
+                let Some(setter) = typed_signal_setter_extern_name(&entry.ty) else {
                     return;
                 };
                 let value = args.into_iter().next().expect("len == 1 just checked");
@@ -423,8 +467,8 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
                     )),
                     positional_args: vec![
                         zyntax_typed_ast::TypedNode::new(
-                            TypedExpression::Literal(TypedLiteral::String(receiver_name)),
-                            Type::Primitive(PrimitiveType::String),
+                            TypedExpression::Literal(TypedLiteral::Integer(entry.id_raw as i128)),
+                            Type::Primitive(PrimitiveType::I64),
                             span,
                         ),
                         value,
@@ -440,7 +484,7 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
 
     fn rewrite_block(
         block: &mut zyntax_typed_ast::typed_ast::TypedBlock,
-        signals: &HashMap<InternedString, Type>,
+        signals: &HashMap<InternedString, SignalEntry>,
     ) {
         for stmt in &mut block.statements {
             rewrite_stmt(stmt, signals);
@@ -449,7 +493,7 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
 
     fn rewrite_stmt(
         stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>,
-        signals: &HashMap<InternedString, Type>,
+        signals: &HashMap<InternedString, SignalEntry>,
     ) {
         match &mut stmt.node {
             TypedStatement::Expression(e) => rewrite_expr(e, signals),

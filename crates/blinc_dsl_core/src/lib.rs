@@ -975,21 +975,12 @@ impl BlincDsl {
         };
 
         let mut signal_ids: Vec<SignalId> = Vec::new();
-        for (name, ty) in &dep_pool {
-            let id = match ty {
-                Type::Primitive(PrimitiveType::I32) => {
-                    blinc_runtime::signal::state_i32(name).map(|s| s.signal_id())
-                }
-                Type::Primitive(PrimitiveType::F64) => {
-                    blinc_runtime::signal::state_f64(name).map(|s| s.signal_id())
-                }
-                Type::Primitive(PrimitiveType::String) => {
-                    blinc_runtime::signal::state_str(name).map(|s| s.signal_id())
-                }
-                _ => None,
-            };
-            if let Some(id) = id {
-                signal_ids.push(id);
+        for (name, _ty) in &dep_pool {
+            // Look up the SignalId registered at DSL compile time. The
+            // registry stores the raw `SignalId.to_raw()` — reconstruct
+            // the strongly-typed handle's id for the Stateful dep list.
+            if let Some((id_raw, _sig_ty)) = blinc_runtime::signal::lookup(name) {
+                signal_ids.push(blinc_core::reactive::SignalId::from_raw(id_raw));
             }
         }
 
@@ -1072,34 +1063,79 @@ impl BlincDsl {
         Ok(None)
     }
 
-    /// Set an i32-typed signal in the per-thread signal table.
+    /// Set an i32-typed signal by its DSL-declared name.
+    ///
+    /// Look up the `SignalId` in [`blinc_runtime::signal`]
+    /// (auto-minting if absent — supports
+    /// hosts that seed initial values BEFORE compiling DSL source),
+    /// then call `blinc_core::reactive::Signal::<i32>::from_id(id).set(value)`.
+    /// That fires the property-binding registry the same way native
+    /// Rust `.set()` does, so any `Div::bg(&signal_handle)` repaints.
     pub fn set_signal_i32(&self, name: &str, value: i32) {
-        blinc_runtime::signal::set_i32(name, value);
+        let id_raw =
+            blinc_runtime::signal::mint_or_get(name, blinc_runtime::signal::SignalType::I32);
+        blinc_core::reactive::Signal::<i32>::from_id(blinc_core::reactive::SignalId::from_raw(
+            id_raw,
+        ))
+        .set(value);
     }
 
-    /// Read an i32-typed signal. `None` if unset (distinct from `Some(0)`).
+    /// Read an i32-typed signal. `None` if undeclared, the id no longer
+    /// resolves, or the wrong type was declared.
     pub fn get_signal_i32(&self, name: &str) -> Option<i32> {
-        blinc_runtime::signal::get_i32(name)
+        let (id_raw, blinc_runtime::signal::SignalType::I32) = blinc_runtime::signal::lookup(name)?
+        else {
+            return None;
+        };
+        blinc_core::reactive::Signal::<i32>::from_id(blinc_core::reactive::SignalId::from_raw(
+            id_raw,
+        ))
+        .try_get()
     }
 
-    /// Set an f64-typed signal.
+    /// Set an f64-typed signal. Auto-mints on first call.
     pub fn set_signal_f64(&self, name: &str, value: f64) {
-        blinc_runtime::signal::set_f64(name, value);
+        let id_raw =
+            blinc_runtime::signal::mint_or_get(name, blinc_runtime::signal::SignalType::F64);
+        blinc_core::reactive::Signal::<f64>::from_id(blinc_core::reactive::SignalId::from_raw(
+            id_raw,
+        ))
+        .set(value);
     }
 
-    /// Read an f64-typed signal. `None` if unset.
+    /// Read an f64-typed signal. `None` if undeclared or wrong type.
     pub fn get_signal_f64(&self, name: &str) -> Option<f64> {
-        blinc_runtime::signal::get_f64(name)
+        let (id_raw, blinc_runtime::signal::SignalType::F64) = blinc_runtime::signal::lookup(name)?
+        else {
+            return None;
+        };
+        blinc_core::reactive::Signal::<f64>::from_id(blinc_core::reactive::SignalId::from_raw(
+            id_raw,
+        ))
+        .try_get()
     }
 
-    /// Set a string-typed signal.
+    /// Set a string-typed signal. Auto-mints on first call.
     pub fn set_signal_string(&self, name: &str, value: impl Into<String>) {
-        blinc_runtime::signal::set_str(name, value);
+        let id_raw =
+            blinc_runtime::signal::mint_or_get(name, blinc_runtime::signal::SignalType::String);
+        blinc_core::reactive::Signal::<String>::from_id(blinc_core::reactive::SignalId::from_raw(
+            id_raw,
+        ))
+        .set(value.into());
     }
 
-    /// Read a string-typed signal.
+    /// Read a string-typed signal. `None` if undeclared or wrong type.
     pub fn get_signal_string(&self, name: &str) -> Option<String> {
-        blinc_runtime::signal::get_str(name)
+        let (id_raw, blinc_runtime::signal::SignalType::String) =
+            blinc_runtime::signal::lookup(name)?
+        else {
+            return None;
+        };
+        blinc_core::reactive::Signal::<String>::from_id(blinc_core::reactive::SignalId::from_raw(
+            id_raw,
+        ))
+        .try_get()
     }
 }
 

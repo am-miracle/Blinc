@@ -5418,16 +5418,21 @@ fn signal_get_rewrites_to_typed_extern_i32() {
     let TypedExpression::Variable(callee) = &call.callee.node else {
         panic!("expected Variable callee");
     };
+    // Post-1A: signal calls lower to id-keyed externs taking an i64
+    // literal (the `SignalId.to_raw()`). The id is process-stable but
+    // not 0 — we just check the shape.
     assert_eq!(
         callee.resolve_global().as_deref(),
-        Some("__signal_get_i32"),
-        "signal call should rewrite to __signal_get_i32"
+        Some("__signal_get_by_id_i32"),
+        "signal call should rewrite to __signal_get_by_id_i32"
     );
     assert_eq!(call.positional_args.len(), 1);
-    let TypedExpression::Literal(TypedLiteral::String(name)) = &call.positional_args[0].node else {
-        panic!("expected string-literal name arg");
+    let TypedExpression::Literal(TypedLiteral::Integer(_)) = &call.positional_args[0].node else {
+        panic!(
+            "expected i64-literal id arg, got {:?}",
+            call.positional_args[0].node
+        );
     };
-    assert_eq!(name.resolve_global().as_deref(), Some("count"));
 }
 
 /// `name.get()` (string) lowers to `__signal_get_string("name")`.
@@ -5476,8 +5481,8 @@ fn signal_get_rewrites_to_typed_extern_string() {
     };
     assert_eq!(
         callee.resolve_global().as_deref(),
-        Some("__signal_get_string"),
-        "string-typed signal should rewrite to __signal_get_string"
+        Some("__signal_get_by_id_string"),
+        "string-typed signal should rewrite to __signal_get_by_id_string"
     );
 }
 
@@ -5584,16 +5589,65 @@ fn multiple_signals_rewrite_independently() {
     }
 
     assert!(
-        callee_exists(&program, "__signal_get_i32"),
-        "i32 signal should produce __signal_get_i32 call"
+        callee_exists(&program, "__signal_get_by_id_i32"),
+        "i32 signal should produce __signal_get_by_id_i32 call"
     );
     assert!(
-        callee_exists(&program, "__signal_get_string"),
-        "string signal should produce __signal_get_string call"
+        callee_exists(&program, "__signal_get_by_id_string"),
+        "string signal should produce __signal_get_by_id_string call"
     );
 }
 
 // Host-machinery + end-to-end signal-guard tests.
+
+/// Phase 1A acceptance: a DSL-declared `signal` is THE
+/// `blinc_core::reactive::Signal<T>` primitive — share storage,
+/// share the property-binding registry. Writing to the DSL signal
+/// via `dsl.set_signal_i32(name, value)` and then reading the SAME
+/// id-derived handle via the native Rust API yields the new value.
+#[test]
+fn dsl_signal_shares_storage_with_blinc_core_signal_primitive() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+
+    // Compile a source so the DSL registers `tally: i32`.
+    dsl.compile_source(
+        r#"
+            signal tally: i32
+            view { text("noop") }
+        "#,
+        "share_storage.blinc",
+    )
+    .expect("compile");
+
+    // Write via the DSL host API.
+    dsl.set_signal_i32("tally", 42);
+
+    // Independently reconstruct a `Signal<i32>` from the registry's
+    // SignalId and confirm it sees the value. No name, no facade —
+    // just the reactive primitive.
+    let id_raw = blinc_runtime::signal::lookup("tally")
+        .map(|(id, _)| id)
+        .expect("DSL compile should have minted `tally`");
+    let direct_handle = blinc_core::reactive::Signal::<i32>::from_id(
+        blinc_core::reactive::SignalId::from_raw(id_raw),
+    );
+
+    assert_eq!(
+        direct_handle.try_get(),
+        Some(42),
+        "DSL signal storage = blinc_core::reactive::Signal<T>: a write \
+         via the DSL host API must be visible to a Rust handle \
+         reconstructed from the same SignalId. Anything else means a \
+         parallel storage facade is still in play."
+    );
+
+    // Reverse direction — write via the native Rust handle, read via
+    // the DSL getter. Same Storage, same fire-the-bindings semantics.
+    direct_handle.set(99);
+    assert_eq!(dsl.get_signal_i32("tally"), Some(99));
+}
 
 /// `signal=200, guard >100` → tick fires.
 #[test]
@@ -5858,8 +5912,8 @@ fn signal_get_rewrites_to_typed_extern_f64() {
     };
     assert_eq!(
         callee.resolve_global().as_deref(),
-        Some("__signal_get_f64"),
-        "f64 signal should rewrite to __signal_get_f64"
+        Some("__signal_get_by_id_f64"),
+        "f64 signal should rewrite to __signal_get_by_id_f64"
     );
     let TypedExpression::Literal(TypedLiteral::Float(v)) = &cmp.right.node else {
         panic!("RHS should be FloatLit, got {:?}", cmp.right.node);

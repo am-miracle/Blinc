@@ -32,20 +32,16 @@
     // `inject_builtin_externs` injects matching extern decls; the
     // host registers the implementations via
     // `register_function_typed` and the JIT calls into Rust.
-    __signal_get_i32: "__signal_get_i32",
-    __signal_get_f64: "__signal_get_f64",
-    __signal_get_string: "__signal_get_string",
-    // Setter mirrors of the `_get_` externs above. Synthesised by
-    // `resolve_signal_calls` from `<sig>.set(v)` / `<sig> = expr`
-    // shapes inside DSL function and closure bodies. Must be in
-    // this map so `inject_builtin_externs` mints matching extern
-    // decls — without them, the SSA Variable→Symbol resolver
-    // inside translated lambda bodies emits `Indirect(Undef)`
-    // calls and the JIT either rejects the function or compiles
-    // it to a `call_indirect → 0` that SIGSEGVs at runtime.
-    __signal_set_i32: "__signal_set_i32",
-    __signal_set_f64: "__signal_set_f64",
-    __signal_set_string: "__signal_set_string",
+    // Id-keyed signal accessors (Phase 1A). The DSL lowering pass
+    // bakes the `SignalId.to_raw()` as an i64 literal at the call
+    // site; these externs reconstruct `Signal::from_id` and delegate
+    // to `blinc_core::reactive` directly. No runtime name lookup.
+    __signal_get_by_id_i32: "__signal_get_by_id_i32",
+    __signal_get_by_id_f64: "__signal_get_by_id_f64",
+    __signal_get_by_id_string: "__signal_get_by_id_string",
+    __signal_set_by_id_i32: "__signal_set_by_id_i32",
+    __signal_set_by_id_f64: "__signal_set_by_id_f64",
+    __signal_set_by_id_string: "__signal_set_by_id_string",
     // `<FsmName>.trigger("State.Event")` lowered by
     // `resolve_fsm_trigger_calls` routes here. Same reason as
     // above — needs an extern decl in the typed program for

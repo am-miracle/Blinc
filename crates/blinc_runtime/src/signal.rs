@@ -1,203 +1,142 @@
-//! Per-thread signal table.
+//! Process-global `name → SignalId` map plus thin typed accessors.
 //!
-//! "Signal" is the DSL term for a named runtime cell that user
-//! code reads from and the host writes into — the typical use
-//! is bridging widget state into FSM tick guards (a scroll
-//! position, a progress percentage, etc.). The DSL surface is
-//! `signal <name>: <T>` + `<name>.get()` inside guard
-//! expressions; the DSL pipeline rewrites those into extern
-//! calls (`__signal_get_i32` / `__signal_get_f64` /
-//! `__signal_get_string`) that the runtime resolves by name.
+//! Each declared signal name maps to a single
+//! `blinc_core::reactive::Signal<T>` minted lazily on first lookup
+//! against the process-global reactive graph. There is NO parallel
+//! storage cell — the underlying `Signal<T>` lives in the graph, and
+//! both the DSL compile-time pipeline (`blinc_dsl_core::signal_registry`)
+//! and the FSM transition runtime (`fsm::default_instance::execute_action`)
+//! share THIS map so they target the same id for the same name.
 //!
-//! Storage is a single thread-local `HashMap<String,
-//! ZyntaxValue>`. Both JIT and AOT-compiled DSL code produces
-//! `ZyntaxValue` natively (it's Zyntax's canonical runtime
-//! value representation), so the substrate stores it directly
-//! — no parallel value enum. Complex types (structs, enums,
-//! arrays, optionals, generics) flow through unchanged the
-//! moment the JIT / AOT externs grow to handle them.
+//! ## Why blinc_runtime owns this
 //!
-//! Lives in `blinc_runtime` rather than `blinc_dsl_core`
-//! because both backends share this storage; a widget that
-//! wants to feed a value into a DSL tick guard reaches for
-//! `blinc_runtime::signal::set_*` without depending on the
-//! DSL compiler.
+//! `blinc_dsl_core` depends on `blinc_runtime`, not the other way
+//! around. The FSM transition runtime (which fires `set_i32` /
+//! `add_i32` actions) lives in `blinc_runtime`, so the map must live
+//! at least that low. Keeping it here means a name maps to ONE
+//! `SignalId` no matter which layer minted it first.
 //!
-//! ## Threading
+//! ## Pre-Phase-1A history
 //!
-//! The table is thread-local. Zyntax JIT calls run
-//! synchronously on the caller thread, so host-side state
-//! populated before a call is visible inside the call.
-//! Cross-thread signal sharing is not supported by this layer;
-//! embedders that need it should layer their own
-//! `Mutex<HashMap>` on top and update via the `set_*` API from
-//! the worker thread that's about to issue a call.
+//! This module used to host a thread-local `HashMap<String, ZyntaxValue>`
+//! plus typed accessors that stored values directly. That facade was
+//! retired in Phase 1A of the DSL reactive-integration plan — the
+//! underlying `blinc_core::reactive::Signal<T>` is now the storage,
+//! and this map only carries the name→id mapping for callers that
+//! reach in by name.
 
-use std::cell::RefCell;
+use blinc_core::reactive::{Signal, SignalId};
 use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
-use zyntax_embed::ZyntaxValue;
-
-thread_local! {
-    /// The underlying `ZyntaxValue`-keyed table. Used as a
-    /// fallback when `BlincContextState` hasn't been initialised
-    /// (headless tests, AOT bootstrap before app start). In a
-    /// running app the typed accessors route through reactive
-    /// `State<T>` instead — see the typed-accessor sections
-    /// below.
-    static TABLE: RefCell<HashMap<String, ZyntaxValue>> = RefCell::new(HashMap::new());
+/// Tag stored alongside each signal id so re-lookups for the same
+/// name detect type mismatches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalType {
+    I32,
+    F64,
+    String,
 }
 
-/// Stable key under which an i32 signal lives in
-/// `BlincContextState`'s `use_state_keyed` registry. Picking a
-/// fixed prefix means a `Div(on_click = "…")` extern can grab
-/// the same `State<i32>` the host already subscribed to, by
-/// name alone.
-fn i32_key(name: &str) -> String {
-    format!("__sig:i32:{name}")
+#[derive(Clone, Copy)]
+struct Entry {
+    id_raw: u64,
+    ty: SignalType,
 }
 
-fn f64_key(name: &str) -> String {
-    format!("__sig:f64:{name}")
+static REGISTRY: OnceLock<RwLock<HashMap<String, Entry>>> = OnceLock::new();
+
+fn registry() -> &'static RwLock<HashMap<String, Entry>> {
+    REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-fn str_key(name: &str) -> String {
-    format!("__sig:str:{name}")
+/// Look up an existing signal by name. Returns the raw `SignalId` plus
+/// declared type, or `None` if `name` hasn't been minted yet.
+pub fn lookup(name: &str) -> Option<(u64, SignalType)> {
+    let map = registry().read().ok()?;
+    map.get(name).map(|e| (e.id_raw, e.ty))
 }
 
-/// `State<i32>` handle for a named signal. `Some` when
-/// `BlincContextState` is initialised (always true during
-/// `WindowedApp::run`); `None` for headless callers using only
-/// the thread-local table.
+/// Mint a new `Signal<T>` against the process-global reactive graph
+/// for `name` (or return the existing id if `name` was already
+/// registered). Idempotent across multiple DSL compiles or repeated
+/// host-side `set_*` calls.
 ///
-/// Subscribe a stateful container to this and the subtree
-/// re-evaluates whenever any code (FSM transition action,
-/// host write, …) calls `set_i32` on the same name.
-pub fn state_i32(name: &str) -> Option<blinc_core::State<i32>> {
-    if !blinc_core::context_state::BlincContextState::is_initialized() {
-        return None;
+/// Type-mismatch handling: if `name` was previously registered with a
+/// different `SignalType`, we keep the original entry and log a
+/// warning. Re-binding would invalidate any subscriber tracking the
+/// old id.
+pub fn mint_or_get(name: &str, ty: SignalType) -> u64 {
+    if let Some((id, existing_ty)) = lookup(name) {
+        if existing_ty != ty {
+            tracing::warn!(
+                name = name,
+                existing = ?existing_ty,
+                requested = ?ty,
+                "signal type changed across declarations — keeping the original entry"
+            );
+        }
+        return id;
     }
-    Some(blinc_core::context_state::use_state_keyed(
-        &i32_key(name),
-        || 0i32,
-    ))
-}
 
-/// `State<f64>` mirror of [`state_i32`].
-pub fn state_f64(name: &str) -> Option<blinc_core::State<f64>> {
-    if !blinc_core::context_state::BlincContextState::is_initialized() {
-        return None;
-    }
-    Some(blinc_core::context_state::use_state_keyed(
-        &f64_key(name),
-        || 0.0f64,
-    ))
-}
-
-/// `State<String>` mirror of [`state_i32`].
-pub fn state_str(name: &str) -> Option<blinc_core::State<String>> {
-    if !blinc_core::context_state::BlincContextState::is_initialized() {
-        return None;
-    }
-    Some(blinc_core::context_state::use_state_keyed(
-        &str_key(name),
-        String::new,
-    ))
+    let id_raw = match ty {
+        SignalType::I32 => blinc_core::reactive::signal::<i32>(0).id().to_raw(),
+        SignalType::F64 => blinc_core::reactive::signal::<f64>(0.0).id().to_raw(),
+        SignalType::String => blinc_core::reactive::signal::<String>(String::new())
+            .id()
+            .to_raw(),
+    };
+    registry()
+        .write()
+        .expect("signal registry RwLock poisoned")
+        .entry(name.to_string())
+        .or_insert(Entry { id_raw, ty });
+    id_raw
 }
 
 // =====================================================================
-// Generic ZyntaxValue accessors
-// =====================================================================
+// Typed name-keyed accessors — thin wrappers over `Signal<T>::from_id`.
 //
-// These work in `ZyntaxValue` directly — for complex types
-// (structs, enums, arrays) callers use these and pattern-match
-// on the returned `ZyntaxValue`.
-
-/// Set a signal to an arbitrary [`ZyntaxValue`]. Replaces any
-/// prior entry for `name`.
-pub fn set(name: &str, value: ZyntaxValue) {
-    TABLE.with(|t| {
-        t.borrow_mut().insert(name.to_string(), value);
-    });
-}
-
-/// Read the current value of a signal. Returns `None` when
-/// the signal hasn't been set on this thread.
-pub fn get(name: &str) -> Option<ZyntaxValue> {
-    TABLE.with(|t| t.borrow().get(name).cloned())
-}
-
-/// Clear the signal table on the calling thread. Tests reach
-/// for this to start from a clean slate; production code
-/// typically doesn't need it (signals naturally persist
-/// across JIT calls within a thread's lifetime).
-pub fn clear_all() {
-    TABLE.with(|t| t.borrow_mut().clear());
-}
-
+// These exist so callers that reach in by name (FSM transition actions,
+// hot-reload restore, host-side `BlincDsl::set_signal_*`) don't have to
+// thread `SignalId`s themselves. Each call auto-mints the underlying
+// signal on first use.
 // =====================================================================
-// i32 typed accessors
-// =====================================================================
-//
-// Wrap the generic table. JIT externs and most host callers
-// work in primitive types, so the typed accessors stay the
-// ergonomic surface. Each accessor pattern-matches on the
-// matching `ZyntaxValue` variant — `Int(i64)` for the integer
-// signals, `Float(f64)` for floats, `String(String)` for
-// strings.
 
-/// Set the current value of an i32-typed signal. Writes
-/// through the reactive `State<i32>` when `BlincContextState`
-/// is initialised so any stateful subscriber re-evaluates;
-/// falls back to the thread-local cell otherwise.
+/// Set the current value of an i32-typed signal. Auto-mints if absent.
+/// Calls `Signal::<i32>::set(value)` directly — fires the property
+/// binding registry the same way native Rust `.set()` does.
 pub fn set_i32(name: &str, value: i32) {
-    if let Some(s) = state_i32(name) {
-        s.set(value);
-    } else {
-        set(name, ZyntaxValue::Int(value as i64));
-    }
+    let id_raw = mint_or_get(name, SignalType::I32);
+    Signal::<i32>::from_id(SignalId::from_raw(id_raw)).set(value);
 }
 
-/// Read the current value of an i32-typed signal.
+/// Read the current value of an i32-typed signal. `None` if undeclared
+/// or the wrong type was minted.
 pub fn get_i32(name: &str) -> Option<i32> {
-    if let Some(s) = state_i32(name) {
-        return s.try_get();
-    }
-    match get(name) {
-        Some(ZyntaxValue::Int(n)) => i32::try_from(n).ok(),
-        _ => None,
-    }
+    let (id_raw, SignalType::I32) = lookup(name)? else {
+        return None;
+    };
+    Signal::<i32>::from_id(SignalId::from_raw(id_raw)).try_get()
 }
 
-/// Read with a default of `0` when the signal hasn't been
-/// set. Matches the surface the JIT extern presents to DSL
-/// code.
+/// Read with a default of `0` when absent.
 pub fn get_i32_or_default(name: &str) -> i32 {
     get_i32(name).unwrap_or(0)
 }
 
-// =====================================================================
-// f64 typed accessors
-// =====================================================================
-
 /// f64 mirror of [`set_i32`].
 pub fn set_f64(name: &str, value: f64) {
-    if let Some(s) = state_f64(name) {
-        s.set(value);
-    } else {
-        set(name, ZyntaxValue::Float(value));
-    }
+    let id_raw = mint_or_get(name, SignalType::F64);
+    Signal::<f64>::from_id(SignalId::from_raw(id_raw)).set(value);
 }
 
 /// f64 mirror of [`get_i32`].
 pub fn get_f64(name: &str) -> Option<f64> {
-    if let Some(s) = state_f64(name) {
-        return s.try_get();
-    }
-    match get(name) {
-        Some(ZyntaxValue::Float(n)) => Some(n),
-        _ => None,
-    }
+    let (id_raw, SignalType::F64) = lookup(name)? else {
+        return None;
+    };
+    Signal::<f64>::from_id(SignalId::from_raw(id_raw)).try_get()
 }
 
 /// f64 mirror of [`get_i32_or_default`].
@@ -205,124 +144,71 @@ pub fn get_f64_or_default(name: &str) -> f64 {
     get_f64(name).unwrap_or(0.0)
 }
 
-// =====================================================================
-// String typed accessors
-// =====================================================================
-
-/// Set the current value of a string-typed signal.
+/// String mirror of [`set_i32`].
 pub fn set_str(name: &str, value: impl Into<String>) {
-    let value = value.into();
-    if let Some(s) = state_str(name) {
-        s.set(value);
-    } else {
-        set(name, ZyntaxValue::String(value));
-    }
+    let id_raw = mint_or_get(name, SignalType::String);
+    Signal::<String>::from_id(SignalId::from_raw(id_raw)).set(value.into());
 }
 
-/// Read the current value of a string-typed signal.
+/// String mirror of [`get_i32`].
 pub fn get_str(name: &str) -> Option<String> {
-    if let Some(s) = state_str(name) {
-        return s.try_get();
-    }
-    match get(name) {
-        Some(ZyntaxValue::String(s)) => Some(s),
-        _ => None,
-    }
+    let (id_raw, SignalType::String) = lookup(name)? else {
+        return None;
+    };
+    Signal::<String>::from_id(SignalId::from_raw(id_raw)).try_get()
 }
 
-/// Read with a default of `""` when the signal hasn't been
-/// set.
+/// String mirror of [`get_i32_or_default`].
 pub fn get_str_or_default(name: &str) -> String {
     get_str(name).unwrap_or_default()
+}
+
+/// Drop every entry in the name → SignalId map. Used by hot-reload to
+/// reset state between sessions and by tests for clean slates. Does
+/// NOT remove the underlying `Signal<T>` storage from the global
+/// reactive graph — those slots leak until the graph drops, but the
+/// name handles are released.
+pub fn clear_all() {
+    if let Ok(mut map) = registry().write() {
+        map.clear();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Each (name, type) maps to one Signal<T>; second set updates the same
+    /// storage.
     #[test]
-    fn i32_round_trip() {
+    fn i32_round_trip_through_signal_primitive() {
         clear_all();
-        assert_eq!(get_i32("count"), None);
-        set_i32("count", 42);
-        assert_eq!(get_i32("count"), Some(42));
-        set_i32("count", -7);
-        assert_eq!(get_i32("count"), Some(-7));
+        assert_eq!(get_i32("count_test"), None);
+        set_i32("count_test", 42);
+        assert_eq!(get_i32("count_test"), Some(42));
+        set_i32("count_test", -7);
+        assert_eq!(get_i32("count_test"), Some(-7));
     }
 
     #[test]
-    fn i32_default_when_unset() {
+    fn typed_mismatch_returns_none() {
         clear_all();
-        assert_eq!(get_i32_or_default("missing"), 0);
-        set_i32("present", 99);
-        assert_eq!(get_i32_or_default("present"), 99);
-    }
-
-    /// f64 round-trip — single table, but typed readers stay
-    /// type-strict: a name written as f64 reads back via
-    /// `get_f64`, not `get_i32`. Overwriting with i32 makes
-    /// `get_f64` return None (stored shape no longer matches).
-    #[test]
-    fn f64_round_trip_and_default() {
-        clear_all();
-        assert_eq!(get_f64("progress"), None);
-        assert_eq!(get_f64_or_default("progress"), 0.0);
-
-        set_f64("progress", 0.75);
-        assert_eq!(get_f64("progress"), Some(0.75));
-        assert_eq!(get_f64_or_default("progress"), 0.75);
-
-        set_i32("progress", 100);
-        assert_eq!(get_i32("progress"), Some(100));
-        assert_eq!(get_f64("progress"), None);
+        set_i32("conflict", 100);
+        // Reading as f64 misses — different SignalType in the map.
+        assert_eq!(get_f64("conflict"), None);
+        assert_eq!(get_str("conflict"), None);
+        assert_eq!(get_i32("conflict"), Some(100));
     }
 
     #[test]
-    fn str_round_trip_and_default() {
+    fn f64_and_str_round_trip() {
         clear_all();
-        assert_eq!(get_str("title"), None);
-        assert_eq!(get_str_or_default("title"), "");
+        assert_eq!(get_f64_or_default("progress_t"), 0.0);
+        set_f64("progress_t", 0.75);
+        assert_eq!(get_f64("progress_t"), Some(0.75));
 
-        set_str("title", "hello");
-        assert_eq!(get_str("title").as_deref(), Some("hello"));
-        assert_eq!(get_str_or_default("title"), "hello");
-    }
-
-    /// Complex shape — Struct flows through the substrate
-    /// without normalising. Proves the single-table design
-    /// holds for arbitrary `ZyntaxValue` shapes.
-    #[test]
-    fn complex_value_round_trip() {
-        clear_all();
-        let point = ZyntaxValue::Struct {
-            type_name: "Point".into(),
-            fields: HashMap::from([
-                ("x".to_string(), ZyntaxValue::Int(3)),
-                ("y".to_string(), ZyntaxValue::Int(4)),
-            ]),
-        };
-        set("origin", point.clone());
-        let read_back = get("origin").unwrap();
-        assert_eq!(read_back, point);
-
-        // Typed accessors return None for a struct value.
-        assert_eq!(get_i32("origin"), None);
-        assert_eq!(get_str("origin"), None);
-    }
-
-    #[test]
-    fn clear_all_wipes_table() {
-        set_i32("a", 1);
-        set_f64("b", 2.0);
-        set_str("c", "three");
-        set(
-            "d",
-            ZyntaxValue::Array(vec![ZyntaxValue::Int(1), ZyntaxValue::Int(2)]),
-        );
-        clear_all();
-        assert_eq!(get_i32("a"), None);
-        assert_eq!(get_f64("b"), None);
-        assert_eq!(get_str("c"), None);
-        assert_eq!(get("d"), None);
+        assert_eq!(get_str_or_default("title_t"), "");
+        set_str("title_t", "hello");
+        assert_eq!(get_str("title_t").as_deref(), Some("hello"));
     }
 }
