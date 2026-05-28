@@ -1441,18 +1441,28 @@ impl WebApp {
                                 blinc_platform::MouseButton::Left,
                             );
                         }
-                        // Finger lifted — fire `on_gesture_end()` on
-                        // every scroll container in the tree. This is
-                        // the touch sibling of the wheel-idle
-                        // debounce in `run_one_frame`: we have a
-                        // reliable end-of-gesture signal here (touch
-                        // events have no momentum tail in the DOM),
-                        // so any scroll widget that ended its drag
-                        // in rubber-band territory snaps back
-                        // immediately rather than waiting for the
-                        // 180 ms wheel debounce to elapse.
+                        // Finger lifted — fire `on_scroll_end()` on the
+                        // most-recently-scrolled container. This covers
+                        // BOTH cases the touch path needs to handle:
+                        //
+                        // 1. Overscrolled at release → rubber-band snap
+                        //    back (what the older `on_gesture_end()`
+                        //    path did exclusively).
+                        // 2. Released with velocity → transition the
+                        //    scroll FSM to `Decelerating` so the
+                        //    momentum-decay tick loop runs out the
+                        //    flick. `apply_touch_scroll_delta()` has
+                        //    already been accumulating velocity from
+                        //    each `touchmove`; without this call the
+                        //    momentum was computed but never consumed
+                        //    — flicks stopped dead on finger-lift
+                        //    instead of free-scrolling.
+                        //
+                        // iOS (ios.rs:1097) and Android (android.rs:1024)
+                        // both already call `on_scroll_end` on touch-end
+                        // for the same reason. Web was the outlier.
                         if let Some(ref mut tree) = app.current_tree {
-                            tree.on_gesture_end();
+                            tree.on_scroll_end();
                         }
                         // Cancel any armed long-press timer the
                         // user just dismissed by lifting their
