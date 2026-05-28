@@ -1791,42 +1791,33 @@ impl GpuRenderer {
             surface_caps.alpha_modes
         );
 
-        // Select texture format based on platform
+        // Always prefer a non-sRGB surface format. Blinc's shaders
+        // emit sRGB-encoded colors directly into the framebuffer
+        // (text glyphs, SDF fills, layer composites all bake the
+        // gamma transfer at the source), so an sRGB-format surface
+        // would treat those already-encoded values as linear and
+        // re-apply the curve on present — every colour visibly
+        // washes out.
+        //
+        // This was originally `#[cfg(target_os = "macos")]`-only,
+        // with non-macOS native falling through to sRGB "for now."
+        // Linux users reported washed colours; the underlying
+        // pipeline is the same on every native platform so the
+        // selection should be too. WebGL2 was already covered by
+        // the storage-buffer-limit heuristic below — folded into
+        // this unconditional non-sRGB-first preference.
+        //
+        // The fallback (first available format) only kicks in on
+        // platforms whose surface only advertises sRGB formats;
+        // there's nothing better we can do there short of writing
+        // a manual `pow(c, 2.2)` in every shader.
         let texture_format = config.texture_format.unwrap_or_else(|| {
-            // On macOS, prefer non-sRGB format to avoid automatic gamma correction
-            // which causes colors to appear washed out. Other platforms may behave
-            // differently, so we use sRGB there for now.
-            #[cfg(target_os = "macos")]
-            {
-                surface_caps
-                    .formats
-                    .iter()
-                    .find(|f| !f.is_srgb())
-                    .copied()
-                    .unwrap_or(surface_caps.formats[0])
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                // On WebGL2 (GL adapter without storage buffers), prefer non-sRGB
-                // to avoid double gamma correction — shaders output sRGB-encoded
-                // colors directly, and an sRGB surface would apply gamma again.
-                let prefer_non_srgb = adapter.limits().max_storage_buffers_per_shader_stage == 0;
-                if prefer_non_srgb {
-                    surface_caps
-                        .formats
-                        .iter()
-                        .find(|f| !f.is_srgb())
-                        .copied()
-                        .unwrap_or(surface_caps.formats[0])
-                } else {
-                    surface_caps
-                        .formats
-                        .iter()
-                        .find(|f| f.is_srgb())
-                        .copied()
-                        .unwrap_or(surface_caps.formats[0])
-                }
-            }
+            surface_caps
+                .formats
+                .iter()
+                .find(|f| !f.is_srgb())
+                .copied()
+                .unwrap_or(surface_caps.formats[0])
         });
         tracing::info!(
             "Selected texture format: {:?} (sRGB: {})",
