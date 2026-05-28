@@ -407,19 +407,6 @@ pub(crate) struct WindowState {
     /// the full event-buffer refactor.
     /// ([[project-reactive-architecture-v2]] Phase 3.1.)
     pub last_pointer_dispatch: Option<std::time::Instant>,
-    /// Count of consecutive `SurfaceError::Timeout` from
-    /// `surface.get_current_texture()`. On Wayland with `Fifo`
-    /// present-mode (what `AutoVsync` resolves to) the compositor
-    /// can transiently fail to release a swapchain image — wgpu
-    /// blocks for ~1 s then returns `Timeout`. A handful in a row
-    /// is normal backpressure (recoverable, no action needed); a
-    /// long sustained run usually means the surface configuration
-    /// went stale (window resized off-screen, compositor restarted,
-    /// xdg-shell state desync). After
-    /// `SURFACE_TIMEOUT_RECONFIGURE_THRESHOLD` consecutive hits we
-    /// re-call `surface.configure(...)` once as a recovery; the
-    /// counter resets on the next successful frame.
-    pub consecutive_surface_timeouts: u32,
 }
 
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
@@ -450,23 +437,38 @@ impl WindowState {
             last_cursor: None,
             last_router_state_fp: None,
             last_pointer_dispatch: None,
-            consecutive_surface_timeouts: 0,
         }
     }
 }
 
-/// Number of consecutive `SurfaceError::Timeout` returns from
-/// `get_current_texture()` before we re-call `surface.configure(...)`
-/// as a recovery measure. wgpu's internal timeout is ~1 s, so this
-/// represents `THRESHOLD` seconds of solid no-frame state — long
-/// enough that transient compositor backpressure (a handful of
-/// dropped Wayland frame-callbacks during a window resize, a
-/// minimised window briefly throttling) has resolved on its own, but
-/// short enough that a real stale-surface condition (compositor
-/// restart, xdg-shell state desync) gets recovered automatically
-/// without the user having to restart the app.
+/// Pick the best present mode for the current surface, preferring
+/// non-blocking `Mailbox` on Linux/Wayland where `Fifo` (what
+/// `AutoVsync` resolves to) can pathologically block
+/// `get_current_texture()` for ~1 s per acquire when the compositor
+/// transiently can't release a swapchain image. Falls back to
+/// `AutoVsync` if `Mailbox` isn't in `surface_caps.present_modes`,
+/// matching GPUI's documented Wayland mitigation (`zed-industries/zed`
+/// `crates/gpui_linux/src/linux/wayland/window.rs`).
+///
+/// Other platforms keep `AutoVsync` — `Fifo` is the right call for
+/// energy efficiency and frame pacing when the compositor isn't
+/// pathological.
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
-const SURFACE_TIMEOUT_RECONFIGURE_THRESHOLD: u32 = 10;
+fn preferred_present_mode(
+    surface: &wgpu::Surface<'static>,
+    adapter: &wgpu::Adapter,
+) -> wgpu::PresentMode {
+    #[cfg(target_os = "linux")]
+    {
+        let caps = surface.get_capabilities(adapter);
+        if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            return wgpu::PresentMode::Mailbox;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (surface, adapter);
+    wgpu::PresentMode::AutoVsync
+}
 
 /// Context passed to the UI builder function
 pub struct WindowedContext {
@@ -3262,7 +3264,10 @@ impl WindowedApp {
                                         format,
                                         width,
                                         height,
-                                        present_mode: wgpu::PresentMode::AutoVsync,
+                                        present_mode: preferred_present_mode(
+                                            &surf,
+                                            blinc_app.adapter(),
+                                        ),
                                         alpha_mode,
                                         view_formats: vec![],
                                         desired_maximum_frame_latency: primary_max_frame_latency,
@@ -3414,7 +3419,10 @@ impl WindowedApp {
                                                 format,
                                                 width: w,
                                                 height: h,
-                                                present_mode: wgpu::PresentMode::AutoVsync,
+                                                present_mode: preferred_present_mode(
+                                                    &surf,
+                                                    blinc_app.adapter(),
+                                                ),
                                                 alpha_mode,
                                                 view_formats: vec![],
                                                 desired_maximum_frame_latency: secondary_latency,
@@ -4954,17 +4962,9 @@ impl WindowedApp {
 
                             // Get current frame
                             let frame = match surf.get_current_texture() {
-                                Ok(f) => {
-                                    // Successful acquire — clear the
-                                    // consecutive-timeout counter so
-                                    // transient backpressure doesn't
-                                    // trip the reconfigure threshold.
-                                    ws.consecutive_surface_timeouts = 0;
-                                    f
-                                }
+                                Ok(f) => f,
                                 Err(wgpu::SurfaceError::Lost) => {
                                     surf.configure(blinc_app.device(), config);
-                                    ws.consecutive_surface_timeouts = 0;
                                     return ControlFlow::Continue;
                                 }
                                 Err(wgpu::SurfaceError::OutOfMemory) => {
@@ -4972,35 +4972,20 @@ impl WindowedApp {
                                     return ControlFlow::Exit;
                                 }
                                 Err(wgpu::SurfaceError::Timeout) => {
-                                    // Transient on Wayland with `Fifo`
-                                    // present-mode — the compositor
-                                    // couldn't release a swapchain image
-                                    // in wgpu's ~1 s window. A few in a
-                                    // row is normal (window resize race,
-                                    // briefly throttled compositor),
-                                    // so debug-log instead of warn to
-                                    // avoid the 1 Hz log spam users
-                                    // reported. If we hit a sustained
-                                    // run we reconfigure the surface
-                                    // as a stale-state recovery.
-                                    ws.consecutive_surface_timeouts =
-                                        ws.consecutive_surface_timeouts.saturating_add(1);
-                                    if ws.consecutive_surface_timeouts
-                                        >= SURFACE_TIMEOUT_RECONFIGURE_THRESHOLD
-                                    {
-                                        tracing::warn!(
-                                            "Surface acquire timed out {} times in a row — \
-                                             reconfiguring surface as recovery",
-                                            ws.consecutive_surface_timeouts,
-                                        );
-                                        surf.configure(blinc_app.device(), config);
-                                        ws.consecutive_surface_timeouts = 0;
-                                    } else {
-                                        tracing::debug!(
-                                            "Surface acquire timeout (consecutive={})",
-                                            ws.consecutive_surface_timeouts,
-                                        );
-                                    }
+                                    // Transient — Wayland Fifo backpressure,
+                                    // driver quirk on some Linux/Mesa
+                                    // adapters (gfx-rs/wgpu#1218,
+                                    // bevy#5957). Skip this frame and
+                                    // re-arm a redraw; do NOT reconfigure
+                                    // the surface — reconfigure forces
+                                    // another full acquire cycle that
+                                    // tends to time out again, producing
+                                    // multi-second input latency. Matches
+                                    // GPUI / iced / egui / Slint / Bevy
+                                    // policy convergent across the
+                                    // ecosystem.
+                                    tracing::debug!("Surface acquire timeout — skipping frame");
+                                    window.request_redraw();
                                     return ControlFlow::Continue;
                                 }
                                 Err(e) => {
