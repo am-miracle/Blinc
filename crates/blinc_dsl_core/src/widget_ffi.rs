@@ -360,11 +360,11 @@ fn ensure_context_state() {
         return;
     }
 
-    let reactive = std::sync::Arc::new(std::sync::Mutex::new(
-        blinc_core::reactive::ReactiveGraph::new(),
-    ));
+    // Use the process-global reactive graph so bare `signal()` calls
+    // from DSL widgets interop with the rest of the reactive surface.
+    let reactive = blinc_core::reactive::global_graph();
     let hooks = std::sync::Arc::new(std::sync::Mutex::new(blinc_core::HookState::new()));
-    let dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dirty = blinc_core::reactive::global_dirty_flag();
     blinc_core::BlincContextState::init(reactive, hooks, dirty);
 }
 

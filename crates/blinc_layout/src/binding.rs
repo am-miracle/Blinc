@@ -42,7 +42,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use blinc_core::reactive::{Computed, DerivedId, SignalId, State};
+use blinc_core::reactive::{Computed, DerivedId, Signal, SignalId, State};
 
 use crate::element::RenderProps;
 use crate::property::{PropertyId, SideEffects};
@@ -165,6 +165,33 @@ impl<T: Clone + Send + 'static> IntoReactive<T> for &Computed<T> {
 impl<T: Clone + Send + 'static> IntoReactive<T> for Computed<T> {
     fn into_reactive(self) -> Reactive<T> {
         Reactive::Computed(self)
+    }
+}
+
+// Standalone signal: bridge a `Signal<T>` into the same `Reactive::Bound`
+// channel `&State<T>` uses, by wrapping it with the process-global
+// reactive graph + dirty flag. This lets `.bg(signal)` / `.bg(&signal)`
+// share the property-binding registry path with `.bg(&state)`.
+//
+// `Signal<T>` is `Copy`, so both impl arms are trivial — the by-value
+// form doesn't even need an explicit clone.
+impl<T: Clone + Send + 'static> IntoReactive<T> for Signal<T> {
+    fn into_reactive(self) -> Reactive<T> {
+        Reactive::Bound(State::new(
+            self,
+            blinc_core::reactive::global_graph(),
+            blinc_core::reactive::global_dirty_flag(),
+        ))
+    }
+}
+
+impl<T: Clone + Send + 'static> IntoReactive<T> for &Signal<T> {
+    fn into_reactive(self) -> Reactive<T> {
+        Reactive::Bound(State::new(
+            *self,
+            blinc_core::reactive::global_graph(),
+            blinc_core::reactive::global_dirty_flag(),
+        ))
     }
 }
 

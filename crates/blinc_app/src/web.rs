@@ -680,7 +680,8 @@ impl WebApp {
         }
 
         let ref_dirty_flag: RefDirtyFlag = Arc::new(AtomicBool::new(false));
-        let reactive: SharedReactiveGraph = Arc::new(Mutex::new(ReactiveGraph::new()));
+        // Shared process-global reactive graph — see windowed.rs.
+        let reactive: SharedReactiveGraph = blinc_core::reactive::global_graph();
         let hooks = Arc::new(Mutex::new(HookState::new()));
 
         // Initialize the global `BlincContextState` singleton with
@@ -706,8 +707,9 @@ impl WebApp {
                 Arc::clone(&reactive),
                 Arc::clone(&hooks),
                 Arc::clone(&ref_dirty_flag),
-                stateful_callback,
+                stateful_callback.clone(),
             );
+            blinc_core::reactive::set_stateful_deps_notifier(move |ids| stateful_callback(ids));
         }
 
         // Initialize the global ThemeState the same way the desktop /

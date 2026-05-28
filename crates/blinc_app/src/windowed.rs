@@ -2642,8 +2642,10 @@ impl WindowedApp {
 
         // Shared dirty flag for element refs
         let ref_dirty_flag: RefDirtyFlag = Arc::new(AtomicBool::new(false));
-        // Shared reactive graph for signal-based state management
-        let reactive: SharedReactiveGraph = Arc::new(Mutex::new(ReactiveGraph::new()));
+        // Process-global reactive graph + dirty flag — shared with bare
+        // `signal()` / `effect()` / `computed()` callers in user code so
+        // dependency tracking spans both paths.
+        let reactive: SharedReactiveGraph = blinc_core::reactive::global_graph();
         // Shared hook state for use_state persistence
         let hooks: SharedHookState = Arc::new(Mutex::new(HookState::new()));
 
@@ -2659,8 +2661,12 @@ impl WindowedApp {
                 Arc::clone(&reactive),
                 Arc::clone(&hooks),
                 Arc::clone(&ref_dirty_flag),
-                stateful_callback,
+                stateful_callback.clone(),
             );
+            // Install the same callback as the process-global
+            // stateful-deps notifier so bare `Signal<T>::set` fires
+            // `Stateful` deps the same way `State<T>::set` does.
+            blinc_core::reactive::set_stateful_deps_notifier(move |ids| stateful_callback(ids));
         }
 
         // Shared animation scheduler for spring/keyframe animations

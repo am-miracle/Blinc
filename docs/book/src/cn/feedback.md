@@ -76,32 +76,66 @@ badge("")
 
 ## Progress
 
-Progress bar:
+Progress bar — value is in the 0..=100 range:
 
 ```rust
-progress()
-    .value(75.0)  // 0-100
+progress(75.0)
+```
+
+### Signal-bound (recommended)
+
+`progress(...)` accepts `impl IntoReactive<f32>`, so you can pass
+either an eager `f32` or a `&State<f32>`. With a signal, updates patch
+the indicator's GPU scale-x transform directly — no Stateful rebuild,
+no per-frame layout recompute.
+
+```rust
+use blinc_core::context_state::use_state;
+
+let pct = use_state(0.0_f32);
+
+div()
+    .child(progress(&pct).w(300.0))
+    .child(
+        button("Advance").on_click(move |_| {
+            pct.update(|v| (v + 10.0).min(100.0));
+        })
+    )
 ```
 
 ### Indeterminate
 
 ```rust
-progress()
-    .indeterminate(true)
+progress(0.0).indeterminate(true)
 ```
 
 ### With Label
 
+The label needs to re-render when `pct` changes, so wrap it in a
+`Stateful` with `.deps(...)`. The progress bar itself binds the
+signal directly and updates with no rebuild.
+
 ```rust
+use blinc_layout::stateful::{NoState, stateful};
+
+let pct = use_state(0.0_f32);
+
 div()
     .flex_col()
     .gap(4.0)
     .child(
-        div().flex_row().justify_between()
-            .child(text("Uploading..."))
-            .child(text(format!("{}%", progress_value)))
+        stateful::<NoState>()
+            .deps([pct.signal_id()])
+            .on_state({
+                let pct = pct.clone();
+                move |_ctx| {
+                    div().flex_row().justify_between()
+                        .child(text("Uploading..."))
+                        .child(text(&format!("{}%", pct.get() as i32)))
+                }
+            })
     )
-    .child(progress().value(progress_value))
+    .child(progress(&pct))
 ```
 
 ## Spinner

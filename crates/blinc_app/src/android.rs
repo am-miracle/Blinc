@@ -192,9 +192,10 @@ impl AndroidApp {
         // Initialize the theme system
         Self::init_theme();
 
-        // Shared state
+        // Shared state — process-global reactive graph so bare
+        // `signal()` interops with `State<T>` / `Stateful::deps`.
         let ref_dirty_flag: RefDirtyFlag = Arc::new(AtomicBool::new(false));
-        let reactive: SharedReactiveGraph = Arc::new(Mutex::new(ReactiveGraph::new()));
+        let reactive: SharedReactiveGraph = blinc_core::reactive::global_graph();
         let hooks: SharedHookState = Arc::new(Mutex::new(HookState::new()));
 
         // Initialize global context state singleton
@@ -208,8 +209,9 @@ impl AndroidApp {
                 Arc::clone(&reactive),
                 Arc::clone(&hooks),
                 Arc::clone(&ref_dirty_flag),
-                stateful_callback,
+                stateful_callback.clone(),
             );
+            blinc_core::reactive::set_stateful_deps_notifier(move |ids| stateful_callback(ids));
         }
 
         // Animation scheduler - single-threaded for mobile efficiency

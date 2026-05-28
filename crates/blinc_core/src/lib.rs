@@ -69,7 +69,8 @@ pub use layer::{
 };
 pub use reactive::{
     Computed, Derived, DerivedId, DirtyFlag, Effect, EffectId, ReactiveGraph, SharedReactiveGraph,
-    Signal, SignalId, State, StatefulDepsCallback,
+    Signal, SignalId, State, StatefulDepsCallback, computed, derived, effect, global_dirty_flag,
+    global_graph, set_stateful_deps_notifier, signal,
 };
 pub use runtime::BlincReactiveRuntime;
 pub use value::{

@@ -172,29 +172,29 @@ fn toggle_button() -> impl ElementBuilder {
 
 ### Drag to Move
 
+`offset` is a `State<(f32, f32)>` carrying the drag accumulator.
+`bind_transform_from` maps it into a `Transform::translate`, so each
+`.set(...)` patches the GPU translate directly — no Stateful rebuild,
+no relayout.
+
 ```rust
-use blinc_core::BlincContextState;
+use blinc_core::context_state::use_state;
+use blinc_core::Transform;
 
-fn draggable_box(ctx: &WindowedContext) -> impl ElementBuilder {
-    let pos_x = ctx.use_signal(100.0f32);
-    let pos_y = ctx.use_signal(100.0f32);
-
-    let x = ctx.get(pos_x).unwrap_or(100.0);
-    let y = ctx.get(pos_y).unwrap_or(100.0);
+fn draggable_box() -> impl ElementBuilder {
+    let offset = use_state((100.0_f32, 100.0_f32));
 
     div()
-        .absolute()
-        .left(x)
-        .top(y)
         .w(80.0)
         .h(80.0)
         .rounded(8.0)
         .bg(Color::rgba(0.4, 0.6, 1.0, 1.0))
-        .on_drag(move |evt| {
-            // Signal<T> is Copy, so it can be captured directly
-            // Use BlincContextState to update signals from closures
-            BlincContextState::get().update(pos_x, |v| v + evt.drag_delta_x);
-            BlincContextState::get().update(pos_y, |v| v + evt.drag_delta_y);
+        .bind_transform_from(offset.clone(), |(x, y)| Transform::translate(x, y))
+        .on_drag({
+            let offset = offset.clone();
+            move |evt| {
+                offset.update(|(x, y)| (x + evt.drag_delta_x, y + evt.drag_delta_y));
+            }
         })
 }
 ```
@@ -244,31 +244,41 @@ fn hover_card() -> impl ElementBuilder {
 
 ## Capturing State in Closures
 
-Event handlers are `Fn` closures. `Signal<T>` is `Copy`, so signals can be captured directly. Use `BlincContextState` to access signal operations from within closures:
+Event handlers are `Fn` closures. `State<T>` is cheap to `clone()`
+(it's an Arc-of-handle internally), so the common pattern is to clone
+the handle into each closure that needs it:
 
 ```rust
-use blinc_core::BlincContextState;
+use blinc_core::context_state::use_state;
+use blinc_layout::stateful::{NoState, stateful};
 
-fn counter_buttons(ctx: &WindowedContext) -> impl ElementBuilder {
-    let count = ctx.use_signal(0i32);
+fn counter_buttons() -> impl ElementBuilder {
+    let count = use_state(0_i32);
 
     div()
         .flex_row()
         .gap(16.0)
         .child(
             div()
-                .on_click(move |_| {
-                    // Signal is Copy - captured directly in the closure
-                    BlincContextState::get().update(count, |v| v - 1);
+                .on_click({
+                    let count = count.clone();
+                    move |_| count.update(|v| v - 1)
                 })
                 .child(text("-"))
         )
-        .child(text(&format!("{}", ctx.get(count).unwrap_or(0))))
+        // The label re-renders when count changes — wrap in Stateful
+        // with .deps() so it picks up the new value.
+        .child(
+            stateful::<NoState>()
+                .deps([count.signal_id()])
+                .on_state({
+                    let count = count.clone();
+                    move |_ctx| div().child(text(&format!("{}", count.get())))
+                })
+        )
         .child(
             div()
-                .on_click(move |_| {
-                    BlincContextState::get().update(count, |v| v + 1);
-                })
+                .on_click(move |_| count.update(|v| v + 1))
                 .child(text("+"))
         )
 }
@@ -276,21 +286,25 @@ fn counter_buttons(ctx: &WindowedContext) -> impl ElementBuilder {
 
 ### Thread Safety
 
-`BlincContextState` is a thread-safe global singleton:
-
-- It uses `Arc<Mutex<...>>` for the reactive graph and hook state
-- All callbacks use `RwLock` for safe concurrent access
-- `BlincContextState::get()` returns `&'static BlincContextState`
-
-This makes it safe to use in event handler closures:
+`BlincContextState` is a thread-safe global singleton — the reactive
+graph and hook state both live behind `Arc<Mutex<...>>`. `State<T>`
+handles wrap that graph, so calling `.set` / `.update` from any
+thread is safe.
 
 ```rust
+let my_state = use_state(0_i32);
+
 div()
-    .on_click(move |_| {
-        // Safe: BlincContextState is thread-safe
-        BlincContextState::get().update(my_signal, |v| v + 1);
-        BlincContextState::get().set_focus(Some("my-input"));
-        BlincContextState::get().request_rebuild();
+    .on_click({
+        let my_state = my_state.clone();
+        move |_| {
+            // Safe: State<T> is thread-safe through the shared graph.
+            my_state.update(|v| v + 1);
+
+            // BlincContextState exposes the rest of the global APIs.
+            BlincContextState::get().set_focus(Some("my-input"));
+            BlincContextState::get().request_rebuild();
+        }
     })
 ```
 

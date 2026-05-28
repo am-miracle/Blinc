@@ -532,6 +532,186 @@ the same line).
 
 ---
 
+## Reactive Property Bindings
+
+Stateful elements aren't the only way to make UI react to signals.
+Every Blinc element exposes a set of **reactive property setters** that
+accept either an eager value *or* a signal-bound reference at the same
+call site — when the signal changes, only that one property is updated.
+No rebuild, no `on_state` callback, no `.deps([...])`.
+
+This is the channel `.bg(&state)` / `.w(&computed)` / `.opacity(&signal)`
+travel through.
+
+### Signal vs State — what to reach for
+
+Two flavours of reactive value, both wired into the same property-binding
+registry. Pick by creation semantics, not capability — they support the
+same `.get / .set / .update` operations and both work in every reactive
+setter.
+
+| Type | Created via | Lifetime | When to reach for it |
+| --- | --- | --- | --- |
+| **`Signal<T>`** | `signal(initial)`, returned by `use_signal_keyed(...)` | Slotmap-keyed in the process-global graph | `Copy` — capture by value in closures without `.clone()`. Use anywhere; the primitive. |
+| **`State<T>`** | `use_state(initial)`, `use_state_keyed(k, init)` | Hook-keyed slot persisted across rebuilds | UI-component-local state where call-site keying matters. `Clone`. |
+
+Both can be passed to `.bg(...)` etc. interchangeably:
+
+```rust
+let count: Signal<i32> = signal(0);          // bare primitive
+let theme: State<Theme> = use_state(Theme::Dark);  // hook-keyed
+
+div().bg(&theme_color_for(theme)).rounded(&radius_for(count));
+```
+
+> **Migration note:** older code shows `State<T>` everywhere because
+> `Signal<T>` only got its rich API in this release. They're
+> interoperable — mix freely.
+
+### `Reactive<T>` and `IntoReactive<T>`
+
+Reactive setters take `impl IntoReactive<T>`. Four impls cover the
+common cases:
+
+| Pass in | Resolves to | What happens |
+| --- | --- | --- |
+| A value of `T` | `Reactive::Const(T)` | Direct write at build time — no subscription |
+| `&Signal<T>` or `Signal<T>` | `Reactive::Bound(state)` | Registers a subscription on the signal's id; fires on every `.set(...)` |
+| `&State<T>` or `State<T>` | `Reactive::Bound(state)` | Same as `Signal<T>` — same channel |
+| `&Computed<T>` or `Computed<T>` | `Reactive::Computed(c)` | Registers a subscription on the derived id; fires when *any* tracked dependency of the computed changes |
+
+The call site doesn't change — the type of the argument selects the
+behaviour:
+
+```rust
+use blinc_core::reactive::signal;            // bare reactive primitive
+use blinc_core::context_state::use_state;    // hook-keyed
+use blinc_layout::prelude::*;
+
+let bg = signal(Color::from_hex(0x1a1a1a));  // Copy
+let w  = use_state(120.0_f32);                // Clone
+
+div()
+    .bg(bg)         // Signal is Copy — pass by value
+    .w(&w)          // State needs reference (Clone, not Copy)
+    .rounded(8.0)   // eager — no subscription
+```
+
+There is no separate "bound" setter. The eager and bound forms share
+one method name, so you can swap a constant for a signal (or vice
+versa) by changing the argument alone.
+
+### Free functions: `signal()` / `computed()` / `derived()` / `effect()`
+
+Four free functions provide the bare reactive-primitive surface, all
+operating against the process-global reactive graph:
+
+```rust
+use blinc_core::reactive::{signal, computed, derived, effect};
+
+let count: Signal<i32> = signal(0);
+
+// Computed (alias: `derived`). Auto-tracks every signal read inside
+// the closure. Re-fires bindings when any tracked dep changes.
+let doubled = computed(move |g| g.get(count).unwrap_or(0) * 2);
+
+// Side effect — logging, IO, custom integrations.
+let _e = effect(move |g| {
+    println!("count = {}", g.get(count).unwrap_or(0));
+});
+
+// Drives both: bindings re-paint, effect re-prints.
+count.set(5);
+```
+
+`Signal<T>` is `Copy`, so closures capture by value without `.clone()`
+ceremony:
+
+```rust
+let n = signal(0_i32);
+let plus  = button("+").on_click(move |_| n.update(|v| v + 1));
+let minus = button("-").on_click(move |_| n.update(|v| v - 1));
+// Both closures captured `n` by copy — no boilerplate.
+```
+
+### Reactive-aware Div setters
+
+These all take `impl IntoReactive<T>` today:
+
+| Setter | `T` | Channel |
+| --- | --- | --- |
+| `.bg(value)` | `Color` | RenderProps (no relayout) |
+| `.opacity(value)` | `f32` | RenderProps |
+| `.rounded(value)` | `f32` | RenderProps |
+| `.border_color(value)` | `Color` | RenderProps |
+| `.shadow(value)` | `Shadow` | RenderProps |
+| `.transform(value)` | `Transform` | RenderProps |
+| `.scale(value)` | `f32` | RenderProps (composes with existing transform) |
+| `.rotate(value)` / `.rotate_deg(value)` | `f32` | RenderProps |
+| `.transform_width(value)` | `f32` (0..=1) | RenderProps — GPU scale-x, left-pivot. Use for `cn::progress`-style fill animations without relayout |
+| `.bind_transform_from(source, |v| Transform::…)` | any `T` | RenderProps — arbitrary mapper from a signal to a transform |
+| `.w(value)` / `.h(value)` | `f32` | taffy `Style` (triggers relayout) |
+| `.p(value)` | `f32` | taffy `Style` (relayout) |
+| `.gap(value)` | `f32` | taffy `Style` (relayout) |
+
+Visual-only updates skip `compute_layout` entirely — they just patch
+`RenderProps` and request a redraw. Layout-affecting updates patch the
+live `taffy::Style` and schedule one relayout next frame.
+
+### Computed (derived) values
+
+`use_computed(compute)` returns a `Computed<T>` that lazily evaluates
+the closure and auto-tracks every signal it reads. Pass it to a
+reactive setter just like a `State<T>`:
+
+```rust
+use blinc_core::context_state::{use_state, use_computed};
+
+let count = use_state(0_i32);
+let label_color = {
+    let count = count.clone();
+    use_computed(move |_g| {
+        if count.get() > 10 { Color::RED } else { Color::WHITE }
+    })
+};
+
+div()
+    .child(text("Count").color(&label_color))
+    .on_click(move |_| count.update(|n| n + 1))
+```
+
+When `count.set(...)` fires, the registry walks every derived that
+depends on it (here: `label_color`), marks it dirty, and re-fires
+every property binding subscribed to that derived. Only the `text`'s
+colour is patched — no rebuild.
+
+`Computed<T>` exposes `.get()` for ad-hoc reads, but the common case
+is to hand it straight to a setter and let the registry drive it.
+
+### Reactive bindings vs `.deps()` + `on_state`
+
+Both routes "make UI react to a signal". They aren't equivalent —
+pick by what you're updating:
+
+| Use… | When |
+| --- | --- |
+| Reactive setter (`.bg(&state)`, `.w(&state)`, …) | Patching a *single* property on a known element. Cheapest path — no callback, no rebuild |
+| `.deps([…])` + `on_state` | The signal change needs to **restructure** the subtree (different children, different conditional branches) or read multiple signals to produce a Div |
+
+A 1-to-1 mapping (`signal → one property`) belongs in a reactive
+setter. A `1-to-many` or "rebuild this whole region" relationship
+belongs in `on_state`.
+
+### Lifecycle
+
+Reactive bindings register against the `LayoutNodeId` that owns them.
+When `remove_subtree_nodes` drops the node — structural rebuild,
+unmount, conditional removal — `PropertyBindingRegistry::unregister_node`
+evicts every binding for that node so stale subscribers can't fire.
+Cleanup is automatic; you never call `.unsubscribe()`.
+
+---
+
 ## Persistent Stateful Handles (`SharedState<S>`)
 
 Blinc has two distinct persistent-state abstractions and the names

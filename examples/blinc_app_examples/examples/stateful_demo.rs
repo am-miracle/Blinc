@@ -21,6 +21,7 @@ use blinc_cn::prelude::*;
 use blinc_core::Color;
 use blinc_core::Transform;
 use blinc_core::events::event_types;
+use blinc_core::reactive::{computed, effect, signal};
 use blinc_layout::stateful::ButtonState;
 use blinc_theme::{ColorToken, HybridTheme, RadiusToken, ThemeBundle, ThemeState};
 
@@ -100,7 +101,8 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
                     .items_center()
                     .child(counter_button())
                     .child(event_info_display())
-                    .child(signal_bound_modifier_section(ctx)),
+                    .child(signal_bound_modifier_section(ctx))
+                    .child(free_function_signal_section()),
             ),
         )
 }
@@ -424,6 +426,99 @@ fn signal_bound_modifier_section(ctx: &WindowedContext) -> impl ElementBuilder +
                                     move |_| width.set(240.0)
                                 })),
                         ),
+                ),
+        )
+}
+
+/// Demonstrates the bare reactive primitive surface:
+///
+/// - `signal(initial)` — bare reactive primitive (Copy, no `.clone()`
+///   ceremony in closures).
+/// - `Signal<T>::set` / `.update` / `.get` directly on the handle.
+/// - `computed(|g| ...)` — derived value that auto-tracks every signal
+///   read inside the closure, plugged into the same `IntoReactive`
+///   channel as `.bg(&computed)`.
+/// - `effect(|g| ...)` — side-effect that re-runs when any tracked
+///   dependency changes (here: logs to the terminal).
+///
+/// All three operate on the process-global reactive graph, so they
+/// interop with the `State<T>` / `use_state*` surface above without
+/// any plumbing.
+fn free_function_signal_section() -> impl ElementBuilder + use<> {
+    let theme = ThemeState::get();
+    let text_secondary = theme.color(ColorToken::TextSecondary);
+
+    // Bare signals — Copy, no Arc clone needed in closures.
+    let r = signal(0.5_f32);
+    let g = signal(0.5_f32);
+    let b = signal(0.5_f32);
+
+    // Computed: derived from r/g/b. The closure auto-tracks the three
+    // signal reads via the graph; any `.set` on r/g/b refires this.
+    let mixed = computed(move |graph| {
+        Color::rgba(
+            graph.get(r).unwrap_or(0.0),
+            graph.get(g).unwrap_or(0.0),
+            graph.get(b).unwrap_or(0.0),
+            1.0,
+        )
+    });
+
+    // Effect: side-effect demo. Logs each change to the terminal —
+    // useful for debugging, telemetry, or any "do something when X
+    // changes" pattern. The handle is intentionally leaked: an effect
+    // dropped while the graph is still alive would unsubscribe.
+    let _e = effect(move |graph| {
+        let rv = graph.get(r).unwrap_or(0.0);
+        let gv = graph.get(g).unwrap_or(0.0);
+        let bv = graph.get(b).unwrap_or(0.0);
+        tracing::info!("free-fn effect: rgb = ({rv:.2}, {gv:.2}, {bv:.2})");
+    });
+
+    let slider_row = |channel: &'static str, s: blinc_core::Signal<f32>| {
+        div()
+            .flex_row()
+            .gap(8.0)
+            .items_center()
+            .child(div().w(20.0).child(text(channel).color(text_secondary)))
+            .child(cn::button("0").on_click(move |_| s.set(0.0)))
+            .child(cn::button("0.25").on_click(move |_| s.set(0.25)))
+            .child(cn::button("0.5").on_click(move |_| s.set(0.5)))
+            .child(cn::button("0.75").on_click(move |_| s.set(0.75)))
+            .child(cn::button("1").on_click(move |_| s.set(1.0)))
+            .child(cn::button("+0.1").on_click(move |_| s.update(|v| (v + 0.1).min(1.0))))
+            .child(cn::button("-0.1").on_click(move |_| s.update(|v| (v - 0.1).max(0.0))))
+    };
+
+    section_container()
+        .child(section_title(
+            "Free functions: signal() / computed() / effect()",
+        ))
+        .child(
+            text(
+                "The swatch's colour is a `computed(|g| Color::rgba(...))` \
+                 derived from three bare `signal(0.5)` primitives. Each \
+                 slider button calls `.set(...)` directly on a Copy \
+                 `Signal<f32>` — no `.clone()` ceremony, no `Stateful` \
+                 wrap, no `ctx`. An `effect(...)` also subscribes and \
+                 logs each change to the terminal.",
+            )
+            .size(theme.typography().text_sm)
+            .color(text_secondary),
+        )
+        .child(
+            div()
+                .flex_row()
+                .gap(16.0)
+                .items_center()
+                .child(div().w(120.0).h(120.0).rounded(16.0).bg(&mixed))
+                .child(
+                    div()
+                        .flex_col()
+                        .gap(8.0)
+                        .child(slider_row("R", r))
+                        .child(slider_row("G", g))
+                        .child(slider_row("B", b)),
                 ),
         )
 }

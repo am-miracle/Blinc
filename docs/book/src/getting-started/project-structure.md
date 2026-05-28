@@ -176,65 +176,131 @@ pub fn home_screen(ctx: &WindowedContext) -> impl ElementBuilder {
 
 ### Global App State
 
+App-wide state lives in `State<T>` slots keyed by string (so every
+call site resolves to the same slot across rebuilds). `State<T>`
+clones are cheap — pass them around by value or reference.
+
 ```rust
 // src/state/app_state.rs
-use blinc_core::reactive::Signal;
-use blinc_app::windowed::WindowedContext;
-
-pub struct AppState {
-    pub user_name: Signal<String>,
-    pub theme: Signal<Theme>,
-    pub sidebar_open: Signal<bool>,
-}
-
-impl AppState {
-    pub fn new(ctx: &WindowedContext) -> Self {
-        Self {
-            user_name: ctx.use_signal(String::new()),
-            theme: ctx.use_signal(Theme::Dark),
-            sidebar_open: ctx.use_signal(true),
-        }
-    }
-}
+use blinc_core::{State, use_state_keyed};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Theme {
     Light,
     Dark,
 }
+
+#[derive(Clone)]
+pub struct AppState {
+    pub user_name:    State<String>,
+    pub theme:        State<Theme>,
+    pub sidebar_open: State<bool>,
+}
+
+impl AppState {
+    /// Resolve every slot by string key — calling this from anywhere
+    /// in the app returns the same shared handles.
+    pub fn get() -> Self {
+        Self {
+            user_name:    use_state_keyed("app.user_name",    || String::new()),
+            theme:        use_state_keyed("app.theme",        || Theme::Dark),
+            sidebar_open: use_state_keyed("app.sidebar_open", || true),
+        }
+    }
+}
 ```
 
 ### Using App State
+
+Two integration routes for reading the state:
+
+**1. Reactive property bindings (cheapest)** — pass the `State<T>`
+straight to a reactive setter. Only the bound property re-evaluates
+when the signal changes; no subtree rebuild.
 
 ```rust
 // src/app.rs
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
+use blinc_core::context_state::use_computed;
 use crate::state::AppState;
-use crate::screens;
 
 pub fn build(ctx: &WindowedContext) -> impl ElementBuilder {
-    let state = AppState::new(ctx);
+    let state = AppState::get();
+
+    // Derived: theme → background colour. Auto-tracks `state.theme`.
+    let bg_color = {
+        let theme = state.theme.clone();
+        use_computed(move |_g| match theme.get() {
+            Theme::Light => Color::rgba(0.95, 0.95, 0.97, 1.0),
+            Theme::Dark  => Color::rgba(0.08, 0.08, 0.12, 1.0),
+        })
+    };
 
     div()
         .w(ctx.width)
         .h(ctx.height)
         .flex_row()
-        .child(sidebar(ctx, &state))
-        .child(main_content(ctx, &state))
-}
-
-fn sidebar(ctx: &WindowedContext, state: &AppState) -> Div {
-    let is_open = ctx.get(state.sidebar_open).unwrap_or(true);
-
-    if is_open {
-        div().w(250.0).h_full().bg(Color::rgba(0.1, 0.1, 0.15, 1.0))
-            // ... sidebar content
-    } else {
-        div().w(0.0).h(0.0)
-    }
+        .bg(&bg_color)                     // re-paints on theme change
+        .child(sidebar(&state))
+        .child(main_content(&state))
 }
 ```
+
+**2. `Stateful` + `.deps([…])` (for subtree restructuring)** — use
+when a signal change must swap children or branch the tree shape.
+
+```rust
+use blinc_layout::prelude::*;
+use blinc_layout::stateful::{NoState, stateful};
+
+fn sidebar(state: &AppState) -> impl ElementBuilder {
+    // Derived: collapse width to 0 when closed. Reactive setter on
+    // `.w()` is enough — no rebuild required.
+    let width = {
+        let open = state.sidebar_open.clone();
+        use_computed(move |_g| if open.get() { 250.0 } else { 0.0 })
+    };
+
+    div()
+        .w(&width)
+        .h_full()
+        .bg(Color::rgba(0.1, 0.1, 0.15, 1.0))
+    // … sidebar content
+}
+
+/// Header that swaps content based on the user_name signal —
+/// structural change, so it goes through `on_state`.
+fn header(state: &AppState) -> impl ElementBuilder {
+    let user = state.user_name.clone();
+    stateful::<NoState>()
+        .deps([user.signal_id()])
+        .on_state(move |_ctx| {
+            let name = user.get();
+            if name.is_empty() {
+                div().child(text("Welcome, guest"))
+            } else {
+                div().child(text(&format!("Welcome, {name}")))
+            }
+        })
+}
+```
+
+**Toggling state from anywhere:**
+
+```rust
+// Inside an event handler — no ctx needed.
+let state = AppState::get();
+let open = state.sidebar_open.clone();
+button("Toggle sidebar").on_click(move |_| {
+    open.update(|v| !v);
+});
+```
+
+> **Tip** — keep state slots granular. A separate `State<Theme>` and
+> `State<bool>` re-render less than a single `State<AppConfig>`
+> carrying both, because each property binding only fires for the
+> signal that actually changed.
 
 ## Module Re-exports
 
