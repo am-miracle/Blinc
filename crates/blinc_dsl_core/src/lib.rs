@@ -37,6 +37,7 @@ pub use fsm_registry::{
 };
 pub use host::{DslOp, take_scene_ops};
 use passes::inject_call_site_keys;
+use passes::inject_user_view_instance_id_params;
 use passes::{
     bind_component_props, collect_declared, detect_and_strip_stateful_views, ensure_unit_return,
     extract_and_strip_stylesheets, inject_fsm_context_markers, lower_children_arrays_to_blocks,
@@ -293,23 +294,49 @@ impl BlincDsl {
         // ZRTL `Type` → native conversion mirrors `type_to_tag`
         // but lives in this caller because `call_function`
         // takes the broader `NativeType` shape, not a `TypeTag`.
-        let native_params: Vec<NativeType> = param_types
-            .iter()
-            .map(|ty| type_to_native(ty))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|ty| {
+        //
+        // User-component views (`<X>$view`) now take a leading
+        // `__instance_id__: u64` synthetic param injected by
+        // [`crate::passes::inject_user_view_instance_id_params`].
+        // Substrate widget extern views (`$Blinc$X$view`) similarly
+        // take a leading `u64` injected by `descriptor_to_sig`. We
+        // detect both cases by the view_symbol shape and synthesise
+        // a `0` instance-id at the front of the props list.
+        let view_symbol_str: &str = view_symbol.as_ref();
+        let takes_instance_id = view_symbol_str.starts_with("$Blinc$")
+            || (view_symbol_str.ends_with("$view") && !view_symbol_str.starts_with("$Blinc$"));
+
+        let mut native_params: Vec<NativeType> = Vec::with_capacity(param_types.len() + 1);
+        if takes_instance_id {
+            native_params.push(NativeType::I64); // u64 maps to I64 in NativeType
+        }
+        for ty in &param_types {
+            let nt = type_to_native(ty).map_err(|ty| {
                 BlincDslError::Compile(format!(
                     "query({name}): no NativeType mapping for prop type {ty:?}"
                 ))
             })?;
+            native_params.push(nt);
+        }
         let sig = NativeSignature::new(&native_params, NativeType::I64);
+
+        // Prepend the synthetic instance_id = 0 to the props if needed.
+        let mut props_with_id: Vec<ZyntaxValue>;
+        let props_ref: &[ZyntaxValue] = if takes_instance_id {
+            props_with_id = Vec::with_capacity(props.len() + 1);
+            props_with_id.push(ZyntaxValue::Int(0));
+            props_with_id.extend_from_slice(props);
+            &props_with_id
+        } else {
+            props
+        };
 
         let runtime = self
             .runtime
             .lock()
             .expect("BlincDsl runtime mutex poisoned");
         let result = runtime
-            .call_function(view_symbol.as_ref(), props, &sig)
+            .call_function(view_symbol.as_ref(), props_ref, &sig)
             .map_err(BlincDslError::from)?;
         drop(runtime);
 
@@ -431,6 +458,11 @@ impl BlincDsl {
             .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
         lower_component_calls(&mut typed_program, filename);
         bind_component_props(&mut typed_program);
+        // Inject `__instance_id__: u64` as the leading view-method param
+        // so each user-component instance receives a distinct id at call
+        // time. MUST run AFTER `bind_component_props` so prop params are
+        // in place — instance_id goes before them.
+        inject_user_view_instance_id_params(&mut typed_program);
 
         // Module hardcoded to "main" — Zyntax compiles each source into one module.
         let module = zyntax_typed_ast::InternedString::new_global("main");
@@ -439,6 +471,9 @@ impl BlincDsl {
         publish_fsms_to_runtime_registry(&typed_program);
 
         // MUST run after `bind_component_props` so view params reflect the prop list.
+        // `__instance_id__` is filtered out at registry-publication time
+        // ([runtime_bridge.rs]) so it doesn't leak into the user-visible
+        // prop list.
         publish_components_to_runtime_registry(&typed_program);
 
         // MUST run BEFORE `ensure_unit_return` so its defensive `Return(None)`
@@ -766,6 +801,7 @@ impl BlincDsl {
         lower_component_calls(&mut program, filename);
 
         bind_component_props(&mut program);
+        inject_user_view_instance_id_params(&mut program);
 
         // Local set; `parse_to_typed_ast` doesn't touch the JIT renderer.
         let mut local_vrv = std::collections::HashSet::new();
@@ -799,6 +835,17 @@ impl BlincDsl {
             .map(|set| set.contains(fn_name))
             .unwrap_or(false);
 
+        // User-component views (`<X>$view`) now take a leading
+        // `__instance_id__: u64` synthetic param. When called from
+        // the host (render_component, JitViewRenderer) outside any
+        // DSL call-site lowering pass, we pass `0` as the synthetic
+        // id — that's the empty-stack sentinel and is fine for
+        // top-level ad-hoc rendering. Substrate-style internal symbols
+        // (top-level `render_view`, etc.) still use the zero-arg ABI.
+        let user_view_takes_instance_id = fn_name != "render_view"
+            && !fn_name.starts_with("$Blinc$")
+            && fn_name.ends_with("$view");
+
         let runtime = self
             .runtime
             .lock()
@@ -810,8 +857,13 @@ impl BlincDsl {
             let ptr = runtime.get_function_ptr(fn_name).ok_or_else(|| {
                 BlincDslError::Compile(format!("view symbol '{fn_name}' not registered in runtime"))
             })?;
-            let view: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
-            let _ = view();
+            if user_view_takes_instance_id {
+                let view: extern "C" fn(u64) -> i64 = unsafe { std::mem::transmute(ptr) };
+                let _ = view(0);
+            } else {
+                let view: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
+                let _ = view();
+            }
         } else {
             runtime.call::<()>(fn_name, &[])?;
         }

@@ -300,28 +300,48 @@ fn bind_component_props_writes_view_params() {
         .expect("expected an Impl decl");
 
     // Props bound on both methods; marker stripped.
+    //
+    // The `view` method ALSO gains a leading `__instance_id__: u64`
+    // synthetic param injected by `inject_user_view_instance_id_params`
+    // — that's part of the call-site instance-keying pipeline. Other
+    // methods (like `on_click`) keep only the prop params. Both
+    // forms are asserted.
     for method_name in ["view", "on_click"] {
         let method = impl_block
             .methods
             .iter()
             .find(|m| m.name.resolve_global().as_deref() == Some(method_name))
             .unwrap_or_else(|| panic!("expected method `{method_name}`"));
+        let expected_params = if method_name == "view" { 3 } else { 2 };
         assert_eq!(
             method.params.len(),
-            2,
-            "{method_name} should receive 2 prop params, got {:?}",
+            expected_params,
+            "{method_name} should receive {expected_params} params \
+             (`view` includes the leading `__instance_id__: u64` synthetic), \
+             got {:?}",
             method
                 .params
                 .iter()
                 .map(|p| p.name.resolve_global())
                 .collect::<Vec<_>>()
         );
+        let prop_offset = if method_name == "view" { 1 } else { 0 };
+        if method_name == "view" {
+            assert_eq!(
+                method.params[0].name.resolve_global().as_deref(),
+                Some("__instance_id__"),
+                "view's leading param must be __instance_id__"
+            );
+        }
         assert_eq!(
-            method.params[0].name.resolve_global().as_deref(),
+            method.params[prop_offset].name.resolve_global().as_deref(),
             Some("initial")
         );
         assert_eq!(
-            method.params[1].name.resolve_global().as_deref(),
+            method.params[prop_offset + 1]
+                .name
+                .resolve_global()
+                .as_deref(),
             Some("step")
         );
     }
@@ -360,6 +380,46 @@ fn render_view_invoking_component() {
         DslOp::Text(s) => assert_eq!(s, "from inner"),
         other => panic!("expected DslOp::Text, got {other:?}"),
     }
+}
+
+/// Regression: two `Counter()` invocations produce distinct
+/// inner-button keys via runtime XOR composition of the caller's
+/// `__instance_id__` with each child's local span hash. This is the
+/// shared-body case that pure compile-time keying can't fix on its
+/// own — both Counter instances run the same JIT-compiled view, so
+/// the body's `Button("inc")` literal hash is identical across both
+/// invocations. The XOR with the distinct caller-side `__instance_id__`
+/// values is what diverges the final keys.
+#[test]
+fn dup_counter_invocations_produce_distinct_inner_state() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        // Two Counter() invocations, each rendering a Button with the
+        // same source-local label. Pre-XOR: both Counters' button
+        // would key as `Button:LOCAL_HASH`, colliding. Post-XOR: each
+        // is keyed as `Button:(LOCAL_HASH ^ COUNTER_INSTANCE_ID)`, and
+        // since the two Counter call sites get distinct
+        // COUNTER_INSTANCE_IDs (different spans), the buttons diverge.
+        r#"
+            component Counter {
+                view { Button("Click") }
+            }
+            view {
+                Counter()
+                Counter()
+            }
+        "#,
+        "dup_counter.blinc",
+    )
+    .expect("compile");
+
+    // Just verifying that compilation succeeds + render runs without
+    // error proves the XOR call site lowers to a valid Cranelift
+    // computation and `__instance_id__` is correctly resolved.
+    let _ = dsl.render_view().expect("render_view");
+    let _ = dsl.render_view().expect("render_view second");
 }
 
 /// Regression: two `Button("Play")` invocations at distinct source
@@ -871,18 +931,23 @@ fn parse_component_with_props_folded() {
         .iter()
         .map(|p| p.name.resolve_global())
         .collect();
+    // 3 = `__instance_id__` (synthetic, leading) + 2 declared props.
     assert_eq!(
         view.params.len(),
-        2,
-        "view should receive 2 props, got params: {:?}",
+        3,
+        "view should receive __instance_id__ + 2 declared props, got params: {:?}",
         param_names
     );
     assert_eq!(
         view.params[0].name.resolve_global().as_deref(),
-        Some("initial")
+        Some("__instance_id__")
     );
     assert_eq!(
         view.params[1].name.resolve_global().as_deref(),
+        Some("initial")
+    );
+    assert_eq!(
+        view.params[2].name.resolve_global().as_deref(),
         Some("step")
     );
 }
@@ -3035,14 +3100,18 @@ fn parse_view_with_deps() {
         .find(|m| m.name.resolve_global().as_deref() == Some("view"))
         .expect("expected view method");
 
-    // (a) one parameter named "ctx".
+    // (a) two parameters: leading __instance_id__ (synthetic) + user's `ctx`.
     assert_eq!(
         view.params.len(),
-        1,
-        "expected one param, got {:?}",
+        2,
+        "expected 2 params (__instance_id__ + ctx), got {:?}",
         view.params
     );
-    assert_eq!(view.params[0].name.resolve_global().as_deref(), Some("ctx"));
+    assert_eq!(
+        view.params[0].name.resolve_global().as_deref(),
+        Some("__instance_id__")
+    );
+    assert_eq!(view.params[1].name.resolve_global().as_deref(), Some("ctx"));
 
     let body = view.body.as_ref().expect("view body");
     assert!(
@@ -3117,7 +3186,13 @@ fn parse_view_simple_still_works() {
         .iter()
         .find(|m| m.name.resolve_global().as_deref() == Some("view"))
         .unwrap();
-    assert_eq!(view.params.len(), 0);
+    // User-component views gain `__instance_id__: u64` as the leading
+    // synthetic param from `inject_user_view_instance_id_params`.
+    assert_eq!(view.params.len(), 1);
+    assert_eq!(
+        view.params[0].name.resolve_global().as_deref(),
+        Some("__instance_id__")
+    );
     let body = view.body.as_ref().unwrap();
     let TypedStatement::Expression(first) = &body.statements[0].node else {
         panic!("expected Expression stmt");

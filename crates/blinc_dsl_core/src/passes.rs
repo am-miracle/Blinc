@@ -1351,10 +1351,8 @@ pub(crate) fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec
 }
 
 /// Stable per-call-site instance ID derived from `(filename, byte_offset)`.
-/// Used by [`lower_component_calls`] (and a follow-up wrap-injection pass)
-/// to bracket every rewritten call with `__push_call_id__(ID)` so widget
-/// FFI can key per-instance state to the source location instead of
-/// brittle proxies like widget label strings.
+/// Plain byte-offset hash. Used by tests + the simpler call sites where
+/// component name + class info isn't readily available.
 ///
 /// `DefaultHasher` (SipHash) is deterministic per process but not across
 /// processes — that's fine here since instance IDs are scoped to a single
@@ -1364,6 +1362,51 @@ pub(crate) fn call_site_instance_id(filename: &str, span_start: usize) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     filename.hash(&mut h);
     span_start.hash(&mut h);
+    h.finish()
+}
+
+/// Path-based per-call-site instance ID — incorporates the component
+/// name, an optional CSS class (when present as a string-literal arg
+/// at the call site), and the source-location offset. The path string
+/// has the shape `ComponentName[.className]:hex_offset` and is then
+/// hashed.
+///
+/// Including the class name as part of identity is a deliberate design
+/// choice ([previous design discussion]):
+/// - Two `Button(class="hero")` calls at the same source position
+///   collapse to the same identity (intended — they're the same widget).
+/// - Two `Button(class="hero")` and `Button(class="cta")` calls at the
+///   same source position diverge — class is part of identity.
+/// - Two `Button(class="hero")` calls at DIFFERENT source positions
+///   also diverge — offset is part of identity.
+///
+/// Two-input redundancy: class alone or offset alone would each be
+/// sufficient discriminators in most realistic source files. Combining
+/// them adds belt-and-suspenders robustness against pathological
+/// reformatting (e.g. an auto-formatter that shuffles named-args).
+pub(crate) fn call_site_path_id(
+    filename: &str,
+    span_start: usize,
+    component_name: &str,
+    class_name: Option<&str>,
+    id_name: Option<&str>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut path = String::with_capacity(component_name.len() + 32);
+    path.push_str(component_name);
+    if let Some(id) = id_name {
+        path.push('#');
+        path.push_str(id);
+    }
+    if let Some(class) = class_name {
+        path.push('.');
+        path.push_str(class);
+    }
+    use std::fmt::Write as _;
+    let _ = write!(&mut path, ":{span_start:x}");
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    filename.hash(&mut h);
+    path.hash(&mut h);
     h.finish()
 }
 
@@ -1746,6 +1789,60 @@ pub(crate) fn lower_component_calls(program: &mut TypedProgram, filename: &str) 
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// Prepend `__instance_id__: u64` as the first parameter of every
+/// user-component `view` method. Pairs with the
+/// [`inject_call_site_keys`] pass: that pass injects a `u64` literal
+/// (or an XOR with the enclosing view's `__instance_id__`) as the
+/// leading arg at every user-component call site, which slots into
+/// this auto-prepended param.
+///
+/// MUST run AFTER [`bind_component_props`] (so prop params are in
+/// place — `__instance_id__` goes BEFORE them) and BEFORE
+/// `publish_components_to_runtime_registry` would have an issue — but
+/// the registry should NOT see this synthetic param. To keep the prop
+/// list clean for downstream code that consults the registry (e.g.
+/// [`resolve_extern_widget_named_args`]), we ALSO skip the param
+/// during registry publication. The actual filter lives in
+/// `runtime_bridge.rs`.
+///
+/// Idempotent: if the first param is already `__instance_id__`, skip.
+pub(crate) fn inject_user_view_instance_id_params(program: &mut TypedProgram) {
+    use zyntax_typed_ast::Mutability;
+    use zyntax_typed_ast::typed_ast::{ParameterKind, TypedDeclaration, TypedMethodParam};
+
+    for decl in program.declarations.iter_mut() {
+        let TypedDeclaration::Impl(imp) = &mut decl.node else {
+            continue;
+        };
+        for method in imp.methods.iter_mut() {
+            if method.name.resolve_global().as_deref() != Some("view") {
+                continue;
+            }
+            // Idempotence — bail if already injected.
+            if method
+                .params
+                .first()
+                .and_then(|p| p.name.resolve_global())
+                .as_deref()
+                == Some("__instance_id__")
+            {
+                continue;
+            }
+            let param = TypedMethodParam {
+                name: zyntax_typed_ast::InternedString::new_global("__instance_id__"),
+                ty: Type::Primitive(PrimitiveType::U64),
+                mutability: Mutability::Immutable,
+                is_self: false,
+                kind: ParameterKind::Regular,
+                default_value: None,
+                attributes: vec![],
+                span: method.span,
+            };
+            method.params.insert(0, param);
         }
     }
 }
@@ -3879,90 +3976,124 @@ pub(crate) fn ensure_unit_return(program: &mut TypedProgram) {
     }
 }
 
-/// Prepend a span-derived `u64` call-site key as the leading positional
-/// argument to every substrate-primitive widget call (`$Blinc$<X>$view`).
+/// Prepend a path-derived `u64` call-site key as the leading positional
+/// argument to every widget-view call (substrate primitives + user
+/// components).
 ///
-/// The injected key is `call_site_instance_id(filename, span.start)` —
-/// a stable hash of the source location. Widget FFIs receive it as the
-/// first arg and use it as the seed for per-instance state allocation
-/// (replacing the old label-based `dsl_state_key("button", &label)`
-/// pattern that collided on duplicate labels).
+/// **Substrate primitives** (e.g. `$Blinc$Button$view`): widget FFIs
+/// consume the leading u64 as the state-allocation seed via
+/// `dsl_state_key`. Dup-labelled Buttons at distinct call sites hold
+/// distinct state because their span hashes differ.
 ///
-/// Scope: substrate primitives only in this pass. User-component view
-/// calls (`<X>$view`) keep their existing signature — adding a leading
-/// `__instance_id__: u64` to user views (so the body can compose a
-/// hierarchical id with each child's local span) is a follow-up that
-/// also needs `bind_component_props` to mint the param.
+/// **User components** (e.g. `Counter$view`): the `__instance_id__: u64`
+/// param injected by [`inject_user_view_instance_id_params`] catches
+/// the value; downstream calls inside Counter's view body emit
+/// `__instance_id__ ^ LOCAL_HASH` instead of just `LOCAL_HASH`, so two
+/// `Counter()` invocations produce sub-trees with distinct keys even
+/// though Counter's body source is shared.
+///
+/// The XOR composition is the runtime piece that makes the
+/// shared-body case work — `LOCAL_HASH` alone is identical across all
+/// Counter instances (same source position), but XOR'd with the
+/// caller's distinct `__instance_id__`, the composed key is per-instance.
 ///
 /// MUST run AFTER `lower_children_arrays_to_blocks` so we walk the
 /// final shape of widget calls including those that were moved into
 /// `__push_child__` arg positions during children-array expansion.
 pub(crate) fn inject_call_site_keys(program: &mut TypedProgram, filename: &str) {
-    use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedExpression, TypedLiteral};
+    use zyntax_typed_ast::typed_ast::{
+        TypedBinary, TypedDeclaration, TypedExpression, TypedLiteral,
+    };
 
-    /// Is `callee_name` a substrate-primitive view symbol that the
-    /// widget FFI side expects to receive a leading u64 call-id?
-    /// Delegates to `abi.rs`'s authoritative set populated by
-    /// `register_builtins`, so external widgets registered via
-    /// `register_extern_widget_spec` are correctly excluded.
+    /// Is `callee_name` a substrate-primitive view symbol (auto-injected
+    /// leading u64; FFI consumes it)?
     fn is_substrate_view_symbol(callee_name: &str) -> bool {
         crate::abi::is_substrate_widget_view_public(callee_name)
     }
 
-    /// Recurse into the expression first (so nested calls get their
-    /// own keys), then prepend a `u64` literal to THIS call's args if
-    /// its callee is a substrate-primitive view. Post-order matters
-    /// for idempotence — we look at the rewritten args before deciding
-    /// whether to inject.
-    fn rewrite_expr(expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>, filename: &str) {
+    /// Is `callee_name` a DSL-declared user-component view symbol
+    /// (auto-prepended `__instance_id__` param by
+    /// [`inject_user_view_instance_id_params`])?
+    ///
+    /// Heuristic: ends with `$view`, doesn't start with `$Blinc$`, and
+    /// is in the component registry. This correctly excludes
+    /// externally-registered widgets via `register_extern_widget_spec`
+    /// (whose view_symbols start with `$Blinc$` by convention but
+    /// whose Rust FFIs don't have the auto-injected leading u64).
+    fn is_user_view_symbol(callee_name: &str) -> bool {
+        if !callee_name.ends_with("$view") || callee_name.starts_with("$Blinc$") {
+            return false;
+        }
+        let bare = match callee_name.strip_suffix("$view") {
+            Some(s) => s,
+            None => return false,
+        };
+        blinc_runtime::component::with_component_registry(|r| r.get_by_name(bare).is_some())
+    }
+
+    /// Does this Call need a leading call-site key injected? Either kind
+    /// of view symbol qualifies.
+    fn needs_call_id_injection(callee_name: &str) -> bool {
+        is_substrate_view_symbol(callee_name) || is_user_view_symbol(callee_name)
+    }
+
+    /// Walker context — tracks whether we're inside a user-component
+    /// view body (where injected keys must XOR with `__instance_id__`).
+    struct Ctx<'a> {
+        filename: &'a str,
+        in_user_view: bool,
+    }
+
+    fn rewrite_expr(expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>, ctx: &Ctx<'_>) {
         match &mut expr.node {
             TypedExpression::Call(call) => {
-                rewrite_expr(&mut call.callee, filename);
+                rewrite_expr(&mut call.callee, ctx);
                 for a in &mut call.positional_args {
-                    rewrite_expr(a, filename);
+                    rewrite_expr(a, ctx);
                 }
                 for n in &mut call.named_args {
-                    rewrite_expr(&mut n.value, filename);
+                    rewrite_expr(&mut n.value, ctx);
                 }
             }
             TypedExpression::MethodCall(mc) => {
-                rewrite_expr(&mut mc.receiver, filename);
+                rewrite_expr(&mut mc.receiver, ctx);
                 for a in &mut mc.positional_args {
-                    rewrite_expr(a, filename);
+                    rewrite_expr(a, ctx);
                 }
             }
             TypedExpression::Binary(b) => {
-                rewrite_expr(&mut b.left, filename);
-                rewrite_expr(&mut b.right, filename);
+                rewrite_expr(&mut b.left, ctx);
+                rewrite_expr(&mut b.right, ctx);
             }
-            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand, filename),
-            TypedExpression::Field(f) => rewrite_expr(&mut f.object, filename),
+            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand, ctx),
+            TypedExpression::Field(f) => rewrite_expr(&mut f.object, ctx),
             TypedExpression::Index(idx) => {
-                rewrite_expr(&mut idx.object, filename);
-                rewrite_expr(&mut idx.index, filename);
+                rewrite_expr(&mut idx.object, ctx);
+                rewrite_expr(&mut idx.index, ctx);
             }
             TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
                 for it in items {
-                    rewrite_expr(it, filename);
+                    rewrite_expr(it, ctx);
                 }
             }
             TypedExpression::Struct(s) => {
                 for field in &mut s.fields {
-                    rewrite_expr(&mut field.value, filename);
+                    rewrite_expr(&mut field.value, ctx);
                 }
             }
-            TypedExpression::Block(b) => rewrite_block(b, filename),
+            TypedExpression::Block(b) => rewrite_block(b, ctx),
             TypedExpression::If(if_expr) => {
-                rewrite_expr(&mut if_expr.condition, filename);
-                rewrite_expr(&mut if_expr.then_branch, filename);
-                rewrite_expr(&mut if_expr.else_branch, filename);
+                rewrite_expr(&mut if_expr.condition, ctx);
+                rewrite_expr(&mut if_expr.then_branch, ctx);
+                rewrite_expr(&mut if_expr.else_branch, ctx);
             }
             _ => {}
         }
 
-        // Inject leading u64 key if this Call's callee is a substrate
-        // view symbol. Use the call expression's OWN span as the key
-        // source — that's the unique source-location of this invocation.
+        // Inject leading u64 key if this Call's callee is a view symbol
+        // (substrate primitive OR user component). Use the call
+        // expression's OWN span as the key source — that's the unique
+        // source-location of this invocation.
         let span = expr.span;
         let TypedExpression::Call(call) = &mut expr.node else {
             return;
@@ -3973,9 +4104,25 @@ pub(crate) fn inject_call_site_keys(program: &mut TypedProgram, filename: &str) 
         let Some(resolved) = callee_name.resolve_global() else {
             return;
         };
-        if !is_substrate_view_symbol(resolved.as_ref()) {
+        if !needs_call_id_injection(resolved.as_ref()) {
             return;
         }
+
+        // Build a path-shaped key: `ComponentName[.className]:hex_offset`.
+        // The `class` arg, when present and a string literal, contributes
+        // to identity — `Button(class="hero")` and `Button(class="cta")`
+        // at the same source position diverge. Look it up via the
+        // component registry's prop list, which gives us the position
+        // of the `class` slot for this widget.
+        let component_name = strip_view_suffix(resolved.as_ref()).unwrap_or("");
+        let class_name = extract_class_arg(call, resolved.as_ref());
+        let key = call_site_path_id(
+            ctx.filename,
+            span.start,
+            component_name,
+            class_name.as_deref(),
+            None, // id args aren't a thing on substrate primitives today
+        );
 
         // Cranelift backend (zyntax-compiler) doesn't handle
         // `HirConstant::U64` in its `value_map` population step — the
@@ -3985,57 +4132,125 @@ pub(crate) fn inject_call_site_keys(program: &mut TypedProgram, filename: &str) 
         // width, same calling-convention slot) and let the abi.rs side
         // tag the param as TypeTag::U64 — the int is reinterpreted as
         // u64 on the Rust receive side without any value mangling.
-        let key = call_site_instance_id(filename, span.start);
-        let key_arg = zyntax_typed_ast::TypedNode::new(
+        let literal = zyntax_typed_ast::TypedNode::new(
             TypedExpression::Literal(TypedLiteral::Integer(key as i64 as i128)),
             Type::Primitive(PrimitiveType::I64),
             span,
         );
+
+        // When INSIDE a user-component view body, the leading arg is
+        // `__instance_id__ ^ LOCAL_LITERAL` so the caller's distinct
+        // instance id distinguishes each Counter() invocation's
+        // sub-tree from another's. At the TOP-LEVEL view body (or any
+        // non-user-view function), there's no `__instance_id__` in
+        // scope; the literal stands alone.
+        let key_arg = if ctx.in_user_view {
+            let instance_id_var = zyntax_typed_ast::TypedNode::new(
+                TypedExpression::Variable(zyntax_typed_ast::InternedString::new_global(
+                    "__instance_id__",
+                )),
+                Type::Primitive(PrimitiveType::I64),
+                span,
+            );
+            let xor_expr = TypedExpression::Binary(TypedBinary {
+                op: zyntax_typed_ast::typed_ast::BinaryOp::BitXor,
+                left: Box::new(instance_id_var),
+                right: Box::new(literal),
+            });
+            zyntax_typed_ast::TypedNode::new(xor_expr, Type::Primitive(PrimitiveType::I64), span)
+        } else {
+            literal
+        };
         call.positional_args.insert(0, key_arg);
     }
 
-    fn rewrite_block(block: &mut zyntax_typed_ast::typed_ast::TypedBlock, filename: &str) {
+    /// Strip the `$Blinc$` prefix (if any) and the `$view` suffix from
+    /// a view symbol to recover the bare component name. Returns `None`
+    /// if the symbol doesn't have the expected shape.
+    fn strip_view_suffix(view_symbol: &str) -> Option<&str> {
+        let stripped = view_symbol.strip_suffix("$view")?;
+        Some(stripped.strip_prefix("$Blinc$").unwrap_or(stripped))
+    }
+
+    /// Find the `class` arg in `call`'s positional_args and return its
+    /// string-literal value, if present. The arg's POSITION is looked
+    /// up from the component registry's prop list — `class` is usually
+    /// the 3rd or 4th positional for substrate primitives but the exact
+    /// index varies (e.g. `Image` has no class slot).
+    fn extract_class_arg(
+        call: &zyntax_typed_ast::typed_ast::TypedCall,
+        callee_name: &str,
+    ) -> Option<String> {
+        let component_name = strip_view_suffix(callee_name)?;
+        let class_idx = blinc_runtime::component::with_component_registry(|r| {
+            r.get_by_name(component_name)
+                .and_then(|def| def.props.iter().position(|p| p.name.as_ref() == "class"))
+        })?;
+        let class_arg = call.positional_args.get(class_idx)?;
+        let TypedExpression::Literal(TypedLiteral::String(s)) = &class_arg.node else {
+            return None;
+        };
+        s.resolve_global().map(|s| s.to_string())
+    }
+
+    fn rewrite_block(block: &mut zyntax_typed_ast::typed_ast::TypedBlock, ctx: &Ctx<'_>) {
         for stmt in &mut block.statements {
-            rewrite_stmt(stmt, filename);
+            rewrite_stmt(stmt, ctx);
         }
     }
 
-    fn rewrite_stmt(stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>, filename: &str) {
+    fn rewrite_stmt(stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>, ctx: &Ctx<'_>) {
         match &mut stmt.node {
-            TypedStatement::Expression(e) => rewrite_expr(e, filename),
+            TypedStatement::Expression(e) => rewrite_expr(e, ctx),
             TypedStatement::Let(l) => {
                 if let Some(init) = &mut l.initializer {
-                    rewrite_expr(init, filename);
+                    rewrite_expr(init, ctx);
                 }
             }
-            TypedStatement::Return(Some(e)) => rewrite_expr(e, filename),
+            TypedStatement::Return(Some(e)) => rewrite_expr(e, ctx),
             TypedStatement::If(if_stmt) => {
-                rewrite_expr(&mut if_stmt.condition, filename);
-                rewrite_block(&mut if_stmt.then_block, filename);
+                rewrite_expr(&mut if_stmt.condition, ctx);
+                rewrite_block(&mut if_stmt.then_block, ctx);
                 if let Some(else_block) = &mut if_stmt.else_block {
-                    rewrite_block(else_block, filename);
+                    rewrite_block(else_block, ctx);
                 }
             }
             TypedStatement::While(w) => {
-                rewrite_expr(&mut w.condition, filename);
-                rewrite_block(&mut w.body, filename);
+                rewrite_expr(&mut w.condition, ctx);
+                rewrite_block(&mut w.body, ctx);
             }
-            TypedStatement::Block(b) => rewrite_block(b, filename),
+            TypedStatement::Block(b) => rewrite_block(b, ctx),
             _ => {}
         }
     }
 
     for decl in &mut program.declarations {
         match &mut decl.node {
+            // Top-level functions — `render_view`, plus any user helpers.
+            // None of these have `__instance_id__` in scope.
             TypedDeclaration::Function(func) => {
                 if let Some(body) = &mut func.body {
-                    rewrite_block(body, filename);
+                    let ctx = Ctx {
+                        filename,
+                        in_user_view: false,
+                    };
+                    rewrite_block(body, &ctx);
                 }
             }
+            // Impl methods. A method named `view` is the user-component
+            // view body — `__instance_id__` IS in scope as the leading
+            // synthetic param, so children inside the body must XOR
+            // with it. Other methods (init, helpers) walk with
+            // in_user_view=false.
             TypedDeclaration::Impl(imp) => {
                 for method in &mut imp.methods {
                     if let Some(body) = &mut method.body {
-                        rewrite_block(body, filename);
+                        let in_user_view = method.name.resolve_global().as_deref() == Some("view");
+                        let ctx = Ctx {
+                            filename,
+                            in_user_view,
+                        };
+                        rewrite_block(body, &ctx);
                     }
                 }
             }

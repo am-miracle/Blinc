@@ -70,8 +70,20 @@ impl blinc_runtime::view::ViewRenderer for JitViewRenderer {
                     "view symbol '{symbol}' not registered in runtime"
                 ))
             })?;
-            let view: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
-            Ok(ZyntaxValue::Int(view()))
+            // User-component views (`<X>$view`) take a leading u64
+            // `__instance_id__` synthetic param. `render_view` is the
+            // top-level function exception — no `$view` suffix matches,
+            // so it stays in the zero-arg ABI path.
+            let user_view_takes_instance_id = symbol != "render_view"
+                && !symbol.starts_with("$Blinc$")
+                && symbol.ends_with("$view");
+            if user_view_takes_instance_id {
+                let view: extern "C" fn(u64) -> i64 = unsafe { std::mem::transmute(ptr) };
+                Ok(ZyntaxValue::Int(view(0)))
+            } else {
+                let view: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
+                Ok(ZyntaxValue::Int(view()))
+            }
         } else {
             runtime
                 .call::<()>(symbol, &[])
@@ -382,10 +394,18 @@ pub(crate) fn publish_components_to_runtime_registry(program: &TypedProgram) {
         };
 
         // Each view param becomes a `PropDef`; `ty` passes through unchanged.
+        // `__instance_id__` is auto-injected by
+        // [`crate::passes::inject_user_view_instance_id_params`] as the leading
+        // synthetic param; it's an implementation detail that downstream
+        // call-site lowering threads through, NOT a user-facing prop, so it
+        // must NOT appear in the registry's prop list (otherwise
+        // `resolve_extern_widget_named_args` treats it as match-able and the
+        // user could write `Counter(instance_id=42)`).
         let props: Vec<blinc_runtime::component::PropDef> = view_method
             .params
             .iter()
             .filter(|p| !p.is_self)
+            .filter(|p| p.name.resolve_global().as_deref() != Some("__instance_id__"))
             .filter_map(|p| {
                 let name_str = p.name.resolve_global()?;
                 Some(blinc_runtime::component::PropDef {
