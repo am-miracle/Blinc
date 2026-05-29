@@ -1730,6 +1730,7 @@ call_args_tail = { ","? ~ e:expr }
 primary_expr = {
     lambda_expr |
     computed_expr |
+    if_expr |
     paren_expr |
     f_string_literal |
     string_literal |
@@ -1740,6 +1741,29 @@ primary_expr = {
     bare_call_expr |
     variable_expr
 }
+
+// `if cond { value } else { value }` as an expression. Both
+// branches must be present (no value-less if-expression — that
+// shape stays in statement position via `if_stmt`). Each branch
+// is a single expression today; block-with-trailing-expression
+// (`if cond { let tmp = a; tmp * 2 } else { 0 }`) is a follow-up
+// because it requires a new "tail expression" rule.
+//
+// PEG ordering: slotted BEFORE `paren_expr` so the leading `if`
+// keyword steers expression-position calls into the value-bearing
+// shape. Statement-position `if` keeps using `if_stmt` because
+// statement alternates are tried first at that boundary.
+//
+// Lowers to Zyntax's native `TypedExpression::If` (the
+// ternary-shaped variant whose fields are `condition` / `then_expr`
+// / `else_expr`, all expressions). Distinct from the statement
+// form's `then_block` / `else_block` block fields.
+if_expr = { "if" ~ cond:expr ~ "{" ~ then_e:expr ~ "}" ~ "else" ~ "{" ~ else_e:expr ~ "}" }
+  -> TypedExpression::If {
+      condition: cond,
+      then_expr: then_e,
+      else_expr: else_e,
+  }
 
 // `name(arg1, arg2, ...)` — a bare function call in expression
 // position. Distinct from `component_call_expr` (which requires a

@@ -6377,6 +6377,91 @@ fn dsl_const_group_with_explicit_values_inlines_literals() {
     );
 }
 
+/// `if cond { value } else { value }` as an expression: each branch
+/// evaluates to a value of the same type, and the if-expression
+/// itself produces that value at the surrounding position. Both arms
+/// of the test exercise the same fn — `pick(7)` takes the then
+/// branch (returns 1), `pick(-5)` takes the else branch (returns
+/// -1) — so the same compiled program serves both directions.
+///
+/// Regression-covers two pieces:
+/// 1. The `if_expr` grammar alternative in `primary_expr`.
+/// 2. The upstream Zyntax fix that defaults
+///    `TypedExpression::If`'s outer-node type to the then-branch's
+///    type (was previously `Type::Unit`, which `convert_type`
+///    lowered to `HirType::Void` and made the phi result invisible
+///    to the surrounding load/store).
+#[test]
+fn dsl_if_expression_returns_branch_value_to_let_binding() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            fn pick(x: i32): i32 {
+                let v = if x > 0 { 1 } else { -1 }
+                return v
+            }
+
+            view {
+                text(f"a={pick(7)}")
+                text(f"b={pick(-5)}")
+            }
+        "#,
+        "if_expr_let.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let saw_then = ops
+        .iter()
+        .any(|op| matches!(op, DslOp::Text(s) if s == "a=1"));
+    let saw_else = ops
+        .iter()
+        .any(|op| matches!(op, DslOp::Text(s) if s == "b=-1"));
+    assert!(
+        saw_then,
+        "pick(7) > 0 should take the then branch and return 1, got {ops:?}"
+    );
+    assert!(
+        saw_else,
+        "pick(-5) <= 0 should take the else branch and return -1, got {ops:?}"
+    );
+}
+
+/// if-expression as the immediate operand of a `return` (no
+/// intermediate let-binding). Smaller surface than the let-binding
+/// case — exercises the path where the if-expression's value flows
+/// directly into the function's return slot.
+#[test]
+fn dsl_if_expression_immediately_returned() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            fn answer(x: i32): i32 {
+                return if x > 0 { 42 } else { 99 }
+            }
+
+            view {
+                text(f"val={answer(3)}")
+            }
+        "#,
+        "if_expr_return.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let saw = ops
+        .iter()
+        .any(|op| matches!(op, DslOp::Text(s) if s == "val=42"));
+    assert!(
+        saw,
+        "answer(3) should return the then-branch value 42, got {ops:?}"
+    );
+}
+
 /// `while cond { body }` re-evaluates `cond` before every iteration
 /// and exits when it falsies. Drives the body via a signal counter
 /// so the loop has observable termination: 3 iterations push 3
