@@ -239,6 +239,91 @@ fn cross_file_same_named_components_do_not_collide() {
     );
 }
 
+/// Two files each declaring `fsm MyFsm { … }` no longer collide
+/// in the global `FsmRegistry`. The mangling pass renames each
+/// file's state enum + impl from `MyFsm` to `<module>$MyFsm`, and
+/// the registry-population pass keys by the trait name (now
+/// mangled), so both FSMs sit at distinct entries instead of one
+/// overwriting the other.
+///
+/// Regression-covers the FSM extension of the namespacing pass
+/// that originally only mangled components. Pre-fix, the two
+/// `MyFsm` definitions silently collapsed onto a single registry
+/// entry and whichever file was compiled last won.
+#[test]
+fn cross_file_same_named_fsms_register_distinctly() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dir = TempDir::new("blinc_project_fsm_collision").expect("tempdir");
+    dir.write(
+        "alpha.blinc",
+        r#"
+            fsm MyFsm {
+                state Idle
+                state Running
+                initial Idle
+                on Idle.Start -> Running
+            }
+            view { Text("alpha") }
+        "#,
+    )
+    .unwrap();
+    dir.write(
+        "beta.blinc",
+        r#"
+            fsm MyFsm {
+                state Off
+                state On
+                initial Off
+                on Off.Flip -> On
+            }
+            view { Text("beta") }
+        "#,
+    )
+    .unwrap();
+    // Entry needs to import both files so `compile_project` walks
+    // them. Imports trigger compilation even though the entry view
+    // doesn't reference the FSMs directly.
+    let entry = dir
+        .write(
+            "main.blinc",
+            r#"
+            import { MyFsm } from "./alpha"
+            import { MyFsm } from "./beta"
+            view { Text("main") }
+            "#,
+        )
+        .unwrap();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    let _ = dsl
+        .compile_project(&entry, dir.path())
+        .expect("compile_project");
+
+    // Both mangled FSMs should be live in the registry. Look them
+    // up by module-mangled name.
+    use blinc_dsl_core::with_fsm_registry;
+    use zyntax_typed_ast::InternedString;
+    let module = InternedString::new_global("main");
+    let alpha_id = with_fsm_registry(|r| r.find_by_name(module, "alpha$MyFsm"));
+    let beta_id = with_fsm_registry(|r| r.find_by_name(module, "beta$MyFsm"));
+    assert!(
+        alpha_id.is_some(),
+        "alpha module's FSM should register as `alpha$MyFsm`"
+    );
+    assert!(
+        beta_id.is_some(),
+        "beta module's FSM should register as `beta$MyFsm`"
+    );
+    // Un-mangled `MyFsm` must NOT exist — the namespacing pass
+    // renames every cross-file FSM declaration.
+    let unmangled = with_fsm_registry(|r| r.find_by_name(module, "MyFsm"));
+    assert!(
+        unmangled.is_none(),
+        "no un-mangled `MyFsm` should leak into the registry"
+    );
+}
+
 /// `recompile_file` re-runs compile for a single path and
 /// refreshes the per-file function-name map. Pins the hot-
 /// reload entry point.

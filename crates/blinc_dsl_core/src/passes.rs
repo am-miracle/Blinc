@@ -1334,17 +1334,40 @@ pub(crate) fn apply_module_namespace_prefix(program: &mut TypedProgram, namespac
         return;
     }
 
-    // Step 1: identify mangleable component classes. A class is a
-    // component iff (a) it has a non-marker name and (b) some Impl in
-    // the same program targets it. Structs without impls pass through
-    // un-mangled, which is the right behaviour for `struct Point { … }`
-    // declarations used as plain data carriers.
+    // Step 1: identify mangleable top-level types. Two categories
+    // get mangled:
+    //
+    // 1. Component classes — a `Class` decl whose name has a
+    //    matching `Impl` decl pointing at it. Marker classes
+    //    (`__blinc_*`) and structs without impls pass through
+    //    un-mangled.
+    //
+    // 2. FSM state enums — an `Enum` decl whose name has a matching
+    //    `Impl` decl whose `__fsm_meta__` marker method identifies
+    //    it as an FSM. Same-named cross-file FSMs would otherwise
+    //    collide in the global `FsmRegistry`.
+    //
+    // Both categories share one `to_mangle` map so the downstream
+    // call-site rewrites can resolve same-file references against
+    // either kind uniformly.
     let class_names: Vec<InternedString> = program
         .declarations
         .iter()
         .filter_map(|d| {
             if let TypedDeclaration::Class(c) = &d.node {
                 Some(c.name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let enum_names: Vec<InternedString> = program
+        .declarations
+        .iter()
+        .filter_map(|d| {
+            if let TypedDeclaration::Enum(e) = &d.node {
+                Some(e.name)
             } else {
                 None
             }
@@ -1366,18 +1389,64 @@ pub(crate) fn apply_module_namespace_prefix(program: &mut TypedProgram, namespac
         })
         .collect();
 
+    // FSM-impl set: target names for impls that carry a `__fsm_meta__`
+    // method. Used to discriminate "this enum is a state enum for an
+    // FSM" from "this enum is a plain data enum the user declared".
+    let fsm_impl_targets: HashSet<InternedString> = program
+        .declarations
+        .iter()
+        .filter_map(|d| {
+            let TypedDeclaration::Impl(imp) = &d.node else {
+                return None;
+            };
+            let has_fsm_meta = imp
+                .methods
+                .iter()
+                .any(|m| m.name.resolve_global().as_deref() == Some("__fsm_meta__"));
+            if !has_fsm_meta {
+                return None;
+            }
+            match &imp.for_type {
+                Type::Unresolved(name) => Some(*name),
+                Type::Named { id, .. } => program.type_registry.get_type_by_id(*id).map(|t| t.name),
+                _ => None,
+            }
+        })
+        .collect();
+
     let mut to_mangle: HashMap<InternedString, InternedString> = HashMap::new();
+
+    // Components.
     for name in class_names {
         let Some(name_str_arc) = name.resolve_global() else {
             continue;
         };
         let name_str: &str = &name_str_arc;
-        // Marker classes — never mangle.
         if name_str.starts_with("__blinc_") || name_str.starts_with("__") {
             continue;
         }
-        // No impl → struct without methods → not a component.
         if !impl_targets.contains(&name) {
+            continue;
+        }
+        let mangled_str = format!("{namespace}${name_str}");
+        to_mangle.insert(name, InternedString::new_global(&mangled_str));
+    }
+
+    // FSMs.
+    for name in enum_names {
+        let Some(name_str_arc) = name.resolve_global() else {
+            continue;
+        };
+        let name_str: &str = &name_str_arc;
+        if name_str.starts_with("__blinc_") || name_str.starts_with("__") {
+            continue;
+        }
+        if !fsm_impl_targets.contains(&name) {
+            continue;
+        }
+        // Skip if already mangled (e.g., a name collision between a
+        // component class and an FSM enum — pathological but defensive).
+        if to_mangle.contains_key(&name) {
             continue;
         }
         let mangled_str = format!("{namespace}${name_str}");
@@ -1388,7 +1457,12 @@ pub(crate) fn apply_module_namespace_prefix(program: &mut TypedProgram, namespac
         return;
     }
 
-    // Step 2: rename Class.name + every matching Impl.for_type.
+    // Step 2: rename Class.name / Enum.name + every matching
+    // Impl.for_type AND Impl.trait_name. FSM impls use the same
+    // string for both trait_name (the inherent-impl convention) and
+    // for_type — `populate_fsm_registry_pass` keys off trait_name,
+    // so renaming both keeps the registry entry's identity in sync
+    // with the type-level rename.
     for decl in &mut program.declarations {
         match &mut decl.node {
             TypedDeclaration::Class(c) => {
@@ -1396,32 +1470,49 @@ pub(crate) fn apply_module_namespace_prefix(program: &mut TypedProgram, namespac
                     c.name = new_name;
                 }
             }
-            TypedDeclaration::Impl(imp) => match &mut imp.for_type {
-                Type::Unresolved(name) => {
-                    if let Some(&new_name) = to_mangle.get(name) {
-                        *name = new_name;
+            TypedDeclaration::Enum(e) => {
+                if let Some(&new_name) = to_mangle.get(&e.name) {
+                    e.name = new_name;
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                if let Some(&new_name) = to_mangle.get(&imp.trait_name) {
+                    imp.trait_name = new_name;
+                }
+                match &mut imp.for_type {
+                    Type::Unresolved(name) => {
+                        if let Some(&new_name) = to_mangle.get(name) {
+                            *name = new_name;
+                        }
                     }
+                    Type::Named { .. } => {
+                        // Post-resolution shape — the type registry entry's
+                        // own `name` is what `publish_components_to_runtime_registry`
+                        // reads. The mangling pass runs pre-resolution so
+                        // this arm is reached only if some earlier pass
+                        // ran the type resolver; we conservatively skip
+                        // it to avoid mutating the registry mid-pipeline.
+                    }
+                    _ => {}
                 }
-                Type::Named { .. } => {
-                    // Post-resolution shape — the type registry entry's
-                    // own `name` is what `publish_components_to_runtime_registry`
-                    // reads. The mangling pass runs pre-resolution so
-                    // this arm is reached only if some earlier pass
-                    // ran the type resolver; we conservatively skip
-                    // it to avoid mutating the registry mid-pipeline.
-                }
-                _ => {}
-            },
+            }
             _ => {}
         }
     }
 
-    // Step 3: rewrite every `__component_call__("local_name")` marker
-    // whose name matches a mangled class. This is what makes a
-    // SAME-FILE reference resolve to the mangled component at
-    // `lower_component_calls` time. Cross-file references (imports)
-    // are handled separately in `inject_imported_view_externs`,
-    // which calls into the same `rewrite_component_calls_in_program`
+    // Step 3: rewrite same-file references to mangled names. Two
+    // shapes share the rewrite helper:
+    //
+    // - Component calls: `__component_call__("Name", …)` markers
+    //   (emitted by the `component_call_*` grammar rules) have
+    //   their first string-literal arg rewritten.
+    // - FSM receivers: `<FsmName>.trigger(...)` / `.subscribe(...)`
+    //   parse as MethodCall whose receiver is a `Variable(FsmName)`.
+    //   The helper walks receiver positions and rewrites the Variable
+    //   name when it matches the mangled set.
+    //
+    // Cross-file references (imports) are handled separately in
+    // `inject_imported_view_externs`, which calls into the same
     // helper with its own (import-local-name → mangled-name) map.
     rewrite_component_calls_in_program(program, &to_mangle);
 }
@@ -1486,6 +1577,20 @@ pub(crate) fn rewrite_component_calls_in_program(
                 }
             }
             TypedExpression::MethodCall(mc) => {
+                // FSM receiver rewrite: `<FsmName>.trigger(...)` /
+                // `.subscribe(...)` parse as MethodCall whose
+                // receiver is a `Variable(FsmName)`. After mangling,
+                // the local `FsmName` no longer matches the
+                // registered FSM identity — rewrite the receiver
+                // Variable's name to the mangled form here so the
+                // downstream `resolve_fsm_trigger_calls` /
+                // `resolve_fsm_subscribe_calls` passes resolve
+                // against the same key as the registry.
+                if let TypedExpression::Variable(name) = &mc.receiver.node
+                    && let Some(&new_name) = rewrites.get(name)
+                {
+                    mc.receiver.node = TypedExpression::Variable(new_name);
+                }
                 rewrite_expr(&mut mc.receiver, rewrites);
                 for a in &mut mc.positional_args {
                     rewrite_expr(a, rewrites);
