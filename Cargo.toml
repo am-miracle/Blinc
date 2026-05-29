@@ -246,16 +246,3 @@ blinc_platform = { path = "crates/blinc_platform" }
 # matches and struct destructures. Path-patching keeps the GPU
 # pipeline in lockstep with core.
 blinc_gpu = { path = "crates/blinc_gpu" }
-
-# Redirect zyntax git-rev deps to the local sibling checkout so
-# upstream patches under development (e.g. construct_statement `Block`
-# variant + Cranelift string-eq) take effect without a push + rev bump
-# in every dependent crate. Each entry only applies when the path
-# actually exists on the build host, so CI runners without a sibling
-# zyntax checkout fall back to the pinned git rev unchanged.
-[patch."https://github.com/darmie/zyntax"]
-zyntax_embed = { path = "../zyntax/crates/zyntax_embed" }
-zyntax_typed_ast = { path = "../zyntax/crates/typed_ast" }
-zyntax_compiler = { path = "../zyntax/crates/compiler" }
-zyn_peg = { path = "../zyntax/crates/zyn_peg" }
-zrtl = { path = "../zyntax/sdk/zrtl" }
