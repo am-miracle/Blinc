@@ -1060,7 +1060,7 @@ statements = { stmt:statement* }
 // — interpolate via `text(f"{count}")` instead. f-string parts now
 // accept full expressions (see `f_string_expr` below).
 statement = {
-    text_string_stmt | text_int_stmt | match_stmt | effect_stmt | if_stmt | return_stmt | let_stmt | component_call_stmt | bare_call_stmt | assign_stmt | method_call_stmt
+    text_string_stmt | text_int_stmt | match_stmt | effect_stmt | if_stmt | while_stmt | loop_stmt | break_stmt | continue_stmt | return_stmt | let_stmt | component_call_stmt | bare_call_stmt | assign_stmt | method_call_stmt
 }
 
 // `name(args)` as a bare statement — a top-level / module-level
@@ -1356,6 +1356,56 @@ if_simple_stmt = { "if" ~ cond:expr ~ then_body:block }
       else_branch: None,
   }
 
+// `while cond { body }` — loop until `cond` evaluates false. The
+// condition runs before every iteration (pre-test loop). Both the
+// condition and the body share the same shape as `if_stmt`. Lowers
+// to Zyntax's native `TypedStatement::While`.
+while_stmt = { "while" ~ cond:expr ~ body:block }
+  -> TypedStatement::While {
+      condition: cond,
+      body: body,
+  }
+
+// `loop { body }` — unconditional infinite loop. Exits via `break`
+// (which can also carry a value). Desugars to `while true { body }`
+// because Zyntax's action-language `construct_statement` interpreter
+// doesn't construct the `Loop` variant directly — the While form
+// with a true literal lowers to identical HIR.
+loop_stmt = { "loop" ~ body:block }
+  -> TypedStatement::While {
+      condition: TypedExpression::BoolLiteral { value: true },
+      body: body,
+  }
+
+// `for x in iter { body }` — DEFERRED. The grammar shape is simple
+// (`"for" ~ name:identifier ~ "in" ~ iter:expr ~ body:block`) but
+// Zyntax's CFG construction for `TypedStatement::For`
+// (`compiler/cfg.rs::process_for_loop`) sets up a header→body→header
+// shape WITHOUT materialising the iterator-protocol's
+// "has-next" check, so the body runs forever at execution time. Range
+// expressions (`0..3`, `0..=2`) need the same iterator support to be
+// useful, so both `for_stmt` and `range_expr` are off the surface
+// until upstream lands the iter codegen.
+
+// `break` or `break <value>` — exit the innermost enclosing loop,
+// optionally carrying a value out of a `loop { … }` expression
+// (Zyntax's `Break(Option<Expression>)` shape). Like `return_stmt`,
+// the value-bearing form is tried first and the void form uses a
+// negative-lookahead to discriminate.
+break_stmt = { break_stmt_value | break_stmt_void }
+
+break_stmt_value = { "break" ~ value:expr }
+  -> TypedStatement::Break { value: value }
+
+break_stmt_void = { "break" ~ !expr }
+  -> TypedStatement::Break { }
+
+// `continue` — skip the rest of the body and re-evaluate the loop
+// condition (for `while` / `for`) or restart the body (for `loop`).
+// Lowers to `TypedStatement::Continue` (no payload).
+continue_stmt = { "continue" }
+  -> TypedStatement::Continue { }
+
 // Curly-delimited statement block. Distinct from the bare
 // `statements` rule because top-level `view { ... }` and
 // `fn name() { ... }` already provide the surrounding braces. This
@@ -1540,6 +1590,9 @@ f_string_text = @{ (!("\"" | "{" | "}") ~ ANY)+ }
 // outward as components grow conditionals and method dispatch.
 
 expr = { e:or_expr } -> e
+
+// Range expression — DEFERRED alongside `for_stmt`. See the
+// `for_stmt` comment above for the upstream blocker.
 
 // Logical OR layer (lowest precedence among binary operators).
 // `a || b || c` folds left as `Binary(Binary(a, Or, b), Or, c)`,

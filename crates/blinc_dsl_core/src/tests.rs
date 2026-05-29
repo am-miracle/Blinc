@@ -6377,6 +6377,125 @@ fn dsl_const_group_with_explicit_values_inlines_literals() {
     );
 }
 
+/// `while cond { body }` re-evaluates `cond` before every iteration
+/// and exits when it falsies. Drives the body via a signal counter
+/// so the loop has observable termination: 3 iterations push 3
+/// `text("loop")` ops, then the condition flips and the loop
+/// exits cleanly. Regression-covers the `while_stmt` grammar +
+/// `TypedStatement::While` lowering through Zyntax's CFG.
+#[test]
+fn dsl_while_loop_terminates_on_signal_condition_flip() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            signal i: i32
+
+            view {
+                while i.get() < 3 {
+                    text("loop")
+                    i.set(i.get() + 1)
+                }
+            }
+        "#,
+        "while_loop.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let count = ops
+        .iter()
+        .filter(|op| matches!(op, DslOp::Text(s) if s == "loop"))
+        .count();
+    assert_eq!(
+        count, 3,
+        "while loop should emit `loop` exactly 3 times \
+         before the signal hits the >=3 boundary, got {ops:?}"
+    );
+}
+
+/// `loop { body }` runs forever until an explicit `break` exits.
+/// Internally the grammar desugars `loop` to `while true { body }`
+/// because Zyntax's `construct_statement` interpreter doesn't
+/// expose a `Loop` variant constructor directly — semantics are
+/// identical regardless. Test asserts the `break` short-circuits
+/// once the signal threshold is hit.
+#[test]
+fn dsl_loop_with_break_exits_on_threshold() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            signal n: i32
+
+            view {
+                loop {
+                    if n.get() >= 2 {
+                        break
+                    }
+                    text("step")
+                    n.set(n.get() + 1)
+                }
+            }
+        "#,
+        "loop_break.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let count = ops
+        .iter()
+        .filter(|op| matches!(op, DslOp::Text(s) if s == "step"))
+        .count();
+    assert_eq!(
+        count, 2,
+        "loop should run twice then break once the signal hits >=2, \
+         got {ops:?}"
+    );
+}
+
+/// `continue` inside a loop skips the rest of the current iteration
+/// and re-evaluates the loop condition. The body emits `text("body")`
+/// for every iteration except when the counter hits 2 — that one
+/// `continue`s before reaching the emit. With 4 iterations (j: 1..=4)
+/// minus the skipped one, the body fires 3 times.
+#[test]
+fn dsl_continue_skips_to_next_iteration() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            signal j: i32
+
+            view {
+                while j.get() < 4 {
+                    j.set(j.get() + 1)
+                    if j.get() == 2 {
+                        continue
+                    }
+                    text("body")
+                }
+            }
+        "#,
+        "continue_skip.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let count = ops
+        .iter()
+        .filter(|op| matches!(op, DslOp::Text(s) if s == "body"))
+        .count();
+    assert_eq!(
+        count, 3,
+        "while loop iterates 4 times; the j==2 iteration `continue`s \
+         past the emit, leaving 3 `body` emissions, got {ops:?}"
+    );
+}
+
 /// Top-level `fn name(params): R { body }` declares a callable
 /// module-level function. ES6 type annotations: each param's type
 /// is `name: T`; the return type is `: T` after the param list
