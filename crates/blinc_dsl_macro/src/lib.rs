@@ -140,13 +140,40 @@ fn classify_param_type(ty: &syn::Type) -> Option<ParamKind> {
     }
 }
 
-/// Parsed `#[extern_widget(name = "X", styled?)]` args.
+/// Parsed `#[extern_widget(name = "X", namespace = "ns"?, styled?)]` args.
 struct ExternWidgetArgs {
+    /// Bare DSL-visible name, e.g. `"Button"`. Required.
     name: String,
+    /// Optional namespace prefix, e.g. `"cn"`. When set, the
+    /// registered DSL name becomes `"<namespace>.<name>"` (e.g.
+    /// `"cn.Button"`) and the grammar's dotted-component-call shape
+    /// `cn.Button(...)` resolves to this widget. Empty namespace is
+    /// equivalent to omitting the field — the widget registers at
+    /// the top level under just `<name>`.
+    namespace: Option<String>,
     /// When true, the macro wraps the widget in `Styled<W>` and the
     /// spec advertises a `__style` prop the lowering pass populates
     /// from inline DSL styling args.
     styled: bool,
+}
+
+impl ExternWidgetArgs {
+    /// Qualified DSL name as registered with the runtime. With a
+    /// namespace it's `"<ns>.<name>"`; without, just `"<name>"`.
+    fn dsl_name(&self) -> String {
+        match &self.namespace {
+            Some(ns) if !ns.is_empty() => format!("{ns}.{}", self.name),
+            _ => self.name.clone(),
+        }
+    }
+
+    /// Rust-identifier-safe form of the qualified name — the dot in
+    /// `cn.Button` becomes an underscore so the thunk fn / JIT symbol
+    /// remain valid Rust idents and well-formed linker symbols.
+    /// Equivalent to `dsl_name().replace('.', "_")`.
+    fn symbol_safe_name(&self) -> String {
+        self.dsl_name().replace('.', "_")
+    }
 }
 
 fn field_has_children_attr(field: &syn::Field) -> bool {
@@ -172,36 +199,67 @@ fn field_slot_name(field: &syn::Field) -> Option<String> {
 }
 
 impl syn::parse::Parse for ExternWidgetArgs {
+    /// Accepts `name = "..."`, optional `namespace = "..."`, and the
+    /// bare `styled` flag in any order. `name` is required; everything
+    /// else defaults. Trailing commas are tolerated.
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let key: syn::Ident = input.parse()?;
-        if key != "name" {
-            return Err(syn::Error::new(
-                key.span(),
-                "expected `name = \"<DslName>\"`",
-            ));
-        }
-        let _: syn::Token![=] = input.parse()?;
-        let value: syn::LitStr = input.parse()?;
-
+        let mut name: Option<(syn::LitStr, proc_macro2::Span)> = None;
+        let mut namespace: Option<String> = None;
         let mut styled = false;
-        while !input.is_empty() {
-            let _: syn::Token![,] = input.parse()?;
+
+        loop {
             if input.is_empty() {
                 break;
             }
-            let flag: syn::Ident = input.parse()?;
-            match flag.to_string().as_str() {
-                "styled" => styled = true,
+            let key: syn::Ident = input.parse()?;
+            match key.to_string().as_str() {
+                "name" => {
+                    let _: syn::Token![=] = input.parse()?;
+                    let value: syn::LitStr = input.parse()?;
+                    name = Some((value, key.span()));
+                }
+                "namespace" => {
+                    let _: syn::Token![=] = input.parse()?;
+                    let value: syn::LitStr = input.parse()?;
+                    namespace = Some(value.value());
+                }
+                "styled" => {
+                    styled = true;
+                }
                 other => {
                     return Err(syn::Error::new(
-                        flag.span(),
-                        format!("unknown #[extern_widget] flag `{other}` — expected `styled`"),
+                        key.span(),
+                        format!(
+                            "unknown #[extern_widget] arg `{other}` — expected one of \
+                             `name = \"...\"`, `namespace = \"...\"`, `styled`"
+                        ),
                     ));
                 }
             }
+            if input.is_empty() {
+                break;
+            }
+            let _: syn::Token![,] = input.parse()?;
+        }
+
+        let Some((name_lit, _)) = name else {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "#[extern_widget] requires `name = \"<DslName>\"`",
+            ));
+        };
+        if let Some(ns) = &namespace
+            && (ns.is_empty() || ns.contains('.'))
+        {
+            return Err(syn::Error::new(
+                name_lit.span(),
+                "#[extern_widget] `namespace` must be a single segment without `.` — \
+                 e.g. `namespace = \"cn\"`, not `namespace = \"foo.bar\"`",
+            ));
         }
         Ok(Self {
-            name: value.value(),
+            name: name_lit.value(),
+            namespace,
             styled,
         })
     }
@@ -229,7 +287,16 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut item_struct = parse_macro_input!(item as syn::ItemStruct);
 
     let struct_ident = item_struct.ident.clone();
-    let dsl_name = args.name;
+    // `dsl_name` is what flows into the runtime registry — the
+    // qualified form (`"cn.Button"`) when a namespace is set; the bare
+    // `"Button"` otherwise. The grammar's `__component_call__("cn.Button", …)`
+    // lookup is name-based, so a dotted DSL name resolves the same way
+    // a bare one does.
+    let dsl_name = args.dsl_name();
+    // `symbol_safe_name` keeps the dot out of Rust identifiers / JIT
+    // linker symbols. `cn.Button` → `cn_Button` for the thunk + view
+    // symbol; the registry still sees the dotted form via `dsl_name`.
+    let symbol_safe_name = args.symbol_safe_name();
     let styled = args.styled;
 
     if !item_struct.generics.params.is_empty() {
@@ -253,10 +320,10 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let thunk_ident = syn::Ident::new(
-        &format!("__blinc_extern_{dsl_name}_view"),
+        &format!("__blinc_extern_{symbol_safe_name}_view"),
         proc_macro2::Span::call_site(),
     );
-    let view_symbol = format!("$Blinc${dsl_name}$view");
+    let view_symbol = format!("$Blinc${symbol_safe_name}$view");
 
     // FFI order: children → slots → scalars.
     let mut children_field: Option<&syn::Field> = None;
