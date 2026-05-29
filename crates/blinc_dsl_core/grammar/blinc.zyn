@@ -859,10 +859,30 @@ fn_param_tail = { ","? ~ p:fn_param } -> p
 // ES6 annotation: param name and type are separated by `:`. Type
 // reuses `state_type` — same bool / i32 / f64 / string / Named
 // surface that signals, fields, and computed-return types accept.
-fn_param = { name:identifier ~ ":" ~ ty:state_type }
+// An optional `= <default-expr>` after the type makes the param
+// optional at the call site — Zyntax's `construct_parameter`
+// promotes the parameter's `kind` to `Optional` when a
+// `default_value` is present, and the call-site lowering splices
+// the default in for omitted trailing positions.
+//
+// PEG-ordered: try the `_with_default` variant first since the
+// trailing `= default` is the strong disambiguator. Falls through
+// to the no-default form when no `=` follows the type.
+fn_param = { fn_param_with_default | fn_param_no_default }
+
+fn_param_no_default = { name:identifier ~ ":" ~ ty:state_type }
   -> TypedParameter {
       name: intern(name),
       ty: ty,
+  }
+
+fn_param_with_default = {
+    name:identifier ~ ":" ~ ty:state_type ~ "=" ~ default:expr
+}
+  -> TypedParameter {
+      name: intern(name),
+      ty: ty,
+      default_value: default,
   }
 
 // Optional return-type annotation: `: T` after the param list. The

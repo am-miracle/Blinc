@@ -6581,6 +6581,98 @@ fn dsl_continue_skips_to_next_iteration() {
     );
 }
 
+/// `fn name(param: T = default_expr)` — a trailing param carries
+/// a default value the call site can omit. Zyntax's
+/// `construct_parameter` flags the param's `kind` as `Optional`
+/// when a `default_value` is present, and the call-site lowering
+/// splices the default in for omitted trailing positions. Same
+/// compiled program serves both call shapes — `step(5, 10)`
+/// passes both args; `step(5)` lets the default fill in for `by`.
+#[test]
+fn dsl_fn_default_param_splices_when_omitted_at_call_site() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            fn step(x: i32, by: i32 = 1): i32 {
+                return x + by
+            }
+
+            view {
+                text(f"explicit={step(5, 10)}")
+                text(f"defaulted={step(5)}")
+            }
+        "#,
+        "fn_default_single.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let saw_explicit = ops
+        .iter()
+        .any(|op| matches!(op, DslOp::Text(s) if s == "explicit=15"));
+    let saw_defaulted = ops
+        .iter()
+        .any(|op| matches!(op, DslOp::Text(s) if s == "defaulted=6"));
+    assert!(
+        saw_explicit,
+        "step(5, 10) should return 15 when `by` is explicit, got {ops:?}"
+    );
+    assert!(
+        saw_defaulted,
+        "step(5) should return 6 (5 + default 1) when `by` is omitted, got {ops:?}"
+    );
+}
+
+/// Multiple trailing defaults. Authors can omit just the last, or
+/// progressively more from the right — Zyntax fills in each
+/// missing default in order.
+#[test]
+fn dsl_fn_multiple_defaults_omit_progressively() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            fn pack(a: i32, b: i32 = 10, c: i32 = 20): i32 {
+                return a + b + c
+            }
+
+            view {
+                text(f"all={pack(1, 2, 3)}")
+                text(f"one_default={pack(1, 2)}")
+                text(f"two_defaults={pack(1)}")
+            }
+        "#,
+        "fn_default_multi.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let saw_all = ops
+        .iter()
+        .any(|op| matches!(op, DslOp::Text(s) if s == "all=6"));
+    let saw_one = ops
+        .iter()
+        .any(|op| matches!(op, DslOp::Text(s) if s == "one_default=23"));
+    let saw_two = ops
+        .iter()
+        .any(|op| matches!(op, DslOp::Text(s) if s == "two_defaults=31"));
+    assert!(
+        saw_all,
+        "pack(1, 2, 3) should return 6 with no defaults applied, got {ops:?}"
+    );
+    assert!(
+        saw_one,
+        "pack(1, 2) should return 23 (1 + 2 + default 20), got {ops:?}"
+    );
+    assert!(
+        saw_two,
+        "pack(1) should return 31 (1 + default 10 + default 20), got {ops:?}"
+    );
+}
+
 /// Top-level `fn name(params): R { body }` declares a callable
 /// module-level function. ES6 type annotations: each param's type
 /// is `name: T`; the return type is `: T` after the param list
