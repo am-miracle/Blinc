@@ -695,6 +695,10 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
         }
 
         // Children first so nested signal calls (e.g. `text(count.get())`) are rewritten.
+        // EXCEPTION: MethodCall.receiver and Call+Field.object aren't walked
+        // when they're a bare `Variable(<signal>)` — the dedicated
+        // `count.get()` / `count.set(...)` rewrite below needs to see the
+        // receiver as a Variable, not as a pre-rewritten getter-Call.
         match &mut expr.node {
             TypedExpression::Binary(b) => {
                 rewrite_expr(&mut b.left, signals);
@@ -704,7 +708,20 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
                 rewrite_expr(&mut u.operand, signals);
             }
             TypedExpression::Call(c) => {
-                rewrite_expr(&mut c.callee, signals);
+                // If the callee is `Field { object: Variable(<signal>), ... }`,
+                // skip rewriting the object so the post-walk MethodCall/Call+Field
+                // handler can match `<signal>.<method>(args)`. Args are still walked.
+                let preserve_callee = matches!(
+                    &c.callee.node,
+                    TypedExpression::Field(f)
+                        if matches!(
+                            &f.object.node,
+                            TypedExpression::Variable(n) if signals.contains_key(n)
+                        )
+                );
+                if !preserve_callee {
+                    rewrite_expr(&mut c.callee, signals);
+                }
                 for a in &mut c.positional_args {
                     rewrite_expr(a, signals);
                 }
@@ -722,7 +739,13 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
                 }
             }
             TypedExpression::MethodCall(mc) => {
-                rewrite_expr(&mut mc.receiver, signals);
+                let preserve_receiver = matches!(
+                    &mc.receiver.node,
+                    TypedExpression::Variable(n) if signals.contains_key(n)
+                );
+                if !preserve_receiver {
+                    rewrite_expr(&mut mc.receiver, signals);
+                }
                 for a in &mut mc.positional_args {
                     rewrite_expr(a, signals);
                 }
@@ -783,6 +806,44 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
         };
 
         let Some((receiver_name, method, args, span)) = method_call else {
+            // Bare `Variable(<signal>)` read — not `.get()`, not an
+            // Assign LHS (those returned at the top). Rewrite to a
+            // getter call so the JIT issues an actual signal load
+            // instead of treating the name as an undefined local.
+            //
+            // SCOPE: only `__fsm_ctx_*` (FSM context-field) signals.
+            // User-declared signals are left as bare Variables because
+            // `lower_styling_args_to_overlays` (which runs after us)
+            // pattern-matches on bare-Variable args to widget props
+            // and rewrites them to the `_signal__` overlay variant for
+            // LIVE binding at paint time. Forcing a getter call here
+            // would freeze the value at compile time and break that
+            // feature for `Div(bg = bg_color)`-style code.
+            if let TypedExpression::Variable(name) = &expr.node
+                && let Some(entry) = signals.get(name).cloned()
+                && name
+                    .resolve_global()
+                    .map(|s| s.starts_with("__fsm_ctx_"))
+                    .unwrap_or(false)
+                && let Some(extern_name) = typed_signal_extern_name(&entry.ty)
+            {
+                let span = expr.span;
+                expr.node = TypedExpression::Call(TypedCall {
+                    callee: Box::new(zyntax_typed_ast::TypedNode::new(
+                        TypedExpression::Variable(InternedString::new_global(extern_name)),
+                        Type::Unknown,
+                        span,
+                    )),
+                    positional_args: vec![zyntax_typed_ast::TypedNode::new(
+                        TypedExpression::Literal(TypedLiteral::Integer(entry.id_raw as i128)),
+                        Type::Primitive(PrimitiveType::I64),
+                        span,
+                    )],
+                    named_args: vec![],
+                    type_args: vec![],
+                });
+                expr.ty = entry.ty;
+            }
             return;
         };
         let Some(entry) = signals.get(&receiver_name).cloned() else {
@@ -2972,15 +3033,82 @@ pub(crate) fn populate_fsm_registry_pass(
                         def.initial = Some(state);
                     }
                 }
+                "__fsm_context_field__" => {
+                    // arg 0 = name (StringLiteral)
+                    // arg 1 = type-name (StringLiteral, e.g. "i32")
+                    // arg 2 = default literal expression
+                    use zyntax_typed_ast::typed_ast::TypedLiteral as TL;
+                    let (Some(field_name), Some(field_ty_name)) = (str_arg(0), str_arg(1)) else {
+                        continue;
+                    };
+                    let Some(default_node) = call.positional_args.get(2) else {
+                        continue;
+                    };
+                    let Some(field_ty_str) = field_ty_name.resolve_global() else {
+                        continue;
+                    };
+                    let default = match (&field_ty_str[..], &default_node.node) {
+                        ("i32", TypedExpression::Literal(TL::Integer(n))) => {
+                            crate::fsm_registry::ContextDefault::I32(*n as i32)
+                        }
+                        ("f64", TypedExpression::Literal(TL::Float(f))) => {
+                            crate::fsm_registry::ContextDefault::F64(*f)
+                        }
+                        ("f64", TypedExpression::Literal(TL::Integer(n))) => {
+                            crate::fsm_registry::ContextDefault::F64(*n as f64)
+                        }
+                        ("bool", TypedExpression::Literal(TL::Bool(b))) => {
+                            crate::fsm_registry::ContextDefault::Bool(*b)
+                        }
+                        ("string", TypedExpression::Literal(TL::String(s)))
+                        | ("str", TypedExpression::Literal(TL::String(s))) => {
+                            crate::fsm_registry::ContextDefault::String(*s)
+                        }
+                        _ => {
+                            // Default for unsupported (ty, literal) combos —
+                            // emit a zero-of-type so downstream init stays
+                            // sane and the lowered signal still exists.
+                            match &field_ty_str[..] {
+                                "i32" => crate::fsm_registry::ContextDefault::I32(0),
+                                "f64" => crate::fsm_registry::ContextDefault::F64(0.0),
+                                "bool" => crate::fsm_registry::ContextDefault::Bool(false),
+                                _ => crate::fsm_registry::ContextDefault::String(
+                                    InternedString::new_global(""),
+                                ),
+                            }
+                        }
+                    };
+                    def.context_fields.push(crate::fsm_registry::ContextField {
+                        name: field_name,
+                        ty: field_ty_name,
+                        default,
+                    });
+                }
                 "__fsm_transition__" => {
                     if let (Some(from), Some(event), Some(to)) =
                         (str_arg(0), str_arg(1), str_arg(2))
                     {
+                        // Optional 4th positional arg: lifted action
+                        // symbol name (a StringLiteral the early
+                        // `synthesize_fsm_context_and_actions` pass
+                        // wrote in place of the original Block body).
+                        let actions = if let Some(action_sym) = str_arg(3) {
+                            action_sym
+                                .resolve_global()
+                                .map(|s| {
+                                    vec![blinc_runtime::fsm::TransitionAction::Symbol(
+                                        std::sync::Arc::from(s.as_ref()),
+                                    )]
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            vec![]
+                        };
                         def.transitions.push(EventTransition {
                             from,
                             event,
                             to,
-                            actions: vec![],
+                            actions,
                         });
                     }
                 }
@@ -5631,6 +5759,745 @@ pub(crate) fn inject_call_site_keys(program: &mut TypedProgram, filename: &str) 
                             in_user_view,
                         };
                         rewrite_block(body, &ctx);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// =====================================================================
+// FSM context + transition actions
+// =====================================================================
+//
+// The grammar emits three new shapes when an FSM uses extended state:
+//
+//   1. `__fsm_context_field__("name", "ty", default_literal)` markers
+//      inside `__fsm_meta__` — one per `context { … }` field.
+//   2. `__fsm_transition__("from", "event", "to", Block { stmts })` —
+//      the optional 4th positional arg carries the action body.
+//   3. `__compound_assign__("Add", lhs, rhs)` marker calls produced by
+//      `+=` / `-=` / `*=` / `/=` (works everywhere statements appear,
+//      not just inside FSM bodies).
+//
+// The lowering pipeline turns these into ordinary Blinc machinery:
+//   - Context fields become top-level `signal __fsm_ctx_<Fsm>_<field>: <ty>`
+//     decls so `resolve_signal_calls` handles get/set uniformly.
+//   - Action bodies get lifted to top-level fns
+//     `__fsm_action_<Fsm>_<idx>__` whose body has `ctx.<field>` rewritten
+//     to the mangled signal name. The `__fsm_transition__` marker's 4th
+//     arg is rewritten from Block to a string-literal carrying the lifted
+//     symbol name so `populate_fsm_registry_pass` reads it as
+//     `TransitionAction::Symbol(...)`.
+//   - Tick-guard expressions go through the same `ctx.<field>` rewrite.
+//   - Compound-assign markers expand to plain `target = target op value`
+//     (with the LHS cloned).
+//   - From-outside dotted access `<Fsm>.<field>` (typically followed by
+//     `.get()` / `.set(...)` or appearing on either side of an `=`) is
+//     rewritten to the mangled signal identifier so `resolve_signal_calls`
+//     picks it up.
+
+/// Desugar `__compound_assign__("Add", lhs, rhs)` marker calls into
+/// `lhs = lhs <op> rhs`. Runs early so subsequent passes only see plain
+/// `Binary Assign` shapes — no special-casing of `+=` etc. downstream.
+///
+/// Walks every expression position reachable from the program's
+/// declarations, including inside lambda bodies and nested blocks. The
+/// LHS is cloned to share between the outer Assign and the inner Binary
+/// arithmetic — TypedNodes are owned trees, no aliasing concerns.
+pub(crate) fn desugar_compound_assigns(program: &mut TypedProgram) {
+    use zyntax_typed_ast::TypedNode;
+    use zyntax_typed_ast::typed_ast::{
+        BinaryOp, TypedBinary, TypedCall, TypedDeclaration, TypedExpression, TypedLambdaBody,
+        TypedLiteral,
+    };
+
+    fn op_from_str(s: &str) -> Option<BinaryOp> {
+        match s {
+            "+=" => Some(BinaryOp::Add),
+            "-=" => Some(BinaryOp::Sub),
+            "*=" => Some(BinaryOp::Mul),
+            "/=" => Some(BinaryOp::Div),
+            _ => None,
+        }
+    }
+
+    fn rewrite_expr(node: &mut TypedNode<TypedExpression>) {
+        // Walk children first so nested compound assigns inside arg
+        // expressions are handled before the outer is examined.
+        match &mut node.node {
+            TypedExpression::Call(c) => {
+                rewrite_expr(&mut c.callee);
+                for a in &mut c.positional_args {
+                    rewrite_expr(a);
+                }
+            }
+            TypedExpression::MethodCall(mc) => {
+                rewrite_expr(&mut mc.receiver);
+                for a in &mut mc.positional_args {
+                    rewrite_expr(a);
+                }
+            }
+            TypedExpression::Binary(b) => {
+                rewrite_expr(&mut b.left);
+                rewrite_expr(&mut b.right);
+            }
+            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand),
+            TypedExpression::Field(f) => rewrite_expr(&mut f.object),
+            TypedExpression::Index(i) => {
+                rewrite_expr(&mut i.object);
+                rewrite_expr(&mut i.index);
+            }
+            TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
+                for it in items {
+                    rewrite_expr(it);
+                }
+            }
+            TypedExpression::Block(block) => {
+                for stmt in &mut block.statements {
+                    rewrite_stmt(stmt);
+                }
+            }
+            TypedExpression::If(if_expr) => {
+                rewrite_expr(&mut if_expr.condition);
+                rewrite_expr(&mut if_expr.then_branch);
+                rewrite_expr(&mut if_expr.else_branch);
+            }
+            TypedExpression::Lambda(lam) => match &mut lam.body {
+                TypedLambdaBody::Expression(e) => rewrite_expr(e),
+                TypedLambdaBody::Block(block) => {
+                    for stmt in &mut block.statements {
+                        rewrite_stmt(stmt);
+                    }
+                }
+            },
+            _ => {}
+        }
+
+        // Now look for `__compound_assign__(op_str, lhs, rhs)` at this
+        // node and rewrite in place.
+        let TypedExpression::Call(call) = &node.node else {
+            return;
+        };
+        let TypedExpression::Variable(callee_name) = &call.callee.node else {
+            return;
+        };
+        if callee_name.resolve_global().as_deref() != Some("__compound_assign__") {
+            return;
+        }
+        if call.positional_args.len() != 3 {
+            return;
+        }
+        let TypedExpression::Literal(TypedLiteral::String(op_intern)) =
+            &call.positional_args[0].node
+        else {
+            return;
+        };
+        let Some(op_str) = op_intern.resolve_global() else {
+            return;
+        };
+        let Some(op) = op_from_str(&op_str) else {
+            return;
+        };
+        let lhs = call.positional_args[1].clone();
+        let rhs = call.positional_args[2].clone();
+        let span = node.span;
+        let lhs_for_rhs = lhs.clone();
+        let inner_ty = lhs.ty.clone();
+        let combined = TypedNode::new(
+            TypedExpression::Binary(TypedBinary {
+                op,
+                left: Box::new(lhs_for_rhs),
+                right: Box::new(rhs),
+            }),
+            inner_ty,
+            span,
+        );
+        node.node = TypedExpression::Binary(TypedBinary {
+            op: BinaryOp::Assign,
+            left: Box::new(lhs),
+            right: Box::new(combined),
+        });
+        node.ty = Type::Primitive(PrimitiveType::Unit);
+        // Silence "unused" lints on imports only used through pattern matches above.
+        let _ = std::any::type_name::<TypedCall>();
+    }
+
+    fn rewrite_stmt(stmt: &mut TypedNode<TypedStatement>) {
+        match &mut stmt.node {
+            TypedStatement::Expression(e) => rewrite_expr(e),
+            TypedStatement::Let(l) => {
+                if let Some(init) = &mut l.initializer {
+                    rewrite_expr(init);
+                }
+            }
+            TypedStatement::Return(Some(e)) => rewrite_expr(e),
+            TypedStatement::Block(b) => {
+                for inner in &mut b.statements {
+                    rewrite_stmt(inner);
+                }
+            }
+            TypedStatement::If(if_stmt) => {
+                rewrite_expr(&mut if_stmt.condition);
+                for inner in &mut if_stmt.then_block.statements {
+                    rewrite_stmt(inner);
+                }
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    for inner in &mut else_block.statements {
+                        rewrite_stmt(inner);
+                    }
+                }
+            }
+            TypedStatement::While(w) => {
+                rewrite_expr(&mut w.condition);
+                for inner in &mut w.body.statements {
+                    rewrite_stmt(inner);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for decl in &mut program.declarations {
+        match &mut decl.node {
+            TypedDeclaration::Function(f) => {
+                if let Some(body) = &mut f.body {
+                    for stmt in &mut body.statements {
+                        rewrite_stmt(stmt);
+                    }
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                for m in &mut imp.methods {
+                    if let Some(body) = &mut m.body {
+                        for stmt in &mut body.statements {
+                            rewrite_stmt(stmt);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Rewrite `ctx.<field>` → `<mangled_signal_name>` inside the supplied
+/// block. Used by both the action-body lifter and the tick-guard
+/// expression handler so the two paths share one resolution rule.
+///
+/// `Field { object: Variable("ctx"), field: <name> }` → `Variable(__fsm_ctx_<Fsm>_<name>)`.
+///
+/// Any other appearance of bare `ctx` (e.g. `let x = ctx`,
+/// `someFn(ctx)`) is left untouched — downstream resolution will error
+/// out because `ctx` isn't a real binding. We rely on that to surface
+/// misuse rather than implementing a separate check here.
+fn rewrite_fsm_ctx_access_block(
+    fsm_name: &str,
+    block: &mut zyntax_typed_ast::typed_ast::TypedBlock,
+) {
+    for stmt in &mut block.statements {
+        rewrite_fsm_ctx_access_stmt(fsm_name, stmt);
+    }
+}
+
+fn rewrite_fsm_ctx_access_stmt(
+    fsm_name: &str,
+    stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>,
+) {
+    match &mut stmt.node {
+        TypedStatement::Expression(e) => rewrite_fsm_ctx_access_expr(fsm_name, e),
+        TypedStatement::Let(l) => {
+            if let Some(init) = &mut l.initializer {
+                rewrite_fsm_ctx_access_expr(fsm_name, init);
+            }
+        }
+        TypedStatement::Return(Some(e)) => rewrite_fsm_ctx_access_expr(fsm_name, e),
+        TypedStatement::Block(b) => rewrite_fsm_ctx_access_block(fsm_name, b),
+        TypedStatement::If(if_stmt) => {
+            rewrite_fsm_ctx_access_expr(fsm_name, &mut if_stmt.condition);
+            rewrite_fsm_ctx_access_block(fsm_name, &mut if_stmt.then_block);
+            if let Some(else_block) = &mut if_stmt.else_block {
+                rewrite_fsm_ctx_access_block(fsm_name, else_block);
+            }
+        }
+        TypedStatement::While(w) => {
+            rewrite_fsm_ctx_access_expr(fsm_name, &mut w.condition);
+            rewrite_fsm_ctx_access_block(fsm_name, &mut w.body);
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_fsm_ctx_access_expr(
+    fsm_name: &str,
+    expr: &mut zyntax_typed_ast::TypedNode<zyntax_typed_ast::typed_ast::TypedExpression>,
+) {
+    use zyntax_typed_ast::InternedString;
+    use zyntax_typed_ast::typed_ast::{TypedExpression, TypedLambdaBody};
+
+    // Walk children first so deeper accesses are rewritten before the
+    // outer node is inspected.
+    match &mut expr.node {
+        TypedExpression::Call(c) => {
+            rewrite_fsm_ctx_access_expr(fsm_name, &mut c.callee);
+            for a in &mut c.positional_args {
+                rewrite_fsm_ctx_access_expr(fsm_name, a);
+            }
+        }
+        TypedExpression::MethodCall(mc) => {
+            rewrite_fsm_ctx_access_expr(fsm_name, &mut mc.receiver);
+            for a in &mut mc.positional_args {
+                rewrite_fsm_ctx_access_expr(fsm_name, a);
+            }
+        }
+        TypedExpression::Binary(b) => {
+            rewrite_fsm_ctx_access_expr(fsm_name, &mut b.left);
+            rewrite_fsm_ctx_access_expr(fsm_name, &mut b.right);
+        }
+        TypedExpression::Unary(u) => {
+            rewrite_fsm_ctx_access_expr(fsm_name, &mut u.operand);
+        }
+        TypedExpression::Field(f) => {
+            // Recurse into the object first — handles
+            // `something.ctx.field` shapes if they ever appear; mostly
+            // a no-op since `ctx` is leftmost.
+            rewrite_fsm_ctx_access_expr(fsm_name, &mut f.object);
+        }
+        TypedExpression::Index(i) => {
+            rewrite_fsm_ctx_access_expr(fsm_name, &mut i.object);
+            rewrite_fsm_ctx_access_expr(fsm_name, &mut i.index);
+        }
+        TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
+            for it in items {
+                rewrite_fsm_ctx_access_expr(fsm_name, it);
+            }
+        }
+        TypedExpression::Block(block) => {
+            rewrite_fsm_ctx_access_block(fsm_name, block);
+        }
+        TypedExpression::If(if_expr) => {
+            rewrite_fsm_ctx_access_expr(fsm_name, &mut if_expr.condition);
+            rewrite_fsm_ctx_access_expr(fsm_name, &mut if_expr.then_branch);
+            rewrite_fsm_ctx_access_expr(fsm_name, &mut if_expr.else_branch);
+        }
+        TypedExpression::Lambda(lam) => match &mut lam.body {
+            TypedLambdaBody::Expression(e) => rewrite_fsm_ctx_access_expr(fsm_name, e),
+            TypedLambdaBody::Block(block) => rewrite_fsm_ctx_access_block(fsm_name, block),
+        },
+        _ => {}
+    }
+
+    // Now look at THIS node: is it `Field { object: Variable("ctx"), field: <name> }`?
+    let is_ctx_field = match &expr.node {
+        TypedExpression::Field(f) => match &f.object.node {
+            TypedExpression::Variable(name) => name.resolve_global().as_deref() == Some("ctx"),
+            _ => false,
+        },
+        _ => false,
+    };
+    if !is_ctx_field {
+        return;
+    }
+    let TypedExpression::Field(f) = &expr.node else {
+        return;
+    };
+    let Some(field_name) = f.field.resolve_global() else {
+        return;
+    };
+    let mangled = super::fsm_registry::mangle_ctx_signal(fsm_name, &field_name);
+    let span = expr.span;
+    let ty = expr.ty.clone();
+    expr.node = TypedExpression::Variable(InternedString::new_global(&mangled));
+    expr.ty = ty;
+    expr.span = span;
+}
+
+/// Early FSM-context pass: scans each `__fsm_meta__` body for
+/// `__fsm_context_field__` and `__fsm_transition__` markers; emits
+/// top-level signal declarations for context fields; lifts action
+/// bodies (4th-positional `Block` on `__fsm_transition__`) to
+/// top-level fns `__fsm_action_<Fsm>_<idx>__`; rewrites `ctx.<field>`
+/// access inside each lifted body to the mangled signal name. Also
+/// applies the ctx-rewrite to tick-guard expressions
+/// (`__fsm_tick__("from", <guard>, "to")` arg 1) so guards can read
+/// context like actions can.
+///
+/// Side effects on `__fsm_meta__`:
+///   - `__fsm_context_field__` markers are LEFT in place so the
+///     publish-step can read them.
+///   - `__fsm_transition__` markers with a 4th-arg Block are rewritten:
+///     the Block is replaced by a `StringLiteral(<lifted_symbol_name>)`.
+///     `populate_fsm_registry_pass` reads that string and emits
+///     `TransitionAction::Symbol(...)` on the `EventTransition`.
+pub(crate) fn synthesize_fsm_context_and_actions(program: &mut TypedProgram) {
+    use zyntax_typed_ast::TypedNode;
+    use zyntax_typed_ast::typed_ast::{
+        TypedBlock, TypedCall, TypedDeclaration, TypedExpression, TypedFunction, TypedLiteral,
+    };
+    use zyntax_typed_ast::{InternedString, Mutability};
+
+    // Collected work — applied after the read loop so we don't hold
+    // borrows across mutations.
+    struct ActionLift {
+        fn_name: InternedString,
+        body: TypedBlock,
+    }
+    struct CtxFieldDecl {
+        signal_name: String,
+        ty: Type,
+    }
+
+    let mut signal_decls: Vec<CtxFieldDecl> = Vec::new();
+    let mut action_lifts: Vec<ActionLift> = Vec::new();
+
+    fn type_from_name(ty_name: &str) -> Option<Type> {
+        Some(Type::Primitive(match ty_name {
+            "i32" => PrimitiveType::I32,
+            "f64" => PrimitiveType::F64,
+            "bool" => PrimitiveType::Bool,
+            "string" | "str" => PrimitiveType::String,
+            _ => return None,
+        }))
+    }
+
+    for decl in &mut program.declarations {
+        let TypedDeclaration::Impl(imp) = &mut decl.node else {
+            continue;
+        };
+        let Some(fsm_name) = imp.trait_name.resolve_global() else {
+            continue;
+        };
+        let fsm_name_str: &str = &fsm_name;
+
+        for method in &mut imp.methods {
+            if method.name.resolve_global().as_deref() != Some("__fsm_meta__") {
+                continue;
+            }
+            let Some(body) = method.body.as_mut() else {
+                continue;
+            };
+
+            let mut action_idx: usize = 0;
+            for stmt in &mut body.statements {
+                let TypedStatement::Expression(expr_node) = &mut stmt.node else {
+                    continue;
+                };
+                let TypedExpression::Call(call) = &mut expr_node.node else {
+                    continue;
+                };
+                let TypedExpression::Variable(callee_id) = &call.callee.node else {
+                    continue;
+                };
+                let Some(callee) = callee_id.resolve_global() else {
+                    continue;
+                };
+                let callee_str: &str = &callee;
+
+                match callee_str {
+                    "__fsm_context_field__" => {
+                        // arg[0] = name (StringLiteral)
+                        // arg[1] = type (StringLiteral, e.g. "i32")
+                        // arg[2] = default expression (literal)
+                        let Some(name_arg) = call.positional_args.first() else {
+                            continue;
+                        };
+                        let Some(ty_arg) = call.positional_args.get(1) else {
+                            continue;
+                        };
+                        let TypedExpression::Literal(TypedLiteral::String(name_intern)) =
+                            &name_arg.node
+                        else {
+                            continue;
+                        };
+                        let TypedExpression::Literal(TypedLiteral::String(ty_intern)) =
+                            &ty_arg.node
+                        else {
+                            continue;
+                        };
+                        let Some(name_str) = name_intern.resolve_global() else {
+                            continue;
+                        };
+                        let Some(ty_str) = ty_intern.resolve_global() else {
+                            continue;
+                        };
+                        let Some(field_ty) = type_from_name(&ty_str) else {
+                            // Unknown type — skip; populate_fsm_registry_pass
+                            // will emit a diagnostic on the same marker shape.
+                            continue;
+                        };
+                        let signal_name =
+                            super::fsm_registry::mangle_ctx_signal(fsm_name_str, &name_str);
+                        signal_decls.push(CtxFieldDecl {
+                            signal_name,
+                            ty: field_ty,
+                        });
+                    }
+                    "__fsm_transition__" => {
+                        // 4th positional arg (if present) is the action
+                        // body `Block`. Lift it; rewrite the marker arg
+                        // to a string literal carrying the lifted symbol.
+                        if call.positional_args.len() < 4 {
+                            continue;
+                        }
+                        let body_arg = call.positional_args[3].clone();
+                        let TypedExpression::Block(action_block) = body_arg.node else {
+                            continue;
+                        };
+                        // Apply ctx-rewrite to the lifted body before
+                        // it leaves this FSM's scope.
+                        let mut rewritten = action_block;
+                        rewrite_fsm_ctx_access_block(fsm_name_str, &mut rewritten);
+
+                        let fn_name_str = format!("__fsm_action_{fsm_name_str}_{action_idx}__");
+                        let fn_name = InternedString::new_global(&fn_name_str);
+                        action_lifts.push(ActionLift {
+                            fn_name,
+                            body: rewritten,
+                        });
+
+                        // Replace the Block arg with a StringLiteral
+                        // carrying the lifted symbol name. populate
+                        // reads it as args[3] and emits
+                        // TransitionAction::Symbol(...).
+                        call.positional_args[3] = TypedNode::new(
+                            TypedExpression::Literal(TypedLiteral::String(
+                                InternedString::new_global(&fn_name_str),
+                            )),
+                            Type::Primitive(PrimitiveType::String),
+                            body_arg.span,
+                        );
+                        action_idx += 1;
+                    }
+                    "__fsm_tick__" => {
+                        // arg[1] is the raw guard expression; apply
+                        // ctx-rewrite so guards can read context fields
+                        // the same way actions do.
+                        if let Some(guard_expr) = call.positional_args.get_mut(1) {
+                            rewrite_fsm_ctx_access_expr(fsm_name_str, guard_expr);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Emit top-level signal decls (extern fn-with-no-body shape) so
+    // `resolve_signal_calls` recognises them. The signal-init pass
+    // (publish-side) seeds non-zero defaults at FSM-registration time.
+    for ctx_field in signal_decls {
+        let sig_func = TypedFunction {
+            name: InternedString::new_global(&ctx_field.signal_name),
+            params: vec![],
+            return_type: ctx_field.ty,
+            body: None,
+            is_external: true,
+            link_name: None,
+            ..Default::default()
+        };
+        program.declarations.push(TypedNode::new(
+            TypedDeclaration::Function(sig_func),
+            Type::Unknown,
+            Span::default(),
+        ));
+    }
+
+    // Emit lifted action fns.
+    for ActionLift { fn_name, body } in action_lifts {
+        let func = TypedFunction {
+            name: fn_name,
+            params: vec![],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            body: Some(body),
+            ..Default::default()
+        };
+        program.declarations.push(TypedNode::new(
+            TypedDeclaration::Function(func),
+            Type::Unknown,
+            Span::default(),
+        ));
+    }
+
+    // Silence "unused" lints on imports only used through pattern matches above.
+    let _ = std::any::type_name::<TypedCall>();
+    let _ = std::any::type_name::<Mutability>();
+}
+
+/// Resolve `<FsmName>.<field>` field-access expressions appearing
+/// OUTSIDE an FSM body (view, init, other components) by rewriting them
+/// to the mangled signal identifier. Required so user-facing code can
+/// read / write FSM context like a signal:
+///
+///   `Text(f"{CounterFsm.count.get()}")`     // read
+///   `CounterFsm.count.set(0)`               // write via set()
+///   `@stateful([CounterFsm.count])`         // binding list
+///
+/// After this pass, the surface forms reach `resolve_signal_calls` as
+/// plain `Variable(<mangled>).get()` etc.
+///
+/// Discrimination: only rewrites when a matching synthetic signal decl
+/// (`__fsm_ctx_<Fsm>_<field>`) exists. Non-FSM field-access shapes
+/// (struct.field) pass through unchanged.
+pub(crate) fn resolve_dotted_fsm_field_access(program: &mut TypedProgram) {
+    use std::collections::HashSet;
+    use zyntax_typed_ast::InternedString;
+    use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedExpression, TypedLambdaBody};
+
+    // Build the set of known mangled context-signal names from the
+    // synthesized extern decls.
+    let mut known_ctx_signals: HashSet<String> = HashSet::new();
+    for decl in &program.declarations {
+        if let TypedDeclaration::Function(f) = &decl.node {
+            if !is_signal_decl(f) {
+                continue;
+            }
+            let Some(name) = f.name.resolve_global() else {
+                continue;
+            };
+            if name.starts_with("__fsm_ctx_") {
+                known_ctx_signals.insert(name.to_string());
+            }
+        }
+    }
+    if known_ctx_signals.is_empty() {
+        return;
+    }
+
+    fn rewrite_expr(
+        expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>,
+        known: &HashSet<String>,
+    ) {
+        // Children first.
+        match &mut expr.node {
+            TypedExpression::Call(c) => {
+                rewrite_expr(&mut c.callee, known);
+                for a in &mut c.positional_args {
+                    rewrite_expr(a, known);
+                }
+            }
+            TypedExpression::MethodCall(mc) => {
+                rewrite_expr(&mut mc.receiver, known);
+                for a in &mut mc.positional_args {
+                    rewrite_expr(a, known);
+                }
+            }
+            TypedExpression::Binary(b) => {
+                rewrite_expr(&mut b.left, known);
+                rewrite_expr(&mut b.right, known);
+            }
+            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand, known),
+            TypedExpression::Field(f) => rewrite_expr(&mut f.object, known),
+            TypedExpression::Index(i) => {
+                rewrite_expr(&mut i.object, known);
+                rewrite_expr(&mut i.index, known);
+            }
+            TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
+                for it in items {
+                    rewrite_expr(it, known);
+                }
+            }
+            TypedExpression::Block(block) => {
+                for stmt in &mut block.statements {
+                    rewrite_stmt(stmt, known);
+                }
+            }
+            TypedExpression::If(if_expr) => {
+                rewrite_expr(&mut if_expr.condition, known);
+                rewrite_expr(&mut if_expr.then_branch, known);
+                rewrite_expr(&mut if_expr.else_branch, known);
+            }
+            TypedExpression::Lambda(lam) => match &mut lam.body {
+                TypedLambdaBody::Expression(e) => rewrite_expr(e, known),
+                TypedLambdaBody::Block(block) => {
+                    for stmt in &mut block.statements {
+                        rewrite_stmt(stmt, known);
+                    }
+                }
+            },
+            _ => {}
+        }
+
+        // Now check THIS node for `Field { object: Variable(<FsmName>),
+        // field: <name> }` and rewrite to a Variable lookup of the
+        // mangled signal name — but only when that mangled signal
+        // actually exists.
+        let TypedExpression::Field(f) = &expr.node else {
+            return;
+        };
+        let TypedExpression::Variable(obj_name) = &f.object.node else {
+            return;
+        };
+        let Some(obj_str) = obj_name.resolve_global() else {
+            return;
+        };
+        let Some(field_str) = f.field.resolve_global() else {
+            return;
+        };
+        let candidate = super::fsm_registry::mangle_ctx_signal(&obj_str, &field_str);
+        if !known.contains(&candidate) {
+            return;
+        }
+        let span = expr.span;
+        let ty = expr.ty.clone();
+        expr.node = TypedExpression::Variable(InternedString::new_global(&candidate));
+        expr.ty = ty;
+        expr.span = span;
+    }
+
+    fn rewrite_stmt(
+        stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>,
+        known: &HashSet<String>,
+    ) {
+        match &mut stmt.node {
+            TypedStatement::Expression(e) => rewrite_expr(e, known),
+            TypedStatement::Let(l) => {
+                if let Some(init) = &mut l.initializer {
+                    rewrite_expr(init, known);
+                }
+            }
+            TypedStatement::Return(Some(e)) => rewrite_expr(e, known),
+            TypedStatement::Block(b) => {
+                for inner in &mut b.statements {
+                    rewrite_stmt(inner, known);
+                }
+            }
+            TypedStatement::If(if_stmt) => {
+                rewrite_expr(&mut if_stmt.condition, known);
+                for inner in &mut if_stmt.then_block.statements {
+                    rewrite_stmt(inner, known);
+                }
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    for inner in &mut else_block.statements {
+                        rewrite_stmt(inner, known);
+                    }
+                }
+            }
+            TypedStatement::While(w) => {
+                rewrite_expr(&mut w.condition, known);
+                for inner in &mut w.body.statements {
+                    rewrite_stmt(inner, known);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for decl in &mut program.declarations {
+        match &mut decl.node {
+            TypedDeclaration::Function(f) => {
+                if let Some(body) = &mut f.body {
+                    for stmt in &mut body.statements {
+                        rewrite_stmt(stmt, &known_ctx_signals);
+                    }
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                for m in &mut imp.methods {
+                    if let Some(body) = &mut m.body {
+                        for stmt in &mut body.statements {
+                            rewrite_stmt(stmt, &known_ctx_signals);
+                        }
                     }
                 }
             }

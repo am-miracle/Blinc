@@ -49,12 +49,19 @@ pub struct EventTransition {
     pub actions: Vec<TransitionAction>,
 }
 
-/// Side effect declared on a transition body in the DSL. Kept
-/// to a small, deterministic set so the substrate can execute
-/// each action without dragging in a JIT — both the JIT and
-/// AOT compile paths lower their `{ count = count + 1 }`
-/// syntax into these variants and the runtime executes them
-/// the same way.
+/// Side effect declared on a transition body in the DSL.
+///
+/// Two flavours:
+/// - The "small deterministic set" — `SetI32` / `AddI32` —
+///   covers literal-shape mutations the substrate can execute
+///   without a JIT (legacy lowering path; both JIT and AOT can
+///   emit these directly).
+/// - `Symbol` — names a lifted top-level fn (typically
+///   `__fsm_action_<Fsm>_<idx>__`) compiled into the JIT
+///   module. Used for arbitrary action bodies like
+///   `{ ctx.count = ctx.count + 1 }` that can't be reduced to
+///   a single enum variant. Dispatched through
+///   [`super::dispatch::GuardDispatcher::call_action`].
 #[derive(Debug, Clone)]
 pub enum TransitionAction {
     /// `<signal_name> = <int_literal>` — set the named i32
@@ -63,6 +70,12 @@ pub enum TransitionAction {
     /// `<signal_name> = <signal_name> + <int_literal>` (or `-`)
     /// — add a constant delta to the named i32 signal.
     AddI32 { signal: Arc<str>, delta: i32 },
+    /// Arbitrary JIT-resolved action. The body has been lifted
+    /// to a top-level zero-arg `extern "C" fn()` whose symbol
+    /// name lives here; the runtime dispatches it via
+    /// [`super::dispatch::call_action`] which routes through
+    /// the installed [`super::GuardDispatcher`].
+    Symbol(Arc<str>),
 }
 
 /// One tick-driven (data-guarded) transition. The guard

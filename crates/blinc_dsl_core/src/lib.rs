@@ -40,14 +40,15 @@ use passes::inject_call_site_keys;
 use passes::inject_user_view_instance_id_params;
 use passes::{
     apply_module_namespace_prefix, bind_component_props, collect_declared,
-    detect_and_strip_stateful_views, ensure_unit_return, expand_const_groups,
-    extract_and_strip_stylesheets, inject_fsm_context_markers, lower_bare_call_named_args,
-    lower_children_arrays_to_blocks, lower_component_calls, lower_match_blocks,
-    lower_struct_literals, lower_struct_widget_props_to_handles, lower_styling_args_to_overlays,
-    lower_view_to_value_returning, materialize_view, module_namespace_from_path,
-    populate_fsm_registry_pass, resolve_const_references, resolve_extern_widget_named_args,
-    resolve_fsm_subscribe_calls, resolve_fsm_trigger_calls, resolve_signal_calls,
-    rewrite_component_calls_in_program, synthesize_fsm_event_enums,
+    desugar_compound_assigns, detect_and_strip_stateful_views, ensure_unit_return,
+    expand_const_groups, extract_and_strip_stylesheets, inject_fsm_context_markers,
+    lower_bare_call_named_args, lower_children_arrays_to_blocks, lower_component_calls,
+    lower_match_blocks, lower_struct_literals, lower_struct_widget_props_to_handles,
+    lower_styling_args_to_overlays, lower_view_to_value_returning, materialize_view,
+    module_namespace_from_path, populate_fsm_registry_pass, resolve_const_references,
+    resolve_dotted_fsm_field_access, resolve_extern_widget_named_args, resolve_fsm_subscribe_calls,
+    resolve_fsm_trigger_calls, resolve_signal_calls, rewrite_component_calls_in_program,
+    synthesize_fsm_context_and_actions, synthesize_fsm_event_enums,
     synthesize_fsm_trait_interfaces, validate_component_calls,
 };
 use runtime_bridge::{
@@ -480,6 +481,17 @@ impl BlincDsl {
         inject_fsm_context_markers(&mut typed_program);
         synthesize_fsm_event_enums(&mut typed_program);
         synthesize_fsm_trait_interfaces(&mut typed_program);
+        // Expand `+=` / `-=` / `*=` / `/=` markers into plain
+        // `target = target op value` BEFORE any pass that inspects
+        // Binary expressions (resolve_signal_calls, match-lowering, …).
+        desugar_compound_assigns(&mut typed_program);
+        // Synthesise mangled-signal decls for `context { … }` fields,
+        // lift transition-action bodies to top-level fns, rewrite
+        // `ctx.<field>` inside lifted bodies + tick-guard expressions.
+        // MUST run BEFORE `resolve_signal_calls` so the synthesised
+        // signals + lifted-body rewrites flow through the standard
+        // signal-resolution path.
+        synthesize_fsm_context_and_actions(&mut typed_program);
         lower_match_blocks(&mut typed_program);
         // MUST run before `resolve_const_references` so const-group
         // members are hoisted into individual `__blinc_const__`
@@ -489,6 +501,12 @@ impl BlincDsl {
         // any const-substituted literals look identical to author-
         // written ones to downstream symbol-resolution work.
         resolve_const_references(&mut typed_program);
+        // `<Fsm>.<field>` dotted access from outside an FSM body
+        // (view / init / sibling component) becomes a bare reference
+        // to the mangled signal. MUST run BEFORE `resolve_signal_calls`
+        // so it then handles `.get()` / `.set()` / direct assignment
+        // uniformly.
+        resolve_dotted_fsm_field_access(&mut typed_program);
         resolve_signal_calls(&mut typed_program);
         // Module hardcoded to "main" here — same key
         // `populate_fsm_registry_pass` uses below. Both FSM-call
@@ -1015,9 +1033,12 @@ impl BlincDsl {
         inject_fsm_context_markers(&mut program);
         synthesize_fsm_event_enums(&mut program);
         synthesize_fsm_trait_interfaces(&mut program);
+        desugar_compound_assigns(&mut program);
+        synthesize_fsm_context_and_actions(&mut program);
         lower_match_blocks(&mut program);
         expand_const_groups(&mut program);
         resolve_const_references(&mut program);
+        resolve_dotted_fsm_field_access(&mut program);
         resolve_signal_calls(&mut program);
         let fsm_lookup_module = zyntax_typed_ast::InternedString::new_global("main");
         resolve_fsm_trigger_calls(&mut program, fsm_lookup_module);

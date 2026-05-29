@@ -4190,6 +4190,7 @@ fn fsm_registry_upsert_get() {
             to: intern("TimedOut"),
             guard_fn: Some(intern("__fsm_tick_guard_Loader_0__")),
         }],
+        context_fields: vec![],
         name: Some(intern("Loader")),
     };
 

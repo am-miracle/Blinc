@@ -49,6 +49,31 @@ pub trait GuardDispatcher: Send + Sync + 'static {
     ///   `FsmStateId::on_tick` walker; the registered tick loop
     ///   continues with the next guard.
     fn call_guard(&self, symbol: &str) -> Option<bool>;
+
+    /// Call the lifted transition-action function identified
+    /// by `symbol`. Used for [`super::registry::TransitionAction::Symbol`]
+    /// — DSL `on X.Y -> Z { ctx.count += 1 }` bodies get
+    /// lifted to `__fsm_action_<Fsm>_<idx>__` and dispatched
+    /// here.
+    ///
+    /// The lifted action is a zero-arg `extern "C" fn()`; side
+    /// effects (signal writes, externs) happen during the call.
+    ///
+    /// Returns:
+    /// - `Some(())` — action ran to completion.
+    /// - `None` — symbol couldn't be resolved or the call
+    ///   errored. The dispatch loop logs once and continues
+    ///   with subsequent actions / subscribers; a missing
+    ///   action symbol shouldn't abort the rest of the
+    ///   transition.
+    ///
+    /// Default impl returns `None` so existing dispatchers that
+    /// haven't been recompiled against this trait extension
+    /// degrade gracefully (no action support, rather than
+    /// failing to build).
+    fn call_action(&self, _symbol: &str) -> Option<()> {
+        None
+    }
 }
 
 /// Process-wide guard-dispatcher slot. Set once at app startup
@@ -95,6 +120,17 @@ pub(crate) fn call_guard(symbol: &str) -> Option<bool> {
         .expect("blinc_runtime::fsm::dispatch slot poisoned");
     let dispatcher = guard.as_ref()?;
     dispatcher.call_guard(symbol)
+}
+
+/// Call a transition-action via the currently-installed
+/// dispatcher. Returns `None` if no dispatcher is installed or
+/// the symbol couldn't be resolved.
+pub(crate) fn call_action(symbol: &str) -> Option<()> {
+    let guard = slot()
+        .read()
+        .expect("blinc_runtime::fsm::dispatch slot poisoned");
+    let dispatcher = guard.as_ref()?;
+    dispatcher.call_action(symbol)
 }
 
 /// Test-only mutex that serializes every test toggling

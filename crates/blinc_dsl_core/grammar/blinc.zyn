@@ -936,6 +936,7 @@ fn_return_type = { ":" ~ ty:state_type } -> ty
 // schema change for the existing event-driven shape.
 fsm_decl = {
     "fsm" ~ name:identifier ~ "{"
+    ~ context:fsm_context_block?
     ~ states:state_decl+
     ~ "initial" ~ initial:identifier
     ~ transitions:transition_decl*
@@ -954,21 +955,63 @@ fsm_decl = {
               params: [],
               return_type: Type::Unit,
               body: Some(TypedBlock {
-                  statements: prepend_list(
-                      TypedStatement::Expression {
-                          expr: TypedExpression::Call {
-                              callee: Box::new(TypedExpression::Variable {
-                                  name: intern("__fsm_initial__"),
-                              }),
-                              args: [TypedExpression::StringLiteral { value: initial }],
+                  // Order in `__fsm_meta__` body:
+                  //   1. context-field markers — `__fsm_context_field__(name, ty, default)`
+                  //   2. `__fsm_initial__(state)` — declared initial state
+                  //   3. `__fsm_transition__` / `__fsm_tick__` — transition table
+                  //
+                  // The populate_fsm_registry_pass relies on this ordering to
+                  // synthesise per-FSM signal decls (from #1) BEFORE the
+                  // transition-table scan (#3) so action lifting can reference
+                  // the mangled signal names.
+                  statements: concat_list(
+                      context.unwrap_or([]),
+                      prepend_list(
+                          TypedStatement::Expression {
+                              expr: TypedExpression::Call {
+                                  callee: Box::new(TypedExpression::Variable {
+                                      name: intern("__fsm_initial__"),
+                                  }),
+                                  args: [TypedExpression::StringLiteral { value: initial }],
+                              },
                           },
-                      },
-                      transitions,
+                          transitions,
+                      ),
                   ),
               }),
           }],
       }],
   )
+
+// `context { count: i32 = 0, ... }` — optional per-FSM extended-state
+// declaration. Each field becomes a mangled top-level signal
+// (`__fsm_ctx_<FsmName>_<field>`) at lowering, and `ctx.<field>` inside
+// transition action bodies / guards desugars to the corresponding
+// signal get/set. Defaults are literal-only for the first cut; deferred:
+// constexpr defaults, struct / array fields, type inference.
+//
+// Carried through `__fsm_meta__` as a sequence of marker statements
+// (`__fsm_context_field__("name", "ty", default)`) so the existing
+// FSM-meta scan in populate_fsm_registry_pass picks them up
+// without a new traversal site.
+fsm_context_block = { "context" ~ "{" ~ fields:context_field* ~ "}" }
+  -> fields
+
+context_field = {
+    name:identifier ~ ":" ~ ty:identifier ~ "=" ~ value:const_literal ~ ","?
+}
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Call {
+          callee: Box::new(TypedExpression::Variable {
+              name: intern("__fsm_context_field__"),
+          }),
+          args: [
+              TypedExpression::StringLiteral { value: name },
+              TypedExpression::StringLiteral { value: ty },
+              value,
+          ],
+      },
+  }
 
 // `state Foo` — a single state variant. Lowers to a `TypedVariant`
 // with `Unit` fields (no associated data). Variants with attached
@@ -1008,19 +1051,44 @@ transition_decl = { event_transition | tick_transition }
 // marker carries the names as strings and the host resolves them
 // at FSM-registration time. Same approach used for
 // `__fsm_initial__`'s arg.
-event_transition = { "on" ~ from:identifier ~ "." ~ event:identifier ~ "->" ~ to:identifier }
+event_transition = {
+    "on" ~ from:identifier ~ "." ~ event:identifier ~ "->" ~ to:identifier
+  ~ action:fsm_action_body?
+}
   -> TypedStatement::Expression {
       expr: TypedExpression::Call {
           callee: Box::new(TypedExpression::Variable {
               name: intern("__fsm_transition__"),
           }),
-          args: [
-              TypedExpression::StringLiteral { value: from },
-              TypedExpression::StringLiteral { value: event },
-              TypedExpression::StringLiteral { value: to },
-          ],
+          // Optional 4th positional arg is the action body as a
+          // `TypedExpression::Block`. populate_fsm_registry_pass
+          // detects its presence and lifts it to a top-level fn
+          // `__fsm_action_<Fsm>_<idx>__` registered as a
+          // `TransitionAction::Symbol(...)` on the runtime
+          // EventTransition.
+          args: concat_list(
+              [
+                  TypedExpression::StringLiteral { value: from },
+                  TypedExpression::StringLiteral { value: event },
+                  TypedExpression::StringLiteral { value: to },
+              ],
+              action.unwrap_or([]),
+          ),
       },
   }
+
+// `{ stmts }` — the optional action body on
+// `on <From>.<Event> -> <To> { … }`. Wraps statements in a
+// `TypedExpression::Block` and returns it as a single-element list so
+// the parent `event_transition` action can concatenate via `concat_list`
+// without an `Option`-unpacking detour. `ctx.<field>` references inside
+// the body are rewritten to mangled-signal calls by a downstream pass
+// before SSA sees them.
+fsm_action_body = { "{" ~ stmts:statement* ~ "}" }
+  -> prepend_list(
+      TypedExpression::Block { statements: stmts },
+      [],
+  )
 
 // `tick <FromState> -> <ToState> when <guard expr>` — data-guarded
 // transition. Lowers to a marker call
@@ -1086,7 +1154,7 @@ statements = { stmt:statement* }
 // — interpolate via `text(f"{count}")` instead. f-string parts now
 // accept full expressions (see `f_string_expr` below).
 statement = {
-    text_string_stmt | text_int_stmt | match_stmt | effect_stmt | if_stmt | while_stmt | loop_stmt | break_stmt | continue_stmt | return_stmt | let_stmt | component_call_stmt | bare_call_stmt | assign_stmt | method_call_stmt
+    text_string_stmt | text_int_stmt | match_stmt | effect_stmt | if_stmt | while_stmt | loop_stmt | break_stmt | continue_stmt | return_stmt | let_stmt | component_call_stmt | bare_call_stmt | compound_assign_stmt | ctx_field_assign_stmt | assign_stmt | method_call_stmt
 }
 
 // `name(args)` as a bare statement — a top-level / module-level
@@ -1469,6 +1537,77 @@ assign_stmt = { target:variable_expr ~ "=" ~ value:expr }
           right: Box::new(value),
       },
   }
+
+// `<obj>.<field> = <expr>` — field-access assignment. The first user
+// is `ctx.<field> = <expr>` inside FSM transition action / guard
+// bodies, where `ctx` is the magic context-namespace handle and
+// `<field>` is a context-block field name. A downstream pass
+// (`rewrite_fsm_ctx_access`) rewrites the `Field` LHS to the mangled
+// signal identifier, after which `resolve_signal_calls` handles the
+// signal-set lowering uniformly. Non-ctx LHS shapes (`struct.field =`)
+// don't have downstream support yet — they parse but fail later
+// resolution; the grammar deliberately stays general so adding struct
+// field assignment later doesn't need another rule.
+ctx_field_assign_stmt = {
+    obj:identifier ~ "." ~ field:identifier ~ "=" ~ value:expr
+}
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Binary {
+          op: "Assign",
+          left: Box::new(TypedExpression::Field {
+              object: Box::new(TypedExpression::Variable { name: intern(obj) }),
+              field: intern(field),
+          }),
+          right: Box::new(value),
+      },
+  }
+
+// `<target> += <expr>` (and `-=`, `*=`, `/=`) — compound assignment.
+// Parse-time the rule emits a `__compound_assign__(op, target, value)`
+// marker call; a tiny desugar pass converts each marker to
+// `target = target op value` after cloning the LHS, so the rest of
+// lowering only sees plain `Assign + Binary` shapes. Two flavours
+// distinguish bare-identifier from field-access LHS so the dispatch
+// shape is recognisable to the desugar pass without a postfix-expr
+// inspection. PEG ordering: this whole `compound_assign_stmt` arm
+// is tried BEFORE `assign_stmt` / `ctx_field_assign_stmt` so the
+// two-char `+=` matches before the one-char `=`.
+compound_assign_stmt = { ctx_compound_assign | bare_compound_assign }
+
+bare_compound_assign = { name:identifier ~ op:compound_op ~ value:expr }
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Call {
+          callee: Box::new(TypedExpression::Variable {
+              name: intern("__compound_assign__"),
+          }),
+          args: [
+              TypedExpression::StringLiteral { value: op },
+              TypedExpression::Variable { name: intern(name) },
+              value,
+          ],
+      },
+  }
+
+ctx_compound_assign = {
+    obj:identifier ~ "." ~ field:identifier ~ op:compound_op ~ value:expr
+}
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Call {
+          callee: Box::new(TypedExpression::Variable {
+              name: intern("__compound_assign__"),
+          }),
+          args: [
+              TypedExpression::StringLiteral { value: op },
+              TypedExpression::Field {
+                  object: Box::new(TypedExpression::Variable { name: intern(obj) }),
+                  field: intern(field),
+              },
+              value,
+          ],
+      },
+  }
+
+compound_op = @{ "+=" | "-=" | "*=" | "/=" }
 
 // =====================================================================
 // text(<string-typed expr>)

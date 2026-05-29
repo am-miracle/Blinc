@@ -35,6 +35,33 @@ pub struct EventTransition {
     pub actions: Vec<blinc_runtime::fsm::TransitionAction>,
 }
 
+/// One context-field declared in `context { count: i32 = 0, ... }`.
+/// Each field becomes a top-level signal at lowering whose mangled name
+/// is `__fsm_ctx_<FsmName>_<field>`. `ctx.<field>` references inside
+/// transition action bodies / guards rewrite to that mangled name
+/// before [`resolve_signal_calls`] sees them.
+#[derive(Debug, Clone)]
+pub struct ContextField {
+    /// User-visible field name (the identifier after `context {`).
+    pub name: zyntax_typed_ast::InternedString,
+    /// Type name as written ("i32" / "f64" / "string" / "bool").
+    pub ty: zyntax_typed_ast::InternedString,
+    /// Literal default value. Drives the signal seed at FSM
+    /// registration time and downstream type checks.
+    pub default: ContextDefault,
+}
+
+/// Literal default value for a [`ContextField`]. Constrained to the
+/// shapes a `const_literal` can produce — see grammar/blinc.zyn's
+/// `context_field` rule for the parse-time guarantee.
+#[derive(Debug, Clone)]
+pub enum ContextDefault {
+    I32(i32),
+    F64(f64),
+    Bool(bool),
+    String(zyntax_typed_ast::InternedString),
+}
+
 /// Runtime definition of an fsm — populated by the `__fsm_meta__` body.
 #[derive(Debug, Clone, Default)]
 pub struct FsmDefinition {
@@ -44,8 +71,20 @@ pub struct FsmDefinition {
     pub transitions: Vec<EventTransition>,
     /// Tick-driven guards in declaration order.
     pub tick_guards: Vec<TickGuard>,
+    /// Context-fields declared in the optional `context { … }` block,
+    /// in source order. Empty when the FSM has no extended state.
+    pub context_fields: Vec<ContextField>,
     /// Bare fsm name (for diagnostics; authoritative identity is `FsmId`).
     pub name: Option<zyntax_typed_ast::InternedString>,
+}
+
+/// Mangle a context-field name into the signal identifier the
+/// downstream signal-resolution path expects. Format:
+/// `__fsm_ctx_<FsmName>_<field>`. Stays inside the
+/// `__signal_*` underscore namespace so it doesn't collide with
+/// any author-visible identifier.
+pub fn mangle_ctx_signal(fsm_name: &str, field: &str) -> String {
+    format!("__fsm_ctx_{fsm_name}_{field}")
 }
 
 impl FsmDefinition {

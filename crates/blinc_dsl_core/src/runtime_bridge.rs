@@ -34,6 +34,19 @@ impl blinc_runtime::fsm::GuardDispatcher for JitGuardDispatcher {
         let guard: extern "C" fn() -> i32 = unsafe { std::mem::transmute(ptr) };
         Some(guard() != 0)
     }
+
+    fn call_action(&self, symbol: &str) -> Option<()> {
+        let runtime = self.runtime.lock().ok()?;
+        // Same JIT-pointer transmute path as `call_guard`. Action
+        // bodies are lifted by [`crate::passes`] to
+        // `__fsm_action_<Fsm>_<idx>__` as zero-arg
+        // `extern "C" fn()` — no return; side effects (signal
+        // writes) happen during the call.
+        let ptr = runtime.get_function_ptr(symbol)?;
+        let action: extern "C" fn() = unsafe { std::mem::transmute(ptr) };
+        action();
+        Some(())
+    }
 }
 
 /// JIT `ViewRenderer` — value-returning views call as `() -> i64` (handle);
@@ -536,5 +549,34 @@ pub(crate) fn publish_fsms_to_runtime_registry(program: &TypedProgram) {
         blinc_runtime::fsm::with_fsm_registry_mut(|r| {
             r.register(runtime_def);
         });
+
+        // Seed context-field signals with their declared defaults.
+        // The synthesised `__fsm_ctx_<Fsm>_<field>: <ty>` signal decl
+        // already exists by this point, and the runtime signal store
+        // defaults to zero — but explicit non-zero literals need to be
+        // written. We do the write unconditionally for clarity; the
+        // cost is one HashMap insert per field at startup.
+        for field in &local_def.context_fields {
+            let Some(field_name) = field.name.resolve_global() else {
+                continue;
+            };
+            let mangled = crate::fsm_registry::mangle_ctx_signal(&fsm_name, &field_name);
+            match &field.default {
+                crate::fsm_registry::ContextDefault::I32(v) => {
+                    blinc_runtime::signal::set_i32(&mangled, *v);
+                }
+                crate::fsm_registry::ContextDefault::F64(v) => {
+                    blinc_runtime::signal::set_f64(&mangled, *v);
+                }
+                crate::fsm_registry::ContextDefault::Bool(v) => {
+                    blinc_runtime::signal::set_i32(&mangled, if *v { 1 } else { 0 });
+                }
+                crate::fsm_registry::ContextDefault::String(s) => {
+                    if let Some(s_str) = s.resolve_global() {
+                        blinc_runtime::signal::set_str(&mangled, s_str.to_string());
+                    }
+                }
+            }
+        }
     }
 }

@@ -207,6 +207,14 @@ fn execute_action(action: &TransitionAction) {
             let current = crate::signal::get_i32_or_default(signal);
             crate::signal::set_i32(signal, current + delta);
         }
+        TransitionAction::Symbol(name) => {
+            // JIT-resolved action: arbitrary DSL `{ ctx.count = … }`
+            // bodies lifted to a top-level `extern "C" fn()`. A
+            // missing dispatcher / unresolved symbol just no-ops
+            // — same fallback policy guards use. Errors are logged
+            // by the dispatcher impl; here we keep dispatch going.
+            let _ = super::dispatch::call_action(name);
+        }
     }
 }
 

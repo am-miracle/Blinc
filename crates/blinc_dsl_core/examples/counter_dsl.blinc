@@ -1,13 +1,14 @@
-signal count: i32
-
 fsm CounterFsm {
+    context {
+        count: i32 = 0
+    }
     state Idle
     state Counting
     initial Idle
-    on Idle.Increment -> Counting
-    on Counting.Increment -> Counting
-    on Counting.Reset -> Idle
-    on Idle.Reset -> Idle
+    on Idle.Increment     -> Counting { ctx.count += 1 }
+    on Counting.Increment -> Counting { ctx.count += 1 }
+    on Counting.Reset     -> Idle     { ctx.count = 0 }
+    on Idle.Reset         -> Idle
 }
 
 component Counter {
@@ -18,15 +19,9 @@ component Counter {
         .counter-reset   { background: #ef4444; border-radius: 10px; padding: 14px }
         .counter-cta *, .counter-reset * { pointer-events: none }
     }
-    init {
-        CounterFsm.subscribe(|state| match state {
-            "Counting.Increment" -> { count.set(count.get() + 1) }
-            "Counting.Reset"     -> { count.set(0) }
-        })
-    }
-    @stateful([count]) @fsm([CounterFsm]) view {
+    @stateful @fsm([CounterFsm]) view {
         Div(class = "counter-card") {
-            Text(f"Count: {count.get()}")
+            Text(f"Count: {CounterFsm.count.get()}")
             Div(class = "counter-row") {
                 Div(class = "counter-cta", on_click = || {
                     CounterFsm.trigger("Idle.Increment")
