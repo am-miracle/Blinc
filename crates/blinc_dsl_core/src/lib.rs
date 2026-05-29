@@ -44,9 +44,9 @@ use passes::{
     lower_component_calls, lower_match_blocks, lower_struct_literals,
     lower_struct_widget_props_to_handles, lower_styling_args_to_overlays,
     lower_view_to_value_returning, materialize_view, populate_fsm_registry_pass,
-    resolve_extern_widget_named_args, resolve_fsm_subscribe_calls, resolve_fsm_trigger_calls,
-    resolve_signal_calls, synthesize_fsm_event_enums, synthesize_fsm_trait_interfaces,
-    validate_component_calls,
+    resolve_const_references, resolve_extern_widget_named_args, resolve_fsm_subscribe_calls,
+    resolve_fsm_trigger_calls, resolve_signal_calls, synthesize_fsm_event_enums,
+    synthesize_fsm_trait_interfaces, validate_component_calls,
 };
 use runtime_bridge::{
     JitGuardDispatcher, JitViewRenderer, publish_components_to_runtime_registry,
@@ -430,6 +430,10 @@ impl BlincDsl {
         synthesize_fsm_event_enums(&mut typed_program);
         synthesize_fsm_trait_interfaces(&mut typed_program);
         lower_match_blocks(&mut typed_program);
+        // MUST run before `resolve_signal_calls` and the FSM passes so
+        // any const-substituted literals look identical to author-
+        // written ones to downstream symbol-resolution work.
+        resolve_const_references(&mut typed_program);
         resolve_signal_calls(&mut typed_program);
         resolve_fsm_trigger_calls(&mut typed_program);
         resolve_fsm_subscribe_calls(&mut typed_program);
@@ -786,6 +790,7 @@ impl BlincDsl {
         synthesize_fsm_event_enums(&mut program);
         synthesize_fsm_trait_interfaces(&mut program);
         lower_match_blocks(&mut program);
+        resolve_const_references(&mut program);
         resolve_signal_calls(&mut program);
         resolve_fsm_trigger_calls(&mut program);
         resolve_fsm_subscribe_calls(&mut program);

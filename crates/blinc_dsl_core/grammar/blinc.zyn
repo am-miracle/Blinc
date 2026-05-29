@@ -158,7 +158,7 @@ top_level_items = { item:top_level_item* }
 // `component_decl`. Falling through handles standalone struct-only
 // `component { fields }` decls, standalone `impl` blocks, and the
 // bare `view { ... }` quick-test shape.
-top_level_item = { import_stmt | style_decl | signal_decl | struct_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
+top_level_item = { import_stmt | style_decl | signal_decl | const_decl | struct_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
 
 // `style { ...CSS... }` — block-form CSS declaration. Author
 // writes raw CSS between the braces; balanced nested braces
@@ -249,6 +249,40 @@ signal_decl = { "signal" ~ name:identifier ~ ":" ~ ty:state_type }
       body: None,
       is_external: true,
   }
+
+// `const NAME: T = <literal>` — top-level compile-time constant.
+// Lowered to a `__blinc_const__` marker function carrying (name,
+// value) as two body statements. The `resolve_const_references` post-
+// parse pass walks every `__blinc_const__` decl into a name→value map,
+// strips the markers, then rewrites every `TypedExpression::Variable`
+// reference whose name matches a registered const into the stored
+// literal expression. Net effect: `const PI: f64 = 3.14159` followed
+// by `text(f"{PI}")` lowers as if the author had written
+// `text(f"{3.14159}")`.
+//
+// MVP scope: RHS is one literal token only — int / float / string /
+// bool. No arithmetic, no references to other consts. Type annotation
+// is informational; no compile-time type-check yet (the registered
+// expression carries the literal's own type).
+const_decl = { "const" ~ name:identifier ~ ":" ~ ty:state_type ~ "=" ~ value:const_literal }
+  -> TypedDeclaration::Function {
+      name: intern("__blinc_const__"),
+      params: [],
+      return_type: ty,
+      body: Some(TypedBlock { statements: [
+          TypedStatement::Expression { expr:
+              TypedExpression::StringLiteral { value: name }
+          },
+          TypedStatement::Expression { expr: value },
+      ] }),
+  }
+
+// Literals accepted on the RHS of `const`. PEG-ordered: `float`
+// before `integer` (longer prefix wins for `1.0`); `bool_literal`
+// before `string_literal` because `"true"` and `"false"` are
+// unambiguously the keyword forms here; `integer` last among numeric
+// shapes so a bare digit doesn't shadow the float arm.
+const_literal = { float | integer | bool_literal | string_literal }
 
 // `@stateful` decorator — opt-in marker that tells the host
 // to wrap this view in a reactive container subscribed to
