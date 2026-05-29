@@ -1,9 +1,10 @@
 use super::*;
 use crate::host::{
-    blinc_dsl_effect, blinc_format_int, blinc_fsm_runtime_trigger, blinc_fsm_subscribe,
-    blinc_signal_get_by_id_f64, blinc_signal_get_by_id_i32, blinc_signal_get_by_id_string,
-    blinc_signal_set_by_id_f64, blinc_signal_set_by_id_i32, blinc_signal_set_by_id_string,
-    blinc_string_concat, blinc_text, blinc_text_int,
+    blinc_dsl_computed_f64, blinc_dsl_computed_i32, blinc_dsl_computed_string, blinc_dsl_effect,
+    blinc_format_int, blinc_fsm_runtime_trigger, blinc_fsm_subscribe, blinc_signal_get_by_id_f64,
+    blinc_signal_get_by_id_i32, blinc_signal_get_by_id_string, blinc_signal_set_by_id_f64,
+    blinc_signal_set_by_id_i32, blinc_signal_set_by_id_string, blinc_string_concat, blinc_text,
+    blinc_text_int,
 };
 use crate::widget_ffi::{
     blinc_b_view, blinc_blockquote_view, blinc_button_view, blinc_canvas_view, blinc_caption_view,
@@ -135,6 +136,27 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             param_types: &[Type::Primitive(PrimitiveType::I64)],
             return_type: Type::Primitive(PrimitiveType::Unit),
             ptr: blinc_dsl_effect as *const u8,
+        },
+        BuiltinDescriptor {
+            // `computed { expr } : i32` — closure ptr in, DerivedId.to_raw()
+            // out (cast to i64 over the wire because Cranelift's
+            // value-map population doesn't handle `HirConstant::U64`).
+            name: "__blinc_computed_i32__",
+            param_types: &[Type::Primitive(PrimitiveType::I64)],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_dsl_computed_i32 as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__blinc_computed_f64__",
+            param_types: &[Type::Primitive(PrimitiveType::I64)],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_dsl_computed_f64 as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__blinc_computed_string__",
+            param_types: &[Type::Primitive(PrimitiveType::I64)],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_dsl_computed_string as *const u8,
         },
         BuiltinDescriptor {
             // Push a stable instance-ID derived from the call site's

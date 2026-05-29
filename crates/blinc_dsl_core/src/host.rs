@@ -160,6 +160,63 @@ pub(crate) extern "C" fn blinc_fsm_runtime_trigger(fsm_ptr: *const i32, path_ptr
     blinc_runtime::fsm::dispatch_default(fsm, event);
 }
 
+/// `__blinc_computed_i32__(closure_ptr) -> i64` — create a value-
+/// returning reactive derived against the process-global graph. The
+/// DSL grammar's `computed { expr } : i32` rule wraps the body in a
+/// zero-arg lambda; Zyntax lowers that to an
+/// `extern "C" fn() -> i32` ptr. We transmute, hand the closure to
+/// `blinc_core::reactive::computed(|_g| f())`, and return
+/// `Computed::derived_id().to_raw() as i64`. Callers bind the
+/// returned id to a DSL local; future passes (Phase 1D) consume the
+/// id as a reactive prop-binding source.
+///
+/// # Safety
+///
+/// `closure_ptr` must remain valid for the lifetime of the
+/// `ZyntaxRuntime`.
+pub(crate) extern "C" fn blinc_dsl_computed_i32(closure_ptr: i64) -> i64 {
+    if closure_ptr == 0 {
+        tracing::warn!("__blinc_computed_i32__ called with null closure pointer");
+        return 0;
+    }
+    type ComputedFn = extern "C" fn() -> i32;
+    let func: ComputedFn = unsafe { std::mem::transmute(closure_ptr) };
+    let computed = blinc_core::reactive::computed::<i32, _>(move |_graph| func());
+    computed.derived_id().to_raw() as i64
+}
+
+/// f64 mirror.
+pub(crate) extern "C" fn blinc_dsl_computed_f64(closure_ptr: i64) -> i64 {
+    if closure_ptr == 0 {
+        tracing::warn!("__blinc_computed_f64__ called with null closure pointer");
+        return 0;
+    }
+    type ComputedFn = extern "C" fn() -> f64;
+    let func: ComputedFn = unsafe { std::mem::transmute(closure_ptr) };
+    let computed = blinc_core::reactive::computed::<f64, _>(move |_graph| func());
+    computed.derived_id().to_raw() as i64
+}
+
+/// String mirror. The closure body returns a Zyntax length-prefixed
+/// string pointer; we decode it inside the wrapper closure so each
+/// reactive re-evaluation produces a fresh owned `String` that the
+/// derived caches.
+pub(crate) extern "C" fn blinc_dsl_computed_string(closure_ptr: i64) -> i64 {
+    if closure_ptr == 0 {
+        tracing::warn!("__blinc_computed_string__ called with null closure pointer");
+        return 0;
+    }
+    type ComputedFn = extern "C" fn() -> *const i32;
+    let func: ComputedFn = unsafe { std::mem::transmute(closure_ptr) };
+    let computed = blinc_core::reactive::computed::<String, _>(move |_graph| {
+        let ptr = func();
+        // SAFETY: closure body produces a length-prefixed string via
+        // `blinc_string_alloc` (the Zyntax string-return ABI).
+        unsafe { blinc_string_decode(ptr).to_string() }
+    });
+    computed.derived_id().to_raw() as i64
+}
+
 /// `__blinc_effect__(closure_ptr)` — register a reactive side-effect
 /// against the process-global graph.
 ///

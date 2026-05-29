@@ -5649,6 +5649,101 @@ fn dsl_signal_shares_storage_with_blinc_core_signal_primitive() {
     assert_eq!(dsl.get_signal_i32("tally"), Some(99));
 }
 
+/// Phase 1C acceptance: `computed { expr } : T` parses, compiles, and
+/// the JIT call returns a non-zero `DerivedId.to_raw()` — that's the
+/// extern's contract. We can't easily check the derived's VALUE
+/// without binding it as a widget prop (Phase 1D), but a non-zero
+/// id proves:
+///
+/// 1. The grammar's `computed_expr_i32` rule fires for the
+///    `computed { … } : i32` form.
+/// 2. The closure-lifting via Zyntax's CreateClosure SSA path
+///    produces a valid `extern "C" fn() -> i32` ptr.
+/// 3. The host extern `blinc_dsl_computed_i32` reaches
+///    `blinc_core::reactive::computed(...)`, which mints a fresh
+///    `Computed<i32>` whose `derived_id()` is non-zero.
+///
+/// `derived { … } : T` is a grammar alias of `computed { … } : T` —
+/// tested separately to confirm the alternation in the rule fires
+/// for both keywords.
+#[test]
+fn dsl_computed_block_compiles_and_returns_nonzero_derived_id() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    // We emit a `text(...)` carrying the derived id encoded as a
+    // decimal string so we can read it back from the scene-op buffer.
+    // The `text(f"...")` f-string lowers via the same path
+    // `text(<int>)` would, with the int's i64 value rendered.
+    //
+    // The `computed { 42 } : i32` arm of the rule emits a Call to
+    // `__blinc_computed_i32__` whose return is i64 — we bind it as
+    // `let derived_id` and pass to text-int via an i32 cast since
+    // text() is i32 today. The exact value isn't asserted; we just
+    // require non-zero, which proves both arms (grammar + extern)
+    // executed.
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            view {
+                let derived_id = computed { 42 } : i32
+                text(f"derived_id={derived_id}")
+            }
+        "#,
+        "computed_smoke_i32.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let derived_text = ops
+        .iter()
+        .find_map(|op| match op {
+            DslOp::Text(s) if s.starts_with("derived_id=") => Some(s.clone()),
+            _ => None,
+        })
+        .expect("expected a text op carrying derived_id=...");
+    let id_str = derived_text
+        .strip_prefix("derived_id=")
+        .expect("just stripped prefix above");
+    let id: u64 = id_str
+        .parse()
+        .or_else(|_| {
+            // f-string may render i64 as the textual form of i64-as-decimal.
+            id_str.parse::<i64>().map(|n| n as u64)
+        })
+        .expect("derived_id should render as a decimal integer");
+    assert!(
+        id != 0,
+        "Computed::derived_id().to_raw() should be non-zero — \
+         got {id_str:?} from {ops:?}"
+    );
+}
+
+/// `derived { … } : T` is a grammar alias of `computed { … } : T`.
+/// Same lowering, same extern, same non-zero `DerivedId` contract.
+#[test]
+fn dsl_derived_alias_works_like_computed() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            view {
+                let id_via_derived = derived { 7 } : i32
+                text(f"derived={id_via_derived}")
+            }
+        "#,
+        "derived_alias.blinc",
+    )
+    .expect("compile");
+    let ops = dsl.render_view().expect("render_view");
+    let saw_text = ops
+        .iter()
+        .any(|op| matches!(op, DslOp::Text(s) if s.starts_with("derived=") && !s.ends_with("=0")));
+    assert!(
+        saw_text,
+        "derived alias should yield a non-zero id text op, got {ops:?}"
+    );
+}
+
 /// Phase 1B acceptance: an `effect { ... }` block at the top of a DSL
 /// view body fires once at registration. The closure body emits a
 /// scene-buffer op (via `text(...)`) which we observe through

@@ -209,6 +209,21 @@ impl SignalId {
     }
 }
 
+impl DerivedId {
+    /// Convert to raw u64 for cross-FFI storage. Used by the DSL
+    /// `computed { … } : T` lowering to bake a `Computed<T>` handle
+    /// into JIT code as an i64 literal.
+    pub fn to_raw(&self) -> u64 {
+        use slotmap::Key;
+        self.data().as_ffi()
+    }
+
+    /// Reconstruct from raw u64.
+    pub fn from_raw(raw: u64) -> Self {
+        slotmap::KeyData::from_ffi(raw).into()
+    }
+}
+
 /// A derived/computed value handle
 #[derive(Debug)]
 pub struct Derived<T> {

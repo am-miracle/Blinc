@@ -47,6 +47,16 @@
     // The DSL grammar's `effect_stmt` rule wraps the body into a
     // zero-arg lambda and passes it as the single arg.
     __blinc_effect__: "__blinc_effect__",
+    // `computed { expr } : T` (or `derived { expr } : T` alias) —
+    // creates a `Computed<T>` against the process-global graph and
+    // returns its `DerivedId.to_raw()` as i64. One extern per typed
+    // arm so the lambda's `extern "C" fn() -> T` ptr can be
+    // transmuted to the right shape host-side. Auto-tracking falls
+    // out because the closure body uses the same `Signal::get` path
+    // the native Rust `computed(...)` API does.
+    __blinc_computed_i32__: "__blinc_computed_i32__",
+    __blinc_computed_f64__: "__blinc_computed_f64__",
+    __blinc_computed_string__: "__blinc_computed_string__",
     // `<FsmName>.trigger("State.Event")` lowered by
     // `resolve_fsm_trigger_calls` routes here. Same reason as
     // above — needs an extern decl in the typed program for
@@ -1444,6 +1454,7 @@ call_args_tail = { ","? ~ e:expr }
 //   6. `variable_expr` last as the catch-all bare-name shape.
 primary_expr = {
     lambda_expr |
+    computed_expr |
     paren_expr |
     f_string_literal |
     string_literal |
@@ -1469,6 +1480,49 @@ lambda_expr = { "||" ~ "{" ~ stmts:statement* ~ "}" }
   -> TypedExpression::Lambda {
       params: [],
       body: TypedExpression::Block { statements: stmts },
+  }
+
+// `computed { expr } : T` — a value-returning reactive derived. Same
+// lambda-fn-ptr-as-i64 trick as `effect_stmt`, except the closure
+// returns a typed value AND the host extern returns an i64
+// (`DerivedId.to_raw()`) so the caller can later look it up. The
+// trailing type ascription drives which extern fires:
+//
+//   `computed { count.get() * 2 } : i32`  → `__blinc_computed_i32__`
+//   `computed { progress.get() * 0.5 } : f64` → `__blinc_computed_f64__`
+//   `computed { f"{user}!"          } : string` → `__blinc_computed_string__`
+//
+// `derived` is an alias of `computed` — both produce the same lowering.
+// PEG ordering: this rule sits in `primary_expr` after `lambda_expr`
+// (no `||` ambiguity) and before `paren_expr` / literals / vars so
+// the leading keyword is unambiguous.
+computed_expr = { computed_expr_i32 | computed_expr_f64 | computed_expr_string }
+
+computed_expr_i32 = { ("computed" | "derived") ~ "{" ~ e:expr ~ "}" ~ ":" ~ "i32" }
+  -> TypedExpression::Call {
+      callee: Box::new(TypedExpression::Variable { name: intern("__blinc_computed_i32__") }),
+      args: [TypedExpression::Lambda {
+          params: [],
+          body: TypedExpression::Block { statements: [TypedStatement::Return(Some(e))] },
+      }],
+  }
+
+computed_expr_f64 = { ("computed" | "derived") ~ "{" ~ e:expr ~ "}" ~ ":" ~ "f64" }
+  -> TypedExpression::Call {
+      callee: Box::new(TypedExpression::Variable { name: intern("__blinc_computed_f64__") }),
+      args: [TypedExpression::Lambda {
+          params: [],
+          body: TypedExpression::Block { statements: [TypedStatement::Return(Some(e))] },
+      }],
+  }
+
+computed_expr_string = { ("computed" | "derived") ~ "{" ~ e:expr ~ "}" ~ ":" ~ "string" }
+  -> TypedExpression::Call {
+      callee: Box::new(TypedExpression::Variable { name: intern("__blinc_computed_string__") }),
+      args: [TypedExpression::Lambda {
+          params: [],
+          body: TypedExpression::Block { statements: [TypedStatement::Return(Some(e))] },
+      }],
   }
 
 // Component call: `Counter(arg)`, `Counter(1, step = 2)`,
