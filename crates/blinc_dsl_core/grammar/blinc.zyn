@@ -1004,18 +1004,58 @@ match_arm = {
       ),
   }
 
-// Arm patterns: today a literal string OR the wildcard `_`. The
-// wildcard is encoded as a synthetic `__wildcard__` `StringLiteral`
-// the lowering pass treats specially. Future: int literals, bool,
-// guard expressions, enum patterns once Zyntax-native
-// `TypedPattern` is plumbed through the action-lang.
-match_pattern = { pattern_string | pattern_wildcard }
+// Arm patterns: a struct destructure, a literal string, or the
+// wildcard `_`. The wildcard is encoded as a synthetic
+// `__wildcard__` `StringLiteral` the lowering pass treats specially;
+// struct patterns get a dedicated marker call so the lowering can
+// distinguish them from a (string-)literal pattern. Future: int
+// literals, bool, guard expressions, array / object patterns, value
+// patterns inside structs (`Point { x: 5, y }`), nested patterns.
+//
+// PEG ordering: `pattern_struct` first so a `Capitalised { … }`
+// shape doesn't get misinterpreted as anything else.
+match_pattern = { pattern_struct | pattern_string | pattern_wildcard }
 
 pattern_string = { s:string_literal }
   -> s
 
 pattern_wildcard = { "_" }
   -> TypedExpression::StringLiteral { value: "__wildcard__" }
+
+// `<StructName> { field1, field2, … }` — destructure a struct
+// scrutinee, binding each named field as a `let` at the start of the
+// arm body. Field name is also the binding name (no rename shorthand
+// yet — `{ x: a }` is a follow-up). Requires at least one field;
+// empty `Name { }` is intentionally rejected so misnamed component
+// calls don't accidentally parse as patterns.
+//
+// Discrimination caveat: this MVP doesn't carry a runtime type tag,
+// so a struct pattern matches ANY scrutinee that has the named
+// fields. Arm ordering decides which arm fires when several struct
+// patterns target the same shape; effectively `Name { … }` behaves
+// like a wildcard that also binds fields. Discrimination by struct
+// type lands when a type-tag carrier (or compile-time type check)
+// is added.
+//
+// Lowering shape: emits a `__struct_pattern__` marker call with the
+// struct name as the first arg and the field names as subsequent
+// string-literal args. `lower_match_blocks` peels this and produces
+// `let <field> = <scrutinee>.<field>` bindings prepended to the arm
+// body.
+pattern_struct = { name:component_name ~ "{" ~ first:identifier ~ rest:pattern_struct_tail* ~ "}" }
+  -> TypedExpression::Call {
+      callee: Box::new(TypedExpression::Variable { name: intern("__struct_pattern__") }),
+      args: prepend_list(
+          TypedExpression::StringLiteral { value: name },
+          prepend_list(
+              TypedExpression::StringLiteral { value: first },
+              rest,
+          ),
+      ),
+  }
+
+pattern_struct_tail = { ","? ~ field:identifier }
+  -> TypedExpression::StringLiteral { value: field }
 
 // Arm bodies: a brace-block of statements, or a single expression
 // (which lowers to a one-statement list). Both produce a `Vec` of

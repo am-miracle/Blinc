@@ -2414,7 +2414,24 @@ pub(crate) fn lower_match_blocks(program: &mut TypedProgram) {
             }
 
             // Each arm at i+1..end_idx is a Block whose first stmt is `__match_arm__(pat)`.
-            let mut arms: Vec<(Option<String>, TypedBlock)> = Vec::new();
+            // `pat` is one of:
+            //   - `StringLiteral("__wildcard__")` — the `_` arm
+            //   - `StringLiteral("literal")`      — a string pattern
+            //   - `Call(__struct_pattern__, [StringLiteral(name), StringLiteral(f1), …])`
+            //     — a struct destructure pattern, binds each field as a
+            //     `let` at the start of the arm body. See
+            //     `pattern_struct` in `grammar/blinc.zyn` for the
+            //     producer-side rationale.
+            enum ArmPattern {
+                Literal(String),
+                Wildcard,
+                Struct {
+                    #[allow(dead_code)]
+                    name: String,
+                    fields: Vec<String>,
+                },
+            }
+            let mut arms: Vec<(Option<ArmPattern>, TypedBlock)> = Vec::new();
             for arm in stmts[(i + 1)..end_idx].iter() {
                 let TypedStatement::Block(arm_block) = &arm.node else {
                     continue;
@@ -2425,31 +2442,111 @@ pub(crate) fn lower_match_blocks(program: &mut TypedProgram) {
                 if !is_call_to(&arm_block.statements[0], "__match_arm__") {
                     continue;
                 }
-                let pat_str = call_first_arg(&arm_block.statements[0]).and_then(|expr| {
+                let pat_expr = call_first_arg(&arm_block.statements[0]);
+                let pat = pat_expr.and_then(|expr| {
+                    // Literal string pattern (and the `__wildcard__` sentinel).
                     if let TypedExpression::Literal(TypedLiteral::String(s)) = &expr.node {
-                        s.resolve_global().map(|s| s.to_string())
-                    } else {
-                        None
+                        let s_arc = s.resolve_global()?;
+                        let s_str: &str = &s_arc;
+                        return Some(if s_str == "__wildcard__" {
+                            ArmPattern::Wildcard
+                        } else {
+                            ArmPattern::Literal(s_str.to_string())
+                        });
                     }
+                    // Struct destructure: Call(__struct_pattern__, [name, field1, …]).
+                    if let TypedExpression::Call(call) = &expr.node
+                        && let TypedExpression::Variable(callee) = &call.callee.node
+                        && callee.resolve_global().as_deref() == Some("__struct_pattern__")
+                    {
+                        let mut args = call.positional_args.iter();
+                        let name = args.next().and_then(|a| {
+                            if let TypedExpression::Literal(TypedLiteral::String(s)) = &a.node {
+                                s.resolve_global().map(|s| s.to_string())
+                            } else {
+                                None
+                            }
+                        })?;
+                        let fields = args
+                            .filter_map(|a| {
+                                if let TypedExpression::Literal(TypedLiteral::String(s)) = &a.node {
+                                    s.resolve_global().map(|s| s.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        return Some(ArmPattern::Struct { name, fields });
+                    }
+                    None
                 });
                 let body = TypedBlock {
                     statements: arm_block.statements[1..].to_vec(),
                     span: arm_block.span,
                 };
-                arms.push((pat_str, body));
+                arms.push((pat, body));
             }
 
-            // Build the if/else-if/else chain. First `_` arm becomes trailing `else`.
+            // Build the if/else-if/else chain. The first arm that
+            // unconditionally matches (wildcard OR struct pattern in
+            // this MVP) becomes the trailing `else`; subsequent
+            // always-match arms are dropped. Struct arms prepend
+            // `let <field> = <scrutinee>.<field>` bindings to their
+            // body so the arm body sees the destructured locals.
+            fn wrap_struct_body(
+                body: TypedBlock,
+                fields: &[String],
+                scrutinee: &TypedNode<TypedExpression>,
+            ) -> TypedBlock {
+                let span = body.span;
+                let mut bindings: Vec<TypedNode<TypedStatement>> = fields
+                    .iter()
+                    .map(|field| {
+                        let field_access = TypedNode::new(
+                            TypedExpression::Field(zyntax_typed_ast::typed_ast::TypedFieldAccess {
+                                object: Box::new(scrutinee.clone()),
+                                field: zyntax_typed_ast::InternedString::new_global(field),
+                            }),
+                            Type::Any,
+                            span,
+                        );
+                        TypedNode::new(
+                            TypedStatement::Let(zyntax_typed_ast::typed_ast::TypedLet {
+                                name: zyntax_typed_ast::InternedString::new_global(field),
+                                ty: Type::Any,
+                                mutability: zyntax_typed_ast::Mutability::Immutable,
+                                initializer: Some(Box::new(field_access)),
+                                span,
+                            }),
+                            Type::Primitive(PrimitiveType::Unit),
+                            span,
+                        )
+                    })
+                    .collect();
+                bindings.extend(body.statements);
+                TypedBlock {
+                    statements: bindings,
+                    span,
+                }
+            }
+
             let mut else_block: Option<TypedBlock> = None;
             let mut chain_arms: Vec<(String, TypedBlock)> = Vec::new();
             for (pat, body) in arms {
-                match pat.as_deref() {
-                    Some("__wildcard__") if else_block.is_none() => {
+                match pat {
+                    Some(ArmPattern::Wildcard) if else_block.is_none() => {
                         else_block = Some(body);
                     }
-                    Some("__wildcard__") => {}
-                    Some(p) => {
-                        chain_arms.push((p.to_string(), body));
+                    Some(ArmPattern::Wildcard) => {}
+                    Some(ArmPattern::Struct { fields, .. }) if else_block.is_none() => {
+                        else_block = Some(wrap_struct_body(body, &fields, &scrutinee_expr));
+                    }
+                    Some(ArmPattern::Struct { .. }) => {
+                        // Already have an else — subsequent always-match
+                        // arms are unreachable in this MVP.
+                    }
+                    Some(ArmPattern::Literal(p)) => {
+                        chain_arms.push((p, body));
                     }
                     None => {}
                 }
