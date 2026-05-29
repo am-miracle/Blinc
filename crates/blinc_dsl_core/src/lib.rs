@@ -41,9 +41,9 @@ use passes::inject_user_view_instance_id_params;
 use passes::{
     apply_module_namespace_prefix, bind_component_props, collect_declared,
     detect_and_strip_stateful_views, ensure_unit_return, expand_const_groups,
-    extract_and_strip_stylesheets, inject_fsm_context_markers, lower_children_arrays_to_blocks,
-    lower_component_calls, lower_match_blocks, lower_struct_literals,
-    lower_struct_widget_props_to_handles, lower_styling_args_to_overlays,
+    extract_and_strip_stylesheets, inject_fsm_context_markers, lower_bare_call_named_args,
+    lower_children_arrays_to_blocks, lower_component_calls, lower_match_blocks,
+    lower_struct_literals, lower_struct_widget_props_to_handles, lower_styling_args_to_overlays,
     lower_view_to_value_returning, materialize_view, module_namespace_from_path,
     populate_fsm_registry_pass, resolve_const_references, resolve_extern_widget_named_args,
     resolve_fsm_subscribe_calls, resolve_fsm_trigger_calls, resolve_signal_calls,
@@ -564,6 +564,14 @@ impl BlincDsl {
         // extern decls carry synthetic `p0`, `p1`, … param names that can't bind by name.
         resolve_extern_widget_named_args(&mut typed_program);
 
+        // Resolve named args + splice defaults on bare calls to
+        // user-declared top-level fns (`step(by = 5)` →
+        // `step(default_x, 5)`). The `__named__` markers must be
+        // lifted into a fully-positional list before
+        // `compile_typed_program` — Zyntax doesn't recognise the
+        // marker as a host extern.
+        lower_bare_call_named_args(&mut typed_program);
+
         // Inject span-derived `u64` call-site keys as the leading arg to
         // every substrate-primitive widget call. Widget FFIs use it as
         // the state-key seed so dup-labelled widgets at distinct call
@@ -1037,6 +1045,7 @@ impl BlincDsl {
         lower_struct_widget_props_to_handles(&mut program)
             .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
         resolve_extern_widget_named_args(&mut program);
+        lower_bare_call_named_args(&mut program);
 
         Ok(program)
     }

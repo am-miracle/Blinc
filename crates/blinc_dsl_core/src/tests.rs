@@ -6581,6 +6581,52 @@ fn dsl_continue_skips_to_next_iteration() {
     );
 }
 
+/// `step(by = 5)` — named-argument call syntax for top-level fns.
+/// Authors can override individual params by name; this pairs with
+/// default values so non-trailing optional params can be skipped
+/// (`pack(1, c = 200)` accepts default `b = 10` AND the explicit
+/// `c = 200`). The grammar lifts `name = value` to a `__named__`
+/// marker which `lower_bare_call_named_args` slot-resolves against
+/// the declared fn signature.
+#[test]
+fn dsl_fn_named_args_reorder_and_skip_defaults() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            fn pack(a: i32, b: i32 = 10, c: i32 = 20): i32 {
+                return a + b + c
+            }
+
+            view {
+                text(f"override_c={pack(1, c = 200)}")
+                text(f"named_only={pack(a = 7, c = 3, b = 5)}")
+            }
+        "#,
+        "fn_named_args.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let saw_override = ops
+        .iter()
+        .any(|op| matches!(op, DslOp::Text(s) if s == "override_c=211"));
+    let saw_named_only = ops
+        .iter()
+        .any(|op| matches!(op, DslOp::Text(s) if s == "named_only=15"));
+    assert!(
+        saw_override,
+        "pack(1, c = 200) should keep default b=10 and use named c=200 \
+         → 1 + 10 + 200 = 211, got {ops:?}"
+    );
+    assert!(
+        saw_named_only,
+        "pack(a = 7, c = 3, b = 5) should reorder all-named args to \
+         (7, 5, 3) → 7 + 5 + 3 = 15, got {ops:?}"
+    );
+}
+
 /// `fn name(param: T = default_expr)` — a trailing param carries
 /// a default value the call site can omit. Zyntax's
 /// `construct_parameter` flags the param's `kind` as `Optional`

@@ -1100,7 +1100,7 @@ statement = {
 // can't resolve. `text(...)` has dedicated `text_string_stmt` /
 // `text_int_stmt` rules that handle the well-formed shapes; any
 // other shape should fail loudly at compile time.
-bare_call_stmt = { !text_keyword_word ~ name:identifier ~ "(" ~ args:call_args_list? ~ ")" }
+bare_call_stmt = { !text_keyword_word ~ name:identifier ~ "(" ~ args:bare_call_args_list? ~ ")" }
   -> TypedStatement::Expression {
       expr: TypedExpression::Call {
           callee: Box::new(TypedExpression::Variable { name: intern(name) }),
@@ -1733,6 +1733,41 @@ call_args_list = { first:expr ~ rest:call_args_tail* }
 call_args_tail = { ","? ~ e:expr }
   -> e
 
+// Argument list accepted by bare-call positions (`bare_call_expr`,
+// `bare_call_stmt`). Same shape as `call_args_list` PLUS support
+// for `name = value` named args — used to let authors skip
+// non-trailing default params at call sites (e.g.
+// `step(by = 5)`). Named args lower to `__named__("name", value)`
+// markers the same way component_args do; a post-parse pass
+// extracts them into `TypedCall.named_args`.
+//
+// PEG ordering on `bare_call_arg`: try `named_bare_arg` first
+// because `identifier ~ "="` is the strong disambiguator.
+//
+// `call_args_list` (positional-only) stays untouched — it's also
+// used by `suffix_method` and `method_call_stmt`, which today
+// don't accept named args. Extending those is a separate slice.
+bare_call_args_list = { first:bare_call_arg ~ rest:bare_call_args_tail* }
+  -> prepend_list(first, rest)
+
+bare_call_args_tail = { ","? ~ a:bare_call_arg }
+  -> a
+
+bare_call_arg = { named_bare_arg | expr }
+
+// `name = value` named-arg form. Same marker-call lowering as
+// `named_component_arg` so a single downstream pass can extract
+// `__named__(...)` markers from both bare-fn-call positional_args
+// and component_call positional_args.
+named_bare_arg = { name:identifier ~ "=" ~ value:expr }
+  -> TypedExpression::Call {
+      callee: Box::new(TypedExpression::Variable { name: intern("__named__") }),
+      args: [
+          TypedExpression::StringLiteral { value: name },
+          value,
+      ],
+  }
+
 // Primary expressions. PEG ordered alternates — order matters:
 //
 //   1. `paren_expr` first because `(` is unambiguous.
@@ -1801,7 +1836,7 @@ if_expr = { "if" ~ cond:expr ~ "{" ~ then_e:expr ~ "}" ~ "else" ~ "{" ~ else_e:e
 // bare identifier). Methods (`obj.method(args)`) still parse via
 // `postfix_suffix → suffix_method` because this rule doesn't match a
 // leading `obj.` prefix.
-bare_call_expr = { name:identifier ~ "(" ~ args:call_args_list? ~ ")" }
+bare_call_expr = { name:identifier ~ "(" ~ args:bare_call_args_list? ~ ")" }
   -> TypedExpression::Call {
       callee: Box::new(TypedExpression::Variable { name: intern(name) }),
       args: args.unwrap_or([]),
