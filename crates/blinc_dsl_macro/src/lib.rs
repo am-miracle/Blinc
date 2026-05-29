@@ -545,6 +545,9 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         impl ::blinc_dsl_core::__extern_widget_internals::ExternWidget for #struct_ident {
+            // User-facing qualified form — `"cn.Button"` for namespaced
+            // widgets, `"Button"` otherwise. Surfaces in diagnostics and
+            // is the form a DSL author writes at the call site.
             const DSL_NAME: &'static str = #dsl_name;
 
             fn extern_widget_spec()
@@ -554,7 +557,15 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
                     ExternWidgetSpec, PrimitiveType, Type,
                 };
                 ExternWidgetSpec {
-                    name: #dsl_name.to_string(),
+                    // Registry key is the mangled form (`cn_Button`).
+                    // `lower_component_calls` replaces the dot in the
+                    // grammar-emitted dotted name with `_` before doing
+                    // its lookup, and `primitive_callee_props` reverses
+                    // the linker symbol (`$Blinc$cn_Button$view`) to the
+                    // same form. Keeping the registry on the mangled
+                    // side means both lookup directions agree without
+                    // a second substitution.
+                    name: #symbol_safe_name.to_string(),
                     view_symbol: #view_symbol.to_string(),
                     props: vec![#(#prop_defs),*],
                     param_types: vec![#(#param_types),*],

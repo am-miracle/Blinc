@@ -2232,13 +2232,21 @@ pub(crate) fn validate_component_calls(program: &TypedProgram) -> Result<(), Vec
                 }
 
                 // Check `__component_call__("Name", ...)` against known set.
+                // Namespaced calls (`cn.Button`) round-trip the same way the
+                // call-site resolver does: dotted form coming out of the
+                // grammar maps to the underscore-mangled registry key
+                // (`cn_Button`). Check both so the dotted surface and the
+                // mangled-key registration agree without an extra
+                // duplicate entry.
                 if let TypedExpression::Variable(callee_name) = &c.callee.node
                     && callee_name.resolve_global().as_deref() == Some("__component_call__")
                     && let Some(name_node) = c.positional_args.first()
                     && let TypedExpression::Literal(TypedLiteral::String(name)) = &name_node.node
                 {
                     let name_str = name.resolve_global().unwrap_or_default();
-                    if !known.contains::<str>(name_str.as_ref()) {
+                    let name_ref: &str = name_str.as_ref();
+                    let mangled = name_ref.replace('.', "_");
+                    if !known.contains(name_ref) && !known.contains(&mangled) {
                         errors.push(format!(
                             "unknown component `{}` — declare it with \
                                          `component {} {{ ... }}` before use",
@@ -2526,13 +2534,24 @@ pub(crate) fn lower_component_calls(program: &mut TypedProgram, filename: &str) 
 
         // Resolve callee to the registry's `view_symbol` (substrate primitives use
         // `$Blinc$<Name>$view`; user components use `<Name>$view`).
+        //
+        // Namespace mangling: dotted DSL names from the grammar
+        // (`cn.Button`) lookup against the registry as the mangled form
+        // (`cn_Button`). The dot is invalid in Cranelift symbols / Rust
+        // idents, so the macro registers the widget under the mangled
+        // key and the symbol-name derivation strips the dot too.
+        // Keeping the registry on the mangled side means
+        // `primitive_callee_props` (which reverses
+        // `$Blinc$<key>$view` → `<key>`) finds the same entry without
+        // a second character substitution.
         let component_name_str = component_name.resolve_global().unwrap_or_default();
         let component_name_str: &str = component_name_str.as_ref();
+        let registry_key = component_name_str.replace('.', "_");
         let view_symbol = blinc_runtime::component::with_component_registry(|r| {
-            r.get_by_name(component_name_str)
+            r.get_by_name(&registry_key)
                 .map(|def| def.view_symbol.as_ref().to_string())
         })
-        .unwrap_or_else(|| format!("{component_name_str}$view"));
+        .unwrap_or_else(|| format!("{registry_key}$view"));
         let new_callee = zyntax_typed_ast::TypedNode::new(
             TypedExpression::Variable(zyntax_typed_ast::InternedString::new_global(&view_symbol)),
             Type::Any,

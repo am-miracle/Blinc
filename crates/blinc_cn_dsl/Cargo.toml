@@ -1,0 +1,38 @@
+[package]
+name = "blinc_cn_dsl"
+description = "DSL bindings for the blinc_cn widget pack — exposes cn.* widgets to the Blinc DSL via #[extern_widget]"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/blinc_cn_dsl"
+rust-version.workspace = true
+
+[lib]
+crate-type = ["lib"]
+
+[dev-dependencies]
+# `tracing_subscriber::fmt::try_init` for the integration tests.
+tracing-subscriber.workspace = true
+# Renderer surface + ZyntaxValue used to materialise widgets through
+# the JIT in end-to-end tests.
+blinc_runtime = { path = "../blinc_runtime", version = "0.5.1" }
+zyntax_embed = { git = "https://github.com/darmie/zyntax", rev = "9763886bd1f6d5ee86e5a5665d3d06be9426e106" }
+
+[dependencies]
+# DSL surface — host registration API + the `#[extern_widget]` macro
+# that generates the FFI thunks. We hold the BlincDsl handle and call
+# `register_extern_widget::<W>()` per wrapper.
+blinc_dsl_core = { path = "../blinc_dsl_core", version = "0.5.1" }
+
+# Widget catalog being exposed. Each `cn.<Name>` wrapper in this crate
+# delegates construction to a `blinc_cn::<name>` builder.
+blinc_cn = { path = "../blinc_cn", version = "0.5.1" }
+
+# `ElementBuilder` is the trait every widget returns; the wrappers
+# need it in scope so the macro can box the build result.
+blinc_layout = { path = "../blinc_layout", version = "0.5.1" }
+
+# Logging — unknown-variant / unknown-size diagnostics surface as
+# `tracing::warn!` so DSL typos show up without breaking the build.
+tracing.workspace = true
