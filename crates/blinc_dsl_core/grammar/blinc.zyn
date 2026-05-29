@@ -2132,7 +2132,7 @@ computed_expr_string = { ("computed" | "derived") ~ "{" ~ e:expr ~ "}" ~ ":" ~ "
 // elsewhere in this grammar.
 component_call_expr = { component_call_with_args | component_call_body_only | component_call_bare }
 
-component_call_with_args = { name:component_name ~ "(" ~ args:component_args_list? ~ ")" ~ body:component_body? }
+component_call_with_args = { name:component_call_name ~ "(" ~ args:component_args_list? ~ ")" ~ body:component_body? }
   -> TypedExpression::Call {
       callee: Box::new(TypedExpression::Variable { name: intern("__component_call__") }),
       args: prepend_list(
@@ -2144,7 +2144,7 @@ component_call_with_args = { name:component_name ~ "(" ~ args:component_args_lis
       ),
   }
 
-component_call_body_only = { name:component_name ~ body:component_body }
+component_call_body_only = { name:component_call_name ~ body:component_body }
   -> TypedExpression::Call {
       callee: Box::new(TypedExpression::Variable { name: intern("__component_call__") }),
       args: prepend_list(
@@ -2153,7 +2153,7 @@ component_call_body_only = { name:component_name ~ body:component_body }
       ),
   }
 
-component_call_bare = { name:component_name ~ !"." }
+component_call_bare = { name:component_call_name ~ !"." }
   -> TypedExpression::Call {
       callee: Box::new(TypedExpression::Variable { name: intern("__component_call__") }),
       args: [TypedExpression::StringLiteral { value: name }],
@@ -2240,6 +2240,31 @@ slot_stmt = {
 // rule so the matched text comes through as a String for use as
 // the marker's first arg.
 component_name = @{ 'A'..'Z' ~ (ASCII_ALPHANUMERIC | "_")* }
+
+// The head of a component call. Either the bare uppercase identifier
+// (`Counter`) or a `<lowercase-ns>.<UpperIdent>` qualified form
+// (`cn.Button`). The qualified shape lets downstream widget packs
+// register under namespace prefixes via
+// `#[extern_widget(namespace = "cn", name = "Button")]` — the runtime
+// registry keys on whatever string flows through `__component_call__`,
+// dot included.
+//
+// PEG ordering: qualified first because the lowercase head locks in
+// a longer prefix than the bare uppercase rule. If the input starts
+// uppercase, qualified fails immediately on the `'a'..'z'` constraint
+// and falls back to bare `component_name`. The two forms can't
+// collide because they require opposite case for their leading char.
+//
+// Atomic (`@{}`) so the matched text — bare or qualified — comes
+// through as one contiguous String into the marker call's first arg.
+// No whitespace tolerated between the namespace, dot, and component
+// name; method-call sites (`obj.method(...)`) already follow the
+// same no-whitespace rule.
+component_call_name = @{ qualified_component_name | component_name }
+
+qualified_component_name = @{
+    'a'..'z' ~ (ASCII_ALPHANUMERIC | "_")* ~ "." ~ 'A'..'Z' ~ (ASCII_ALPHANUMERIC | "_")*
+}
 
 // Comma-or-newline separated arg list. Each entry is either a
 // positional `expr` or a named `name = expr`. PEG ordered

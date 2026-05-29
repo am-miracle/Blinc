@@ -248,14 +248,21 @@ impl syn::parse::Parse for ExternWidgetArgs {
                 "#[extern_widget] requires `name = \"<DslName>\"`",
             ));
         };
-        if let Some(ns) = &namespace
-            && (ns.is_empty() || ns.contains('.'))
-        {
-            return Err(syn::Error::new(
-                name_lit.span(),
-                "#[extern_widget] `namespace` must be a single segment without `.` — \
-                 e.g. `namespace = \"cn\"`, not `namespace = \"foo.bar\"`",
-            ));
+        if let Some(ns) = &namespace {
+            let invalid = ns.is_empty()
+                || ns.contains('.')
+                || !ns.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                || !ns.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if invalid {
+                return Err(syn::Error::new(
+                    name_lit.span(),
+                    "#[extern_widget] `namespace` must be a single lowercase-leading \
+                     identifier — e.g. `namespace = \"cn\"`. The DSL grammar disambiguates \
+                     namespaced calls (`cn.Button(…)`) from method calls on uppercase \
+                     types (`Counter.method(…)`) by requiring a lowercase namespace head, \
+                     so this constraint is load-bearing rather than stylistic.",
+                ));
+            }
         }
         Ok(Self {
             name: name_lit.value(),
