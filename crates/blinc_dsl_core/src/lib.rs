@@ -114,6 +114,19 @@ pub struct BlincDsl {
     /// it compiles. `inject_imported_view_externs` reads this map to
     /// build the cross-file mangled-name reference at the entry site.
     module_namespaces: Arc<Mutex<std::collections::HashMap<std::path::PathBuf, String>>>,
+    /// Non-fatal compile-time diagnostics accumulated across every
+    /// `compile_*` call (e.g. duplicate-local-name imports from
+    /// distinct source files). Compile keeps going — the warning is
+    /// surfaced via `tracing::warn!` AND appended here so callers
+    /// can present diagnostics in a structured way (IDE squiggles,
+    /// test assertions, CI reports). Leverages Zyntax's
+    /// `Diagnostic` shape — same annotation / help / note / code
+    /// surface its type-checker and other phases emit, so a future
+    /// unified renderer (ariadne, console, JSON) can format these
+    /// alongside Zyntax-emitted diagnostics. Read via
+    /// [`Self::compile_diagnostics`]; cleared via
+    /// [`Self::clear_compile_diagnostics`].
+    compile_diagnostics: Arc<Mutex<Vec<zyntax_typed_ast::Diagnostic>>>,
     /// CSS from `style { … }` blocks, compile-order.
     compiled_stylesheets: Arc<Mutex<Vec<String>>>,
     /// Cursor into `compiled_stylesheets` of how far the
@@ -160,6 +173,7 @@ impl BlincDsl {
         let value_returning_views = Arc::new(Mutex::new(std::collections::HashSet::new()));
         let compiled_modules = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let module_namespaces = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let compile_diagnostics = Arc::new(Mutex::new(Vec::new()));
         let compiled_stylesheets = Arc::new(Mutex::new(Vec::new()));
         let stylesheets_queued_up_to = Arc::new(Mutex::new(0));
         let declared_signals = Arc::new(Mutex::new(Vec::new()));
@@ -174,6 +188,7 @@ impl BlincDsl {
             value_returning_views,
             compiled_modules,
             module_namespaces,
+            compile_diagnostics,
             compiled_stylesheets,
             stylesheets_queued_up_to,
             declared_signals,
@@ -627,10 +642,18 @@ impl BlincDsl {
         // its source module's namespace. Keys interned for the shared
         // `rewrite_component_calls_in_program` helper.
         let mut import_rewrites: HashMap<InternedString, InternedString> = HashMap::new();
+        // `local_name → (source_file, span)` for the first import that
+        // bound each local name. Used to detect a second import from
+        // a DIFFERENT file that re-binds the same local — that's the
+        // shape `import { Counter } from "./red"` followed by
+        // `import { Counter } from "./blue"` takes, where the second
+        // import silently shadows the first at the use site.
+        let mut local_name_owner: HashMap<String, (std::path::PathBuf, Span)> = HashMap::new();
         for decl in &program.declarations {
             let TypedDeclaration::Import(import) = &decl.node else {
                 continue;
             };
+            let import_span = decl.span;
             let segments: Vec<String> = import
                 .module_path
                 .iter()
@@ -657,6 +680,49 @@ impl BlincDsl {
                     continue;
                 };
                 let local: &str = import_name.as_ref();
+
+                // Duplicate-import diagnostic: second import binding
+                // the same local from a DIFFERENT source file means
+                // the later one shadows the earlier at the use site.
+                // The namespacing pass keeps the two underlying
+                // components distinct in the JIT symbol table, but
+                // author-side disambiguation (`as MyCounter` alias,
+                // qualified-call syntax) is needed to USE both. Same
+                // file re-imports are silently de-duped instead of
+                // flagged — they're a stylistic preference, not a
+                // semantic collision.
+                if let Some((existing_path, existing_span)) = local_name_owner.get(local) {
+                    if existing_path != &imported_path {
+                        let diag = zyntax_typed_ast::Diagnostic::warning(format!(
+                            "duplicate import: `{local}` is imported from \
+                             both `{first}` and `{second}` — the later import \
+                             shadows the earlier at every reference in this file",
+                            local = local,
+                            first = existing_path.display(),
+                            second = imported_path.display(),
+                        ))
+                        .with_code(zyntax_typed_ast::DiagnosticCode("BLINC-IMPORT-DUP"))
+                        .with_primary(import_span, "duplicate import here")
+                        .with_secondary(*existing_span, "first imported here")
+                        .with_help(format!(
+                            "the namespacing pass keeps both components \
+                             distinct in the JIT symbol table (`{first_ns}` \
+                             vs `{second_ns}`), but you need an alias or \
+                             qualified-call syntax to reference both — \
+                             rename one import with `as`, e.g. \
+                             `import {{ {local} as {local}Other }} from \"{second_src}\"`",
+                            first_ns = namespaces.get(existing_path).cloned().unwrap_or_default(),
+                            second_ns = source_ns,
+                            local = local,
+                            second_src = imported_path.display(),
+                        ));
+                        self.emit_compile_diagnostic(diag);
+                    }
+                } else {
+                    local_name_owner
+                        .insert(local.to_string(), (imported_path.clone(), import_span));
+                }
+
                 let mangled_name = if source_ns.is_empty() {
                     local.to_string()
                 } else {
@@ -867,6 +933,55 @@ impl BlincDsl {
             .lock()
             .map(|s| s.clone())
             .unwrap_or_default()
+    }
+
+    /// Non-fatal diagnostics accumulated across every compile call,
+    /// in the order they were emitted. Uses Zyntax's structured
+    /// `Diagnostic` shape (level / code / message / annotations /
+    /// help / notes / suggestions) so callers can render them
+    /// through any of Zyntax's existing diagnostic surfaces or a
+    /// future unified renderer.
+    pub fn compile_diagnostics(&self) -> Vec<zyntax_typed_ast::Diagnostic> {
+        self.compile_diagnostics
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_default()
+    }
+
+    /// Drop every accumulated diagnostic. Useful for incremental
+    /// recompile flows that want fresh diagnostics per cycle (the
+    /// accumulator otherwise grows across `compile_*` calls so
+    /// long-lived sessions can stream the history).
+    pub fn clear_compile_diagnostics(&self) {
+        if let Ok(mut d) = self.compile_diagnostics.lock() {
+            d.clear();
+        }
+    }
+
+    /// Append a single diagnostic + mirror it through `tracing` so
+    /// it surfaces in user-facing logs even if the caller never
+    /// reads [`Self::compile_diagnostics`]. Internal helper —
+    /// individual compile passes call this with a Zyntax-shaped
+    /// `Diagnostic` they construct directly.
+    fn emit_compile_diagnostic(&self, diag: zyntax_typed_ast::Diagnostic) {
+        use zyntax_typed_ast::DiagnosticLevel;
+        let level = diag.level;
+        let code = diag.code.map(|c| c.to_string()).unwrap_or_default();
+        let message = diag.message.clone();
+        match level {
+            DiagnosticLevel::Ice | DiagnosticLevel::Error => {
+                tracing::error!(code = %code, "{message}");
+            }
+            DiagnosticLevel::Warning => {
+                tracing::warn!(code = %code, "{message}");
+            }
+            DiagnosticLevel::Note | DiagnosticLevel::Help => {
+                tracing::info!(code = %code, "{message}");
+            }
+        }
+        if let Ok(mut acc) = self.compile_diagnostics.lock() {
+            acc.push(diag);
+        }
     }
 
     /// Parse `.blinc` source to TypedAST without compiling. Runs the same

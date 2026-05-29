@@ -156,6 +156,13 @@ fn compile_project_resolves_nested_es6_path() {
 /// mangled symbols regardless of which one the entry's view body
 /// actually references.
 ///
+/// Importing the same local name from two different source files
+/// ALSO emits a `BLINC-IMPORT-DUP` warning diagnostic (Zyntax-shaped
+/// `Diagnostic::warning` with primary + secondary annotations and a
+/// help suggestion pointing at the `as` alias escape hatch) so
+/// authors know the second import shadows the first at every
+/// reference. The compile keeps going — the warning is non-fatal.
+///
 /// Regression-covers the cross-file collision case the namespacing
 /// pass exists to prevent — pre-namespacing, both `Counter$view`
 /// symbols would have collapsed onto a single entry in the JIT
@@ -202,6 +209,27 @@ fn cross_file_same_named_components_do_not_collide() {
         names.iter().any(|s| s == "blue$Counter$view"),
         "blue module's Counter should produce `blue$Counter$view`, got: {names:?}"
     );
+    // BLINC-IMPORT-DUP warning fires because the entry imports
+    // `Counter` from two distinct files.
+    let diags = dsl.compile_diagnostics();
+    let dup_warning = diags
+        .iter()
+        .find(|d| d.code.map(|c| c.0 == "BLINC-IMPORT-DUP").unwrap_or(false));
+    let dup_warning = dup_warning.expect(
+        "duplicate-import warning should fire when the same local name \
+         is imported from two distinct source files",
+    );
+    assert!(
+        dup_warning.message.contains("Counter"),
+        "warning message should name the colliding local, got: {:?}",
+        dup_warning.message
+    );
+    assert!(
+        dup_warning.help.iter().any(|h| h.contains(" as ")),
+        "warning should suggest the `as` alias escape hatch, got help: {:?}",
+        dup_warning.help
+    );
+
     // Un-mangled `Counter$view` must NOT appear — every component
     // declared inside a `compile_project` run carries its module
     // prefix.
