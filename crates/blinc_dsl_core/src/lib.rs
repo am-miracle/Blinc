@@ -1274,6 +1274,7 @@ impl BlincDsl {
 
         let renderer_for_callback = renderer.clone();
         Box::new(builder.on_state(move |_sctx| {
+            tracing::debug!("stateful container: on_state re-render");
             let value =
                 blinc_runtime::view::render_main(&renderer_for_callback).expect("render_main");
             let ZyntaxValue::Int(handle) = value else {

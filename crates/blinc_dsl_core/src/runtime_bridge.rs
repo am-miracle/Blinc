@@ -32,6 +32,13 @@ impl blinc_runtime::fsm::GuardDispatcher for JitGuardDispatcher {
         // guards to.
         let ptr = runtime.get_function_ptr(symbol)?;
         let guard: extern "C" fn() -> i32 = unsafe { std::mem::transmute(ptr) };
+        // Release the runtime mutex BEFORE running the JIT body —
+        // see `call_action` for the same rationale. Even read-only
+        // guards can fire property-binding side effects via the
+        // signals they read (notify_active → wake_callback → frame
+        // scheduling), and any reentry into ZyntaxRuntime would
+        // deadlock against this lock.
+        drop(runtime);
         Some(guard() != 0)
     }
 
@@ -42,8 +49,19 @@ impl blinc_runtime::fsm::GuardDispatcher for JitGuardDispatcher {
         // `__fsm_action_<Fsm>_<idx>__` as zero-arg
         // `extern "C" fn()` — no return; side effects (signal
         // writes) happen during the call.
-        let ptr = runtime.get_function_ptr(symbol)?;
+        let Some(ptr) = runtime.get_function_ptr(symbol) else {
+            tracing::warn!(symbol = symbol, "JIT: action symbol not registered");
+            return None;
+        };
+        tracing::debug!(symbol = symbol, "JIT: calling lifted action");
         let action: extern "C" fn() = unsafe { std::mem::transmute(ptr) };
+        // CRITICAL: release the runtime mutex BEFORE running the JIT
+        // body. The action's lifted code calls host externs
+        // (`__signal_set_by_id_i32`, etc.); those don't reach back
+        // into ZyntaxRuntime, but anything in the framework that
+        // does (computed re-evals, view re-renders triggered by
+        // signal change) would deadlock against our held lock.
+        drop(runtime);
         action();
         Some(())
     }

@@ -109,6 +109,7 @@ pub fn reset_default(fsm_name: &str) -> Option<Arc<str>> {
 /// `i32` signal writes), and every callback registered via
 /// [`register_transition_effect`] fires in order.
 pub fn dispatch_default(fsm_name: &str, event_name: &str) -> Option<(Arc<str>, Arc<str>)> {
+    tracing::debug!(fsm = fsm_name, event = event_name, "fsm dispatch_default");
     let event_code = with_fsm_registry(|r| {
         let id = r.id_of(fsm_name)?;
         r.get(id)?.event_code(event_name)
@@ -127,6 +128,11 @@ pub fn dispatch_default(fsm_name: &str, event_name: &str) -> Option<(Arc<str>, A
             })
             .unwrap_or_default();
             if !inner.dispatch(event_code) {
+                tracing::debug!(
+                    fsm = fsm_name,
+                    event = event_name,
+                    "fsm dispatch_default: no matching transition for current state"
+                );
                 return None;
             }
             (from, inner.state, actions)
@@ -134,6 +140,14 @@ pub fn dispatch_default(fsm_name: &str, event_name: &str) -> Option<(Arc<str>, A
         request_redraw();
         let from_name = from_state.state_name()?;
         let to_name = to_state.state_name()?;
+        tracing::debug!(
+            fsm = fsm_name,
+            event = event_name,
+            from = %from_name,
+            to = %to_name,
+            actions = actions.len(),
+            "fsm transition fired (SharedState path) + request_redraw"
+        );
         (from_name, to_name, actions)
     } else {
         let current_code = current_state_code(fsm_name)?;
@@ -151,6 +165,14 @@ pub fn dispatch_default(fsm_name: &str, event_name: &str) -> Option<(Arc<str>, A
         FALLBACK_CODES.with(|m| {
             m.borrow_mut().insert(Arc::from(fsm_name), next_code);
         });
+        tracing::debug!(
+            fsm = fsm_name,
+            event = event_name,
+            from = %from_name,
+            to = %to_name,
+            actions = actions.len(),
+            "fsm transition fired (FALLBACK path — no SharedState; no redraw will run)"
+        );
         (from_name, to_name, actions)
     };
 
@@ -201,19 +223,32 @@ pub fn dispatch_default(fsm_name: &str, event_name: &str) -> Option<(Arc<str>, A
 fn execute_action(action: &TransitionAction) {
     match action {
         TransitionAction::SetI32 { signal, value } => {
+            tracing::debug!(signal = %signal, value = *value, "fsm action: SetI32");
             crate::signal::set_i32(signal, *value);
         }
         TransitionAction::AddI32 { signal, delta } => {
             let current = crate::signal::get_i32_or_default(signal);
+            tracing::debug!(
+                signal = %signal,
+                delta = *delta,
+                from = current,
+                to = current + *delta,
+                "fsm action: AddI32"
+            );
             crate::signal::set_i32(signal, current + delta);
         }
         TransitionAction::Symbol(name) => {
             // JIT-resolved action: arbitrary DSL `{ ctx.count = … }`
             // bodies lifted to a top-level `extern "C" fn()`. A
             // missing dispatcher / unresolved symbol just no-ops
-            // — same fallback policy guards use. Errors are logged
-            // by the dispatcher impl; here we keep dispatch going.
-            let _ = super::dispatch::call_action(name);
+            // — same fallback policy guards use.
+            tracing::debug!(symbol = %name, "fsm action: Symbol dispatch");
+            if super::dispatch::call_action(name).is_none() {
+                tracing::warn!(
+                    symbol = %name,
+                    "fsm action symbol did not run — no dispatcher installed or symbol unresolved"
+                );
+            }
         }
     }
 }

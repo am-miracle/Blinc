@@ -11,10 +11,16 @@ use blinc_layout::widgets::code;
 const SOURCE: &str = include_str!("counter_dsl.blinc");
 
 fn main() -> Result<()> {
+    // Default-on diagnostics: show every FSM transition / action dispatch
+    // + Stateful re-render so it's obvious when the counter wires up
+    // correctly. Override with `RUST_LOG=...` if you want a quieter run.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new(
+                    "warn,blinc_runtime::fsm=debug,blinc_dsl_core=debug",
+                )
+            }),
         )
         .init();
 

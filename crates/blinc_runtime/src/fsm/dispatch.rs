@@ -129,7 +129,13 @@ pub(crate) fn call_action(symbol: &str) -> Option<()> {
     let guard = slot()
         .read()
         .expect("blinc_runtime::fsm::dispatch slot poisoned");
-    let dispatcher = guard.as_ref()?;
+    let Some(dispatcher) = guard.as_ref() else {
+        tracing::warn!(
+            symbol = symbol,
+            "no GuardDispatcher installed — fsm action skipped"
+        );
+        return None;
+    };
     dispatcher.call_action(symbol)
 }
 
