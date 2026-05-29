@@ -5906,6 +5906,209 @@ fn dsl_opacity_signal_binding_reflects_signal_value() {
     );
 }
 
+/// `Div(corner_radius = r)` with a DSL-declared f64 signal `r`:
+/// lowering picks the `__set_overlay_corner_radius_signal__` extern
+/// and `apply_to` reads the live value into all four corners of
+/// `RenderProps::border_radius`.
+#[test]
+fn dsl_corner_radius_signal_binding_reflects_signal_value() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.set_signal_f64("rad", 4.0);
+    dsl.compile_source(
+        r#"
+            signal rad: f64
+            view {
+                Div(corner_radius = rad)
+            }
+        "#,
+        "div_corner_radius_signal.blinc",
+    )
+    .expect("compile");
+
+    let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+    let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+    let ZyntaxValue::Int(handle) = value else {
+        panic!("expected widget handle, got: {value:?}");
+    };
+    let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+    let WidgetBox::Custom(builder) = *widget else {
+        panic!("expected Custom(Styled<Div>)");
+    };
+
+    let props = builder.render_props();
+    assert!(props.border_radius_explicit);
+    assert!(
+        (props.border_radius.top_left - 4.0).abs() < 1e-6,
+        "first render should reflect seeded signal value 4.0, got {}",
+        props.border_radius.top_left
+    );
+
+    dsl.set_signal_f64("rad", 12.0);
+    let props2 = builder.render_props();
+    assert!(
+        (props2.border_radius.top_left - 12.0).abs() < 1e-6,
+        "second render should reflect updated signal value 12.0, got {}",
+        props2.border_radius.top_left
+    );
+    assert!(
+        (props2.border_radius.bottom_right - 12.0).abs() < 1e-6,
+        "all four corners should track the same signal value"
+    );
+}
+
+/// `Div(border_width = w)` with a DSL-declared f64 signal `w`:
+/// lowering picks the `__set_overlay_border_width_signal__` extern
+/// and `apply_to` reads the live value into `RenderProps::border_width`.
+#[test]
+fn dsl_border_width_signal_binding_reflects_signal_value() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.set_signal_f64("bw", 1.0);
+    dsl.compile_source(
+        r#"
+            signal bw: f64
+            view {
+                Div(border_width = bw)
+            }
+        "#,
+        "div_border_width_signal.blinc",
+    )
+    .expect("compile");
+
+    let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+    let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+    let ZyntaxValue::Int(handle) = value else {
+        panic!("expected widget handle, got: {value:?}");
+    };
+    let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+    let WidgetBox::Custom(builder) = *widget else {
+        panic!("expected Custom(Styled<Div>)");
+    };
+
+    let props = builder.render_props();
+    assert!(
+        (props.border_width - 1.0).abs() < 1e-6,
+        "first render should reflect seeded signal value 1.0, got {}",
+        props.border_width
+    );
+
+    dsl.set_signal_f64("bw", 3.0);
+    let props2 = builder.render_props();
+    assert!(
+        (props2.border_width - 3.0).abs() < 1e-6,
+        "second render should reflect updated signal value 3.0, got {}",
+        props2.border_width
+    );
+}
+
+/// `Div(bg = color)` with a DSL-declared i32 signal `color`:
+/// lowering picks the `__set_overlay_bg_signal__` extern and
+/// `apply_to` unpacks the i32 as a packed hex color, matching the
+/// literal-path `Color::from_hex(value as u32)` convention.
+#[test]
+fn dsl_bg_signal_binding_reflects_signal_value() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    // 0xFF0000 = pure red.
+    dsl.set_signal_i32("bg_color", 0xFF_0000);
+    dsl.compile_source(
+        r#"
+            signal bg_color: i32
+            view {
+                Div(bg = bg_color)
+            }
+        "#,
+        "div_bg_signal.blinc",
+    )
+    .expect("compile");
+
+    let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+    let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+    let ZyntaxValue::Int(handle) = value else {
+        panic!("expected widget handle, got: {value:?}");
+    };
+    let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+    let WidgetBox::Custom(builder) = *widget else {
+        panic!("expected Custom(Styled<Div>)");
+    };
+
+    let props = builder.render_props();
+    let Some(blinc_core::layer::Brush::Solid(c)) = props.background else {
+        panic!("expected solid background brush after bg signal apply");
+    };
+    assert!((c.r - 1.0).abs() < 0.01, "first render r should be ~1.0");
+    assert!(c.g.abs() < 0.01, "first render g should be ~0.0");
+    assert!(c.b.abs() < 0.01, "first render b should be ~0.0");
+
+    // 0x00FF00 = pure green.
+    dsl.set_signal_i32("bg_color", 0x00_FF00);
+    let props2 = builder.render_props();
+    let Some(blinc_core::layer::Brush::Solid(c2)) = props2.background else {
+        panic!("expected solid background brush after second bg signal apply");
+    };
+    assert!(c2.r.abs() < 0.01, "second render r should be ~0.0");
+    assert!(
+        (c2.g - 1.0).abs() < 0.01,
+        "second render g should be ~1.0, got {}",
+        c2.g
+    );
+    assert!(c2.b.abs() < 0.01, "second render b should be ~0.0");
+}
+
+/// `Div(border_color = c)` with a DSL-declared i32 signal `c`:
+/// lowering picks the `__set_overlay_border_color_signal__` extern and
+/// `apply_to` unpacks the i32 as a packed hex color.
+#[test]
+fn dsl_border_color_signal_binding_reflects_signal_value() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    // 0x0000FF = pure blue.
+    dsl.set_signal_i32("bc", 0x00_00FF);
+    dsl.compile_source(
+        r#"
+            signal bc: i32
+            view {
+                Div(border_color = bc)
+            }
+        "#,
+        "div_border_color_signal.blinc",
+    )
+    .expect("compile");
+
+    let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+    let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+    let ZyntaxValue::Int(handle) = value else {
+        panic!("expected widget handle, got: {value:?}");
+    };
+    let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+    let WidgetBox::Custom(builder) = *widget else {
+        panic!("expected Custom(Styled<Div>)");
+    };
+
+    let props = builder.render_props();
+    let c = props.border_color.expect("border_color should be set");
+    assert!(c.r.abs() < 0.01, "first render r should be ~0.0");
+    assert!(c.g.abs() < 0.01, "first render g should be ~0.0");
+    assert!((c.b - 1.0).abs() < 0.01, "first render b should be ~1.0");
+
+    // 0xFFFFFF = white.
+    dsl.set_signal_i32("bc", 0xFF_FFFF);
+    let props2 = builder.render_props();
+    let c2 = props2.border_color.expect("border_color should remain set");
+    assert!(
+        (c2.r - 1.0).abs() < 0.01 && (c2.g - 1.0).abs() < 0.01 && (c2.b - 1.0).abs() < 0.01,
+        "second render should be white, got ({}, {}, {})",
+        c2.r,
+        c2.g,
+        c2.b
+    );
+}
+
 /// `signal=200, guard >100` → tick fires.
 #[test]
 fn signal_guard_fires_when_above_threshold() {

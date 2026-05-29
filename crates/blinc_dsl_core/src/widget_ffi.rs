@@ -125,11 +125,34 @@ pub struct RenderPropsOverlay {
     /// process-global reactive graph (clamped to f32 since
     /// `RenderProps::opacity` is f32).
     pub opacity_signal_id_raw: Option<u64>,
+    /// f64 signal id bound to corner_radius (px).
+    pub corner_radius_signal_id_raw: Option<u64>,
+    /// f64 signal id bound to border_width (px).
+    pub border_width_signal_id_raw: Option<u64>,
+    /// i32 signal id bound to bg. The signal value is read as a packed
+    /// color hex (`Color::from_hex(value as u32)`), matching the
+    /// literal-path encoding for `bg = 0xRRGGBB`.
+    pub bg_signal_id_raw: Option<u64>,
+    /// i32 signal id bound to border_color. Same hex-packed convention
+    /// as [`Self::bg_signal_id_raw`].
+    pub border_color_signal_id_raw: Option<u64>,
 }
 
 impl RenderPropsOverlay {
     pub fn apply_to(&self, base: &mut blinc_layout::RenderProps) {
-        if let Some(bg) = self.background.clone() {
+        // Reactive bg wins over a literal. The signal carries a packed
+        // color hex as i32 — same convention as `Color::from_hex` on
+        // the literal-arg path.
+        if let Some(id_raw) = self.bg_signal_id_raw {
+            let signal = blinc_core::reactive::Signal::<i32>::from_id(
+                blinc_core::reactive::SignalId::from_raw(id_raw),
+            );
+            if let Some(v) = signal.try_get() {
+                base.background = Some(blinc_core::layer::Brush::Solid(
+                    blinc_core::layer::Color::from_hex(v as u32),
+                ));
+            }
+        } else if let Some(bg) = self.background.clone() {
             base.background = Some(bg);
         }
         // Reactive opacity wins over a literal. Pull the current f64
@@ -144,14 +167,37 @@ impl RenderPropsOverlay {
         } else if let Some(o) = self.opacity {
             base.opacity = o;
         }
-        if let Some(r) = self.corner_radius {
+        if let Some(id_raw) = self.corner_radius_signal_id_raw {
+            let signal = blinc_core::reactive::Signal::<f64>::from_id(
+                blinc_core::reactive::SignalId::from_raw(id_raw),
+            );
+            if let Some(v) = signal.try_get() {
+                let r = v as f32;
+                base.border_radius = blinc_core::layer::CornerRadius::new(r, r, r, r);
+                base.border_radius_explicit = true;
+            }
+        } else if let Some(r) = self.corner_radius {
             base.border_radius = blinc_core::layer::CornerRadius::new(r, r, r, r);
             base.border_radius_explicit = true;
         }
-        if let Some(w) = self.border_width {
+        if let Some(id_raw) = self.border_width_signal_id_raw {
+            let signal = blinc_core::reactive::Signal::<f64>::from_id(
+                blinc_core::reactive::SignalId::from_raw(id_raw),
+            );
+            if let Some(v) = signal.try_get() {
+                base.border_width = v as f32;
+            }
+        } else if let Some(w) = self.border_width {
             base.border_width = w;
         }
-        if let Some(c) = self.border_color {
+        if let Some(id_raw) = self.border_color_signal_id_raw {
+            let signal = blinc_core::reactive::Signal::<i32>::from_id(
+                blinc_core::reactive::SignalId::from_raw(id_raw),
+            );
+            if let Some(v) = signal.try_get() {
+                base.border_color = Some(blinc_core::layer::Color::from_hex(v as u32));
+            }
+        } else if let Some(c) = self.border_color {
             base.border_color = Some(c);
         }
     }
@@ -1156,6 +1202,48 @@ pub(crate) extern "C" fn blinc_set_overlay_border_color(ptr: i64, color: i64) {
     }
     let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
     overlay.border_color = Some(blinc_core::layer::Color::from_hex(color as u32));
+}
+
+/// Reactive-binding variants of the four remaining overlay setters.
+/// Each records a `SignalId.to_raw()` on the overlay so `apply_to`
+/// reads the live value from the reactive graph each render. Float
+/// props bind to `f64` signals; color props bind to `i32` signals
+/// carrying a packed hex value (same convention as
+/// `__set_overlay_bg__` / `__set_overlay_border_color__`).
+///
+/// `id_raw` arrives as i64 — same wire convention as the signal-by-id
+/// getters/setters (Cranelift's value-map doesn't handle
+/// `HirConstant::U64`).
+pub(crate) extern "C" fn blinc_set_overlay_bg_signal(ptr: i64, id_raw: i64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.bg_signal_id_raw = Some(id_raw as u64);
+}
+
+pub(crate) extern "C" fn blinc_set_overlay_corner_radius_signal(ptr: i64, id_raw: i64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.corner_radius_signal_id_raw = Some(id_raw as u64);
+}
+
+pub(crate) extern "C" fn blinc_set_overlay_border_width_signal(ptr: i64, id_raw: i64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.border_width_signal_id_raw = Some(id_raw as u64);
+}
+
+pub(crate) extern "C" fn blinc_set_overlay_border_color_signal(ptr: i64, id_raw: i64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.border_color_signal_id_raw = Some(id_raw as u64);
 }
 
 /// Reclaim a `Box<RenderPropsOverlay>` from `__new_style_overlay__`. Default for null.

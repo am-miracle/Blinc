@@ -3593,8 +3593,10 @@ pub(crate) fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
         }
 
         // Partition named args into styling args (consumed by
-        // overlay setters) vs other args (left in place).
-        let mut styling_args: Vec<(&'static str, TypedNamedArg)> = Vec::new();
+        // overlay setters) vs other args (left in place). We carry the
+        // value-kind through so the redirect step below knows which
+        // signal type to look for when a value is a bare Variable.
+        let mut styling_args: Vec<(&'static str, StylingValueKind, TypedNamedArg)> = Vec::new();
         let mut remaining_named: Vec<TypedNamedArg> = Vec::new();
         let existing_named = std::mem::take(&mut call.named_args);
         for na in existing_named {
@@ -3603,7 +3605,7 @@ pub(crate) fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
             if let Some(name) = name_str
                 && let Some(entry) = STYLING_PROP_NAMES.iter().find(|(n, _, _)| *n == name)
             {
-                styling_args.push((entry.1, na));
+                styling_args.push((entry.1, entry.2, na));
                 continue;
             }
             remaining_named.push(na);
@@ -3671,32 +3673,37 @@ pub(crate) fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
         ));
 
         // One setter call per styling arg. If the value is a bare
-        // identifier referring to a DSL-declared signal, redirect to
-        // the `_signal` variant — the host extern records the
-        // `SignalId.to_raw()` on the overlay so each render reads the
-        // live signal value via the reactive primitive instead of
-        // baking a literal.
-        for (setter_name, na) in styling_args {
+        // identifier referring to a DSL-declared signal of the right
+        // type, redirect to the `_signal` variant — the host extern
+        // records the `SignalId.to_raw()` on the overlay so each
+        // render reads the live signal value via the reactive
+        // primitive instead of baking a literal.
+        for (setter_name, kind, na) in styling_args {
             let value_node = *na.value;
-            let signal_redirect = if setter_name == "__set_overlay_opacity__" {
-                signal_id_for_variable(&value_node, blinc_runtime::signal::SignalType::F64).map(
-                    |id_raw_u64| {
-                        let signal_setter = zyntax_typed_ast::InternedString::new_global(
-                            "__set_overlay_opacity_signal__",
-                        );
-                        let id_arg = typed_node(
-                            TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(
-                                id_raw_u64 as i64 as i128,
-                            )),
-                            i64_ty.clone(),
-                            span,
-                        );
-                        (signal_setter, id_arg)
-                    },
-                )
-            } else {
-                None
+            let expected_signal_ty = match kind {
+                StylingValueKind::Float => blinc_runtime::signal::SignalType::F64,
+                StylingValueKind::IntColor => blinc_runtime::signal::SignalType::I32,
             };
+            let signal_redirect =
+                signal_id_for_variable(&value_node, expected_signal_ty).map(|id_raw_u64| {
+                    // Derive the `_signal__` variant name by replacing
+                    // the trailing `__` with `_signal__`. Every styling
+                    // setter follows the `__set_overlay_*__` convention
+                    // and has a registered `_signal__` peer in the abi
+                    // table.
+                    let signal_setter_name =
+                        format!("{}_signal__", setter_name.trim_end_matches("__"));
+                    let signal_setter =
+                        zyntax_typed_ast::InternedString::new_global(&signal_setter_name);
+                    let id_arg = typed_node(
+                        TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(
+                            id_raw_u64 as i64 as i128,
+                        )),
+                        i64_ty.clone(),
+                        span,
+                    );
+                    (signal_setter, id_arg)
+                });
             let (effective_setter, effective_arg) = match signal_redirect {
                 Some((setter, arg)) => (setter, arg),
                 None => (
