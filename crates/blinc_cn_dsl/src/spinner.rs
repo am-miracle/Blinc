@@ -1,0 +1,61 @@
+//! `cn.Spinner` — loading indicator.
+
+use std::cell::OnceCell;
+
+use blinc_dsl_core::extern_widget;
+use blinc_layout::div::ElementBuilder;
+
+/// `cn.Spinner(size?, duration_ms?)` — loading indicator.
+///
+/// Props (DSL surface):
+/// - `size: string` — `"small"`, `"medium"` (default), or `"large"`.
+/// - `duration_ms: i32` — full-rotation duration in milliseconds.
+///   Zero or negative means "use cn default". Color overrides
+///   (`color`, `track_color`) are deferred until the colour FFI lands.
+#[extern_widget(namespace = "cn", name = "Spinner")]
+pub struct CnSpinner {
+    pub size: String,
+    pub duration_ms: i32,
+    /// Lazy-constructed cn builder. Same caching rationale as
+    /// `CnButton::built`.
+    #[skip]
+    built: OnceCell<blinc_cn::SpinnerBuilder>,
+}
+
+impl CnSpinner {
+    fn get_or_build(&self) -> &blinc_cn::SpinnerBuilder {
+        self.built.get_or_init(|| self.to_cn_builder())
+    }
+
+    fn to_cn_builder(&self) -> blinc_cn::SpinnerBuilder {
+        let size = match self.size.as_str() {
+            "small" => blinc_cn::SpinnerSize::Small,
+            "large" => blinc_cn::SpinnerSize::Large,
+            "" | "medium" => blinc_cn::SpinnerSize::Medium,
+            other => {
+                tracing::warn!(
+                    size = %other,
+                    "cn.Spinner: unknown size — falling back to `medium`",
+                );
+                blinc_cn::SpinnerSize::Medium
+            }
+        };
+        let mut b = blinc_cn::spinner().size(size);
+        if self.duration_ms > 0 {
+            b = b.duration_ms(self.duration_ms as u32);
+        }
+        b
+    }
+}
+
+impl ElementBuilder for CnSpinner {
+    fn build(&self, tree: &mut blinc_layout::LayoutTree) -> blinc_layout::LayoutNodeId {
+        self.get_or_build().build(tree)
+    }
+    fn render_props(&self) -> blinc_layout::RenderProps {
+        self.get_or_build().render_props()
+    }
+    fn children_builders(&self) -> &[Box<dyn ElementBuilder>] {
+        self.get_or_build().children_builders()
+    }
+}

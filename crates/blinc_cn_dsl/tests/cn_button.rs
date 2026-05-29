@@ -62,3 +62,32 @@ fn cn_button_accepts_named_args() {
     dsl.compile_source(src, "cn_button_named_probe.blinc")
         .expect("compile cn.Button with named args");
 }
+
+/// `on_click` prop accepts a DSL closure. The closure compiles to a
+/// zero-arg `extern "C" fn()` and the i64 fn-ptr is handed to
+/// `CnButton::to_cn_builder` at materialise time. Mirrors
+/// `Div(on_click = || { … })`.
+///
+/// Headless mode can't click the button, but the JIT compile path
+/// here exercises every brittle hand-off: closure-body lift, fn-ptr
+/// extraction, named-arg resolution against the registry, the
+/// macro-generated thunk decoding `on_click: i64`. A regression in
+/// any of those would error at `compile_source` time.
+#[test]
+fn cn_button_accepts_on_click_closure() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("dsl init");
+    blinc_cn_dsl::register_all(&dsl).expect("register cn.* widgets");
+
+    let src = r#"
+        signal click_count: i32
+        view {
+            cn.Button("Tap", on_click = || {
+                click_count.set(click_count.get() + 1)
+            })
+        }
+    "#;
+    dsl.compile_source(src, "cn_button_on_click_probe.blinc")
+        .expect("compile cn.Button with on_click closure");
+}

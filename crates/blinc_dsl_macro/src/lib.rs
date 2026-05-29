@@ -183,6 +183,20 @@ fn field_has_children_attr(field: &syn::Field) -> bool {
         .any(|attr| attr.path().is_ident("children"))
 }
 
+/// `#[skip]` field attribute — the field stays in the struct body
+/// but is excluded from the FFI thunk, the prop list, the parameter
+/// type list, and the param-count. The struct constructor inside the
+/// generated thunk fills the field with `Default::default()`, so any
+/// skipped field's type must impl [`Default`].
+///
+/// Use case: caching `OnceCell<...>` state from the wrapped widget
+/// so `ElementBuilder::children_builders()` can return a stable
+/// reference instead of an empty slice. The DSL never marshals these
+/// fields; they're internal book-keeping.
+fn field_is_skipped(field: &syn::Field) -> bool {
+    field.attrs.iter().any(|attr| attr.path().is_ident("skip"))
+}
+
 fn field_slot_name(field: &syn::Field) -> Option<String> {
     let attr = field.attrs.iter().find(|a| a.path().is_ident("slot"))?;
     let mut name: Option<String> = None;
@@ -332,12 +346,17 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
     );
     let view_symbol = format!("$Blinc${symbol_safe_name}$view");
 
-    // FFI order: children → slots → scalars.
+    // FFI order: children → slots → scalars. Skipped fields don't
+    // participate in the FFI at all; they get `Default::default()`
+    // in the generated struct constructor.
     let mut children_field: Option<&syn::Field> = None;
     let mut slot_fields: Vec<(&syn::Field, String)> = Vec::new();
     let mut scalar_fields: Vec<&syn::Field> = Vec::new();
+    let mut skipped_fields: Vec<&syn::Field> = Vec::new();
     for field in &fields.named {
-        if field_has_children_attr(field) {
+        if field_is_skipped(field) {
+            skipped_fields.push(field);
+        } else if field_has_children_attr(field) {
             if children_field.is_some() {
                 return syn::Error::new_spanned(
                     field,
@@ -359,6 +378,19 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut struct_inits: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut prop_defs: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut param_types: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    // Skipped fields show up in the struct constructor with
+    // `Default::default()` so the FFI thunk can build a complete
+    // struct without seeing them. Order in the constructor doesn't
+    // need to match struct definition order — Rust accepts named
+    // initializers in any order — so appending here is fine.
+    for field in &skipped_fields {
+        let field_ident = field
+            .ident
+            .as_ref()
+            .expect("named fields always have idents");
+        struct_inits.push(quote! { #field_ident: ::core::default::Default::default() });
+    }
 
     if let Some(field) = children_field {
         if !matches!(field.vis, syn::Visibility::Public(_)) {
@@ -507,9 +539,11 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Strip macro-only field attributes before re-emitting the struct.
     if let syn::Fields::Named(named) = &mut item_struct.fields {
         for field in &mut named.named {
-            field
-                .attrs
-                .retain(|attr| !(attr.path().is_ident("children") || attr.path().is_ident("slot")));
+            field.attrs.retain(|attr| {
+                !(attr.path().is_ident("children")
+                    || attr.path().is_ident("slot")
+                    || attr.path().is_ident("skip"))
+            });
         }
     }
 
