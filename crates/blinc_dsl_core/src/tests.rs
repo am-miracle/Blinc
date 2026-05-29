@@ -6109,26 +6109,23 @@ fn dsl_border_color_signal_binding_reflects_signal_value() {
     );
 }
 
-/// `match` at the top of a view body compiles and lowers to an
-/// if/else-if/else chain via `lower_match_blocks`. This
-/// regression-covers the grammar fix (Expression(Block(…)) wrapping)
-/// that made `match` parseable.
+/// `match` at the top of a view body compiles, lowers to an
+/// if/else-if/else chain via `lower_match_blocks`, and the matching
+/// literal arm fires at render time. Regression-covers two fixes:
+/// (1) the grammar workaround that made `match` parseable
+/// (`Expression(Block(…))` wrapping) and (2) the upstream Cranelift
+/// `BinaryOp::Eq` routing through `zrtl_string_equals` for `Ptr(I8)`
+/// operands — without that, raw pointer comparison would silently
+/// fall through to the wildcard.
 ///
-/// Arm bodies use the brace-block shape (`{ text(...) }`) rather
-/// than a bare `text(...)` expression because the `match_arm_body_expr`
+/// Arm bodies use the brace-block shape (`{ text(...) }`) rather than
+/// a bare `text(...)` expression because the `match_arm_body_expr`
 /// alternative routes through `expr` and the `text(string)` builtin
 /// is registered as a STATEMENT in the grammar (`text_string_stmt`),
 /// not an expression. Wrapping the body in `{}` selects
 /// `match_arm_body_block` which accepts arbitrary statements.
-///
-/// String-equality limitation: the Cranelift backend's `BinaryOp::Eq`
-/// returns false for string operands today, so a literal-string arm
-/// never fires — the chain falls through to the wildcard. The lowering
-/// shape is still being exercised end-to-end; once string-eq lands
-/// upstream the wildcard-only assertion can be tightened to assert
-/// the literal arm wins.
 #[test]
-fn dsl_match_in_view_body_compiles_and_lowers_to_if_else_chain() {
+fn dsl_match_in_view_body_fires_matching_literal_arm() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let dsl = BlincDsl::new().expect("runtime init");
@@ -6145,17 +6142,22 @@ fn dsl_match_in_view_body_compiles_and_lowers_to_if_else_chain() {
     )
     .expect("compile");
 
-    // Render the view — the if/else chain runs. With the current
-    // string-eq limitation the wildcard arm fires; the literal arm
-    // doesn't. Either way, the lowering is exercised end-to-end.
     let ops = dsl.render_view().expect("render_view");
-    let saw_an_arm = ops.iter().any(|op| {
-        matches!(op, DslOp::Text(s)
-        if s == "fast arm fired" || s == "wildcard arm fired")
+    let saw_fast = ops.iter().any(|op| match op {
+        DslOp::Text(s) => s == "fast arm fired",
+        _ => false,
     });
     assert!(
-        saw_an_arm,
-        "at least one match arm should fire after lowering, got {ops:?}"
+        saw_fast,
+        "matching arm \"fast\" should fire, expected `text(\"fast arm fired\")` in {ops:?}"
+    );
+    let saw_wildcard = ops.iter().any(|op| match op {
+        DslOp::Text(s) => s == "wildcard arm fired",
+        _ => false,
+    });
+    assert!(
+        !saw_wildcard,
+        "wildcard arm should NOT fire when the literal arm matches, but saw `text(\"wildcard arm fired\")` in {ops:?}"
     );
 }
 
@@ -6218,6 +6220,41 @@ fn dsl_match_in_div_on_click_closure_compiles() {
         "match_in_closure.blinc",
     )
     .expect("compile");
+}
+
+/// Match-arm bodies can be bare function-call expressions (no
+/// brace-block needed). Regression-covers the `bare_call_expr`
+/// alternative in `primary_expr` — without it, `_ -> text("a")`
+/// would fail because the `text(string)` builtin is registered as a
+/// statement and the expression-position `expr` rule couldn't parse
+/// the trailing `(args)` after a bare identifier.
+#[test]
+fn dsl_match_arm_bodies_accept_bare_function_calls() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            view {
+                match "fast" {
+                    "fast" -> text("matched"),
+                    _      -> text("wildcard"),
+                }
+            }
+        "#,
+        "match_bare_body.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let saw_matched = ops.iter().any(|op| match op {
+        DslOp::Text(s) => s == "matched",
+        _ => false,
+    });
+    assert!(
+        saw_matched,
+        "matching literal arm with bare-call body should fire, got {ops:?}"
+    );
 }
 
 /// `signal=200, guard >100` → tick fires.

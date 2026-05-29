@@ -962,64 +962,46 @@ effect_stmt = { "effect" ~ "{" ~ stmts:statement* ~ "}" }
 // matching with string-literal patterns + `_` wildcard. Each arm body
 // is a single expression or a brace-block. Emits marker statements
 // the `lower_match_blocks` pass rewrites into an if/else-if chain.
-//
-// Grammar wrapping note: each arm + the whole match body are wrapped
-// in `TypedStatement::Expression { expr: TypedExpression::Block { … } }`
-// instead of the more natural `TypedStatement::Block { … }` because
-// Zyntax's action-language interpreter's `construct_statement`
-// (zyn_peg/runtime2/interpreter.rs ~ line 385) doesn't have a case for
-// the `Block` variant — that path would fail with "unknown
-// TypedStatement variant: Block" and PEG would report a confusing
-// "expected end of input" at the start of the parent rule. Wrapping
-// in `Expression(Block(…))` lands in the supported `Expression` arm
-// and the block expression with its statements is constructed via
-// `construct_block` instead. `lower_match_blocks` knows the shape and
-// peels the wrapper when detecting arms.
 match_stmt = {
     "match" ~ scrutinee:expr ~ "{" ~ arms:match_arm+ ~ "}"
 }
-  -> TypedStatement::Expression {
-      expr: TypedExpression::Block {
-          statements: concat_list(
+  -> TypedStatement::Block {
+      statements: concat_list(
+          [TypedStatement::Expression {
+              expr: TypedExpression::Call {
+                  callee: Box::new(TypedExpression::Variable { name: intern("__match_begin__") }),
+                  args: [scrutinee],
+              },
+          }],
+          concat_list(
+              arms,
               [TypedStatement::Expression {
                   expr: TypedExpression::Call {
-                      callee: Box::new(TypedExpression::Variable { name: intern("__match_begin__") }),
-                      args: [scrutinee],
+                      callee: Box::new(TypedExpression::Variable { name: intern("__match_end__") }),
+                      args: [],
                   },
               }],
-              concat_list(
-                  arms,
-                  [TypedStatement::Expression {
-                      expr: TypedExpression::Call {
-                          callee: Box::new(TypedExpression::Variable { name: intern("__match_end__") }),
-                          args: [],
-                      },
-                  }],
-              ),
           ),
-      },
+      ),
   }
 
 // Single match arm. Emits a `Block` carrying a `__match_arm__(pat)`
 // marker followed by the body statements. The outer `match_stmt`
 // concatenates all arm-blocks between `__match_begin__` and
-// `__match_end__`. Same `Expression(Block(…))` wrapping rationale as
-// `match_stmt` above — see the comment there.
+// `__match_end__`.
 match_arm = {
     pat:match_pattern ~ "->" ~ body:match_arm_body ~ ","?
 }
-  -> TypedStatement::Expression {
-      expr: TypedExpression::Block {
-          statements: concat_list(
-              [TypedStatement::Expression {
-                  expr: TypedExpression::Call {
-                      callee: Box::new(TypedExpression::Variable { name: intern("__match_arm__") }),
-                      args: [pat],
-                  },
-              }],
-              body,
-          ),
-      },
+  -> TypedStatement::Block {
+      statements: concat_list(
+          [TypedStatement::Expression {
+              expr: TypedExpression::Call {
+                  callee: Box::new(TypedExpression::Variable { name: intern("__match_arm__") }),
+                  args: [pat],
+              },
+          }],
+          body,
+      ),
   }
 
 // Arm patterns: today a literal string OR the wildcard `_`. The
@@ -1490,8 +1472,31 @@ primary_expr = {
     integer |
     bool_literal |
     component_call_expr |
+    bare_call_expr |
     variable_expr
 }
+
+// `name(arg1, arg2, ...)` — a bare function call in expression
+// position. Distinct from `component_call_expr` (which requires a
+// capitalised name and produces a `__component_call__` marker) and
+// from the various statement-form calls (`text_string_stmt`,
+// `method_call_stmt`, `assign_stmt`) that only fire at statement
+// position. Lowers to a plain `TypedExpression::Call` so a body like
+// `match "x" { _ -> text("a") }` (where `text` is registered as the
+// `$Blinc$text` builtin) parses without requiring a brace-wrapped
+// statement body.
+//
+// PEG ordering: comes AFTER `component_call_expr` (capitalised names
+// take that branch first) and BEFORE `variable_expr` (so the
+// trailing `(args)` is consumed rather than left dangling after a
+// bare identifier). Methods (`obj.method(args)`) still parse via
+// `postfix_suffix → suffix_method` because this rule doesn't match a
+// leading `obj.` prefix.
+bare_call_expr = { name:identifier ~ "(" ~ args:call_args_list? ~ ")" }
+  -> TypedExpression::Call {
+      callee: Box::new(TypedExpression::Variable { name: intern(name) }),
+      args: args.unwrap_or([]),
+  }
 
 // Zero-arg closure: `|| { stmt; stmt; … }`. Lowers directly to
 // `TypedExpression::Lambda { params: [], body: Block(stmts) }`
