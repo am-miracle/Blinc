@@ -324,6 +324,70 @@ fn cross_file_same_named_fsms_register_distinctly() {
     );
 }
 
+/// Cross-file FSM import: alpha.blinc declares `MyFsm`; main.blinc
+/// imports it and calls `MyFsm.trigger(...)` from its view body.
+///
+/// `resolve_fsm_trigger_calls` consults the global `FsmRegistry`
+/// for receiver names that aren't in the current program's local
+/// FSM impls — alpha.blinc's `MyFsm` (mangled to `alpha$MyFsm`)
+/// is registered by `populate_fsm_registry_pass` when alpha
+/// compiles, then main.blinc's `MyFsm.trigger(...)` resolves
+/// against it. The `import_rewrites` step in
+/// `inject_imported_view_externs` swaps the receiver Variable's
+/// name from `MyFsm` to `alpha$MyFsm` before the FSM-call
+/// resolution runs, so the `__fsm_runtime_trigger__` marker carries
+/// the mangled name that the runtime's default-instance tracker
+/// keys by.
+#[test]
+fn cross_file_fsm_import_advances_state_via_trigger() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dir = TempDir::new("blinc_project_fsm_import").expect("tempdir");
+    dir.write(
+        "alpha.blinc",
+        r#"
+            fsm MyFsm {
+                state Idle
+                state Running
+                initial Idle
+                on Idle.Start -> Running
+            }
+            view { Text("alpha") }
+        "#,
+    )
+    .unwrap();
+    let entry = dir
+        .write(
+            "main.blinc",
+            r#"
+            import { MyFsm } from "./alpha"
+            view {
+                MyFsm.trigger("Idle.Start")
+                Text("main")
+            }
+            "#,
+        )
+        .unwrap();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_project(&entry, dir.path())
+        .expect("compile_project");
+
+    // Rendering invokes the trigger call in main.blinc's view body.
+    dsl.render_view().expect("render_view");
+
+    // After the trigger fires, the FSM should have advanced from
+    // Idle to Running. Runtime default-instance tracker keys by
+    // the MANGLED name.
+    let current = blinc_runtime::fsm::current_state_name("alpha$MyFsm");
+    assert_eq!(
+        current.as_deref(),
+        Some("Running"),
+        "imported FSM trigger from main.blinc should advance \
+         alpha's MyFsm from Idle to Running"
+    );
+}
+
 /// `recompile_file` re-runs compile for a single path and
 /// refreshes the per-file function-name map. Pins the hot-
 /// reload entry point.

@@ -490,8 +490,14 @@ impl BlincDsl {
         // written ones to downstream symbol-resolution work.
         resolve_const_references(&mut typed_program);
         resolve_signal_calls(&mut typed_program);
-        resolve_fsm_trigger_calls(&mut typed_program);
-        resolve_fsm_subscribe_calls(&mut typed_program);
+        // Module hardcoded to "main" here — same key
+        // `populate_fsm_registry_pass` uses below. Both FSM-call
+        // passes consult the global `FsmRegistry` keyed by this
+        // module so cross-file FSMs imported from previously-
+        // compiled modules in the same `compile_project` resolve.
+        let fsm_lookup_module = zyntax_typed_ast::InternedString::new_global("main");
+        resolve_fsm_trigger_calls(&mut typed_program, fsm_lookup_module);
+        resolve_fsm_subscribe_calls(&mut typed_program, fsm_lookup_module);
 
         // Extract `style { … }` blocks and queue through `BlincContextState` for next frame.
         {
@@ -1005,8 +1011,9 @@ impl BlincDsl {
         expand_const_groups(&mut program);
         resolve_const_references(&mut program);
         resolve_signal_calls(&mut program);
-        resolve_fsm_trigger_calls(&mut program);
-        resolve_fsm_subscribe_calls(&mut program);
+        let fsm_lookup_module = zyntax_typed_ast::InternedString::new_global("main");
+        resolve_fsm_trigger_calls(&mut program, fsm_lookup_module);
+        resolve_fsm_subscribe_calls(&mut program, fsm_lookup_module);
         let _ = detect_and_strip_stateful_views(&mut program);
 
         lower_struct_literals(&mut program)

@@ -907,7 +907,26 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
 }
 
 /// Rewrite `<FsmName>.trigger(<path>)` → `__fsm_runtime_trigger__("<FsmName>", <path>)`.
-pub(crate) fn resolve_fsm_trigger_calls(program: &mut TypedProgram) {
+///
+/// Two sources of "this is a known FSM" are checked at each call
+/// site:
+///
+/// 1. **Local impls in this program** (same-file FSMs): collected
+///    up-front into `fsm_names` from `__fsm_meta__`-bearing impls.
+/// 2. **Global `FsmRegistry`** (cross-file FSMs imported from
+///    previously-compiled modules under the same `module` key):
+///    queried per call site when the receiver's name doesn't match
+///    a local entry. Lets `MyFsm.trigger("Idle.Start")` in main.blinc
+///    resolve to a `MyFsm` (or its module-mangled form like
+///    `alpha$MyFsm` after import-rewrite) declared in alpha.blinc.
+///
+/// Without (2) the early-return at the top of this pass would
+/// bail when the entry program has no local FSM impls, leaving
+/// cross-file trigger calls unresolved at run time.
+pub(crate) fn resolve_fsm_trigger_calls(
+    program: &mut TypedProgram,
+    module: zyntax_typed_ast::InternedString,
+) {
     use std::collections::HashSet;
     use zyntax_typed_ast::InternedString;
     use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
@@ -925,170 +944,194 @@ pub(crate) fn resolve_fsm_trigger_calls(program: &mut TypedProgram) {
             fsm_names.insert(imp.trait_name);
         }
     }
-    if fsm_names.is_empty() {
-        return;
+    // NOTE: don't early-return on `fsm_names.is_empty()` — the entry
+    // program in a multi-file project may declare zero local FSMs
+    // but still reference imported ones. The per-call global-
+    // registry lookup below covers that case.
+
+    // Visitor wrapper keeps `fsm_names` + `module` in scope across
+    // the recursive rewrite without threading them through every
+    // helper signature.
+    struct Rewriter<'a> {
+        fsm_names: &'a HashSet<InternedString>,
+        module: InternedString,
     }
 
-    fn rewrite_expr(
-        expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>,
-        fsm_names: &HashSet<InternedString>,
-    ) {
-        // Recurse children first.
-        match &mut expr.node {
-            TypedExpression::Binary(b) => {
-                rewrite_expr(&mut b.left, fsm_names);
-                rewrite_expr(&mut b.right, fsm_names);
-            }
-            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand, fsm_names),
-            TypedExpression::Call(c) => {
-                rewrite_expr(&mut c.callee, fsm_names);
-                for a in &mut c.positional_args {
-                    rewrite_expr(a, fsm_names);
+    impl Rewriter<'_> {
+        fn rewrite_expr(&self, expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>) {
+            // Recurse children first.
+            match &mut expr.node {
+                TypedExpression::Binary(b) => {
+                    self.rewrite_expr(&mut b.left);
+                    self.rewrite_expr(&mut b.right);
                 }
-            }
-            TypedExpression::Field(f) => rewrite_expr(&mut f.object, fsm_names),
-            TypedExpression::Index(idx) => {
-                rewrite_expr(&mut idx.object, fsm_names);
-                rewrite_expr(&mut idx.index, fsm_names);
-            }
-            TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
-                for it in items {
-                    rewrite_expr(it, fsm_names);
+                TypedExpression::Unary(u) => self.rewrite_expr(&mut u.operand),
+                TypedExpression::Call(c) => {
+                    self.rewrite_expr(&mut c.callee);
+                    for a in &mut c.positional_args {
+                        self.rewrite_expr(a);
+                    }
                 }
-            }
-            TypedExpression::MethodCall(mc) => {
-                rewrite_expr(&mut mc.receiver, fsm_names);
-                for a in &mut mc.positional_args {
-                    rewrite_expr(a, fsm_names);
+                TypedExpression::Field(f) => self.rewrite_expr(&mut f.object),
+                TypedExpression::Index(idx) => {
+                    self.rewrite_expr(&mut idx.object);
+                    self.rewrite_expr(&mut idx.index);
                 }
-            }
-            TypedExpression::Block(b) => rewrite_block(b, fsm_names),
-            TypedExpression::If(if_expr) => {
-                rewrite_expr(&mut if_expr.condition, fsm_names);
-                rewrite_expr(&mut if_expr.then_branch, fsm_names);
-                rewrite_expr(&mut if_expr.else_branch, fsm_names);
-            }
-            TypedExpression::Lambda(lam) => match &mut lam.body {
-                zyntax_typed_ast::typed_ast::TypedLambdaBody::Expression(e) => {
-                    rewrite_expr(e, fsm_names);
+                TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
+                    for it in items {
+                        self.rewrite_expr(it);
+                    }
                 }
-                zyntax_typed_ast::typed_ast::TypedLambdaBody::Block(block) => {
-                    rewrite_block(block, fsm_names);
+                TypedExpression::MethodCall(mc) => {
+                    self.rewrite_expr(&mut mc.receiver);
+                    for a in &mut mc.positional_args {
+                        self.rewrite_expr(a);
+                    }
                 }
-            },
-            _ => {}
+                TypedExpression::Block(b) => self.rewrite_block(b),
+                TypedExpression::If(if_expr) => {
+                    self.rewrite_expr(&mut if_expr.condition);
+                    self.rewrite_expr(&mut if_expr.then_branch);
+                    self.rewrite_expr(&mut if_expr.else_branch);
+                }
+                TypedExpression::Lambda(lam) => match &mut lam.body {
+                    zyntax_typed_ast::typed_ast::TypedLambdaBody::Expression(e) => {
+                        self.rewrite_expr(e);
+                    }
+                    zyntax_typed_ast::typed_ast::TypedLambdaBody::Block(block) => {
+                        self.rewrite_block(block);
+                    }
+                },
+                _ => {}
+            }
+            self.try_rewrite_trigger(expr);
         }
 
-        // Match `<FsmName>.trigger(<arg>)` in both AST shapes (MethodCall / Call+Field).
-        let trigger_call = match &expr.node {
-            TypedExpression::MethodCall(mc) if mc.positional_args.len() == 1 => {
-                if let TypedExpression::Variable(receiver_name) = &mc.receiver.node {
-                    Some((
-                        *receiver_name,
-                        mc.method,
-                        mc.positional_args[0].clone(),
-                        expr.span,
-                    ))
-                } else {
-                    None
-                }
-            }
-            TypedExpression::Call(c) if c.positional_args.len() == 1 => {
-                if let TypedExpression::Field(f) = &c.callee.node {
-                    if let TypedExpression::Variable(receiver_name) = &f.object.node {
+        fn try_rewrite_trigger(&self, expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>) {
+            // Match `<FsmName>.trigger(<arg>)` in both AST shapes (MethodCall / Call+Field).
+            let trigger_call = match &expr.node {
+                TypedExpression::MethodCall(mc) if mc.positional_args.len() == 1 => {
+                    if let TypedExpression::Variable(receiver_name) = &mc.receiver.node {
                         Some((
                             *receiver_name,
-                            f.field,
-                            c.positional_args[0].clone(),
+                            mc.method,
+                            mc.positional_args[0].clone(),
                             expr.span,
                         ))
                     } else {
                         None
                     }
-                } else {
-                    None
+                }
+                TypedExpression::Call(c) if c.positional_args.len() == 1 => {
+                    if let TypedExpression::Field(f) = &c.callee.node {
+                        if let TypedExpression::Variable(receiver_name) = &f.object.node {
+                            Some((
+                                *receiver_name,
+                                f.field,
+                                c.positional_args[0].clone(),
+                                expr.span,
+                            ))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            let Some((receiver_name, method, path_arg, span)) = trigger_call else {
+                return;
+            };
+            if method.resolve_global().as_deref() != Some("trigger") {
+                return;
+            }
+            // Local FSMs (current program) take precedence; cross-file
+            // FSMs (previously-compiled modules) found in the global
+            // registry are accepted second. Receiver names that match
+            // neither leave the original `MethodCall` shape alone — the
+            // type-checker / linker surfaces them as undefined later.
+            if !self.fsm_names.contains(&receiver_name) {
+                let Some(name_str_arc) = receiver_name.resolve_global() else {
+                    return;
+                };
+                let name_str: &str = &name_str_arc;
+                let found_in_global = crate::fsm_registry::with_fsm_registry(|r| {
+                    r.find_by_name(self.module, name_str).is_some()
+                });
+                if !found_in_global {
+                    return;
                 }
             }
-            _ => None,
-        };
 
-        let Some((receiver_name, method, path_arg, span)) = trigger_call else {
-            return;
-        };
-        if !fsm_names.contains(&receiver_name) {
-            return;
+            let fsm_name_arg = zyntax_typed_ast::TypedNode::new(
+                TypedExpression::Literal(TypedLiteral::String(receiver_name)),
+                Type::Primitive(PrimitiveType::String),
+                span,
+            );
+            let callee = zyntax_typed_ast::TypedNode::new(
+                TypedExpression::Variable(InternedString::new_global("__fsm_runtime_trigger__")),
+                Type::Unknown,
+                span,
+            );
+            expr.node = TypedExpression::Call(TypedCall {
+                callee: Box::new(callee),
+                positional_args: vec![fsm_name_arg, path_arg],
+                named_args: vec![],
+                type_args: vec![],
+            });
+            expr.ty = Type::Primitive(PrimitiveType::Unit);
         }
-        if method.resolve_global().as_deref() != Some("trigger") {
-            return;
+
+        fn rewrite_block(&self, block: &mut zyntax_typed_ast::typed_ast::TypedBlock) {
+            for stmt in &mut block.statements {
+                self.rewrite_stmt(stmt);
+            }
         }
 
-        let fsm_name_arg = zyntax_typed_ast::TypedNode::new(
-            TypedExpression::Literal(TypedLiteral::String(receiver_name)),
-            Type::Primitive(PrimitiveType::String),
-            span,
-        );
-        let callee = zyntax_typed_ast::TypedNode::new(
-            TypedExpression::Variable(InternedString::new_global("__fsm_runtime_trigger__")),
-            Type::Unknown,
-            span,
-        );
-        expr.node = TypedExpression::Call(TypedCall {
-            callee: Box::new(callee),
-            positional_args: vec![fsm_name_arg, path_arg],
-            named_args: vec![],
-            type_args: vec![],
-        });
-        expr.ty = Type::Primitive(PrimitiveType::Unit);
-    }
-
-    fn rewrite_block(
-        block: &mut zyntax_typed_ast::typed_ast::TypedBlock,
-        fsm_names: &HashSet<InternedString>,
-    ) {
-        for stmt in &mut block.statements {
-            rewrite_stmt(stmt, fsm_names);
-        }
-    }
-
-    fn rewrite_stmt(
-        stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>,
-        fsm_names: &HashSet<InternedString>,
-    ) {
-        match &mut stmt.node {
-            TypedStatement::Expression(e) => rewrite_expr(e, fsm_names),
-            TypedStatement::Let(l) => {
-                if let Some(init) = &mut l.initializer {
-                    rewrite_expr(init, fsm_names);
+        fn rewrite_stmt(&self, stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>) {
+            match &mut stmt.node {
+                TypedStatement::Expression(e) => self.rewrite_expr(e),
+                TypedStatement::Let(l) => {
+                    if let Some(init) = &mut l.initializer {
+                        self.rewrite_expr(init);
+                    }
                 }
-            }
-            TypedStatement::Return(Some(e)) => rewrite_expr(e, fsm_names),
-            TypedStatement::If(if_stmt) => {
-                rewrite_expr(&mut if_stmt.condition, fsm_names);
-                rewrite_block(&mut if_stmt.then_block, fsm_names);
-                if let Some(else_block) = &mut if_stmt.else_block {
-                    rewrite_block(else_block, fsm_names);
+                TypedStatement::Return(Some(e)) => self.rewrite_expr(e),
+                TypedStatement::If(if_stmt) => {
+                    self.rewrite_expr(&mut if_stmt.condition);
+                    self.rewrite_block(&mut if_stmt.then_block);
+                    if let Some(else_block) = &mut if_stmt.else_block {
+                        self.rewrite_block(else_block);
+                    }
                 }
+                TypedStatement::While(w) => {
+                    self.rewrite_expr(&mut w.condition);
+                    self.rewrite_block(&mut w.body);
+                }
+                TypedStatement::Block(b) => self.rewrite_block(b),
+                _ => {}
             }
-            TypedStatement::While(w) => {
-                rewrite_expr(&mut w.condition, fsm_names);
-                rewrite_block(&mut w.body, fsm_names);
-            }
-            TypedStatement::Block(b) => rewrite_block(b, fsm_names),
-            _ => {}
         }
     }
+
+    let rewriter = Rewriter {
+        fsm_names: &fsm_names,
+        module,
+    };
 
     for decl in &mut program.declarations {
         match &mut decl.node {
             TypedDeclaration::Function(func) => {
                 if let Some(body) = &mut func.body {
-                    rewrite_block(body, &fsm_names);
+                    rewriter.rewrite_block(body);
                 }
             }
             TypedDeclaration::Impl(imp) => {
                 for method in &mut imp.methods {
                     if let Some(body) = &mut method.body {
-                        rewrite_block(body, &fsm_names);
+                        rewriter.rewrite_block(body);
                     }
                 }
             }
@@ -1100,7 +1143,14 @@ pub(crate) fn resolve_fsm_trigger_calls(program: &mut TypedProgram) {
 /// Rewrite `<FsmName>.subscribe(<path>, <closure>)` →
 /// `__fsm_subscribe__("<FsmName>", <path>, <closure>)`. Path filtering happens
 /// host-side in `blinc_runtime::fsm::register_subscriber`.
-pub(crate) fn resolve_fsm_subscribe_calls(program: &mut TypedProgram) {
+///
+/// Same two-source resolution as [`resolve_fsm_trigger_calls`] —
+/// local impls AND global-registry imports both count. See that
+/// doc for the rationale.
+pub(crate) fn resolve_fsm_subscribe_calls(
+    program: &mut TypedProgram,
+    module: zyntax_typed_ast::InternedString,
+) {
     use std::collections::HashSet;
     use zyntax_typed_ast::InternedString;
     use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
@@ -1117,171 +1167,185 @@ pub(crate) fn resolve_fsm_subscribe_calls(program: &mut TypedProgram) {
             fsm_names.insert(imp.trait_name);
         }
     }
-    if fsm_names.is_empty() {
-        return;
+    // Don't early-return on empty local set — cross-file FSMs found
+    // via the global registry are still resolvable.
+
+    struct Rewriter<'a> {
+        fsm_names: &'a HashSet<InternedString>,
+        module: InternedString,
     }
 
-    fn rewrite_expr(
-        expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>,
-        fsm_names: &HashSet<InternedString>,
-    ) {
-        match &mut expr.node {
-            TypedExpression::Binary(b) => {
-                rewrite_expr(&mut b.left, fsm_names);
-                rewrite_expr(&mut b.right, fsm_names);
-            }
-            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand, fsm_names),
-            TypedExpression::Call(c) => {
-                rewrite_expr(&mut c.callee, fsm_names);
-                for a in &mut c.positional_args {
-                    rewrite_expr(a, fsm_names);
+    impl Rewriter<'_> {
+        fn rewrite_expr(&self, expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>) {
+            match &mut expr.node {
+                TypedExpression::Binary(b) => {
+                    self.rewrite_expr(&mut b.left);
+                    self.rewrite_expr(&mut b.right);
                 }
-            }
-            TypedExpression::Field(f) => rewrite_expr(&mut f.object, fsm_names),
-            TypedExpression::Index(idx) => {
-                rewrite_expr(&mut idx.object, fsm_names);
-                rewrite_expr(&mut idx.index, fsm_names);
-            }
-            TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
-                for it in items {
-                    rewrite_expr(it, fsm_names);
+                TypedExpression::Unary(u) => self.rewrite_expr(&mut u.operand),
+                TypedExpression::Call(c) => {
+                    self.rewrite_expr(&mut c.callee);
+                    for a in &mut c.positional_args {
+                        self.rewrite_expr(a);
+                    }
                 }
-            }
-            TypedExpression::MethodCall(mc) => {
-                rewrite_expr(&mut mc.receiver, fsm_names);
-                for a in &mut mc.positional_args {
-                    rewrite_expr(a, fsm_names);
+                TypedExpression::Field(f) => self.rewrite_expr(&mut f.object),
+                TypedExpression::Index(idx) => {
+                    self.rewrite_expr(&mut idx.object);
+                    self.rewrite_expr(&mut idx.index);
                 }
-            }
-            TypedExpression::Block(b) => rewrite_block(b, fsm_names),
-            TypedExpression::If(if_expr) => {
-                rewrite_expr(&mut if_expr.condition, fsm_names);
-                rewrite_expr(&mut if_expr.then_branch, fsm_names);
-                rewrite_expr(&mut if_expr.else_branch, fsm_names);
-            }
-            TypedExpression::Lambda(lam) => match &mut lam.body {
-                zyntax_typed_ast::typed_ast::TypedLambdaBody::Expression(e) => {
-                    rewrite_expr(e, fsm_names);
+                TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
+                    for it in items {
+                        self.rewrite_expr(it);
+                    }
                 }
-                zyntax_typed_ast::typed_ast::TypedLambdaBody::Block(block) => {
-                    rewrite_block(block, fsm_names);
+                TypedExpression::MethodCall(mc) => {
+                    self.rewrite_expr(&mut mc.receiver);
+                    for a in &mut mc.positional_args {
+                        self.rewrite_expr(a);
+                    }
                 }
-            },
-            _ => {}
+                TypedExpression::Block(b) => self.rewrite_block(b),
+                TypedExpression::If(if_expr) => {
+                    self.rewrite_expr(&mut if_expr.condition);
+                    self.rewrite_expr(&mut if_expr.then_branch);
+                    self.rewrite_expr(&mut if_expr.else_branch);
+                }
+                TypedExpression::Lambda(lam) => match &mut lam.body {
+                    zyntax_typed_ast::typed_ast::TypedLambdaBody::Expression(e) => {
+                        self.rewrite_expr(e);
+                    }
+                    zyntax_typed_ast::typed_ast::TypedLambdaBody::Block(block) => {
+                        self.rewrite_block(block);
+                    }
+                },
+                _ => {}
+            }
+            self.try_rewrite_subscribe(expr);
         }
 
-        // Match in both AST shapes (MethodCall / Call+Field).
-        let subscribe_call = match &expr.node {
-            TypedExpression::MethodCall(mc) if mc.positional_args.len() == 2 => {
-                if let TypedExpression::Variable(receiver_name) = &mc.receiver.node {
-                    Some((
-                        *receiver_name,
-                        mc.method,
-                        mc.positional_args[0].clone(),
-                        mc.positional_args[1].clone(),
-                        expr.span,
-                    ))
-                } else {
-                    None
-                }
-            }
-            TypedExpression::Call(c) if c.positional_args.len() == 2 => {
-                if let TypedExpression::Field(f) = &c.callee.node {
-                    if let TypedExpression::Variable(receiver_name) = &f.object.node {
+        fn try_rewrite_subscribe(&self, expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>) {
+            // Match in both AST shapes (MethodCall / Call+Field).
+            let subscribe_call = match &expr.node {
+                TypedExpression::MethodCall(mc) if mc.positional_args.len() == 2 => {
+                    if let TypedExpression::Variable(receiver_name) = &mc.receiver.node {
                         Some((
                             *receiver_name,
-                            f.field,
-                            c.positional_args[0].clone(),
-                            c.positional_args[1].clone(),
+                            mc.method,
+                            mc.positional_args[0].clone(),
+                            mc.positional_args[1].clone(),
                             expr.span,
                         ))
                     } else {
                         None
                     }
-                } else {
-                    None
+                }
+                TypedExpression::Call(c) if c.positional_args.len() == 2 => {
+                    if let TypedExpression::Field(f) = &c.callee.node {
+                        if let TypedExpression::Variable(receiver_name) = &f.object.node {
+                            Some((
+                                *receiver_name,
+                                f.field,
+                                c.positional_args[0].clone(),
+                                c.positional_args[1].clone(),
+                                expr.span,
+                            ))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            let Some((receiver_name, method, path_arg, closure_arg, span)) = subscribe_call else {
+                return;
+            };
+            if method.resolve_global().as_deref() != Some("subscribe") {
+                return;
+            }
+            if !self.fsm_names.contains(&receiver_name) {
+                let Some(name_str_arc) = receiver_name.resolve_global() else {
+                    return;
+                };
+                let name_str: &str = &name_str_arc;
+                let found_in_global = crate::fsm_registry::with_fsm_registry(|r| {
+                    r.find_by_name(self.module, name_str).is_some()
+                });
+                if !found_in_global {
+                    return;
                 }
             }
-            _ => None,
-        };
 
-        let Some((receiver_name, method, path_arg, closure_arg, span)) = subscribe_call else {
-            return;
-        };
-        if !fsm_names.contains(&receiver_name) {
-            return;
+            let fsm_name_arg = zyntax_typed_ast::TypedNode::new(
+                TypedExpression::Literal(TypedLiteral::String(receiver_name)),
+                Type::Primitive(PrimitiveType::String),
+                span,
+            );
+            let callee = zyntax_typed_ast::TypedNode::new(
+                TypedExpression::Variable(InternedString::new_global("__fsm_subscribe__")),
+                Type::Unknown,
+                span,
+            );
+            expr.node = TypedExpression::Call(TypedCall {
+                callee: Box::new(callee),
+                positional_args: vec![fsm_name_arg, path_arg, closure_arg],
+                named_args: vec![],
+                type_args: vec![],
+            });
+            expr.ty = Type::Primitive(PrimitiveType::Unit);
         }
-        if method.resolve_global().as_deref() != Some("subscribe") {
-            return;
+
+        fn rewrite_block(&self, block: &mut zyntax_typed_ast::typed_ast::TypedBlock) {
+            for stmt in &mut block.statements {
+                self.rewrite_stmt(stmt);
+            }
         }
 
-        let fsm_name_arg = zyntax_typed_ast::TypedNode::new(
-            TypedExpression::Literal(TypedLiteral::String(receiver_name)),
-            Type::Primitive(PrimitiveType::String),
-            span,
-        );
-        let callee = zyntax_typed_ast::TypedNode::new(
-            TypedExpression::Variable(InternedString::new_global("__fsm_subscribe__")),
-            Type::Unknown,
-            span,
-        );
-        expr.node = TypedExpression::Call(TypedCall {
-            callee: Box::new(callee),
-            positional_args: vec![fsm_name_arg, path_arg, closure_arg],
-            named_args: vec![],
-            type_args: vec![],
-        });
-        expr.ty = Type::Primitive(PrimitiveType::Unit);
-    }
-
-    fn rewrite_block(
-        block: &mut zyntax_typed_ast::typed_ast::TypedBlock,
-        fsm_names: &HashSet<InternedString>,
-    ) {
-        for stmt in &mut block.statements {
-            rewrite_stmt(stmt, fsm_names);
-        }
-    }
-
-    fn rewrite_stmt(
-        stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>,
-        fsm_names: &HashSet<InternedString>,
-    ) {
-        match &mut stmt.node {
-            TypedStatement::Expression(e) => rewrite_expr(e, fsm_names),
-            TypedStatement::Let(l) => {
-                if let Some(init) = &mut l.initializer {
-                    rewrite_expr(init, fsm_names);
+        fn rewrite_stmt(&self, stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>) {
+            match &mut stmt.node {
+                TypedStatement::Expression(e) => self.rewrite_expr(e),
+                TypedStatement::Let(l) => {
+                    if let Some(init) = &mut l.initializer {
+                        self.rewrite_expr(init);
+                    }
                 }
-            }
-            TypedStatement::Return(Some(e)) => rewrite_expr(e, fsm_names),
-            TypedStatement::If(if_stmt) => {
-                rewrite_expr(&mut if_stmt.condition, fsm_names);
-                rewrite_block(&mut if_stmt.then_block, fsm_names);
-                if let Some(else_block) = &mut if_stmt.else_block {
-                    rewrite_block(else_block, fsm_names);
+                TypedStatement::Return(Some(e)) => self.rewrite_expr(e),
+                TypedStatement::If(if_stmt) => {
+                    self.rewrite_expr(&mut if_stmt.condition);
+                    self.rewrite_block(&mut if_stmt.then_block);
+                    if let Some(else_block) = &mut if_stmt.else_block {
+                        self.rewrite_block(else_block);
+                    }
                 }
+                TypedStatement::While(w) => {
+                    self.rewrite_expr(&mut w.condition);
+                    self.rewrite_block(&mut w.body);
+                }
+                TypedStatement::Block(b) => self.rewrite_block(b),
+                _ => {}
             }
-            TypedStatement::While(w) => {
-                rewrite_expr(&mut w.condition, fsm_names);
-                rewrite_block(&mut w.body, fsm_names);
-            }
-            TypedStatement::Block(b) => rewrite_block(b, fsm_names),
-            _ => {}
         }
     }
+
+    let rewriter = Rewriter {
+        fsm_names: &fsm_names,
+        module,
+    };
 
     for decl in &mut program.declarations {
         match &mut decl.node {
             TypedDeclaration::Function(func) => {
                 if let Some(body) = &mut func.body {
-                    rewrite_block(body, &fsm_names);
+                    rewriter.rewrite_block(body);
                 }
             }
             TypedDeclaration::Impl(imp) => {
                 for method in &mut imp.methods {
                     if let Some(body) = &mut method.body {
-                        rewrite_block(body, &fsm_names);
+                        rewriter.rewrite_block(body);
                     }
                 }
             }
@@ -1543,6 +1607,20 @@ pub(crate) fn rewrite_component_calls_in_program(
         rewrites: &HashMap<InternedString, InternedString>,
     ) {
         if let TypedExpression::Call(call) = &mut expr.node {
+            // FSM trigger/subscribe shape via the
+            // `method_call_stmt` grammar — `MyFsm.trigger(...)`
+            // lowers to `Call(Field(Variable(MyFsm), trigger), …)`.
+            // Rewrite the inner Variable to the mangled name before
+            // recursing so the `resolve_fsm_*_calls` passes see the
+            // mangled receiver. The downstream MethodCall arm below
+            // handles the alternate `MethodCall { receiver: Variable,
+            // method, args }` AST shape uniformly.
+            if let TypedExpression::Field(f) = &mut call.callee.node
+                && let TypedExpression::Variable(name) = &f.object.node
+                && let Some(&new_name) = rewrites.get(name)
+            {
+                f.object.node = TypedExpression::Variable(new_name);
+            }
             rewrite_expr(&mut call.callee, rewrites);
             if let TypedExpression::Variable(callee) = &call.callee.node
                 && callee.resolve_global().as_deref() == Some("__component_call__")
