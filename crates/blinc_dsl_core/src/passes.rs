@@ -1294,9 +1294,7 @@ pub(crate) fn resolve_fsm_subscribe_calls(
                     let path_arg = args[0].clone();
                     let closure_arg = args[1].clone();
                     let callee = zyntax_typed_ast::TypedNode::new(
-                        TypedExpression::Variable(InternedString::new_global(
-                            "__fsm_subscribe__",
-                        )),
+                        TypedExpression::Variable(InternedString::new_global("__fsm_subscribe__")),
                         Type::Unknown,
                         span,
                     );

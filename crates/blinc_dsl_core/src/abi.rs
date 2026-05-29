@@ -2,10 +2,9 @@ use super::*;
 use crate::host::{
     blinc_dsl_computed_f64, blinc_dsl_computed_i32, blinc_dsl_computed_string, blinc_dsl_effect,
     blinc_format_int, blinc_fsm_runtime_trigger, blinc_fsm_subscribe, blinc_fsm_subscribe_all,
-    blinc_signal_get_by_id_f64,
-    blinc_signal_get_by_id_i32, blinc_signal_get_by_id_string, blinc_signal_set_by_id_f64,
-    blinc_signal_set_by_id_i32, blinc_signal_set_by_id_string, blinc_string_concat, blinc_text,
-    blinc_text_int,
+    blinc_signal_get_by_id_f64, blinc_signal_get_by_id_i32, blinc_signal_get_by_id_string,
+    blinc_signal_set_by_id_f64, blinc_signal_set_by_id_i32, blinc_signal_set_by_id_string,
+    blinc_string_concat, blinc_text, blinc_text_int,
 };
 use crate::widget_ffi::{
     blinc_b_view, blinc_blockquote_view, blinc_button_view, blinc_canvas_view, blinc_caption_view,

@@ -306,8 +306,8 @@ pub(crate) extern "C" fn blinc_fsm_subscribe_all(fsm_ptr: *const i32, closure_pt
         let bytes = path.as_bytes();
         let len = bytes.len() as i32;
         let total = 4 + bytes.len();
-        let layout = std::alloc::Layout::from_size_align(total, 4)
-            .expect("ZRTL string layout for fsm path");
+        let layout =
+            std::alloc::Layout::from_size_align(total, 4).expect("ZRTL string layout for fsm path");
         // SAFETY: layout is non-zero (4 + len ≥ 4) and 4-aligned.
         let raw = unsafe { std::alloc::alloc(layout) };
         if raw.is_null() {
@@ -318,11 +318,7 @@ pub(crate) extern "C" fn blinc_fsm_subscribe_all(fsm_ptr: *const i32, closure_pt
         // the i32 length header lives in the first 4 bytes, the utf8
         // payload starts at offset 4. Writes are within bounds.
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                len.to_le_bytes().as_ptr(),
-                raw,
-                4,
-            );
+            std::ptr::copy_nonoverlapping(len.to_le_bytes().as_ptr(), raw, 4);
             if !bytes.is_empty() {
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), raw.add(4), bytes.len());
             }
