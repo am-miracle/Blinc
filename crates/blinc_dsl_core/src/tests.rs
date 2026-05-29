@@ -5744,6 +5744,68 @@ fn dsl_derived_alias_works_like_computed() {
     );
 }
 
+/// Re-entrancy acceptance (post Phase-1.5): a DSL `effect { ... }`
+/// body can READ and WRITE signals without deadlocking against the
+/// outer `flush_effects` lock. Reads route through
+/// `blinc_core::reactive`'s in-flight-graph TLS fast path; writes
+/// queue on the deferred-writes TLS and run after the outer
+/// Signal::set completes its notifications.
+///
+/// This is the case that hung pre-Phase-1.5 (see the docstring on
+/// `dsl_effect_block_fires_at_registration` for the deferred reason).
+#[test]
+fn dsl_effect_block_reads_and_writes_signals_without_deadlock() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            signal src: i32
+            signal dst: i32
+
+            view {
+                effect {
+                    dst = src.get() + 1
+                }
+            }
+        "#,
+        "effect_re_entrant_rw.blinc",
+    )
+    .expect("compile");
+
+    // Initial render — effect fires once during view-body execution.
+    // src starts at 0, so dst becomes 1.
+    let _ = dsl.render_view().expect("render_view");
+    assert_eq!(
+        dsl.get_signal_i32("dst"),
+        Some(1),
+        "effect should fire once at registration with src=0 → dst=1"
+    );
+
+    // Host write that triggers the effect to re-run. Pre-Phase-1.5
+    // this deadlocked: src.set() acquired the graph mutex, called
+    // flush_effects, the effect closure tried to acquire the mutex
+    // again via `dst = src.get() + 1` and the test hung.
+    //
+    // Post-fix: the in-flight TLS lets `src.get()` borrow the locked
+    // graph directly; the `dst = …` assignment queues onto the
+    // deferred-writes TLS and runs after the outer src.set's
+    // notifications complete.
+    dsl.set_signal_i32("src", 5);
+    assert_eq!(
+        dsl.get_signal_i32("dst"),
+        Some(6),
+        "effect should re-fire on src.set(5) → dst = 5 + 1 = 6"
+    );
+
+    dsl.set_signal_i32("src", 41);
+    assert_eq!(
+        dsl.get_signal_i32("dst"),
+        Some(42),
+        "effect should keep firing on subsequent writes → dst = 41 + 1 = 42"
+    );
+}
+
 /// Phase 1B acceptance: an `effect { ... }` block at the top of a DSL
 /// view body fires once at registration. The closure body emits a
 /// scene-buffer op (via `text(...)`) which we observe through

@@ -95,6 +95,84 @@ impl<T> Signal<T> {
 }
 
 // =========================================================================
+// Re-entrancy infrastructure — TLS in-flight graph + deferred writes.
+//
+// The process-global graph is protected by a `Mutex`. Inside
+// `flush_effects` (called while the mutex is held), user effect
+// closures may want to read or write signals. Re-acquiring the
+// global mutex from inside such a closure deadlocks — same thread,
+// non-reentrant mutex.
+//
+// Two-piece fix that keeps the public `Signal<T>::get / set / update`
+// API unchanged:
+//
+// 1. **In-flight graph pointer** — `run_effect` stashes
+//    `self as *const ReactiveGraph` in TLS for the duration of the
+//    closure call. Reads (`Signal::try_get`) check the TLS first; if
+//    set, they borrow the graph directly without locking.
+//
+// 2. **Deferred-write queue** — writes attempted while the in-flight
+//    pointer is set get pushed onto a TLS queue of boxed closures.
+//    After the outer write returns (notifications fired, lock long
+//    released), [`drain_deferred_writes`] re-invokes each one. This
+//    matches the "write semantics defer to next tick" pattern
+//    SolidJS / Leptos use to keep effect bodies' read values stable
+//    within a single fire.
+// =========================================================================
+
+thread_local! {
+    /// Pointer to the `ReactiveGraph` currently executing inside
+    /// `run_effect`. `null` when no effect is in flight. Reads
+    /// inside effect closures use this to bypass the global mutex.
+    static IN_FLIGHT_GRAPH: std::cell::Cell<*const ReactiveGraph> =
+        const { std::cell::Cell::new(std::ptr::null()) };
+
+    /// Writes deferred while [`IN_FLIGHT_GRAPH`] was non-null.
+    /// Drained by [`drain_deferred_writes`] from the outer
+    /// `Signal<T>::set` after notifications complete.
+    static DEFERRED_WRITES: std::cell::RefCell<Vec<Box<dyn FnOnce() + Send>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Returns `true` if a `flush_effects` callback is currently running
+/// on this thread — i.e. re-entrant signal access would deadlock if
+/// it took the mutex.
+fn is_in_flush() -> bool {
+    IN_FLIGHT_GRAPH.with(|c| !c.get().is_null())
+}
+
+/// Run `f` against the in-flight graph if one is set; otherwise
+/// returns `None` and the caller takes the global-mutex path.
+fn with_in_flight_graph<R>(f: impl FnOnce(&ReactiveGraph) -> R) -> Option<R> {
+    let p = IN_FLIGHT_GRAPH.with(|c| c.get());
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: pointer is set only for the duration of `run_effect`'s
+    // closure invocation, which holds `&mut self` to the graph.
+    // We're a borrow within that window — single-threaded, no
+    // aliasing.
+    Some(f(unsafe { &*p }))
+}
+
+/// Drain queued deferred writes. Called from the outer write's
+/// continuation after notifications fire. Each closure is a fresh
+/// `Signal<T>::set` call that takes the normal path (in-flight
+/// pointer is clear by the time this runs).
+fn drain_deferred_writes() {
+    // Re-entrant safety: a deferred write may itself queue more.
+    // Loop until the queue is empty. Don't hold the borrow across
+    // the call.
+    loop {
+        let next = DEFERRED_WRITES.with(|q| q.borrow_mut().pop());
+        match next {
+            Some(f) => f(),
+            None => break,
+        }
+    }
+}
+
+// =========================================================================
 // Signal<T> rich API — operates against the process-global graph.
 //
 // These methods make `Signal<T>` a first-class reactive primitive:
@@ -109,7 +187,16 @@ impl<T> Signal<T> {
 impl<T: Clone + Send + 'static> Signal<T> {
     /// Read the current value. Returns `None` if the signal is no
     /// longer in the graph (e.g. graph reset between tests).
+    ///
+    /// Re-entrancy: when called from inside an effect closure, takes
+    /// the fast path against the in-flight graph reference (no
+    /// mutex acquisition) so DSL effect bodies that call
+    /// `<signal>.get()` don't deadlock against the lock the outer
+    /// `flush_effects` holds.
     pub fn try_get(&self) -> Option<T> {
+        if let Some(value) = with_in_flight_graph(|g| g.get(*self)) {
+            return value;
+        }
         let graph = global_graph();
         let g = graph.lock().unwrap();
         g.get(*self)
@@ -130,7 +217,23 @@ impl<T: Clone + Send + 'static> Signal<T> {
     ///
     /// Visual-only — does not flip the dirty flag. Use
     /// [`Self::set_rebuild`] for structural changes.
+    ///
+    /// Re-entrancy: if called while an effect closure is in flight
+    /// (the global graph mutex is held by an outer `flush_effects`),
+    /// the write is queued in the per-thread deferred-writes table
+    /// and drained after the outer `Signal::set` completes its
+    /// notifications. Writes during an effect are visible to
+    /// subsequent reads but NOT to the in-progress effect's own
+    /// in-this-fire reads — matching the SolidJS / Leptos semantics.
     pub fn set(&self, value: T) {
+        let id = *self;
+        if is_in_flush() {
+            DEFERRED_WRITES.with(|q| {
+                q.borrow_mut()
+                    .push(Box::new(move || Signal::<T>::from_id(id.id).set(value)));
+            });
+            return;
+        }
         let dirty_derived = {
             let graph = global_graph();
             let mut g = graph.lock().unwrap();
@@ -142,12 +245,22 @@ impl<T: Clone + Send + 'static> Signal<T> {
         for d_id in dirty_derived {
             notify_property_bindings_for_derived(d_id);
         }
+        drain_deferred_writes();
     }
 
     /// Set a new value AND flip the global dirty flag, requesting a
     /// full tree rebuild. Use for structural changes (adding/removing
     /// children, swapping branches); prefer [`Self::set`] otherwise.
     pub fn set_rebuild(&self, value: T) {
+        let id = *self;
+        if is_in_flush() {
+            DEFERRED_WRITES.with(|q| {
+                q.borrow_mut().push(Box::new(move || {
+                    Signal::<T>::from_id(id.id).set_rebuild(value)
+                }));
+            });
+            return;
+        }
         let dirty_derived = {
             let graph = global_graph();
             let mut g = graph.lock().unwrap();
@@ -160,11 +273,25 @@ impl<T: Clone + Send + 'static> Signal<T> {
         for d_id in dirty_derived {
             notify_property_bindings_for_derived(d_id);
         }
+        drain_deferred_writes();
     }
 
     /// Update the value via a closure. Fires the same subscribers as
     /// [`Self::set`].
     pub fn update(&self, f: impl FnOnce(T) -> T) {
+        // Deferring an `update` mid-flush means: read the value NOW
+        // (off the in-flight graph), apply `f`, and queue a `set` of
+        // the result. Without this, deferring `update` would lose the
+        // closure's snapshot semantics.
+        if is_in_flush() {
+            // Read current value via the in-flight graph fast path,
+            // apply f, queue the resulting set.
+            let current = self.try_get();
+            let Some(current) = current else { return };
+            let next = f(current);
+            self.set(next);
+            return;
+        }
         let dirty_derived = {
             let graph = global_graph();
             let mut g = graph.lock().unwrap();
@@ -176,10 +303,18 @@ impl<T: Clone + Send + 'static> Signal<T> {
         for d_id in dirty_derived {
             notify_property_bindings_for_derived(d_id);
         }
+        drain_deferred_writes();
     }
 
     /// Update the value AND flip the global dirty flag.
     pub fn update_rebuild(&self, f: impl FnOnce(T) -> T) {
+        if is_in_flush() {
+            let current = self.try_get();
+            let Some(current) = current else { return };
+            let next = f(current);
+            self.set_rebuild(next);
+            return;
+        }
         let dirty_derived = {
             let graph = global_graph();
             let mut g = graph.lock().unwrap();
@@ -192,6 +327,7 @@ impl<T: Clone + Send + 'static> Signal<T> {
         for d_id in dirty_derived {
             notify_property_bindings_for_derived(d_id);
         }
+        drain_deferred_writes();
     }
 }
 
@@ -679,11 +815,27 @@ impl ReactiveGraph {
             }
         };
 
+        // Set the thread-local in-flight graph pointer so `Signal<T>::get`
+        // / `set` / `update` calls inside the effect closure take the
+        // re-entrant fast path (read directly from this graph, queue
+        // writes for post-flush draining) instead of re-acquiring the
+        // global mutex. Cleared in a guard's Drop so a panic inside the
+        // closure can't leak the pointer to subsequent code.
+        struct InFlightGuard;
+        impl Drop for InFlightGuard {
+            fn drop(&mut self) {
+                IN_FLIGHT_GRAPH.with(|c| c.set(std::ptr::null()));
+            }
+        }
+        IN_FLIGHT_GRAPH.with(|c| c.set(self as *const _));
+        let _guard = InFlightGuard;
+
         // SAFETY: We're not modifying the effect while running it
         // (though the effect can modify signals, which is fine)
         unsafe {
             (*run_ptr)(self);
         }
+        drop(_guard);
 
         // Get tracked dependencies
         let deps = self.tracking.take().unwrap_or_default();
@@ -1226,9 +1378,18 @@ pub fn effect<F>(run: F) -> Effect
 where
     F: FnMut(&ReactiveGraph) + Send + 'static,
 {
-    let graph = global_graph();
-    let mut g = graph.lock().unwrap();
-    g.create_effect(run)
+    let handle = {
+        let graph = global_graph();
+        let mut g = graph.lock().unwrap();
+        g.create_effect(run)
+    };
+    // The effect's initial run happens inside `create_effect`'s
+    // `flush_effects`. If that closure queued writes via the
+    // re-entrancy fast path, drain them here — outside the lock,
+    // outside the in-flight window — so the writes actually take
+    // effect.
+    drain_deferred_writes();
+    handle
 }
 
 #[cfg(test)]
