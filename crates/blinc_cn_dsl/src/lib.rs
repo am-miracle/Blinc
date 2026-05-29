@@ -48,11 +48,14 @@
 //! shape gets wired.
 
 pub mod alert;
+pub mod avatar;
 pub mod badge;
 pub mod button;
 pub mod card;
 pub mod label;
+pub mod progress;
 pub mod separator;
+pub mod skeleton;
 pub mod spinner;
 
 // Internal — shared helpers used by per-widget modules. Not
@@ -60,11 +63,14 @@ pub mod spinner;
 pub(crate) mod color;
 
 pub use alert::CnAlert;
+pub use avatar::CnAvatar;
 pub use badge::CnBadge;
 pub use button::CnButton;
 pub use card::CnCard;
 pub use label::CnLabel;
+pub use progress::CnProgress;
 pub use separator::CnSeparator;
+pub use skeleton::CnSkeleton;
 pub use spinner::CnSpinner;
 
 use blinc_dsl_core::{BlincDsl, BlincDslResult};
@@ -98,5 +104,8 @@ pub fn register_basics(dsl: &BlincDsl) -> BlincDslResult<()> {
     dsl.register_extern_widget::<CnSeparator>()?;
     dsl.register_extern_widget::<CnSpinner>()?;
     dsl.register_extern_widget::<CnCard>()?;
+    dsl.register_extern_widget::<CnProgress>()?;
+    dsl.register_extern_widget::<CnAvatar>()?;
+    dsl.register_extern_widget::<CnSkeleton>()?;
     Ok(())
 }

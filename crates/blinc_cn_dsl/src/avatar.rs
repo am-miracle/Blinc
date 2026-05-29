@@ -1,0 +1,93 @@
+//! `cn.Avatar` — circular / square profile image with fallback initials.
+
+use blinc_dsl_core::extern_widget;
+use blinc_layout::div::ElementBuilder;
+
+/// `cn.Avatar(src?, fallback?, size?, shape?, fallback_bg?, fallback_color?)`
+/// — profile image with fallback initials.
+///
+/// Props (DSL surface):
+/// - `src: string` — image URL/path. Empty falls back to text.
+/// - `fallback: string` — initials shown when no image (or image
+///   fails to load). Typically `"JD"` etc.
+/// - `size: string` — `"extra_small"`, `"small"`, `"medium"`
+///   (default), `"large"`, `"extra_large"`.
+/// - `shape: string` — `"circle"` (default) or `"square"`.
+/// - `fallback_bg: string` / `fallback_color: string` — hex colour
+///   overrides for the fallback-initials background and text.
+///
+/// `blinc_cn::AvatarBuilder` doesn't expose a OnceCell-style cache
+/// API today — its `.src() / .fallback() / .size()` methods consume
+/// `self` and return `Self`. Each render rebuilds the builder; cost
+/// is dominated by image-loading anyway, so the cache cost would be
+/// negligible. `children_builders()` returns `&[]` for now (no
+/// children-bearing API on cn::Avatar).
+#[extern_widget(namespace = "cn", name = "Avatar")]
+pub struct CnAvatar {
+    pub src: String,
+    pub fallback: String,
+    pub size: String,
+    pub shape: String,
+    pub fallback_bg: String,
+    pub fallback_color: String,
+}
+
+impl CnAvatar {
+    fn to_cn_builder(&self) -> blinc_cn::AvatarBuilder {
+        let size = match self.size.as_str() {
+            "extra_small" | "xs" => blinc_cn::AvatarSize::ExtraSmall,
+            "small" | "sm" => blinc_cn::AvatarSize::Small,
+            "large" | "lg" => blinc_cn::AvatarSize::Large,
+            "extra_large" | "xl" => blinc_cn::AvatarSize::ExtraLarge,
+            "" | "medium" | "md" => blinc_cn::AvatarSize::Medium,
+            other => {
+                tracing::warn!(
+                    size = %other,
+                    "cn.Avatar: unknown size — falling back to `medium`",
+                );
+                blinc_cn::AvatarSize::Medium
+            }
+        };
+        let shape = match self.shape.as_str() {
+            "square" => blinc_cn::AvatarShape::Square,
+            "" | "circle" => blinc_cn::AvatarShape::Circle,
+            other => {
+                tracing::warn!(
+                    shape = %other,
+                    "cn.Avatar: unknown shape — falling back to `circle`",
+                );
+                blinc_cn::AvatarShape::Circle
+            }
+        };
+        let mut b = blinc_cn::avatar().size(size).shape(shape);
+        if !self.src.is_empty() {
+            b = b.src(self.src.clone());
+        }
+        if !self.fallback.is_empty() {
+            b = b.fallback(self.fallback.clone());
+        }
+        if let Some(c) =
+            crate::color::parse_color_prop("cn.Avatar", "fallback_bg", &self.fallback_bg)
+        {
+            b = b.fallback_bg(c);
+        }
+        if let Some(c) =
+            crate::color::parse_color_prop("cn.Avatar", "fallback_color", &self.fallback_color)
+        {
+            b = b.fallback_color(c);
+        }
+        b
+    }
+}
+
+impl ElementBuilder for CnAvatar {
+    fn build(&self, tree: &mut blinc_layout::LayoutTree) -> blinc_layout::LayoutNodeId {
+        self.to_cn_builder().build(tree)
+    }
+    fn render_props(&self) -> blinc_layout::RenderProps {
+        self.to_cn_builder().render_props()
+    }
+    fn children_builders(&self) -> &[Box<dyn ElementBuilder>] {
+        &[]
+    }
+}
