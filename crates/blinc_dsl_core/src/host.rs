@@ -167,8 +167,8 @@ pub(crate) extern "C" fn blinc_fsm_runtime_trigger(fsm_ptr: *const i32, path_ptr
 /// `extern "C" fn() -> i32` ptr. We transmute, hand the closure to
 /// `blinc_core::reactive::computed(|_g| f())`, and return
 /// `Computed::derived_id().to_raw() as i64`. Callers bind the
-/// returned id to a DSL local; future passes (Phase 1D) consume the
-/// id as a reactive prop-binding source.
+/// returned id to a DSL local; later passes consume the id as a
+/// reactive prop-binding source.
 ///
 /// # Safety
 ///

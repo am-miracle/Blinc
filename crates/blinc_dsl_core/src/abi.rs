@@ -15,11 +15,12 @@ use crate::widget_ffi::{
     blinc_new_style_overlay, blinc_notch_view, blinc_ol_view, blinc_p_view, blinc_pre_view,
     blinc_push_child, blinc_rich_text_view, blinc_set_overlay_bg, blinc_set_overlay_border_color,
     blinc_set_overlay_border_width, blinc_set_overlay_corner_radius, blinc_set_overlay_opacity,
-    blinc_set_struct_bool, blinc_set_struct_f64, blinc_set_struct_handle, blinc_set_struct_i32,
-    blinc_set_struct_i64, blinc_set_struct_string, blinc_small_view, blinc_span_view,
-    blinc_stack_view, blinc_strong_view, blinc_svg_view, blinc_table_view, blinc_task_item_view,
-    blinc_tbody_view, blinc_td_view, blinc_text_area_view, blinc_text_input_view, blinc_text_view,
-    blinc_tfoot_view, blinc_th_view, blinc_thead_view, blinc_tr_view, blinc_ul_view,
+    blinc_set_overlay_opacity_signal, blinc_set_struct_bool, blinc_set_struct_f64,
+    blinc_set_struct_handle, blinc_set_struct_i32, blinc_set_struct_i64, blinc_set_struct_string,
+    blinc_small_view, blinc_span_view, blinc_stack_view, blinc_strong_view, blinc_svg_view,
+    blinc_table_view, blinc_task_item_view, blinc_tbody_view, blinc_td_view, blinc_text_area_view,
+    blinc_text_input_view, blinc_text_view, blinc_tfoot_view, blinc_th_view, blinc_thead_view,
+    blinc_tr_view, blinc_ul_view,
 };
 
 /// Pairs a DSL-visible symbol name with an `extern "C"` fn pointer and signature.
@@ -53,7 +54,7 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_text_int as *const u8,
         },
         BuiltinDescriptor {
-            // Id-keyed signal externs (Phase 1A). The DSL lowering pass
+            // Id-keyed signal externs. The DSL lowering pass
             // bakes the `SignalId.to_raw()` as an i64 literal at compile
             // time; these externs reconstruct `Signal::<T>::from_id` and
             // delegate to `blinc_core::reactive::Signal::get`/`set`.
@@ -764,6 +765,20 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ],
             return_type: Type::Primitive(PrimitiveType::Unit),
             ptr: blinc_set_overlay_opacity as *const u8,
+        },
+        BuiltinDescriptor {
+            // Signal-bound variant of `__set_overlay_opacity__` — second
+            // arg is a `SignalId.to_raw()` cast to i64. The lowering
+            // pass `lower_styling_args_to_overlays` emits this extern
+            // when the `opacity = …` named-arg's value is a Variable
+            // referring to a DSL-declared f64 signal.
+            name: "__set_overlay_opacity_signal__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_set_overlay_opacity_signal as *const u8,
         },
         BuiltinDescriptor {
             name: "__set_overlay_corner_radius__",

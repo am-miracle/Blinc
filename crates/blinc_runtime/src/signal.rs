@@ -20,8 +20,8 @@
 //!
 //! This module used to host a thread-local `HashMap<String, ZyntaxValue>`
 //! plus typed accessors that stored values directly. That facade was
-//! retired in Phase 1A of the DSL reactive-integration plan — the
-//! underlying `blinc_core::reactive::Signal<T>` is now the storage,
+//! retired when the DSL reactive integration landed — the underlying
+//! `blinc_core::reactive::Signal<T>` is now the storage,
 //! and this map only carries the name→id mapping for callers that
 //! reach in by name.
 

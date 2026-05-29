@@ -106,6 +106,12 @@ pub(crate) fn current_call_id() -> u64 {
 /// Per-call overlay of visual styling props. `Some` fields
 /// override the wrapped widget's `render_props()`; `None` fields
 /// leave it alone.
+///
+/// Reactive props: the `*_signal_id_raw` fields take precedence over
+/// their literal counterparts. When set, `apply_to` reads the current
+/// value from `blinc_core::reactive::Signal::<T>::from_id(...)` each
+/// render — so a DSL-side mutation of the signal value reflects in
+/// the next paint without re-running the view body.
 #[derive(Debug, Default, Clone)]
 pub struct RenderPropsOverlay {
     pub background: Option<blinc_core::layer::Brush>,
@@ -114,6 +120,11 @@ pub struct RenderPropsOverlay {
     pub corner_radius: Option<f32>,
     pub border_width: Option<f32>,
     pub border_color: Option<blinc_core::layer::Color>,
+    /// `SignalId.to_raw()` for an f64 DSL signal bound to opacity.
+    /// When `Some`, `apply_to` reads the current value via the
+    /// process-global reactive graph (clamped to f32 since
+    /// `RenderProps::opacity` is f32).
+    pub opacity_signal_id_raw: Option<u64>,
 }
 
 impl RenderPropsOverlay {
@@ -121,7 +132,16 @@ impl RenderPropsOverlay {
         if let Some(bg) = self.background.clone() {
             base.background = Some(bg);
         }
-        if let Some(o) = self.opacity {
+        // Reactive opacity wins over a literal. Pull the current f64
+        // value from the signal and cast to f32 for `RenderProps`.
+        if let Some(id_raw) = self.opacity_signal_id_raw {
+            let signal = blinc_core::reactive::Signal::<f64>::from_id(
+                blinc_core::reactive::SignalId::from_raw(id_raw),
+            );
+            if let Some(v) = signal.try_get() {
+                base.opacity = v as f32;
+            }
+        } else if let Some(o) = self.opacity {
             base.opacity = o;
         }
         if let Some(r) = self.corner_radius {
@@ -1094,6 +1114,24 @@ pub(crate) extern "C" fn blinc_set_overlay_opacity(ptr: i64, val: f64) {
     }
     let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
     overlay.opacity = Some(val as f32);
+}
+
+/// Reactive-binding variant of `blinc_set_overlay_opacity`. Records
+/// the `SignalId.to_raw()` on the overlay so `apply_to` reads the
+/// current signal value each render. The DSL grammar emits this
+/// extern when the `opacity = …` named-arg's value is a Variable
+/// referring to a DSL-declared f64 signal (see
+/// `passes::lower_styling_args_to_overlays`).
+///
+/// `id_raw` arrives as i64 — same wire convention as the signal-by-id
+/// getters/setters (Cranelift's value-map doesn't handle
+/// `HirConstant::U64`).
+pub(crate) extern "C" fn blinc_set_overlay_opacity_signal(ptr: i64, id_raw: i64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.opacity_signal_id_raw = Some(id_raw as u64);
 }
 
 pub(crate) extern "C" fn blinc_set_overlay_corner_radius(ptr: i64, val: f64) {

@@ -5600,7 +5600,7 @@ fn multiple_signals_rewrite_independently() {
 
 // Host-machinery + end-to-end signal-guard tests.
 
-/// Phase 1A acceptance: a DSL-declared `signal` is THE
+/// A DSL-declared `signal` is THE
 /// `blinc_core::reactive::Signal<T>` primitive — share storage,
 /// share the property-binding registry. Writing to the DSL signal
 /// via `dsl.set_signal_i32(name, value)` and then reading the SAME
@@ -5649,11 +5649,10 @@ fn dsl_signal_shares_storage_with_blinc_core_signal_primitive() {
     assert_eq!(dsl.get_signal_i32("tally"), Some(99));
 }
 
-/// Phase 1C acceptance: `computed { expr } : T` parses, compiles, and
-/// the JIT call returns a non-zero `DerivedId.to_raw()` — that's the
-/// extern's contract. We can't easily check the derived's VALUE
-/// without binding it as a widget prop (Phase 1D), but a non-zero
-/// id proves:
+/// `computed { expr } : T` parses, compiles, and the JIT call returns
+/// a non-zero `DerivedId.to_raw()` — that's the extern's contract.
+/// We can't easily check the derived's VALUE without binding it as
+/// a widget prop, but a non-zero id proves:
 ///
 /// 1. The grammar's `computed_expr_i32` rule fires for the
 ///    `computed { … } : i32` form.
@@ -5744,15 +5743,11 @@ fn dsl_derived_alias_works_like_computed() {
     );
 }
 
-/// Re-entrancy acceptance (post Phase-1.5): a DSL `effect { ... }`
-/// body can READ and WRITE signals without deadlocking against the
-/// outer `flush_effects` lock. Reads route through
-/// `blinc_core::reactive`'s in-flight-graph TLS fast path; writes
-/// queue on the deferred-writes TLS and run after the outer
+/// A DSL `effect { ... }` body can READ and WRITE signals without
+/// deadlocking against the outer `flush_effects` lock. Reads route
+/// through `blinc_core::reactive`'s in-flight-graph TLS fast path;
+/// writes queue on the deferred-writes TLS and run after the outer
 /// Signal::set completes its notifications.
-///
-/// This is the case that hung pre-Phase-1.5 (see the docstring on
-/// `dsl_effect_block_fires_at_registration` for the deferred reason).
 #[test]
 fn dsl_effect_block_reads_and_writes_signals_without_deadlock() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -5782,10 +5777,10 @@ fn dsl_effect_block_reads_and_writes_signals_without_deadlock() {
         "effect should fire once at registration with src=0 → dst=1"
     );
 
-    // Host write that triggers the effect to re-run. Pre-Phase-1.5
-    // this deadlocked: src.set() acquired the graph mutex, called
-    // flush_effects, the effect closure tried to acquire the mutex
-    // again via `dst = src.get() + 1` and the test hung.
+    // Host write that triggers the effect to re-run. Before the
+    // re-entrancy fix this deadlocked: src.set() acquired the graph
+    // mutex, called flush_effects, and the effect closure tried to
+    // re-acquire the same mutex via `dst = src.get() + 1`.
     //
     // Post-fix: the in-flight TLS lets `src.get()` borrow the locked
     // graph directly; the `dst = …` assignment queues onto the
@@ -5806,8 +5801,8 @@ fn dsl_effect_block_reads_and_writes_signals_without_deadlock() {
     );
 }
 
-/// Phase 1B acceptance: an `effect { ... }` block at the top of a DSL
-/// view body fires once at registration. The closure body emits a
+/// An `effect { ... }` block at the top of a DSL view body fires
+/// once at registration. The closure body emits a
 /// scene-buffer op (via `text(...)`) which we observe through
 /// `dsl.render_view()`. Confirms:
 ///
@@ -5848,6 +5843,66 @@ fn dsl_effect_block_fires_at_registration() {
         saw_effect_text,
         "effect closure should fire on initial registration during view body \
          execution — expected `DslOp::Text(\"effect fired\")` in {ops:?}"
+    );
+}
+
+/// `Div(opacity = alpha)` where `alpha` is a DSL-declared f64 signal:
+/// the lowering pass detects the bare-Variable arg, mints/looks up
+/// the signal id, and emits `__set_overlay_opacity_signal__` instead
+/// of the literal-baking `__set_overlay_opacity__`. At render time
+/// `RenderPropsOverlay::apply_to` reads the live value from the
+/// reactive graph — so a host-side `set_signal_f64` between two
+/// `render_props()` calls reflects in the second snapshot without
+/// re-running the view body.
+#[test]
+fn dsl_opacity_signal_binding_reflects_signal_value() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    // Seed the signal before compile so the first render observes a
+    // non-default value — proves the overlay reads through the signal
+    // rather than the f64 default of 0.0.
+    dsl.set_signal_f64("alpha", 0.25);
+    dsl.compile_source(
+        r#"
+            signal alpha: f64
+            view {
+                Div(opacity = alpha)
+            }
+        "#,
+        "div_opacity_signal.blinc",
+    )
+    .expect("compile");
+
+    let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+    let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+    let ZyntaxValue::Int(handle) = value else {
+        panic!("expected widget handle, got: {value:?}");
+    };
+    assert_ne!(handle, 0);
+
+    let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+    let WidgetBox::Custom(builder) = *widget else {
+        panic!("expected Custom(Styled<Div>)");
+    };
+
+    // First snapshot: signal=0.25 at compile-and-render time.
+    let props = builder.render_props();
+    assert!(
+        (props.opacity - 0.25).abs() < 1e-6,
+        "first render should reflect seeded signal value 0.25, got {}",
+        props.opacity
+    );
+
+    // Mutate the signal between renders. No view-body re-run — the
+    // overlay reads the new value directly through the reactive
+    // primitive on the next `render_props()` call.
+    dsl.set_signal_f64("alpha", 0.85);
+    let props2 = builder.render_props();
+    assert!(
+        (props2.opacity - 0.85).abs() < 1e-6,
+        "second render should reflect updated signal value 0.85 without view-body re-run, got {}",
+        props2.opacity
     );
 }
 

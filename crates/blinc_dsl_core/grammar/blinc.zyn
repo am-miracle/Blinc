@@ -32,7 +32,7 @@
     // `inject_builtin_externs` injects matching extern decls; the
     // host registers the implementations via
     // `register_function_typed` and the JIT calls into Rust.
-    // Id-keyed signal accessors (Phase 1A). The DSL lowering pass
+    // Id-keyed signal accessors. The DSL lowering pass
     // bakes the `SignalId.to_raw()` as an i64 literal at the call
     // site; these externs reconstruct `Signal::from_id` and delegate
     // to `blinc_core::reactive` directly. No runtime name lookup.
@@ -99,6 +99,11 @@
     __new_style_overlay__: "__new_style_overlay__",
     __set_overlay_bg__: "__set_overlay_bg__",
     __set_overlay_opacity__: "__set_overlay_opacity__",
+    // Signal-bound opacity. Second arg is a `SignalId.to_raw()` cast
+    // to i64; the host extern records it on the overlay so each
+    // render reads the current f64 value via
+    // `blinc_core::reactive::Signal::<f64>::from_id(...)`.
+    __set_overlay_opacity_signal__: "__set_overlay_opacity_signal__",
     __set_overlay_corner_radius__: "__set_overlay_corner_radius__",
     __set_overlay_border_width__: "__set_overlay_border_width__",
     __set_overlay_border_color__: "__set_overlay_border_color__",

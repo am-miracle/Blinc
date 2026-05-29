@@ -3512,6 +3512,27 @@ pub(crate) fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
         })
     }
 
+    /// If `value` is a bare identifier naming a DSL-declared signal whose
+    /// registered type matches `expected_ty`, return its raw `SignalId`.
+    /// Used by the styling-arg lowering to redirect prop setters like
+    /// `__set_overlay_opacity__` to their `_signal` counterparts so the
+    /// overlay reads the live value through the reactive primitive at
+    /// paint time instead of baking a snapshot.
+    fn signal_id_for_variable(
+        value: &zyntax_typed_ast::TypedNode<TypedExpression>,
+        expected_ty: blinc_runtime::signal::SignalType,
+    ) -> Option<u64> {
+        let TypedExpression::Variable(name) = &value.node else {
+            return None;
+        };
+        let name_str = name.resolve_global()?;
+        let (id_raw, ty) = blinc_runtime::signal::lookup(&name_str)?;
+        if ty != expected_ty {
+            return None;
+        }
+        Some(id_raw)
+    }
+
     fn walk_stmt(stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>, counter: &mut u32) {
         match &mut stmt.node {
             TypedStatement::Expression(e) => rewrite_expr(e, counter),
@@ -3649,13 +3670,43 @@ pub(crate) fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
             span,
         ));
 
-        // One setter call per styling arg.
+        // One setter call per styling arg. If the value is a bare
+        // identifier referring to a DSL-declared signal, redirect to
+        // the `_signal` variant — the host extern records the
+        // `SignalId.to_raw()` on the overlay so each render reads the
+        // live signal value via the reactive primitive instead of
+        // baking a literal.
         for (setter_name, na) in styling_args {
+            let value_node = *na.value;
+            let signal_redirect = if setter_name == "__set_overlay_opacity__" {
+                signal_id_for_variable(&value_node, blinc_runtime::signal::SignalType::F64).map(
+                    |id_raw_u64| {
+                        let signal_setter = zyntax_typed_ast::InternedString::new_global(
+                            "__set_overlay_opacity_signal__",
+                        );
+                        let id_arg = typed_node(
+                            TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(
+                                id_raw_u64 as i64 as i128,
+                            )),
+                            i64_ty.clone(),
+                            span,
+                        );
+                        (signal_setter, id_arg)
+                    },
+                )
+            } else {
+                None
+            };
+            let (effective_setter, effective_arg) = match signal_redirect {
+                Some((setter, arg)) => (setter, arg),
+                None => (
+                    zyntax_typed_ast::InternedString::new_global(setter_name),
+                    value_node,
+                ),
+            };
             let setter_call = TypedExpression::Call(TypedCall {
                 callee: Box::new(typed_node(
-                    TypedExpression::Variable(zyntax_typed_ast::InternedString::new_global(
-                        setter_name,
-                    )),
+                    TypedExpression::Variable(effective_setter),
                     Type::Any,
                     span,
                 )),
@@ -3665,7 +3716,7 @@ pub(crate) fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
                         i64_ty.clone(),
                         span,
                     ),
-                    *na.value,
+                    effective_arg,
                 ],
                 named_args: vec![],
                 type_args: vec![],
