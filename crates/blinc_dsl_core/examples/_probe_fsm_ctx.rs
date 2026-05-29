@@ -11,7 +11,6 @@ const SRC: &str = include_str!("counter_dsl.blinc");
 fn main() {
     let _ = tracing_subscriber::fmt().try_init();
     let dsl = BlincDsl::new().expect("dsl");
-    dsl.install_runtime_bridge();
     match dsl.compile_source(SRC, "counter_dsl.blinc") {
         Ok(syms) => println!("compile: Ok ({} symbols)", syms.len()),
         Err(e) => {

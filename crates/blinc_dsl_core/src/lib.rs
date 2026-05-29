@@ -183,7 +183,7 @@ impl BlincDsl {
         let stateful_view_deps = Arc::new(Mutex::new(Vec::new()));
         let stateful_view_fsms = Arc::new(Mutex::new(Vec::new()));
 
-        Ok(Self {
+        let this = Self {
             grammar,
             runtime,
             value_returning_views,
@@ -197,12 +197,24 @@ impl BlincDsl {
             has_stateful_view,
             stateful_view_deps,
             stateful_view_fsms,
-        })
+        };
+        // Auto-install the JIT bridge so FSM tick guards + transition
+        // action bodies dispatch out of the box. Pre-fix this was an
+        // opt-in `install_runtime_bridge()` call, which the common
+        // single-DSL case had no reason to make — meaning guards / actions
+        // silently no-op'd through the dispatcher's `None` fallback unless
+        // the user happened to discover the method. Multi-DSL apps can
+        // still call `install_runtime_bridge()` explicitly to swap which
+        // instance owns the process-wide slot (last-write-wins).
+        this.install_runtime_bridge();
+        Ok(this)
     }
 
     /// Install this `BlincDsl`'s JIT guard dispatcher as the process-wide
-    /// `blinc_runtime::fsm::GuardDispatcher`. Opt-in to avoid races between
-    /// multiple `BlincDsl` instances in the same process. Last-write-wins.
+    /// `blinc_runtime::fsm::GuardDispatcher`. `BlincDsl::new()` already
+    /// calls this; only needed when multiple `BlincDsl` instances coexist
+    /// and you want to choose which one owns the dispatcher slot
+    /// (last-write-wins).
     pub fn install_runtime_bridge(&self) {
         blinc_runtime::fsm::set_guard_dispatcher(std::sync::Arc::new(JitGuardDispatcher {
             runtime: self.runtime.clone(),
@@ -431,19 +443,6 @@ impl BlincDsl {
         // lowering sees them as known symbols.
         self.inject_imported_view_externs(&mut typed_program, filename);
 
-        // Snapshot signal/fsm decls BEFORE rewrite/strip passes destroy them.
-        {
-            let (signals, fsms) = collect_declared(&typed_program);
-            self.declared_signals
-                .lock()
-                .expect("declared_signals mutex poisoned")
-                .extend(signals);
-            self.declared_fsms
-                .lock()
-                .expect("declared_fsms mutex poisoned")
-                .extend(fsms);
-        }
-
         // Detect and strip `@stateful` / `@fsm` markers. Accumulate explicit deps.
         {
             let (saw_stateful, explicit_deps, explicit_fsms) =
@@ -492,6 +491,26 @@ impl BlincDsl {
         // signals + lifted-body rewrites flow through the standard
         // signal-resolution path.
         synthesize_fsm_context_and_actions(&mut typed_program);
+
+        // Snapshot signal/fsm decls AFTER `synthesize_fsm_context_and_actions`
+        // so the synthesised `__fsm_ctx_<Fsm>_<field>` signals join the
+        // declared-signal list. The `@stateful` (no-deps) subscription
+        // relies on this snapshot to enumerate which signals trigger
+        // refresh — without it, FSM context mutations would write the
+        // signal but the Stateful container wouldn't re-render. MUST
+        // still run BEFORE `resolve_signal_calls` and friends, which
+        // strip / rewrite signal decls.
+        {
+            let (signals, fsms) = collect_declared(&typed_program);
+            self.declared_signals
+                .lock()
+                .expect("declared_signals mutex poisoned")
+                .extend(signals);
+            self.declared_fsms
+                .lock()
+                .expect("declared_fsms mutex poisoned")
+                .extend(fsms);
+        }
         lower_match_blocks(&mut typed_program);
         // MUST run before `resolve_const_references` so const-group
         // members are hoisted into individual `__blinc_const__`
