@@ -2413,10 +2413,20 @@ pub(crate) fn lower_match_blocks(program: &mut TypedProgram) {
                 continue;
             }
 
-            // Each arm at i+1..end_idx is a Block whose first stmt is `__match_arm__(pat)`.
+            // Each arm at i+1..end_idx is an `Expression(Block(…))`
+            // statement whose inner Block's first stmt is
+            // `__match_arm__(pat)`. The grammar wraps the arm body in
+            // `Expression(Block(…))` instead of `Block(…)` because
+            // Zyntax's action-language interpreter doesn't construct
+            // the `Block` variant of `TypedStatement` — see the
+            // comment on `match_stmt` in `grammar/blinc.zyn` for the
+            // full rationale.
             let mut arms: Vec<(Option<String>, TypedBlock)> = Vec::new();
             for arm in stmts[(i + 1)..end_idx].iter() {
-                let TypedStatement::Block(arm_block) = &arm.node else {
+                let TypedStatement::Expression(arm_expr) = &arm.node else {
+                    continue;
+                };
+                let TypedExpression::Block(arm_block) = &arm_expr.node else {
                     continue;
                 };
                 if arm_block.statements.is_empty() {
