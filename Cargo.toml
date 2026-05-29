@@ -247,14 +247,7 @@ blinc_platform = { path = "crates/blinc_platform" }
 # pipeline in lockstep with core.
 blinc_gpu = { path = "crates/blinc_gpu" }
 
-# Temporary [patch] redirect for in-flight zyntax development —
-# wires the git-rev deps to the local sibling checkout so a Blinc
-# probe can verify the upstream If-expr type-defaulting fix before
-# the SHA is bumped. Drop once the zyntax change lands and the
-# per-crate `rev =` pins are bumped.
-[patch."https://github.com/darmie/zyntax"]
-zyntax_embed = { path = "../zyntax/crates/zyntax_embed" }
-zyntax_typed_ast = { path = "../zyntax/crates/typed_ast" }
-zyntax_compiler = { path = "../zyntax/crates/compiler" }
-zyn_peg = { path = "../zyntax/crates/zyn_peg" }
-zrtl = { path = "../zyntax/sdk/zrtl" }
+# (former [patch] redirect for in-flight zyntax development was here —
+# dropped once the upstream change landed and per-crate `rev =` pins
+# were bumped to the matching SHA. Restore the same shape if you need
+# to iterate on zyntax against this checkout again.)
