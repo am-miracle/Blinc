@@ -517,6 +517,36 @@ fn call_site_instance_id_is_stable_and_discriminating() {
     );
 }
 
+/// Path-based instance IDs incorporate the (post-mangling) component
+/// name, so two files declaring `Counter` resolve to distinct
+/// identities even at the exact same span offset. The filename hash
+/// would already discriminate, but the mangled component name adds a
+/// second axis — important for downstream features that key state on
+/// the path alone without knowing which file the call came from.
+#[test]
+fn call_site_path_id_namespace_mangling_discriminates_cross_file_counters() {
+    use crate::passes::call_site_path_id;
+
+    // Same filename + same offset + same class — only the component
+    // name differs. Pre-namespacing both would have been "Counter";
+    // post-namespacing each file's component carries its module
+    // prefix.
+    let red_id = call_site_path_id("main.blinc", 0x20, "red$Counter", None, None);
+    let blue_id = call_site_path_id("main.blinc", 0x20, "blue$Counter", None, None);
+    assert_ne!(
+        red_id, blue_id,
+        "mangled component name must be part of identity so two files' \
+         same-named components don't share state when referenced at \
+         the same call site"
+    );
+    // Sanity: identical mangled name still produces the same id.
+    assert_eq!(
+        red_id,
+        call_site_path_id("main.blinc", 0x20, "red$Counter", None, None),
+        "id must be stable for identical (filename, offset, component, class, id)"
+    );
+}
+
 /// `render_component(name)` invokes the mangled `<name>$view`.
 #[test]
 fn render_component_emits_view_ops() {

@@ -70,7 +70,11 @@ fn compile_directory_emits_per_file_function_names() {
 /// a sibling file; `compile_project` resolves the dependency
 /// through the registered filesystem resolver, merges the
 /// imported decls into the entry program, and JIT-compiles the
-/// result.
+/// result. With `apply_module_namespace_prefix` in the pipeline,
+/// `Counter` from `widgets.blinc` becomes `widgets$Counter` —
+/// the entry's `Counter()` call gets rewritten to that mangled
+/// name by `inject_imported_view_externs` so the JIT symbol
+/// resolves cleanly.
 #[test]
 fn compile_project_resolves_es6_imports() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -96,19 +100,21 @@ fn compile_project_resolves_es6_imports() {
         .compile_project(&entry, dir.path())
         .expect("compile_project");
     assert!(
-        names.iter().any(|s| s == "Counter$view"),
-        "merged import should expose Counter$view, got: {names:?}"
+        names.iter().any(|s| s == "widgets$Counter$view"),
+        "merged import should expose mangled `widgets$Counter$view`, got: {names:?}"
     );
     assert!(
         names.iter().any(|s| s == "render_view"),
-        "entry should expose render_view, got: {names:?}"
+        "entry should expose render_view (the entry view body is not a component, so it stays un-mangled), got: {names:?}"
     );
 }
 
-/// Nested ES6 path: `import { X } from "./ui/widgets"`
-/// resolves to `<root>/ui/widgets.blinc` via the NodeStyle
-/// resolver. Confirms `ModuleArchitecture::NodeStyle` handles
-/// multi-segment paths.
+/// Nested ES6 path: `import { X } from "./ui/widgets"` resolves to
+/// `<root>/ui/widgets.blinc` via the NodeStyle resolver. With the
+/// namespace prefix derived from path-relative-to-source-root, the
+/// nested file's `Counter` becomes `ui$widgets$Counter` — multi-
+/// segment path components join with the same `$` separator
+/// `apply_module_namespace_prefix` uses for the class name itself.
 #[test]
 fn compile_project_resolves_nested_es6_path() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -135,8 +141,73 @@ fn compile_project_resolves_nested_es6_path() {
         .compile_project(&entry, dir.path())
         .expect("compile_project");
     assert!(
-        names.iter().any(|s| s == "Counter$view"),
-        "nested import should expose Counter$view, got: {names:?}"
+        names.iter().any(|s| s == "ui$widgets$Counter$view"),
+        "nested import should expose `ui$widgets$Counter$view` (path segments joined with `$`), got: {names:?}"
+    );
+}
+
+/// Two files each declaring a `component Counter` no longer collide
+/// in the JIT symbol table or the component registry — they emit
+/// `<module>$Counter$view` and `<other_module>$Counter$view` as
+/// distinct symbols. The entry imports both (the last-imported
+/// `Counter` wins at the use-site in the entry's own source until
+/// alias support lands as a follow-up), but `compile_project` walks
+/// every transitive import and both files get compiled to distinct
+/// mangled symbols regardless of which one the entry's view body
+/// actually references.
+///
+/// Regression-covers the cross-file collision case the namespacing
+/// pass exists to prevent — pre-namespacing, both `Counter$view`
+/// symbols would have collapsed onto a single entry in the JIT
+/// symbol table and the component registry, and whichever file
+/// compiled last would silently overwrite the other.
+#[test]
+fn cross_file_same_named_components_do_not_collide() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dir = TempDir::new("blinc_project_collision").expect("tempdir");
+    dir.write("red.blinc", r#"component Counter { view { Text("red") } }"#)
+        .unwrap();
+    dir.write(
+        "blue.blinc",
+        r#"component Counter { view { Text("blue") } }"#,
+    )
+    .unwrap();
+    // Entry imports both. Without alias support both bring the local
+    // name `Counter` into the entry, but each file's own component
+    // still gets compiled to its mangled symbol. `compile_project`
+    // walks every import so both red.blinc and blue.blinc are
+    // included in the aggregated names list.
+    let entry = dir
+        .write(
+            "main.blinc",
+            r#"
+            import { Counter } from "./red"
+            import { Counter } from "./blue"
+            view { Counter() }
+            "#,
+        )
+        .unwrap();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    let names = dsl
+        .compile_project(&entry, dir.path())
+        .expect("compile_project");
+
+    assert!(
+        names.iter().any(|s| s == "red$Counter$view"),
+        "red module's Counter should produce `red$Counter$view`, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|s| s == "blue$Counter$view"),
+        "blue module's Counter should produce `blue$Counter$view`, got: {names:?}"
+    );
+    // Un-mangled `Counter$view` must NOT appear — every component
+    // declared inside a `compile_project` run carries its module
+    // prefix.
+    assert!(
+        !names.iter().any(|s| s == "Counter$view"),
+        "no un-mangled `Counter$view` should leak, got: {names:?}"
     );
 }
 

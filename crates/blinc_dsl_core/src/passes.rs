@@ -3,6 +3,7 @@
 // =====================================================================
 
 use super::*;
+use std::path::Path;
 
 /// Shape-based recognition for `signal <name>: <T>` decls: extern fn, no body,
 /// no params, primitive return, `link_name: None` (so we don't catch host builtins).
@@ -1287,6 +1288,316 @@ pub(crate) fn resolve_fsm_subscribe_calls(program: &mut TypedProgram) {
             _ => {}
         }
     }
+}
+
+/// Rename every user-component (Class + matching Impl) with the
+/// module namespace prefix so cross-file declarations don't collide
+/// in the JIT symbol table or the component registry.
+///
+/// Mangling shape: `Counter` declared in module `widgets` becomes
+/// `widgets$Counter`. Multi-segment paths use `$` as the separator:
+/// `ui/widgets.blinc` → `ui$widgets$Counter`. Matches Zyntax's
+/// existing inherent-impl symbol convention (`Class$method`), so the
+/// downstream `<Component>$view` symbol naturally lands as
+/// `widgets$Counter$view` without any change in the symbol emitter.
+///
+/// Scope: ONLY user-declared components — a `Class` decl whose name
+/// has a matching `Impl` decl pointing at it. Marker classes
+/// (`__blinc_*`), structs without sibling impls, FSMs, the synthetic
+/// `render_view` function, and substrate primitives are all left
+/// untouched.
+///
+/// Side effects this pass handles atomically:
+/// 1. `Class.name` is renamed.
+/// 2. Every matching `Impl.for_type` (`Type::Unresolved(name)`
+///    pre-resolution; `Type::Named { id, … }` post-resolution) is
+///    repointed at the mangled name.
+/// 3. Every `__component_call__("local_name")` marker call in the
+///    program is rewritten to `__component_call__("mangled_name")`
+///    so [`lower_component_calls`] resolves the callee against the
+///    same mangled-name entry in the runtime component registry.
+///
+/// No-op when `namespace` is empty — single-file `compile_source` /
+/// `compile_directory` paths keep emitting un-mangled symbols, so
+/// existing tests that assert `Counter$view` stay green.
+///
+/// Cross-module reference rewriting (entry's `Counter()` →
+/// `widgets$Counter()` for an import from `./widgets`) happens
+/// separately in [`crate::BlincDsl::inject_imported_view_externs`]
+/// because that hook already knows each import's source file.
+pub(crate) fn apply_module_namespace_prefix(program: &mut TypedProgram, namespace: &str) {
+    use std::collections::{HashMap, HashSet};
+    use zyntax_typed_ast::InternedString;
+    use zyntax_typed_ast::typed_ast::TypedDeclaration;
+
+    if namespace.is_empty() {
+        return;
+    }
+
+    // Step 1: identify mangleable component classes. A class is a
+    // component iff (a) it has a non-marker name and (b) some Impl in
+    // the same program targets it. Structs without impls pass through
+    // un-mangled, which is the right behaviour for `struct Point { … }`
+    // declarations used as plain data carriers.
+    let class_names: Vec<InternedString> = program
+        .declarations
+        .iter()
+        .filter_map(|d| {
+            if let TypedDeclaration::Class(c) = &d.node {
+                Some(c.name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let impl_targets: HashSet<InternedString> = program
+        .declarations
+        .iter()
+        .filter_map(|d| {
+            let TypedDeclaration::Impl(imp) = &d.node else {
+                return None;
+            };
+            match &imp.for_type {
+                Type::Unresolved(name) => Some(*name),
+                Type::Named { id, .. } => program.type_registry.get_type_by_id(*id).map(|t| t.name),
+                _ => None,
+            }
+        })
+        .collect();
+
+    let mut to_mangle: HashMap<InternedString, InternedString> = HashMap::new();
+    for name in class_names {
+        let Some(name_str_arc) = name.resolve_global() else {
+            continue;
+        };
+        let name_str: &str = &name_str_arc;
+        // Marker classes — never mangle.
+        if name_str.starts_with("__blinc_") || name_str.starts_with("__") {
+            continue;
+        }
+        // No impl → struct without methods → not a component.
+        if !impl_targets.contains(&name) {
+            continue;
+        }
+        let mangled_str = format!("{namespace}${name_str}");
+        to_mangle.insert(name, InternedString::new_global(&mangled_str));
+    }
+
+    if to_mangle.is_empty() {
+        return;
+    }
+
+    // Step 2: rename Class.name + every matching Impl.for_type.
+    for decl in &mut program.declarations {
+        match &mut decl.node {
+            TypedDeclaration::Class(c) => {
+                if let Some(&new_name) = to_mangle.get(&c.name) {
+                    c.name = new_name;
+                }
+            }
+            TypedDeclaration::Impl(imp) => match &mut imp.for_type {
+                Type::Unresolved(name) => {
+                    if let Some(&new_name) = to_mangle.get(name) {
+                        *name = new_name;
+                    }
+                }
+                Type::Named { .. } => {
+                    // Post-resolution shape — the type registry entry's
+                    // own `name` is what `publish_components_to_runtime_registry`
+                    // reads. The mangling pass runs pre-resolution so
+                    // this arm is reached only if some earlier pass
+                    // ran the type resolver; we conservatively skip
+                    // it to avoid mutating the registry mid-pipeline.
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    // Step 3: rewrite every `__component_call__("local_name")` marker
+    // whose name matches a mangled class. This is what makes a
+    // SAME-FILE reference resolve to the mangled component at
+    // `lower_component_calls` time. Cross-file references (imports)
+    // are handled separately in `inject_imported_view_externs`,
+    // which calls into the same `rewrite_component_calls_in_program`
+    // helper with its own (import-local-name → mangled-name) map.
+    rewrite_component_calls_in_program(program, &to_mangle);
+}
+
+/// Walk every function / impl body in `program` and rewrite every
+/// `__component_call__("local", …)` marker call where `local` matches
+/// a key in `rewrites` to `__component_call__("rewrites[local]", …)`.
+/// Shared between [`apply_module_namespace_prefix`] (which uses it
+/// for same-file component renames) and
+/// [`crate::BlincDsl::inject_imported_view_externs`] (which uses it
+/// for cross-file import renames). The rewrite never touches a
+/// component's structural shape — only the leading string-literal
+/// name arg.
+pub(crate) fn rewrite_component_calls_in_program(
+    program: &mut TypedProgram,
+    rewrites: &std::collections::HashMap<
+        zyntax_typed_ast::InternedString,
+        zyntax_typed_ast::InternedString,
+    >,
+) {
+    use std::collections::HashMap;
+    use zyntax_typed_ast::InternedString;
+    use zyntax_typed_ast::TypedNode;
+    use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedExpression, TypedLiteral};
+
+    fn rewrite_expr(
+        expr: &mut TypedNode<TypedExpression>,
+        rewrites: &HashMap<InternedString, InternedString>,
+    ) {
+        if let TypedExpression::Call(call) = &mut expr.node {
+            rewrite_expr(&mut call.callee, rewrites);
+            if let TypedExpression::Variable(callee) = &call.callee.node
+                && callee.resolve_global().as_deref() == Some("__component_call__")
+                && let Some(name_arg) = call.positional_args.first_mut()
+                && let TypedExpression::Literal(TypedLiteral::String(name)) = &name_arg.node
+                && let Some(&new_name) = rewrites.get(name)
+            {
+                name_arg.node = TypedExpression::Literal(TypedLiteral::String(new_name));
+            }
+            for a in &mut call.positional_args {
+                rewrite_expr(a, rewrites);
+            }
+            for na in &mut call.named_args {
+                rewrite_expr(&mut na.value, rewrites);
+            }
+            return;
+        }
+        match &mut expr.node {
+            TypedExpression::Binary(b) => {
+                rewrite_expr(&mut b.left, rewrites);
+                rewrite_expr(&mut b.right, rewrites);
+            }
+            TypedExpression::Unary(u) => rewrite_expr(&mut u.operand, rewrites),
+            TypedExpression::Field(f) => rewrite_expr(&mut f.object, rewrites),
+            TypedExpression::Index(idx) => {
+                rewrite_expr(&mut idx.object, rewrites);
+                rewrite_expr(&mut idx.index, rewrites);
+            }
+            TypedExpression::Array(items) | TypedExpression::Tuple(items) => {
+                for it in items {
+                    rewrite_expr(it, rewrites);
+                }
+            }
+            TypedExpression::MethodCall(mc) => {
+                rewrite_expr(&mut mc.receiver, rewrites);
+                for a in &mut mc.positional_args {
+                    rewrite_expr(a, rewrites);
+                }
+            }
+            TypedExpression::Block(block) => {
+                for stmt in &mut block.statements {
+                    rewrite_stmt(stmt, rewrites);
+                }
+            }
+            TypedExpression::If(if_expr) => {
+                rewrite_expr(&mut if_expr.condition, rewrites);
+                rewrite_expr(&mut if_expr.then_branch, rewrites);
+                rewrite_expr(&mut if_expr.else_branch, rewrites);
+            }
+            TypedExpression::Lambda(lam) => match &mut lam.body {
+                zyntax_typed_ast::typed_ast::TypedLambdaBody::Expression(e) => {
+                    rewrite_expr(e, rewrites);
+                }
+                zyntax_typed_ast::typed_ast::TypedLambdaBody::Block(block) => {
+                    for stmt in &mut block.statements {
+                        rewrite_stmt(stmt, rewrites);
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn rewrite_stmt(
+        stmt: &mut TypedNode<TypedStatement>,
+        rewrites: &HashMap<InternedString, InternedString>,
+    ) {
+        match &mut stmt.node {
+            TypedStatement::Expression(e) => rewrite_expr(e, rewrites),
+            TypedStatement::Return(Some(e)) => rewrite_expr(e, rewrites),
+            TypedStatement::Let(l) => {
+                if let Some(init) = &mut l.initializer {
+                    rewrite_expr(init, rewrites);
+                }
+            }
+            TypedStatement::If(if_stmt) => {
+                rewrite_expr(&mut if_stmt.condition, rewrites);
+                for s in &mut if_stmt.then_block.statements {
+                    rewrite_stmt(s, rewrites);
+                }
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    for s in &mut else_block.statements {
+                        rewrite_stmt(s, rewrites);
+                    }
+                }
+            }
+            TypedStatement::While(w) => {
+                rewrite_expr(&mut w.condition, rewrites);
+                for s in &mut w.body.statements {
+                    rewrite_stmt(s, rewrites);
+                }
+            }
+            TypedStatement::Block(b) => {
+                for s in &mut b.statements {
+                    rewrite_stmt(s, rewrites);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for decl in &mut program.declarations {
+        match &mut decl.node {
+            TypedDeclaration::Function(func) => {
+                if let Some(body) = &mut func.body {
+                    for stmt in &mut body.statements {
+                        rewrite_stmt(stmt, rewrites);
+                    }
+                }
+            }
+            TypedDeclaration::Impl(imp) => {
+                for method in &mut imp.methods {
+                    if let Some(body) = &mut method.body {
+                        for stmt in &mut body.statements {
+                            rewrite_stmt(stmt, rewrites);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Derive a module namespace from a file path relative to a source
+/// root. Returns an empty string when `entry` isn't inside
+/// `source_root` (defensive — single-file compile paths use the
+/// empty-namespace branch in `apply_module_namespace_prefix`).
+///
+/// Shape: `widgets.blinc` → `"widgets"`,
+/// `ui/widgets.blinc` → `"ui$widgets"`. Hyphens / dots inside path
+/// segments survive; the `.blinc` extension is stripped.
+pub(crate) fn module_namespace_from_path(entry: &Path, source_root: &Path) -> String {
+    let rel = entry.strip_prefix(source_root).unwrap_or(entry);
+    let mut segments: Vec<String> = Vec::new();
+    for component in rel.components() {
+        if let std::path::Component::Normal(os) = component
+            && let Some(s) = os.to_str()
+        {
+            let stem = s.strip_suffix(".blinc").unwrap_or(s);
+            if !stem.is_empty() {
+                segments.push(stem.to_string());
+            }
+        }
+    }
+    segments.join("$")
 }
 
 /// Lower explicit `struct` constructor calls (`MyData(field = value)`) into

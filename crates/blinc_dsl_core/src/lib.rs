@@ -39,13 +39,15 @@ pub use host::{DslOp, take_scene_ops};
 use passes::inject_call_site_keys;
 use passes::inject_user_view_instance_id_params;
 use passes::{
-    bind_component_props, collect_declared, detect_and_strip_stateful_views, ensure_unit_return,
-    expand_const_groups, extract_and_strip_stylesheets, inject_fsm_context_markers,
-    lower_children_arrays_to_blocks, lower_component_calls, lower_match_blocks,
-    lower_struct_literals, lower_struct_widget_props_to_handles, lower_styling_args_to_overlays,
-    lower_view_to_value_returning, materialize_view, populate_fsm_registry_pass,
-    resolve_const_references, resolve_extern_widget_named_args, resolve_fsm_subscribe_calls,
-    resolve_fsm_trigger_calls, resolve_signal_calls, synthesize_fsm_event_enums,
+    apply_module_namespace_prefix, bind_component_props, collect_declared,
+    detect_and_strip_stateful_views, ensure_unit_return, expand_const_groups,
+    extract_and_strip_stylesheets, inject_fsm_context_markers, lower_children_arrays_to_blocks,
+    lower_component_calls, lower_match_blocks, lower_struct_literals,
+    lower_struct_widget_props_to_handles, lower_styling_args_to_overlays,
+    lower_view_to_value_returning, materialize_view, module_namespace_from_path,
+    populate_fsm_registry_pass, resolve_const_references, resolve_extern_widget_named_args,
+    resolve_fsm_subscribe_calls, resolve_fsm_trigger_calls, resolve_signal_calls,
+    rewrite_component_calls_in_program, synthesize_fsm_event_enums,
     synthesize_fsm_trait_interfaces, validate_component_calls,
 };
 use runtime_bridge::{
@@ -102,6 +104,16 @@ pub struct BlincDsl {
     value_returning_views: Arc<Mutex<std::collections::HashSet<String>>>,
     /// JIT function names per source path; used by `recompile_file`.
     compiled_modules: Arc<Mutex<std::collections::HashMap<std::path::PathBuf, Vec<String>>>>,
+    /// Module-namespace prefix applied to user components in each
+    /// compiled file (e.g. `widgets` for `widgets.blinc`, `ui$widgets`
+    /// for `ui/widgets.blinc`). Empty string means the file was
+    /// compiled without a source-root context — `compile_source` /
+    /// `compile_file` / `compile_directory` all leave this empty so
+    /// existing single-file tests stay un-mangled.
+    /// `compile_project` populates non-empty entries for every file
+    /// it compiles. `inject_imported_view_externs` reads this map to
+    /// build the cross-file mangled-name reference at the entry site.
+    module_namespaces: Arc<Mutex<std::collections::HashMap<std::path::PathBuf, String>>>,
     /// CSS from `style { … }` blocks, compile-order.
     compiled_stylesheets: Arc<Mutex<Vec<String>>>,
     /// Cursor into `compiled_stylesheets` of how far the
@@ -147,6 +159,7 @@ impl BlincDsl {
 
         let value_returning_views = Arc::new(Mutex::new(std::collections::HashSet::new()));
         let compiled_modules = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let module_namespaces = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let compiled_stylesheets = Arc::new(Mutex::new(Vec::new()));
         let stylesheets_queued_up_to = Arc::new(Mutex::new(0));
         let declared_signals = Arc::new(Mutex::new(Vec::new()));
@@ -160,6 +173,7 @@ impl BlincDsl {
             runtime,
             value_returning_views,
             compiled_modules,
+            module_namespaces,
             compiled_stylesheets,
             stylesheets_queued_up_to,
             declared_signals,
@@ -360,6 +374,22 @@ impl BlincDsl {
     /// signal/fsm resolution, component lowering, value-returning view rewrite,
     /// styling overlay collection, extern named-arg resolution, init dispatch.
     pub fn compile_source(&self, source: &str, filename: &str) -> BlincDslResult<Vec<String>> {
+        self.compile_source_with_namespace(source, filename, "")
+    }
+
+    /// `compile_source` variant that prefixes every user-component
+    /// declaration with `module_namespace` so cross-file declarations
+    /// don't collide in the JIT symbol table / component registry.
+    /// Pass `""` for the single-file unprefixed shape (which is what
+    /// the public `compile_source` does). `compile_project` derives
+    /// the namespace from each file's path relative to the source
+    /// root and calls this with the non-empty form.
+    pub fn compile_source_with_namespace(
+        &self,
+        source: &str,
+        filename: &str,
+        module_namespace: &str,
+    ) -> BlincDslResult<Vec<String>> {
         let mut runtime = self
             .runtime
             .lock()
@@ -371,6 +401,12 @@ impl BlincDsl {
             .grammar
             .parse_with_signatures(source, filename, runtime.plugin_signatures())
             .map_err(|e| BlincDslError::Compile(e.to_string()))?;
+
+        // Apply the module-namespace prefix to local components
+        // BEFORE import-extern injection so cross-module references
+        // resolve against the registered mangled name. No-op when
+        // `module_namespace` is empty (single-file compiles).
+        apply_module_namespace_prefix(&mut typed_program, module_namespace);
 
         // Pre-Zyntax-212dba3 a call to an imported `<Comp>$view` lowered
         // to `Indirect(Undef)` and slid through; post-bump it surfaces a
@@ -552,10 +588,19 @@ impl BlincDsl {
     /// decls so the entry program's lowering recognises imported view
     /// calls as known symbols.
     ///
+    /// When the imported file was compiled with a non-empty module
+    /// namespace (recorded in `module_namespaces`), the extern's
+    /// symbol becomes `<ns>$<X>$view` (matching what
+    /// `apply_module_namespace_prefix` produced on the source side),
+    /// AND every local `__component_call__("X")` marker in the entry
+    /// is rewritten to `__component_call__("<ns>$X")` so the same
+    /// mangled name flows through `lower_component_calls`.
+    ///
     /// Today assumes zero-prop view signatures — prop-bearing imports
     /// need their param list mirrored too. Sufficient for the
     /// `compile_project` test surface.
     fn inject_imported_view_externs(&self, program: &mut TypedProgram, entry_filename: &str) {
+        use std::collections::HashMap;
         use zyntax_typed_ast::type_registry::{CallingConvention, Visibility};
         use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedFunction};
         use zyntax_typed_ast::{InternedString, typed_node};
@@ -571,8 +616,17 @@ impl BlincDsl {
             Ok(m) => m.clone(),
             Err(_) => return,
         };
+        let namespaces = match self.module_namespaces.lock() {
+            Ok(m) => m.clone(),
+            Err(_) => return,
+        };
 
         let mut wanted: Vec<String> = Vec::new();
+        // `local_name → mangled_name` rewrites for `__component_call__`
+        // markers in the entry. Populated below from each import +
+        // its source module's namespace. Keys interned for the shared
+        // `rewrite_component_calls_in_program` helper.
+        let mut import_rewrites: HashMap<InternedString, InternedString> = HashMap::new();
         for decl in &program.declarations {
             let TypedDeclaration::Import(import) = &decl.node else {
                 continue;
@@ -594,6 +648,7 @@ impl BlincDsl {
             let Some(compiled) = modules.get(&imported_path) else {
                 continue;
             };
+            let source_ns = namespaces.get(&imported_path).cloned().unwrap_or_default();
             for item in &import.items {
                 let zyntax_typed_ast::TypedImportItem::Named { name, .. } = item else {
                     continue;
@@ -601,11 +656,30 @@ impl BlincDsl {
                 let Some(import_name) = name.resolve_global() else {
                     continue;
                 };
-                let view_sym = format!("{import_name}$view");
+                let local: &str = import_name.as_ref();
+                let mangled_name = if source_ns.is_empty() {
+                    local.to_string()
+                } else {
+                    format!("{source_ns}${local}")
+                };
+                let view_sym = format!("{mangled_name}$view");
                 if compiled.iter().any(|s| s == &view_sym) && !wanted.contains(&view_sym) {
                     wanted.push(view_sym);
                 }
+                if mangled_name != local {
+                    import_rewrites.insert(
+                        InternedString::new_global(local),
+                        InternedString::new_global(&mangled_name),
+                    );
+                }
             }
+        }
+
+        // Rewrite entry's `__component_call__("X")` markers to point at
+        // each import's mangled name. Mirrors the in-pass rewrite that
+        // `apply_module_namespace_prefix` does for local components.
+        if !import_rewrites.is_empty() {
+            rewrite_component_calls_in_program(program, &import_rewrites);
         }
 
         for sym in wanted {
@@ -648,13 +722,31 @@ impl BlincDsl {
 
     /// Compile a `.blinc` file off disk. Records JIT names per-path for hot reload.
     pub fn compile_file(&self, path: &Path) -> BlincDslResult<Vec<String>> {
+        self.compile_file_with_namespace(path, "")
+    }
+
+    /// `compile_file` variant that compiles the file with a non-empty
+    /// module namespace. Used by `compile_project_inner` to mangle
+    /// each project file's components per its path relative to the
+    /// source root. Also stamps `module_namespaces` so subsequent
+    /// import resolution from other files maps cross-module
+    /// references to the right mangled name.
+    pub fn compile_file_with_namespace(
+        &self,
+        path: &Path,
+        module_namespace: &str,
+    ) -> BlincDslResult<Vec<String>> {
         let source = std::fs::read_to_string(path)?;
         let filename = path.to_string_lossy();
-        let names = self.compile_source(&source, &filename)?;
+        let names = self.compile_source_with_namespace(&source, &filename, module_namespace)?;
         self.compiled_modules
             .lock()
             .expect("compiled_modules mutex poisoned")
             .insert(path.to_path_buf(), names.clone());
+        self.module_namespaces
+            .lock()
+            .expect("module_namespaces mutex poisoned")
+            .insert(path.to_path_buf(), module_namespace.to_string());
         Ok(names)
     }
 
@@ -755,7 +847,8 @@ impl BlincDsl {
             self.compile_project_inner(&imported, source_root, out)?;
         }
 
-        let names = self.compile_file(entry)?;
+        let namespace = module_namespace_from_path(entry, source_root);
+        let names = self.compile_file_with_namespace(entry, &namespace)?;
         out.extend(names);
         Ok(())
     }
