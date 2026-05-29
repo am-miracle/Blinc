@@ -130,8 +130,25 @@ pub(crate) extern "C" fn blinc_signal_set_by_id_string(id_raw: i64, value_ptr: *
     reconstruct_signal::<String>(id_raw).set(value.to_string());
 }
 
-/// `__fsm_runtime_trigger__("<FsmName>", "<state.event>")` — dispatches `event`
-/// on the default instance iff its current state matches `state`.
+/// `__fsm_runtime_trigger__("<FsmName>", "<path>")` — dispatch a transition
+/// on the default instance. Two shapes for the second arg:
+///
+///   * `"<State>.<Event>"` — guard form. Only fires when the FSM's
+///     current state matches `<State>`. Useful for state-conditional
+///     logic where the caller wants the dispatch to be a no-op unless
+///     the FSM is in a specific state.
+///   * `"<Event>"` (no `.`) — bare event form. Dispatches the event
+///     against whatever the FSM's current state is; the registry's
+///     own transition table picks the matching rule. Use this when
+///     the same event can fire from multiple source states (e.g.
+///     `Increment` valid in both `Idle` and `Counting`) and you
+///     don't want to spell every prefix.
+///
+/// Bare-event was added because the state-prefix form double-fires
+/// when you list every prefix to cover multiple sources: `trigger("Idle.X")`
+/// advances state to Counting first, then `trigger("Counting.X")` matches
+/// the new state and runs again on the same click. With bare-event the
+/// runtime handles the dispatch table walk in one call.
 pub(crate) extern "C" fn blinc_fsm_runtime_trigger(fsm_ptr: *const i32, path_ptr: *const i32) {
     let Some(fsm) = decode_signal_name(fsm_ptr) else {
         tracing::warn!("__fsm_runtime_trigger__ called with null fsm pointer");
@@ -141,23 +158,21 @@ pub(crate) extern "C" fn blinc_fsm_runtime_trigger(fsm_ptr: *const i32, path_ptr
         tracing::warn!("__fsm_runtime_trigger__ called with null path pointer");
         return;
     };
-    let Some((state, event)) = path.split_once('.') else {
-        tracing::warn!(
-            fsm = fsm,
-            path = path,
-            "trigger path must be '<State>.<Event>' — leaving fsm untouched"
-        );
-        return;
-    };
-    let state = state.trim();
-    let event = event.trim();
-
-    let current = blinc_runtime::fsm::current_state_name(fsm);
-    let matches_precondition = current.as_deref().map(|c| c == state).unwrap_or(false);
-    if !matches_precondition {
-        return;
+    if let Some((state, event)) = path.split_once('.') {
+        let state = state.trim();
+        let event = event.trim();
+        let current = blinc_runtime::fsm::current_state_name(fsm);
+        let matches_precondition = current.as_deref().map(|c| c == state).unwrap_or(false);
+        if !matches_precondition {
+            return;
+        }
+        blinc_runtime::fsm::dispatch_default(fsm, event);
+    } else {
+        // Bare event — dispatch unconditionally; the registry's
+        // `step_event` looks up by (current_state, event) and the
+        // first matching rule wins.
+        blinc_runtime::fsm::dispatch_default(fsm, path.trim());
     }
-    blinc_runtime::fsm::dispatch_default(fsm, event);
 }
 
 /// `__blinc_computed_i32__(closure_ptr) -> i64` — create a value-

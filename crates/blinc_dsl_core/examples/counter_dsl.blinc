@@ -24,13 +24,12 @@ component Counter {
             Text(f"Count: {CounterFsm.count.get()}")
             Div(class = "counter-row") {
                 Div(class = "counter-cta", on_click = || {
-                    CounterFsm.trigger("Idle.Increment")
-                    CounterFsm.trigger("Counting.Increment")
+                    CounterFsm.trigger("Increment")
                 }) {
                     Text("+1")
                 }
                 Div(class = "counter-reset", on_click = || {
-                    CounterFsm.trigger("Counting.Reset")
+                    CounterFsm.trigger("Reset")
                 }) {
                     Text("Reset")
                 }
