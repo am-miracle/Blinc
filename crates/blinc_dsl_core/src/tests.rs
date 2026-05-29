@@ -6222,6 +6222,82 @@ fn dsl_match_in_div_on_click_closure_compiles() {
     .expect("compile");
 }
 
+/// Go-style `const ( … )` group declares related constants in one
+/// block. `iota` substitutes the member's zero-based index at
+/// expansion time, so `Red = iota / Green = iota / Blue = iota`
+/// yields `Red = 0 / Green = 1 / Blue = 2`. Internally
+/// `expand_const_groups` hoists each member into a standalone
+/// `__blinc_const__` marker before `resolve_const_references` runs;
+/// from that point on a group member is indistinguishable from a
+/// standalone `const NAME: T = literal`.
+#[test]
+fn dsl_const_group_with_iota_assigns_indices() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            const (
+                Red = iota
+                Green = iota
+                Blue = iota
+            )
+
+            view {
+                text(f"r={Red} g={Green} b={Blue}")
+            }
+        "#,
+        "const_group_iota.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let saw_indexed = ops.iter().any(|op| match op {
+        DslOp::Text(s) => s == "r=0g=1b=2",
+        _ => false,
+    });
+    assert!(
+        saw_indexed,
+        "iota members should expand to their zero-based index: expected \
+         `r=0g=1b=2`, got {ops:?}"
+    );
+}
+
+/// Const group with explicit literal values (no iota). Each member
+/// substitutes its literal at every reference site, exactly like a
+/// standalone `const NAME: T = literal` decl.
+#[test]
+fn dsl_const_group_with_explicit_values_inlines_literals() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            const (
+                Min = 10
+                Max = 90
+            )
+
+            view {
+                text(f"min={Min} max={Max}")
+            }
+        "#,
+        "const_group_explicit.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let saw_inlined = ops.iter().any(|op| match op {
+        DslOp::Text(s) => s == "min=10max=90",
+        _ => false,
+    });
+    assert!(
+        saw_inlined,
+        "explicit const-group members should inline as literals at refs: \
+         expected `min=10max=90`, got {ops:?}"
+    );
+}
+
 /// Top-level `const NAME: T = literal` decls inline at every
 /// reference site. The post-parse pass `resolve_const_references`
 /// walks every `__blinc_const__` marker function, records its

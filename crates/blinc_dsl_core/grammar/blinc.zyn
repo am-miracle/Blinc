@@ -158,7 +158,7 @@ top_level_items = { item:top_level_item* }
 // `component_decl`. Falling through handles standalone struct-only
 // `component { fields }` decls, standalone `impl` blocks, and the
 // bare `view { ... }` quick-test shape.
-top_level_item = { import_stmt | style_decl | signal_decl | const_decl | struct_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
+top_level_item = { import_stmt | style_decl | signal_decl | const_group | const_decl | struct_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
 
 // `style { ...CSS... }` — block-form CSS declaration. Author
 // writes raw CSS between the braces; balanced nested braces
@@ -283,6 +283,58 @@ const_decl = { "const" ~ name:identifier ~ ":" ~ ty:state_type ~ "=" ~ value:con
 // unambiguously the keyword forms here; `integer` last among numeric
 // shapes so a bare digit doesn't shadow the float arm.
 const_literal = { float | integer | bool_literal | string_literal }
+
+// `const ( Name = value, Name = value, … )` — group declaration of
+// related constants (Go-style). Each member is hoisted into an
+// individual `__blinc_const__` marker decl by the
+// `expand_const_groups` post-parse pass before
+// `resolve_const_references` runs, so a group member behaves
+// identically to a standalone `const NAME: T = literal`.
+//
+// `iota` keyword (member-position-only): substitutes the member's
+// zero-based index in the group at expansion time, so
+// `const ( Red = iota, Green = iota, Blue = iota )` yields
+// `Red = 0`, `Green = 1`, `Blue = 2`. Mixing `iota` and explicit
+// values in the same group is allowed — explicit values keep their
+// literal; `iota`-bearing members compute from their position.
+//
+// MVP scope: type annotations aren't required (group members are
+// inferred from the RHS literal; mixed types across one group are
+// permitted but make the group act as a loose namespace). No
+// "implicit-repeat" Go idiom (omitted RHS reusing the previous
+// expression) yet — every member needs an explicit `= value`.
+const_group = { "const" ~ "(" ~ first:const_group_member ~ rest:const_group_tail* ~ ")" }
+  -> TypedDeclaration::Function {
+      name: intern("__blinc_const_group__"),
+      params: [],
+      return_type: Type::Unit,
+      body: Some(TypedBlock {
+          statements: prepend_list(first, rest),
+      }),
+  }
+
+const_group_member = { name:identifier ~ "=" ~ value:const_group_value }
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Call {
+          callee: Box::new(TypedExpression::Variable {
+              name: intern("__blinc_const_group_member__"),
+          }),
+          args: [
+              TypedExpression::StringLiteral { value: name },
+              value,
+          ],
+      },
+  }
+
+const_group_tail = { ","? ~ m:const_group_member } -> m
+
+// `iota` is a soft keyword — outside `const ( … )` it'd parse as a
+// regular identifier. PEG-ordered after the literal alternatives so
+// numeric / string / bool members keep their fast-path shape.
+const_group_value = { float | integer | bool_literal | string_literal | iota_keyword }
+
+iota_keyword = { "iota" }
+  -> TypedExpression::StringLiteral { value: "__iota__" }
 
 // `@stateful` decorator — opt-in marker that tells the host
 // to wrap this view in a reactive container subscribed to

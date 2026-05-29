@@ -216,6 +216,153 @@ pub(crate) fn auto_inject_semicolons(raw: &str) -> String {
 
 /// Rewrite `<sig>.get()` / `<sig>.set(v)` / `<sig> = v` into `__signal_<get|set>_<T>` calls.
 /// One entry in the per-compile signal map: the declared type plus the
+/// Walk every `__blinc_const_group__` decl, hoist each contained
+/// member into its own `__blinc_const__` marker, substitute the
+/// member's zero-based index in place of any `__iota__` placeholder
+/// in the value expression, then strip the group decl. After this
+/// pass runs, `resolve_const_references` sees a flat sequence of
+/// individual const decls and treats every group member identically
+/// to a standalone `const NAME: T = literal`.
+///
+/// Group-marker shape (set up by the `const_group` grammar rule):
+///   `__blinc_const_group__` function with body =
+///     `[Expression(Call(__blinc_const_group_member__,
+///                       [StringLiteral(name), value_expr])), …]`
+///
+/// Iota encoding: `iota` in the grammar lowers to
+/// `StringLiteral("__iota__")`. This pass swaps it for an
+/// `IntLiteral(index)`. Mixed iota-and-explicit-value members in
+/// the same group are supported — only the iota placeholders get
+/// substituted; explicit literals pass through unchanged.
+///
+/// MUST run before [`resolve_const_references`] so the hoisted
+/// `__blinc_const__` markers are visible when references are
+/// resolved.
+pub(crate) fn expand_const_groups(program: &mut TypedProgram) {
+    use zyntax_typed_ast::TypedNode;
+    use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedExpression, TypedLiteral};
+
+    fn substitute_iota(expr: &mut TypedNode<TypedExpression>, index: i128) {
+        if let TypedExpression::Literal(TypedLiteral::String(s)) = &expr.node
+            && let Some(s_arc) = s.resolve_global()
+        {
+            let s_str: &str = &s_arc;
+            if s_str == "__iota__" {
+                expr.node = TypedExpression::Literal(TypedLiteral::Integer(index));
+                expr.ty = Type::Primitive(PrimitiveType::I32);
+                return;
+            }
+        }
+        // Recurse for completeness — iota always sits at the top of
+        // the member's value expression today, but future arithmetic
+        // (`iota + 1`) would need the descent.
+        match &mut expr.node {
+            TypedExpression::Binary(b) => {
+                substitute_iota(&mut b.left, index);
+                substitute_iota(&mut b.right, index);
+            }
+            TypedExpression::Unary(u) => substitute_iota(&mut u.operand, index),
+            TypedExpression::Call(c) => {
+                substitute_iota(&mut c.callee, index);
+                for a in &mut c.positional_args {
+                    substitute_iota(a, index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Phase 1: collect hoisted const decls from each group, recording
+    // both the group index (for the diagnostic span hint below) and
+    // the spliced const-marker decl. Drop the group markers from the
+    // program in the same pass.
+    let mut hoisted: Vec<TypedNode<TypedDeclaration>> = Vec::new();
+    program.declarations.retain(|decl| {
+        let TypedDeclaration::Function(func) = &decl.node else {
+            return true;
+        };
+        if func.name.resolve_global().as_deref() != Some("__blinc_const_group__") {
+            return true;
+        }
+        let Some(body) = &func.body else {
+            return false;
+        };
+        for (index, stmt) in body.statements.iter().enumerate() {
+            let TypedStatement::Expression(call_expr) = &stmt.node else {
+                continue;
+            };
+            let TypedExpression::Call(call) = &call_expr.node else {
+                continue;
+            };
+            let TypedExpression::Variable(callee) = &call.callee.node else {
+                continue;
+            };
+            if callee.resolve_global().as_deref() != Some("__blinc_const_group_member__") {
+                continue;
+            }
+            if call.positional_args.len() != 2 {
+                continue;
+            }
+            let TypedExpression::Literal(TypedLiteral::String(name)) =
+                &call.positional_args[0].node
+            else {
+                continue;
+            };
+            let Some(name_arc) = name.resolve_global() else {
+                continue;
+            };
+            let mut value = call.positional_args[1].clone();
+            substitute_iota(&mut value, index as i128);
+
+            // Synthesise a `__blinc_const__` marker decl with the
+            // same body shape `resolve_const_references` expects.
+            let const_func = zyntax_typed_ast::typed_ast::TypedFunction {
+                name: zyntax_typed_ast::InternedString::new_global("__blinc_const__"),
+                annotations: Vec::new(),
+                effects: Vec::new(),
+                with_handlers: Vec::new(),
+                type_params: Vec::new(),
+                params: Vec::new(),
+                return_type: Type::Any,
+                body: Some(zyntax_typed_ast::typed_ast::TypedBlock {
+                    statements: vec![
+                        TypedNode::new(
+                            TypedStatement::Expression(Box::new(TypedNode::new(
+                                TypedExpression::Literal(TypedLiteral::String(*name)),
+                                Type::Primitive(PrimitiveType::String),
+                                decl.span,
+                            ))),
+                            Type::Primitive(PrimitiveType::Unit),
+                            decl.span,
+                        ),
+                        TypedNode::new(
+                            TypedStatement::Expression(Box::new(value)),
+                            Type::Primitive(PrimitiveType::Unit),
+                            decl.span,
+                        ),
+                    ],
+                    span: decl.span,
+                }),
+                visibility: zyntax_typed_ast::type_registry::Visibility::Private,
+                is_async: false,
+                is_pure: false,
+                is_external: false,
+                calling_convention: Default::default(),
+                link_name: None,
+            };
+            let _ = name_arc;
+            hoisted.push(TypedNode::new(
+                TypedDeclaration::Function(const_func),
+                Type::Primitive(PrimitiveType::Unit),
+                decl.span,
+            ));
+        }
+        false
+    });
+
+    program.declarations.extend(hoisted);
+}
+
 /// Extract every `__blinc_const__` marker function, register the
 /// declared constants into a `name → literal-expression` map, strip
 /// the markers, then rewrite every `TypedExpression::Variable`
