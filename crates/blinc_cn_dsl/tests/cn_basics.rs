@@ -14,12 +14,14 @@ fn cn_basics_compile_in_one_view() {
 
     let src = r#"
         view {
-            cn.Button("Save", variant = "primary")
-            cn.Badge("New", variant = "success")
-            cn.Alert("Heads up", variant = "warning")
-            cn.Label("Email", required = true)
-            cn.Separator(orientation = "horizontal")
-            cn.Spinner(size = "small")
+            cn.Card {
+                cn.Button("Save", variant = "primary")
+                cn.Badge("New", variant = "success")
+                cn.Alert("Heads up", variant = "warning")
+                cn.Label("Email", required = true)
+                cn.Separator(orientation = "horizontal")
+                cn.Spinner(size = "small")
+            }
         }
     "#;
     dsl.compile_source(src, "cn_basics.blinc")

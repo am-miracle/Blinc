@@ -39,14 +39,18 @@
 //! - [`separator`] — `cn.Separator`.
 //! - [`spinner`] — `cn.Spinner`.
 //!
-//! The container-and-children-heavy widgets (`Card`, `Dialog`,
-//! `Combobox`, `Tabs`, `Drawer`, `Table`) land incrementally —
-//! children-block FFI through the extern-widget macro needs more
-//! exercise before bulk-wrapping the surface there.
+//! Container widgets:
+//! - [`card`] — `cn.Card { children… }`. Body block flows through
+//!   the macro's existing `#[children]` plumbing.
+//!
+//! Heavier container surface (`Dialog`, `Combobox`, `Tabs`, `Drawer`,
+//! `Table`, …) lands incrementally as each widget's prop / slot
+//! shape gets wired.
 
 pub mod alert;
 pub mod badge;
 pub mod button;
+pub mod card;
 pub mod label;
 pub mod separator;
 pub mod spinner;
@@ -54,6 +58,7 @@ pub mod spinner;
 pub use alert::CnAlert;
 pub use badge::CnBadge;
 pub use button::CnButton;
+pub use card::CnCard;
 pub use label::CnLabel;
 pub use separator::CnSeparator;
 pub use spinner::CnSpinner;
@@ -88,5 +93,6 @@ pub fn register_basics(dsl: &BlincDsl) -> BlincDslResult<()> {
     dsl.register_extern_widget::<CnLabel>()?;
     dsl.register_extern_widget::<CnSeparator>()?;
     dsl.register_extern_widget::<CnSpinner>()?;
+    dsl.register_extern_widget::<CnCard>()?;
     Ok(())
 }
