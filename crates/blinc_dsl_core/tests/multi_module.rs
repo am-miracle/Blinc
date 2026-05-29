@@ -1,4 +1,4 @@
-//! Phase A: multi-file compilation via `BlincDsl::compile_directory`.
+//! Multi-file compilation via `BlincDsl::compile_directory`.
 
 use blinc_dsl_core::BlincDsl;
 use std::time::{SystemTime, UNIX_EPOCH};

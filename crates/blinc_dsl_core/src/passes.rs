@@ -272,7 +272,7 @@ pub(crate) fn expand_const_groups(program: &mut TypedProgram) {
         }
     }
 
-    // Phase 1: collect hoisted const decls from each group, recording
+    // Step 1: collect hoisted const decls from each group, recording
     // both the group index (for the diagnostic span hint below) and
     // the spliced const-marker decl. Drop the group markers from the
     // program in the same pass.
@@ -385,7 +385,7 @@ pub(crate) fn resolve_const_references(program: &mut TypedProgram) {
     use zyntax_typed_ast::TypedNode;
     use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedExpression, TypedLiteral};
 
-    // Phase 1: collect every `__blinc_const__` decl into a name→value
+    // Step 1: collect every `__blinc_const__` decl into a name→value
     // map, then strip those decls from the program. The marker
     // function's body is `[Expression(StringLiteral(name)),
     // Expression(<value-literal>)]` — see `const_decl` in
@@ -424,7 +424,7 @@ pub(crate) fn resolve_const_references(program: &mut TypedProgram) {
         return;
     }
 
-    // Phase 2: rewrite every `Variable(name)` whose `name` is a
+    // Step 2: rewrite every `Variable(name)` whose `name` is a
     // registered const to a clone of the stored literal. Recurses
     // through all expression / statement shapes that the existing
     // passes touch.
@@ -590,7 +590,7 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
     use zyntax_typed_ast::InternedString;
     use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
 
-    // Phase 1: collect signal name → (type, id_raw). The id_raw is
+    // Step 1: collect signal name → (type, id_raw). The id_raw is
     // minted on first encounter via the process-global
     // `blinc_dsl_core::signal_registry` — that calls
     // `blinc_core::reactive::signal(default)` and caches the resulting
@@ -638,7 +638,7 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
         return;
     }
 
-    // Phase 2: rewrite `<sig>.get()` → `__signal_get_by_id_<T>(<id_literal>)`.
+    // Step 2: rewrite `<sig>.get()` → `__signal_get_by_id_<T>(<id_literal>)`.
     fn typed_signal_extern_name(ty: &Type) -> Option<&'static str> {
         match ty {
             Type::Primitive(PrimitiveType::I32) => Some("__signal_get_by_id_i32"),
@@ -896,7 +896,7 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
         }
     }
 
-    // Phase 3: strip signal-marker decls (metadata only; usage was rewritten above).
+    // Step 3: strip signal-marker decls (metadata only; usage was rewritten above).
     program.declarations.retain(|decl| {
         let TypedDeclaration::Function(func) = &decl.node else {
             return true;
@@ -911,7 +911,7 @@ pub(crate) fn resolve_fsm_trigger_calls(program: &mut TypedProgram) {
     use zyntax_typed_ast::InternedString;
     use zyntax_typed_ast::typed_ast::{TypedCall, TypedDeclaration, TypedExpression, TypedLiteral};
 
-    // Phase 1: collect declared FSM names from `__fsm_meta__`-bearing impls.
+    // Step 1: collect declared FSM names from `__fsm_meta__`-bearing impls.
     let mut fsm_names: HashSet<InternedString> = HashSet::new();
     for decl in &program.declarations {
         if let TypedDeclaration::Impl(imp) = &decl.node
@@ -2386,7 +2386,7 @@ pub(crate) fn populate_fsm_registry_pass(
         TypedDeclaration, TypedExpression, TypedLiteral, TypedVariantFields,
     };
 
-    // Phase 1: scan. Collect (fsm_name, FsmDefinition) tuples.
+    // Step 1: scan. Collect (fsm_name, FsmDefinition) tuples.
     let mut found: Vec<(InternedString, FsmDefinition)> = Vec::new();
     let mut guards_to_lift: Vec<(
         InternedString,
@@ -2483,7 +2483,7 @@ pub(crate) fn populate_fsm_registry_pass(
         found.push((fsm_name, def));
     }
 
-    // Phase 2: pin TypeIds + populate the registry. Pre-register so Zyntax's
+    // Step 2: pin TypeIds + populate the registry. Pre-register so Zyntax's
     // compile path short-circuits and respects our id.
     for (fsm_name, def) in &found {
         let type_id = TypeId::next();
@@ -2541,7 +2541,7 @@ pub(crate) fn populate_fsm_registry_pass(
         with_fsm_registry_mut(|r| r.upsert(id, def.clone()));
     }
 
-    // Phase 2.5: lift each captured tick-guard expression into a top-level fn
+    // Step 3: lift each captured tick-guard expression into a top-level fn
     // returning i32 (1 if guard fires, 0 otherwise). i32 chosen because bool-return
     // ABI marshaling through `runtime.call::<bool>` is untested upstream.
     use zyntax_typed_ast::typed_ast::{TypedFunction, TypedIf};
@@ -2606,7 +2606,7 @@ pub(crate) fn populate_fsm_registry_pass(
         program.declarations.push(decl_node);
     }
 
-    // Phase 3: strip `__fsm_meta__` so compile doesn't try to resolve markers.
+    // Step 4: strip `__fsm_meta__` so compile doesn't try to resolve markers.
     for decl in &mut program.declarations {
         let TypedDeclaration::Impl(imp) = &mut decl.node else {
             continue;

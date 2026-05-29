@@ -424,8 +424,7 @@ fn dup_counter_invocations_produce_distinct_inner_state() {
 
 /// Regression: two `Button("Play")` invocations at distinct source
 /// positions hold distinct FSM state instead of colliding on the
-/// shared label. Span-derived call-site keys (Phase 1: substrate
-/// primitives) are what make this work.
+/// shared label. Span-derived call-site keys are what make this work.
 #[test]
 fn dup_labelled_buttons_hold_distinct_state() {
     use blinc_layout::stateful::ButtonState;
@@ -1229,9 +1228,9 @@ fn render_text_widget_compiles_and_runs() {
     // value-returning extern doesn't push to the scene
     // buffer, so we expect an empty op vec. The widget
     // handle returned by `$Blinc$Text$view` gets discarded
-    // today (Phase 2d wires the return value through the
-    // view function's signature; Phase 2e materialises it
-    // back into a `blinc_layout::Text`).
+    // today; threading the return value through the view
+    // function's signature and materialising it back into a
+    // `blinc_layout::Text` are follow-ups.
     let ops = dsl.render_view().expect("render_view");
     assert!(
         ops.is_empty(),
@@ -4517,7 +4516,7 @@ fn jit_view_renderer_round_trip() {
 /// shape: the substrate ViewRenderer returns a non-zero
 /// `ZyntaxValue::Int(handle)`, which decodes via
 /// [`materialize_widget`] back to a `WidgetBox::Text` whose
-/// `content` matches the source. Pins the full Phase 2
+/// `content` matches the source. Pins the full value-returning
 /// round-trip: AST rewrite → JIT-i64-return ABI → host-side
 /// box reclamation.
 #[test]
@@ -6308,10 +6307,10 @@ fn dsl_const_group_with_explicit_values_inlines_literals() {
 /// literal. End-to-end check: f-string interpolation `f"…{NAME}…"`
 /// sees the substituted literal at format time.
 ///
-/// MVP scope per `Phase 2C` of the plan: RHS is one literal token
-/// (int / float / string / bool); no arithmetic, no inter-const
-/// references, no type-checking against the annotation. `static`
-/// decls are deferred — the existing `signal` keyword already covers
+/// MVP scope: RHS is one literal token (int / float / string / bool);
+/// no arithmetic, no inter-const references, no type-checking against
+/// the annotation. `static` decls are deferred — the existing
+/// `signal` keyword already covers
 /// "top-level mutable cell" semantics if reactivity is acceptable.
 #[test]
 fn dsl_const_decl_inlines_at_reference_sites() {
