@@ -1,9 +1,9 @@
 use super::*;
 use crate::host::{
-    blinc_format_int, blinc_fsm_runtime_trigger, blinc_fsm_subscribe, blinc_signal_get_by_id_f64,
-    blinc_signal_get_by_id_i32, blinc_signal_get_by_id_string, blinc_signal_set_by_id_f64,
-    blinc_signal_set_by_id_i32, blinc_signal_set_by_id_string, blinc_string_concat, blinc_text,
-    blinc_text_int,
+    blinc_dsl_effect, blinc_format_int, blinc_fsm_runtime_trigger, blinc_fsm_subscribe,
+    blinc_signal_get_by_id_f64, blinc_signal_get_by_id_i32, blinc_signal_get_by_id_string,
+    blinc_signal_set_by_id_f64, blinc_signal_set_by_id_i32, blinc_signal_set_by_id_string,
+    blinc_string_concat, blinc_text, blinc_text_int,
 };
 use crate::widget_ffi::{
     blinc_b_view, blinc_blockquote_view, blinc_button_view, blinc_canvas_view, blinc_caption_view,
@@ -123,6 +123,18 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ],
             return_type: Type::Primitive(PrimitiveType::Unit),
             ptr: blinc_fsm_subscribe as *const u8,
+        },
+        BuiltinDescriptor {
+            // `effect { ... }` block — the DSL grammar's `effect_stmt`
+            // wraps the body in a zero-arg lambda; Zyntax lowers that
+            // lambda to an `extern "C" fn()` ptr that arrives here as
+            // an i64. We hand it to `blinc_core::reactive::effect(...)`
+            // — auto-tracking falls out because the closure body reads
+            // signals via the same path the native Rust effect uses.
+            name: "__blinc_effect__",
+            param_types: &[Type::Primitive(PrimitiveType::I64)],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_dsl_effect as *const u8,
         },
         BuiltinDescriptor {
             // Push a stable instance-ID derived from the call site's

@@ -42,6 +42,11 @@
     __signal_set_by_id_i32: "__signal_set_by_id_i32",
     __signal_set_by_id_f64: "__signal_set_by_id_f64",
     __signal_set_by_id_string: "__signal_set_by_id_string",
+    // `effect { ... }` block — registers a reactive side-effect that
+    // re-fires whenever any signal read inside the body changes.
+    // The DSL grammar's `effect_stmt` rule wraps the body into a
+    // zero-arg lambda and passes it as the single arg.
+    __blinc_effect__: "__blinc_effect__",
     // `<FsmName>.trigger("State.Event")` lowered by
     // `resolve_fsm_trigger_calls` routes here. Same reason as
     // above — needs an extern decl in the typed program for
@@ -909,8 +914,29 @@ statements = { stmt:statement* }
 // — interpolate via `text(f"{count}")` instead. f-string parts now
 // accept full expressions (see `f_string_expr` below).
 statement = {
-    text_string_stmt | text_int_stmt | match_stmt | if_stmt | let_stmt | component_call_stmt | assign_stmt | method_call_stmt
+    text_string_stmt | text_int_stmt | match_stmt | effect_stmt | if_stmt | let_stmt | component_call_stmt | assign_stmt | method_call_stmt
 }
+
+// `effect { ... }` — reactive side-effect block. Re-fires whenever
+// any signal read inside the body changes (auto-tracked via the
+// reactive graph). Lowers to `__blinc_effect__(<zero-arg lambda>)` —
+// the host extern wraps the lambda's `extern "C" fn()` ptr in a
+// closure and hands it to `blinc_core::reactive::effect(...)`.
+//
+// PEG note: the body matches `statement*` (same shape as `lambda_expr`
+// at line ~1442) so anything that parses as a statement inside a `||
+// { ... }` closure also works here. No leading `||` is required at
+// the source level — the lambda is synthesised at lowering time.
+effect_stmt = { "effect" ~ "{" ~ stmts:statement* ~ "}" }
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Call {
+          callee: Box::new(TypedExpression::Variable { name: intern("__blinc_effect__") }),
+          args: [TypedExpression::Lambda {
+              params: [],
+              body: TypedExpression::Block { statements: stmts },
+          }],
+      },
+  }
 
 // `match e { "a" -> f(), "b" -> g(), _ -> h() }`. Arrow-arm pattern
 // matching with string-literal patterns + `_` wildcard. Each arm body

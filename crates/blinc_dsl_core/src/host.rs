@@ -160,6 +160,31 @@ pub(crate) extern "C" fn blinc_fsm_runtime_trigger(fsm_ptr: *const i32, path_ptr
     blinc_runtime::fsm::dispatch_default(fsm, event);
 }
 
+/// `__blinc_effect__(closure_ptr)` — register a reactive side-effect
+/// against the process-global graph.
+///
+/// The DSL grammar's `effect_stmt` rule wraps the user's body in a
+/// zero-arg lambda; Zyntax's compiler lowers the lambda to an
+/// `extern "C" fn()` pointer and passes it as `closure_ptr`. We
+/// transmute the pointer back to a callable fn type and hand it to
+/// `blinc_core::reactive::effect(...)` — which auto-tracks every
+/// signal read inside the closure body the same way native Rust
+/// effects do.
+///
+/// # Safety
+///
+/// `closure_ptr` must remain valid for the lifetime of the
+/// `ZyntaxRuntime` (same contract as `__fsm_subscribe__`).
+pub(crate) extern "C" fn blinc_dsl_effect(closure_ptr: i64) {
+    if closure_ptr == 0 {
+        tracing::warn!("__blinc_effect__ called with null closure pointer");
+        return;
+    }
+    type EffectFn = extern "C" fn();
+    let func: EffectFn = unsafe { std::mem::transmute(closure_ptr) };
+    blinc_core::reactive::effect(move |_graph| func());
+}
+
 /// `__fsm_subscribe__("<FsmName>", "<From.Event>", closure_ptr)` — registers a
 /// path-filtered subscriber closure for the FSM's default-instance transitions.
 ///

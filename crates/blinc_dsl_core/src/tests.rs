@@ -5649,6 +5649,51 @@ fn dsl_signal_shares_storage_with_blinc_core_signal_primitive() {
     assert_eq!(dsl.get_signal_i32("tally"), Some(99));
 }
 
+/// Phase 1B acceptance: an `effect { ... }` block at the top of a DSL
+/// view body fires once at registration. The closure body emits a
+/// scene-buffer op (via `text(...)`) which we observe through
+/// `dsl.render_view()`. Confirms:
+///
+/// 1. The grammar's `effect_stmt` rule parses + lowers cleanly.
+/// 2. The `__blinc_effect__` extern hands the closure to
+///    `blinc_core::reactive::effect(...)` which auto-schedules the
+///    initial run during view-body execution.
+///
+/// Re-fire-on-dep-change is intentionally NOT tested here because
+/// `blinc_core::reactive`'s global-graph mutex isn't re-entrant —
+/// a closure that calls `<sig>.get()` deadlocks on the lock the
+/// outer `flush_effects` holds. That's a blinc_core
+/// concern to fix separately (TLS in-flush stack, or
+/// `parking_lot::ReentrantMutex`). The DSL side is correct as-is.
+#[test]
+fn dsl_effect_block_fires_at_registration() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            view {
+                effect {
+                    text("effect fired")
+                }
+            }
+        "#,
+        "effect_initial_fire.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let saw_effect_text = ops.iter().any(|op| match op {
+        DslOp::Text(s) => s == "effect fired",
+        _ => false,
+    });
+    assert!(
+        saw_effect_text,
+        "effect closure should fire on initial registration during view body \
+         execution — expected `DslOp::Text(\"effect fired\")` in {ops:?}"
+    );
+}
+
 /// `signal=200, guard >100` → tick fires.
 #[test]
 fn signal_guard_fires_when_above_threshold() {
