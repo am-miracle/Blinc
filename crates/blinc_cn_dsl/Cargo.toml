@@ -33,6 +33,10 @@ blinc_cn = { path = "../blinc_cn", version = "0.5.1" }
 # need it in scope so the macro can box the build result.
 blinc_layout = { path = "../blinc_layout", version = "0.5.1" }
 
+# `Color::from_hex` for the shared string-hex colour parser used by
+# every widget exposing a colour prop.
+blinc_core = { path = "../blinc_core", version = "0.5.1" }
+
 # Logging — unknown-variant / unknown-size diagnostics surface as
 # `tracing::warn!` so DSL typos show up without breaking the build.
 tracing.workspace = true

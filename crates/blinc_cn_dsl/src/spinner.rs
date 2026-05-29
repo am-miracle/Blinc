@@ -5,17 +5,24 @@ use std::cell::OnceCell;
 use blinc_dsl_core::extern_widget;
 use blinc_layout::div::ElementBuilder;
 
-/// `cn.Spinner(size?, duration_ms?)` — loading indicator.
+/// `cn.Spinner(size?, duration_ms?, color?, track_color?)` —
+/// loading indicator.
 ///
 /// Props (DSL surface):
 /// - `size: string` — `"small"`, `"medium"` (default), or `"large"`.
 /// - `duration_ms: i32` — full-rotation duration in milliseconds.
-///   Zero or negative means "use cn default". Color overrides
-///   (`color`, `track_color`) are deferred until the colour FFI lands.
+///   Zero or negative means "use cn default".
+/// - `color: string` — foreground arc colour as a hex string
+///   (`"#FF0000"` / `"#F00"` / `"FF0000"` / `"0xFF0000"`). Empty
+///   string means "use cn default". See
+///   [`crate::color::parse_color_prop`] for the accepted shapes.
+/// - `track_color: string` — background track colour, same hex shape.
 #[extern_widget(namespace = "cn", name = "Spinner")]
 pub struct CnSpinner {
     pub size: String,
     pub duration_ms: i32,
+    pub color: String,
+    pub track_color: String,
     /// Lazy-constructed cn builder. Same caching rationale as
     /// `CnButton::built`.
     #[skip]
@@ -43,6 +50,14 @@ impl CnSpinner {
         let mut b = blinc_cn::spinner().size(size);
         if self.duration_ms > 0 {
             b = b.duration_ms(self.duration_ms as u32);
+        }
+        if let Some(c) = crate::color::parse_color_prop("cn.Spinner", "color", &self.color) {
+            b = b.color(c);
+        }
+        if let Some(c) =
+            crate::color::parse_color_prop("cn.Spinner", "track_color", &self.track_color)
+        {
+            b = b.track_color(c);
         }
         b
     }

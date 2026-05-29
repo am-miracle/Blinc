@@ -5,7 +5,7 @@ use std::cell::OnceCell;
 use blinc_dsl_core::extern_widget;
 use blinc_layout::div::ElementBuilder;
 
-/// `cn.Button(label, variant?, size?, disabled?, icon?, icon_position?, icon_size?, on_click?)`
+/// `cn.Button(label, variant?, size?, disabled?, icon?, icon_position?, icon_size?, color?, on_click?)`
 /// — a single-line action button.
 ///
 /// Props (DSL surface):
@@ -21,15 +21,15 @@ use blinc_layout::div::ElementBuilder;
 ///   when `icon` is empty.
 /// - `icon_size: f64` — pixel size override. Zero means "derive from
 ///   button size" (the cn-side default).
+/// - `color: string` — text/icon colour override as a hex string
+///   (`"#FF0000"` / `"#F00"` / `"FF0000"` / `"0xFF0000"`). Empty
+///   string means "use the variant's default colour". See
+///   [`crate::color::parse_color_prop`] for the accepted shapes.
 /// - `on_click: || => unit` — DSL closure invoked on click. Mirrors
 ///   the existing `Div(on_click = ||{ … })` shape: zero-arg, fires
 ///   for side effects (signal writes, FSM triggers). The cn-side
 ///   `EventContext` is discarded — the closure runs as if it had
 ///   been written `||{ … }` on a plain Div.
-///
-/// `color` (Color override) is intentionally deferred — color FFI
-/// needs a string-hex / packed-i32 design that's shared across every
-/// cn widget with a colour prop. Tracked separately.
 #[extern_widget(namespace = "cn", name = "Button")]
 pub struct CnButton {
     pub label: String,
@@ -39,6 +39,7 @@ pub struct CnButton {
     pub icon: String,
     pub icon_position: String,
     pub icon_size: f64,
+    pub color: String,
     /// Closure handle minted by Zyntax's `CreateClosure` → `func_addr`.
     /// Zero when the user omitted `on_click`. See [`CnButton::to_cn_builder`]
     /// for the transmute + dispatch.
@@ -115,6 +116,9 @@ impl CnButton {
             if self.icon_size > 0.0 {
                 b = b.icon_size(self.icon_size as f32);
             }
+        }
+        if let Some(c) = crate::color::parse_color_prop("cn.Button", "color", &self.color) {
+            b = b.color(c);
         }
         if self.on_click != 0 {
             // Mirrors `blinc_div_view`: Zyntax mints a zero-arg

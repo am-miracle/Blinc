@@ -55,6 +55,10 @@ pub mod label;
 pub mod separator;
 pub mod spinner;
 
+// Internal — shared helpers used by per-widget modules. Not
+// re-exported; widgets pull what they need via `crate::color::…`.
+pub(crate) mod color;
+
 pub use alert::CnAlert;
 pub use badge::CnBadge;
 pub use button::CnButton;
