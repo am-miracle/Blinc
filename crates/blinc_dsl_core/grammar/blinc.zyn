@@ -67,6 +67,12 @@
     // this extern. Same closure-body Variable-resolution reason
     // as the rest of this section.
     __fsm_subscribe__: "__fsm_subscribe__",
+    // `<FsmName>.subscribe(|state| { match state { … } })` — single-
+    // arg form, an "all-paths" subscriber whose closure receives
+    // the matched `"From.Event"` path each transition. Lowered
+    // from `resolve_fsm_subscribe_calls` when the source call has
+    // a single closure arg (no path filter).
+    __fsm_subscribe_all__: "__fsm_subscribe_all__",
     // F-string desugaring: the normalization pass
     // `fstring_to_concat` (zyntax passes/normalization) rewrites
     // multi-part f-strings into `string_concat` chains with
@@ -1853,10 +1859,72 @@ bare_call_expr = { name:identifier ~ "(" ~ args:bare_call_args_list? ~ ")" }
 // fires INSIDE `or_expr` after a left operand is already
 // parsed, so a bare `||` at the start of an expression
 // position falls into this rule without ambiguity.
-lambda_expr = { "||" ~ "{" ~ stmts:statement* ~ "}" }
+// Two shapes:
+//   * Zero-arg `|| { stmts }` — fires under `effect`, path-filtered
+//     fsm subscribers, on_click handlers, etc.
+//   * One-arg `|name| { stmts }` — the closure body receives a
+//     string value (`name: string`). Used today by
+//     `<Fsm>.subscribe(|state| match state { … })` and matched
+//     by [`resolve_fsm_subscribe_calls`] when the subscribe call
+//     carries a single closure arg.
+//
+// PEG ordering: zero-arg form first because `||` is a stronger
+// fixed-string prefix than `|`. Single-arg form falls through
+// when the parser sees `|` followed by an identifier.
+lambda_expr = { lambda_no_param | lambda_one_param }
+
+lambda_no_param = { "||" ~ "{" ~ stmts:statement* ~ "}" }
   -> TypedExpression::Lambda {
       params: [],
       body: TypedExpression::Block { statements: stmts },
+  }
+
+// `|name| { stmts }` — single-param closure. The param's type is
+// `string` today (the only call site is `<Fsm>.subscribe(|state|
+// …)` which passes the matched `"From.Event"` path); extending to
+// explicit annotations (`|name: T|`) is a follow-up.
+//
+// Lambda params use `TypedLambdaParam` — Zyntax's
+// lambda-specific param variant whose `ty` is optional. The
+// action interpreter's `get_field_as_lambda_param_list` reads
+// this list specifically (not the regular `TypedParameter` list
+// the rest of the function machinery uses). Param-list
+// construction uses `prepend_list(p, [])` instead of an inline
+// `[p]` literal because the interpreter's struct-init path
+// doesn't accept a variable expression inside an inline list.
+//
+// Two body shapes accepted:
+//   * Braced   `|name| { stmts }`     — same shape as zero-arg lambdas.
+//   * Bareform `|name| <single stmt>` — useful for
+//     `fsm.subscribe(|state| match state { … })`. The single
+//     statement wraps in a `Block` so the SSA path stays uniform.
+//
+// PEG ordering: braced form first because `{` is a stronger leading
+// token than any statement-start keyword. The bareform alternate
+// lets the parser accept `|state| match state { … }` (the form
+// the user asked for) without requiring an outer pair of `{ }`.
+lambda_one_param = { lambda_one_param_block | lambda_one_param_bare }
+
+lambda_one_param_block = {
+    "|" ~ p:lambda_one_param_decl ~ "|" ~ "{" ~ stmts:statement* ~ "}"
+}
+  -> TypedExpression::Lambda {
+      params: prepend_list(p, []),
+      body: TypedExpression::Block { statements: stmts },
+  }
+
+lambda_one_param_bare = {
+    "|" ~ p:lambda_one_param_decl ~ "|" ~ s:statement
+}
+  -> TypedExpression::Lambda {
+      params: prepend_list(p, []),
+      body: TypedExpression::Block { statements: prepend_list(s, []) },
+  }
+
+lambda_one_param_decl = { name:identifier }
+  -> TypedLambdaParam {
+      name: intern(name),
+      ty: Type::Primitive { name: intern("str") },
   }
 
 // `computed { expr } : T` — a value-returning reactive derived. Same

@@ -1225,29 +1225,32 @@ pub(crate) fn resolve_fsm_subscribe_calls(
         }
 
         fn try_rewrite_subscribe(&self, expr: &mut zyntax_typed_ast::TypedNode<TypedExpression>) {
-            // Match in both AST shapes (MethodCall / Call+Field).
+            // Two shapes:
+            //   * 2-arg `subscribe(path, closure)` → `__fsm_subscribe__(name, path, closure)`
+            //   * 1-arg `subscribe(closure)`       → `__fsm_subscribe_all__(name, closure)`
+            // Both ASTs (MethodCall / Call+Field) carry through. Tuple is
+            // `(receiver, method, args:Vec<expr>, span)` where the args
+            // vector's length distinguishes the two forms.
             let subscribe_call = match &expr.node {
-                TypedExpression::MethodCall(mc) if mc.positional_args.len() == 2 => {
+                TypedExpression::MethodCall(mc) => {
                     if let TypedExpression::Variable(receiver_name) = &mc.receiver.node {
                         Some((
                             *receiver_name,
                             mc.method,
-                            mc.positional_args[0].clone(),
-                            mc.positional_args[1].clone(),
+                            mc.positional_args.clone(),
                             expr.span,
                         ))
                     } else {
                         None
                     }
                 }
-                TypedExpression::Call(c) if c.positional_args.len() == 2 => {
+                TypedExpression::Call(c) => {
                     if let TypedExpression::Field(f) = &c.callee.node {
                         if let TypedExpression::Variable(receiver_name) = &f.object.node {
                             Some((
                                 *receiver_name,
                                 f.field,
-                                c.positional_args[0].clone(),
-                                c.positional_args[1].clone(),
+                                c.positional_args.clone(),
                                 expr.span,
                             ))
                         } else {
@@ -1260,7 +1263,7 @@ pub(crate) fn resolve_fsm_subscribe_calls(
                 _ => None,
             };
 
-            let Some((receiver_name, method, path_arg, closure_arg, span)) = subscribe_call else {
+            let Some((receiver_name, method, args, span)) = subscribe_call else {
                 return;
             };
             if method.resolve_global().as_deref() != Some("subscribe") {
@@ -1284,18 +1287,52 @@ pub(crate) fn resolve_fsm_subscribe_calls(
                 Type::Primitive(PrimitiveType::String),
                 span,
             );
-            let callee = zyntax_typed_ast::TypedNode::new(
-                TypedExpression::Variable(InternedString::new_global("__fsm_subscribe__")),
-                Type::Unknown,
-                span,
-            );
-            expr.node = TypedExpression::Call(TypedCall {
-                callee: Box::new(callee),
-                positional_args: vec![fsm_name_arg, path_arg, closure_arg],
-                named_args: vec![],
-                type_args: vec![],
-            });
-            expr.ty = Type::Primitive(PrimitiveType::Unit);
+
+            match args.len() {
+                2 => {
+                    // Path-filtered form.
+                    let path_arg = args[0].clone();
+                    let closure_arg = args[1].clone();
+                    let callee = zyntax_typed_ast::TypedNode::new(
+                        TypedExpression::Variable(InternedString::new_global(
+                            "__fsm_subscribe__",
+                        )),
+                        Type::Unknown,
+                        span,
+                    );
+                    expr.node = TypedExpression::Call(TypedCall {
+                        callee: Box::new(callee),
+                        positional_args: vec![fsm_name_arg, path_arg, closure_arg],
+                        named_args: vec![],
+                        type_args: vec![],
+                    });
+                    expr.ty = Type::Primitive(PrimitiveType::Unit);
+                }
+                1 => {
+                    // All-paths form. The closure is a one-arg lambda
+                    // whose body receives the matched `"From.Event"`
+                    // path string each transition.
+                    let closure_arg = args[0].clone();
+                    let callee = zyntax_typed_ast::TypedNode::new(
+                        TypedExpression::Variable(InternedString::new_global(
+                            "__fsm_subscribe_all__",
+                        )),
+                        Type::Unknown,
+                        span,
+                    );
+                    expr.node = TypedExpression::Call(TypedCall {
+                        callee: Box::new(callee),
+                        positional_args: vec![fsm_name_arg, closure_arg],
+                        named_args: vec![],
+                        type_args: vec![],
+                    });
+                    expr.ty = Type::Primitive(PrimitiveType::Unit);
+                }
+                _ => {
+                    // Wrong arity — leave the call shape alone; the
+                    // type checker / linker surfaces the error.
+                }
+            }
         }
 
         fn rewrite_block(&self, block: &mut zyntax_typed_ast::typed_ast::TypedBlock) {
@@ -3211,7 +3248,8 @@ pub(crate) fn synthesize_fsm_event_enums(program: &mut TypedProgram) {
 pub(crate) fn lower_match_blocks(program: &mut TypedProgram) {
     use zyntax_typed_ast::TypedNode;
     use zyntax_typed_ast::typed_ast::{
-        BinaryOp, TypedBinary, TypedBlock, TypedDeclaration, TypedExpression, TypedIf, TypedLiteral,
+        BinaryOp, TypedBinary, TypedBlock, TypedDeclaration, TypedExpression, TypedIfExpr,
+        TypedLiteral,
     };
 
     fn is_call_to(stmt: &TypedNode<TypedStatement>, name: &str) -> bool {
@@ -3404,8 +3442,28 @@ pub(crate) fn lower_match_blocks(program: &mut TypedProgram) {
                 }
             }
 
-            // Fold from last to first so the FIRST arm wraps everything else.
-            let mut tail_else = else_block;
+            // Fold from last to first into an *expression*-form if/else
+            // chain (`TypedExpression::If` wrapping `TypedExpression::Block`
+            // branches). The expression form is the only one Zyntax's SSA
+            // creates fresh successor blocks for on demand — the statement
+            // form (`TypedStatement::If`) relies on pre-built CFG
+            // successors, which `translate_closure` doesn't construct.
+            // Inside a closure body the statement form silently skips
+            // both branches (then + else), so the match arms never fire.
+            // The expression form works in both top-level and closure
+            // contexts.
+            let unit = || Type::Primitive(PrimitiveType::Unit);
+            let block_expr = |b: TypedBlock| -> TypedNode<TypedExpression> {
+                let s = b.span;
+                TypedNode::new(TypedExpression::Block(b), unit(), s)
+            };
+            let mut tail_else_expr: TypedNode<TypedExpression> = match else_block {
+                Some(b) => block_expr(b),
+                None => block_expr(TypedBlock {
+                    statements: vec![],
+                    span: scrutinee_expr.span,
+                }),
+            };
             for (pat, body) in chain_arms.into_iter().rev() {
                 let span = body.span;
                 let pat_literal = TypedNode::new(
@@ -3424,25 +3482,24 @@ pub(crate) fn lower_match_blocks(program: &mut TypedProgram) {
                     Type::Primitive(PrimitiveType::Bool),
                     span,
                 );
-                let if_stmt = TypedStatement::If(TypedIf {
+                let then_expr = block_expr(body);
+                let if_expr = TypedExpression::If(TypedIfExpr {
                     condition: Box::new(condition),
-                    then_block: body,
-                    else_block: tail_else.take(),
-                    span,
+                    then_branch: Box::new(then_expr),
+                    else_branch: Box::new(tail_else_expr),
                 });
-                tail_else = Some(TypedBlock {
-                    statements: vec![TypedNode::new(
-                        if_stmt,
-                        Type::Primitive(PrimitiveType::Unit),
-                        span,
-                    )],
-                    span,
-                });
+                tail_else_expr = TypedNode::new(if_expr, unit(), span);
             }
 
-            // Splice the chain in place of the marker span.
-            let chain_stmts = tail_else.map(|b| b.statements).unwrap_or_default();
-            stmts.splice(i..=end_idx, chain_stmts);
+            // Splice the chain in place of the marker span. Wrap the
+            // expression-form if-chain in a single `TypedStatement::Expression`.
+            let chain_span = tail_else_expr.span;
+            let chain_stmt = TypedNode::new(
+                TypedStatement::Expression(Box::new(tail_else_expr)),
+                unit(),
+                chain_span,
+            );
+            stmts.splice(i..=end_idx, [chain_stmt]);
             i += 1;
         }
     }

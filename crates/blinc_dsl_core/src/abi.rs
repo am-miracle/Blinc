@@ -1,7 +1,8 @@
 use super::*;
 use crate::host::{
     blinc_dsl_computed_f64, blinc_dsl_computed_i32, blinc_dsl_computed_string, blinc_dsl_effect,
-    blinc_format_int, blinc_fsm_runtime_trigger, blinc_fsm_subscribe, blinc_signal_get_by_id_f64,
+    blinc_format_int, blinc_fsm_runtime_trigger, blinc_fsm_subscribe, blinc_fsm_subscribe_all,
+    blinc_signal_get_by_id_f64,
     blinc_signal_get_by_id_i32, blinc_signal_get_by_id_string, blinc_signal_set_by_id_f64,
     blinc_signal_set_by_id_i32, blinc_signal_set_by_id_string, blinc_string_concat, blinc_text,
     blinc_text_int,
@@ -127,6 +128,22 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ],
             return_type: Type::Primitive(PrimitiveType::Unit),
             ptr: blinc_fsm_subscribe as *const u8,
+        },
+        BuiltinDescriptor {
+            // `<FsmName>.subscribe(|state| { … })` — single-arg
+            // form, all-paths subscriber. The closure is a one-arg
+            // lambda whose body receives the matched
+            // `"From.Event"` path as a ZRTL-string ptr; the host
+            // extern wraps the i64 closure ptr in a Rust callback
+            // that allocates a ZRTL string for the path each
+            // dispatch and frees it after the closure returns.
+            name: "__fsm_subscribe_all__",
+            param_types: &[
+                Type::Primitive(PrimitiveType::String),
+                Type::Primitive(PrimitiveType::I64),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_fsm_subscribe_all as *const u8,
         },
         BuiltinDescriptor {
             // `effect { ... }` block — the DSL grammar's `effect_stmt`

@@ -19,8 +19,10 @@ component Counter {
         .counter-cta *, .counter-reset * { pointer-events: none }
     }
     init {
-        CounterFsm.subscribe("Counting.Increment", || { count.set(count.get() + 1) })
-        CounterFsm.subscribe("Counting.Reset",     || { count.set(0) })
+        CounterFsm.subscribe(|state| match state {
+            "Counting.Increment" -> { count.set(count.get() + 1) }
+            "Counting.Reset"     -> { count.set(0) }
+        })
     }
     @stateful([count]) @fsm([CounterFsm]) view {
         Div(class = "counter-card") {

@@ -59,8 +59,9 @@ pub mod instance;
 pub mod registry;
 
 pub use default_instance::{
-    TransitionEffect, TransitionSubscriber, current_state_code, current_state_name, default_state,
-    dispatch_default, register_subscriber, register_transition_effect, reset_default,
+    TransitionEffect, TransitionSubscriber, TransitionSubscriberPathed, current_state_code,
+    current_state_name, default_state, dispatch_default, register_subscriber,
+    register_subscriber_all, register_transition_effect, reset_default,
 };
 pub use dispatch::{GuardDispatcher, clear_guard_dispatcher, set_guard_dispatcher};
 pub use instance::FsmStateId;

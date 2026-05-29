@@ -273,6 +273,70 @@ pub(crate) extern "C" fn blinc_fsm_subscribe(
     });
 }
 
+/// `__fsm_subscribe_all__("<FsmName>", closure_ptr)` — registers an
+/// all-paths subscriber. The closure is the one-arg form
+/// (`|state| { … }`) whose body receives the matched
+/// `"From.Event"` path as a ZRTL-string pointer. Lowered from a
+/// single-arg `<Fsm>.subscribe(closure)` at the DSL level.
+///
+/// # Safety
+///
+/// `closure_ptr` must remain valid for the lifetime of the
+/// `ZyntaxRuntime`. The closure ABI is
+/// `extern "C" fn(*const i32)` — string-ptr in, no return — matching
+/// Zyntax's one-arg `CreateClosure` shape for closures whose only
+/// param is a `Ptr<I8>`-typed string.
+pub(crate) extern "C" fn blinc_fsm_subscribe_all(fsm_ptr: *const i32, closure_ptr: i64) {
+    let Some(fsm) = decode_signal_name(fsm_ptr) else {
+        tracing::warn!("__fsm_subscribe_all__ called with null fsm pointer");
+        return;
+    };
+    if closure_ptr == 0 {
+        tracing::warn!("__fsm_subscribe_all__ called with null closure pointer");
+        return;
+    }
+    blinc_runtime::fsm::register_subscriber_all(fsm, move |path: &str| {
+        // SAFETY: SSA lowering produces an `extern "C" fn(*const i32)`
+        // lambda body for one-arg string-typed lambdas. Build a ZRTL
+        // string (`[i32 length][utf8_bytes...]`) for the path and
+        // hand it to the closure.
+        type SubscriberFn = extern "C" fn(*const i32);
+        let func: SubscriberFn = unsafe { std::mem::transmute(closure_ptr) };
+
+        let bytes = path.as_bytes();
+        let len = bytes.len() as i32;
+        let total = 4 + bytes.len();
+        let layout = std::alloc::Layout::from_size_align(total, 4)
+            .expect("ZRTL string layout for fsm path");
+        // SAFETY: layout is non-zero (4 + len ≥ 4) and 4-aligned.
+        let raw = unsafe { std::alloc::alloc(layout) };
+        if raw.is_null() {
+            tracing::warn!("__fsm_subscribe_all__ failed to allocate path buffer");
+            return;
+        }
+        // SAFETY: `raw` is freshly allocated with at least `total` bytes;
+        // the i32 length header lives in the first 4 bytes, the utf8
+        // payload starts at offset 4. Writes are within bounds.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                len.to_le_bytes().as_ptr(),
+                raw,
+                4,
+            );
+            if !bytes.is_empty() {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), raw.add(4), bytes.len());
+            }
+        }
+        func(raw as *const i32);
+        // SAFETY: same layout used for the allocation; freeing after
+        // the closure returns. The closure must not retain the
+        // pointer past its own scope — match arms compare against
+        // string literals, which Zyntax's `zrtl_string_equals`
+        // resolves by reading the bytes, not by holding the ptr.
+        unsafe { std::alloc::dealloc(raw, layout) };
+    });
+}
+
 /// `$Blinc$text_int` — integer arm of `text(...)`. Pushes an int onto the scene buffer.
 pub(crate) extern "C" fn blinc_text_int(n: i32) {
     push_op(DslOp::IntText(n));

@@ -180,6 +180,21 @@ pub fn dispatch_default(fsm_name: &str, event_name: &str) -> Option<(Arc<str>, A
         cb();
     }
 
+    // All-paths subscribers: fire AFTER path-filtered subscribers so
+    // the user-visible firing order is "specific filter first, then
+    // generic". Each callback receives the formatted
+    // `"From.Event"` path so the DSL `subscribe(|state| match state
+    // { ... })` form can route on it.
+    let all_matched: Vec<Arc<TransitionSubscriberPathed>> = SUBSCRIBERS_ALL.with(|s| {
+        s.borrow()
+            .get(fsm_name)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default()
+    });
+    for cb in all_matched {
+        cb(&triggered_path);
+    }
+
     Some((from_name, to_name))
 }
 
@@ -209,6 +224,14 @@ thread_local! {
     /// the matching subset without holding the borrow across user
     /// code.
     static SUBSCRIBERS: RefCell<SubscriberMap> = RefCell::new(HashMap::new());
+    /// Per-FSM list of "all-paths" subscribers — fired on every
+    /// successful transition, receiving the matched
+    /// `"From.Event"` path string. Registered from DSL
+    /// `<Fsm>.subscribe(|state| …)` (single-arg form, distinct
+    /// from the path-filter / zero-arg shape). Same `Arc` snapshot
+    /// pattern as `SUBSCRIBERS` so dispatch doesn't hold the
+    /// borrow across user code.
+    static SUBSCRIBERS_ALL: RefCell<SubscriberAllMap> = RefCell::new(HashMap::new());
 }
 
 /// Callback signature for host-side effects registered via
@@ -225,10 +248,23 @@ pub type TransitionEffect = Box<dyn Fn(&str, &str, &str) + 'static>;
 /// [`register_subscriber`].
 pub type TransitionSubscriber = dyn Fn() + 'static;
 
+/// Path-receiving subscriber. Same firing site as
+/// [`TransitionSubscriber`] but the callback receives the matched
+/// `"From.Event"` path so the closure body can dispatch on it
+/// (e.g. `match state { "Counting.Increment" -> … }`). Registered
+/// from DSL `<Fsm>.subscribe(|state| { … })` — the single-arg
+/// form distinct from the path-filter / zero-arg shape.
+pub type TransitionSubscriberPathed = dyn Fn(&str) + 'static;
+
 /// Per-thread subscriber table: FSM name → list of
 /// `(path filter, callback)` pairs. Aliased so the `thread_local!`
 /// + lookup sites don't repeat the deeply-nested generics.
 type SubscriberMap = HashMap<String, Vec<(String, Arc<TransitionSubscriber>)>>;
+
+/// All-paths-subscriber table: FSM name → list of callbacks that
+/// fire on every transition. Separate from `SubscriberMap` so the
+/// dispatch loop can iterate without a path-filter check.
+type SubscriberAllMap = HashMap<String, Vec<Arc<TransitionSubscriberPathed>>>;
 
 /// Register a DSL-side subscriber that fires after each successful
 /// default-instance transition whose triggered `"From.Event"` path
@@ -243,6 +279,20 @@ pub fn register_subscriber(fsm_name: &str, path: &str, cb: impl Fn() + 'static) 
             .entry(fsm_name.to_string())
             .or_default()
             .push((path.to_string(), Arc::new(cb)));
+    });
+}
+
+/// All-paths subscriber registered from DSL
+/// `<Fsm>.subscribe(|state| { … })`. Fires on every successful
+/// default-instance transition, receiving the formatted
+/// `"From.Event"` path as the callback's single argument so the
+/// closure body can dispatch on it (typically via `match state`).
+pub fn register_subscriber_all(fsm_name: &str, cb: impl Fn(&str) + 'static) {
+    SUBSCRIBERS_ALL.with(|s| {
+        s.borrow_mut()
+            .entry(fsm_name.to_string())
+            .or_default()
+            .push(Arc::new(cb));
     });
 }
 
@@ -264,4 +314,5 @@ pub fn clear_all() {
     FALLBACK_CODES.with(|m| m.borrow_mut().clear());
     EFFECTS.with(|e| e.borrow_mut().clear());
     SUBSCRIBERS.with(|s| s.borrow_mut().clear());
+    SUBSCRIBERS_ALL.with(|s| s.borrow_mut().clear());
 }
