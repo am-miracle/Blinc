@@ -2195,18 +2195,68 @@ fn parse_struct_field_can_reference_custom_struct_type() {
     assert_eq!(*point_value, 3);
 }
 
-/// Lowercase `counter(0)` does not parse as a component call.
+/// Lowercase `counter(0)` parses as a bare function call (the
+/// `bare_call_stmt` alternative) — NOT as a `__component_call__`
+/// marker. Component calls require a capitalised name; lowercase
+/// identifiers route to a plain `Call(Variable("counter"), [0])`
+/// expression so they can resolve against user-declared `fn` decls
+/// or registered host builtins.
 #[test]
-fn parse_lowercase_call_is_not_component_call() {
+fn parse_lowercase_call_routes_to_bare_call_not_component_call() {
+    use zyntax_typed_ast::typed_ast::{TypedDeclaration, TypedExpression, TypedLiteral};
     let _ = tracing_subscriber::fmt::try_init();
 
     let dsl = BlincDsl::new().expect("runtime init");
-    // Lowercase calls only land via typed `text(...)` rules.
-    let result = dsl.parse_to_typed_ast(r#"view { counter(0) }"#, "lowercase_call.blinc");
-    assert!(
-        result.is_err(),
-        "lowercase `counter(0)` should not parse as a component call"
+    let program = dsl
+        .parse_to_typed_ast(r#"view { counter(0) }"#, "lowercase_call.blinc")
+        .expect("lowercase calls now parse as bare-call statements");
+
+    let render_view = program
+        .declarations
+        .iter()
+        .find_map(|d| match &d.node {
+            TypedDeclaration::Function(f)
+                if f.name.resolve_global().as_deref() == Some("render_view") =>
+            {
+                Some(f)
+            }
+            _ => None,
+        })
+        .expect("entry `view {}` produces a `render_view` fn");
+    let body = render_view.body.as_ref().expect("view body");
+    let first = body.statements.first().expect("view has at least one stmt");
+    let TypedStatement::Expression(expr) = &first.node else {
+        panic!("expected Expression statement, got: {:?}", first.node);
+    };
+    let TypedExpression::Call(call) = &expr.node else {
+        panic!("expected Call expression, got: {:?}", expr.node);
+    };
+    let TypedExpression::Variable(callee) = &call.callee.node else {
+        panic!(
+            "expected plain Variable callee, got: {:?}",
+            call.callee.node
+        );
+    };
+    let callee_name = callee.resolve_global();
+    assert_eq!(
+        callee_name.as_deref(),
+        Some("counter"),
+        "callee should be the bare identifier `counter`, NOT \
+         `__component_call__`"
     );
+    // First arg is the integer literal `0` (NOT a string-literal
+    // component name — that's the discriminator from the
+    // `__component_call__` shape).
+    let first_arg = call
+        .positional_args
+        .first()
+        .expect("counter(0) has one positional arg");
+    let TypedExpression::Literal(TypedLiteral::Integer(_)) = &first_arg.node else {
+        panic!(
+            "first arg should be the integer literal 0, got: {:?}",
+            first_arg.node
+        );
+    };
 }
 
 /// Single-prop bare component (no body methods) — props silently dropped.
@@ -6327,6 +6377,128 @@ fn dsl_const_group_with_explicit_values_inlines_literals() {
     );
 }
 
+/// Top-level `fn name(params): R { body }` declares a callable
+/// module-level function. ES6 type annotations: each param's type
+/// is `name: T`; the return type is `: T` after the param list
+/// (same `:` convention `computed { … }: T` and `signal x: T` use).
+/// `return expr` in the body lowers to Zyntax's native
+/// `TypedStatement::Return`, and the return value reaches the
+/// caller — proved here by interpolating an `add(7, 11)` call into
+/// the view body's f-string and asserting the formatted output.
+#[test]
+fn dsl_top_level_fn_with_params_and_return_reaches_caller() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            fn add(x: i32, y: i32): i32 {
+                return x + y
+            }
+
+            view {
+                text(f"sum={add(7, 11)}")
+            }
+        "#,
+        "fn_with_params_and_return.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let saw_result = ops.iter().any(|op| match op {
+        DslOp::Text(s) => s == "sum=18",
+        _ => false,
+    });
+    assert!(
+        saw_result,
+        "add(7, 11) should return 18 and interpolate into the view's \
+         f-string — expected `sum=18`, got {ops:?}"
+    );
+}
+
+/// A bare `return` statement in a void function exits early,
+/// skipping any subsequent statements in the body. Regression-
+/// covers the `return_stmt_void` grammar alternative that matches
+/// `return` with no trailing expression via PEG negative lookahead.
+#[test]
+fn dsl_bare_return_in_void_fn_skips_rest_of_body() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            fn maybe(n: i32) {
+                if n > 0 {
+                    return
+                }
+                text("non-positive")
+            }
+
+            view {
+                maybe(5)
+                text("after")
+            }
+        "#,
+        "fn_bare_return.blinc",
+    )
+    .expect("compile");
+
+    let ops = dsl.render_view().expect("render_view");
+    let saw_after = ops.iter().any(|op| match op {
+        DslOp::Text(s) => s == "after",
+        _ => false,
+    });
+    let saw_skipped = ops.iter().any(|op| match op {
+        DslOp::Text(s) => s == "non-positive",
+        _ => false,
+    });
+    assert!(
+        saw_after,
+        "control should return to the view body after maybe(5), expected \
+         `after`, got {ops:?}"
+    );
+    assert!(
+        !saw_skipped,
+        "the `return` should skip the body's `text(\"non-positive\")` \
+         statement — got {ops:?}"
+    );
+}
+
+/// `impl_fn` accepts params + return type with the same shape as
+/// top-level `fn_decl` — both share `fn_param_list` and
+/// `fn_return_type`. Regression-covers the impl_fn upgrade.
+#[test]
+fn dsl_impl_fn_accepts_params_and_return_type() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    // The handler body's `return 42` doesn't observably wire up in
+    // this MVP (Blinc components don't surface arbitrary method
+    // return values to call sites yet), but the COMPILE path
+    // exercises the grammar's impl_fn-with-params-and-return shape
+    // end-to-end. Symbol emission produces the inherent-method
+    // name `C$handler` alongside `C$view`.
+    let names = dsl
+        .compile_source(
+            r#"
+                component C {
+                    view { Text("hi") }
+                    fn handler(prefix: string): i32 { return 42 }
+                }
+            "#,
+            "impl_fn_params_return.blinc",
+        )
+        .expect("compile");
+    assert!(
+        names.iter().any(|s| s == "C$handler"),
+        "impl-method symbol `C$handler` should appear, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|s| s == "C$view"),
+        "view-method symbol `C$view` should still appear, got: {names:?}"
+    );
+}
+
 /// Top-level `const NAME: T = literal` decls inline at every
 /// reference site. The post-parse pass `resolve_const_references`
 /// walks every `__blinc_const__` marker function, records its
@@ -6340,8 +6512,8 @@ fn dsl_const_group_with_explicit_values_inlines_literals() {
 /// MVP scope: RHS is one literal token (int / float / string / bool);
 /// no arithmetic, no inter-const references, no type-checking against
 /// the annotation. `static` decls are deferred — the existing
-/// `signal` keyword already covers
-/// "top-level mutable cell" semantics if reactivity is acceptable.
+/// `signal` keyword already covers "top-level mutable cell"
+/// semantics if reactivity is acceptable.
 #[test]
 fn dsl_const_decl_inlines_at_reference_sites() {
     let _ = tracing_subscriber::fmt::try_init();

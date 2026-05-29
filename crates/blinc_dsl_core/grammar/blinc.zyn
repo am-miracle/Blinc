@@ -158,7 +158,7 @@ top_level_items = { item:top_level_item* }
 // `component_decl`. Falling through handles standalone struct-only
 // `component { fields }` decls, standalone `impl` blocks, and the
 // bare `view { ... }` quick-test shape.
-top_level_item = { import_stmt | style_decl | signal_decl | const_group | const_decl | struct_decl | component_folded | component_decl | fsm_decl | impl_block | bare_view_item }
+top_level_item = { import_stmt | style_decl | signal_decl | const_group | const_decl | struct_decl | component_folded | component_decl | fsm_decl | impl_block | fn_decl | bare_view_item }
 
 // `style { ...CSS... }` — block-form CSS declaration. Author
 // writes raw CSS between the braces; balanced nested braces
@@ -817,18 +817,58 @@ impl_block = { "impl" ~ name:identifier ~ "{" ~ items:impl_items ~ "}" }
 impl_items = { item:impl_fn* }
   -> item
 
-// `fn <name>() { stmts }` inside an impl block. No params, no
-// return type for the prototype slice — adding params (including
-// `self`) and return types is mechanical when handlers / methods
-// taking arguments land. The interpreter's Impl-walk converts this
-// `TypedDeclaration::Function` into a `TypedMethod`.
-impl_fn = { "fn" ~ name:identifier ~ "(" ~ ")" ~ "{" ~ stmts:statements ~ "}" }
+// `fn <name>(<params>): <ret> { stmts }` inside an impl block. ES6-
+// style type annotations — `:` for both per-param types AND the
+// return type — match the rest of Blinc's surface (`state x: T`,
+// `signal s: T`, `computed { … }: T`). Params + return are both
+// optional: bare `fn handler() { … }` keeps its pre-extension shape.
+// `self` / `&self` receivers aren't carried yet — methods that need
+// component state still bind through `bind_component_props`'
+// __component_props__ marker pathway.
+impl_fn = { "fn" ~ name:identifier ~ "(" ~ params:fn_param_list? ~ ")" ~ ret:fn_return_type? ~ "{" ~ stmts:statements ~ "}" }
   -> TypedDeclaration::Function {
       name: intern(name),
-      params: [],
-      return_type: Type::Unit,
+      params: params.unwrap_or([]),
+      return_type: ret.unwrap_or(Type::Unit),
       body: Some(TypedBlock { statements: stmts }),
   }
+
+// `fn <name>(<params>): <ret> { stmts }` at the top level — a
+// module-level function callable from any view body, FSM guard,
+// effect closure, etc. Shares the param + return-type shape with
+// `impl_fn`; lowers to a free-standing `TypedDeclaration::Function`
+// that Zyntax compiles to the symbol `<name>` (no class prefix —
+// top-level fns aren't inherent methods).
+fn_decl = { "fn" ~ name:identifier ~ "(" ~ params:fn_param_list? ~ ")" ~ ret:fn_return_type? ~ "{" ~ stmts:statements ~ "}" }
+  -> TypedDeclaration::Function {
+      name: intern(name),
+      params: params.unwrap_or([]),
+      return_type: ret.unwrap_or(Type::Unit),
+      body: Some(TypedBlock { statements: stmts }),
+  }
+
+// Param list: `name: T, name: T, …`. Comma-or-newline separated via
+// `prepend_list` (the same helper `component_args_list` uses), so
+// authors can lay out params one per line OR comma-pack on a single
+// line. Trailing `,?` falls out of the optional separator on `_tail`.
+fn_param_list = { first:fn_param ~ rest:fn_param_tail* }
+  -> prepend_list(first, rest)
+
+fn_param_tail = { ","? ~ p:fn_param } -> p
+
+// ES6 annotation: param name and type are separated by `:`. Type
+// reuses `state_type` — same bool / i32 / f64 / string / Named
+// surface that signals, fields, and computed-return types accept.
+fn_param = { name:identifier ~ ":" ~ ty:state_type }
+  -> TypedParameter {
+      name: intern(name),
+      ty: ty,
+  }
+
+// Optional return-type annotation: `: T` after the param list. The
+// leading `:` matches the existing `computed { e }: T` form for
+// reactive derives, and the per-param `name: T` rule above.
+fn_return_type = { ":" ~ ty:state_type } -> ty
 
 // =====================================================================
 // `fsm <Name> { ... }` — finite state machine declaration
@@ -1020,8 +1060,54 @@ statements = { stmt:statement* }
 // — interpolate via `text(f"{count}")` instead. f-string parts now
 // accept full expressions (see `f_string_expr` below).
 statement = {
-    text_string_stmt | text_int_stmt | match_stmt | effect_stmt | if_stmt | let_stmt | component_call_stmt | assign_stmt | method_call_stmt
+    text_string_stmt | text_int_stmt | match_stmt | effect_stmt | if_stmt | return_stmt | let_stmt | component_call_stmt | bare_call_stmt | assign_stmt | method_call_stmt
 }
+
+// `name(args)` as a bare statement — a top-level / module-level
+// function call invoked for its side effects. Mirrors
+// `bare_call_expr` (which sits in `primary_expr` for expression
+// position) so the same call shape works in both positions.
+// PEG ordering: AFTER `component_call_stmt` (capitalised names take
+// that branch and emit a `__component_call__` marker) and BEFORE
+// `assign_stmt` / `method_call_stmt` (those fall through when the
+// trailing token after the identifier is `=` or `.` respectively
+// instead of `(`).
+//
+// `text` is excluded via negative lookahead so an ill-formed
+// `text(...)` invocation (no args, non-string arg, etc.) still
+// surfaces as a parse error at the statement boundary instead of
+// silently lowering to a bare `Variable("text")` call that the JIT
+// can't resolve. `text(...)` has dedicated `text_string_stmt` /
+// `text_int_stmt` rules that handle the well-formed shapes; any
+// other shape should fail loudly at compile time.
+bare_call_stmt = { !text_keyword_word ~ name:identifier ~ "(" ~ args:call_args_list? ~ ")" }
+  -> TypedStatement::Expression {
+      expr: TypedExpression::Call {
+          callee: Box::new(TypedExpression::Variable { name: intern(name) }),
+          args: args.unwrap_or([]),
+      },
+  }
+
+// Atomic lookahead helper: matches the `text` keyword IFF the next
+// non-word character isn't part of a longer identifier (so `text2`
+// is still a valid bare-call name). Same word-boundary shape PEG
+// uses for keyword discrimination.
+text_keyword_word = @{ "text" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+// `return` or `return <expr>` — early-return from a function body.
+// PEG ordered alternates: try the value-bearing form first so a
+// trailing expression is captured rather than left dangling. The
+// value-less form matches a bare `return` (or `return` followed by a
+// non-expression token like `}` — the implicit-Unit return case from
+// a void function). Lowers to Zyntax's native `TypedStatement::Return`
+// — the compiler emits the appropriate ret instruction at codegen.
+return_stmt = { return_stmt_value | return_stmt_void }
+
+return_stmt_value = { "return" ~ value:expr }
+  -> TypedStatement::Return { value: value }
+
+return_stmt_void = { "return" ~ !expr }
+  -> TypedStatement::Return { }
 
 // `effect { ... }` — reactive side-effect block. Re-fires whenever
 // any signal read inside the body changes (auto-tracked via the
