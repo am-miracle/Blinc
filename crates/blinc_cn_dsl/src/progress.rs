@@ -22,7 +22,7 @@ use blinc_layout::div::ElementBuilder;
 /// - `width: f64` — bar width in pixels. Zero (default) means "use
 ///   cn default of 200px".
 /// - `indicator_color: string` / `track_color: string` — hex colour
-///   overrides per [`crate::color::parse_color_prop`].
+///   overrides (`"#RRGGBB"` / `"RRGGBB"` / `"0xRRGGBB"` / `"#RGB"`).
 /// - `rounded: f64` — corner radius override. Zero means "use cn
 ///   default" (the size-derived value).
 ///

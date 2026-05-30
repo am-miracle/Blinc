@@ -1,9 +1,16 @@
-# Stateful API
+# Stateful API + Signal-bound modifiers demo.
 
-This example demonstrates the new stateful::<S>() API with:
-- `ctx.event()` - Access triggering event in state callbacks
-- `ctx.use_signal()` - Scoped signals for local state
-- `ctx.use_animated_value()` - Spring-animated values
+Two complementary examples:
+
+1. **Stateful counter / event display** — the original demo of
+   `stateful::<S>()`, `ctx.use_signal()`, `ctx.use_animated_value()`
+   (declarative spring animations + scoped signals).
+
+2. **Signal-bound modifiers** (reactive-architecture-v2 Phase 2) —
+   `.bg(&state)` / `.opacity(&state)` / `.rounded(&state)` /
+   `.border_color(&state)` / `.w(&state)` patch a single
+   `RenderProps` (or taffy `Style`) cell on `state.set(...)` without
+   a `Stateful` wrap or closure re-run.
 
 <iframe
   src="../../examples/stateful_demo/index.html"

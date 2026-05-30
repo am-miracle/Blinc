@@ -144,6 +144,18 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         r#"{ git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "5dbdad2bfdf7189446ee211da9cbd28b3edd4186" }"#,
     ),
     (
+        "blinc_gpu::",
+        "blinc_gpu",
+        // Custom-render-pass demos (`gpu_pass_demo`) import `blinc_gpu`
+        // directly. `default-features = false` is required because the
+        // default `desktop` feature pulls vulkan / metal / dx12 / winit
+        // backends that don't compile on `wasm32-unknown-unknown`. The
+        // `web` feature enables `webgpu` + `webgl` wgpu backends — same
+        // set blinc_app's `web` feature chains in transitively, but
+        // wrappers depending on `blinc_gpu` by name need their own copy.
+        r#"{ path = "../../../crates/blinc_gpu", default-features = false, features = ["web"] }"#,
+    ),
+    (
         "blinc_theme::",
         "blinc_theme",
         r#"{ path = "../../../crates/blinc_theme" }"#,
@@ -213,6 +225,19 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
     // `performance.now()` with the same API. Detected by source
     // scan so demos that don't animate don't pay the extra dep.
     ("web_time::", "web-time", r#""1.1""#),
+    // wgpu + bytemuck: pulled in only by demos that drive a
+    // `CustomRenderPass` directly (currently `gpu_pass_demo`). The
+    // workspace pins `wgpu = "=26.0.1"` so the wrapper agrees on
+    // ABI with `blinc_gpu`; backend features (`webgpu`, `webgl`)
+    // come transitively via `blinc_gpu`'s `web` feature, so we
+    // don't enable them here. `bytemuck` carries the `derive`
+    // feature for `Pod` / `Zeroable` proc-macros.
+    ("wgpu::", "wgpu", r#""=26.0.1""#),
+    (
+        "bytemuck::",
+        "bytemuck",
+        r#"{ version = "1.14", features = ["derive"] }"#,
+    ),
 ];
 
 // ============================================================================

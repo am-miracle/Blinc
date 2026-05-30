@@ -14,8 +14,7 @@ use blinc_layout::div::ElementBuilder;
 ///   Zero or negative means "use cn default".
 /// - `color: string` — foreground arc colour as a hex string
 ///   (`"#FF0000"` / `"#F00"` / `"FF0000"` / `"0xFF0000"`). Empty
-///   string means "use cn default". See
-///   [`crate::color::parse_color_prop`] for the accepted shapes.
+///   string means "use cn default".
 /// - `track_color: string` — background track colour, same hex shape.
 #[extern_widget(namespace = "cn", name = "Spinner")]
 pub struct CnSpinner {

@@ -30,6 +30,7 @@ manageable.
 - [**@flow Shader**](./example-gallery/flow_demo.md) — Demonstrates the @flow DAG-based shader system.
 - [**Fluid Surface**](./example-gallery/fluid_demo.md) — Combines `@flow` GPU shaders with `pointer-query` CSS-driven interaction.
 - [**Skeleton animation with glTF + `blinc_canvas_kit`.**](./example-gallery/gltf_animation_demo.md) — Loads Sketchfab's buster_drone (39 meshes, 92 nodes, one 25-second
+- [**`DrawContext::run_gpu_pass` end-to-end demo.**](./example-gallery/gpu_pass_demo.md) — Shows the same pattern a user would reach for if they wanted to
 - [**Image CSS Styling**](./example-gallery/image_css_demo.md) — Demonstrates CSS properties that work on images via stylesheets:
 - [**Image Layer Test**](./example-gallery/image_layer_test.md) — Tests the rendering order of images vs primitives (paths, backgrounds).
 - [**Keyframe Animation Canvas**](./example-gallery/keyframe_canvas.md) — Demonstrates keyframe animations with the canvas element for:
@@ -46,7 +47,7 @@ manageable.
 - [**Scroll Container**](./example-gallery/scroll.md) — This example demonstrates the scroll widget with opt-in webkit-style
 - [**Semantic @flow**](./example-gallery/semantic_flow_demo.md) — Demonstrates the semantic step/chain/use system for @flow shaders.
 - [**Sortable**](./example-gallery/sortable_demo.md) — Demonstrates drag-based interactions using FSM-driven stateful containers:
-- [**Stateful API**](./example-gallery/stateful_demo.md) — This example demonstrates the new stateful::<S>() API with:
+- [**Stateful API + Signal-bound modifiers demo.**](./example-gallery/stateful_demo.md) — Two complementary examples:
 - [**End-to-end 3D demo wiring Blinc's SceneKit3D renderer up to**](./example-gallery/strangler_demo.md) — dispatch front-end used by any Blinc app that wants to drop
 - [**Unified Styling API**](./example-gallery/styling_demo.md) — Demonstrates all styling approaches in Blinc:
 - [**SVG Animation**](./example-gallery/svg_animation_demo.md) — Demonstrates SVG animation capabilities:

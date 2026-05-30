@@ -23,8 +23,7 @@ use blinc_layout::div::ElementBuilder;
 ///   button size" (the cn-side default).
 /// - `color: string` — text/icon colour override as a hex string
 ///   (`"#FF0000"` / `"#F00"` / `"FF0000"` / `"0xFF0000"`). Empty
-///   string means "use the variant's default colour". See
-///   [`crate::color::parse_color_prop`] for the accepted shapes.
+///   string means "use the variant's default colour".
 /// - `on_click: || => unit` — DSL closure invoked on click. Mirrors
 ///   the existing `Div(on_click = ||{ … })` shape: zero-arg, fires
 ///   for side effects (signal writes, FSM triggers). The cn-side
@@ -41,8 +40,9 @@ pub struct CnButton {
     pub icon_size: f64,
     pub color: String,
     /// Closure handle minted by Zyntax's `CreateClosure` → `func_addr`.
-    /// Zero when the user omitted `on_click`. See [`CnButton::to_cn_builder`]
-    /// for the transmute + dispatch.
+    /// Zero when the user omitted `on_click`. The cn-side builder
+    /// constructed by `get_or_build` handles the transmute + dispatch
+    /// when invoked.
     pub on_click: i64,
     /// Lazy-constructed cn-side builder. Cached so the `ElementBuilder`
     /// trait methods can delegate to a stable reference instead of
