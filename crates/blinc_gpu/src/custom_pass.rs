@@ -246,6 +246,95 @@ impl CustomPassManager {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GpuPass — bridge wrapper used by DrawContext::run_gpu_pass
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Canonical bridge between [`CustomRenderPass`] and
+/// [`blinc_core::draw::DrawContext::run_gpu_pass`].
+///
+/// Wrap any `CustomRenderPass` with `GpuPass::new(...)` and pass `&pass`
+/// into `ctx.run_gpu_pass()` from inside a canvas closure. The wrapper
+/// is cheap to clone (it's an `Arc` internally) and carries its own
+/// retained pipeline / buffer state across frames via the underlying
+/// pass's `&mut self` methods.
+///
+/// The wrapper uses interior mutability (`Arc<Mutex<_>>`) because the
+/// canvas render closure is `Fn`, not `FnMut`. Users capture the wrapper
+/// by move and call `&pass` from within the closure; the GPU dispatch
+/// site locks the mutex briefly to call `initialize` (once) and
+/// `render` (every frame).
+///
+/// # Example
+///
+/// ```ignore
+/// use blinc_gpu::{GpuPass, custom_pass::{CustomRenderPass, RenderStage, RenderPassContext}};
+///
+/// struct Particles { /* wgpu state on self */ }
+/// impl CustomRenderPass for Particles {
+///     fn label(&self) -> &str { "particles" }
+///     fn stage(&self) -> RenderStage { RenderStage::PreRender }
+///     fn initialize(&mut self, _d: &wgpu::Device, _q: &wgpu::Queue, _f: wgpu::TextureFormat) {}
+///     fn render(&mut self, _ctx: &RenderPassContext) {}
+/// }
+///
+/// let particles = GpuPass::new(Particles { /* ... */ });
+/// // inside a canvas closure: `ctx.run_gpu_pass(&particles)`
+/// ```
+#[derive(Clone)]
+pub struct GpuPass {
+    pub(crate) inner: std::sync::Arc<std::sync::Mutex<GpuPassInner>>,
+}
+
+/// Locked state of a [`GpuPass`]. Crate-visible so the GPU paint
+/// dispatch in `paint.rs` can drive `initialize` / `render` without
+/// re-exporting the lock guard.
+pub(crate) struct GpuPassInner {
+    pub pass: Box<dyn CustomRenderPass>,
+    pub initialized: bool,
+}
+
+impl GpuPass {
+    /// Wrap a [`CustomRenderPass`] so it can be scheduled via
+    /// `DrawContext::run_gpu_pass`. Initialization is deferred to the
+    /// first frame that actually dispatches the pass.
+    pub fn new<T: CustomRenderPass + 'static>(pass: T) -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(GpuPassInner {
+                pass: Box::new(pass),
+                initialized: false,
+            })),
+        }
+    }
+
+    /// Initialize the underlying pass on first call, then run it.
+    /// Used by the GPU dispatch site after a `take_pending_gpu_passes`
+    /// drain. Not intended for user code.
+    #[doc(hidden)]
+    pub fn initialize_and_render(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        ctx: &RenderPassContext<'_>,
+    ) {
+        let mut guard = self.inner.lock().expect("GpuPass mutex poisoned");
+        if !guard.initialized {
+            guard.pass.initialize(device, queue, format);
+            guard.initialized = true;
+        }
+        if guard.pass.enabled() {
+            guard.pass.render(ctx);
+        }
+    }
+}
+
+impl blinc_core::draw::GpuPassHook for GpuPass {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Custom Bind Groups
 // ─────────────────────────────────────────────────────────────────────────────
 

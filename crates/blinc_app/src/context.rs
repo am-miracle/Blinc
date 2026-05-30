@@ -243,6 +243,11 @@ pub struct CanvasOverlay {
     pub primitives: Vec<blinc_gpu::primitives::GpuPrimitive>,
     pub dynamic_images: Vec<blinc_gpu::primitives::DynamicImage>,
     pub meshes: Vec<blinc_gpu::PendingMesh>,
+    /// User-defined GPU passes scheduled via `DrawContext::run_gpu_pass`
+    /// inside canvas closures. Drained from each canvas's scratch paint
+    /// context and dispatched alongside `meshes`, after the SDF static
+    /// cache has been blitted onto the frame target.
+    pub gpu_passes: Vec<blinc_gpu::paint::PendingGpuPass>,
     /// Aux-data emitted by canvas closures (polygon-clip vertices, 3D
     /// group shape descriptors). Concatenated across closures; per-
     /// primitive offsets that referenced the closure's own
@@ -1177,6 +1182,7 @@ impl RenderContext {
             overlay.primitives.extend(new_batch.primitives);
             overlay.dynamic_images.extend(new_batch.dynamic_images);
             overlay.meshes.extend(scratch.take_pending_meshes());
+            overlay.gpu_passes.extend(scratch.take_pending_gpu_passes());
         }
         overlay
     }
@@ -7328,6 +7334,16 @@ impl RenderContext {
                         &overlay.meshes,
                     );
                 }
+                if !overlay.gpu_passes.is_empty() {
+                    dispatch_pending_gpu_passes(
+                        &mut self.renderer,
+                        target_view,
+                        width,
+                        height,
+                        tree.scale_factor(),
+                        &overlay.gpu_passes,
+                    );
+                }
                 // Authoritative `visible_anim_active` update —
                 // walker didn't run this frame, so reset the flag
                 // from current animation state. Mirrors the motion
@@ -7669,6 +7685,16 @@ impl RenderContext {
                         &overlay.meshes,
                     );
                 }
+                if !overlay.gpu_passes.is_empty() {
+                    dispatch_pending_gpu_passes(
+                        &mut self.renderer,
+                        target_view,
+                        width,
+                        height,
+                        tree.scale_factor(),
+                        &overlay.gpu_passes,
+                    );
+                }
 
                 // The walker normally writes `visible_anim_active` from
                 // its per-frame observations (canvas paints, active
@@ -7937,6 +7963,16 @@ impl RenderContext {
                 width,
                 height,
                 &overlay.meshes,
+            );
+        }
+        if !overlay.gpu_passes.is_empty() {
+            dispatch_pending_gpu_passes(
+                &mut self.renderer,
+                target_view,
+                width,
+                height,
+                tree.scale_factor(),
+                &overlay.gpu_passes,
             );
         }
 
@@ -8274,6 +8310,11 @@ impl RenderContext {
         // `ctx` can drop right after `take_batch`/`take_pending_meshes`
         // and the rest of the frame runs without holding onto it.
         let pending_meshes = ctx.take_pending_meshes();
+        // Custom GPU passes scheduled via `ctx.run_gpu_pass(...)` inside
+        // canvas callbacks. Same lifecycle as `pending_meshes` —
+        // dispatched alongside meshes on the legacy (non-overlay) path
+        // a few hundred lines down.
+        let pending_gpu_passes = ctx.take_pending_gpu_passes();
 
         // Collect text, SVG, image, and flow elements WITH motion state.
         //
@@ -9516,6 +9557,16 @@ impl RenderContext {
         if !pending_meshes.is_empty() {
             dispatch_pending_meshes(&mut self.renderer, target, width, height, &pending_meshes);
         }
+        if !pending_gpu_passes.is_empty() {
+            dispatch_pending_gpu_passes(
+                &mut self.renderer,
+                target,
+                width,
+                height,
+                scale_factor,
+                &pending_gpu_passes,
+            );
+        }
 
         // Render overlays from RenderState
         self.render_overlays(render_state, width, height, target);
@@ -10529,6 +10580,52 @@ fn dispatch_pending_meshes(
             batch_index,
             batch_count,
         );
+    }
+}
+
+/// Dispatch every [`PendingGpuPass`] captured by `GpuPaintContext` to
+/// its underlying [`blinc_gpu::CustomRenderPass`].
+///
+/// Lazy-initializes each pass on the first frame it dispatches (the
+/// `GpuPass` wrapper carries the `initialized` flag internally). The
+/// `RenderPassContext` we build here mirrors the one
+/// [`CustomPassManager::execute_stage`] uses for renderer-registered
+/// passes, with two differences: `view_proj` / `inv_view_proj` /
+/// `camera_pos` are left `None` (no 3D camera implied for canvas-scoped
+/// custom passes — users who want 3D should still register at the
+/// `Scene3D` stage), and `viewport` is whatever the canvas closure
+/// derived from its bounds (or `None` = full target).
+fn dispatch_pending_gpu_passes(
+    renderer: &mut GpuRenderer,
+    target: &wgpu::TextureView,
+    width: u32,
+    height: u32,
+    scale_factor: f32,
+    passes: &[blinc_gpu::paint::PendingGpuPass],
+) {
+    if passes.is_empty() {
+        return;
+    }
+    let device = renderer.device_arc();
+    let queue = renderer.queue_arc();
+    let format = renderer.surface_format();
+    for pending in passes {
+        let ctx = blinc_gpu::custom_pass::RenderPassContext {
+            device: &device,
+            queue: &queue,
+            target,
+            viewport_width: width,
+            viewport_height: height,
+            texture_format: format,
+            scale_factor: scale_factor as f64,
+            view_proj: None,
+            inv_view_proj: None,
+            camera_pos: None,
+            viewport: pending.viewport,
+        };
+        pending
+            .pass
+            .initialize_and_render(&device, &queue, format, &ctx);
     }
 }
 

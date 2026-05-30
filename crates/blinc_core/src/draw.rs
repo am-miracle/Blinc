@@ -2190,6 +2190,39 @@ pub trait DrawContext {
     fn sample_layer(&mut self, id: LayerId, source_rect: Rect, dest_rect: Rect);
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Custom GPU passes
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Schedule a user-defined GPU pass to run inline with this paint
+    /// session.
+    ///
+    /// `viewport` is the rect (in local coordinates) the pass should
+    /// clip its output to. Pass `Some(bounds.rect())` from inside a
+    /// `canvas(|ctx, bounds| …)` closure to clip to the canvas's layout
+    /// region, or `None` to inherit whatever clip is already on the
+    /// stack (the GPU backend captures the current clip-stack AABB
+    /// when `None`). Falling back further when no clip is pushed runs
+    /// the pass against the full frame target.
+    ///
+    /// The default impl is a no-op so non-GPU contexts (mock test
+    /// contexts, the recording context) silently skip the pass. The
+    /// GPU-backed paint context overrides this to queue the pass for
+    /// dispatch during composite.
+    ///
+    /// `GpuPassHook` is an opaque marker from `blinc_core` to keep this
+    /// trait free of `wgpu` references. The concrete bridge type lives
+    /// in `blinc_gpu` (`GpuPass`); construct one via
+    /// `blinc_gpu::GpuPass::new(my_custom_pass)`. Takes `&dyn` (not
+    /// `&mut dyn`) because canvas closures are `Fn`, not `FnMut`; the
+    /// concrete `GpuPass` uses interior mutability so the user can hold
+    /// it through a captured-by-move binding without `RefCell` /
+    /// `Mutex` of their own.
+    ///
+    /// See the "Custom GPU passes" chapter of the book for the full
+    /// pattern.
+    fn run_gpu_pass(&mut self, _pass: &dyn GpuPassHook, _viewport: Option<Rect>) {}
+
+    // ─────────────────────────────────────────────────────────────────────────
     // State Queries
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -2204,6 +2237,21 @@ pub trait DrawContext {
 
     /// Get the current blend mode
     fn current_blend_mode(&self) -> BlendMode;
+}
+
+/// Opaque hook for user-defined GPU work scheduled through
+/// [`DrawContext::run_gpu_pass`].
+///
+/// `blinc_core` doesn't know what's inside — only the concrete GPU paint
+/// context (`blinc_gpu::GpuPaintContext`) does. The canonical bridge type
+/// is `blinc_gpu::GpuPass`, which wraps any `CustomRenderPass` and
+/// implements this trait.
+///
+/// Implementations should return `self` from `as_any`; the GPU layer
+/// downcasts to its canonical wrapper to retrieve the underlying pass.
+pub trait GpuPassHook: 'static {
+    /// Bridge to `Any` for downcast inside the GPU backend.
+    fn as_any(&self) -> &dyn core::any::Any;
 }
 
 /// Extension trait for DrawContext that provides ergonomic generic methods

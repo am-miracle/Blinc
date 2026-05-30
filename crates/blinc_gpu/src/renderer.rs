@@ -4409,6 +4409,13 @@ impl GpuRenderer {
         self.queue.clone()
     }
 
+    /// Surface texture format the renderer was configured with. Used by
+    /// the custom-pass dispatch site so user passes know what format
+    /// their `initialize` should target.
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.texture_format
+    }
+
     /// Create a new surface for an additional window.
     ///
     /// Uses the existing wgpu Instance to create a surface that can be

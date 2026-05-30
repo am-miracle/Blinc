@@ -138,6 +138,7 @@
 - [Performance Tips](./advanced/performance.md)
 - [Flow Shaders](./advanced/flow-shaders.md)
 - [3D Rendering](./advanced/3d-rendering.md)
+- [Custom GPU Passes](./advanced/custom-gpu-passes.md)
 - [Hot-reload (experimental)](./advanced/hot-reload.md)
 
 # Architecture

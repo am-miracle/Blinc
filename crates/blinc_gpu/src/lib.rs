@@ -35,8 +35,8 @@ pub mod text;
 
 pub use backbuffer::{Backbuffer, BackbufferConfig, FrameContext};
 pub use custom_pass::{
-    BindGroupBuilder, ComputeDispatch, CustomRenderPass, PostProcessChain, PostProcessEffect,
-    RenderPassContext, RenderStage, create_buffer, create_compute_pipeline,
+    BindGroupBuilder, ComputeDispatch, CustomRenderPass, GpuPass, PostProcessChain,
+    PostProcessEffect, RenderPassContext, RenderStage, create_buffer, create_compute_pipeline,
     create_fullscreen_pipeline,
 };
 pub use gradient_texture::{GRADIENT_TEXTURE_WIDTH, GradientTextureCache, RasterizedGradient};

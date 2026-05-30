@@ -92,6 +92,11 @@ blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = 
 image.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Direct wgpu + bytemuck for the gpu_pass_demo example. Other demos
+# go through DrawContext / blinc_canvas_kit and never name these
+# crates directly.
+wgpu.workspace = true
+bytemuck.workspace = true
 # Cross-target monotonic clock. `std::time::Instant` panics on
 # `wasm32-unknown-unknown`; `web_time::Instant` is the same API
 # backed by `performance.now()` on web, `Instant::now()` elsewhere.

@@ -156,6 +156,36 @@ pub struct PendingMesh {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Pending Custom GPU Pass
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A user-defined GPU pass captured inside a canvas closure via
+/// [`crate::DrawContext::run_gpu_pass`].
+///
+/// Same lifecycle pattern as [`PendingMesh`]: the paint context can't
+/// dispatch directly (it has no renderer handle), so the override
+/// records the pass + the canvas viewport here and the outer render
+/// loop drains the list after `take_batch` and invokes each pass with
+/// the frame's real device / queue / target.
+///
+/// `pass` carries an `Arc<Mutex<_>>` internally, so cloning + dispatch
+/// don't fight the user's `Fn` canvas closure.
+#[derive(Clone)]
+pub struct PendingGpuPass {
+    /// The wrapped pass. Cloning is cheap (Arc bump). The dispatch site
+    /// calls [`crate::GpuPass::initialize_and_render`] which lazy-inits
+    /// on first frame.
+    pub pass: crate::custom_pass::GpuPass,
+    /// Canvas viewport rect in physical pixels `[x, y, w, h]`. `Some`
+    /// when the pass was scheduled inside a canvas with bounds (the
+    /// typical case via `set_3d_viewport_bounds`); `None` for full-frame
+    /// dispatch. The renderer plumbs this through `RenderPassContext::viewport`
+    /// so the pass can `set_viewport` + `set_scissor_rect` to clip to
+    /// the canvas region.
+    pub viewport: Option<[f32; 4]>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GPU Paint Context
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -281,6 +311,11 @@ pub struct GpuPaintContext<'a> {
     /// Environment cubemap data set by `set_environment_cubemap`. Captured
     /// into each `PendingMesh` so the renderer can upload it.
     pending_env: Option<std::sync::Arc<CubemapData>>,
+    /// User-defined GPU passes scheduled via `run_gpu_pass`. Drained by
+    /// the outer render loop with `take_pending_gpu_passes` and
+    /// dispatched alongside (and using the same lifecycle as) the
+    /// pending-mesh path.
+    pending_gpu_passes: Vec<PendingGpuPass>,
 }
 
 impl<'a> GpuPaintContext<'a> {
@@ -321,6 +356,7 @@ impl<'a> GpuPaintContext<'a> {
             pending_meshes: Vec::new(),
             mesh_viewport_bounds: None,
             pending_env: None,
+            pending_gpu_passes: Vec::new(),
             dynamic_batch: PrimitiveBatch::new(),
             motion_subtree_depth: 0,
             composite_layer_batches: std::collections::HashMap::new(),
@@ -378,6 +414,7 @@ impl<'a> GpuPaintContext<'a> {
             pending_meshes: Vec::new(),
             mesh_viewport_bounds: None,
             pending_env: None,
+            pending_gpu_passes: Vec::new(),
             dynamic_batch: PrimitiveBatch::new(),
             motion_subtree_depth: 0,
             composite_layer_batches: std::collections::HashMap::new(),
@@ -1607,6 +1644,18 @@ impl<'a> GpuPaintContext<'a> {
     /// the dispatch site.
     pub fn take_pending_meshes(&mut self) -> Vec<PendingMesh> {
         std::mem::take(&mut self.pending_meshes)
+    }
+
+    /// Take the user-defined GPU passes scheduled this frame.
+    ///
+    /// Every call to [`crate::DrawContext::run_gpu_pass`] inside a
+    /// canvas callback pushes one [`PendingGpuPass`] here. The outer
+    /// render loop drains this list after `take_batch` and dispatches
+    /// each via `GpuPass::initialize_and_render` against the frame's
+    /// real device / queue / target. See `blinc_app::context` for the
+    /// dispatch site.
+    pub fn take_pending_gpu_passes(&mut self) -> Vec<PendingGpuPass> {
+        std::mem::take(&mut self.pending_gpu_passes)
     }
 
     /// Get a reference to the current batch
@@ -3953,6 +4002,41 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
             .last()
             .copied()
             .unwrap_or(BlendMode::Normal)
+    }
+
+    fn run_gpu_pass(
+        &mut self,
+        hook: &dyn blinc_core::draw::GpuPassHook,
+        viewport: Option<blinc_core::Rect>,
+    ) {
+        // Downcast through the canonical wrapper type. Any other
+        // `GpuPassHook` impl is treated as an opaque no-op — the only
+        // sanctioned construction route is `blinc_gpu::GpuPass::new`.
+        let Some(pass) = hook.as_any().downcast_ref::<crate::custom_pass::GpuPass>() else {
+            return;
+        };
+        // Resolve the viewport rect in physical pixels. Explicit
+        // `Some(rect)` from the caller wins (caller is usually the
+        // canvas closure handing through `bounds.rect()`). Otherwise
+        // fall back to the current clip-stack AABB, which gives a
+        // sensible default when the wrapping widget has already pushed
+        // a clip for its layout bounds. `None` at both layers means
+        // "render to the full frame target".
+        let pixel_viewport = match viewport {
+            Some(rect) => {
+                let tl = self.transform_point(rect.origin);
+                let br = self.transform_point(blinc_core::Point::new(
+                    rect.origin.x + rect.size.width,
+                    rect.origin.y + rect.size.height,
+                ));
+                Some([tl.x, tl.y, (br.x - tl.x).abs(), (br.y - tl.y).abs()])
+            }
+            None => self.current_clip_aabb(),
+        };
+        self.pending_gpu_passes.push(PendingGpuPass {
+            pass: pass.clone(),
+            viewport: pixel_viewport,
+        });
     }
 }
 
