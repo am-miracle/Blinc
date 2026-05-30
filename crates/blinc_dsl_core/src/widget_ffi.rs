@@ -162,6 +162,204 @@ pub struct RenderPropsOverlay {
 }
 
 impl RenderPropsOverlay {
+    /// Register every signal- or computed-bound prop on this overlay
+    /// with the global `PropertyBindingRegistry`. Called by
+    /// `Styled::build` once the wrapped widget has resolved a real
+    /// `LayoutNodeId`. The registry's notifier fires on every
+    /// `Signal::set` (and on derived re-evaluation), walking
+    /// subscribers and queueing partial prop updates that trigger
+    /// `request_redraw`. Without this, the overlay's `apply_to`
+    /// reads the live signal value at paint time but nothing
+    /// triggers the next paint when the signal mutates.
+    ///
+    /// Each registered write closure mirrors the matching branch of
+    /// `apply_to`, so a binding fire and a fresh `apply_to` walk
+    /// produce identical `RenderProps`.
+    pub fn register_bindings(&self, node_id: blinc_layout::LayoutNodeId) {
+        use blinc_core::reactive::{Computed, DerivedId, Signal, SignalId};
+        use blinc_layout::binding::{BoundValue, with_registry};
+        use blinc_layout::property::PropertyId;
+        use std::sync::Arc;
+
+        // ── Signal-bound slots ─────────────────────────────────────
+        if let Some(id_raw) = self.opacity_signal_id_raw {
+            let sid = SignalId::from_raw(id_raw);
+            with_registry(|reg| {
+                reg.register(
+                    sid,
+                    node_id,
+                    PropertyId::Opacity,
+                    Arc::new(move || Signal::<f64>::from_id(sid).try_get().map(BoundValue::new)),
+                    Arc::new(|props: &mut blinc_layout::RenderProps, val: &BoundValue| {
+                        if let Some(v) = val.downcast_ref::<f64>() {
+                            props.opacity = *v as f32;
+                        }
+                    }),
+                );
+            });
+        }
+        if let Some(id_raw) = self.corner_radius_signal_id_raw {
+            let sid = SignalId::from_raw(id_raw);
+            with_registry(|reg| {
+                reg.register(
+                    sid,
+                    node_id,
+                    PropertyId::CornerRadius,
+                    Arc::new(move || Signal::<f64>::from_id(sid).try_get().map(BoundValue::new)),
+                    Arc::new(|props: &mut blinc_layout::RenderProps, val: &BoundValue| {
+                        if let Some(v) = val.downcast_ref::<f64>() {
+                            let r = *v as f32;
+                            props.border_radius = blinc_core::layer::CornerRadius::new(r, r, r, r);
+                            props.border_radius_explicit = true;
+                        }
+                    }),
+                );
+            });
+        }
+        if let Some(id_raw) = self.border_width_signal_id_raw {
+            let sid = SignalId::from_raw(id_raw);
+            with_registry(|reg| {
+                reg.register(
+                    sid,
+                    node_id,
+                    PropertyId::BorderWidth,
+                    Arc::new(move || Signal::<f64>::from_id(sid).try_get().map(BoundValue::new)),
+                    Arc::new(|props: &mut blinc_layout::RenderProps, val: &BoundValue| {
+                        if let Some(v) = val.downcast_ref::<f64>() {
+                            props.border_width = *v as f32;
+                        }
+                    }),
+                );
+            });
+        }
+        if let Some(id_raw) = self.bg_signal_id_raw {
+            let sid = SignalId::from_raw(id_raw);
+            with_registry(|reg| {
+                reg.register(
+                    sid,
+                    node_id,
+                    PropertyId::Background,
+                    Arc::new(move || Signal::<i32>::from_id(sid).try_get().map(BoundValue::new)),
+                    Arc::new(|props: &mut blinc_layout::RenderProps, val: &BoundValue| {
+                        if let Some(v) = val.downcast_ref::<i32>() {
+                            props.background = Some(blinc_core::layer::Brush::Solid(
+                                blinc_core::layer::Color::from_hex(*v as u32),
+                            ));
+                        }
+                    }),
+                );
+            });
+        }
+        if let Some(id_raw) = self.border_color_signal_id_raw {
+            let sid = SignalId::from_raw(id_raw);
+            with_registry(|reg| {
+                reg.register(
+                    sid,
+                    node_id,
+                    PropertyId::BorderColor,
+                    Arc::new(move || Signal::<i32>::from_id(sid).try_get().map(BoundValue::new)),
+                    Arc::new(|props: &mut blinc_layout::RenderProps, val: &BoundValue| {
+                        if let Some(v) = val.downcast_ref::<i32>() {
+                            props.border_color =
+                                Some(blinc_core::layer::Color::from_hex(*v as u32));
+                        }
+                    }),
+                );
+            });
+        }
+
+        // ── Computed-bound slots ───────────────────────────────────
+        // Same shape, but the read closure goes through
+        // `Computed::<T>::from_id(...).try_get()` which re-evaluates
+        // through the reactive graph (and fires on every dependency
+        // signal's mutation).
+        if let Some(id_raw) = self.opacity_computed_id_raw {
+            let did = DerivedId::from_raw(id_raw);
+            with_registry(|reg| {
+                reg.register_derived(
+                    did,
+                    node_id,
+                    PropertyId::Opacity,
+                    Arc::new(move || Computed::<f64>::from_id(did).try_get().map(BoundValue::new)),
+                    Arc::new(|props: &mut blinc_layout::RenderProps, val: &BoundValue| {
+                        if let Some(v) = val.downcast_ref::<f64>() {
+                            props.opacity = *v as f32;
+                        }
+                    }),
+                );
+            });
+        }
+        if let Some(id_raw) = self.corner_radius_computed_id_raw {
+            let did = DerivedId::from_raw(id_raw);
+            with_registry(|reg| {
+                reg.register_derived(
+                    did,
+                    node_id,
+                    PropertyId::CornerRadius,
+                    Arc::new(move || Computed::<f64>::from_id(did).try_get().map(BoundValue::new)),
+                    Arc::new(|props: &mut blinc_layout::RenderProps, val: &BoundValue| {
+                        if let Some(v) = val.downcast_ref::<f64>() {
+                            let r = *v as f32;
+                            props.border_radius = blinc_core::layer::CornerRadius::new(r, r, r, r);
+                            props.border_radius_explicit = true;
+                        }
+                    }),
+                );
+            });
+        }
+        if let Some(id_raw) = self.border_width_computed_id_raw {
+            let did = DerivedId::from_raw(id_raw);
+            with_registry(|reg| {
+                reg.register_derived(
+                    did,
+                    node_id,
+                    PropertyId::BorderWidth,
+                    Arc::new(move || Computed::<f64>::from_id(did).try_get().map(BoundValue::new)),
+                    Arc::new(|props: &mut blinc_layout::RenderProps, val: &BoundValue| {
+                        if let Some(v) = val.downcast_ref::<f64>() {
+                            props.border_width = *v as f32;
+                        }
+                    }),
+                );
+            });
+        }
+        if let Some(id_raw) = self.bg_computed_id_raw {
+            let did = DerivedId::from_raw(id_raw);
+            with_registry(|reg| {
+                reg.register_derived(
+                    did,
+                    node_id,
+                    PropertyId::Background,
+                    Arc::new(move || Computed::<i32>::from_id(did).try_get().map(BoundValue::new)),
+                    Arc::new(|props: &mut blinc_layout::RenderProps, val: &BoundValue| {
+                        if let Some(v) = val.downcast_ref::<i32>() {
+                            props.background = Some(blinc_core::layer::Brush::Solid(
+                                blinc_core::layer::Color::from_hex(*v as u32),
+                            ));
+                        }
+                    }),
+                );
+            });
+        }
+        if let Some(id_raw) = self.border_color_computed_id_raw {
+            let did = DerivedId::from_raw(id_raw);
+            with_registry(|reg| {
+                reg.register_derived(
+                    did,
+                    node_id,
+                    PropertyId::BorderColor,
+                    Arc::new(move || Computed::<i32>::from_id(did).try_get().map(BoundValue::new)),
+                    Arc::new(|props: &mut blinc_layout::RenderProps, val: &BoundValue| {
+                        if let Some(v) = val.downcast_ref::<i32>() {
+                            props.border_color =
+                                Some(blinc_core::layer::Color::from_hex(*v as u32));
+                        }
+                    }),
+                );
+            });
+        }
+    }
+
     pub fn apply_to(&self, base: &mut blinc_layout::RenderProps) {
         // Priority per prop: computed > signal > literal. The lowering
         // pass picks exactly one shape per arg so we never see both a
@@ -378,7 +576,20 @@ impl<W: blinc_layout::div::ElementBuilder> Styled<W> {
 
 impl<W: blinc_layout::div::ElementBuilder> blinc_layout::div::ElementBuilder for Styled<W> {
     fn build(&self, tree: &mut blinc_layout::LayoutTree) -> blinc_layout::LayoutNodeId {
-        self.inner.build(tree)
+        let node_id = self.inner.build(tree);
+        // Register every signal/computed prop on the overlay with the
+        // global PropertyBindingRegistry now that we have a node_id.
+        // This is what makes `Div(opacity = sig)` actually react to
+        // `sig.set(...)` in a live app: signal fire → registry walks
+        // subscribers → queues a partial prop update → renderer
+        // requests a redraw → next paint reads the live value through
+        // the same `apply_to` path the static-only render uses.
+        //
+        // The unit tests for the overlay path (`dsl_*_signal_binding_*`)
+        // work without this because they call `builder.render_props()`
+        // manually, sidestepping the redraw chain.
+        self.overlay.register_bindings(node_id);
+        node_id
     }
     fn render_props(&self) -> blinc_layout::RenderProps {
         let mut base = self.inner.render_props();
