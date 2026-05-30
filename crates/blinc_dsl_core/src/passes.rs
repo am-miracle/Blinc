@@ -6784,6 +6784,39 @@ pub(crate) fn lower_reactive_args(program: &mut TypedProgram) {
         Some(id_raw)
     }
 
+    /// Shape B for substrate reactive props: `__signal_get_by_id_<T>(<id_literal>)`
+    /// — the wrapped form that `resolve_signal_calls` produces for
+    /// FSM-context signals (`Ticker.pct` after `resolve_dotted_fsm_field_access`).
+    /// Returns the raw signal id when the call matches the inner T.
+    /// Mirrors the Shape B recognizer in `lower_styling_args_to_overlays`.
+    fn signal_id_for_wrapped_getter(
+        value: &TypedNode<TypedExpression>,
+        inner_ty: &Type,
+    ) -> Option<u64> {
+        let TypedExpression::Call(c) = &value.node else {
+            return None;
+        };
+        let TypedExpression::Variable(callee) = &c.callee.node else {
+            return None;
+        };
+        let want = match inner_ty {
+            Type::Primitive(PrimitiveType::I32) => "__signal_get_by_id_i32",
+            Type::Primitive(PrimitiveType::F64) => "__signal_get_by_id_f64",
+            Type::Primitive(PrimitiveType::Bool) => "__signal_get_by_id_bool",
+            Type::Primitive(PrimitiveType::String) => "__signal_get_by_id_string",
+            _ => return None,
+        };
+        let callee_str = callee.resolve_global()?;
+        if callee_str.as_str() != want {
+            return None;
+        }
+        let arg = c.positional_args.first()?;
+        let TypedExpression::Literal(TypedLiteral::Integer(id_lit)) = &arg.node else {
+            return None;
+        };
+        Some(*id_lit as i64 as u64)
+    }
+
     /// Expand one reactive-prop arg into the wire-format slots the
     /// macro thunk expects. Scalar `Reactive<T>` returns two slots
     /// `(tag, payload: i64)`; `Reactive<String>` returns three
@@ -6798,6 +6831,20 @@ pub(crate) fn lower_reactive_args(program: &mut TypedProgram) {
 
         // Shape A: bare-Variable signal ref → SIGNAL tag.
         if let Some(id_raw) = signal_id_for_variable(&arg) {
+            let tag = i32_literal(TAG_SIGNAL, span);
+            let id = i64_literal(id_raw as i128, span);
+            if is_string {
+                return vec![tag, id, null_string_ptr_literal(span)];
+            }
+            return vec![tag, id];
+        }
+        // Shape A': wrapped getter `__signal_get_by_id_<T>(<id_literal>)`.
+        // `resolve_signal_calls` force-wraps every FSM-context ctx-signal
+        // reference into this form so action-body arithmetic / f-string
+        // interp compiles; without this recognizer the wrapper survives
+        // into the reactive arg slot and falls back to LITERAL, snapping
+        // the value to its initial constant for the entire session.
+        if let Some(id_raw) = signal_id_for_wrapped_getter(&arg, inner_ty) {
             let tag = i32_literal(TAG_SIGNAL, span);
             let id = i64_literal(id_raw as i128, span);
             if is_string {

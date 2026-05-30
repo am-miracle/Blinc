@@ -13,12 +13,13 @@
 //     primitives in place. Same compositor fast path the
 //     `reactive_dsl` canary in `blinc_dsl_core/examples` exercises.
 //
-// The Step / Reset buttons stay as plain `Div(on_click = …)` for
-// now: `cn.Button(on_click = …)` compiles and wires its closure
-// through `cn::ButtonBuilder::on_click`, but the click event itself
-// doesn't dispatch through the cn-side Stateful chain from a
-// JIT-driven build. Tracked separately — once that lands, the
-// buttons here swap straight to `cn.Button(...)`.
+// `cn.Button(on_click = …)` wires its click handler through the
+// cn-side Stateful chain; the wrapper's `ElementBuilder` impl
+// forwards `event_handlers` / `element_classes` / `element_id` /
+// `element_type_id` to the inner cn::ButtonBuilder so the renderer
+// finds the click surface, the cn-button CSS classes, and the
+// semantic type. Plain-Div Step / Reset still work the same way —
+// kept here as a visual contrast with the cn-styled variants.
 
 fsm Ticker {
     context {
@@ -96,12 +97,8 @@ component CnLive {
             }
 
             Div(class = "btn-row") {
-                Div(class = "btn", on_click = || { Ticker.trigger("Step") }) {
-                    Text("Step")
-                }
-                Div(class = "btn-reset", on_click = || { Ticker.trigger("Reset") }) {
-                    Text("Reset")
-                }
+                cn.Button("Step", on_click = || { Ticker.trigger("Step") })
+                cn.Button("Reset", variant = "destructive", on_click = || { Ticker.trigger("Reset") })
             }
         }
     }

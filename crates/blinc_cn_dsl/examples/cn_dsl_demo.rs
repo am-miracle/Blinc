@@ -9,7 +9,9 @@
 
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedApp;
+use blinc_cn::cn_styles::CN_STYLES;
 use blinc_dsl_core::BlincDsl;
+use blinc_theme::themes::universal::hybrid;
 
 const SOURCE: &str = include_str!("cn_dsl_demo.blinc");
 
@@ -43,7 +45,7 @@ fn main() -> Result<()> {
             resizable: true,
             ..Default::default()
         },
-        blinc_cn::cn_bundle(),
+        hybrid::HybridTheme::bundle().with_css(CN_STYLES),
         blinc_theme::ColorScheme::Dark,
         move |ctx| {
             div()

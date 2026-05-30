@@ -148,17 +148,6 @@ impl CnButton {
             // fire the closure with no args. Signal writes inside the
             // closure route through the existing `__signal_set_*`
             // host externs as usual.
-            //
-            // KNOWN GAP: the closure here IS wired through
-            // `cn::ButtonBuilder::on_click`, but click events don't
-            // currently reach it from a JIT-driven build path. cn's
-            // `layout_button::Button` wraps a `Stateful<ButtonState>`
-            // whose pointer-event auto-feed assumes a stable
-            // `InstanceKey` lineage; the DSL-side cache layering
-            // produces a different lineage and the Stateful FSM
-            // never transitions to "click-confirmed". Tracked as a
-            // follow-up — plain `Div(on_click = …)` works fine in
-            // the meantime.
             let click_ptr = self.on_click;
             b = b.on_click(move |_ctx| {
                 type ClosureFn = extern "C" fn();
@@ -182,4 +171,36 @@ impl ElementBuilder for CnButton {
     fn children_builders(&self) -> &[Box<dyn ElementBuilder>] {
         self.get_or_build().children_builders()
     }
+
+    // MUST forward — without these, the renderer queries `CnButton`
+    // (the outer wrapper) for identity / interaction surface and gets
+    // the trait defaults (None / &[]), even though every layer below
+    // (cn::ButtonBuilder → cn::Button → layout_button → Stateful → Div)
+    // carries the real values. Symptom: clicks silently drop because
+    // `event_handlers()` returns None; CSS class selectors don't match
+    // because `element_classes()` returns `&[]`. Same gotcha
+    // `gotcha_element_builder_trait_forwarding` calls out — every
+    // wrapping `impl ElementBuilder for Foo` needs the full set.
+    fn event_handlers(&self) -> Option<&blinc_layout::event_handler::EventHandlers> {
+        self.get_or_build().event_handlers()
+    }
+
+    fn element_classes(&self) -> &[std::sync::Arc<str>] {
+        self.get_or_build().element_classes()
+    }
+
+    fn element_id(&self) -> Option<&str> {
+        self.get_or_build().element_id()
+    }
+
+    fn element_type_id(&self) -> blinc_layout::div::ElementTypeId {
+        self.get_or_build().element_type_id()
+    }
+
+    // layout_style forwarding deliberately omitted: blinc_cn_dsl
+    // doesn't depend on `taffy` directly, and the layout side reads
+    // the style from the node_id `build()` populated rather than via
+    // the wrapper. If a downstream consumer needs `.layout_style()`
+    // on `CnButton`, lift `taffy` into the workspace dep list and
+    // forward to `self.get_or_build().layout_style()`.
 }
