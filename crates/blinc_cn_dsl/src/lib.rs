@@ -83,12 +83,27 @@ use blinc_dsl_core::{BlincDsl, BlincDslResult};
 /// `BlincDsl`. Call once after `BlincDsl::new()`, before
 /// `compile_source`.
 ///
+/// Also queues `blinc_cn::cn_styles::CN_STYLES` through the global
+/// `BlincContextState` so the widgets render with their default
+/// shadcn-style appearance once the renderer starts pulling from the
+/// stylesheet queue. Without this, `cn.Button` ships with no
+/// background / padding / typography and reads as invisible — a
+/// common "the buttons don't work" symptom on first wiring.
+///
 /// Returns the first registration error if one occurs; subsequent
 /// widgets are not attempted on failure. The error type is
 /// [`blinc_dsl_core::BlincDslError`] from the underlying
 /// `register_extern_widget` call.
 pub fn register_all(dsl: &BlincDsl) -> BlincDslResult<()> {
     register_basics(dsl)?;
+    // Queue cn's default stylesheet through the free-function entry
+    // point. `BlincContextState::get()` panics pre-init (matters in
+    // tests / headless harnesses that never construct a context),
+    // but `queue_pending_stylesheet` buffers strings into a static
+    // queue that the runner drains once it constructs the context.
+    // So this is safe to call from any host setup path, including
+    // unit tests.
+    blinc_core::context_state::queue_pending_stylesheet(blinc_cn::cn_styles::CN_STYLES);
     Ok(())
 }
 

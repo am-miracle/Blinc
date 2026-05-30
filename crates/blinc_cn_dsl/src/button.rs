@@ -148,6 +148,17 @@ impl CnButton {
             // fire the closure with no args. Signal writes inside the
             // closure route through the existing `__signal_set_*`
             // host externs as usual.
+            //
+            // KNOWN GAP: the closure here IS wired through
+            // `cn::ButtonBuilder::on_click`, but click events don't
+            // currently reach it from a JIT-driven build path. cn's
+            // `layout_button::Button` wraps a `Stateful<ButtonState>`
+            // whose pointer-event auto-feed assumes a stable
+            // `InstanceKey` lineage; the DSL-side cache layering
+            // produces a different lineage and the Stateful FSM
+            // never transitions to "click-confirmed". Tracked as a
+            // follow-up — plain `Div(on_click = …)` works fine in
+            // the meantime.
             let click_ptr = self.on_click;
             b = b.on_click(move |_ctx| {
                 type ClosureFn = extern "C" fn();

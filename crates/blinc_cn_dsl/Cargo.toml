@@ -18,6 +18,15 @@ tracing-subscriber.workspace = true
 # the JIT in end-to-end tests.
 blinc_runtime = { path = "../blinc_runtime", version = "0.5.1" }
 zyntax_embed = { git = "https://github.com/darmie/zyntax", rev = "9763886bd1f6d5ee86e5a5665d3d06be9426e106" }
+# Desktop windowed runner for the cn_dsl_demo example. Same posture
+# `blinc_dsl_core` uses for counter_dsl / reactive_dsl.
+blinc_app = { path = "../blinc_app", default-features = false, features = ["windowed"] }
+# `ColorScheme` enum + `ThemeBundle` for `run_with_theme`.
+blinc_theme = { path = "../blinc_theme", version = "0.5.1" }
+
+[[example]]
+name = "cn_dsl_demo"
+path = "examples/cn_dsl_demo.rs"
 
 [dependencies]
 # DSL surface — host registration API + the `#[extern_widget]` macro
