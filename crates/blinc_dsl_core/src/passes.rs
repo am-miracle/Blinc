@@ -819,6 +819,13 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
             // LIVE binding at paint time. Forcing a getter call here
             // would freeze the value at compile time and break that
             // feature for `Div(bg = bg_color)`-style code.
+            //
+            // For ctx-signals the force-wrap is still required —
+            // action bodies use them in arithmetic (`ctx.pct + 0.1`)
+            // and f-string interpolation. The styling-args pass has
+            // its own recognizer for the wrapped
+            // `__signal_get_by_id_<T>(id_literal)` shape so
+            // `Div(opacity = Ticker.pct)` still binds live.
             if let TypedExpression::Variable(name) = &expr.node
                 && let Some(entry) = signals.get(name).cloned()
                 && name
@@ -4673,15 +4680,54 @@ pub(crate) fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
         value: &zyntax_typed_ast::TypedNode<TypedExpression>,
         expected_ty: blinc_runtime::signal::SignalType,
     ) -> Option<u64> {
-        let TypedExpression::Variable(name) = &value.node else {
-            return None;
-        };
-        let name_str = name.resolve_global()?;
-        let (id_raw, ty) = blinc_runtime::signal::lookup(&name_str)?;
-        if ty != expected_ty {
-            return None;
+        // Shape A: bare Variable. User-declared top-level signals
+        // (`signal foo: T` + `Div(opacity = foo)`) reach the styling
+        // pass in this form because `resolve_signal_calls` leaves
+        // user signals alone.
+        if let TypedExpression::Variable(name) = &value.node {
+            let name_str = name.resolve_global()?;
+            let (id_raw, ty) = blinc_runtime::signal::lookup(&name_str)?;
+            if ty != expected_ty {
+                return None;
+            }
+            return Some(id_raw);
         }
-        Some(id_raw)
+        // Shape B: `__signal_get_by_id_<T>(<id_literal>)` call.
+        // FSM-context signals (`Ticker.pct`) reach the styling pass
+        // in this form because `resolve_signal_calls` force-wraps
+        // every bare ctx-signal Variable into a typed getter call —
+        // needed for action-body arithmetic + f-string interp where a
+        // bare reference would be an undefined local. The wrap
+        // collapses the value to a runtime getter; we still want the
+        // STYLING side to route to the live `_signal__` setter, so
+        // peel the wrap back to recover the raw id.
+        if let TypedExpression::Call(c) = &value.node {
+            let TypedExpression::Variable(callee) = &c.callee.node else {
+                return None;
+            };
+            let callee_str = callee.resolve_global()?;
+            let getter_ty = match (callee_str.as_ref(), expected_ty) {
+                ("__signal_get_by_id_f64", blinc_runtime::signal::SignalType::F64) => {
+                    blinc_runtime::signal::SignalType::F64
+                }
+                ("__signal_get_by_id_i32", blinc_runtime::signal::SignalType::I32) => {
+                    blinc_runtime::signal::SignalType::I32
+                }
+                _ => return None,
+            };
+            let arg = c.positional_args.first()?;
+            let TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::Integer(id_lit)) =
+                &arg.node
+            else {
+                return None;
+            };
+            // The id literal carries the raw signal id as i64. Cast
+            // back to u64 — same wire convention as the `_signal__`
+            // extern's arg.
+            let _ = getter_ty; // type already matched above
+            return Some(*id_lit as i64 as u64);
+        }
+        None
     }
 
     /// Recognise `__blinc_computed_<T>__(closure_expr)` — the call
@@ -6440,11 +6486,23 @@ pub(crate) fn resolve_dotted_fsm_field_access(program: &mut TypedProgram) {
                 for a in &mut c.positional_args {
                     rewrite_expr(a, known);
                 }
+                // MUST also walk named args. Without this, `Div(opacity = Ticker.pct)`
+                // ships its `Ticker.pct` Field access through to the
+                // styling-args lowering as a raw Field — never matches
+                // `signal_id_for_variable`, falls back to literal path,
+                // overlay's `*_signal_id_raw` stays None, and the live
+                // binding never wires up.
+                for na in &mut c.named_args {
+                    rewrite_expr(&mut na.value, known);
+                }
             }
             TypedExpression::MethodCall(mc) => {
                 rewrite_expr(&mut mc.receiver, known);
                 for a in &mut mc.positional_args {
                     rewrite_expr(a, known);
+                }
+                for na in &mut mc.named_args {
+                    rewrite_expr(&mut na.value, known);
                 }
             }
             TypedExpression::Binary(b) => {
