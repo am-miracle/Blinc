@@ -43,7 +43,7 @@ fn main() -> Result<()> {
 #[cfg(target_arch = "wasm32")]
 fn main() {}
 
-const GRID_DIM: u32 = 64; // 64 × 64 = 4 096 instances
+const GRID_DIM: u32 = 64; // 64 × 64 = 4096 instances
 const INSTANCE_COUNT: u32 = GRID_DIM * GRID_DIM;
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
@@ -77,7 +77,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
         .gap_px(12.0)
         .p(20.0)
         .child(
-            text("4 096 instanced quads, one draw call, buffers retained across frames")
+            text("4096 instanced quads, one draw call, buffers retained across frames")
                 .size(18.0)
                 .color(Color::WHITE),
         )
@@ -143,7 +143,12 @@ struct InstancedGrid {
     bind_group: Option<wgpu::BindGroup>,
     /// Wall-clock start, captured the first time `render` runs. Used to
     /// drive the per-cell wobble without any external state.
-    start: Option<std::time::Instant>,
+    // `web_time::Instant` is the cross-target shim: re-exports
+    // `std::time::Instant` on desktop and routes to `performance.now()`
+    // on `wasm32-unknown-unknown`. `std::time::Instant::now()` panics
+    // ("time not implemented on this platform") on wasm, so the web
+    // build crashed at the first frame before the swap.
+    start: Option<web_time::Instant>,
 }
 
 impl InstancedGrid {
@@ -331,7 +336,7 @@ impl CustomRenderPass for InstancedGrid {
         };
 
         // Per-frame uniform update: single 16-byte write.
-        let start = *self.start.get_or_insert_with(std::time::Instant::now);
+        let start = *self.start.get_or_insert_with(web_time::Instant::now);
         let time = start.elapsed().as_secs_f32();
         let uniforms = Uniforms {
             grid_dim: GRID_DIM as f32,
