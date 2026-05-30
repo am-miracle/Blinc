@@ -160,7 +160,7 @@ pub struct PendingMesh {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A user-defined GPU pass captured inside a canvas closure via
-/// [`crate::DrawContext::run_gpu_pass`].
+/// [`blinc_core::draw::DrawContext::run_gpu_pass`].
 ///
 /// Same lifecycle pattern as [`PendingMesh`]: the paint context can't
 /// dispatch directly (it has no renderer handle), so the override
@@ -1648,7 +1648,7 @@ impl<'a> GpuPaintContext<'a> {
 
     /// Take the user-defined GPU passes scheduled this frame.
     ///
-    /// Every call to [`crate::DrawContext::run_gpu_pass`] inside a
+    /// Every call to [`blinc_core::draw::DrawContext::run_gpu_pass`] inside a
     /// canvas callback pushes one [`PendingGpuPass`] here. The outer
     /// render loop drains this list after `take_batch` and dispatches
     /// each via `GpuPass::initialize_and_render` against the frame's

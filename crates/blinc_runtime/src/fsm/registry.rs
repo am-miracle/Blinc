@@ -72,9 +72,8 @@ pub enum TransitionAction {
     AddI32 { signal: Arc<str>, delta: i32 },
     /// Arbitrary JIT-resolved action. The body has been lifted
     /// to a top-level zero-arg `extern "C" fn()` whose symbol
-    /// name lives here; the runtime dispatches it via
-    /// [`super::dispatch::call_action`] which routes through
-    /// the installed [`super::GuardDispatcher`].
+    /// name lives here; the runtime dispatches it through the
+    /// installed [`super::GuardDispatcher`].
     Symbol(Arc<str>),
 }
 
