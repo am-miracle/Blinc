@@ -1,11 +1,15 @@
 // Live signal-binding canary — no `@stateful`, no `@fsm`.
 //
 // Click `Step`. The three swatches' opacity / corner_radius /
-// bg update in place: signal mutation fires the
-// `PropertyBindingRegistry`, the registry queues a partial prop
-// update, the renderer requests a redraw, and the next paint
-// resolves the live values through `RenderPropsOverlay::apply_to`.
-// No subtree rebuild, no `@stateful` wrapper.
+// bg update in place: the FSM action mutates `ctx.pct`,
+// `ctx.radius`, `ctx.hue` in one body, the PropertyBindingRegistry
+// fires once per signal, and the renderer paints the updated
+// values through the same `apply_to` path the static-only render
+// uses. No subtree rebuild, no `@stateful` wrapper.
+//
+// Signals live on the Ticker's `context` block so they're owned by
+// the only thing that mutates them — co-located with the actions
+// that update them and the view that reads them.
 //
 // `@stateful` would create a structural rebuild hatch that defeats
 // the binding pipeline. If you need it here, either the prop isn't
@@ -13,22 +17,23 @@
 // reads the signal once and bakes the result into the text
 // primitive — that's why the demo avoids f-strings entirely).
 
-signal pct: f64
-signal radius: f64
-signal hue: i32
-
 fsm Ticker {
+    context {
+        pct: f64 = 0.0
+        radius: f64 = 0.0
+        hue: i32 = 0
+    }
     state Idle
     initial Idle
     on Idle.Step -> Idle {
-        pct.set(pct.get() + 0.1)
-        radius.set(radius.get() + 6.0)
-        hue.set(hue.get() + 1118481)   // ~0x111111 step through hex
+        ctx.pct += 0.1
+        ctx.radius += 6.0
+        ctx.hue += 1118481           // ~0x111111 step through hex
     }
     on Idle.Reset -> Idle {
-        pct.set(0.0)
-        radius.set(0.0)
-        hue.set(0)
+        ctx.pct = 0.0
+        ctx.radius = 0.0
+        ctx.hue = 0
     }
 }
 
@@ -79,9 +84,9 @@ component LiveBind {
     view {
         Div(class = "panel") {
             Div(class = "swatch-row") {
-                Div(class = "swatch", opacity = pct)
-                Div(class = "swatch", corner_radius = radius)
-                Div(class = "swatch", bg = hue)
+                Div(class = "swatch", opacity = Ticker.pct)
+                Div(class = "swatch", corner_radius = Ticker.radius)
+                Div(class = "swatch", bg = Ticker.hue)
             }
             Div(class = "btn-row") {
                 Div(class = "btn", on_click = || { Ticker.trigger("Step") }) {
