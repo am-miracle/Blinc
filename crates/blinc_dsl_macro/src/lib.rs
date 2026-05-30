@@ -539,19 +539,19 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
         // values into the arg list.
         if let Some(inner_ty) = classify_reactive_field(&field.ty) {
             let tag_arg_ident = syn::Ident::new(&format!("__arg_{idx}_tag"), field_ident.span());
-            let payload_arg_ident =
-                syn::Ident::new(&format!("__arg_{idx}_payload"), field_ident.span());
-            let inner_prim = match inner_ty.to_string().as_str() {
+            let inner_name = inner_ty.to_string();
+            let inner_prim = match inner_name.as_str() {
                 "i32" => quote! { PrimitiveType::I32 },
                 "f64" => quote! { PrimitiveType::F64 },
                 "bool" => quote! { PrimitiveType::Bool },
+                "String" => quote! { PrimitiveType::String },
                 other => {
                     return syn::Error::new_spanned(
                         &field.ty,
                         format!(
                             "#[extern_widget] Reactive<{other}> isn't supported yet — only \
-                             Reactive<i32>, Reactive<f64>, Reactive<bool> ship a wire-format \
-                             decoder. Add a `decode_ffi` impl in \
+                             Reactive<i32>, Reactive<f64>, Reactive<bool>, Reactive<String> \
+                             ship a wire-format decoder. Add the matching constructors in \
                              `blinc_runtime::reactive_value` to extend the set."
                         ),
                     )
@@ -559,6 +559,87 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
                     .into();
                 }
             };
+
+            if inner_name == "String" {
+                // `Reactive<String>` uses a three-slot wire shape:
+                // a string literal can't fit in an `i64` payload, so
+                // the macro reserves a separate `*const i32`
+                // (`literal_ptr`) slot alongside the standard
+                // `id_payload: i64` slot. The lowering pass writes the
+                // ZRTL string-literal pointer into `literal_ptr` for
+                // `REACTIVE_TAG_LITERAL`, leaves it null for the
+                // binding shapes, and routes the id through
+                // `id_payload` for `REACTIVE_TAG_SIGNAL` /
+                // `REACTIVE_TAG_COMPUTED`.
+                let id_arg_ident = syn::Ident::new(&format!("__arg_{idx}_id"), field_ident.span());
+                let literal_arg_ident =
+                    syn::Ident::new(&format!("__arg_{idx}_literal"), field_ident.span());
+
+                thunk_params.push(quote! { #tag_arg_ident: i32 });
+                thunk_params.push(quote! { #id_arg_ident: i64 });
+                thunk_params.push(quote! { #literal_arg_ident: *const i32 });
+                thunk_decodes.push(quote! {
+                    let #field_ident = match #tag_arg_ident {
+                        ::blinc_dsl_core::__extern_widget_internals::REACTIVE_TAG_SIGNAL => {
+                            ::blinc_dsl_core::__extern_widget_internals::Reactive::<String>::from_signal_id(
+                                #id_arg_ident as u64,
+                            )
+                        }
+                        ::blinc_dsl_core::__extern_widget_internals::REACTIVE_TAG_COMPUTED => {
+                            ::blinc_dsl_core::__extern_widget_internals::Reactive::<String>::from_computed_id(
+                                #id_arg_ident as u64,
+                            )
+                        }
+                        _ => {
+                            // SAFETY: lowering pass guarantees the
+                            // pointer is either null or a length-
+                            // prefixed ZRTL string buffer.
+                            let __literal = unsafe {
+                                ::blinc_dsl_core::__extern_widget_internals::decode_string(
+                                    #literal_arg_ident,
+                                )
+                            };
+                            ::blinc_dsl_core::__extern_widget_internals::Reactive::<String>::from_literal(__literal)
+                        }
+                    };
+                });
+                struct_inits.push(quote! { #field_ident });
+                prop_defs.push(quote! {
+                    ::blinc_dsl_core::__extern_widget_internals::PropDef {
+                        name: ::std::sync::Arc::from(#field_name),
+                        ty: ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                            ::blinc_dsl_core::__extern_widget_internals::#inner_prim
+                        ),
+                        reactive_inner: Some(
+                            ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                                ::blinc_dsl_core::__extern_widget_internals::#inner_prim
+                            ),
+                        ),
+                    }
+                });
+                // Three param-type slots: tag (I32), id (I64),
+                // literal (String → `*const i32` at the wire level).
+                param_types.push(quote! {
+                    ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                        ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I32
+                    )
+                });
+                param_types.push(quote! {
+                    ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                        ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I64
+                    )
+                });
+                param_types.push(quote! {
+                    ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                        ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::String
+                    )
+                });
+                continue;
+            }
+
+            // Scalar Reactive<T> path — uniform two-slot wire shape.
+            let payload_arg_ident =
+                syn::Ident::new(&format!("__arg_{idx}_payload"), field_ident.span());
 
             thunk_params.push(quote! { #tag_arg_ident: i32 });
             thunk_params.push(quote! { #payload_arg_ident: i64 });

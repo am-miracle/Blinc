@@ -28,14 +28,23 @@
 //!
 //! ## What's NOT here (yet)
 //!
-//! * `Reactive<String>` — string payloads need ZRTL-pointer
-//!   ownership semantics across the FFI; lands in a focused
-//!   follow-up.
 //! * Multi-typed dispatch via a single Reactive over `Any` — out of
 //!   scope. The macro generates per-`T` decoders.
 //! * Effect-style props — `effect { … }` stays a side-effect-only
 //!   surface (no value channel); the existing
 //!   `__blinc_effect__` host extern handles it.
+//!
+//! ## String shape note
+//!
+//! `Reactive<String>` doesn't use the standard two-slot
+//! `(tag, payload: i64)` wire format because a string literal can't
+//! fit in an `i64`. The macro generates three slots instead:
+//! `(tag, id_payload: i64, literal_ptr: *const i32)`. The
+//! `from_signal_id` / `from_computed_id` / `from_literal`
+//! constructors below let the macro assemble the typed variant
+//! without `Reactive<String>` needing to call into the ZRTL
+//! string-decoder itself (that helper lives in `blinc_dsl_core` and
+//! `blinc_runtime` doesn't depend on it).
 
 use blinc_core::reactive::{Computed, Signal, SignalId};
 
@@ -143,6 +152,29 @@ impl Reactive<bool> {
     }
 }
 
+impl Reactive<String> {
+    /// Build a signal-bound variant from the raw `SignalId.to_raw()`
+    /// payload the lowering pass writes into the `id_payload` slot.
+    /// The macro calls this when `tag == REACTIVE_TAG_SIGNAL`.
+    pub fn from_signal_id(id_raw: u64) -> Self {
+        Self::Signal(Signal::from_id(SignalId::from_raw(id_raw)))
+    }
+
+    /// Computed mirror of `from_signal_id`.
+    pub fn from_computed_id(id_raw: u64) -> Self {
+        Self::Computed(Computed::from_id(
+            blinc_core::reactive::DerivedId::from_raw(id_raw),
+        ))
+    }
+
+    /// Wrap a pre-decoded `String` literal as `Reactive::Literal`.
+    /// The macro calls this for `tag == REACTIVE_TAG_LITERAL` after
+    /// running the ZRTL string-decoder on the literal-payload pointer.
+    pub fn from_literal(value: String) -> Self {
+        Self::Literal(value)
+    }
+}
+
 // =====================================================================
 // Default impl — required by the `#[extern_widget]` macro's
 // `#[skip]` field handling: any field excluded from the FFI gets
@@ -196,6 +228,31 @@ mod tests {
         // whatever the payload happened to be.
         let r = Reactive::<i32>::decode_ffi(99, 7);
         assert!(matches!(r, Reactive::Literal(7)));
+    }
+
+    #[test]
+    fn string_literal_constructor() {
+        let r = Reactive::<String>::from_literal("hi".to_string());
+        let Reactive::Literal(s) = r else {
+            panic!("expected Literal");
+        };
+        assert_eq!(s, "hi");
+    }
+
+    #[test]
+    fn string_signal_constructor_roundtrips_id() {
+        // String signals follow the same global-graph + raw-id
+        // round-trip the scalar tests cover; build a fresh signal,
+        // pass its id through `from_signal_id`, confirm the rehydrated
+        // handle reads the seeded value.
+        let s = blinc_core::reactive::signal::<String>("hello".to_string());
+        let raw = s.id().to_raw();
+        let r = Reactive::<String>::from_signal_id(raw);
+        let Reactive::Signal(sig) = r else {
+            panic!("expected Signal");
+        };
+        assert_eq!(sig.id(), s.id());
+        assert_eq!(sig.try_get().as_deref(), Some("hello"));
     }
 
     #[test]

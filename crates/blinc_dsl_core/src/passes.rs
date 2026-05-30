@@ -6780,34 +6780,64 @@ pub(crate) fn lower_reactive_args(program: &mut TypedProgram) {
         Some(id_raw)
     }
 
-    /// Expand one reactive-prop arg into a `(tag, payload)` pair.
-    /// Returns the two new arg nodes; the caller splices them in
-    /// place of the original single arg.
+    /// Expand one reactive-prop arg into the wire-format slots the
+    /// macro thunk expects. Scalar `Reactive<T>` returns two slots
+    /// `(tag, payload: i64)`; `Reactive<String>` returns three
+    /// `(tag, id_payload: i64, literal_ptr: *const i32)`. The caller
+    /// splices the result in place of the original single arg.
     fn expand_reactive(
         inner_ty: &Type,
         arg: TypedNode<TypedExpression>,
-    ) -> (TypedNode<TypedExpression>, TypedNode<TypedExpression>) {
+    ) -> Vec<TypedNode<TypedExpression>> {
         let span = arg.span;
-        // Shape A: bare-Variable signal ref → SIGNAL tag, payload is
-        // the raw signal id literal.
+        let is_string = matches!(inner_ty, Type::Primitive(PrimitiveType::String));
+
+        // Shape A: bare-Variable signal ref → SIGNAL tag.
         if let Some(id_raw) = signal_id_for_variable(&arg) {
-            return (
-                i32_literal(TAG_SIGNAL, span),
-                i64_literal(id_raw as i128, span),
-            );
+            let tag = i32_literal(TAG_SIGNAL, span);
+            let id = i64_literal(id_raw as i128, span);
+            if is_string {
+                return vec![tag, id, null_string_ptr_literal(span)];
+            }
+            return vec![tag, id];
         }
-        // Shape B: `computed { … } : T` call → COMPUTED tag, payload
-        // is the call expression itself (evaluates to a derived id
-        // at runtime). Keep the original call node — it returns i64
-        // already.
+        // Shape B: `computed { … } : T` call → COMPUTED tag.
+        // For string the call's return value is the raw derived id
+        // (an i64); the literal slot stays null.
         if is_computed_call(&arg) {
-            return (i32_literal(TAG_COMPUTED, span), arg);
+            let tag = i32_literal(TAG_COMPUTED, span);
+            if is_string {
+                return vec![tag, arg, null_string_ptr_literal(span)];
+            }
+            return vec![tag, arg];
         }
-        // Shape C: literal expression → LITERAL tag, payload is the
-        // encoded bit pattern of the literal. Non-literals fall here
-        // too with payload=0 — see encode_literal_payload's doc.
+        // Shape C: literal expression → LITERAL tag.
+        let tag = i32_literal(TAG_LITERAL, span);
+        if is_string {
+            // The literal is a String expression; it flows verbatim
+            // into the `literal_ptr` slot. The `id_payload` slot is
+            // unused for the literal path — write 0.
+            return vec![tag, i64_literal(0, span), arg];
+        }
         let payload = encode_literal_payload(inner_ty, &arg);
-        (i32_literal(TAG_LITERAL, span), i64_literal(payload, span))
+        vec![tag, i64_literal(payload, span)]
+    }
+
+    /// A null `*const i32` literal for the unused `literal_ptr` slot
+    /// in non-literal `Reactive<String>` wire-format triples. Zyntax
+    /// doesn't have a dedicated null-pointer literal, so we approximate
+    /// with an empty `""` string literal — `decode_string` on the
+    /// resulting pointer would yield an empty string, but the macro
+    /// thunk's match never reaches the literal branch when the tag
+    /// is SIGNAL or COMPUTED, so the value is never observed.
+    fn null_string_ptr_literal(span: zyntax_typed_ast::Span) -> TypedNode<TypedExpression> {
+        TypedNode::new(
+            TypedExpression::Literal(zyntax_typed_ast::TypedLiteral::String(
+                zyntax_typed_ast::InternedString::new_global(""),
+            )),
+            Type::Primitive(PrimitiveType::String),
+            span,
+        )
     }
 
     /// Per-call expansion. Iterates `props` and `positional_args` in
@@ -6832,9 +6862,7 @@ pub(crate) fn lower_reactive_args(program: &mut TypedProgram) {
                 break;
             };
             if let Some(inner_ty) = &prop.reactive_inner {
-                let (tag, payload) = expand_reactive(inner_ty, arg);
-                new_args.push(tag);
-                new_args.push(payload);
+                new_args.extend(expand_reactive(inner_ty, arg));
             } else {
                 new_args.push(arg);
             }

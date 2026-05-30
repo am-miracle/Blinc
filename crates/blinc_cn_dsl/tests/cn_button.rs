@@ -63,6 +63,74 @@ fn cn_button_accepts_named_args() {
         .expect("compile cn.Button with named args");
 }
 
+/// `cn.Button(label = my_signal)` compiles through the
+/// `Reactive<String>` pipeline. Three-slot FFI shape
+/// (`tag`, `id_payload`, `literal_ptr`) routes the signal id
+/// through the lowering pass, the macro thunk decodes it into
+/// `Reactive::Signal`, and the wrapper snapshots the value at
+/// build time via `Reactive::get_or_else`.
+#[test]
+fn cn_button_label_signal_compiles() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("dsl init");
+    blinc_cn_dsl::register_all(&dsl).expect("register cn.* widgets");
+
+    let src = r#"
+        signal title: string
+        view {
+            cn.Button(label = title)
+        }
+    "#;
+    dsl.compile_source(src, "cn_button_label_signal.blinc")
+        .expect("compile cn.Button(label = signal)");
+}
+
+/// `cn.Button(label = computed { ... } : string)` compiles. The
+/// computed expression evaluates to a `DerivedId.to_raw() as i64`
+/// at runtime; the wrapper builds a `Reactive::Computed(...)`
+/// handle and snapshots the value via `get_or_else`.
+///
+/// Like the matching `cn.Progress.value` computed test, this
+/// covers wiring only — value-flow inside the lambda body waits
+/// on the upstream `gotcha-zyntax-lambda-return-value` fix.
+#[test]
+fn cn_button_label_computed_compiles() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("dsl init");
+    blinc_cn_dsl::register_all(&dsl).expect("register cn.* widgets");
+
+    let src = r#"
+        signal raw: string
+        view {
+            cn.Button(label = computed { raw.get() } : string)
+        }
+    "#;
+    dsl.compile_source(src, "cn_button_label_computed.blinc")
+        .expect("compile cn.Button(label = computed { … })");
+}
+
+/// `cn.Button()` with no label supplied: the macro's
+/// `Reactive<String>` field defaults to `Literal(String::new())`
+/// via the unsupplied-prop default path. Confirms the empty-string
+/// fallback round-trips cleanly without panic.
+#[test]
+fn cn_button_omitted_label_defaults_to_empty() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("dsl init");
+    blinc_cn_dsl::register_all(&dsl).expect("register cn.* widgets");
+
+    let src = r#"
+        view {
+            cn.Button()
+        }
+    "#;
+    dsl.compile_source(src, "cn_button_label_default.blinc")
+        .expect("compile cn.Button() with default label");
+}
+
 /// `on_click` prop accepts a DSL closure. The closure compiles to a
 /// zero-arg `extern "C" fn()` and the i64 fn-ptr is handed to
 /// `CnButton::to_cn_builder` at materialise time. Mirrors

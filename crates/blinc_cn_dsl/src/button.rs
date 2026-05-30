@@ -2,14 +2,22 @@
 
 use std::cell::OnceCell;
 
-use blinc_dsl_core::extern_widget;
+use blinc_dsl_core::{Reactive, extern_widget};
 use blinc_layout::div::ElementBuilder;
 
 /// `cn.Button(label, variant?, size?, disabled?, icon?, icon_position?, icon_size?, color?, on_click?)`
 /// — a single-line action button.
 ///
 /// Props (DSL surface):
-/// - `label: string` — the button text. Positional or named.
+/// - `label: Reactive<string>` — the button text. Positional or named.
+///   Accepts three call-site shapes:
+///     * `cn.Button(label = "Save")` — static literal.
+///     * `cn.Button(label = my_signal)` — signal-bound. Value
+///       snapshots at build time today; full live binding lands
+///       once cn-side `IntoReactive<String>` arrives on
+///       `ButtonBuilder::label`.
+///     * `cn.Button(label = computed { … } : string)` — derived,
+///       same snapshot-at-build semantics for now.
 /// - `variant: string` — `"primary"` (default), `"secondary"`,
 ///   `"destructive"`, `"outline"`, `"ghost"`, or `"link"`. Unknown
 ///   values fall back to `"primary"`.
@@ -31,7 +39,7 @@ use blinc_layout::div::ElementBuilder;
 ///   been written `||{ … }` on a plain Div.
 #[extern_widget(namespace = "cn", name = "Button")]
 pub struct CnButton {
-    pub label: String,
+    pub label: Reactive<String>,
     pub variant: String,
     pub size: String,
     pub disabled: bool,
@@ -94,7 +102,15 @@ impl CnButton {
                 blinc_cn::ButtonSize::Medium
             }
         };
-        let mut b = blinc_cn::button(self.label.clone())
+        // Snapshot the label at build time. Signal / computed shapes
+        // resolve through the same `get_or_else` path; live binding
+        // (re-rendering when the signal fires) waits on cn-side
+        // `IntoReactive<String>` on `ButtonBuilder::label`. The
+        // wiring on this side is complete — once cn grows the
+        // reactive surface, swap the snapshot for a bridge in the
+        // three match arms.
+        let label = self.label.get_or_else(String::new());
+        let mut b = blinc_cn::button(label)
             .variant(variant)
             .size(size)
             .disabled(self.disabled);

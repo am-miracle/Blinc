@@ -630,8 +630,10 @@ pub mod __extern_widget_internals {
         BlincDsl, BlincDslError, BlincDslResult, BlincStructFieldValue, BlincStructValue,
         ExternWidget, ExternWidgetSpec, RenderPropsOverlay, Styled, WidgetBox,
     };
-    pub use blinc_runtime::Reactive;
     pub use blinc_runtime::component::PropDef;
+    pub use blinc_runtime::{
+        REACTIVE_TAG_COMPUTED, REACTIVE_TAG_LITERAL, REACTIVE_TAG_SIGNAL, Reactive,
+    };
     pub use zyntax_typed_ast::InternedString;
     pub use zyntax_typed_ast::type_registry::{PrimitiveType, Type};
 
