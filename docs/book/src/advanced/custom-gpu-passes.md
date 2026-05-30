@@ -218,12 +218,15 @@ fn render(&mut self, ctx: &RenderPassContext) {
 
         // Clip to the canvas's bounds. `viewport` is the
         // physical-pixel rect Blinc plumbed in from your
-        // `run_gpu_pass` call.
+        // `run_gpu_pass` call — already clamped to the render
+        // target, and zero-area rects are skipped at the dispatch
+        // boundary. Pass it through verbatim; don't `.max(1.0)`
+        // any axis or you walk into the wgpu scissor overflow
+        // panic when the canvas sits exactly on the bottom edge
+        // after a resize.
         if let Some([vx, vy, vw, vh]) = ctx.viewport {
-            pass.set_viewport(vx, vy, vw.max(1.0), vh.max(1.0), 0.0, 1.0);
-            pass.set_scissor_rect(
-                vx.max(0.0) as u32, vy.max(0.0) as u32,
-                vw.max(1.0) as u32, vh.max(1.0) as u32);
+            pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+            pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
         }
 
         pass.set_bind_group(0, bg, &[]);

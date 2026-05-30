@@ -10568,6 +10568,21 @@ fn dispatch_pending_meshes(
         let lights = collect_directional_lights(&pending.lights);
         let model = mat4_to_array(&pending.transform);
 
+        // Same clamp + zero-area skip as
+        // `dispatch_pending_gpu_passes`. The mesh tonemap pass also
+        // does `set_scissor_rect(...)` with this rect and the same
+        // `vw.max(1.0) as u32` defensive pattern that turns a
+        // clamped zero into a one-pixel overflow.
+        let clamped_viewport = match pending.viewport {
+            Some(r) => {
+                let c = clamp_viewport(r, width, height);
+                if c[2] < 1.0 || c[3] < 1.0 {
+                    continue;
+                }
+                Some(c)
+            }
+            None => None,
+        };
         renderer.render_mesh_data_batched(
             target,
             &pending.mesh,
@@ -10576,15 +10591,7 @@ fn dispatch_pending_meshes(
             camera_pos,
             &lights,
             shadow_matrix,
-            // Same clamp as `dispatch_pending_gpu_passes` — the mesh
-            // pipeline's tonemap pass does `set_scissor_rect(...)`
-            // with this rect, and a stale viewport from before a
-            // window resize will overflow the (now smaller) target
-            // texture and trip wgpu's strict scissor validator. The
-            // tonemap pass also only clamps lower bounds locally;
-            // clamping at the dispatch boundary means every caller
-            // (mesh + custom pass) inherits the same fix.
-            pending.viewport.map(|r| clamp_viewport(r, width, height)),
+            clamped_viewport,
             batch_index,
             batch_count,
         );
@@ -10618,6 +10625,33 @@ fn dispatch_pending_gpu_passes(
     let queue = renderer.queue_arc();
     let format = renderer.surface_format();
     for pending in passes {
+        // Clamp here so user pass code can pass the rect straight
+        // to `set_scissor_rect` / `set_viewport` without writing
+        // its own bounds-check. Window resize is the canonical
+        // crash case: the paint walker computed the canvas
+        // viewport against the previous frame's target size; if
+        // the surface shrunk between paint and dispatch the
+        // viewport overflows. wgpu validates scissor strictly and
+        // panics on overflow.
+        //
+        // A clamped-to-zero rect (canvas dragged offscreen, or
+        // sitting exactly on the bottom/right edge after a resize)
+        // is skipped entirely. Passing the zero-area rect through
+        // would invite the same footgun the upstream user code
+        // defends against — `vh.max(1.0) as u32` re-inflates h=0
+        // back to 1, which then overflows by one row at the bottom
+        // edge. There's nothing to draw at zero area; just drop
+        // the dispatch.
+        let clamped_viewport = match pending.viewport {
+            Some(r) => {
+                let c = clamp_viewport(r, width, height);
+                if c[2] < 1.0 || c[3] < 1.0 {
+                    continue;
+                }
+                Some(c)
+            }
+            None => None,
+        };
         let ctx = blinc_gpu::custom_pass::RenderPassContext {
             device: &device,
             queue: &queue,
@@ -10629,15 +10663,7 @@ fn dispatch_pending_gpu_passes(
             view_proj: None,
             inv_view_proj: None,
             camera_pos: None,
-            // Clamp here so user pass code can pass the rect straight
-            // to `set_scissor_rect` / `set_viewport` without writing
-            // its own bounds-check. Window resize is the canonical
-            // crash case: the paint walker computed the canvas
-            // viewport against the previous frame's target size; if
-            // the surface shrunk between paint and dispatch the
-            // viewport overflows. wgpu validates scissor strictly and
-            // panics on overflow.
-            viewport: pending.viewport.map(|r| clamp_viewport(r, width, height)),
+            viewport: clamped_viewport,
         };
         pending
             .pass

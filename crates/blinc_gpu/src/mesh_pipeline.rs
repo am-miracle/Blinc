@@ -2979,13 +2979,15 @@ impl GpuRenderer {
                 pass.set_pipeline(&mp.tonemap_pipeline);
 
                 if let Some([vx, vy, vw, vh]) = viewport {
-                    pass.set_viewport(vx, vy, vw.max(1.0), vh.max(1.0), 0.0, 1.0);
-                    pass.set_scissor_rect(
-                        vx.max(0.0) as u32,
-                        vy.max(0.0) as u32,
-                        vw.max(1.0) as u32,
-                        vh.max(1.0) as u32,
-                    );
+                    // `dispatch_pending_meshes` already clamps the
+                    // viewport to the target extent and skips zero-
+                    // area dispatches. Don't re-inflate with
+                    // `.max(1.0)` here — at the bottom/right edge
+                    // that bump produces a scissor that overflows
+                    // the target by one row/column and wgpu's
+                    // strict scissor validator panics.
+                    pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+                    pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
                 }
 
                 pass.set_bind_group(0, &tonemap_bind_group, &[]);

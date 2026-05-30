@@ -363,14 +363,16 @@ impl CustomRenderPass for InstancedGrid {
                 ..Default::default()
             });
             pass.set_pipeline(pipeline);
+            // Blinc's dispatch site already clamps `ctx.viewport` to
+            // the render target and skips the dispatch entirely when
+            // the rect collapses to zero area. Pass the rect through
+            // as-is; no `.max(1.0)` games. Re-inflating a clamped
+            // zero-size rect to size 1 walks right back into the
+            // wgpu scissor-overflow panic when the canvas sits on
+            // the bottom / right edge after a resize.
             if let Some([vx, vy, vw, vh]) = ctx.viewport {
-                pass.set_viewport(vx, vy, vw.max(1.0), vh.max(1.0), 0.0, 1.0);
-                pass.set_scissor_rect(
-                    vx.max(0.0) as u32,
-                    vy.max(0.0) as u32,
-                    vw.max(1.0) as u32,
-                    vh.max(1.0) as u32,
-                );
+                pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+                pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
             }
             pass.set_bind_group(0, bg, &[]);
             pass.set_vertex_buffer(0, vb.slice(..));
