@@ -3506,7 +3506,7 @@ impl WindowedApp {
 
                     Event::Window(_, WindowEvent::Resized { width, height }) => {
                         if let (Some(blinc_app), Some(surf), Some(config)) =
-                            (&ws.app, &ws.surface, &mut ws.surface_config)
+                            (&mut ws.app, &ws.surface, &mut ws.surface_config)
                         {
                             // winit fires a spurious Resized event when the window is first
                             // mapped, with the same dimensions used to configure the surface.
@@ -3524,6 +3524,18 @@ impl WindowedApp {
                                 surf.configure(blinc_app.device(), config);
                                 ws.needs_rebuild = true;
                                 ws.needs_relayout = true;
+                                // Resize invalidates every cached primitive
+                                // position. Without this, the slow-path
+                                // rebuild repopulates the cache but
+                                // canvas-backed subtrees can still get
+                                // their bounds resolved against the old
+                                // cached layout because the static-cache
+                                // texture itself isn't dropped. Match the
+                                // ScaleFactorChanged handler's posture by
+                                // tagging the invalidation explicitly.
+                                blinc_app
+                                    .invalidate_render_cache_tagged("window_resized");
+                                frame_dirty.store(true, Ordering::Release);
 
                                 // Dispatch RESIZE event to elements (use logical dimensions)
                                 if let (Some(windowed_ctx), Some(tree)) =
