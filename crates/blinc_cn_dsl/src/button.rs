@@ -23,7 +23,10 @@ use blinc_layout::div::ElementBuilder;
 ///   values fall back to `"primary"`.
 /// - `size: string` — `"small"`, `"medium"` (default), or `"large"`.
 ///   Unknown values fall back to `"medium"`.
-/// - `disabled: bool` — false by default.
+/// - `disabled: Reactive<bool>` — false by default. Accepts the same
+///   three call-site shapes as `label`: static literal, bare-signal
+///   ref, or `computed { … } : bool`. Snapshot-only today; live
+///   binding waits on cn-side `IntoReactive<bool>` for `ButtonBuilder::disabled`.
 /// - `icon: string` — icon name / SVG-path. Empty string means no icon.
 /// - `icon_position: string` — `"start"` (default) or `"end"`. Ignored
 ///   when `icon` is empty.
@@ -42,7 +45,7 @@ pub struct CnButton {
     pub label: Reactive<String>,
     pub variant: String,
     pub size: String,
-    pub disabled: bool,
+    pub disabled: Reactive<bool>,
     pub icon: String,
     pub icon_position: String,
     pub icon_size: f64,
@@ -102,18 +105,18 @@ impl CnButton {
                 blinc_cn::ButtonSize::Medium
             }
         };
-        // Snapshot the label at build time. Signal / computed shapes
-        // resolve through the same `get_or_else` path; live binding
-        // (re-rendering when the signal fires) waits on cn-side
-        // `IntoReactive<String>` on `ButtonBuilder::label`. The
-        // wiring on this side is complete — once cn grows the
-        // reactive surface, swap the snapshot for a bridge in the
-        // three match arms.
+        // Snapshot the label + disabled values at build time. Signal
+        // / computed shapes resolve through the same `get_or_else`
+        // path; live binding waits on cn-side `IntoReactive<T>` on
+        // `ButtonBuilder::label` / `disabled`. The DSL-side wiring
+        // is complete — once cn grows the reactive surface, swap
+        // the snapshot for a bridge in the three Reactive arms.
         let label = self.label.get_or_else(String::new());
+        let disabled = self.disabled.get_or_else(false);
         let mut b = blinc_cn::button(label)
             .variant(variant)
             .size(size)
-            .disabled(self.disabled);
+            .disabled(disabled);
         if !self.icon.is_empty() {
             b = b.icon(self.icon.clone());
             // `icon_position` only meaningful when an icon is present.

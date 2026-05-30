@@ -131,6 +131,72 @@ fn cn_button_omitted_label_defaults_to_empty() {
         .expect("compile cn.Button() with default label");
 }
 
+/// `cn.Button(disabled = true)` — literal bool. Exercises the
+/// scalar `Reactive<bool>` path (two-slot `(tag, payload: i64)`
+/// wire) end-to-end through the JIT.
+#[test]
+fn cn_button_disabled_literal_compiles() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("dsl init");
+    blinc_cn_dsl::register_all(&dsl).expect("register cn.* widgets");
+
+    let src = r#"
+        view {
+            cn.Button(label = "Save", disabled = true)
+        }
+    "#;
+    dsl.compile_source(src, "cn_button_disabled_literal.blinc")
+        .expect("compile cn.Button(disabled = true)");
+}
+
+/// `cn.Button(disabled = my_signal)` — bool signal binding. The
+/// lowering pass picks up `my_signal` as a SignalType::Bool entry
+/// in the registry and routes through the SIGNAL tag.
+///
+/// IGNORED: blinc_dsl_core's signal registry doesn't currently
+/// declare `bool` signals — only `i32`, `f64`, `string`. Adding
+/// `signal foo: bool` to the DSL needs a tiny grammar / runtime
+/// addition. Un-ignore once the bool signal declaration lands;
+/// the macro + lowering + decode already support
+/// `Reactive<bool>` from the SIGNAL tag.
+#[test]
+#[ignore = "blinc_runtime::signal doesn't declare SignalType::Bool yet"]
+fn cn_button_disabled_signal_compiles() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("dsl init");
+    blinc_cn_dsl::register_all(&dsl).expect("register cn.* widgets");
+
+    let src = r#"
+        signal locked: bool
+        view {
+            cn.Button(label = "Save", disabled = locked)
+        }
+    "#;
+    dsl.compile_source(src, "cn_button_disabled_signal.blinc")
+        .expect("compile cn.Button(disabled = bool signal)");
+}
+
+/// `cn.Button()` with no `disabled` supplied: `Reactive<bool>`
+/// defaults to `Literal(false)`. Confirms the omitted-prop default
+/// path round-trips cleanly for the bool inner type.
+#[test]
+fn cn_button_omitted_disabled_defaults_to_false() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("dsl init");
+    blinc_cn_dsl::register_all(&dsl).expect("register cn.* widgets");
+
+    let src = r#"
+        view {
+            cn.Button(label = "Save")
+        }
+    "#;
+    dsl.compile_source(src, "cn_button_disabled_default.blinc")
+        .expect("compile cn.Button() with default disabled");
+}
+
 /// `on_click` prop accepts a DSL closure. The closure compiles to a
 /// zero-arg `extern "C" fn()` and the i64 fn-ptr is handed to
 /// `CnButton::to_cn_builder` at materialise time. Mirrors
