@@ -1,0 +1,101 @@
+// Live signal-binding canary. Three top-level signals tick on every
+// `Step` event; the FSM is just a button driver. The DSL view
+// binds Div styling props directly to those signals — every paint
+// reads the live value through `RenderPropsOverlay::apply_to` without
+// re-running the view body.
+//
+// Visuals:
+//   - opacity swatch:   Div(opacity = pct)
+//   - corner-radius swatch: Div(corner_radius = radius)
+//   - bg-color swatch:  Div(bg = hue)
+//
+// The text labels DO re-run on each Step because f"{...}" reads the
+// signal at view-execution time, but the styled swatches do NOT —
+// they're patched in place by the compositor's `apply_binding_deltas`.
+
+signal pct: f64
+signal radius: f64
+signal hue: i32
+
+fsm Ticker {
+    state Idle
+    initial Idle
+    on Idle.Step -> Idle {
+        pct.set(pct.get() + 0.1)
+        radius.set(radius.get() + 6.0)
+        hue.set(hue.get() + 1118481)   // 0x111111 step through hex
+    }
+    on Idle.Reset -> Idle {
+        pct.set(0.0)
+        radius.set(0.0)
+        hue.set(0)
+    }
+}
+
+component LiveBind {
+    style {
+        .panel {
+            background: #0f172a;
+            padding: 28px;
+            gap: 20px;
+            border-radius: 18px;
+            color: #f8fafc;
+        }
+        .heading { color: #f8fafc }
+        .caption { color: #94a3b8 }
+        .row { gap: 16px }
+        .swatch-row { gap: 16px }
+        .swatch {
+            width: 140;
+            height: 140;
+            background: #38bdf8;
+            border-radius: 16px;
+        }
+        .swatch-label { color: #cbd5e1 }
+        .btn {
+            background: #3b82f6;
+            padding: 12px 16px;
+            border-radius: 10px;
+            color: #f8fafc;
+        }
+        .btn-reset {
+            background: #ef4444;
+            padding: 12px 16px;
+            border-radius: 10px;
+            color: #f8fafc;
+        }
+        .btn *, .btn-reset * { pointer-events: none }
+    }
+
+    @stateful @fsm([Ticker]) view {
+        Div(class = "panel") {
+            Text("Signal-bound Div styling")
+            Text(f"pct = {pct.get()},  radius = {radius.get()},  hue = {hue.get()}")
+
+            Div(class = "swatch-row") {
+                // Opacity follows pct (0.0 .. 1.0+, fades back in after Reset).
+                Div(class = "swatch", opacity = pct)
+
+                // Corner radius driven by a separate signal so we can
+                // scale the value independently of opacity. No
+                // computed{} needed.
+                Div(class = "swatch", corner_radius = radius)
+
+                // Background hex follows the hue signal — packed RGB
+                // in an i32, exactly what apply_to expects.
+                Div(class = "swatch", bg = hue)
+            }
+
+            Div(class = "row") {
+                Div(class = "btn", on_click = || { Ticker.trigger("Step") }) {
+                    Text("Step")
+                }
+                Div(class = "btn-reset", on_click = || { Ticker.trigger("Reset") }) {
+                    Text("Reset")
+                }
+            }
+        }
+    }
+}
+
+view { LiveBind() }

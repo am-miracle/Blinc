@@ -7719,3 +7719,41 @@ fn diag_type_error_text_with_int_literal() {
         "expected diagnostic to mention type / expected / string; got: {err}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Example smoke tests
+//
+// Each `examples/<name>.blinc` is the canonical source for one of the
+// runnable DSL demos. Compile them through `BlincDsl` here so that
+// grammar / lowering / runtime changes can't quietly break a demo
+// without CI catching it. The runtime `.rs` runners also use
+// `include_str!` on the same file, so a passing test here gives the
+// demo a working compile path at startup.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `examples/counter_dsl.blinc` compiles end-to-end.
+#[test]
+fn example_counter_dsl_compiles() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let dsl = BlincDsl::new().expect("BlincDsl::new");
+    dsl.compile_source(
+        include_str!("../examples/counter_dsl.blinc"),
+        "counter_dsl.blinc",
+    )
+    .expect("counter_dsl.blinc should compile");
+}
+
+/// `examples/reactive_dsl.blinc` compiles end-to-end. Exercises FSM
+/// actions that mutate top-level signals via `.set(get() + delta)`
+/// and `Div(opacity = sig)` / `Div(corner_radius = sig)` / `Div(bg = sig)`
+/// signal-binding lowering all in one file.
+#[test]
+fn example_reactive_dsl_compiles() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let dsl = BlincDsl::new().expect("BlincDsl::new");
+    dsl.compile_source(
+        include_str!("../examples/reactive_dsl.blinc"),
+        "reactive_dsl.blinc",
+    )
+    .expect("reactive_dsl.blinc should compile");
+}

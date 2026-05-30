@@ -89,3 +89,7 @@ blinc_app = { path = "../blinc_app", default-features = false, features = ["wind
 [[example]]
 name = "counter_dsl"
 path = "examples/counter_dsl.rs"
+
+[[example]]
+name = "reactive_dsl"
+path = "examples/reactive_dsl.rs"
