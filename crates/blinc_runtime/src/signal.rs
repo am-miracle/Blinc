@@ -36,6 +36,7 @@ pub enum SignalType {
     I32,
     F64,
     String,
+    Bool,
 }
 
 #[derive(Clone, Copy)]
@@ -85,6 +86,7 @@ pub fn mint_or_get(name: &str, ty: SignalType) -> u64 {
         SignalType::String => blinc_core::reactive::signal::<String>(String::new())
             .id()
             .to_raw(),
+        SignalType::Bool => blinc_core::reactive::signal::<bool>(false).id().to_raw(),
     };
     registry()
         .write()
@@ -161,6 +163,25 @@ pub fn get_str(name: &str) -> Option<String> {
 /// String mirror of [`get_i32_or_default`].
 pub fn get_str_or_default(name: &str) -> String {
     get_str(name).unwrap_or_default()
+}
+
+/// bool mirror of [`set_i32`].
+pub fn set_bool(name: &str, value: bool) {
+    let id_raw = mint_or_get(name, SignalType::Bool);
+    Signal::<bool>::from_id(SignalId::from_raw(id_raw)).set(value);
+}
+
+/// bool mirror of [`get_i32`].
+pub fn get_bool(name: &str) -> Option<bool> {
+    let (id_raw, SignalType::Bool) = lookup(name)? else {
+        return None;
+    };
+    Signal::<bool>::from_id(SignalId::from_raw(id_raw)).try_get()
+}
+
+/// bool mirror of [`get_i32_or_default`]. Defaults to `false`.
+pub fn get_bool_or_default(name: &str) -> bool {
+    get_bool(name).unwrap_or(false)
 }
 
 /// Drop every entry in the name → SignalId map. Used by hot-reload to

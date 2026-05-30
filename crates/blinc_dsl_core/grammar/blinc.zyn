@@ -57,6 +57,7 @@
     __blinc_computed_i32__: "__blinc_computed_i32__",
     __blinc_computed_f64__: "__blinc_computed_f64__",
     __blinc_computed_string__: "__blinc_computed_string__",
+    __blinc_computed_bool__: "__blinc_computed_bool__",
     // `<FsmName>.trigger("State.Event")` lowered by
     // `resolve_fsm_trigger_calls` routes here. Same reason as
     // above — needs an extern decl in the typed program for
@@ -2088,11 +2089,20 @@ lambda_one_param_decl = { name:identifier }
 // PEG ordering: this rule sits in `primary_expr` after `lambda_expr`
 // (no `||` ambiguity) and before `paren_expr` / literals / vars so
 // the leading keyword is unambiguous.
-computed_expr = { computed_expr_i32 | computed_expr_f64 | computed_expr_string }
+computed_expr = { computed_expr_i32 | computed_expr_f64 | computed_expr_string | computed_expr_bool }
 
 computed_expr_i32 = { ("computed" | "derived") ~ "{" ~ e:expr ~ "}" ~ ":" ~ "i32" }
   -> TypedExpression::Call {
       callee: Box::new(TypedExpression::Variable { name: intern("__blinc_computed_i32__") }),
+      args: [TypedExpression::Lambda {
+          params: [],
+          body: TypedExpression::Block { statements: [TypedStatement::Return(Some(e))] },
+      }],
+  }
+
+computed_expr_bool = { ("computed" | "derived") ~ "{" ~ e:expr ~ "}" ~ ":" ~ "bool" }
+  -> TypedExpression::Call {
+      callee: Box::new(TypedExpression::Variable { name: intern("__blinc_computed_bool__") }),
       args: [TypedExpression::Lambda {
           params: [],
           body: TypedExpression::Block { statements: [TypedStatement::Return(Some(e))] },

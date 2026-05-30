@@ -151,17 +151,10 @@ fn cn_button_disabled_literal_compiles() {
 }
 
 /// `cn.Button(disabled = my_signal)` — bool signal binding. The
-/// lowering pass picks up `my_signal` as a SignalType::Bool entry
-/// in the registry and routes through the SIGNAL tag.
-///
-/// IGNORED: blinc_dsl_core's signal registry doesn't currently
-/// declare `bool` signals — only `i32`, `f64`, `string`. Adding
-/// `signal foo: bool` to the DSL needs a tiny grammar / runtime
-/// addition. Un-ignore once the bool signal declaration lands;
-/// the macro + lowering + decode already support
-/// `Reactive<bool>` from the SIGNAL tag.
+/// lowering pass picks up `my_signal` as a `SignalType::Bool` entry
+/// in the registry and routes through the SIGNAL tag of the
+/// `Reactive<bool>` two-slot wire shape.
 #[test]
-#[ignore = "blinc_runtime::signal doesn't declare SignalType::Bool yet"]
 fn cn_button_disabled_signal_compiles() {
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -176,6 +169,27 @@ fn cn_button_disabled_signal_compiles() {
     "#;
     dsl.compile_source(src, "cn_button_disabled_signal.blinc")
         .expect("compile cn.Button(disabled = bool signal)");
+}
+
+/// `cn.Button(disabled = computed { … } : bool)` — bool computed.
+/// Exercises the new `computed_expr_bool` grammar rule + the
+/// `__blinc_computed_bool__` host extern + the existing
+/// `Reactive<bool>` decoder's COMPUTED tag.
+#[test]
+fn cn_button_disabled_computed_compiles() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("dsl init");
+    blinc_cn_dsl::register_all(&dsl).expect("register cn.* widgets");
+
+    let src = r#"
+        signal locked: bool
+        view {
+            cn.Button(label = "Save", disabled = computed { locked.get() } : bool)
+        }
+    "#;
+    dsl.compile_source(src, "cn_button_disabled_computed.blinc")
+        .expect("compile cn.Button(disabled = computed { … } : bool)");
 }
 
 /// `cn.Button()` with no `disabled` supplied: `Reactive<bool>`

@@ -92,6 +92,23 @@ pub(crate) extern "C" fn blinc_signal_get_by_id_string(id_raw: i64) -> *const i3
     blinc_string_alloc(&value)
 }
 
+/// `__signal_get_by_id_bool(id_raw) -> i32` — bool mirror. Returns
+/// `1` for true / `0` for false / `0` when the id no longer
+/// resolves. Wire type is `i32` because Zyntax's Cranelift backend
+/// doesn't have a dedicated bool calling convention — the lowering
+/// pass treats DSL `bool` as `i32` everywhere a value flows across
+/// the FFI seam.
+pub(crate) extern "C" fn blinc_signal_get_by_id_bool(id_raw: i64) -> i32 {
+    if reconstruct_signal::<bool>(id_raw)
+        .try_get()
+        .unwrap_or(false)
+    {
+        1
+    } else {
+        0
+    }
+}
+
 /// Decode a length-prefixed Zyntax string pointer to a `&str`.
 fn decode_signal_name<'a>(name_ptr: *const i32) -> Option<&'a str> {
     if name_ptr.is_null() {
@@ -128,6 +145,13 @@ pub(crate) extern "C" fn blinc_signal_set_by_id_f64(id_raw: i64, value: f64) {
 pub(crate) extern "C" fn blinc_signal_set_by_id_string(id_raw: i64, value_ptr: *const i32) {
     let value = decode_signal_name(value_ptr).unwrap_or("");
     reconstruct_signal::<String>(id_raw).set(value.to_string());
+}
+
+/// `__signal_set_by_id_bool(id_raw, value: i32)` — bool mirror. The
+/// JIT passes the bool as `i32` (0/1) per the same Zyntax calling-
+/// convention quirk noted on the getter.
+pub(crate) extern "C" fn blinc_signal_set_by_id_bool(id_raw: i64, value: i32) {
+    reconstruct_signal::<bool>(id_raw).set(value != 0);
 }
 
 /// `__fsm_runtime_trigger__("<FsmName>", "<path>")` — dispatch a transition
@@ -197,6 +221,22 @@ pub(crate) extern "C" fn blinc_dsl_computed_i32(closure_ptr: i64) -> i64 {
     type ComputedFn = extern "C" fn() -> i32;
     let func: ComputedFn = unsafe { std::mem::transmute(closure_ptr) };
     let computed = blinc_core::reactive::computed::<i32, _>(move |_graph| func());
+    computed.derived_id().to_raw() as i64
+}
+
+/// bool mirror. The DSL `computed { … } : bool` wraps the body in a
+/// zero-arg lambda whose return type Zyntax lowers as `i32` (same
+/// 0/1 wire convention the signal getters use). We reconstruct a
+/// `Computed<bool>` so downstream `Reactive::<bool>::from_computed_id`
+/// rehydrates a typed handle.
+pub(crate) extern "C" fn blinc_dsl_computed_bool(closure_ptr: i64) -> i64 {
+    if closure_ptr == 0 {
+        tracing::warn!("__blinc_computed_bool__ called with null closure pointer");
+        return 0;
+    }
+    type ComputedFn = extern "C" fn() -> i32;
+    let func: ComputedFn = unsafe { std::mem::transmute(closure_ptr) };
+    let computed = blinc_core::reactive::computed::<bool, _>(move |_graph| func() != 0);
     computed.derived_id().to_raw() as i64
 }
 

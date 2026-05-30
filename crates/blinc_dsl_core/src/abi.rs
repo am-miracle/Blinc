@@ -1,10 +1,11 @@
 use super::*;
 use crate::host::{
-    blinc_dsl_computed_f64, blinc_dsl_computed_i32, blinc_dsl_computed_string, blinc_dsl_effect,
-    blinc_format_int, blinc_fsm_runtime_trigger, blinc_fsm_subscribe, blinc_fsm_subscribe_all,
+    blinc_dsl_computed_bool, blinc_dsl_computed_f64, blinc_dsl_computed_i32,
+    blinc_dsl_computed_string, blinc_dsl_effect, blinc_format_int, blinc_fsm_runtime_trigger,
+    blinc_fsm_subscribe, blinc_fsm_subscribe_all, blinc_signal_get_by_id_bool,
     blinc_signal_get_by_id_f64, blinc_signal_get_by_id_i32, blinc_signal_get_by_id_string,
-    blinc_signal_set_by_id_f64, blinc_signal_set_by_id_i32, blinc_signal_set_by_id_string,
-    blinc_string_concat, blinc_text, blinc_text_int,
+    blinc_signal_set_by_id_bool, blinc_signal_set_by_id_f64, blinc_signal_set_by_id_i32,
+    blinc_signal_set_by_id_string, blinc_string_concat, blinc_text, blinc_text_int,
 };
 use crate::widget_ffi::{
     blinc_b_view, blinc_blockquote_view, blinc_button_view, blinc_canvas_view, blinc_caption_view,
@@ -110,6 +111,24 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             ptr: blinc_signal_set_by_id_string as *const u8,
         },
         BuiltinDescriptor {
+            // bool getter / setter — wire type is i32 because
+            // Zyntax's Cranelift backend lowers DSL `bool` to `i32`
+            // across the FFI. The host extern coerces 0/1 ↔ false/true.
+            name: "__signal_get_by_id_bool",
+            param_types: &[Type::Primitive(PrimitiveType::I64)],
+            return_type: Type::Primitive(PrimitiveType::Bool),
+            ptr: blinc_signal_get_by_id_bool as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__signal_set_by_id_bool",
+            param_types: &[
+                Type::Primitive(PrimitiveType::I64),
+                Type::Primitive(PrimitiveType::Bool),
+            ],
+            return_type: Type::Primitive(PrimitiveType::Unit),
+            ptr: blinc_signal_set_by_id_bool as *const u8,
+        },
+        BuiltinDescriptor {
             // `<FsmName>.trigger("State.Event")` lowered by `resolve_fsm_trigger_calls`.
             name: "__fsm_runtime_trigger__",
             param_types: &[
@@ -179,6 +198,12 @@ fn builtins() -> Vec<BuiltinDescriptor> {
             param_types: &[Type::Primitive(PrimitiveType::I64)],
             return_type: Type::Primitive(PrimitiveType::I64),
             ptr: blinc_dsl_computed_string as *const u8,
+        },
+        BuiltinDescriptor {
+            name: "__blinc_computed_bool__",
+            param_types: &[Type::Primitive(PrimitiveType::I64)],
+            return_type: Type::Primitive(PrimitiveType::I64),
+            ptr: blinc_dsl_computed_bool as *const u8,
         },
         BuiltinDescriptor {
             // Push a stable instance-ID derived from the call site's

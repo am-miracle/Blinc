@@ -616,6 +616,7 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
             PrimitiveType::I32 => blinc_runtime::signal::SignalType::I32,
             PrimitiveType::F64 => blinc_runtime::signal::SignalType::F64,
             PrimitiveType::String => blinc_runtime::signal::SignalType::String,
+            PrimitiveType::Bool => blinc_runtime::signal::SignalType::Bool,
             _ => continue,
         };
         let Some(name_str) = func.name.resolve_global() else {
@@ -645,6 +646,7 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
             Type::Primitive(PrimitiveType::I32) => Some("__signal_get_by_id_i32"),
             Type::Primitive(PrimitiveType::F64) => Some("__signal_get_by_id_f64"),
             Type::Primitive(PrimitiveType::String) => Some("__signal_get_by_id_string"),
+            Type::Primitive(PrimitiveType::Bool) => Some("__signal_get_by_id_bool"),
             _ => None,
         }
     }
@@ -654,6 +656,7 @@ pub(crate) fn resolve_signal_calls(program: &mut TypedProgram) {
             Type::Primitive(PrimitiveType::I32) => Some("__signal_set_by_id_i32"),
             Type::Primitive(PrimitiveType::F64) => Some("__signal_set_by_id_f64"),
             Type::Primitive(PrimitiveType::String) => Some("__signal_set_by_id_string"),
+            Type::Primitive(PrimitiveType::Bool) => Some("__signal_set_by_id_bool"),
             _ => None,
         }
     }
@@ -6763,6 +6766,7 @@ pub(crate) fn lower_reactive_args(program: &mut TypedProgram) {
             Some("__blinc_computed_i32__")
                 | Some("__blinc_computed_f64__")
                 | Some("__blinc_computed_string__")
+                | Some("__blinc_computed_bool__")
         )
     }
 
