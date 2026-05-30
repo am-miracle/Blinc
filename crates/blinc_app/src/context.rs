@@ -10576,7 +10576,15 @@ fn dispatch_pending_meshes(
             camera_pos,
             &lights,
             shadow_matrix,
-            pending.viewport,
+            // Same clamp as `dispatch_pending_gpu_passes` — the mesh
+            // pipeline's tonemap pass does `set_scissor_rect(...)`
+            // with this rect, and a stale viewport from before a
+            // window resize will overflow the (now smaller) target
+            // texture and trip wgpu's strict scissor validator. The
+            // tonemap pass also only clamps lower bounds locally;
+            // clamping at the dispatch boundary means every caller
+            // (mesh + custom pass) inherits the same fix.
+            pending.viewport.map(|r| clamp_viewport(r, width, height)),
             batch_index,
             batch_count,
         );
@@ -10621,12 +10629,35 @@ fn dispatch_pending_gpu_passes(
             view_proj: None,
             inv_view_proj: None,
             camera_pos: None,
-            viewport: pending.viewport,
+            // Clamp here so user pass code can pass the rect straight
+            // to `set_scissor_rect` / `set_viewport` without writing
+            // its own bounds-check. Window resize is the canonical
+            // crash case: the paint walker computed the canvas
+            // viewport against the previous frame's target size; if
+            // the surface shrunk between paint and dispatch the
+            // viewport overflows. wgpu validates scissor strictly and
+            // panics on overflow.
+            viewport: pending.viewport.map(|r| clamp_viewport(r, width, height)),
         };
         pending
             .pass
             .initialize_and_render(&device, &queue, format, &ctx);
     }
+}
+
+/// Clamp a viewport rect to a render-target extent. `[x, y, w, h]` in
+/// physical pixels — both origin and size adjusted so `x + w ≤ tw`
+/// and `y + h ≤ th`. Returns a zero-size rect (still inside the
+/// target) when the input is fully outside.
+fn clamp_viewport(rect: [f32; 4], target_w: u32, target_h: u32) -> [f32; 4] {
+    let [x, y, w, h] = rect;
+    let tw = target_w as f32;
+    let th = target_h as f32;
+    let x = x.max(0.0).min(tw);
+    let y = y.max(0.0).min(th);
+    let w = w.max(0.0).min((tw - x).max(0.0));
+    let h = h.max(0.0).min((th - y).max(0.0));
+    [x, y, w, h]
 }
 
 /// Build a view × projection matrix for a directional light illuminating
