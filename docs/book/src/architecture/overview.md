@@ -14,6 +14,9 @@ Blinc follows several key principles:
 
 ## System Architecture
 
+Each frame runs through five named phases. The phase numbering is
+load-bearing: code, traces, and runbooks all reference it.
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  WindowedApp Event Loop (Platform abstraction)              │
@@ -21,49 +24,72 @@ Blinc follows several key principles:
 │ • Receives pointer, keyboard, lifecycle events              │
 │ • Routes through EventRouter -> StateMachines               │
 │ • Triggers reactive signal updates                          │
-│ • Checks signal dependencies for rebuilds                   │
 └─────────────────────────────────────────────────────────────┘
                           ↓
 ┌─────────────────────────────────────────────────────────────┐
-│  ReactiveGraph & Stateful Element Updates                   │
-├─────────────────────────────────────────────────────────────┤
-│ • Signals change -> Effects run -> Rebuilds queued          │
-│ • Stateful elements transition -> Subtree rebuild queued    │
-│ • Diff algorithm determines change categories               │
-└─────────────────────────────────────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────────┐
-│  RenderTree Update (Incremental)                            │
+│  Phase 1: Diff                                              │
 ├─────────────────────────────────────────────────────────────┤
 │ • incremental_update() compares hashes                      │
-│ • VisualOnly: apply prop updates only                       │
-│ • ChildrenChanged: rebuild subtrees + mark layout dirty     │
+│ • VisualOnly: apply prop updates                            │
+│ • ChildrenChanged: rebuild subtree, invalidate cache        │
+│ • Most signal updates skip rebuild; they land as            │
+│   dynamic bindings the compositor patches in Phase 4        │
 └─────────────────────────────────────────────────────────────┘
                           ↓
 ┌─────────────────────────────────────────────────────────────┐
-│  Layout Computation (Taffy Flexbox)                         │
+│  Phase 2: Layout (Taffy Flexbox)                            │
 ├─────────────────────────────────────────────────────────────┤
 │ • compute_layout() on dirty nodes only                      │
-│ • Returns (x, y, width, height) for all nodes               │
-│ • Cached in LayoutTree                                      │
+│ • Stylesheet overrides applied before compute_layout        │
 └─────────────────────────────────────────────────────────────┘
                           ↓
 ┌─────────────────────────────────────────────────────────────┐
-│  Animation Scheduler (Background Thread @ 120fps)           │
+│  Phase 3: Tick                                              │
 ├─────────────────────────────────────────────────────────────┤
-│ • Ticks springs, keyframes, timelines                       │
-│ • Stores current values in AnimatedValue                    │
-│ • Sets needs_redraw flag, wakes main thread                 │
+│ • Spring physics, CSS keyframes, CSS transitions            │
+│ • Scroll physics, motion bindings                           │
+│ • Layout-prop animations re-run compute_layout              │
 └─────────────────────────────────────────────────────────────┘
                           ↓
 ┌─────────────────────────────────────────────────────────────┐
-│  GPU Rendering (DrawContext -> GpuRenderer)                 │
+│  Phase 4: Paint                                             │
 ├─────────────────────────────────────────────────────────────┤
-│ • RenderTree traversal, samples animation values            │
-│ • Emits SDF primitives to batches                           │
-│ • Multi-pass rendering: Background -> Glass -> Foreground  │
+│ • try_fast_paint? (cache + no rebuild / layout / scroll)    │
+│     yes → apply_binding_deltas + apply_css_deltas           │
+│          render_static_layer_damaged (scissor + redraw)     │
+│     no  → full walker → repopulate cache                    │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│  Phase 5: Composite & Present                               │
+├─────────────────────────────────────────────────────────────┤
+│ • Blit static cache → swapchain                             │
+│ • Overlay pass: dynamic batch + motion subtree blits        │
+│ • Submit, present                                           │
+│ • request_redraw() if any visible animation mid-flight      │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+### What makes this fast
+
+After the first paint of a tree state, the static layer lives in a
+GPU-side texture cache. Most subsequent frames (hover, focus, CSS
+animation tick, spring tick) never re-walk the tree. The compositor
+patches a small set of primitive fields in place (translate, scale,
+opacity, colour, corner radius) and the GPU pass scissors a damage rect,
+re-dispatching only the SDF primitives that intersect.
+
+Signal-bound props (`bg(my_signal)`, `w(my_signal)`) go through the same
+in-place patch path. A signal update doesn't necessarily rebuild any
+subtree; it can simply patch the GPU primitive's relevant field.
+
+A signal *read* inside a branched expression is the case that rebuilds the
+reading component's subtree (not the whole UI). And off-screen content
+opted into viewport culling emits zero primitives, so it costs nothing.
+
+The full re-walk only fires when the cache invalidates: structural
+rebuilds, layout-affecting changes, scroll, overlay transitions. See [GPU
+Rendering](./gpu-rendering.md) for the cache, damage, and culling details.
 
 ## Core Crates
 
