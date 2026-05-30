@@ -17,6 +17,44 @@ struct ParamKind {
     param_type_expr: proc_macro2::TokenStream,
 }
 
+/// Recognise `Reactive<T>` as a structural shape — returns `Some(T_ident)`
+/// when the field's declared type is the `Reactive<…>` wrapper from
+/// `blinc_runtime::reactive_value`. The macro generates a two-slot
+/// FFI for these (`tag: i32`, `payload: i64`) instead of the
+/// single-arg shape used for plain scalar props.
+///
+/// Matched on the rightmost segment only — `Reactive<f64>`,
+/// `reactive_value::Reactive<f64>`, `blinc_runtime::Reactive<f64>`
+/// all match. The inner type identifier is what selects the runtime
+/// decoder; one of the per-`T` `Reactive::<T>::decode_ffi` impls in
+/// `blinc_runtime::reactive_value`.
+fn classify_reactive_field(ty: &syn::Type) -> Option<syn::Ident> {
+    let syn::Type::Path(p) = ty else {
+        return None;
+    };
+    let segment = p.path.segments.last()?;
+    if segment.ident != "Reactive" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    if args.args.len() != 1 {
+        return None;
+    }
+    let syn::GenericArgument::Type(inner) = &args.args[0] else {
+        return None;
+    };
+    let syn::Type::Path(inner_path) = inner else {
+        return None;
+    };
+    let inner_seg = inner_path.path.segments.last()?;
+    if !matches!(inner_seg.arguments, syn::PathArguments::None) {
+        return None;
+    }
+    Some(inner_seg.ident.clone())
+}
+
 fn classify_param_type(ty: &syn::Type) -> Option<ParamKind> {
     let syn::Type::Path(p) = ty else {
         return None;
@@ -421,6 +459,7 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
                 ty: ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
                     ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I64
                 ),
+                reactive_inner: None,
             }
         });
         param_types.push(quote! {
@@ -459,6 +498,7 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
                 ty: ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
                     ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I64
                 ),
+                reactive_inner: None,
             }
         });
         param_types.push(quote! {
@@ -485,11 +525,93 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
             .into();
         }
 
+        // `Reactive<T>` props occupy two FFI slots — a tag and a
+        // payload — that the lowering pass fills with one of:
+        //   - `(0, literal_bits)` for a baked-in literal,
+        //   - `(1, signal_id_raw)` for a bare-Variable signal ref,
+        //   - `(2, derived_id_raw)` for a `computed { … } : T` expr.
+        // The decode reconstructs a typed `Reactive<T>` Rust enum;
+        // the wrapper pattern-matches and routes to whichever cn-side
+        // `IntoReactive<T>` adapter fits the inner type.
+        //
+        // Single registry prop entry — the lowering pass uses the
+        // `Type::Reactive(...)` discriminator to know to emit two
+        // values into the arg list.
+        if let Some(inner_ty) = classify_reactive_field(&field.ty) {
+            let tag_arg_ident = syn::Ident::new(&format!("__arg_{idx}_tag"), field_ident.span());
+            let payload_arg_ident =
+                syn::Ident::new(&format!("__arg_{idx}_payload"), field_ident.span());
+            let inner_prim = match inner_ty.to_string().as_str() {
+                "i32" => quote! { PrimitiveType::I32 },
+                "f64" => quote! { PrimitiveType::F64 },
+                "bool" => quote! { PrimitiveType::Bool },
+                other => {
+                    return syn::Error::new_spanned(
+                        &field.ty,
+                        format!(
+                            "#[extern_widget] Reactive<{other}> isn't supported yet — only \
+                             Reactive<i32>, Reactive<f64>, Reactive<bool> ship a wire-format \
+                             decoder. Add a `decode_ffi` impl in \
+                             `blinc_runtime::reactive_value` to extend the set."
+                        ),
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+            };
+
+            thunk_params.push(quote! { #tag_arg_ident: i32 });
+            thunk_params.push(quote! { #payload_arg_ident: i64 });
+            thunk_decodes.push(quote! {
+                let #field_ident = ::blinc_dsl_core::__extern_widget_internals::Reactive::<#inner_ty>::decode_ffi(
+                    #tag_arg_ident,
+                    #payload_arg_ident,
+                );
+            });
+            struct_inits.push(quote! { #field_ident });
+            prop_defs.push(quote! {
+                ::blinc_dsl_core::__extern_widget_internals::PropDef {
+                    name: ::std::sync::Arc::from(#field_name),
+                    // `ty` is the INNER type so call-site type-checking
+                    // matches against the value the DSL author writes
+                    // (e.g. `Reactive<f64>` accepts an f64 literal or
+                    // an f64-typed signal). `reactive_inner` is the
+                    // discriminator the lowering pass reads to know
+                    // this prop expects two FFI args (tag, payload)
+                    // and to route literal / signal / computed shapes
+                    // accordingly.
+                    ty: ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                        ::blinc_dsl_core::__extern_widget_internals::#inner_prim
+                    ),
+                    reactive_inner: Some(
+                        ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                            ::blinc_dsl_core::__extern_widget_internals::#inner_prim
+                        ),
+                    ),
+                }
+            });
+            // Two param-type slots to match the two FFI args; both
+            // are runtime-tag/payload primitives that the lowering
+            // pass owns interpretation of.
+            param_types.push(quote! {
+                ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                    ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I32
+                )
+            });
+            param_types.push(quote! {
+                ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
+                    ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I64
+                )
+            });
+            continue;
+        }
+
         let Some(kind) = classify_param_type(&field.ty) else {
             return syn::Error::new_spanned(
                 &field.ty,
-                "#[extern_widget] fields must be String, i32, i64, f64, or a non-generic custom \
-                 type that implements TryFrom<BlincStructValue> (or use `#[children]` for a \
+                "#[extern_widget] fields must be String, i32, i64, f64, Reactive<T> (where T is \
+                 i32/f64/bool), or a non-generic custom type that implements \
+                 TryFrom<BlincStructValue> (or use `#[children]` for a \
                  `Vec<Box<dyn ElementBuilder>>` children slot)",
             )
             .to_compile_error()
@@ -514,6 +636,7 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
             ::blinc_dsl_core::__extern_widget_internals::PropDef {
                 name: ::std::sync::Arc::from(#field_name),
                 ty: #prop_type_expr,
+                reactive_inner: None,
             }
         });
         param_types.push(param_type_expr.clone());
@@ -527,6 +650,7 @@ pub fn extern_widget(attr: TokenStream, item: TokenStream) -> TokenStream {
                 ty: ::blinc_dsl_core::__extern_widget_internals::Type::Primitive(
                     ::blinc_dsl_core::__extern_widget_internals::PrimitiveType::I64
                 ),
+                reactive_inner: None,
             }
         });
         param_types.push(quote! {

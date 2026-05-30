@@ -13,9 +13,16 @@
 
 pub mod component;
 pub mod fsm;
+pub mod reactive_value;
 pub mod reload;
 pub mod signal;
 pub mod view;
+
+// Convenience re-exports — `Reactive<T>` is the first DSL value
+// type and lives at the top of every consumer's import list.
+pub use reactive_value::{
+    REACTIVE_TAG_COMPUTED, REACTIVE_TAG_LITERAL, REACTIVE_TAG_SIGNAL, Reactive,
+};
 
 // `ZyntaxValue` is the canonical runtime value representation
 // — JIT and AOT compiled code from Zyntax both produce it.

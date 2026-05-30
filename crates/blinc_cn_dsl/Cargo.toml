@@ -34,7 +34,8 @@ blinc_cn = { path = "../blinc_cn", version = "0.5.1" }
 blinc_layout = { path = "../blinc_layout", version = "0.5.1" }
 
 # `Color::from_hex` for the shared string-hex colour parser used by
-# every widget exposing a colour prop.
+# every widget exposing a colour prop. Also `blinc_core::reactive::*`
+# for the `Reactive<T>` Signal → Computed bridge in widget wrappers.
 blinc_core = { path = "../blinc_core", version = "0.5.1" }
 
 # Logging — unknown-variant / unknown-size diagnostics surface as

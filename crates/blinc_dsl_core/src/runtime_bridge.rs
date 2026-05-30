@@ -137,6 +137,7 @@ pub(crate) fn register_blinc_layout_primitives() {
     let prop = |name: &'static str, ty: Type| PropDef {
         name: std::sync::Arc::from(name),
         ty,
+        reactive_inner: None,
     };
     let style_prop = || prop("__style", i64_ty.clone());
     let class_prop = || prop("class", string_ty.clone());
@@ -442,6 +443,11 @@ pub(crate) fn publish_components_to_runtime_registry(program: &TypedProgram) {
                 Some(blinc_runtime::component::PropDef {
                     name: std::sync::Arc::from(name_str.as_ref()),
                     ty: p.ty.clone(),
+                    // User-component props don't carry `Reactive<T>`
+                    // typing yet — the lowering only learns about
+                    // reactive props from extern widgets via the
+                    // `#[extern_widget]` macro today.
+                    reactive_inner: None,
                 })
             })
             .collect();

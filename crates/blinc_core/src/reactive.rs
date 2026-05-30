@@ -379,6 +379,20 @@ impl<T> Derived<T> {
     pub fn id(&self) -> DerivedId {
         self.id
     }
+
+    /// Reconstruct a `Derived<T>` from a raw `DerivedId`.
+    ///
+    /// # Safety
+    /// The caller must ensure the `DerivedId` refers to a derived
+    /// computed of type `T`. Used by the FFI boundary to rehydrate
+    /// a [`Computed<T>`] from a raw `u64` handle baked into JIT
+    /// code by `computed { … } : T` lowering.
+    pub fn from_id(id: DerivedId) -> Self {
+        Self {
+            id,
+            _marker: std::marker::PhantomData,
+        }
+    }
 }
 
 /// An effect handle
@@ -1253,6 +1267,25 @@ impl<T: Clone + Send + 'static> Computed<T> {
     /// the reactive graph it lives in.
     pub fn new(derived: Derived<T>, reactive: SharedReactiveGraph) -> Self {
         Self { derived, reactive }
+    }
+
+    /// Reconstruct a `Computed<T>` from a raw `DerivedId`, anchored
+    /// to the process-global reactive graph.
+    ///
+    /// # Safety
+    /// The caller must ensure the `DerivedId` refers to a derived
+    /// of type `T` and lives in the global graph (i.e. was minted
+    /// by the [`computed`] / [`derived`] free function or one of the
+    /// `BlincContextState::use_*` helpers). Used by the FFI
+    /// boundary to rehydrate a `Computed<T>` baked into JIT code by
+    /// `computed { … } : T` lowering — the lowering hands an
+    /// `i64` derived-id to the host extern; the extern thunk calls
+    /// this to recover a typed handle.
+    pub fn from_id(id: DerivedId) -> Self {
+        Self {
+            derived: Derived::from_id(id),
+            reactive: global_graph(),
+        }
     }
 
     /// Get the current value, recomputing if stale. Always returns

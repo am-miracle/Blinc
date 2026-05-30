@@ -127,6 +127,7 @@ mod tests {
             props: vec![PropDef {
                 name: arc("initial"),
                 ty: Type::Primitive(PrimitiveType::I32),
+                reactive_inner: None,
             }],
         }
     }
@@ -152,10 +153,12 @@ mod tests {
                 PropDef {
                     name: arc("initial"),
                     ty: Type::Primitive(PrimitiveType::I32),
+                    reactive_inner: None,
                 },
                 PropDef {
                     name: arc("step"),
                     ty: Type::Primitive(PrimitiveType::I32),
+                    reactive_inner: None,
                 },
             ],
         };

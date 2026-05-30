@@ -43,13 +43,13 @@ use passes::{
     desugar_compound_assigns, detect_and_strip_stateful_views, ensure_unit_return,
     expand_const_groups, extract_and_strip_stylesheets, inject_fsm_context_markers,
     lower_bare_call_named_args, lower_children_arrays_to_blocks, lower_component_calls,
-    lower_match_blocks, lower_struct_literals, lower_struct_widget_props_to_handles,
-    lower_styling_args_to_overlays, lower_view_to_value_returning, materialize_view,
-    module_namespace_from_path, populate_fsm_registry_pass, resolve_const_references,
-    resolve_dotted_fsm_field_access, resolve_extern_widget_named_args, resolve_fsm_subscribe_calls,
-    resolve_fsm_trigger_calls, resolve_signal_calls, rewrite_component_calls_in_program,
-    synthesize_fsm_context_and_actions, synthesize_fsm_event_enums,
-    synthesize_fsm_trait_interfaces, validate_component_calls,
+    lower_match_blocks, lower_reactive_args, lower_struct_literals,
+    lower_struct_widget_props_to_handles, lower_styling_args_to_overlays,
+    lower_view_to_value_returning, materialize_view, module_namespace_from_path,
+    populate_fsm_registry_pass, resolve_const_references, resolve_dotted_fsm_field_access,
+    resolve_extern_widget_named_args, resolve_fsm_subscribe_calls, resolve_fsm_trigger_calls,
+    resolve_signal_calls, rewrite_component_calls_in_program, synthesize_fsm_context_and_actions,
+    synthesize_fsm_event_enums, synthesize_fsm_trait_interfaces, validate_component_calls,
 };
 use runtime_bridge::{
     JitGuardDispatcher, JitViewRenderer, publish_components_to_runtime_registry,
@@ -57,6 +57,14 @@ use runtime_bridge::{
 };
 
 pub use blinc_dsl_macro::extern_widget;
+
+// `Reactive<T>` — the first typed DSL value at the FFI boundary.
+// Re-exported here so widget-pack crates (`blinc_cn_dsl`,
+// third-party `*_dsl` packs) get the type from the same crate
+// they're already pulling for `#[extern_widget]` + `BlincDsl`. The
+// canonical definition lives in `blinc_runtime::reactive_value`
+// so the JIT and AOT compile paths share one enum.
+pub use blinc_runtime::Reactive;
 pub use widget_ffi::{
     __extern_widget_internals, BlincStructFieldValue, BlincStructValue, ExternWidget,
     ExternWidgetSpec, RenderPropsOverlay, Styled, WidgetBox, materialize_overlay,
@@ -601,6 +609,15 @@ impl BlincDsl {
         // extern decls carry synthetic `p0`, `p1`, … param names that can't bind by name.
         resolve_extern_widget_named_args(&mut typed_program);
 
+        // Expand `Reactive<T>` prop slots into (tag, payload) FFI pairs.
+        // MUST run after `resolve_extern_widget_named_args` (sees
+        // fully-positional args) and before `compile_typed_program`
+        // (the macro thunk's signature has two slots per reactive
+        // prop). Handles `cn.Progress(value = lit | signal | computed)`
+        // and any other `#[reactive] Reactive<T>` prop on any
+        // registered extern widget — built-in or namespaced.
+        lower_reactive_args(&mut typed_program);
+
         // Resolve named args + splice defaults on bare calls to
         // user-declared top-level fns (`step(by = 5)` →
         // `step(default_x, 5)`). The `__named__` markers must be
@@ -1085,6 +1102,7 @@ impl BlincDsl {
         lower_struct_widget_props_to_handles(&mut program)
             .map_err(|errors| BlincDslError::Compile(errors.join("\n")))?;
         resolve_extern_widget_named_args(&mut program);
+        lower_reactive_args(&mut program);
         lower_bare_call_named_args(&mut program);
 
         Ok(program)

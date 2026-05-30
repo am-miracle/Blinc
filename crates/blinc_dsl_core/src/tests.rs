@@ -1542,10 +1542,12 @@ fn slot_bodies_partition_into_named_args() {
                 blinc_runtime::component::PropDef {
                     name: std::sync::Arc::from("children"),
                     ty: Type::Primitive(PrimitiveType::I64),
+                    reactive_inner: None,
                 },
                 blinc_runtime::component::PropDef {
                     name: std::sync::Arc::from("slot_Header"),
                     ty: Type::Primitive(PrimitiveType::I64),
+                    reactive_inner: None,
                 },
             ],
         });
@@ -4656,6 +4658,7 @@ fn register_extern_widget_rust_to_dsl_round_trip() {
         props: vec![blinc_runtime::component::PropDef {
             name: std::sync::Arc::from("content"),
             ty: Type::Primitive(PrimitiveType::String),
+            reactive_inner: None,
         }],
         param_types: vec![Type::Primitive(PrimitiveType::String)],
         return_type: Type::Primitive(PrimitiveType::I64),

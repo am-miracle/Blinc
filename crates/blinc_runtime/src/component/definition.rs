@@ -31,6 +31,16 @@ pub type PropType = Type;
 /// what types it stores; consumers that only handle primitives
 /// pattern-match on `Type::Primitive(...)` and fall through
 /// for anything more complex.
+///
+/// `reactive_inner` flags `Reactive<T>` props (see
+/// [`crate::reactive_value::Reactive`]). When `Some(inner_ty)`,
+/// the lowering pass emits TWO args at the call site (`tag: i32`,
+/// `payload: i64`) — a wire-format encoded literal, signal id, or
+/// derived id — rather than a single value matching `ty`. The
+/// thunk decodes them back into a typed `Reactive<T>` enum the
+/// wrapper consumes. `ty` itself stays the inner `T` so consumers
+/// that don't know about reactive props see the inner type and can
+/// type-check call sites uniformly.
 #[derive(Debug, Clone)]
 pub struct PropDef {
     /// The prop's identifier (the binding name visible inside
@@ -41,6 +51,10 @@ pub struct PropDef {
     /// — keeping the substrate Type identical to Zyntax's
     /// avoids a translation layer between the two.
     pub ty: Type,
+    /// `Some(inner)` for `Reactive<inner>` props; `None` for plain
+    /// props. `inner` is the inner type (`i32` / `f64` / `bool`)
+    /// the lowering pass uses to encode literals.
+    pub reactive_inner: Option<Type>,
 }
 
 /// All registry-level information about a single component.
@@ -109,10 +123,12 @@ mod tests {
                 PropDef {
                     name: arc("initial"),
                     ty: i32_ty(),
+                    reactive_inner: None,
                 },
                 PropDef {
                     name: arc("step"),
                     ty: i32_ty(),
+                    reactive_inner: None,
                 },
             ],
         };
@@ -140,6 +156,7 @@ mod tests {
             props: vec![PropDef {
                 name: arc("buckets"),
                 ty: array_of_f64.clone(),
+                reactive_inner: None,
             }],
         };
         let prop = def.prop("buckets").unwrap();
