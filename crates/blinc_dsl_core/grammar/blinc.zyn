@@ -118,6 +118,14 @@
     __set_overlay_corner_radius_signal__: "__set_overlay_corner_radius_signal__",
     __set_overlay_border_width_signal__: "__set_overlay_border_width_signal__",
     __set_overlay_border_color_signal__: "__set_overlay_border_color_signal__",
+    // Computed-bound variants. Second arg is a `DerivedId.to_raw()`
+    // cast to i64; the host extern records it on the overlay so each
+    // render reads the live value via `Computed::<T>::from_id`.
+    __set_overlay_opacity_computed__: "__set_overlay_opacity_computed__",
+    __set_overlay_bg_computed__: "__set_overlay_bg_computed__",
+    __set_overlay_corner_radius_computed__: "__set_overlay_corner_radius_computed__",
+    __set_overlay_border_width_computed__: "__set_overlay_border_width_computed__",
+    __set_overlay_border_color_computed__: "__set_overlay_border_color_computed__",
     // Call-site instance IDs. `lower_component_calls` brackets every
     // rewritten call with `__push_call_id__(ID)` / `__pop_call_id__()`
     // so widget FFI can key per-instance state to the source span.

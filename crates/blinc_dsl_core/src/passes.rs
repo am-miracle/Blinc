@@ -4684,6 +4684,31 @@ pub(crate) fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
         Some(id_raw)
     }
 
+    /// Recognise `__blinc_computed_<T>__(closure_expr)` — the call
+    /// shape `computed { … } : T` lowers to (per `grammar/blinc.zyn`).
+    /// Returns `true` when the value is one of these calls AND the
+    /// inner T matches what the styling prop expects.
+    ///
+    /// At runtime the call evaluates to a `DerivedId.to_raw() as i64`,
+    /// which is exactly the payload the `_computed__` setters need.
+    /// Mirrors the recognizer inside `lower_reactive_args`.
+    fn is_computed_call_of_kind(
+        value: &zyntax_typed_ast::TypedNode<TypedExpression>,
+        kind: StylingValueKind,
+    ) -> bool {
+        let TypedExpression::Call(c) = &value.node else {
+            return false;
+        };
+        let TypedExpression::Variable(callee) = &c.callee.node else {
+            return false;
+        };
+        let want = match kind {
+            StylingValueKind::Float => "__blinc_computed_f64__",
+            StylingValueKind::IntColor => "__blinc_computed_i32__",
+        };
+        matches!(callee.resolve_global().as_deref(), Some(name) if name == want)
+    }
+
     fn walk_stmt(stmt: &mut zyntax_typed_ast::TypedNode<TypedStatement>, counter: &mut u32) {
         match &mut stmt.node {
             TypedStatement::Expression(e) => rewrite_expr(e, counter),
@@ -4823,12 +4848,21 @@ pub(crate) fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
             span,
         ));
 
-        // One setter call per styling arg. If the value is a bare
-        // identifier referring to a DSL-declared signal of the right
-        // type, redirect to the `_signal` variant — the host extern
-        // records the `SignalId.to_raw()` on the overlay so each
-        // render reads the live signal value via the reactive
-        // primitive instead of baking a literal.
+        // One setter call per styling arg. The arg's expression shape
+        // picks which variant we emit:
+        //
+        //   * Bare signal identifier of the matching SignalType →
+        //     `_signal__` variant, with the raw signal id as payload.
+        //   * `computed { … } : T` call (already desugared to
+        //     `__blinc_computed_<T>__(closure)` by `process_statement`)
+        //     → `_computed__` variant, with the call expression itself
+        //     as payload (it returns a `DerivedId.to_raw() as i64` at
+        //     runtime).
+        //   * Anything else → original literal-baking setter.
+        //
+        // Signal takes priority over computed only because the test
+        // is cheaper; in practice each value matches at most one
+        // shape so order doesn't change behaviour.
         for (setter_name, kind, na) in styling_args {
             let value_node = *na.value;
             let expected_signal_ty = match kind {
@@ -4857,6 +4891,18 @@ pub(crate) fn lower_styling_args_to_overlays(program: &mut TypedProgram) {
                 });
             let (effective_setter, effective_arg) = match signal_redirect {
                 Some((setter, arg)) => (setter, arg),
+                None if is_computed_call_of_kind(&value_node, kind) => {
+                    // Computed redirect. Same suffix-swap dance as the
+                    // signal variant: `__set_overlay_X__` → `__set_overlay_X_computed__`.
+                    // The arg keeps the original `__blinc_computed_<T>__`
+                    // call expression — it already returns the raw
+                    // derived id as i64 at runtime.
+                    let computed_setter_name =
+                        format!("{}_computed__", setter_name.trim_end_matches("__"));
+                    let computed_setter =
+                        zyntax_typed_ast::InternedString::new_global(&computed_setter_name);
+                    (computed_setter, value_node)
+                }
                 None => (
                     zyntax_typed_ast::InternedString::new_global(setter_name),
                     value_node,

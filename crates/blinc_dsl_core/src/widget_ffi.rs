@@ -107,11 +107,21 @@ pub(crate) fn current_call_id() -> u64 {
 /// override the wrapped widget's `render_props()`; `None` fields
 /// leave it alone.
 ///
-/// Reactive props: the `*_signal_id_raw` fields take precedence over
-/// their literal counterparts. When set, `apply_to` reads the current
-/// value from `blinc_core::reactive::Signal::<T>::from_id(...)` each
-/// render — so a DSL-side mutation of the signal value reflects in
-/// the next paint without re-running the view body.
+/// Reactive props come in two shapes, both taking precedence over
+/// the literal:
+///
+/// - `*_signal_id_raw` is set when the prop was bound to a bare
+///   signal identifier. `apply_to` reads the current value via
+///   `Signal::<T>::from_id`.
+/// - `*_computed_id_raw` is set when the prop was bound to a
+///   `computed { … } : T` expression. `apply_to` reads the current
+///   value via `Computed::<T>::from_id().try_get()`, so any signal
+///   the computed body reads stays a live dependency without
+///   re-running the view.
+///
+/// At most one of the two reactive slots is set per prop on any
+/// given call — the lowering pass picks the shape from the call-site
+/// expression.
 #[derive(Debug, Default, Clone)]
 pub struct RenderPropsOverlay {
     pub background: Option<blinc_core::layer::Brush>,
@@ -136,14 +146,43 @@ pub struct RenderPropsOverlay {
     /// i32 signal id bound to border_color. Same hex-packed convention
     /// as [`Self::bg_signal_id_raw`].
     pub border_color_signal_id_raw: Option<u64>,
+    /// `DerivedId.to_raw()` for an f64 `computed { … } : f64` bound
+    /// to opacity. `apply_to` rehydrates a `Computed<f64>` from the
+    /// id and reads its current value.
+    pub opacity_computed_id_raw: Option<u64>,
+    /// f64 computed id bound to corner_radius (px).
+    pub corner_radius_computed_id_raw: Option<u64>,
+    /// f64 computed id bound to border_width (px).
+    pub border_width_computed_id_raw: Option<u64>,
+    /// i32 computed id bound to bg. Same hex-packed value convention
+    /// as the signal slot.
+    pub bg_computed_id_raw: Option<u64>,
+    /// i32 computed id bound to border_color.
+    pub border_color_computed_id_raw: Option<u64>,
 }
 
 impl RenderPropsOverlay {
     pub fn apply_to(&self, base: &mut blinc_layout::RenderProps) {
-        // Reactive bg wins over a literal. The signal carries a packed
-        // color hex as i32 — same convention as `Color::from_hex` on
-        // the literal-arg path.
-        if let Some(id_raw) = self.bg_signal_id_raw {
+        // Priority per prop: computed > signal > literal. The lowering
+        // pass picks exactly one shape per arg so we never see both a
+        // signal slot and a computed slot set together; the else-ifs
+        // are defensive.
+        //
+        // `Computed::try_get` reads through the same reactive graph
+        // signals do, so any signals the computed body touches stay
+        // tracked dependencies without us inspecting them here.
+
+        // bg: i32 hex.
+        if let Some(id_raw) = self.bg_computed_id_raw {
+            let derived = blinc_core::reactive::Computed::<i32>::from_id(
+                blinc_core::reactive::DerivedId::from_raw(id_raw),
+            );
+            if let Some(v) = derived.try_get() {
+                base.background = Some(blinc_core::layer::Brush::Solid(
+                    blinc_core::layer::Color::from_hex(v as u32),
+                ));
+            }
+        } else if let Some(id_raw) = self.bg_signal_id_raw {
             let signal = blinc_core::reactive::Signal::<i32>::from_id(
                 blinc_core::reactive::SignalId::from_raw(id_raw),
             );
@@ -155,9 +194,16 @@ impl RenderPropsOverlay {
         } else if let Some(bg) = self.background.clone() {
             base.background = Some(bg);
         }
-        // Reactive opacity wins over a literal. Pull the current f64
-        // value from the signal and cast to f32 for `RenderProps`.
-        if let Some(id_raw) = self.opacity_signal_id_raw {
+
+        // opacity: f64 → f32.
+        if let Some(id_raw) = self.opacity_computed_id_raw {
+            let derived = blinc_core::reactive::Computed::<f64>::from_id(
+                blinc_core::reactive::DerivedId::from_raw(id_raw),
+            );
+            if let Some(v) = derived.try_get() {
+                base.opacity = v as f32;
+            }
+        } else if let Some(id_raw) = self.opacity_signal_id_raw {
             let signal = blinc_core::reactive::Signal::<f64>::from_id(
                 blinc_core::reactive::SignalId::from_raw(id_raw),
             );
@@ -167,7 +213,18 @@ impl RenderPropsOverlay {
         } else if let Some(o) = self.opacity {
             base.opacity = o;
         }
-        if let Some(id_raw) = self.corner_radius_signal_id_raw {
+
+        // corner_radius: f64 → uniform CornerRadius.
+        if let Some(id_raw) = self.corner_radius_computed_id_raw {
+            let derived = blinc_core::reactive::Computed::<f64>::from_id(
+                blinc_core::reactive::DerivedId::from_raw(id_raw),
+            );
+            if let Some(v) = derived.try_get() {
+                let r = v as f32;
+                base.border_radius = blinc_core::layer::CornerRadius::new(r, r, r, r);
+                base.border_radius_explicit = true;
+            }
+        } else if let Some(id_raw) = self.corner_radius_signal_id_raw {
             let signal = blinc_core::reactive::Signal::<f64>::from_id(
                 blinc_core::reactive::SignalId::from_raw(id_raw),
             );
@@ -180,7 +237,16 @@ impl RenderPropsOverlay {
             base.border_radius = blinc_core::layer::CornerRadius::new(r, r, r, r);
             base.border_radius_explicit = true;
         }
-        if let Some(id_raw) = self.border_width_signal_id_raw {
+
+        // border_width: f64 → f32.
+        if let Some(id_raw) = self.border_width_computed_id_raw {
+            let derived = blinc_core::reactive::Computed::<f64>::from_id(
+                blinc_core::reactive::DerivedId::from_raw(id_raw),
+            );
+            if let Some(v) = derived.try_get() {
+                base.border_width = v as f32;
+            }
+        } else if let Some(id_raw) = self.border_width_signal_id_raw {
             let signal = blinc_core::reactive::Signal::<f64>::from_id(
                 blinc_core::reactive::SignalId::from_raw(id_raw),
             );
@@ -190,7 +256,16 @@ impl RenderPropsOverlay {
         } else if let Some(w) = self.border_width {
             base.border_width = w;
         }
-        if let Some(id_raw) = self.border_color_signal_id_raw {
+
+        // border_color: i32 hex.
+        if let Some(id_raw) = self.border_color_computed_id_raw {
+            let derived = blinc_core::reactive::Computed::<i32>::from_id(
+                blinc_core::reactive::DerivedId::from_raw(id_raw),
+            );
+            if let Some(v) = derived.try_get() {
+                base.border_color = Some(blinc_core::layer::Color::from_hex(v as u32));
+            }
+        } else if let Some(id_raw) = self.border_color_signal_id_raw {
             let signal = blinc_core::reactive::Signal::<i32>::from_id(
                 blinc_core::reactive::SignalId::from_raw(id_raw),
             );
@@ -1245,6 +1320,54 @@ pub(crate) extern "C" fn blinc_set_overlay_border_color_signal(ptr: i64, id_raw:
     }
     let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
     overlay.border_color_signal_id_raw = Some(id_raw as u64);
+}
+
+/// Computed-binding variants. Each records a `DerivedId.to_raw()` on
+/// the overlay so `apply_to` rehydrates a `Computed<T>` and reads the
+/// live value each render. The DSL lowering emits these when the
+/// styling arg's value is a `__blinc_computed_<T>__(closure)` call
+/// (the desugaring of `computed { … } : T`).
+///
+/// `id_raw` arrives as i64 — same wire convention as the signal
+/// variants (Cranelift's value-map doesn't handle `HirConstant::U64`).
+pub(crate) extern "C" fn blinc_set_overlay_opacity_computed(ptr: i64, id_raw: i64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.opacity_computed_id_raw = Some(id_raw as u64);
+}
+
+pub(crate) extern "C" fn blinc_set_overlay_bg_computed(ptr: i64, id_raw: i64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.bg_computed_id_raw = Some(id_raw as u64);
+}
+
+pub(crate) extern "C" fn blinc_set_overlay_corner_radius_computed(ptr: i64, id_raw: i64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.corner_radius_computed_id_raw = Some(id_raw as u64);
+}
+
+pub(crate) extern "C" fn blinc_set_overlay_border_width_computed(ptr: i64, id_raw: i64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.border_width_computed_id_raw = Some(id_raw as u64);
+}
+
+pub(crate) extern "C" fn blinc_set_overlay_border_color_computed(ptr: i64, id_raw: i64) {
+    if ptr == 0 {
+        return;
+    }
+    let overlay: &mut RenderPropsOverlay = unsafe { &mut *(ptr as *mut RenderPropsOverlay) };
+    overlay.border_color_computed_id_raw = Some(id_raw as u64);
 }
 
 /// Reclaim a `Box<RenderPropsOverlay>` from `__new_style_overlay__`. Default for null.

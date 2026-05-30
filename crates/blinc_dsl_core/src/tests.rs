@@ -6192,6 +6192,170 @@ fn dsl_border_color_signal_binding_reflects_signal_value() {
     );
 }
 
+/// `Div(opacity = computed { alpha.get() } : f64)` compiles end-to-end:
+/// the lowering pass detects the `__blinc_computed_f64__` call shape
+/// and emits `__set_overlay_opacity_computed__` (instead of the
+/// literal-baking `__set_overlay_opacity__`). The setter stashes a
+/// `DerivedId.to_raw()` on the overlay so `apply_to` rehydrates a
+/// `Computed<f64>` and reads through it each render.
+///
+/// This test verifies the *wiring* compiles. The value flow is
+/// covered by `dsl_opacity_computed_binding_reflects_signal_changes`,
+/// which is ignored pending the upstream Zyntax lambda return-value
+/// issue (see gotcha-zyntax-lambda-return-value).
+#[test]
+fn dsl_opacity_computed_binding_compiles() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            signal alpha: f64
+            view {
+                Div(opacity = computed { alpha.get() } : f64)
+            }
+        "#,
+        "div_opacity_computed_compiles.blinc",
+    )
+    .expect("compile Div(opacity = computed { … })");
+}
+
+/// Same wiring check on the IntColor path.
+#[test]
+fn dsl_bg_computed_binding_compiles() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.compile_source(
+        r#"
+            signal bg_color: i32
+            view {
+                Div(bg = computed { bg_color.get() } : i32)
+            }
+        "#,
+        "div_bg_computed_compiles.blinc",
+    )
+    .expect("compile Div(bg = computed { … })");
+}
+
+/// End-to-end value verification for `Div(opacity = computed { alpha.get() } : f64)`.
+///
+/// IGNORED: blocked on an upstream Zyntax bug where a zero-arg lambda
+/// body whose `Return(Some(expr))` returns f64 doesn't propagate the
+/// value to the JIT epilogue's f64 return register. The compute
+/// closure executes (verified via probe trace) but always returns
+/// 0.0 regardless of the body, even for `computed { 0.5 } : f64`.
+///
+/// All wiring on the Blinc side (overlay slot, extern setter, ABI
+/// registration, lowering pass) is in place. Re-enable this test
+/// once the lambda return-value flow lands in zyntax. See
+/// `gotcha-zyntax-lambda-return-value` and the related
+/// `gotcha-zyntax-closure-body-control-flow` which fixed lambda
+/// control-flow but didn't touch the return-value path.
+#[test]
+#[ignore = "blocked on upstream zyntax lambda f64-return propagation; see gotcha-zyntax-lambda-return-value"]
+fn dsl_opacity_computed_binding_reflects_signal_changes() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    dsl.set_signal_f64("alpha", 0.25);
+    dsl.compile_source(
+        r#"
+            signal alpha: f64
+            view {
+                Div(opacity = computed { alpha.get() } : f64)
+            }
+        "#,
+        "div_opacity_computed.blinc",
+    )
+    .expect("compile");
+
+    let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+    let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+    let ZyntaxValue::Int(handle) = value else {
+        panic!("expected widget handle, got: {value:?}");
+    };
+    let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+    let WidgetBox::Custom(builder) = *widget else {
+        panic!("expected Custom(Styled<Div>)");
+    };
+
+    let props = builder.render_props();
+    assert!(
+        (props.opacity - 0.25).abs() < 1e-6,
+        "first render should reflect seeded signal value 0.25 via computed, got {}",
+        props.opacity
+    );
+
+    dsl.set_signal_f64("alpha", 0.85);
+    let props2 = builder.render_props();
+    assert!(
+        (props2.opacity - 0.85).abs() < 1e-6,
+        "second render should reflect updated signal value 0.85 via computed, got {}",
+        props2.opacity
+    );
+}
+
+/// End-to-end value verification for the IntColor computed path.
+///
+/// IGNORED: same upstream lambda return-value bug as
+/// `dsl_opacity_computed_binding_reflects_signal_changes`.
+#[test]
+#[ignore = "blocked on upstream zyntax lambda i32-return propagation; see gotcha-zyntax-lambda-return-value"]
+fn dsl_bg_computed_binding_reflects_signal_changes() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dsl = BlincDsl::new().expect("runtime init");
+    // 0xFF0000 = pure red.
+    dsl.set_signal_i32("bg_color", 0xFF_0000);
+    dsl.compile_source(
+        r#"
+            signal bg_color: i32
+            view {
+                Div(bg = computed { bg_color.get() } : i32)
+            }
+        "#,
+        "div_bg_computed.blinc",
+    )
+    .expect("compile");
+
+    let renderer: std::sync::Arc<dyn blinc_runtime::view::ViewRenderer> = dsl.view_renderer();
+    let value = blinc_runtime::view::render_main(&renderer).expect("render_main");
+    let ZyntaxValue::Int(handle) = value else {
+        panic!("expected widget handle, got: {value:?}");
+    };
+    let widget = unsafe { materialize_widget(handle) }.expect("non-null handle");
+    let WidgetBox::Custom(builder) = *widget else {
+        panic!("expected Custom(Styled<Div>)");
+    };
+
+    let props = builder.render_props();
+    let Some(blinc_core::layer::Brush::Solid(c)) = props.background else {
+        panic!("expected solid background brush after bg computed apply");
+    };
+    assert!(
+        (c.r - 1.0).abs() < 0.01,
+        "first render r should be ~1.0, got {}",
+        c.r
+    );
+    assert!(c.g.abs() < 0.01, "first render g should be ~0.0");
+    assert!(c.b.abs() < 0.01, "first render b should be ~0.0");
+
+    // 0x00FF00 = pure green.
+    dsl.set_signal_i32("bg_color", 0x00_FF00);
+    let props2 = builder.render_props();
+    let Some(blinc_core::layer::Brush::Solid(c2)) = props2.background else {
+        panic!("expected solid background brush after second bg computed apply");
+    };
+    assert!(c2.r.abs() < 0.01, "second render r should be ~0.0");
+    assert!(
+        (c2.g - 1.0).abs() < 0.01,
+        "second render g should be ~1.0, got {}",
+        c2.g
+    );
+    assert!(c2.b.abs() < 0.01, "second render b should be ~0.0");
+}
+
 /// `match` at the top of a view body compiles, lowers to an
 /// if/else-if/else chain via `lower_match_blocks`, and the matching
 /// literal arm fires at render time. Regression-covers two fixes:
