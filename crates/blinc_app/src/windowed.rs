@@ -454,16 +454,32 @@ impl WindowState {
 /// underneath.
 ///
 /// Preference order on Linux:
-///   1. `Mailbox`     — non-blocking with frame replacement; ideal.
-///   2. `Immediate`   — non-blocking, may tear; better than blocking.
+///   1. `Immediate`   — non-blocking, may tear. **Preferred** because
+///                      Mesa's `Mailbox` implementation on Intel /
+///                      Wayland still blocks acquire in practice on
+///                      some compositors (real user report). Tearing
+///                      is acceptable when the alternative is a
+///                      multi-second-delay frozen UI.
+///   2. `Mailbox`     — non-blocking with frame replacement; ideal
+///                      *when it actually works*. On compositors
+///                      where Mailbox is honoured, this gives smoother
+///                      output than Immediate.
 ///   3. `FifoRelaxed` — Fifo that allows tearing under late frames.
 ///   4. `AutoVsync`   — strict Fifo, last resort.
 ///
-/// Matches the convergent pattern across Linux-focused frameworks
-/// (GPUI, Slint, iced): never accept strict-Fifo as the only option
-/// when something non-blocking is available. The chosen mode is
-/// logged at startup so end users can report which path their
-/// compositor surfaced.
+/// The previous order (Mailbox → Immediate) matched GPUI's choice,
+/// but GPUI registers `wl_surface::frame()` callbacks themselves and
+/// only calls `get_current_texture()` after a frame-ready signal —
+/// so they never hit the blocking path even if Mailbox-on-Mesa is
+/// buggy. winit 0.30 implements similar gating via
+/// `Window::pre_present_notify` (we call it), but the gating fires
+/// only after a successful present; if every acquire times out
+/// before we can present, the gating never engages and we're back
+/// in the busy-loop. Immediate sidesteps the trap because it's a
+/// different VK present-mode code path in Mesa.
+///
+/// The chosen mode is logged at startup so end users can confirm
+/// which path their compositor surfaced.
 ///
 /// Other platforms keep `AutoVsync` — `Fifo` is the right call for
 /// energy efficiency and frame pacing when the compositor isn't
@@ -477,10 +493,10 @@ fn preferred_present_mode(
     {
         let caps = surface.get_capabilities(adapter);
         let modes = caps.present_modes;
-        let pick = if modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else if modes.contains(&wgpu::PresentMode::Immediate) {
+        let pick = if modes.contains(&wgpu::PresentMode::Immediate) {
             wgpu::PresentMode::Immediate
+        } else if modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
         } else if modes.contains(&wgpu::PresentMode::FifoRelaxed) {
             wgpu::PresentMode::FifoRelaxed
         } else {
