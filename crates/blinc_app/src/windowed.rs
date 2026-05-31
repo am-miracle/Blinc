@@ -3241,6 +3241,7 @@ impl WindowedApp {
                                                         config.width,
                                                         config.height,
                                                     );
+                                                    window.pre_present_notify();
                                                     frame.present();
                                                 }
                                                 Err(
@@ -6181,6 +6182,16 @@ impl WindowedApp {
                             let has_visible_overlays = windowed_ctx.overlay_manager.has_visible_overlays();
                             windowed_ctx.had_visible_overlays = has_visible_overlays;
 
+                            // Tell winit we're about to present. On Wayland this
+                            // arms the `wl_surface::frame()` callback that gates
+                            // the next `RedrawRequested` on the compositor's
+                            // `wl_callback::Done`. Without this, winit emits the
+                            // next redraw immediately and our `get_current_texture()`
+                            // blocks for ~1 s per acquire while the compositor
+                            // hasn't released a swapchain image — the documented
+                            // pathology behind the Linux "frozen UI" reports.
+                            // No-op on other platforms.
+                            window.pre_present_notify();
                             frame.present();
                             t_phase4 = phase4_start.elapsed();
 

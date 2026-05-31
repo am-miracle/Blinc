@@ -161,6 +161,15 @@ impl Window for DesktopWindow {
         self.window.request_redraw();
     }
 
+    fn pre_present_notify(&self) {
+        // Forwards to winit; on Wayland this registers the
+        // `wl_surface::frame()` callback so the next `RedrawRequested`
+        // waits for the compositor's frame-ready signal instead of
+        // racing it (which blocks `surface.get_current_texture()` for
+        // ~1 s per acquire — the Linux "frozen UI" symptom).
+        self.window.pre_present_notify();
+    }
+
     fn is_focused(&self) -> bool {
         self.focused.load(Ordering::Relaxed)
     }

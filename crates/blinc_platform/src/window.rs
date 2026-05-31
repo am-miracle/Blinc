@@ -572,6 +572,15 @@ pub trait Window: Send {
     /// Request a redraw
     fn request_redraw(&self);
 
+    /// Signal that the host is about to present a frame to the GPU
+    /// surface. On Wayland this arms the `wl_surface::frame()` callback
+    /// that gates the next `RedrawRequested` event on the compositor's
+    /// `wl_callback::Done` — without this, swapchain acquire can block
+    /// for ~1 s per frame on Linux. winit exposes the corresponding
+    /// `Window::pre_present_notify` for desktop targets; mobile / web /
+    /// headless backends have no equivalent and use the default no-op.
+    fn pre_present_notify(&self) {}
+
     /// Check if the window is focused
     fn is_focused(&self) -> bool;
 
