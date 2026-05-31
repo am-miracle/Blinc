@@ -150,6 +150,16 @@ pub mod hot_reload;
 ))]
 pub mod windowed;
 
+/// EXPERIMENTAL — hand-rolled Wayland frame-callback gate. Mirrors
+/// GPUI's approach on Linux: register `wl_surface::frame()` callbacks
+/// directly via wayland-client and gate `Surface::get_current_texture()`
+/// on `Done` ourselves, bypassing winit's `pre_present_notify` chain
+/// when that chain doesn't engage on some Mesa + Wayland compositors.
+/// Opt-in via the `wayland-frame-gate` feature; module is a no-op
+/// elsewhere.
+#[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
+pub mod wayland_frame_gate;
+
 /// Native file dialogs (open, save, folder picker).
 /// Available on desktop when the `windowed` feature is enabled.
 #[cfg(feature = "rfd")]

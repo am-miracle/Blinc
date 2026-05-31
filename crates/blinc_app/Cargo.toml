@@ -111,6 +111,15 @@ notify = { workspace = true, optional = true }
 [target.'cfg(not(any(target_os = "android", target_os = "ios", target_os = "fuchsia")))'.dependencies]
 blinc_platform_desktop = { path = "../../extensions/blinc_platform_desktop", version = "0.5.1", optional = true }
 
+# Linux-only experimental Wayland frame-callback gate. Both deps are
+# already in the transitive tree via winit's smithay-client-toolkit;
+# declaring them here just gives us direct access without bumping
+# the resolver. Version matches what winit 0.30 pulls (~0.31.11 /
+# ~0.3.11 at the time of writing).
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = { version = "0.31", optional = true }
+wayland-backend = { version = "0.3", features = ["client_system"], optional = true }
+
 [target.'cfg(target_os = "android")'.dependencies]
 blinc_platform_android = { path = "../../extensions/blinc_platform_android", version = "0.5.1", optional = true }
 android-activity = { workspace = true, optional = true }
@@ -224,6 +233,19 @@ hotkeys = ["global-hotkey"]
 # release builds carry zero overhead even when this feature is
 # on. See `docs/book/src/advanced/hot-reload.md` for the workflow.
 hot-reload = ["subsecond", "tungstenite", "dioxus-cli-config", "notify"]
+# EXPERIMENTAL: hand-rolled Wayland `wl_surface::frame()` gate
+# (Linux only). Mirrors GPUI's pattern — Blinc registers its own
+# frame callbacks via `wayland-client` and only calls
+# `Surface::get_current_texture()` after the compositor delivers
+# `wl_callback::Done`. winit 0.30 implements similar gating via
+# `pre_present_notify`, but some Mesa + Wayland compositors don't
+# deliver Done to winit's internal queue reliably (calloop
+# "non-existence source" WARNs hint at this). When this feature is
+# on, Blinc takes over the gating; `pre_present_notify` is skipped
+# to avoid winit racing our queue. Default off; opt in via
+# `--features wayland-frame-gate`. See module docs in
+# `crates/blinc_app/src/wayland_frame_gate.rs`.
+wayland-frame-gate = ["wayland-client", "wayland-backend"]
 # Umbrella for users who want every desktop convenience surface
 # enabled — matches the pre-split default behaviour.
 windowed-full = ["windowed", "dialogs", "tray", "notifications", "hotkeys"]

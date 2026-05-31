@@ -407,6 +407,15 @@ pub(crate) struct WindowState {
     /// the full event-buffer refactor.
     /// ([[project-reactive-architecture-v2]] Phase 3.1.)
     pub last_pointer_dispatch: Option<std::time::Instant>,
+    /// EXPERIMENTAL: hand-rolled Wayland `wl_surface::frame()` gate.
+    /// `Some(...)` only when (a) the `wayland-frame-gate` feature is
+    /// enabled, (b) we're on Linux/Wayland, and (c) the gate's
+    /// construction from the raw display + surface pointers
+    /// succeeded. When present, takes over the frame-callback
+    /// gating from winit's `pre_present_notify`. See
+    /// `crate::wayland_frame_gate` module docs.
+    #[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
+    pub wayland_gate: Option<crate::wayland_frame_gate::WaylandFrameGate>,
 }
 
 #[cfg(all(feature = "windowed", not(target_os = "android")))]
@@ -437,6 +446,8 @@ impl WindowState {
             last_cursor: None,
             last_router_state_fp: None,
             last_pointer_dispatch: None,
+            #[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
+            wayland_gate: None,
         }
     }
 }
@@ -454,18 +465,14 @@ impl WindowState {
 /// underneath.
 ///
 /// Preference order on Linux:
-///   1. `Immediate`   — non-blocking, may tear. **Preferred** because
-///                      Mesa's `Mailbox` implementation on Intel /
-///                      Wayland still blocks acquire in practice on
-///                      some compositors (real user report). Tearing
-///                      is acceptable when the alternative is a
-///                      multi-second-delay frozen UI.
-///   2. `Mailbox`     — non-blocking with frame replacement; ideal
-///                      *when it actually works*. On compositors
-///                      where Mailbox is honoured, this gives smoother
-///                      output than Immediate.
-///   3. `FifoRelaxed` — Fifo that allows tearing under late frames.
-///   4. `AutoVsync`   — strict Fifo, last resort.
+/// 1. `Immediate` — non-blocking, may tear. Preferred because Mesa's
+///    `Mailbox` implementation on Intel + Wayland still blocks
+///    acquire in practice on some compositors. Tearing is acceptable
+///    when the alternative is a multi-second frozen UI.
+/// 2. `Mailbox` — non-blocking with frame replacement; smoother than
+///    Immediate on compositors where Mailbox is honoured.
+/// 3. `FifoRelaxed` — Fifo that allows tearing under late frames.
+/// 4. `AutoVsync` — strict Fifo, last resort.
 ///
 /// The previous order (Mailbox → Immediate) matched GPUI's choice,
 /// but GPUI registers `wl_surface::frame()` callbacks themselves and
@@ -507,7 +514,7 @@ fn preferred_present_mode(
             chosen = ?pick,
             "Linux surface present-mode selection",
         );
-        return pick;
+        pick
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -3367,6 +3374,51 @@ impl WindowedApp {
                                     ws.surface_config = Some(config);
                                     ws.app = Some(blinc_app);
 
+                                    // Bring up the experimental Wayland
+                                    // frame-callback gate iff the feature
+                                    // is enabled AND raw_window_handle
+                                    // reports a Wayland surface. Anything
+                                    // else (X11, macOS, Windows): the
+                                    // factory returns None and the gate
+                                    // stays inert, falling back to
+                                    // winit's native `pre_present_notify`
+                                    // gating path elsewhere in this loop.
+                                    #[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
+                                    {
+                                        use raw_window_handle::{
+                                            HasDisplayHandle, HasWindowHandle,
+                                            RawDisplayHandle, RawWindowHandle,
+                                        };
+                                        let winit_win = window.winit_window();
+                                        if let (Ok(dh), Ok(wh)) = (
+                                            winit_win.display_handle(),
+                                            winit_win.window_handle(),
+                                        ) {
+                                            if let (
+                                                RawDisplayHandle::Wayland(d),
+                                                RawWindowHandle::Wayland(w),
+                                            ) = (dh.as_raw(), wh.as_raw())
+                                            {
+                                                ws.wayland_gate =
+                                                    crate::wayland_frame_gate::WaylandFrameGate::try_new_from_raw(
+                                                        d.display.as_ptr(),
+                                                        w.surface.as_ptr(),
+                                                    );
+                                                tracing::info!(
+                                                    enabled = ws.wayland_gate.is_some(),
+                                                    "wayland-frame-gate experimental: \
+                                                     hand-rolled wl_surface::frame() callbacks \
+                                                     {}",
+                                                    if ws.wayland_gate.is_some() {
+                                                        "active"
+                                                    } else {
+                                                        "construction failed — falling back to winit"
+                                                    }
+                                                );
+                                            }
+                                        }
+                                    }
+
                                     // Initialize context with event router, animations, dirty flag, reactive graph, hooks, overlay manager, registry, and ready callbacks
                                     ws.ctx = Some(WindowedContext::from_window(
                                         window,
@@ -5019,6 +5071,36 @@ impl WindowedApp {
                             let mut did_rebuild = false;
                             let mut dirty_spring_count = 0usize;
 
+                            // Experimental Wayland frame-callback gate: when
+                            // active, drain our wl_callback Done events from
+                            // the connection's per-queue inbox and bail out
+                            // of this frame entirely if the compositor hasn't
+                            // delivered Done for the last armed callback.
+                            // Re-arming `request_redraw` keeps us re-checking
+                            // without ever attempting a blocking acquire.
+                            //
+                            // The motivating bug: some Mesa + Wayland
+                            // compositors don't deliver Done to winit's
+                            // internal queue reliably; winit's own gating
+                            // either fires too eagerly (and we hit the wgpu
+                            // 1s acquire timeout) or stalls forever. Our
+                            // parallel gate has its own queue independent
+                            // of winit's, so it's not vulnerable to the
+                            // same stale-source race.
+                            #[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
+                            if let Some(gate) = ws.wayland_gate.as_ref() {
+                                gate.dispatch_pending();
+                                // 100 ms safety-valve so a stopped Done
+                                // stream caps user-perceived freeze at one
+                                // tenth of a second instead of forever.
+                                if !gate.is_frame_ready_or_timeout(
+                                    std::time::Duration::from_millis(100),
+                                ) {
+                                    window.request_redraw();
+                                    return ControlFlow::Continue;
+                                }
+                            }
+
                             // Get current frame
                             let frame = match surf.get_current_texture() {
                                 Ok(f) => f,
@@ -6207,8 +6289,24 @@ impl WindowedApp {
                             // hasn't released a swapchain image — the documented
                             // pathology behind the Linux "frozen UI" reports.
                             // No-op on other platforms.
-                            window.pre_present_notify();
+                            //
+                            // When the experimental `wayland-frame-gate` feature
+                            // is active AND the hand-rolled gate constructed
+                            // successfully, WE own the frame-callback registration
+                            // — skip winit's gating so the two queues don't both
+                            // arm a `wl_surface::frame()` on each present.
+                            #[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
+                            let _gate_active = ws.wayland_gate.is_some();
+                            #[cfg(not(all(feature = "wayland-frame-gate", target_os = "linux")))]
+                            let _gate_active = false;
+                            if !_gate_active {
+                                window.pre_present_notify();
+                            }
                             frame.present();
+                            #[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
+                            if let Some(gate) = ws.wayland_gate.as_ref() {
+                                gate.arm_after_present();
+                            }
                             t_phase4 = phase4_start.elapsed();
 
                             // =========================================================
