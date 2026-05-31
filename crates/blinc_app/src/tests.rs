@@ -860,3 +860,45 @@ fn test_render_tree_reuse() {
     save_to_png(app.device(), app.queue(), &texture, 200, 200, &path);
     println!("Saved: {:?}", path);
 }
+
+#[test]
+fn render_to_rgba8_returns_packed_pixels() {
+    require_gpu!(app);
+
+    // Solid red over the full surface. Use sRGB-correct hex so the
+    // value survives the surface-format gamma path:
+    // BlincApp's default texture_format is `Bgra8UnormSrgb`, so the
+    // values we sample are gamma-decoded. A pure-red CSS literal
+    // (#ff0000) lands at (255, 0, 0) after the swizzle.
+    let ui = div().w(8.0).h(8.0).bg(Color::RED);
+
+    let pixels = app
+        .render_to_rgba8(&ui, 8, 8)
+        .expect("render_to_rgba8 should succeed");
+
+    // Right size, right padding-stripping.
+    assert_eq!(pixels.len(), 8 * 8 * 4);
+
+    // Every pixel should be the same colour — there's no padding left
+    // over from `bytes_per_row` alignment if this passes.
+    let probe = [pixels[0], pixels[1], pixels[2], pixels[3]];
+    for chunk in pixels.chunks_exact(4) {
+        assert_eq!(chunk, probe, "padding bytes leaked into row N+1");
+    }
+
+    // Centre pixel should be red after BGRA -> RGBA swizzle.
+    let row = 4;
+    let col = 4;
+    let i = (row * 8 + col) * 4;
+    assert!(
+        pixels[i] > 200,
+        "expected red dominant in centre pixel, got RGBA = ({}, {}, {}, {})",
+        pixels[i],
+        pixels[i + 1],
+        pixels[i + 2],
+        pixels[i + 3]
+    );
+    assert!(pixels[i + 1] < 80, "green should be ~0 for solid red");
+    assert!(pixels[i + 2] < 80, "blue should be ~0 for solid red");
+    assert_eq!(pixels[i + 3], 255, "alpha should be opaque");
+}

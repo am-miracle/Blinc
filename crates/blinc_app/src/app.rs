@@ -181,6 +181,167 @@ impl BlincApp {
             .render_tree(&tree, width as u32, height as u32, target)
     }
 
+    /// Render `element` into a freshly-allocated offscreen
+    /// `wgpu::Texture` in the renderer's configured `texture_format`.
+    ///
+    /// The texture is created with `RENDER_ATTACHMENT | COPY_SRC` so
+    /// callers can either feed it into a follow-up GPU pass (a custom
+    /// `run_gpu_pass`, a `blinc_media` video encoder that consumes
+    /// `wgpu::Texture` directly) or read back to CPU memory via
+    /// `wgpu::CommandEncoder::copy_texture_to_buffer`.
+    ///
+    /// Mirrors the windowed-runner's per-frame render call without a
+    /// surface / swapchain, so it composes naturally into a headless
+    /// frame-export loop:
+    ///
+    /// ```ignore
+    /// for f in 0..total_frames {
+    ///     let t = f as f32 / fps;
+    ///     timeline.seek(t * 1000.0);
+    ///     let frame = app.render_to_texture(&build_ui(t), w, h)?;
+    ///     encoder.push_frame(t, &frame);
+    /// }
+    /// ```
+    ///
+    /// See [`Self::render_to_rgba8`] for the CPU-pixel convenience that
+    /// adds the readback + swizzle for `image` / `ffmpeg-next` feeds.
+    pub fn render_to_texture<E: ElementBuilder>(
+        &mut self,
+        element: &E,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture> {
+        let texture = self.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("blinc_app::render_to_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.texture_format(),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.render(element, &view, width as f32, height as f32)?;
+        Ok(texture)
+    }
+
+    /// Render `element` and read the framebuffer back as tightly-packed
+    /// RGBA8 pixels.
+    ///
+    /// Always returns `width * height * 4` bytes in `[R, G, B, A, ...]`
+    /// order regardless of the renderer's internal pixel format —
+    /// `BGRA8UnormSrgb` (the common surface format on macOS / Windows)
+    /// is swizzled on the way out, and the wgpu copy-row padding
+    /// (`COPY_BYTES_PER_ROW_ALIGNMENT`) is unwound so callers see no
+    /// stride.
+    ///
+    /// Higher-level companion to [`Self::render_to_texture`] for the
+    /// "I just want bytes" use cases — `image::RgbaImage::from_raw`
+    /// for PNG export, `ffmpeg-next` for MP4 / WebM encoding,
+    /// pixel-diff visual regression tests. For GPU-side composition
+    /// (custom passes, video-encoder buffers that take `wgpu::Texture`
+    /// directly) prefer `render_to_texture` to avoid the device →
+    /// host round-trip.
+    ///
+    /// Blocks until the GPU finishes the render and the readback
+    /// buffer maps. Throughput on a single thread is bound by frame
+    /// render cost plus the read-after-write fence; for a sustained
+    /// export pipeline run multiple `BlincApp` instances in parallel
+    /// or pipeline frame N+1's render with frame N's readback.
+    pub fn render_to_rgba8<E: ElementBuilder>(
+        &mut self,
+        element: &E,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>> {
+        let texture = self.render_to_texture(element, width, height)?;
+
+        // wgpu requires `bytes_per_row` aligned to
+        // `COPY_BYTES_PER_ROW_ALIGNMENT` (256 on most adapters). The
+        // unpadded payload is `width * 4`; pad up, copy, then strip
+        // the padding row-by-row on the way out.
+        let unpadded_bpr = width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        #[allow(clippy::manual_div_ceil)]
+        let padded_bpr = unpadded_bpr.div_ceil(align) * align;
+        let readback_size = (padded_bpr as u64) * (height as u64);
+        let readback = self.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("blinc_app::render_to_rgba8 readback"),
+            size: readback_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("blinc_app::render_to_rgba8 copy"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bpr),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue().submit(std::iter::once(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        let _ = self.device().poll(wgpu::PollType::Wait);
+        rx.recv()
+            .map_err(|_| BlincError::Other("readback channel dropped".to_string()))?
+            .map_err(|e| BlincError::Other(format!("readback map failed: {e:?}")))?;
+
+        let data = slice.get_mapped_range();
+        let swizzle_bgra = matches!(
+            self.texture_format(),
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+
+        let mut out = Vec::with_capacity((width as usize) * (height as usize) * 4);
+        for y in 0..height as usize {
+            let row_start = y * padded_bpr as usize;
+            let row = &data[row_start..row_start + unpadded_bpr as usize];
+            if swizzle_bgra {
+                // BGRA -> RGBA, four bytes at a time.
+                for chunk in row.chunks_exact(4) {
+                    out.push(chunk[2]);
+                    out.push(chunk[1]);
+                    out.push(chunk[0]);
+                    out.push(chunk[3]);
+                }
+            } else {
+                out.extend_from_slice(row);
+            }
+        }
+        drop(data);
+        readback.unmap();
+        Ok(out)
+    }
+
     /// Render a pre-computed render tree
     ///
     /// Use this when you want to compute layout once and render multiple times.
