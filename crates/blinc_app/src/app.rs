@@ -184,24 +184,24 @@ impl BlincApp {
     /// Render `element` into a freshly-allocated offscreen
     /// `wgpu::Texture` in the renderer's configured `texture_format`.
     ///
+    /// Routes through the plain [`Self::render`] path: static layout
+    /// and paint only. **Springs, motion containers, transform
+    /// animations, the motion-subtree bake / overlay system, and the
+    /// compositor fast path DO NOT RUN.** Use this for screenshots,
+    /// debug captures, image-diff visual regression — anything where
+    /// the frame is the same regardless of time `t`.
+    ///
+    /// For animated content (the Sketch + Player + Timeline →
+    /// video-export pipeline) use
+    /// [`Self::render_to_texture_with_motion`] instead and manage
+    /// your own [`RenderState`] across frames so spring physics and
+    /// motion-bake caches persist between calls.
+    ///
     /// The texture is created with `RENDER_ATTACHMENT | COPY_SRC` so
     /// callers can either feed it into a follow-up GPU pass (a custom
     /// `run_gpu_pass`, a `blinc_media` video encoder that consumes
     /// `wgpu::Texture` directly) or read back to CPU memory via
     /// `wgpu::CommandEncoder::copy_texture_to_buffer`.
-    ///
-    /// Mirrors the windowed-runner's per-frame render call without a
-    /// surface / swapchain, so it composes naturally into a headless
-    /// frame-export loop:
-    ///
-    /// ```ignore
-    /// for f in 0..total_frames {
-    ///     let t = f as f32 / fps;
-    ///     timeline.seek(t * 1000.0);
-    ///     let frame = app.render_to_texture(&build_ui(t), w, h)?;
-    ///     encoder.push_frame(t, &frame);
-    /// }
-    /// ```
     ///
     /// See [`Self::render_to_rgba8`] for the CPU-pixel convenience that
     /// adds the readback + swizzle for `image` / `ffmpeg-next` feeds.
@@ -260,7 +260,121 @@ impl BlincApp {
         height: u32,
     ) -> Result<Vec<u8>> {
         let texture = self.render_to_texture(element, width, height)?;
+        self.read_texture_to_rgba8(&texture, width, height)
+    }
 
+    /// Render `element` into an offscreen texture using the
+    /// motion-aware render path — same one the windowed runner uses
+    /// per frame.
+    ///
+    /// Routes through [`Self::render_tree_with_motion`], so springs,
+    /// motion containers, transform animations, the motion-subtree
+    /// bake / overlay system, and the compositor fast path all run.
+    /// The caller owns the [`RenderState`] and is responsible for:
+    ///
+    /// 1. **Ticking the `AnimationScheduler`** (held inside the
+    ///    `RenderState`) forward by the right `dt` before each frame —
+    ///    `state.animations().lock().unwrap().tick(dt_ms)` for a
+    ///    deterministic export, or seeking a [`blinc_animation::Timeline`]
+    ///    that the tree reads from.
+    /// 2. **Reusing the same `RenderState` across frames** so
+    ///    `stable_motions`, spring physics, and the motion-bake cache
+    ///    accumulate properly. Creating a fresh `RenderState` per
+    ///    frame resets motion physics and discards the cache — every
+    ///    frame becomes a cold start.
+    /// 3. **Setting the viewport** via
+    ///    `state.set_viewport(0., 0., w, h)` once before the first
+    ///    frame so viewport culling matches the output size.
+    ///
+    /// Composes into the headless video-export loop:
+    ///
+    /// ```ignore
+    /// let mut state = RenderState::new(scheduler);
+    /// state.set_viewport(Rect::new(0., 0., w as f32, h as f32));
+    /// let dt_ms = 1000.0 / fps;
+    /// for f in 0..total_frames {
+    ///     scheduler.lock().unwrap().tick(dt_ms);
+    ///     let tree = build_tree_for_frame(f);
+    ///     let frame = app.render_to_texture_with_motion(&tree, &mut state, w, h)?;
+    ///     encoder.push_frame(f, &frame);
+    /// }
+    /// ```
+    ///
+    /// `tree` is taken `&mut` because `render_tree_with_motion`
+    /// internally mutates lazy state on the tree (motion-derived
+    /// caches, primitive batches). Pre-build via
+    /// `RenderTree::from_element` so layout costs are paid once per
+    /// frame rather than inside the renderer.
+    pub fn render_to_texture_with_motion(
+        &mut self,
+        tree: &RenderTree,
+        render_state: &RenderState,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::Texture> {
+        let texture = self.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("blinc_app::render_to_texture_with_motion"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.texture_format(),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // `try_fast_paint = false` — the fast path is only correct
+        // when a previous full paint primed the cache against the
+        // SAME surface texture. Offscreen export always renders into
+        // a fresh texture, so the cache is stale by definition. The
+        // full walker path is the right (and only correct) call here.
+        self.ctx.render_tree_with_motion_opt(
+            tree,
+            render_state,
+            width,
+            height,
+            &view,
+            None,
+            false,
+        )?;
+        Ok(texture)
+    }
+
+    /// Motion-aware companion to [`Self::render_to_rgba8`]. See
+    /// [`Self::render_to_texture_with_motion`] for the caller-managed
+    /// `RenderState` / scheduler-ticking contract.
+    pub fn render_to_rgba8_with_motion(
+        &mut self,
+        tree: &RenderTree,
+        render_state: &RenderState,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>> {
+        let texture = self.render_to_texture_with_motion(tree, render_state, width, height)?;
+        self.read_texture_to_rgba8(&texture, width, height)
+    }
+
+    /// Copy `texture` back to a tightly-packed `Vec<u8>` of
+    /// `width * height * 4` RGBA bytes. Used by both
+    /// [`Self::render_to_rgba8`] and [`Self::render_to_rgba8_with_motion`];
+    /// also useful on its own when callers built their own offscreen
+    /// `wgpu::Texture` (e.g. via `render_to_texture` followed by a
+    /// custom `run_gpu_pass`) and just want pixels at the end.
+    ///
+    /// Handles the COPY_BYTES_PER_ROW_ALIGNMENT padding-strip and the
+    /// `BGRA8` → `RGBA8` swizzle so callers see no stride and a
+    /// consistent component order regardless of the renderer's
+    /// internal format.
+    pub fn read_texture_to_rgba8(
+        &self,
+        texture: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>> {
         // wgpu requires `bytes_per_row` aligned to
         // `COPY_BYTES_PER_ROW_ALIGNMENT` (256 on most adapters). The
         // unpadded payload is `width * 4`; pad up, copy, then strip
@@ -271,7 +385,7 @@ impl BlincApp {
         let padded_bpr = unpadded_bpr.div_ceil(align) * align;
         let readback_size = (padded_bpr as u64) * (height as u64);
         let readback = self.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("blinc_app::render_to_rgba8 readback"),
+            label: Some("blinc_app::read_texture_to_rgba8 readback"),
             size: readback_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
@@ -280,11 +394,11 @@ impl BlincApp {
         let mut encoder = self
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("blinc_app::render_to_rgba8 copy"),
+                label: Some("blinc_app::read_texture_to_rgba8 copy"),
             });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -326,7 +440,6 @@ impl BlincApp {
             let row_start = y * padded_bpr as usize;
             let row = &data[row_start..row_start + unpadded_bpr as usize];
             if swizzle_bgra {
-                // BGRA -> RGBA, four bytes at a time.
                 for chunk in row.chunks_exact(4) {
                     out.push(chunk[2]);
                     out.push(chunk[1]);

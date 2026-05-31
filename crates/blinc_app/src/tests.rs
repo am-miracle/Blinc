@@ -862,6 +862,46 @@ fn test_render_tree_reuse() {
 }
 
 #[test]
+fn render_to_rgba8_with_motion_routes_through_motion_path() {
+    require_gpu!(app);
+
+    // Solid blue 8x8. The motion path *must* end up with the same
+    // pixels as the static path for a static tree — the regression
+    // this guards is "render_to_texture_with_motion calls the right
+    // renderer entry point (render_tree_with_motion_opt) and doesn't
+    // silently fall back to a no-op or skip dispatch when the tree
+    // has no motion containers".
+    let ui = div().w(8.0).h(8.0).bg(Color::BLUE);
+
+    let mut tree = blinc_layout::RenderTree::from_element(&ui);
+    tree.compute_layout(8.0, 8.0);
+
+    let scheduler = std::sync::Arc::new(std::sync::Mutex::new(
+        blinc_animation::AnimationScheduler::new(),
+    ));
+    let mut state = blinc_layout::RenderState::new(scheduler);
+    state.set_viewport(0.0, 0.0, 8.0, 8.0);
+
+    let pixels = app
+        .render_to_rgba8_with_motion(&tree, &state, 8, 8)
+        .expect("render_to_rgba8_with_motion should succeed");
+
+    assert_eq!(pixels.len(), 8 * 8 * 4);
+    let i = (4 * 8 + 4) * 4;
+    assert!(
+        pixels[i + 2] > 200,
+        "expected blue dominant in centre pixel, got RGBA = ({}, {}, {}, {})",
+        pixels[i],
+        pixels[i + 1],
+        pixels[i + 2],
+        pixels[i + 3]
+    );
+    assert!(pixels[i] < 80, "red should be ~0 for solid blue");
+    assert!(pixels[i + 1] < 80, "green should be ~0 for solid blue");
+    assert_eq!(pixels[i + 3], 255, "alpha should be opaque");
+}
+
+#[test]
 fn render_to_rgba8_returns_packed_pixels() {
     require_gpu!(app);
 
