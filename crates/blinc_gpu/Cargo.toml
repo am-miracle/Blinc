@@ -44,6 +44,14 @@ tbc = { version = "0.3", optional = true }
 
 # GPU
 wgpu.workspace = true
+# Declared but not imported in any module here — the workspace pins
+# `wgpu-hal = "=26.0.5"` to keep the resolver off `26.0.6`, which
+# regresses `vkAcquireNextImage` latency on Mesa via `wgpu#8420`
+# (full rationale in workspace `Cargo.toml`). The constraint only
+# propagates if some workspace crate declares wgpu-hal directly;
+# blinc_gpu is the natural home since it already owns every other
+# wgpu touchpoint.
+wgpu-hal.workspace = true
 naga.workspace = true
 bytemuck.workspace = true
 

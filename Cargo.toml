@@ -128,15 +128,34 @@ krio-core      = { git = "https://github.com/darmie/krio.git", rev = "fe0177c" }
 
 # GPU rendering
 #
-# Pinned to wgpu 26.0.1 + wgpu-hal 26.0.6: wgpu 23 hits a "Parent device
+# Pinned to wgpu 26.0.1 + wgpu-hal 26.0.5: wgpu 23 hits a "Parent device
 # is lost" crash on the Pixel 10 Pro / Tensor G5 PowerVR D-Series Vulkan
-# driver (25.1@6794074) during SDF render-pipeline creation. The 26.0.6
+# driver (25.1@6794074) during SDF render-pipeline creation. The 26.0.5
 # wgpu-hal patch series ships fixes for several PowerVR/Mali pipeline-
 # creation issues. Avoiding 27/28/29 because they carry their own
-# regressions and we want a stable, known-good base. wgpu-hal is a
-# transitive dep — bumping `wgpu = "=26.0.1"` pulls wgpu-hal 26.0.6 via
-# its `^26.0` constraint.
+# regressions and we want a stable, known-good base.
+#
+# wgpu-hal is a transitive dep of wgpu; `wgpu = "=26.0.1"` requires
+# wgpu-hal ^26.0, which would normally resolve to the latest 26.x
+# (26.0.6 at the time of writing). We force 26.0.5 because 26.0.6
+# carries `wgpu#8420` ([hal/vulkan] Wait for fence signalled in
+# vkAcquireNextImage). That PR fixes an NVIDIA Fifo stutter (#8310)
+# but regresses `vkAcquireNextImage` p99 from ~130 µs to ~20,254 µs
+# per the bisected reproducer in `wgpu#9559`. Same generic
+# acquire-path code runs on Mesa Intel + Wayland, which is exactly
+# what we hit: clicks delayed multiple seconds, UI feels frozen
+# regardless of present mode (Mailbox / Immediate / Fifo) because
+# the fence-wait gates the acquire before the present mode is
+# consulted. Cherry-picks of #8420 also exist in v27/v28/v29, so
+# bumping the major doesn't escape — pin to the last pre-regression
+# patch.
+#
+# Forcing the pin requires a direct declaration; `wgpu`'s `^26.0`
+# would otherwise resolve up to 26.0.6. `crates/blinc_gpu` declares
+# `wgpu-hal.workspace = true` so this constraint propagates into
+# the resolver even though no Blinc code imports `wgpu_hal::*`.
 wgpu = "=26.0.1"
+wgpu-hal = "=26.0.5"
 naga = "=26.0.0"
 bytemuck = { version = "1.14", features = ["derive"] }
 
