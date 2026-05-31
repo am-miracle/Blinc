@@ -441,14 +441,29 @@ impl WindowState {
     }
 }
 
-/// Pick the best present mode for the current surface, preferring
-/// non-blocking `Mailbox` on Linux/Wayland where `Fifo` (what
-/// `AutoVsync` resolves to) can pathologically block
-/// `get_current_texture()` for ~1 s per acquire when the compositor
-/// transiently can't release a swapchain image. Falls back to
-/// `AutoVsync` if `Mailbox` isn't in `surface_caps.present_modes`,
-/// matching GPUI's documented Wayland mitigation (`zed-industries/zed`
-/// `crates/gpui_linux/src/linux/wayland/window.rs`).
+/// Pick the best present mode for the current surface.
+///
+/// On Linux, `Fifo` (what `AutoVsync` resolves to) can pathologically
+/// BLOCK `get_current_texture()` for ~1 s per acquire when the
+/// compositor transiently can't release a swapchain image. wgpu's
+/// internal acquire timeout is one second; a stretch of consecutive
+/// timeouts starves the winit event loop because each blocking call
+/// holds the redraw branch for that full second — symptom from real
+/// user reports: clicks taking multiple seconds to land, then the
+/// UI appears frozen even though state mutations are firing
+/// underneath.
+///
+/// Preference order on Linux:
+///   1. `Mailbox`     — non-blocking with frame replacement; ideal.
+///   2. `Immediate`   — non-blocking, may tear; better than blocking.
+///   3. `FifoRelaxed` — Fifo that allows tearing under late frames.
+///   4. `AutoVsync`   — strict Fifo, last resort.
+///
+/// Matches the convergent pattern across Linux-focused frameworks
+/// (GPUI, Slint, iced): never accept strict-Fifo as the only option
+/// when something non-blocking is available. The chosen mode is
+/// logged at startup so end users can report which path their
+/// compositor surfaced.
 ///
 /// Other platforms keep `AutoVsync` — `Fifo` is the right call for
 /// energy efficiency and frame pacing when the compositor isn't
@@ -461,13 +476,28 @@ fn preferred_present_mode(
     #[cfg(target_os = "linux")]
     {
         let caps = surface.get_capabilities(adapter);
-        if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            return wgpu::PresentMode::Mailbox;
-        }
+        let modes = caps.present_modes;
+        let pick = if modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else if modes.contains(&wgpu::PresentMode::Immediate) {
+            wgpu::PresentMode::Immediate
+        } else if modes.contains(&wgpu::PresentMode::FifoRelaxed) {
+            wgpu::PresentMode::FifoRelaxed
+        } else {
+            wgpu::PresentMode::AutoVsync
+        };
+        tracing::info!(
+            available = ?modes,
+            chosen = ?pick,
+            "Linux surface present-mode selection",
+        );
+        return pick;
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = (surface, adapter);
-    wgpu::PresentMode::AutoVsync
+    {
+        let _ = (surface, adapter);
+        wgpu::PresentMode::AutoVsync
+    }
 }
 
 /// Context passed to the UI builder function
