@@ -47,6 +47,11 @@ gltf = ["canvas", "dep:blinc_gltf", "dep:blinc_skeleton", "dep:blinc_input"]
 # `docs/book/src/advanced/hot-reload.md`).
 hot-reload = ["blinc_app/hot-reload"]
 
+# EXPERIMENTAL — hand-rolled Wayland frame-callback gate. Linux-only.
+# Forwards to `blinc_app/wayland-frame-gate`. See the module docs in
+# `crates/blinc_app/src/wayland_frame_gate.rs`.
+wayland-frame-gate = ["blinc_app/wayland-frame-gate"]
+
 [dependencies]
 # Always-on — every demo touches at least these.
 blinc_app = { path = "../../crates/blinc_app", features = ["windowed"] }
