@@ -5090,12 +5090,51 @@ impl WindowedApp {
                             #[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
                             if let Some(gate) = ws.wayland_gate.as_ref() {
                                 gate.dispatch_pending();
+                                let ready = gate.is_frame_ready();
                                 // 100 ms safety-valve so a stopped Done
                                 // stream caps user-perceived freeze at one
                                 // tenth of a second instead of forever.
-                                if !gate.is_frame_ready_or_timeout(
+                                let proceed = gate.is_frame_ready_or_timeout(
                                     std::time::Duration::from_millis(100),
-                                ) {
+                                );
+
+                                // Periodic diagnostic: every 60 frames,
+                                // print how many Done events have actually
+                                // routed into our queue, and how many of
+                                // those frames hit the safety valve instead
+                                // of receiving Done in time. If
+                                // `callbacks_received` stays at 0 the
+                                // routing bridge between winit's connection
+                                // read loop and our parallel queue is
+                                // broken — every frame would be relying on
+                                // the 100ms safety valve, which is exactly
+                                // the "responsive then sluggish then
+                                // freezes" pathology under continuous
+                                // input.
+                                use std::sync::atomic::{
+                                    AtomicU64,
+                                    Ordering as AtomicOrdering,
+                                };
+                                static FRAME_COUNT: AtomicU64 = AtomicU64::new(0);
+                                static SAFETY_VALVE_HITS: AtomicU64 = AtomicU64::new(0);
+                                let fc =
+                                    FRAME_COUNT.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                                if !ready && proceed {
+                                    SAFETY_VALVE_HITS
+                                        .fetch_add(1, AtomicOrdering::Relaxed);
+                                }
+                                if fc % 60 == 0 {
+                                    tracing::info!(
+                                        target: "blinc_app::wayland_gate",
+                                        frame = fc,
+                                        done_events = gate.callbacks_received(),
+                                        safety_valve_hits = SAFETY_VALVE_HITS
+                                            .load(AtomicOrdering::Relaxed),
+                                        "wayland-frame-gate heartbeat",
+                                    );
+                                }
+
+                                if !proceed {
                                     window.request_redraw();
                                     return ControlFlow::Continue;
                                 }
