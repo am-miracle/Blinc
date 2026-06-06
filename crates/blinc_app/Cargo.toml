@@ -116,9 +116,19 @@ blinc_platform_desktop = { path = "../../extensions/blinc_platform_desktop", ver
 # declaring them here just gives us direct access without bumping
 # the resolver. Version matches what winit 0.30 pulls (~0.31.11 /
 # ~0.3.11 at the time of writing).
+#
+# IMPORTANT: do not add `features = ["client_system"]` on
+# `wayland-backend`. winit uses the default `dlopen` path to load
+# `libwayland-client.so.0` at runtime via `wayland-sys`; enabling
+# `client_system` switches the crate to link-against-libwayland at
+# build time, which feature-unifies into winit and disables its
+# dlopen loader — symptom: `Failed to create event loop: The
+# wayland library could not be loaded` at startup. The
+# `from_foreign_display` constructor we use to share winit's
+# connection works fine with the default loader.
 [target.'cfg(target_os = "linux")'.dependencies]
 wayland-client = { version = "0.31", optional = true }
-wayland-backend = { version = "0.3", features = ["client_system"], optional = true }
+wayland-backend = { version = "0.3", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 blinc_platform_android = { path = "../../extensions/blinc_platform_android", version = "0.5.1", optional = true }
