@@ -6302,11 +6302,20 @@ impl WindowedApp {
                             if !_gate_active {
                                 window.pre_present_notify();
                             }
-                            frame.present();
+                            // Arm BEFORE present. `frame.present()`
+                            // calls wgpu's internal `wl_surface::commit()`;
+                            // we need our `wl_surface::frame()` request to
+                            // hit the wire first so the callback bundles
+                            // with this commit rather than the next one.
+                            // The "after a few seconds it freezes" symptom
+                            // was caused by arming after present: callbacks
+                            // were buffered for a next commit that never
+                            // arrived when the render loop went quiet.
                             #[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
                             if let Some(gate) = ws.wayland_gate.as_ref() {
-                                gate.arm_after_present();
+                                gate.arm_before_present();
                             }
+                            frame.present();
                             t_phase4 = phase4_start.elapsed();
 
                             // =========================================================

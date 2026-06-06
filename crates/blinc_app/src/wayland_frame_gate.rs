@@ -217,12 +217,32 @@ impl WaylandFrameGate {
     }
 
     /// Register a fresh `wl_surface::frame()` callback bound to our
-    /// queue, and flip `frame_ready` to `false`. Call after every
-    /// successful `frame.present()`.
+    /// queue, and flip `frame_ready` to `false`. Call **immediately
+    /// before** `frame.present()`.
     ///
-    /// The next call to `is_frame_ready()` will return `false` until
-    /// the compositor sends the corresponding `Done` event.
-    pub fn arm_after_present(&self) {
+    /// ## Why before, not after
+    ///
+    /// Per the Wayland protocol, `wl_surface::frame()` registers a
+    /// callback that becomes armed by the **next**
+    /// `wl_surface::commit()`. `wgpu::SurfaceTexture::present()`
+    /// internally calls that commit. If we call `frame()` *after*
+    /// present, our request is buffered for the commit AFTER this
+    /// one — and if the render loop goes quiet (animations settle,
+    /// no input pending), that next commit never happens. The
+    /// compositor never delivers Done for our callback, and the
+    /// gate sits permanently waiting. From the user's perspective:
+    /// "UI is responsive for a few seconds then freezes" — the
+    /// first frames work because continuous activity keeps
+    /// commits flowing, then the quiet period traps us.
+    ///
+    /// Arming *before* present means our `frame()` request hits
+    /// the wire (`conn.flush()`) before wgpu's commit, so the
+    /// callback bundles with THIS commit and Done arrives on the
+    /// next vsync. GPUI uses the same ordering on Linux.
+    ///
+    /// The next call to `is_frame_ready()` will return `false`
+    /// until the compositor sends the corresponding `Done` event.
+    pub fn arm_before_present(&self) {
         let queue = self.queue.lock().expect("gate queue");
         let qh = queue.handle();
         // Send the request. The returned callback proxy is bound to
@@ -231,8 +251,10 @@ impl WaylandFrameGate {
         // server-side object alive until `Done`, and the queue holds
         // the registration regardless of whether we retain a handle.
         let _callback = self.surface.frame(&qh, ());
-        // Flush — winit's main thread won't necessarily roundtrip
-        // before our next is_frame_ready check.
+        // Flush MUST happen before wgpu's commit. If the request
+        // hits the wire AFTER the commit, the callback buffers for
+        // the next commit (see the docs above for the freeze
+        // pathology).
         let _ = self.conn.flush();
         drop(queue);
         let mut state = self.state.lock().expect("gate state");
