@@ -480,6 +480,10 @@ impl RenderTree {
                 0.0,
                 0.0,
                 scale,
+                false,
+                false,
+                false,
+                false,
             );
             return;
         }

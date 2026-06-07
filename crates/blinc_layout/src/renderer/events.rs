@@ -87,6 +87,10 @@ impl RenderTree {
             0.0,
             0.0,
             1.0,
+            false,
+            false,
+            false,
+            false,
         );
     }
 
@@ -109,6 +113,10 @@ impl RenderTree {
         drag_delta_x: f32,
         drag_delta_y: f32,
         pinch_scale: f32,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+        meta: bool,
     ) {
         // Stale hit-test: bail if the node was removed by a recent
         // rebuild. The skip itself is normal (queued events for
@@ -139,7 +147,8 @@ impl RenderTree {
             .with_local_pos(local_x, local_y)
             .with_bounds_pos(bounds_x, bounds_y)
             .with_bounds(bounds_width, bounds_height)
-            .with_drag_delta(drag_delta_x, drag_delta_y);
+            .with_drag_delta(drag_delta_x, drag_delta_y)
+            .with_modifiers(shift, ctrl, alt, meta);
         ctx.stable_id = stable_id;
 
         if event_type == blinc_core::events::event_types::PINCH {

@@ -2179,6 +2179,10 @@ impl WebApp {
                 tree.dispatch_event_full(
                     node, event_type, mx, my, local_x, local_y, bx, by, bw, bh, dx, dy,
                     /* pinch_scale */ 1.0,
+                    /* shift */ false,
+                    /* ctrl */ false,
+                    /* alt */ false,
+                    /* meta */ false,
                 );
             }
         }

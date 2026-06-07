@@ -979,6 +979,10 @@ impl AndroidApp {
                             0.0, // drag_delta_x — touch drag uses scroll path
                             0.0, // drag_delta_y
                             1.0, // pinch_scale
+                            false, // shift — no software-keyboard modifier tracking yet
+                            false, // ctrl
+                            false, // alt
+                            false, // meta
                         );
                     }
                 }

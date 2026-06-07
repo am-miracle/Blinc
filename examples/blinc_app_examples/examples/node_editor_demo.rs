@@ -389,9 +389,53 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
                 })
                 .show();
         }
+        EditorEvent::AddToGroupRequested(req) => {
+            // Add the node to the target group's member list +
+            // mirror the change into the editor via the granular
+            // `set_group_members` command.
+            let updated = {
+                let mut groups = host.groups.write().unwrap();
+                groups
+                    .iter_mut()
+                    .find(|g| g.id == req.group)
+                    .map(|g| {
+                        if !g.members.contains(&req.node) {
+                            g.members.push(req.node.clone());
+                        }
+                        g.members.clone()
+                    })
+            };
+            if let Some(members) = updated {
+                editor.set_group_members(&req.group, members);
+                tracing::info!(
+                    "added {} to group {}",
+                    req.node.as_str(),
+                    req.group.as_str()
+                );
+            }
+        }
+        EditorEvent::RemoveFromGroupRequested(req) => {
+            let updated = {
+                let mut groups = host.groups.write().unwrap();
+                groups
+                    .iter_mut()
+                    .find(|g| g.id == req.group)
+                    .map(|g| {
+                        g.members.retain(|m| m != &req.node);
+                        g.members.clone()
+                    })
+            };
+            if let Some(members) = updated {
+                editor.set_group_members(&req.group, members);
+                tracing::info!(
+                    "removed {} from group {} ({:?})",
+                    req.node.as_str(),
+                    req.group.as_str(),
+                    req.source,
+                );
+            }
+        }
         EditorEvent::CreateGroupRequested(_)
-        | EditorEvent::AddToGroupRequested(_)
-        | EditorEvent::RemoveFromGroupRequested(_)
         | EditorEvent::ToggleCollapseRequested(_)
         | EditorEvent::DeleteGroupRequested(_)
         | EditorEvent::EdgeClicked { .. }

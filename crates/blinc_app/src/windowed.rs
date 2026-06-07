@@ -387,6 +387,16 @@ pub(crate) struct WindowState {
     /// changed (the mouse-move handler may run hundreds of times a
     /// second during a drag — we don't want to syscall every iteration).
     pub last_cursor: Option<blinc_platform::Cursor>,
+    /// Last-known keyboard modifier state. Updated from every
+    /// `InputEvent::Keyboard` because winit fires `KeyboardInput`
+    /// for modifier keys themselves (Shift / Cmd / Ctrl / Alt
+    /// down + up); subsequent pointer events stamp this onto their
+    /// `EventContext` via `dispatch_event_full(..., shift, ctrl,
+    /// alt, meta)` so downstream handlers (canvas-kit `on_drag` /
+    /// `on_drag_end`, application widgets) can branch on modifier
+    /// state. Without this, pointer EventContexts always reported
+    /// `shift: false` regardless of what was held during the click.
+    pub cached_modifiers: blinc_platform::Modifiers,
     /// Last event-router state fingerprint (hovered + pressed + focused).
     /// Phase 4 skips `apply_stylesheet_state_styles` whenever the
     /// router state is identical to the previous frame — a major win
@@ -444,6 +454,7 @@ impl WindowState {
             ui_builder: None,
             transparent: false,
             last_cursor: None,
+            cached_modifiers: blinc_platform::Modifiers::default(),
             last_router_state_fp: None,
             last_pointer_dispatch: None,
             #[cfg(all(feature = "wayland-frame-gate", target_os = "linux"))]
@@ -4356,6 +4367,55 @@ impl WindowedApp {
                                 },
                                 InputEvent::Keyboard(kb_event) => {
                                     let mods = &kb_event.modifiers;
+                                    // Cache the live modifier state so subsequent
+                                    // pointer events can propagate it through to
+                                    // their EventContext.
+                                    //
+                                    // The cache uses TWO inputs to stay
+                                    // accurate across backend quirks:
+                                    //
+                                    // 1. Start from kb_event.modifiers (winit's
+                                    //    snapshot at the moment the event was
+                                    //    queued). Good when ModifiersChanged
+                                    //    fires before the key event.
+                                    // 2. Override explicitly for modifier-key
+                                    //    transitions: a Pressed Shift sets
+                                    //    cache.shift=true, a Released Shift
+                                    //    clears it. Handles backends where
+                                    //    ModifiersChanged queues AFTER the
+                                    //    KeyboardInput (so the snapshot reports
+                                    //    the pre-transition state).
+                                    let mut next = *mods;
+                                    let is_press = matches!(
+                                        kb_event.state,
+                                        blinc_platform::KeyState::Pressed
+                                    );
+                                    let is_release = matches!(
+                                        kb_event.state,
+                                        blinc_platform::KeyState::Released
+                                    );
+                                    match (&kb_event.key, is_press, is_release) {
+                                        (blinc_platform::Key::Shift, true, _) => next.shift = true,
+                                        (blinc_platform::Key::Shift, _, true) => next.shift = false,
+                                        (blinc_platform::Key::Ctrl, true, _) => next.ctrl = true,
+                                        (blinc_platform::Key::Ctrl, _, true) => next.ctrl = false,
+                                        (blinc_platform::Key::Alt, true, _) => next.alt = true,
+                                        (blinc_platform::Key::Alt, _, true) => next.alt = false,
+                                        (blinc_platform::Key::Meta, true, _) => next.meta = true,
+                                        (blinc_platform::Key::Meta, _, true) => next.meta = false,
+                                        _ => {}
+                                    }
+                                    if next != ws.cached_modifiers {
+                                        tracing::trace!(
+                                            target: "blinc_app::modifiers",
+                                            shift = next.shift,
+                                            ctrl = next.ctrl,
+                                            alt = next.alt,
+                                            meta = next.meta,
+                                            "cached modifiers updated"
+                                        );
+                                    }
+                                    ws.cached_modifiers = next;
 
                                     // Extract character from key if applicable
                                     let key_char = match &kb_event.key {
@@ -4685,6 +4745,15 @@ impl WindowedApp {
                             (Vec::new(), Vec::new(), false, false, None, None)
                         };
 
+                        // Snapshot the cached modifier state before the
+                        // dispatch loop's mutable borrow on `ws.render_tree`
+                        // shadows access to `ws.cached_modifiers`. The
+                        // pointer dispatch path reads from this snapshot to
+                        // stamp Shift / Cmd / Ctrl / Alt onto the
+                        // EventContext (the platform layer doesn't carry
+                        // modifier state on mouse events).
+                        let cached_modifiers_for_dispatch = ws.cached_modifiers;
+
                         // Second phase: dispatch events with mutable borrow
                         // This automatically marks the tree dirty when handlers fire
                         if let Some(ref mut tree) = ws.render_tree {
@@ -4858,6 +4927,19 @@ impl WindowedApp {
                                         ));
                                     let local_x = event.mouse_x - bounds_x;
                                     let local_y = event.mouse_y - bounds_y;
+                                    // Pointer events arrive without modifier
+                                    // state attached — the platform layer
+                                    // doesn't propagate it on mouse events.
+                                    // Fall back to the per-event payload (set
+                                    // by the keyboard arm above for actual
+                                    // keyboard PendingEvents); if zero,
+                                    // substitute the cached modifier snapshot
+                                    // updated on every KeyboardInput.
+                                    let mods_snapshot = cached_modifiers_for_dispatch;
+                                    let shift = event.shift || mods_snapshot.shift;
+                                    let ctrl = event.ctrl || mods_snapshot.ctrl;
+                                    let alt = event.alt || mods_snapshot.alt;
+                                    let meta = event.meta || mods_snapshot.meta;
                                     tree.dispatch_event_full(
                                         event.node_id,
                                         event.event_type,
@@ -4872,6 +4954,10 @@ impl WindowedApp {
                                         event.drag_delta_x,
                                         event.drag_delta_y,
                                         event.pinch_scale,
+                                        shift,
+                                        ctrl,
+                                        alt,
+                                        meta,
                                     );
                                 }
                             }

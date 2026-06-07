@@ -1044,6 +1044,10 @@ impl IOSRenderContext {
                         0.0, // drag_delta_x
                         0.0, // drag_delta_y
                         1.0, // pinch_scale
+                        false, // shift
+                        false, // ctrl
+                        false, // alt
+                        false, // meta
                     );
                 }
             }
