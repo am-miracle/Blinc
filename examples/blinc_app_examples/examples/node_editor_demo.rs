@@ -329,7 +329,7 @@ fn build_editor() -> Editor {
 // ─── UI scaffold ───────────────────────────────────────────────────
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
-    let editor = build_editor();
+    let mut editor = build_editor();
     // No manual `.bg(...)` here — the editor's `element()` paints
     // its own workspace surface from the active theme, so the host
     // only needs to position it.
