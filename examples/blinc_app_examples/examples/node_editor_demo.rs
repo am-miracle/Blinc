@@ -344,6 +344,51 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
                 })
                 .show();
         }
+        EditorEvent::DeleteNodesRequested(ids) => {
+            if ids.is_empty() {
+                return;
+            }
+            let (title, description) = if ids.len() == 1 {
+                (
+                    "Delete node?".to_string(),
+                    "This will remove the node and every connection attached to it."
+                        .to_string(),
+                )
+            } else {
+                (
+                    format!("Delete {} nodes?", ids.len()),
+                    "This will remove the selected nodes and every connection attached to them."
+                        .to_string(),
+                )
+            };
+            let editor_for_confirm = editor.clone();
+            let host_for_confirm = host.clone();
+            let ids_for_confirm = ids.clone();
+            blinc_cn::dialog()
+                .title(title)
+                .description(description)
+                .confirm_text("Delete")
+                .cancel_text("Cancel")
+                .confirm_destructive(true)
+                .on_confirm(move || {
+                    let id_set: std::collections::HashSet<_> =
+                        ids_for_confirm.iter().cloned().collect();
+                    host_for_confirm.nodes.write().unwrap().retain(|n| !id_set.contains(&n.id));
+                    host_for_confirm
+                        .connections
+                        .write()
+                        .unwrap()
+                        .retain(|c| !id_set.contains(&c.from.node) && !id_set.contains(&c.to.node));
+                    for g in host_for_confirm.groups.write().unwrap().iter_mut() {
+                        g.members.retain(|m| !id_set.contains(m));
+                    }
+                    for id in &ids_for_confirm {
+                        editor_for_confirm.remove_node(id);
+                    }
+                    tracing::info!("deleted {} node(s)", ids_for_confirm.len());
+                })
+                .show();
+        }
         EditorEvent::CreateGroupRequested(_)
         | EditorEvent::AddToGroupRequested(_)
         | EditorEvent::RemoveFromGroupRequested(_)
