@@ -1189,7 +1189,48 @@ impl RenderContext {
             // image content while the non-compositor path renders
             // them correctly — the canonical "video doesn't
             // render" / "3D helmet missing" bugs.
-            let new_batch = scratch.take_batch();
+            let mut new_batch = scratch.take_batch();
+
+            // Shift per-primitive aux_data offsets by the amount
+            // already accumulated in `overlay.aux_data`. Each scratch
+            // canvas builds offsets relative to its own (initially
+            // empty) `PrimitiveBatch::aux_data`; we concatenate
+            // every closure's aux_data into one buffer that
+            // `composite_frame` re-uploads, so offsets recorded
+            // against the first closure's [0..) range have to be
+            // rebased to [prev_total..) after the second closure
+            // appends.
+            //
+            // Three primitive types index into aux_data — keep all
+            // three in sync or canvas-emitted variants render as
+            // garbage / invisible:
+            //
+            //   - PRIM_MESH (PrimitiveType::Mesh = 9): triangle
+            //     vertex positions in `border[2]` (per-triangle
+            //     emit from `push_mesh_primitives_brush`). SVG
+            //     icons rendered via `SvgDocument::render_fit` hit
+            //     this path — pre-fix every icon's border[2] held a
+            //     scratch-local offset that pointed into the
+            //     dropped scratch aux_data, so the fragment shader
+            //     sampled stale BG-batch triangles → icons silently
+            //     invisible (despite text + rects working fine).
+            //
+            //   - 3D group SDF (any prim_type with `border[1]` =
+            //     shape_count > 0): ShapeDesc records in
+            //     `border[2]`. Rare in node-graph closures but
+            //     symmetric with the mesh fix.
+            //
+            //   - Polygon clip (`type_info[2] = ClipType::Polygon`):
+            //     polygon vertex pairs in `clip_radius[3]`. Hit by
+            //     any canvas closure that pushes a polygon clip
+            //     (e.g. cn::spinner arcs once those were canvas-
+            //     hosted) — same garbage-read failure mode.
+            Self::shift_aux_offsets(
+                &mut new_batch.primitives,
+                overlay.aux_data.len() as f32,
+            );
+
+            overlay.aux_data.extend(new_batch.aux_data);
             overlay.primitives.extend(new_batch.primitives);
             overlay.dynamic_images.extend(new_batch.dynamic_images);
             overlay.meshes.extend(scratch.take_pending_meshes());
@@ -2463,6 +2504,37 @@ impl RenderContext {
             (self.text_ctx.atlas_view(), self.text_ctx.color_atlas_view())
         {
             self.renderer.set_glyph_atlas(atlas, color_atlas);
+        }
+    }
+
+    /// Shift every `aux_data` index on `prims` by `shift`.
+    ///
+    /// Used when concatenating one source's primitives into a
+    /// merged `aux_data` buffer that already contains entries from
+    /// another source. Three index sites need adjusting in lockstep:
+    ///
+    /// - **Mesh primitives** (`type_info[0] == PrimitiveType::Mesh`)
+    ///   carry the triangle's aux offset in `border[2]`.
+    /// - **3D-group SDF** primitives (any `prim_type` with
+    ///   `border[1]` = `shape_count > 0`) also use `border[2]` for
+    ///   the ShapeDesc-records offset.
+    /// - **Polygon clip** is host-primitive-agnostic
+    ///   (`type_info[2] == ClipType::Polygon`); the offset lives on
+    ///   `clip_radius[3]`.
+    fn shift_aux_offsets(prims: &mut [blinc_gpu::primitives::GpuPrimitive], shift: f32) {
+        if shift == 0.0 {
+            return;
+        }
+        for prim in prims {
+            let prim_type = prim.type_info[0];
+            if prim_type == blinc_gpu::primitives::PrimitiveType::Mesh as u32
+                || prim.border[1] > 0.0
+            {
+                prim.border[2] += shift;
+            }
+            if prim.type_info[2] == blinc_gpu::primitives::ClipType::Polygon as u32 {
+                prim.clip_radius[3] += shift;
+            }
         }
     }
 
@@ -7291,21 +7363,24 @@ impl RenderContext {
                     Some(b) => (b.primitives.as_slice(), b.aux_data.as_slice()),
                     None => (&[][..], &[][..]),
                 };
-                if !dyn_prims.is_empty() {
-                    overlay.primitives.extend_from_slice(dyn_prims);
-                }
-                // Rebind needs `&mut self` so we have to release the
-                // immutable borrow `dyn_aux` is holding on
-                // `cached_dynamic_batch`. Clone the aux slice into a
-                // local Vec — at most a few hundred entries on a
-                // motion-heavy frame, well under 1 µs to copy.
+                // Dyn batch primitives carry aux_offsets relative to
+                // `dyn_aux`. Merging into the single buffer
+                // `composite_frame` uploads means appending `dyn_aux`
+                // after `overlay.aux_data` and shifting dyn_prims'
+                // offsets by the overlay's accumulated length.
+                let dyn_aux_shift = overlay.aux_data.len() as f32;
+                let mut shifted_dyn_prims = dyn_prims.to_vec();
+                Self::shift_aux_offsets(&mut shifted_dyn_prims, dyn_aux_shift);
                 let dyn_aux_owned: Vec<[f32; 4]> = dyn_aux.to_vec();
+                overlay.primitives.extend(shifted_dyn_prims);
+                let mut merged_aux = overlay.aux_data;
+                merged_aux.extend(dyn_aux_owned);
                 self.rebind_glyph_atlas_for_overlay();
                 self.renderer.composite_frame(
                     target_view,
                     target_texture,
                     &overlay.primitives,
-                    &dyn_aux_owned,
+                    &merged_aux,
                 );
                 // Motion-subtree text + SVG overlay — rendered on the
                 // surface after the motion-bound bg primitives so they
@@ -7646,17 +7721,21 @@ impl RenderContext {
                     Some(b) => (b.primitives.as_slice(), b.aux_data.as_slice()),
                     None => (&[][..], &[][..]),
                 };
-                if !dyn_prims.is_empty() {
-                    overlay.primitives.extend_from_slice(dyn_prims);
-                }
-                // See sibling site above — same borrow workaround.
+                // Shift dyn_prims aux_offsets into the merged
+                // buffer (overlay's canvas aux comes first).
+                let dyn_aux_shift = overlay.aux_data.len() as f32;
+                let mut shifted_dyn_prims = dyn_prims.to_vec();
+                Self::shift_aux_offsets(&mut shifted_dyn_prims, dyn_aux_shift);
                 let dyn_aux_owned: Vec<[f32; 4]> = dyn_aux.to_vec();
+                overlay.primitives.extend(shifted_dyn_prims);
+                let mut merged_aux = overlay.aux_data;
+                merged_aux.extend(dyn_aux_owned);
                 self.rebind_glyph_atlas_for_overlay();
                 self.renderer.composite_frame(
                     target_view,
                     target_texture,
                     &overlay.primitives,
-                    &dyn_aux_owned,
+                    &merged_aux,
                 );
                 // Motion-subtree text + SVG overlay — rendered on the
                 // surface after the motion-bound bg primitives so they
@@ -7915,27 +7994,32 @@ impl RenderContext {
         let mut overlay = self.collect_canvas_overlay(tree, width, height);
         // Compositor v2: append motion-bound subtree primitives to the
         // canvas overlay so cache blit + canvas SDF + motion-bound
-        // dispatch all share a single command encoder / submit. See
-        // the matching block in the use_fast branch above. The
-        // dynamic batch's `aux_data` (polygon-clip vertices, etc.)
-        // is forwarded into composite_frame for the same reason
-        // documented there.
-        let overlay_aux: Vec<[f32; 4]> = self
+        // dispatch all share a single command encoder / submit.
+        //
+        // `overlay.aux_data` already carries canvas-emitted entries
+        // (mesh-triangle vertices, polygon-clip vertices, 3D-group
+        // ShapeDescs) with primitive aux_offsets rebased onto the
+        // overlay buffer by `collect_canvas_overlay`. Append the
+        // dynamic batch's aux entries after, shifting the dynamic
+        // batch's primitive offsets up by the overlay length so
+        // they land in the right region of the merged buffer.
+        let dyn_aux_shift = overlay.aux_data.len() as f32;
+        let (dyn_prims_owned, dyn_aux_owned): (Vec<_>, Vec<_>) = self
             .cached_dynamic_batch
             .as_ref()
-            .map(|b| b.aux_data.clone())
+            .map(|b| (b.primitives.clone(), b.aux_data.clone()))
             .unwrap_or_default();
-        if let Some(ref dyn_batch) = self.cached_dynamic_batch {
-            if !dyn_batch.primitives.is_empty() {
-                overlay.primitives.extend_from_slice(&dyn_batch.primitives);
-            }
-        }
+        let mut shifted_dyn_prims = dyn_prims_owned;
+        Self::shift_aux_offsets(&mut shifted_dyn_prims, dyn_aux_shift);
+        overlay.primitives.extend(shifted_dyn_prims);
+        let mut merged_aux = overlay.aux_data;
+        merged_aux.extend(dyn_aux_owned);
         self.rebind_glyph_atlas_for_overlay();
         self.renderer.composite_frame(
             target_view,
             target_texture,
             &overlay.primitives,
-            &overlay_aux,
+            &merged_aux,
         );
         // Motion-subtree text overlay — same rationale as the fast
         // paths: motion-bound bg primitives paint on top of the static
