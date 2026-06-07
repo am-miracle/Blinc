@@ -30,7 +30,7 @@ use blinc_canvas_kit::prelude::*;
 use blinc_core::layer::{Color, Point};
 use blinc_node_editor::prelude::*;
 use blinc_node_editor::{BadgeKind, Group, GroupId, StatusBadge};
-use blinc_tabler_icons::{outline, to_svg_colored};
+use blinc_tabler_icons::outline;
 use blinc_theme::{
     detect_system_color_scheme, themes::universal::HybridTheme, tokens::ColorToken, ThemeState,
 };
@@ -81,14 +81,23 @@ impl PortKind for DemoPort {
 
 // ─── Templates ─────────────────────────────────────────────────────
 
-/// Build a node icon from a Tabler outline path constant + the
-/// title text colour. Colouring via `to_svg_colored` (rather than
-/// the default black) makes the glyph read against the theme's
-/// dark header band.
+/// Build a node icon from a Tabler outline path constant.
+///
+/// Builds the SVG markup inline rather than going through
+/// `to_svg_colored` so we can lower the `stroke-width` from
+/// Tabler's default 2.0. Tabler authors paths in a 24×24 viewBox;
+/// at our 16×16 display size the viewBox scales by 16/24 ≈ 0.667,
+/// so a 2.0 stroke renders at ~1.33 CSS px — falls between pixel
+/// boundaries and AA has to smear the edge across two rows, making
+/// strokes read as thick + soft. Stroke `1.5` resolves to a clean
+/// 1.0 CSS px (2 physical px on retina) which the rasterizer can
+/// align to a pixel grid.
 fn tabler_icon(path_data: &str) -> NodeIcon {
     let colour_hex = token_hex(ColorToken::TextPrimary, "#e8e8e8");
-    NodeIcon::from_svg_str(&to_svg_colored(path_data, 16.0, &colour_hex))
-        .expect("tabler emits valid SVG")
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{colour_hex}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">{path_data}</svg>"#
+    );
+    NodeIcon::from_svg_str(&svg).expect("valid SVG")
 }
 
 /// Resolve a theme colour to a `#rrggbb` hex string. Tabler's
