@@ -248,7 +248,18 @@ fn initial_groups() -> Vec<Group<()>> {
 
 // ─── Editor wiring ─────────────────────────────────────────────────
 
-fn build_editor() -> Editor {
+/// Host-side graph state. The editor stays a pure view; we hold the
+/// authoritative copy of nodes / connections / groups here and
+/// react to [`EditorEvent`]s by patching this state, then
+/// re-syncing via granular commands.
+#[derive(Clone, Default)]
+struct HostGraph {
+    nodes: Arc<RwLock<Vec<NodeInstance<()>>>>,
+    connections: Arc<RwLock<Vec<Connection<()>>>>,
+    groups: Arc<RwLock<Vec<Group<()>>>>,
+}
+
+fn build_editor() -> (Editor, HostGraph) {
     let editor: Editor = NodeEditor::new("node-editor-demo")
         .with_templates(build_templates())
         .with_background(
@@ -256,22 +267,23 @@ fn build_editor() -> Editor {
                 .with_zoom_adaptive(0.3, 5),
         );
 
-    // The host-managed graph state — owned by the demo. The editor
-    // calls back into us via the request hooks; we mutate this and
-    // re-sync via `editor.set_graph(...)`.
-    let nodes = Arc::new(RwLock::new(initial_nodes()));
-    let connections = Arc::new(RwLock::new(initial_connections()));
-    let groups = Arc::new(RwLock::new(initial_groups()));
+    let host = HostGraph {
+        nodes: Arc::new(RwLock::new(initial_nodes())),
+        connections: Arc::new(RwLock::new(initial_connections())),
+        groups: Arc::new(RwLock::new(initial_groups())),
+    };
 
     // Initial sync.
     editor.set_graph(
-        nodes.read().unwrap().clone(),
-        connections.read().unwrap().clone(),
-        groups.read().unwrap().clone(),
+        host.nodes.read().unwrap().clone(),
+        host.connections.read().unwrap().clone(),
+        host.groups.read().unwrap().clone(),
         Vec::new(),
     );
 
-    // Validator — accept connections whose port kinds match.
+    // Validator — accept connections whose port kinds match. This is
+    // the ONLY callback surface: validators answer mid-drag questions
+    // the editor needs synchronously (preview-tint colour).
     let editor = editor.on_connect_request(|req| {
         if req.from_kind.compatible_with(req.to_kind) {
             ValidationOutcome::Accept
@@ -286,59 +298,71 @@ fn build_editor() -> Editor {
         }
     });
 
-    // Materialise accepted connections into the host model + re-sync.
-    let nodes_c = nodes.clone();
-    let connections_c = connections.clone();
-    let groups_c = groups.clone();
-    let editor = {
-        let editor_inner = editor.clone();
-        editor.on_connect_accepted(move |evt| {
-            connections_c
-                .write()
-                .unwrap()
-                .push(Connection::new(evt.from.clone(), evt.to.clone()));
-            editor_inner.set_graph(
-                nodes_c.read().unwrap().clone(),
-                connections_c.read().unwrap().clone(),
-                groups_c.read().unwrap().clone(),
-                Vec::new(),
-            );
+    (editor, host)
+}
+
+/// React to one [`EditorEvent`] by patching `host` and pushing the
+/// matching granular command back at the editor. Centralises the
+/// host-as-driver flow described in the roadmap.
+fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
+    match evt {
+        EditorEvent::ConnectionAccepted(c) => {
+            let conn = Connection::new(c.from.clone(), c.to.clone());
+            host.connections.write().unwrap().push(conn.clone());
+            editor.insert_connection(conn);
             tracing::info!(
                 "connected {:?} -> {:?}",
-                (evt.from.node.as_str(), evt.from.port.as_str()),
-                (evt.to.node.as_str(), evt.to.port.as_str()),
+                (c.from.node.as_str(), c.from.port.as_str()),
+                (c.to.node.as_str(), c.to.port.as_str()),
             );
-        })
-    };
-
-    // Persist drag positions on the host side.
-    let nodes_d = nodes.clone();
-    let connections_d = connections.clone();
-    let groups_d = groups.clone();
-    let editor = {
-        let editor_inner = editor.clone();
-        editor.on_node_drag(move |id, new_pos| {
-            let mut ns = nodes_d.write().unwrap();
-            if let Some(n) = ns.iter_mut().find(|n| &n.id == id) {
-                n.position = new_pos;
+        }
+        EditorEvent::NodeDragged { id, position } => {
+            if let Some(n) = host.nodes.write().unwrap().iter_mut().find(|n| n.id == id) {
+                n.position = position;
             }
-            drop(ns);
-            editor_inner.set_graph(
-                nodes_d.read().unwrap().clone(),
-                connections_d.read().unwrap().clone(),
-                groups_d.read().unwrap().clone(),
-                Vec::new(),
-            );
-        })
-    };
-
-    editor
+            // Editor's drag handler already updated its internal copy
+            // mid-drag — no need to re-push here. Host state is now in
+            // sync for the next save/snapshot.
+        }
+        EditorEvent::CreateGroupRequested(_)
+        | EditorEvent::AddToGroupRequested(_)
+        | EditorEvent::RemoveFromGroupRequested(_)
+        | EditorEvent::ToggleCollapseRequested(_)
+        | EditorEvent::DeleteGroupRequested(_)
+        | EditorEvent::DeleteConnectionRequested(_)
+        | EditorEvent::EdgeClicked { .. }
+        | EditorEvent::NodeClicked { .. }
+        | EditorEvent::LayoutApplied(_) => {
+            // Unhandled in this demo; real hosts dispatch to their
+            // command palette / inspector / layout code.
+        }
+    }
 }
 
 // ─── UI scaffold ───────────────────────────────────────────────────
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
-    let mut editor = build_editor();
+    let (mut editor, host) = build_editor();
+
+    // Drain the editor's event queue whenever any event is pushed.
+    // A zero-size `stateful_with_key` widget with `deps` on the
+    // events signal re-fires its closure on every push, which is
+    // when we drain + dispatch to host state.
+    //
+    // The drain widget renders no chrome — it's mounted only for its
+    // reactive lifecycle.
+    let drain_editor = editor.clone();
+    let drain_host = host.clone();
+    let evts_signal = editor.events_signal();
+    let drainer = stateful_with_key::<NoState>("node-editor-event-drain")
+        .deps([evts_signal])
+        .on_state(move |_ctx| {
+            for evt in drain_editor.drain_events() {
+                handle_event(&drain_editor, &drain_host, evt);
+            }
+            div().w(0.0).h(0.0)
+        });
+
     // No manual `.bg(...)` here — the editor's `element()` paints
     // its own workspace surface from the active theme, so the host
     // only needs to position it.
@@ -347,7 +371,14 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
         .h(ctx.height)
         .flex_col()
         .child(header_bar())
-        .child(div().flex_grow().overflow_clip().w_full().child(editor.element()))
+        .child(
+            div()
+                .flex_grow()
+                .overflow_clip()
+                .w_full()
+                .child(editor.element())
+                .child(drainer),
+        )
 }
 
 fn header_bar() -> Div {

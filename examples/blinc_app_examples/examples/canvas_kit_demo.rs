@@ -659,6 +659,7 @@ fn viewport_hud(kit: CanvasKit, unique_key: &str) -> Stateful<NoState> {
 
             div()
                 .absolute()
+                .layer(RenderLayer::Foreground)
                 .left(8.0)
                 .top(40.0)
                 .bg(Color::rgba(0.0, 0.0, 0.0, 0.6))
@@ -706,6 +707,7 @@ fn reset_button(
 
         div()
             .absolute()
+            .layer(RenderLayer::Foreground)
             .left(8.0)
             .top(120.0)
             .bg(bg)
@@ -736,6 +738,7 @@ fn reset_button_simple(kit: CanvasKit, unique_key: &str) -> Stateful<ButtonState
 
         div()
             .absolute()
+            .layer(RenderLayer::Foreground)
             .left(8.0)
             .top(120.0)
             .bg(bg)

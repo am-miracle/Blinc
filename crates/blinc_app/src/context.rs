@@ -2507,6 +2507,64 @@ impl RenderContext {
         }
     }
 
+    /// Re-dispatch `RenderLayer::Foreground` primitives on top of the
+    /// canvas overlay so host overlays (zoom HUD, minimap, toolbar,
+    /// etc.) stay visible above canvas-drawn content.
+    ///
+    /// Background:
+    /// * The slow paint walker's Pass 4 bakes foreground primitives
+    ///   into the static cache alongside bg + glass content.
+    /// * On compositor frames, `composite_frame` blits that cache then
+    ///   dispatches canvas-emitted primitives as an overlay with
+    ///   `LoadOp::Load`. The canvas overlay paints over the fg pixels
+    ///   that were captured in the cache.
+    /// * Net result without this hook: a host div marked
+    ///   `.layer(RenderLayer::Foreground)` that sits above a canvas
+    ///   appears underneath canvas content because the overlay pass
+    ///   re-paints canvas on top of the cached fg pixels.
+    ///
+    /// Re-dispatching the cached foreground primitives after the
+    /// canvas overlay restores the intended z-order: cache (bg + glass
+    /// + fg) → canvas overlay → fg overlay. The double-paint of fg
+    /// pixels (once from cache, once from this dispatch) is identical
+    /// for opaque content. Semi-transparent fg over a canvas will
+    /// blend twice (acceptable for most overlay use; revisit if a
+    /// pixel-perfect single-blend variant is needed).
+    ///
+    /// aux_data caveat: this dispatch does not re-upload aux_data, so
+    /// foreground primitives that reference aux entries (3D groups,
+    /// polygon clip-paths emitted from a fg-layer element) will read
+    /// from whatever the previous dispatch left in the buffer. Typical
+    /// HUD / minimap / toolbar overlays are simple SDF + text and
+    /// don't reference aux.
+    fn render_foreground_overlay(&mut self, target_view: &wgpu::TextureView) {
+        let fg_prims = self
+            .cached_bg_batch
+            .as_ref()
+            .map(|b| b.foreground_primitives.clone())
+            .filter(|v| !v.is_empty());
+        let fg_glyphs = self
+            .cached_fg_glyphs
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .cloned();
+        if fg_prims.is_none() && fg_glyphs.is_none() {
+            return;
+        }
+        self.rebind_glyph_atlas_for_overlay();
+        if let Some(prims) = fg_prims {
+            self.renderer.render_primitives_overlay(target_view, &prims);
+        }
+        // Foreground text glyphs go through the dedicated text shader
+        // pipeline (not the SDF PRIM_TEXT path), so they need their
+        // own overlay dispatch on top of the canvas. Without this,
+        // text inside a `.layer(RenderLayer::Foreground)` element
+        // appears muffled or hidden under canvas-drawn content.
+        if let Some(glyphs) = fg_glyphs {
+            self.render_text(target_view, &glyphs);
+        }
+    }
+
     /// Shift every `aux_data` index on `prims` by `shift`.
     ///
     /// Used when concatenating one source's primitives into a
@@ -7382,6 +7440,11 @@ impl RenderContext {
                     &overlay.primitives,
                     &merged_aux,
                 );
+                // Foreground overlay — re-dispatch fg primitives on
+                // top of the canvas overlay so host overlays marked
+                // `RenderLayer::Foreground` win z-order over canvas
+                // content. See `render_foreground_overlay` doc.
+                self.render_foreground_overlay(target_view);
                 // Motion-subtree text + SVG overlay — rendered on the
                 // surface after the motion-bound bg primitives so they
                 // land on top of the overlay paint instead of being
@@ -7737,6 +7800,11 @@ impl RenderContext {
                     &overlay.primitives,
                     &merged_aux,
                 );
+                // Foreground overlay — re-dispatch fg primitives on
+                // top of the canvas overlay so host overlays marked
+                // `RenderLayer::Foreground` win z-order over canvas
+                // content. See `render_foreground_overlay` doc.
+                self.render_foreground_overlay(target_view);
                 // Motion-subtree text + SVG overlay — rendered on the
                 // surface after the motion-bound bg primitives so they
                 // land on top of the overlay paint instead of being
@@ -8021,6 +8089,11 @@ impl RenderContext {
             &overlay.primitives,
             &merged_aux,
         );
+        // Foreground overlay — re-dispatch fg primitives on top of
+        // the canvas overlay so host overlays marked
+        // `RenderLayer::Foreground` win z-order over canvas content.
+        // See `render_foreground_overlay` doc.
+        self.render_foreground_overlay(target_view);
         // Motion-subtree text overlay — same rationale as the fast
         // paths: motion-bound bg primitives paint on top of the static
         // cache via `composite_frame`'s overlay, so the text inside
