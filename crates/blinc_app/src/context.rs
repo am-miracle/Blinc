@@ -1035,7 +1035,7 @@ impl RenderContext {
     /// top with `LoadOp::Load` — so the canvas content animates at
     /// vsync while the surrounding tree never re-renders.
     pub fn collect_canvas_overlay_primitives(
-        &self,
+        &mut self,
         tree: &blinc_layout::RenderTree,
         width: u32,
         height: u32,
@@ -1062,7 +1062,7 @@ impl RenderContext {
     /// invocation so canvases at higher z-indexes render on top
     /// of canvases at lower z-indexes within the overlay batch.
     pub fn collect_canvas_overlay(
-        &self,
+        &mut self,
         tree: &blinc_layout::RenderTree,
         width: u32,
         height: u32,
@@ -1098,7 +1098,18 @@ impl RenderContext {
         // transform / opacity stacks get explicit `pop`s after each
         // canvas so the scratch ends every loop iteration in the
         // same fresh state.
+        //
+        // **Wire the text context**: `draw_text` early-returns when
+        // `ctx.text_ctx.is_none()` — without this `set_text_context`
+        // call the scratch context silently dropped every
+        // `ctx.draw_text(...)` call inside a canvas closure, so the
+        // overlay pass emitted zero text primitives even though the
+        // composite_frame downstream was ready to dispatch PRIM_TEXT
+        // via the sdf_core pipeline. Symptom: canvas_demo's
+        // "Canvas Text" sample showed the background plate but
+        // none of the headings.
         let mut scratch = GpuPaintContext::new(width as f32, height as f32);
+        scratch.set_text_context(&mut self.text_ctx);
         let mut overlay = CanvasOverlay::default();
         for record in records {
             // Replay the ancestor clip stack BEFORE pushing the
@@ -8005,6 +8016,21 @@ impl RenderContext {
         target_texture: Option<&wgpu::Texture>,
         try_fast_paint: bool,
     ) -> Result<()> {
+        // NOTE: glyph atlas growth invalidates baked `PRIM_TEXT`
+        // UVs in `cached_bg_batch`. A naive `invalidate_render_cache`
+        // here (gated on `text_ctx.take_atlas_grew()`) STOPPED the
+        // permanent corruption but caused per-frame blink during
+        // continuous-zoom interactions — every smooth-zoom step
+        // rasterised a new glyph size which fired growth, which
+        // fired invalidation, which dropped the cache, which forced
+        // a full re-walk, which (mid-walk) grew the atlas again.
+        // The right fix is in the upstream paint path: rewrite
+        // `gradient_params` on PRIM_TEXT primitives at emit time
+        // against the FINAL atlas dimensions (not whatever interim
+        // dimension existed when `prepare_text` was first called).
+        // Tracked as a follow-up.
+        let _ = self.text_ctx.take_atlas_grew();
+
         // Layer-compositor mode: a surface texture is available
         // (`target_texture` is `Some`). Route through the cached
         // static-layer path, which paints the non-canvas tree once

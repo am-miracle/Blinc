@@ -805,8 +805,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             d = select(1.0, -1.0, inside);
         }
         case 7u /* PRIM_TEXT */: {
-            let uv_bounds = prim.gradient_params;
+            // `gradient_params` holds atlas PIXEL coords (px_min,
+            // py_min, px_max, py_max). UV computed from CURRENT
+            // atlas dimensions — see sdf_core.wgsl for the full
+            // rationale.
+            let pixel_bounds = prim.gradient_params;
             let is_color = fill_type == 1u;
+            var atlas_size: vec2<f32>;
+            if is_color {
+                atlas_size = vec2<f32>(textureDimensions(color_glyph_atlas));
+            } else {
+                atlas_size = vec2<f32>(textureDimensions(glyph_atlas));
+            }
+            let uv_bounds = pixel_bounds / vec4<f32>(
+                atlas_size.x, atlas_size.y, atlas_size.x, atlas_size.y
+            );
             let local_uv = (sp - origin) / size;
             let atlas_uv = uv_bounds.xy + local_uv * (uv_bounds.zw - uv_bounds.xy);
 

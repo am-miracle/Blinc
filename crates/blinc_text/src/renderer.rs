@@ -656,18 +656,26 @@ impl TextRenderer {
             let w = data.info.region.width as f32;
             let h = data.info.region.height as f32;
 
-            // Get UV coordinates from the appropriate atlas
-            let uv = if data.is_color {
-                data.info
-                    .region
-                    .uv_bounds(color_atlas_dims.0, color_atlas_dims.1)
-            } else {
-                data.info.region.uv_bounds(atlas_dims.0, atlas_dims.1)
-            };
+            // Store atlas PIXEL coords in `uv_bounds` (field name
+            // is now a misnomer — kept for backwards compat). The
+            // sdf_core shader's PRIM_TEXT branch divides these by
+            // `textureDimensions(atlas)` at sample time, so atlas
+            // growth (which doubles dimensions to fit new glyphs)
+            // doesn't invalidate previously-emitted text primitives.
+            // Pre-fix we baked UVs against the atlas dimensions
+            // captured at the START of `prepare_text`; any later
+            // growth produced stale UVs and garbled glyphs.
+            let pixel_bounds = [
+                data.info.region.x as f32,
+                data.info.region.y as f32,
+                (data.info.region.x + data.info.region.width) as f32,
+                (data.info.region.y + data.info.region.height) as f32,
+            ];
+            let _ = (atlas_dims, color_atlas_dims); // dims no longer needed CPU-side
 
             glyphs.push(GlyphInstance {
                 bounds: [x, y, w, h],
-                uv_bounds: uv,
+                uv_bounds: pixel_bounds,
                 color,
                 is_color: data.is_color,
             });
@@ -799,11 +807,19 @@ impl TextRenderer {
             let w = glyph_info.region.width as f32;
             let h = glyph_info.region.height as f32;
 
-            let uv = glyph_info.region.uv_bounds(atlas_dims.0, atlas_dims.1);
+            // Pixel coords (see prepare_text_with_style for the
+            // shader-side UV-computation rationale).
+            let pixel_bounds = [
+                glyph_info.region.x as f32,
+                glyph_info.region.y as f32,
+                (glyph_info.region.x + glyph_info.region.width) as f32,
+                (glyph_info.region.y + glyph_info.region.height) as f32,
+            ];
+            let _ = atlas_dims;
 
             glyphs.push(GlyphInstance {
                 bounds: [x, y, w, h],
-                uv_bounds: uv,
+                uv_bounds: pixel_bounds,
                 color,
                 is_color: false,
             });

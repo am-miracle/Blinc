@@ -41,6 +41,23 @@ pub struct TextRenderingContext {
     color_atlas_view: Option<wgpu::TextureView>,
     /// Sampler for the atlas
     sampler: wgpu::Sampler,
+    /// Sticky flag set when [`Self::update_atlas_texture`] or
+    /// [`Self::update_color_atlas_texture`] detects the underlying
+    /// atlas dimensions changed (i.e. the atlas was grown to fit a
+    /// rasterised glyph that wouldn't fit at the previous size).
+    ///
+    /// `AtlasRegion::uv_bounds()` recomputes UVs from the current
+    /// atlas dimensions, but `GpuGlyph` / `GpuPrimitive` BAKE the
+    /// UVs at `prepare_text` time. So any cached `PrimitiveBatch`
+    /// holding `PRIM_TEXT` primitives carries stale UVs after the
+    /// atlas grows — they sample from the wrong sub-rect of the
+    /// resized texture and render as fragmented garbage.
+    ///
+    /// `BlincApp::take_atlas_grew()` reads + clears this flag once
+    /// per frame; when set, the cached background batch + static
+    /// layer are invalidated so the next paint re-walks the tree
+    /// and rebuilds primitives with fresh UVs.
+    atlas_grew_since_last_take: bool,
 }
 
 impl TextRenderingContext {
@@ -108,7 +125,21 @@ impl TextRenderingContext {
             color_atlas_texture: Some(color_atlas_texture),
             color_atlas_view: Some(color_atlas_view),
             sampler,
+            atlas_grew_since_last_take: false,
         }
+    }
+
+    /// Read + clear the "atlas grew" flag. Returns `true` if either
+    /// atlas (grayscale or colour) was recreated at a new size since
+    /// the last call.
+    ///
+    /// `BlincApp` calls this once per frame before deciding fast-
+    /// vs slow-path; on `true`, the cached background batch +
+    /// static layer are invalidated so cached `PRIM_TEXT` UVs (now
+    /// stale against the resized atlas) don't render as garbage on
+    /// the next dispatch.
+    pub fn take_atlas_grew(&mut self) -> bool {
+        std::mem::replace(&mut self.atlas_grew_since_last_take, false)
     }
 
     /// Load the default font from a file path
@@ -660,13 +691,22 @@ impl TextRenderingContext {
         let (width, height) = self.renderer.atlas_dimensions();
         let pixels = self.renderer.atlas_pixels();
 
-        // Create or recreate texture if size changed
+        // Detect a size change — the only way this branch fires
+        // post-init is `GlyphAtlas::grow()` doubling dimensions to
+        // fit a new glyph. Set the sticky flag so BlincApp can
+        // invalidate any cached batch carrying stale `PRIM_TEXT`
+        // UVs. (`None` first-time create isn't a grow event for
+        // caching purposes since nothing's been cached yet.)
+        let existed_before = self.atlas_texture.is_some();
         let needs_create = match &self.atlas_texture {
             Some(tex) => tex.width() != width || tex.height() != height,
             None => true,
         };
 
         if needs_create {
+            if existed_before {
+                self.atlas_grew_since_last_take = true;
+            }
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Glyph Atlas Texture"),
                 size: wgpu::Extent3d {
@@ -716,13 +756,18 @@ impl TextRenderingContext {
         let (width, height) = self.renderer.color_atlas_dimensions();
         let pixels = self.renderer.color_atlas_pixels();
 
-        // Create or recreate texture if size changed
+        // See `update_atlas_texture` for the rationale on
+        // `existed_before` + `atlas_grew_since_last_take`.
+        let existed_before = self.color_atlas_texture.is_some();
         let needs_create = match &self.color_atlas_texture {
             Some(tex) => tex.width() != width || tex.height() != height,
             None => true,
         };
 
         if needs_create {
+            if existed_before {
+                self.atlas_grew_since_last_take = true;
+            }
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Color Glyph Atlas Texture"),
                 size: wgpu::Extent3d {

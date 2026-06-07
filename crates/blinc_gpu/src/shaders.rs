@@ -1867,10 +1867,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         case 7u /* PRIM_TEXT */: {
             // Text glyph - sample from glyph atlas.
-            // UV bounds are stored in gradient_params: (u_min, v_min, u_max, v_max)
-            // fill_type stores is_color flag (1 = color emoji, 0 = grayscale)
-            let uv_bounds = prim.gradient_params;
+            //
+            // `gradient_params` carries atlas PIXEL coords for the
+            // glyph quad: (px_min, py_min, px_max, py_max). UVs are
+            // derived from the CURRENT atlas dimensions via
+            // `textureDimensions()` so atlas growth (which doubles
+            // dims to fit fresh glyphs) automatically produces
+            // correct sampling — pre-fix the CPU baked UVs at
+            // `prepare_text` time and any later growth made them
+            // reference the wrong sub-rect of the resized texture,
+            // producing garbled glyphs on the next paint.
+            //
+            // fill_type stores is_color flag (1 = color emoji, 0 = grayscale).
+            let pixel_bounds = prim.gradient_params;
             let is_color = fill_type == 1u;
+
+            var atlas_size: vec2<f32>;
+            if is_color {
+                atlas_size = vec2<f32>(textureDimensions(color_glyph_atlas));
+            } else {
+                atlas_size = vec2<f32>(textureDimensions(glyph_atlas));
+            }
+            let uv_bounds = pixel_bounds / vec4<f32>(
+                atlas_size.x, atlas_size.y, atlas_size.x, atlas_size.y
+            );
 
             // Calculate UV within the glyph quad
             // Use sp (inverse-transformed point) so rotated/skewed text samples correctly
@@ -2374,11 +2394,17 @@ fn vs_main(
         glyph.bounds.y + local_uv.y * glyph.bounds.w
     );
 
-    // UV in atlas
-    let uv = vec2<f32>(
+    // glyph.uv_bounds holds atlas PIXEL coords (px_min, py_min,
+    // px_max, py_max). Interpolate in pixel space and defer the
+    // divide to the fragment shader — `textureDimensions()` in
+    // the vertex stage would require the atlas binding to be
+    // Vertex-visible, but the Text Pipeline layout declares it
+    // Fragment-only.
+    let pixel_uv = vec2<f32>(
         glyph.uv_bounds.x + local_uv.x * (glyph.uv_bounds.z - glyph.uv_bounds.x),
         glyph.uv_bounds.y + local_uv.y * (glyph.uv_bounds.w - glyph.uv_bounds.y)
     );
+    let uv = pixel_uv;
 
     // Convert to clip space
     let clip_pos = vec2<f32>(
@@ -2452,13 +2478,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // what `textureSample` would have produced. Native backends
     // (Metal, Vulkan, DX12) accept both forms; Dawn requires the
     // explicit form here.
+    // `in.uv` is interpolated PIXEL coords in atlas space (the
+    // vertex shader interpolates pixel coords rather than UVs so
+    // the divide-by-atlas-size happens here, where the atlas
+    // texture is bind-group-visible). Live `textureDimensions()`
+    // tracks atlas growth automatically.
     if in.is_color > 0.5 {
         // Color emoji: sample RGBA from color atlas, use texture color directly
-        let emoji_color = textureSampleLevel(color_atlas, glyph_sampler, in.uv, 0.0);
+        let atlas_size = vec2<f32>(textureDimensions(color_atlas));
+        let uv = in.uv / atlas_size;
+        let emoji_color = textureSampleLevel(color_atlas, glyph_sampler, uv, 0.0);
         return vec4<f32>(emoji_color.rgb, emoji_color.a * clip_alpha);
     } else {
         // Grayscale text: sample coverage from glyph atlas, apply tint color
-        let coverage = textureSampleLevel(glyph_atlas, glyph_sampler, in.uv, 0.0).r;
+        let atlas_size = vec2<f32>(textureDimensions(glyph_atlas));
+        let uv = in.uv / atlas_size;
+        let coverage = textureSampleLevel(glyph_atlas, glyph_sampler, uv, 0.0).r;
 
         // Use coverage directly with slight gamma correction for cleaner edges
         // pow(x, 0.7) brightens mid-tones, making strokes appear crisper

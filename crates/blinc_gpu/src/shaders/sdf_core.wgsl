@@ -845,8 +845,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             d = -1.0;
         }
         case 7u /* PRIM_TEXT */: {
-            let uv_bounds = prim.gradient_params;
+            // `gradient_params` holds atlas PIXEL coords for text
+            // glyphs (px_min, py_min, px_max, py_max), not pre-
+            // divided UVs. Compute UVs against the CURRENT atlas
+            // dimensions via `textureDimensions()` so atlas growth
+            // (which doubles dims to fit new glyphs) automatically
+            // produces correct UVs without needing a CPU-side
+            // primitive rewrite. Pre-fix the CPU baked UVs at
+            // prepare_text time; any later atlas growth made those
+            // UVs reference the wrong sub-rect of the resized
+            // texture → garbled glyphs after the first zoom.
+            let pixel_bounds = prim.gradient_params;
             let is_color = fill_type == 1u;
+            var atlas_size: vec2<f32>;
+            if is_color {
+                atlas_size = vec2<f32>(textureDimensions(color_glyph_atlas));
+            } else {
+                atlas_size = vec2<f32>(textureDimensions(glyph_atlas));
+            }
+            let uv_bounds = pixel_bounds / vec4<f32>(
+                atlas_size.x, atlas_size.y, atlas_size.x, atlas_size.y
+            );
             let local_uv = (sp - origin) / size;
             let atlas_uv = uv_bounds.xy + local_uv * (uv_bounds.zw - uv_bounds.xy);
 

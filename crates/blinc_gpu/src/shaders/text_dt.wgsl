@@ -76,11 +76,20 @@ fn vs_main(
         glyph.bounds.y + local_uv.y * glyph.bounds.w
     );
 
-    // UV in atlas
-    let uv = vec2<f32>(
+    // glyph.uv_bounds holds atlas PIXEL coords (px_min, py_min,
+    // px_max, py_max). We interpolate IN PIXEL SPACE here and
+    // defer the divide-by-atlas-size to the fragment shader, where
+    // the atlas texture binding has visibility. (Vertex-stage
+    // `textureDimensions(glyph_atlas)` would force the atlas
+    // bind-group entry to be `Vertex | Fragment` visible — the
+    // current Text Pipeline layout only declares Fragment for it,
+    // so emitting `textureDimensions` here trips wgpu validation
+    // with "Visibility flags don't include the shader stage".)
+    let pixel_uv = vec2<f32>(
         glyph.uv_bounds.x + local_uv.x * (glyph.uv_bounds.z - glyph.uv_bounds.x),
         glyph.uv_bounds.y + local_uv.y * (glyph.uv_bounds.w - glyph.uv_bounds.y)
     );
+    let uv = pixel_uv;
 
     // Convert to clip space
     let clip_pos = vec2<f32>(
@@ -132,11 +141,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
+    // `in.uv` is interpolated PIXEL coords in atlas space. Divide
+    // by the live atlas dimensions to get the [0,1] UV. Reading
+    // `textureDimensions()` here is fine — the atlas texture
+    // binding is already Fragment-visible in the Text Pipeline
+    // layout.
     if in.is_color > 0.5 {
-        let emoji_color = textureSampleLevel(color_atlas, glyph_sampler, in.uv, 0.0);
+        let atlas_size = vec2<f32>(textureDimensions(color_atlas));
+        let uv = in.uv / atlas_size;
+        let emoji_color = textureSampleLevel(color_atlas, glyph_sampler, uv, 0.0);
         return vec4<f32>(emoji_color.rgb, emoji_color.a * clip_alpha);
     } else {
-        let coverage = textureSampleLevel(glyph_atlas, glyph_sampler, in.uv, 0.0).r;
+        let atlas_size = vec2<f32>(textureDimensions(glyph_atlas));
+        let uv = in.uv / atlas_size;
+        let coverage = textureSampleLevel(glyph_atlas, glyph_sampler, uv, 0.0).r;
         let aa_alpha = pow(coverage, 0.7);
         return vec4<f32>(in.color.rgb, in.color.a * aa_alpha * clip_alpha);
     }
