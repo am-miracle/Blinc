@@ -48,6 +48,15 @@ pub enum InputEvent {
         /// Whether this is the start/end of the gesture
         phase: ScrollPhase,
     },
+    /// Keyboard modifier state changed. Forwarded by the platform
+    /// layer whenever `winit::WindowEvent::ModifiersChanged` fires
+    /// so app-level consumers (e.g. blinc_app's `WindowState`
+    /// modifier cache) can track Shift / Cmd / Ctrl / Alt
+    /// transitions without relying on `KeyboardInput` events
+    /// firing for the modifier keys themselves — some backends
+    /// fire `ModifiersChanged` alone when a modifier toggles
+    /// while focus is on a non-text element.
+    ModifiersChanged(Modifiers),
 }
 
 // ============================================================================

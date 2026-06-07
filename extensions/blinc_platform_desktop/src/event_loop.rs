@@ -437,6 +437,18 @@ where
 
             WinitWindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
+                // Forward the change as an InputEvent so app-level
+                // consumers can keep their own modifier cache in
+                // sync — winit doesn't always fire KeyboardInput
+                // for the modifier key transitions themselves
+                // (focus-dependent on some backends), so without
+                // this dedicated forward a Shift release that
+                // happens while a non-canvas element holds focus
+                // leaves the app's cache latched at `shift: true`.
+                let mods_event = blinc_platform::InputEvent::ModifiersChanged(
+                    input::convert_modifiers(self.modifiers),
+                );
+                self.handle_event_for(winit_id, Event::Input(wid, mods_event));
             }
 
             WinitWindowEvent::KeyboardInput { event, .. } => {

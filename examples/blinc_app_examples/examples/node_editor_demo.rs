@@ -301,6 +301,179 @@ fn build_editor() -> (Editor, HostGraph) {
     (editor, host)
 }
 
+/// Open a floating mini-toolbar at `anchor_screen` with Group +
+/// Delete icon buttons targeting `node_ids`. Matches cn::popover's
+/// surface design (SurfaceElevated bg, 1px border, theme radius,
+/// shadow_lg, theme padding). Click-outside auto-dismisses via the
+/// click_outside registry; clicking an action runs it then closes
+/// the overlay.
+fn open_multi_select_toolbar(
+    editor: &Editor,
+    host: &HostGraph,
+    node_ids: Vec<NodeId>,
+    anchor_screen: Point,
+) {
+    // Suppress the Group action when any selected node is already a
+    // member of an existing group — re-grouping already-grouped
+    // nodes would create overlapping memberships the editor doesn't
+    // currently model. Delete stays available regardless.
+    let can_group = {
+        let groups = host.groups.read().unwrap();
+        !node_ids.iter().any(|id| {
+            groups
+                .iter()
+                .any(|g| g.members.iter().any(|m| m == id))
+        })
+    };
+    use blinc_layout::click_outside;
+    use blinc_layout::overlay_state::overlay_stack;
+    use blinc_layout::widgets::overlay_stack::{OverlayBuilder, OverlayHandle};
+    use std::sync::Mutex;
+
+    let theme = ThemeState::get();
+    let bg = theme.color(ColorToken::SurfaceElevated);
+    let border = theme.color(ColorToken::Border);
+    let radius = theme.radius(blinc_theme::tokens::RadiusToken::Lg);
+    let padding = theme.spacing_value(blinc_theme::tokens::SpacingToken::Space2);
+
+    // Reserve the overlay id so the click-outside registry can
+    // bind to the content element's stable id BEFORE `show()`
+    // returns. Mirrors cn::popover's pattern.
+    let next_handle_id = overlay_stack()
+        .lock()
+        .ok()
+        .map(|s| s.peek_next_handle_id())
+        .unwrap_or(0);
+    let toolbar_id = format!("ne-multi-toolbar-{next_handle_id}");
+    let click_outside_key = format!("ne-multi-toolbar:{next_handle_id}");
+
+    // Slot shared between the overlay's content closure and the
+    // outer scope so action buttons can close the overlay via the
+    // captured handle after `show()` returns.
+    let handle_slot: Arc<Mutex<Option<OverlayHandle>>> = Arc::new(Mutex::new(None));
+
+    let toolbar_id_for_content = toolbar_id.clone();
+    let click_outside_key_for_close = click_outside_key.clone();
+
+    let editor_for_group = editor.clone();
+    let host_for_group = host.clone();
+    let ids_for_group = node_ids.clone();
+    let editor_for_delete = editor.clone();
+    let host_for_delete = host.clone();
+    let ids_for_delete = node_ids;
+    let slot_for_group = handle_slot.clone();
+    let slot_for_delete = handle_slot.clone();
+
+    let handle = OverlayBuilder::popover()
+        .at(anchor_screen.x, anchor_screen.y)
+        .on_close(move |_reason| {
+            click_outside::unregister_click_outside(&click_outside_key_for_close);
+        })
+        .content(move || {
+            let editor_g = editor_for_group.clone();
+            let host_g = host_for_group.clone();
+            let group_ids = ids_for_group.clone();
+            let slot_g = slot_for_group.clone();
+            let editor_d = editor_for_delete.clone();
+            let host_d = host_for_delete.clone();
+            let delete_ids = ids_for_delete.clone();
+            let slot_d = slot_for_delete.clone();
+            let error_color = theme.color(ColorToken::Error);
+            let mut row = div()
+                .id(&toolbar_id_for_content)
+                .flex_row()
+                .gap(6.0)
+                .p_px(padding)
+                .bg(bg)
+                .border(1.0, border)
+                .rounded(radius)
+                .shadow_lg();
+            if can_group {
+                row = row.child(
+                    blinc_cn::button("")
+                        .variant(blinc_cn::ButtonVariant::Ghost)
+                        .icon(blinc_cn::prelude::icons::GROUP)
+                        .on_click(move |_| {
+                            let new_id = GroupId::from(format!(
+                                "g-{}",
+                                web_time::SystemTime::now()
+                                    .duration_since(web_time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0)
+                            ));
+                            let mut group =
+                                Group::<()>::new(new_id.clone(), "New Group")
+                                    .with_description("Group created from multi-select");
+                            for nid in &group_ids {
+                                group = group.add_member(nid.as_str());
+                            }
+                            host_g.groups.write().unwrap().push(group.clone());
+                            editor_g.insert_group(group);
+                            editor_g.clear_selection();
+                            if let Some(h) = slot_g.lock().unwrap().as_ref() {
+                                h.close();
+                            }
+                            tracing::info!(
+                                "grouped {} nodes into {}",
+                                group_ids.len(),
+                                new_id.as_str()
+                            );
+                        }),
+                );
+            }
+            row.child(
+                blinc_cn::button("")
+                    .variant(blinc_cn::ButtonVariant::Ghost)
+                    .icon(blinc_cn::prelude::icons::TRASH)
+                    .color(error_color)
+                    .on_click(move |_| {
+                        let id_set: std::collections::HashSet<_> =
+                            delete_ids.iter().cloned().collect();
+                        host_d
+                            .nodes
+                            .write()
+                            .unwrap()
+                            .retain(|n| !id_set.contains(&n.id));
+                        host_d.connections.write().unwrap().retain(|c| {
+                            !id_set.contains(&c.from.node)
+                                && !id_set.contains(&c.to.node)
+                        });
+                        for g in host_d.groups.write().unwrap().iter_mut() {
+                            g.members.retain(|m| !id_set.contains(m));
+                        }
+                        for id in &delete_ids {
+                            editor_d.remove_node(id);
+                        }
+                        editor_d.clear_selection();
+                        if let Some(h) = slot_d.lock().unwrap().as_ref() {
+                            h.close();
+                        }
+                        tracing::info!(
+                            "deleted {} nodes via multi-select toolbar",
+                            delete_ids.len()
+                        );
+                    }),
+            )
+        })
+        .show();
+
+    // Stash the handle so action callbacks can close it.
+    *handle_slot.lock().unwrap() = Some(handle);
+
+    // Register click-outside dismissal — overlay closes the moment
+    // the next mouse-down lands outside any element with id
+    // == toolbar_id (the chrome rect). Mirrors cn::popover's
+    // pattern; without this only Escape would dismiss.
+    let handle_for_outside = handle;
+    click_outside::register_click_outside(
+        &click_outside_key,
+        &toolbar_id,
+        move || {
+            handle_for_outside.close();
+        },
+    );
+}
+
 /// React to one [`EditorEvent`] by patching `host` and pushing the
 /// matching granular command back at the editor. Centralises the
 /// host-as-driver flow described in the roadmap.
@@ -435,9 +608,63 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
                 );
             }
         }
+        EditorEvent::ToggleCollapseRequested(req) => {
+            // Apply directly — collapse/expand is a benign visual
+            // toggle, no destructive intent. Host mirrors via the
+            // editor's granular command so the renderer's slot
+            // cache invalidates.
+            if let Some(g) = host
+                .groups
+                .write()
+                .unwrap()
+                .iter_mut()
+                .find(|g| g.id == req.group)
+            {
+                g.is_collapsed = req.collapsed;
+            }
+            editor.set_group_collapsed(&req.group, req.collapsed);
+        }
+        EditorEvent::DeleteGroupRequested(req) => {
+            let editor_for_confirm = editor.clone();
+            let host_for_confirm = host.clone();
+            let group_id = req.group.clone();
+            let name = host
+                .groups
+                .read()
+                .unwrap()
+                .iter()
+                .find(|g| g.id == group_id)
+                .map(|g| g.name.clone())
+                .unwrap_or_else(|| group_id.as_str().to_string());
+            blinc_cn::dialog()
+                .title(format!("Delete group \"{name}\"?"))
+                .description("The grouping is removed; member nodes and connections stay.")
+                .confirm_text("Delete")
+                .cancel_text("Cancel")
+                .confirm_destructive(true)
+                .on_confirm(move || {
+                    host_for_confirm
+                        .groups
+                        .write()
+                        .unwrap()
+                        .retain(|g| g.id != group_id);
+                    editor_for_confirm.remove_group(&group_id);
+                    tracing::info!("deleted group {}", group_id.as_str());
+                })
+                .show();
+        }
+        EditorEvent::MultiSelectionSettled {
+            node_ids,
+            anchor_screen,
+        } => {
+            open_multi_select_toolbar(editor, host, node_ids, anchor_screen);
+        }
+        EditorEvent::SelectionCleared => {
+            // Demo doesn't need to do anything — click-outside on
+            // the overlay already dismisses it. Real hosts might
+            // close inspector panels or update breadcrumbs here.
+        }
         EditorEvent::CreateGroupRequested(_)
-        | EditorEvent::ToggleCollapseRequested(_)
-        | EditorEvent::DeleteGroupRequested(_)
         | EditorEvent::EdgeClicked { .. }
         | EditorEvent::NodeClicked { .. }
         | EditorEvent::LayoutApplied(_) => {

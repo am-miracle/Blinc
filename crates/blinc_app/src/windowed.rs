@@ -4737,6 +4737,31 @@ impl WindowedApp {
                                         ..Default::default()
                                     });
                                 }
+                                InputEvent::ModifiersChanged(mods) => {
+                                    // Authoritative modifier-state
+                                    // update from the platform layer
+                                    // (winit's ModifiersChanged). Some
+                                    // backends don't fire KeyboardInput
+                                    // for the modifier keys themselves
+                                    // when focus is on a non-text
+                                    // element (e.g. an open overlay /
+                                    // popover) — without this update
+                                    // path the cache would latch at
+                                    // `shift: true` after a Shift +
+                                    // marquee gesture even after the
+                                    // user lifted Shift.
+                                    if ws.cached_modifiers != mods {
+                                        tracing::trace!(
+                                            target: "blinc_app::modifiers",
+                                            shift = mods.shift,
+                                            ctrl = mods.ctrl,
+                                            alt = mods.alt,
+                                            meta = mods.meta,
+                                            "cached modifiers updated (ModifiersChanged)"
+                                        );
+                                        ws.cached_modifiers = mods;
+                                    }
+                                }
                             }
 
                             router.clear_event_callback();
