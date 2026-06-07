@@ -208,3 +208,23 @@ blinc_core = { path = "crates/blinc_core" }
 blinc_layout = { path = "crates/blinc_layout" }
 blinc_platform = { path = "crates/blinc_platform" }
 blinc_gpu = { path = "crates/blinc_gpu" }
+# blinc_theme is patched too — downstream `/packages/` crates pin
+# `blinc_theme` at a git rev that predates the `ShapeTokens` + shadow-
+# stack work. Without this entry the path-dep'd downstream gets the
+# stale git copy and rejects calls into the new API surface.
+blinc_theme = { path = "crates/blinc_theme" }
+# blinc_svg patched too — downstream packages pull it transitively
+# for SvgDocument / Path conversion; without this they'd resolve to
+# the pinned git rev.
+blinc_svg = { path = "crates/blinc_svg" }
+
+# Patch the sibling downstream `blinc_canvas_kit` git URL to the
+# local `packages/blinc_canvas_kit` copy. Without this entry, the
+# example crate's git dep on canvas_kit (at a pinned rev) and the
+# path-dep that `/packages/blinc_node_editor` uses end up as two
+# different in-graph copies — `editor.element()` returns one
+# version's `Div` while the example imports the other's, and the
+# types refuse to unify. Cargo only applies the patch when the
+# path target exists, so CI builds without `/packages/` skip it.
+[patch."https://github.com/project-blinc/blinc_canvas_kit.git"]
+blinc_canvas_kit = { path = "packages/blinc_canvas_kit" }

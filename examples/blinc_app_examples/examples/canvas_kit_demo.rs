@@ -143,7 +143,9 @@ fn header_bar() -> Div {
 
 fn builder_demo_panel() -> Div {
     let mut kit = CanvasKit::new("builder_demo");
-    kit.set_background(CanvasBackground::dots().with_zoom_adaptive(0.3, 5));
+    kit.set_background(
+        CanvasBackground::dots(Color::rgba(0.25, 0.25, 0.3, 0.5)).with_zoom_adaptive(0.3, 5),
+    );
 
     // Persistent node positions — [[x, y, w, h]; NODE_COUNT]
     let bctx = BlincContextState::get();
@@ -219,7 +221,7 @@ fn builder_demo_panel() -> Div {
 fn handler_demo_panel() -> Div {
     let mut kit = CanvasKit::new("handler_demo");
     kit.set_background(
-        CanvasBackground::grid()
+        CanvasBackground::grid(Color::rgba(0.25, 0.25, 0.3, 0.3))
             .with_spacing(40.0)
             .with_zoom_adaptive(0.3, 5),
     );
