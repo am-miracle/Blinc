@@ -324,12 +324,31 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
             // mid-drag — no need to re-push here. Host state is now in
             // sync for the next save/snapshot.
         }
+        EditorEvent::DeleteConnectionRequested(id) => {
+            // Confirm via a cn alert-dialog before pulling the edge
+            // out of host state. Clones move into the on_confirm
+            // closure so the dialog can fire its callback after the
+            // event-handling call returns.
+            let editor_for_confirm = editor.clone();
+            let host_for_confirm = host.clone();
+            blinc_cn::dialog()
+                .title("Delete connection?")
+                .description("This will remove the edge from the graph. The connected nodes stay in place.")
+                .confirm_text("Delete")
+                .cancel_text("Cancel")
+                .confirm_destructive(true)
+                .on_confirm(move || {
+                    host_for_confirm.connections.write().unwrap().retain(|c| c.id != id);
+                    editor_for_confirm.remove_connection(id);
+                    tracing::info!("deleted connection {}", id.0);
+                })
+                .show();
+        }
         EditorEvent::CreateGroupRequested(_)
         | EditorEvent::AddToGroupRequested(_)
         | EditorEvent::RemoveFromGroupRequested(_)
         | EditorEvent::ToggleCollapseRequested(_)
         | EditorEvent::DeleteGroupRequested(_)
-        | EditorEvent::DeleteConnectionRequested(_)
         | EditorEvent::EdgeClicked { .. }
         | EditorEvent::NodeClicked { .. }
         | EditorEvent::LayoutApplied(_) => {
