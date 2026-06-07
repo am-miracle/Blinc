@@ -913,8 +913,33 @@ fn sample_gradient_stops(stops: &[blinc_core::GradientStop], t: f32) -> Color {
     stops[last].color
 }
 
-/// Tessellate a path for filling
+/// Default tessellation tolerance (path-space pixels). At identity
+/// transform on a 2× retina this puts polyline-vs-curve deviation
+/// below human perception. Callers rendering at a non-identity scale
+/// (canvas zoom, CSS `transform: scale()`, magnification) should
+/// pre-divide by their uniform scale and use
+/// [`tessellate_fill_with_tolerance`] / [`tessellate_stroke_with_tolerance`]
+/// so the SCREEN-SPACE deviation stays under one pixel — otherwise
+/// curves visibly polygonalise at high zoom.
+pub const DEFAULT_TESSELLATION_TOLERANCE: f32 = 0.2;
+
+/// Tessellate a path for filling at the default tolerance.
 pub fn tessellate_fill(path: &Path, brush: &Brush) -> TessellatedPath {
+    tessellate_fill_with_tolerance(path, brush, DEFAULT_TESSELLATION_TOLERANCE)
+}
+
+/// Tessellate a path for filling at an explicit tolerance.
+///
+/// `tolerance` is the maximum allowed distance (in path-space units)
+/// between the true curve and its flattened polyline. Lower values
+/// give smoother curves at the cost of more triangles. Pass
+/// `DEFAULT_TESSELLATION_TOLERANCE / uniform_scale` for scale-aware
+/// tessellation that keeps screen-space deviation roughly constant.
+pub fn tessellate_fill_with_tolerance(
+    path: &Path,
+    brush: &Brush,
+    tolerance: f32,
+) -> TessellatedPath {
     let events = path_to_lyon_events(path);
 
     if events.is_empty() {
@@ -925,14 +950,6 @@ pub fn tessellate_fill(path: &Path, brush: &Brush) -> TessellatedPath {
     let (min_x, min_y, max_x, max_y) = compute_path_bounds(path);
     let bounds_width = (max_x - min_x).max(1.0);
     let bounds_height = (max_y - min_y).max(1.0);
-    // Normalize gradient params from path-space to the object-bounding-box
-    // space the shader compares against `in.uv`. Without this, `uv - center`
-    // mixes a [0,1] UV with raw path coords, `t` lands near zero everywhere,
-    // and a multi-stop gradient collapses to its first stop — the "solid
-    // disc instead of soft halo" symptom visible in Dark Mode Button's
-    // Flair layer. Linear: both endpoints shift to OBB; radial: centre
-    // shifts and the single radius splits into per-axis (rx, ry) so
-    // non-square bounds keep the gradient circular in path-space.
     let gradient_params = normalize_gradient_params_to_obb(
         gradient_type,
         raw_gradient_params,
@@ -942,20 +959,14 @@ pub fn tessellate_fill(path: &Path, brush: &Brush) -> TessellatedPath {
         bounds_height,
     );
 
-    // Build edge segments for anti-aliasing edge distance computation
-    // Use same tolerance as tessellation for accurate edge distances
-    let edges = PathEdges::from_path(path, 0.2);
+    // Edges share the same tolerance as the tessellator so the
+    // edge-distance shader path tracks the actual polyline.
+    let edges = PathEdges::from_path(path, tolerance);
 
     let mut geometry: VertexBuffers<PathVertex, u32> = VertexBuffers::new();
     let mut tessellator = FillTessellator::new();
 
-    // Tolerance is the max distance (in source pixels) between the
-    // true curve and its flattened polyline. 0.2 keeps curves visually
-    // smooth on 2× retina (≈ 0.4 screen-px deviation — below the
-    // perceptibility threshold) while staying ~5× coarser than the
-    // old 0.025 default, which used to explode triangle counts on
-    // curve-heavy paths.
-    let mut options = FillOptions::default().with_tolerance(0.2);
+    let mut options = FillOptions::default().with_tolerance(tolerance);
     // Debug toggle: `BLINC_FILL_RULE_EVENODD=1` switches from the
     // Lottie-default non-zero rule to even-odd. Useful for diagnosing
     // authored self-intersecting shapes (e.g. Dark Mode Button's
@@ -1006,8 +1017,22 @@ pub fn tessellate_fill(path: &Path, brush: &Brush) -> TessellatedPath {
     }
 }
 
-/// Tessellate a path for stroking
+/// Tessellate a path for stroking at the default tolerance.
 pub fn tessellate_stroke(path: &Path, stroke: &Stroke, brush: &Brush) -> TessellatedPath {
+    tessellate_stroke_with_tolerance(path, stroke, brush, DEFAULT_TESSELLATION_TOLERANCE)
+}
+
+/// Tessellate a path for stroking at an explicit tolerance.
+///
+/// See [`tessellate_fill_with_tolerance`] for the scale-aware
+/// pattern callers should use to keep curve smoothness consistent
+/// under transform scale (canvas zoom, CSS `transform: scale()`).
+pub fn tessellate_stroke_with_tolerance(
+    path: &Path,
+    stroke: &Stroke,
+    brush: &Brush,
+    tolerance: f32,
+) -> TessellatedPath {
     let events = path_to_lyon_events(path);
 
     if events.is_empty() {
@@ -1032,10 +1057,9 @@ pub fn tessellate_stroke(path: &Path, stroke: &Stroke, brush: &Brush) -> Tessell
 
     let half_width = stroke.width * 0.5;
 
-    // See `tessellate_fill` for the rationale on 0.2 tolerance.
     let mut options = StrokeOptions::default()
         .with_line_width(stroke.width)
-        .with_tolerance(0.2);
+        .with_tolerance(tolerance);
 
     // Convert line cap
     options = options.with_line_cap(match stroke.cap {

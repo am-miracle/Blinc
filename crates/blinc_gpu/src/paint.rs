@@ -49,7 +49,10 @@ use blinc_core::{
     SdfBuilder, Shadow, ShapeId, Size, Stroke, TextStyle, Transform,
 };
 
-use crate::path::{extract_brush_info, tessellate_fill, tessellate_stroke};
+use crate::path::{
+    extract_brush_info, tessellate_fill_with_tolerance, tessellate_stroke_with_tolerance,
+    DEFAULT_TESSELLATION_TOLERANCE,
+};
 use crate::primitives::{
     ClipType, FillType, GlassType, GpuGlassPrimitive, GpuPrimitive, PrimitiveBatch, PrimitiveType,
     Sdf3DUniform, Viewport3D,
@@ -699,6 +702,28 @@ impl<'a> GpuPaintContext<'a> {
         let det = a * d - b * c;
         det.abs().sqrt().max(1e-6)
     }
+}
+
+/// Scale-aware tessellation tolerance.
+///
+/// The path tessellators flatten curves with a tolerance measured
+/// in path-space units. When the path is later drawn at a larger
+/// transform scale (canvas zoom, CSS `transform: scale()`, DPI
+/// scale), one path-unit of tolerance becomes `scale` screen-pixel
+/// units of deviation — at large zoom, polylines visibly
+/// polygonalise. Dividing the default tolerance by `scale` keeps
+/// the screen-space deviation roughly constant ≈ 0.2 px regardless
+/// of zoom level. The cost is more triangles when zoomed in, which
+/// is exactly the trade you want for crisp curves.
+fn scale_aware_tolerance(scale: f32) -> f32 {
+    (DEFAULT_TESSELLATION_TOLERANCE / scale.max(1e-3)).max(0.005)
+}
+
+impl<'a> GpuPaintContext<'a> {
+    // Stub impl block to keep the original `impl` open below — the
+    // helper above had to live at module scope so it can be called
+    // from `fill_path` / `stroke_path` without the borrow checker
+    // tripping on `&mut self.batch` simultaneous with `&self`.
 
     /// Transform a rect by the current transform (rotation+skew safe)
     ///
@@ -2258,7 +2283,8 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         // "brown face / purple BG / seeker invisible" symptom on
         // the interactive_volume scene.
         if matches!(brush, Brush::Solid(_) | Brush::Gradient(_)) {
-            let mut tessellated = tessellate_fill(path, &brush);
+            let tess_tolerance = scale_aware_tolerance(self.current_uniform_scale());
+            let mut tessellated = tessellate_fill_with_tolerance(path, &brush, tess_tolerance);
             let affine = self.current_affine();
             // Pre-sample per-vertex colours for multi-stop gradients
             // BEFORE the affine transform — gradient stops are
@@ -2301,7 +2327,8 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         // the path pipeline handles them today.
         let brush_info = extract_brush_info(&brush);
 
-        let mut tessellated = tessellate_fill(path, &brush);
+        let tess_tolerance = scale_aware_tolerance(self.current_uniform_scale());
+            let mut tessellated = tessellate_fill_with_tolerance(path, &brush, tess_tolerance);
 
         let affine = self.current_affine();
         for vertex in &mut tessellated.vertices {
@@ -2346,7 +2373,8 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         // submission order lines up with text. See `fill_path` for
         // the rationale.
         if matches!(brush, Brush::Solid(_) | Brush::Gradient(_)) {
-            let mut tessellated = tessellate_stroke(path, stroke, &brush);
+            let tess_tolerance = scale_aware_tolerance(self.current_uniform_scale());
+            let mut tessellated = tessellate_stroke_with_tolerance(path, stroke, &brush, tess_tolerance);
             let affine = self.current_affine();
             let per_vertex_colors = Self::sample_per_vertex_gradient(&tessellated, &brush);
             for vertex in &mut tessellated.vertices {
@@ -2375,7 +2403,8 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
 
         let brush_info = extract_brush_info(&brush);
 
-        let mut tessellated = tessellate_stroke(path, stroke, &brush);
+        let tess_tolerance = scale_aware_tolerance(self.current_uniform_scale());
+            let mut tessellated = tessellate_stroke_with_tolerance(path, stroke, &brush, tess_tolerance);
 
         let affine = self.current_affine();
         for vertex in &mut tessellated.vertices {
