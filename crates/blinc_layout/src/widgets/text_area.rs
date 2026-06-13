@@ -1479,6 +1479,53 @@ pub fn text_area_state_with_placeholder(placeholder: impl Into<String>) -> Share
     Arc::new(Mutex::new(TextAreaState::with_placeholder(placeholder)))
 }
 
+/// Programmatically focus a text_area by its shared state handle.
+///
+/// Mirrors [`crate::widgets::text_input::focus_text_input`]: sets the
+/// widget's visual state to `Focused`, marks it as the active focus
+/// target for keyboard / IME / cursor-blink machinery, blurs any
+/// previously-focused text_input or text_area, and increments the
+/// soft-keyboard refcount. Use from a parent widget's open-handler
+/// when an embedded text area should grab focus on appearance (e.g.
+/// an inline editor popover that should land cursor-ready).
+///
+/// Safe to call BEFORE the matching [`TextArea`] is constructed: when
+/// the widget's [`Self::new`] runs it reads `state.visual` and seeds
+/// the inner `Stateful` with that value, so a pre-set `Focused`
+/// initialises the FSM in `Focused` directly — avoids a mid-frame
+/// Idle→Focused transition that would otherwise cascade a tree
+/// rebuild while the parent overlay is opening (the same flicker
+/// motivation as [`text_input::focus_text_input`]).
+pub fn focus_text_area(state: &SharedTextAreaState) {
+    use crate::widgets::text_input::{increment_focus_count, set_focused_text_area};
+    use blinc_core::events::event_types;
+    if let Ok(mut s) = state.lock() {
+        if !s.visual.is_focused() {
+            if let Some(new_state) = s.visual.on_event(event_types::FOCUS) {
+                s.visual = new_state;
+            } else {
+                s.visual = TextFieldState::Focused;
+            }
+            s.focus_time_ms = crate::widgets::text_input::elapsed_ms();
+            s.reset_cursor_blink();
+            increment_focus_count();
+            // Bump the stateful inner so its on_state callback re-runs
+            // with the new visual state — without this the focus
+            // border / bg colour don't reflect the change until the
+            // next event. Skipped when no stateful exists yet (the
+            // caller focused before constructing the widget — handled
+            // by TextArea::new's initial-visual read instead).
+            if let Some(ref stateful) = s.stateful_state {
+                if let Ok(mut shared) = stateful.lock() {
+                    shared.needs_visual_update = true;
+                }
+            }
+        }
+    }
+    set_focused_text_area(state);
+    crate::stateful::request_redraw();
+}
+
 /// Ready-to-use text area element
 ///
 /// Uses FSM-driven state management via `Stateful<TextFieldState>` for visual states
