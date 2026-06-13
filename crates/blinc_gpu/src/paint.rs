@@ -2441,6 +2441,86 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
     }
 
     fn fill_rect(&mut self, rect: Rect, corner_radius: CornerRadius, brush: Brush) {
+        // Diagnostic for the recurring bg-split-in-half artefact.
+        // Set BLINC_DEBUG_FILL_RECT=1 to print every UNIQUE solid /
+        // gradient fill (deduplicated by bounds + brush bits across
+        // every frame). With dedup, opening an affected widget adds
+        // a small number of lines to the log — what we want to see
+        // is whether the bug correlates with two fills at the SAME
+        // bounds with different colors (stacked paint) or a single
+        // gradient brush sneaking through. The dump includes
+        // clip_bounds / clip_type / clip_radius captured at emit
+        // time so we can see whether the active clip stack is
+        // truncating the primitive to half-height in the affected
+        // (canvas-underneath) configurations.
+        if matches!(std::env::var("BLINC_DEBUG_FILL_RECT").as_deref(), Ok("1")) {
+            use std::sync::{Mutex, OnceLock};
+            static SEEN: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+            let seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+            // Cheap stable hash of (bounds, color) → u64. We bit-cast
+            // the floats so any change in any field produces a
+            // different hash.
+            let hash_key = |bits: &[u32]| -> u64 {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                bits.hash(&mut h);
+                h.finish()
+            };
+            let (cb, cr, _ccs, ct) = self.get_clip_data();
+            let ct_name = match ct {
+                ClipType::None => "none",
+                ClipType::Rect => "rect",
+                ClipType::Circle => "circle",
+                ClipType::Ellipse => "ellipse",
+                ClipType::Polygon => "polygon",
+            };
+            match &brush {
+                Brush::Solid(c) => {
+                    let key = hash_key(&[
+                        rect.x().to_bits(),
+                        rect.y().to_bits(),
+                        rect.width().to_bits(),
+                        rect.height().to_bits(),
+                        c.r.to_bits(),
+                        c.g.to_bits(),
+                        c.b.to_bits(),
+                        c.a.to_bits(),
+                    ]);
+                    if seen.lock().unwrap().insert(key) {
+                        eprintln!(
+                            "[fill_rect#{:x}] solid bounds=({:.1},{:.1},{:.1},{:.1}) color=({:.3},{:.3},{:.3},{:.3}) cr=({:.1},{:.1},{:.1},{:.1}) clip={}({:.1},{:.1},{:.1},{:.1}) clip_r=({:.1},{:.1},{:.1},{:.1}) fg={}",
+                            key & 0xFFFF,
+                            rect.x(), rect.y(), rect.width(), rect.height(),
+                            c.r, c.g, c.b, c.a,
+                            corner_radius.top_left, corner_radius.top_right,
+                            corner_radius.bottom_right, corner_radius.bottom_left,
+                            ct_name, cb[0], cb[1], cb[2], cb[3],
+                            cr[0], cr[1], cr[2], cr[3],
+                            self.is_foreground,
+                        );
+                    }
+                }
+                Brush::Gradient(_) => {
+                    let key = hash_key(&[
+                        rect.x().to_bits(),
+                        rect.y().to_bits(),
+                        rect.width().to_bits(),
+                        rect.height().to_bits(),
+                        0x6E61_7472, // tag bytes so gradient + same bounds don't dedup
+                    ]);
+                    if seen.lock().unwrap().insert(key) {
+                        eprintln!(
+                            "[fill_rect#{:x}] GRADIENT bounds=({:.1},{:.1},{:.1},{:.1}) clip={}({:.1},{:.1},{:.1},{:.1})",
+                            key & 0xFFFF,
+                            rect.x(), rect.y(), rect.width(), rect.height(),
+                            ct_name, cb[0], cb[1], cb[2], cb[3],
+                        );
+                    }
+                }
+                Brush::Blur(_) | Brush::Image(_) | Brush::Glass(_) => {}
+            }
+        }
         let transformed = self.transform_rect(rect);
         let scaled_radius = self.scale_corner_radius(corner_radius);
 
@@ -2690,6 +2770,46 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         } else {
             self.active_batch_mut().push(primitive);
         }
+
+        // Visible companion to the BLINC_DEBUG_FILL_RECT log: when
+        // enabled, paint a thin coloured outline around every fill.
+        // The outline colour is derived from the same per-frame hash
+        // we'd otherwise log, so two stacked fills at the same
+        // bounds with the same brush get the SAME outline colour
+        // (visually overdrawn — looks normal) while two fills with
+        // DIFFERENT colour or geometry get DIFFERENT outline
+        // colours, immediately surfacing the bug visually.
+        // Self-recursion is safe because `stroke_rect` doesn't call
+        // back into `fill_rect`.
+        if matches!(std::env::var("BLINC_DEBUG_FILL_RECT").as_deref(), Ok("1"))
+            && !matches!(&brush, Brush::Blur(_) | Brush::Image(_) | Brush::Glass(_))
+        {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            rect.x().to_bits().hash(&mut h);
+            rect.y().to_bits().hash(&mut h);
+            rect.width().to_bits().hash(&mut h);
+            rect.height().to_bits().hash(&mut h);
+            if let Brush::Solid(c) = &brush {
+                c.r.to_bits().hash(&mut h);
+                c.g.to_bits().hash(&mut h);
+                c.b.to_bits().hash(&mut h);
+                c.a.to_bits().hash(&mut h);
+            }
+            let hue = (h.finish() & 0xFFFF) as f32 / 65536.0;
+            // Pleasant saturated outline regardless of underlying
+            // bg: 6-segment hue wheel, full saturation.
+            let (r, g, b) = match (hue * 6.0) as u32 {
+                0 => (1.0, hue * 6.0, 0.0),
+                1 => (2.0 - hue * 6.0, 1.0, 0.0),
+                2 => (0.0, 1.0, hue * 6.0 - 2.0),
+                3 => (0.0, 4.0 - hue * 6.0, 1.0),
+                4 => (hue * 6.0 - 4.0, 0.0, 1.0),
+                _ => (1.0, 0.0, 6.0 - hue * 6.0),
+            };
+            let outline = Color::rgba(r, g, b, 0.95);
+            self.stroke_rect(rect, corner_radius, &Stroke::new(1.0), Brush::Solid(outline));
+        }
     }
 
     fn fill_notch(
@@ -2929,6 +3049,51 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let scaled_radius = self.scale_corner_radius(corner_radius);
         let (color, _color2, gradient_params, fill_type) = self.brush_to_colors(&brush);
         let (clip_bounds, clip_radius, clip_corner_shape, clip_type) = self.get_clip_data();
+
+        // Mirror BLINC_DEBUG_FILL_RECT for stroke_rect — CSS outlines
+        // (focus rings) emit through this path, and the bg-split-in-
+        // half symptom catches the focused outline too, so the dump
+        // has to see both fills and strokes to triangulate which
+        // ancestor clip is truncating the visible rect.
+        if matches!(std::env::var("BLINC_DEBUG_FILL_RECT").as_deref(), Ok("1")) {
+            use std::sync::{Mutex, OnceLock};
+            static SEEN: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+            let seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            rect.x().to_bits().hash(&mut h);
+            rect.y().to_bits().hash(&mut h);
+            rect.width().to_bits().hash(&mut h);
+            rect.height().to_bits().hash(&mut h);
+            stroke.width.to_bits().hash(&mut h);
+            color[0].to_bits().hash(&mut h);
+            color[1].to_bits().hash(&mut h);
+            color[2].to_bits().hash(&mut h);
+            color[3].to_bits().hash(&mut h);
+            let key = h.finish();
+            if seen.lock().unwrap().insert(key) {
+                let ct_name = match clip_type {
+                    ClipType::None => "none",
+                    ClipType::Rect => "rect",
+                    ClipType::Circle => "circle",
+                    ClipType::Ellipse => "ellipse",
+                    ClipType::Polygon => "polygon",
+                };
+                eprintln!(
+                    "[stroke_rect#{:x}] bounds=({:.1},{:.1},{:.1},{:.1}) w={:.1} color=({:.3},{:.3},{:.3},{:.3}) cr=({:.1},{:.1},{:.1},{:.1}) clip={}({:.1},{:.1},{:.1},{:.1}) clip_r=({:.1},{:.1},{:.1},{:.1}) fg={}",
+                    key & 0xFFFF,
+                    rect.x(), rect.y(), rect.width(), rect.height(),
+                    stroke.width,
+                    color[0], color[1], color[2], color[3],
+                    corner_radius.top_left, corner_radius.top_right,
+                    corner_radius.bottom_right, corner_radius.bottom_left,
+                    ct_name, clip_bounds[0], clip_bounds[1], clip_bounds[2], clip_bounds[3],
+                    clip_radius[0], clip_radius[1], clip_radius[2], clip_radius[3],
+                    self.is_foreground,
+                );
+            }
+        }
 
         // Scale border width by the current transform's uniform scale (DPI + CSS transforms)
         let scaled_border_width = stroke.width * self.current_uniform_scale();
