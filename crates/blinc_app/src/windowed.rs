@@ -6357,40 +6357,20 @@ impl WindowedApp {
                                         || t.has_active_layout_animations()
                                         || t.has_active_flip_animations()
                                 });
-                                // Block the fast path while an overlay /
-                                // toast is structurally changing or animating.
+                                // Phase 3 transition: when the new OverlayStack
+                                // or ToastTray is dirty / has live entries / is
+                                // animating, the fast-path's cached UI doesn't
+                                // include the new layer's content. Force slow
+                                // path so `build_overlay_layer` runs and the
+                                // stack's entries land in the rendered tree.
                                 //
-                                //  - `is_dirty()`: a new entry was just pushed
-                                //    (or the layer was rebuilt). The cached
-                                //    bg-batch from the previous frame doesn't
-                                //    include the new layer content yet, so we
-                                //    need a full slow-walker pass to repopulate
-                                //    the static cache.
-                                //  - `has_animating_overlays()` / `has_animating()`:
-                                //    motion springs are still ticking. Animation
-                                //    state is per-frame; the cached batch would
-                                //    freeze at the moment the spring last
-                                //    crossed a frame boundary, so we walk every
-                                //    frame to re-emit primitives at the current
-                                //    spring state.
-                                //
-                                // Settled, idle overlays do NOT block fast
-                                // path. Pre-fix this branch also OR-d
-                                // `has_visible_overlays()` / `!t.is_empty()`,
-                                // which forced slow walker every frame for the
-                                // entire duration any overlay was open. Combined
-                                // with the cursor-blink continuous_redraw an
-                                // auto-focused input emits, that's a slow-walker
-                                // pass per vsync from the moment a popover with
-                                // an input appears until it closes — visible as
-                                // "canvas re-paints in a rapid zoom-flicker" on
-                                // a canvas-backed host (node_editor_demo) because
-                                // each pass re-bakes the static cache and re-
-                                // collects the canvas overlay back-to-back.
-                                // `is_dirty()` + `has_animating_overlays()` cover
-                                // the real correctness needs (cache-stale-after-
-                                // push, motion-needs-re-emit); the visible-only
-                                // case is now allowed to fast-path.
+                                // (Discovered while migrating tooltip: the
+                                // tooltip pushed to the stack and on_close
+                                // fired ~30ms later, but `build_overlay_layer`
+                                // was never called between because fast-path
+                                // frames bypassed the UI build entirely. Same
+                                // root cause as the tree expand race that this
+                                // gate also guards against.)
                                 let new_overlay_active = {
                                     use blinc_layout::overlay_state::{
                                         overlay_stack, toast_tray,
@@ -6399,12 +6379,13 @@ impl WindowedApp {
                                         .lock()
                                         .map(|s| {
                                             s.is_dirty()
+                                                || s.has_visible_overlays()
                                                 || s.has_animating_overlays()
                                         })
                                         .unwrap_or(false);
                                     let t = toast_tray()
                                         .lock()
-                                        .map(|t| t.is_dirty() || t.has_animating())
+                                        .map(|t| t.is_dirty() || !t.is_empty() || t.has_animating())
                                         .unwrap_or(false);
                                     s || t
                                 };
@@ -6681,17 +6662,7 @@ impl WindowedApp {
                                 "redraw chain"
                             );
 
-                            // External animation tick — set by code that
-                            // drives its own per-frame work outside the
-                            // scheduler / motion / stateful registries
-                            // (canvas-closure animations like the node
-                            // editor's edge-state shimmer). Take-and-clear
-                            // so the source closure must re-request next
-                            // frame; that way the chain stops cleanly the
-                            // moment the source goes quiet.
-                            let external_anim_tick = blinc_layout::take_animation_tick_request();
                             let any_redraw_signal = needs_animation_redraw
-                                || external_anim_tick
                                 || needs_cursor_redraw
                                 || needs_motion_redraw
                                 || scroll_animating
