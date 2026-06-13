@@ -365,7 +365,6 @@ impl OverlayStack {
     /// this, a static FSM-poll race could leave the loop sleeping mid-flight.
     pub fn push(&mut self, entry: OverlayEntry) -> OverlayHandle {
         let handle = entry.handle;
-        let has_enter_motion = entry.motion_enter.is_some();
         tracing::trace!(
             target: "blinc_layout::overlay_stack",
             "push: handle={} kind={:?} motion_key={} stack_len={}->{}",
@@ -380,18 +379,8 @@ impl OverlayStack {
         self.animation_dirty.store(true, Ordering::Release);
         // Cover the typical enter-motion duration so the redraw chain stays
         // alive even if the FSM-poll race briefly reports the motion as
-        // settled (or NotFound) mid-flight. Only extended when this overlay
-        // ACTUALLY carries an enter motion — for plain popovers (no
-        // motion_enter), keeping the window open burned ~1.2 s of slow-
-        // walker frames per open while `has_animating_overlays()` reported
-        // animating purely off the time defence, even though nothing was
-        // animating. The compositor fast path could then never re-engage
-        // for the first second of every popover, and a focused cn::input
-        // riding continuous_redraw saw a slow walker every vsync — visible
-        // as a 1-second rapid "zoom" flicker on canvas-backed hosts.
-        if has_enter_motion {
-            self.extend_redraw_window(1_200);
-        }
+        // settled (or NotFound) mid-flight.
+        self.extend_redraw_window(1_200);
         // Wake the windowed runner. The Frame-event gate checks
         // `stateful::peek_needs_redraw()`, so without this flip a push that
         // happens between Frame events (typical from an `on_click`) would
@@ -542,7 +531,6 @@ impl OverlayStack {
         if entry.exiting {
             return;
         }
-        let has_exit_motion = entry.motion_exit.is_some();
         entry.exiting = true;
         entry.pending_close_deadline_ms = None;
         // Trigger the motion exit via the FSM-keyed queue. If the entry has
@@ -557,12 +545,7 @@ impl OverlayStack {
         // motion would only complete on the next mouse-move event.
         self.animation_dirty.store(true, Ordering::Release);
         // Same time-window defence as `push`: cover the typical exit motion.
-        // Gated on the presence of an actual exit motion — see `push` for
-        // why a blanket extension burns slow-walker frames on no-motion
-        // overlays.
-        if has_exit_motion {
-            self.extend_redraw_window(800);
-        }
+        self.extend_redraw_window(800);
         // Wake the runner — see `push` for the rationale.
         crate::stateful::request_redraw();
     }
