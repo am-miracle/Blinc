@@ -1017,6 +1017,19 @@ impl RenderContext {
                 // Splice would shift every subsequent range — bail.
                 return false;
             }
+            // Defensive bounds check: a tree rebuild that landed
+            // between the original record + this fast-path replay
+            // can leave the stored range pointing past the current
+            // batch's primitive count. Without this guard the
+            // indexed write below panicked with `index out of
+            // bounds` (observed when an inline overlay popped open
+            // mid-frame: the overlay-stack growth shrank the
+            // surrounding subtree's primitive set, invalidating
+            // every later canvas record's range). Bail so the
+            // caller re-records from scratch instead.
+            if record.primitive_range.end > batch.primitives.len() {
+                return false;
+            }
             for (i, p) in new_batch.primitives.into_iter().enumerate() {
                 batch.primitives[record.primitive_range.start + i] = p;
             }
@@ -2531,12 +2544,6 @@ impl RenderContext {
     /// blend twice (acceptable for most overlay use; revisit if a
     /// pixel-perfect single-blend variant is needed).
     ///
-    /// aux_data caveat: this dispatch does not re-upload aux_data, so
-    /// foreground primitives that reference aux entries (3D groups,
-    /// polygon clip-paths emitted from a fg-layer element) will read
-    /// from whatever the previous dispatch left in the buffer. Typical
-    /// HUD / minimap / toolbar overlays are simple SDF + text and
-    /// don't reference aux.
     fn render_foreground_overlay(&mut self, target_view: &wgpu::TextureView) {
         let fg_prims = self
             .cached_bg_batch
@@ -2553,6 +2560,26 @@ impl RenderContext {
         }
         self.rebind_glyph_atlas_for_overlay();
         if let Some(prims) = fg_prims {
+            // `composite_frame` ran immediately before this dispatch
+            // and overwrote the GPU's `aux_data` buffer with the
+            // canvas-overlay's `merged_aux` (canvas-overlay aux +
+            // dynamic aux). The foreground primitives we're about to
+            // dispatch carry aux offsets that were computed against
+            // the STATIC batch's `aux_data` — the buffer state from
+            // before composite_frame. Without re-uploading the
+            // static aux_data here, any foreground primitive that
+            // references aux entries (polygon clip-paths, 3D-group
+            // SDF, mesh-triangle offsets — anything routed through
+            // `shift_aux_offsets`) samples garbage indices. Symptom
+            // matches the documented `gotcha_dynamic_batch_aux_data`
+            // bug (cn_demo spinner arcs lost their tail) but on the
+            // foreground-layer dispatch path. Re-upload restores
+            // the index space these primitives were built against.
+            if let Some(batch) = self.cached_bg_batch.as_ref() {
+                if !batch.aux_data.is_empty() {
+                    self.renderer.update_aux_data_for_batch(batch);
+                }
+            }
             self.renderer.render_primitives_overlay(target_view, &prims);
         }
         // Foreground text glyphs go through the dedicated text shader
@@ -2563,6 +2590,54 @@ impl RenderContext {
         if let Some(glyphs) = fg_glyphs {
             self.render_text(target_view, &glyphs);
         }
+    }
+
+    /// Dispatch the OverlayStack / motion-subtree dynamic batch in its own
+    /// SDF pass on top of the previously-composited surface.
+    ///
+    /// Pairs with `composite_frame` to split what was previously one
+    /// merged SDF dispatch into two. Canvas-emitted primitives stay in
+    /// `composite_frame`'s pass, carrying the canvas wrapper's
+    /// `ancestor_clip_aabb` baked at emit time. Dynamic-batch primitives
+    /// (OverlayStack popovers, toolbars, dialog content, motion
+    /// subtrees) ride this pass with their own intrinsic clips (no-clip
+    /// sentinel by default; per-prim `clip_bounds` from any inner
+    /// `overflow_clip` they emit themselves).
+    ///
+    /// Why split? The two batches' primitives were previously
+    /// concatenated into one `Vec` and dispatched in a single sorted SDF
+    /// call. Z-ordering depended on `.stack_layer()` reliably bumping the
+    /// OverlayStack subtree's z above every canvas-emitted primitive —
+    /// any path that injects z >= overlay-stack-z into the canvas batch
+    /// (an inner stack_layer push from canvas-kit, a future change to
+    /// canvas record ordering) silently regresses to canvas overdraw on
+    /// top of the popover, visually a horizontal split where the popover
+    /// crosses the canvas's content edge. Splitting the dispatch makes
+    /// the layering structural rather than z-policy-dependent.
+    ///
+    /// `composite_frame` overwrites the GPU's `aux_data` buffer with
+    /// the canvas overlay's aux array. The dynamic batch carries its
+    /// own aux (polygon-clip vertices, 3D-group ShapeDescs, mesh
+    /// triangles) that primitives reference via `border[2]` /
+    /// `clip_radius[3]` offsets baked relative to its own buffer. Re-
+    /// upload before dispatch so those indices land on the right data;
+    /// mirrors the pattern `render_foreground_overlay` uses.
+    fn dispatch_dynamic_batch_overlay(&mut self, target_view: &wgpu::TextureView) {
+        let Some(dyn_batch) = self.cached_dynamic_batch.as_ref() else {
+            return;
+        };
+        if dyn_batch.primitives.is_empty() {
+            return;
+        }
+        if !dyn_batch.aux_data.is_empty() {
+            self.renderer.update_aux_data_for_batch(dyn_batch);
+        }
+        // Clone the primitive slice out of `cached_dynamic_batch` so the
+        // immutable borrow on `self` ends before the `&mut self` call
+        // on the renderer. Borrow checker only; primitives are POD.
+        let prims = dyn_batch.primitives.clone();
+        self.rebind_glyph_atlas_for_overlay();
+        self.renderer.render_primitives_overlay(target_view, &prims);
     }
 
     /// Shift every `aux_data` index on `prims` by `shift`.
@@ -7408,38 +7483,26 @@ impl RenderContext {
                         }
                     }
                 }
-                // Composite cache + canvas overlay + dynamic batch
-                // to the surface. Same final-blit shape the motion
-                // damage path uses.
-                let mut overlay = self.collect_canvas_overlay(tree, width, height);
+                // Composite cache + canvas overlay onto the surface
+                // (canvas primitives carry their wrapper's
+                // ancestor_clip baked at emit time). The OverlayStack
+                // dynamic batch then rides on top via its own SDF
+                // pass — see dispatch_dynamic_batch_overlay for why
+                // the two are no longer merged into one dispatch.
+                let overlay = self.collect_canvas_overlay(tree, width, height);
                 if !tree.dynamic_regions().is_empty() {
                     let walked =
                         self.collect_dynamic_region_primitives(tree, render_state, width, height);
                     self.cached_dynamic_batch = Some(walked);
                 }
-                let (dyn_prims, dyn_aux) = match self.cached_dynamic_batch.as_ref() {
-                    Some(b) => (b.primitives.as_slice(), b.aux_data.as_slice()),
-                    None => (&[][..], &[][..]),
-                };
-                // Dyn batch primitives carry aux_offsets relative to
-                // `dyn_aux`. Merging into the single buffer
-                // `composite_frame` uploads means appending `dyn_aux`
-                // after `overlay.aux_data` and shifting dyn_prims'
-                // offsets by the overlay's accumulated length.
-                let dyn_aux_shift = overlay.aux_data.len() as f32;
-                let mut shifted_dyn_prims = dyn_prims.to_vec();
-                Self::shift_aux_offsets(&mut shifted_dyn_prims, dyn_aux_shift);
-                let dyn_aux_owned: Vec<[f32; 4]> = dyn_aux.to_vec();
-                overlay.primitives.extend(shifted_dyn_prims);
-                let mut merged_aux = overlay.aux_data;
-                merged_aux.extend(dyn_aux_owned);
                 self.rebind_glyph_atlas_for_overlay();
                 self.renderer.composite_frame(
                     target_view,
                     target_texture,
                     &overlay.primitives,
-                    &merged_aux,
+                    &overlay.aux_data,
                 );
+                self.dispatch_dynamic_batch_overlay(target_view);
                 // Foreground overlay — re-dispatch fg primitives on
                 // top of the canvas overlay so host overlays marked
                 // `RenderLayer::Foreground` win z-order over canvas
@@ -7739,30 +7802,25 @@ impl RenderContext {
                 // Full canvas overlay — drains SDF primitives + raw-
                 // RGBA images (video frames) + 3D meshes from every
                 // canvas closure. composite_frame blits the static
-                // cache + dispatches the SDF prims; we then layer the
-                // dynamic images and meshes onto the same target.
-                let mut overlay = self.collect_canvas_overlay(tree, width, height);
+                // cache + dispatches the canvas SDF prims; we then
+                // layer the dynamic images and meshes onto the same
+                // target.
+                let overlay = self.collect_canvas_overlay(tree, width, height);
                 // Compositor v2: motion-bound subtree primitives go
                 // into a separate `cached_dynamic_batch` (walker
                 // pushed motion subtree depth around them so they
-                // bypassed the static cache). Append them to the
-                // canvas overlay so composite_frame's single encoder
-                // can dispatch both cache blit + canvas SDF +
-                // motion-bound prims in one queue.submit — separate
-                // submits per frame doubled GPU driver overhead in
-                // the mouse-wiggle steady state.
+                // bypassed the static cache).
                 //
                 // The dynamic batch carries its own `aux_data`
                 // (polygon-clip vertices for the spinner arc, 3D
-                // group descriptors, etc.). The GPU's storage buffer
-                // is shared with the static-cache pass, so we forward
-                // the dynamic batch's `aux_data` into `composite_frame`
-                // — without that, primitives whose `clip_radius.w`
-                // indexes the dynamic batch's vertex array would read
-                // stale data uploaded for the static pass and miss
-                // the polygon discard, producing the cn_demo "all
-                // grey rings, no rotating arc" symptom. Borrow the
-                // aux_data slice in place — no per-frame allocation.
+                // group descriptors, etc.). Dispatched in its own
+                // pass via dispatch_dynamic_batch_overlay AFTER the
+                // canvas overlay so OverlayStack content can never
+                // get z-interleaved with canvas content in a single
+                // sorted SDF dispatch — the prior single-merged-
+                // dispatch shape produced a horizontal "split" on
+                // popovers / toolbars / focused inputs straddling the
+                // canvas's content edge in node_editor_demo.
                 //
                 // CSS-only animation frames: per-region re-walk
                 // refreshes every `DynamicRegion`'s primitives at the
@@ -7780,26 +7838,14 @@ impl RenderContext {
                         self.collect_dynamic_region_primitives(tree, render_state, width, height);
                     self.cached_dynamic_batch = Some(walked);
                 }
-                let (dyn_prims, dyn_aux) = match self.cached_dynamic_batch.as_ref() {
-                    Some(b) => (b.primitives.as_slice(), b.aux_data.as_slice()),
-                    None => (&[][..], &[][..]),
-                };
-                // Shift dyn_prims aux_offsets into the merged
-                // buffer (overlay's canvas aux comes first).
-                let dyn_aux_shift = overlay.aux_data.len() as f32;
-                let mut shifted_dyn_prims = dyn_prims.to_vec();
-                Self::shift_aux_offsets(&mut shifted_dyn_prims, dyn_aux_shift);
-                let dyn_aux_owned: Vec<[f32; 4]> = dyn_aux.to_vec();
-                overlay.primitives.extend(shifted_dyn_prims);
-                let mut merged_aux = overlay.aux_data;
-                merged_aux.extend(dyn_aux_owned);
                 self.rebind_glyph_atlas_for_overlay();
                 self.renderer.composite_frame(
                     target_view,
                     target_texture,
                     &overlay.primitives,
-                    &merged_aux,
+                    &overlay.aux_data,
                 );
+                self.dispatch_dynamic_batch_overlay(target_view);
                 // Foreground overlay — re-dispatch fg primitives on
                 // top of the canvas overlay so host overlays marked
                 // `RenderLayer::Foreground` win z-order over canvas
@@ -8059,36 +8105,25 @@ impl RenderContext {
         // mesh content actually reaches the surface in compositor
         // mode (it was dropped on the floor by the
         // primitives-only path).
-        let mut overlay = self.collect_canvas_overlay(tree, width, height);
-        // Compositor v2: append motion-bound subtree primitives to the
-        // canvas overlay so cache blit + canvas SDF + motion-bound
-        // dispatch all share a single command encoder / submit.
-        //
-        // `overlay.aux_data` already carries canvas-emitted entries
-        // (mesh-triangle vertices, polygon-clip vertices, 3D-group
-        // ShapeDescs) with primitive aux_offsets rebased onto the
-        // overlay buffer by `collect_canvas_overlay`. Append the
-        // dynamic batch's aux entries after, shifting the dynamic
-        // batch's primitive offsets up by the overlay length so
-        // they land in the right region of the merged buffer.
-        let dyn_aux_shift = overlay.aux_data.len() as f32;
-        let (dyn_prims_owned, dyn_aux_owned): (Vec<_>, Vec<_>) = self
-            .cached_dynamic_batch
-            .as_ref()
-            .map(|b| (b.primitives.clone(), b.aux_data.clone()))
-            .unwrap_or_default();
-        let mut shifted_dyn_prims = dyn_prims_owned;
-        Self::shift_aux_offsets(&mut shifted_dyn_prims, dyn_aux_shift);
-        overlay.primitives.extend(shifted_dyn_prims);
-        let mut merged_aux = overlay.aux_data;
-        merged_aux.extend(dyn_aux_owned);
+        let overlay = self.collect_canvas_overlay(tree, width, height);
+        // Compositor v2: motion-bound subtree primitives ride in a
+        // SEPARATE SDF pass via dispatch_dynamic_batch_overlay,
+        // mirroring the fast paths above. Splitting the dispatch
+        // keeps canvas-emitted primitives (which carry their wrapper
+        // ancestor_clip baked at emit time) z-isolated from
+        // OverlayStack / motion-subtree primitives — the prior single
+        // merged dispatch let canvas content z-interleave with
+        // popover / toolbar / focused-input bg primitives in
+        // node_editor_demo, producing a horizontal "split" where the
+        // popover crossed the canvas content edge.
         self.rebind_glyph_atlas_for_overlay();
         self.renderer.composite_frame(
             target_view,
             target_texture,
             &overlay.primitives,
-            &merged_aux,
+            &overlay.aux_data,
         );
+        self.dispatch_dynamic_batch_overlay(target_view);
         // Foreground overlay — re-dispatch fg primitives on top of
         // the canvas overlay so host overlays marked
         // `RenderLayer::Foreground` win z-order over canvas content.
