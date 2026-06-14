@@ -2346,62 +2346,158 @@ impl TextArea {
             .relative()
             .overflow_visible();
 
-        // Render selection highlights (behind text, absolutely positioned)
+        // Render selection highlights (behind text, absolutely positioned).
+        // When wrap is enabled AND visual_lines is populated, iterate the
+        // VISUAL lines so a logical line that wrapped onto several visual
+        // lines gets one highlight rectangle per visual line. The legacy
+        // logical-line iteration only painted at `line_idx * line_height`
+        // which is the FIRST visual line for a wrapped logical line —
+        // continuation visual lines below got no highlight even though
+        // their characters were inside the selection range.
         if is_focused {
             if let Some(sel_start) = data.selection_start {
                 let (start, end) = data.order_positions(sel_start, data.cursor);
                 if start != end {
                     let sel_color = config.selection_color;
-                    for line_idx in start.line..=end.line {
-                        if line_idx >= data.lines.len() {
-                            break;
+                    let use_visual_lines =
+                        config.wrap && !data.visual_lines.is_empty();
+                    if use_visual_lines {
+                        for (vl_idx, vl) in data.visual_lines.iter().enumerate() {
+                            // Skip visual lines outside [start.line, end.line].
+                            if vl.logical_line < start.line || vl.logical_line > end.line {
+                                continue;
+                            }
+                            // Selection bounds within THIS logical line.
+                            let logical_line_text = data
+                                .lines
+                                .get(vl.logical_line)
+                                .map(|s| s.as_str())
+                                .unwrap_or("");
+                            let logical_char_count = logical_line_text.chars().count();
+                            let logical_col_start = if vl.logical_line == start.line {
+                                start.column
+                            } else {
+                                0
+                            };
+                            let logical_col_end = if vl.logical_line == end.line {
+                                end.column
+                            } else {
+                                logical_char_count
+                            };
+                            // Intersect with the visual line's char range.
+                            let visual_col_start =
+                                logical_col_start.max(vl.start_char).min(vl.end_char);
+                            let visual_col_end =
+                                logical_col_end.max(vl.start_char).min(vl.end_char);
+                            if visual_col_end <= visual_col_start {
+                                continue;
+                            }
+                            // x_start / x_end are measured RELATIVE to the
+                            // visual line's text (which starts at
+                            // vl.start_char of the logical line), so the
+                            // selection rect aligns with the rendered
+                            // glyphs at this visual line's position.
+                            let vl_prefix_to_start: String = vl
+                                .text
+                                .chars()
+                                .take(visual_col_start - vl.start_char)
+                                .collect();
+                            let vl_prefix_to_end: String = vl
+                                .text
+                                .chars()
+                                .take(visual_col_end - vl.start_char)
+                                .collect();
+                            let x_start = crate::text_measure::measure_text(
+                                &vl_prefix_to_start,
+                                config.font_size,
+                            )
+                            .width;
+                            let x_end = crate::text_measure::measure_text(
+                                &vl_prefix_to_end,
+                                config.font_size,
+                            )
+                            .width;
+                            // Extend past the right edge with a trailing
+                            // sliver when the selection reaches the end of
+                            // a visual line that isn't the final line of
+                            // the selection — gives the "newline / wrap"
+                            // visual cue users expect.
+                            let reaches_end_of_visual =
+                                visual_col_end >= vl.end_char.min(logical_char_count);
+                            let is_final_visual =
+                                vl.logical_line == end.line && visual_col_end == end.column;
+                            let mut width = x_end - x_start;
+                            if reaches_end_of_visual && !is_final_visual {
+                                width += config.font_size * 0.5;
+                            }
+                            if width > 0.0 {
+                                let sel_top = vl_idx as f32 * line_height;
+                                text_content = text_content.child(
+                                    crate::div::div()
+                                        .absolute()
+                                        .left(x_start)
+                                        .top(sel_top)
+                                        .w(width)
+                                        .h(line_height)
+                                        .bg(sel_color)
+                                        .rounded(2.0),
+                                );
+                            }
                         }
-                        let line_text = &data.lines[line_idx];
-                        let line_char_count = line_text.chars().count();
-
-                        let col_start = if line_idx == start.line {
-                            start.column
-                        } else {
-                            0
-                        };
-                        let col_end = if line_idx == end.line {
-                            end.column
-                        } else {
-                            line_char_count
-                        };
-
-                        let x_start = if col_start > 0 {
-                            let before: String = line_text.chars().take(col_start).collect();
-                            crate::text_measure::measure_text(&before, config.font_size).width
-                        } else {
-                            0.0
-                        };
-
-                        let x_end = if col_end > 0 {
-                            let before: String = line_text.chars().take(col_end).collect();
-                            crate::text_measure::measure_text(&before, config.font_size).width
-                        } else {
-                            0.0
-                        };
-
-                        let width = if col_end == line_char_count && line_idx != end.line {
-                            (x_end - x_start) + config.font_size * 0.5
-                        } else {
-                            x_end - x_start
-                        };
-
-                        if width > 0.0 {
-                            let sel_top = line_idx as f32 * line_height;
-                            text_content = text_content.child(
-                                crate::div::div()
-                                    .absolute()
-                                    .left(x_start)
-                                    .top(sel_top)
-                                    .w(width)
-                                    .h(line_height)
-                                    .bg(sel_color)
-                                    .rounded(2.0),
-                            );
+                    } else {
+                        // No-wrap mode (or visual lines not yet computed):
+                        // legacy per-logical-line rendering. Each logical
+                        // line maps to one visual line at index ==
+                        // logical line index, so the legacy y positioning
+                        // is correct.
+                        for line_idx in start.line..=end.line {
+                            if line_idx >= data.lines.len() {
+                                break;
+                            }
+                            let line_text = &data.lines[line_idx];
+                            let line_char_count = line_text.chars().count();
+                            let col_start = if line_idx == start.line {
+                                start.column
+                            } else {
+                                0
+                            };
+                            let col_end = if line_idx == end.line {
+                                end.column
+                            } else {
+                                line_char_count
+                            };
+                            let x_start = if col_start > 0 {
+                                let before: String =
+                                    line_text.chars().take(col_start).collect();
+                                crate::text_measure::measure_text(&before, config.font_size).width
+                            } else {
+                                0.0
+                            };
+                            let x_end = if col_end > 0 {
+                                let before: String =
+                                    line_text.chars().take(col_end).collect();
+                                crate::text_measure::measure_text(&before, config.font_size).width
+                            } else {
+                                0.0
+                            };
+                            let width = if col_end == line_char_count && line_idx != end.line {
+                                (x_end - x_start) + config.font_size * 0.5
+                            } else {
+                                x_end - x_start
+                            };
+                            if width > 0.0 {
+                                let sel_top = line_idx as f32 * line_height;
+                                text_content = text_content.child(
+                                    crate::div::div()
+                                        .absolute()
+                                        .left(x_start)
+                                        .top(sel_top)
+                                        .w(width)
+                                        .h(line_height)
+                                        .bg(sel_color)
+                                        .rounded(2.0),
+                                );
+                            }
                         }
                     }
                 }
