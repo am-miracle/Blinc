@@ -271,6 +271,20 @@ pub struct AnimationScheduler {
     /// Flag to request continuous redraws (e.g., for cursor blink)
     /// When set, the background thread will keep signaling redraws
     continuous_redraw: Arc<AtomicBool>,
+    /// External-animation signal — set by drivers that paint per
+    /// frame via direct time reads (node-editor's running-edge
+    /// pulses, canvas-kit's port pulses, anything that calls
+    /// `blinc_layout::request_animation_tick`). Read by the bg
+    /// thread's cadence decision: when true, treats the system as
+    /// active so the `wants_continuous`-only half-rate downscale
+    /// doesn't fire. Drivers `set_external_anim_active(true)` while
+    /// they want frames and `(false)` when they settle. Decoupled
+    /// from the per-frame request_animation_tick atomic in
+    /// `blinc_layout::stateful` because that one is take-and-clear
+    /// (single-frame scope) — drivers that want sustained cadence
+    /// need a sticky flag the scheduler can sample without
+    /// consuming it.
+    external_anim_active: Arc<AtomicBool>,
     /// Background thread handle (if running)
     thread_handle: Option<JoinHandle<()>>,
     /// Optional callback to wake up the main thread
@@ -322,6 +336,7 @@ impl AnimationScheduler {
             stop_flag: Arc::new(AtomicBool::new(false)),
             needs_redraw: Arc::new(AtomicBool::new(false)),
             continuous_redraw: Arc::new(AtomicBool::new(false)),
+            external_anim_active: Arc::new(AtomicBool::new(false)),
             thread_handle: None,
             wake_callback: None,
             wakeup: Arc::new((Mutex::new(false), Condvar::new())),
@@ -560,6 +575,7 @@ impl AnimationScheduler {
         let stop_flag = Arc::clone(&self.stop_flag);
         let needs_redraw = Arc::clone(&self.needs_redraw);
         let continuous_redraw = Arc::clone(&self.continuous_redraw);
+        let external_anim_active = Arc::clone(&self.external_anim_active);
         let wake_callback = self.wake_callback.clone();
         let wakeup = Arc::clone(&self.wakeup);
         let last_active = Arc::clone(&self.last_active);
@@ -586,13 +602,27 @@ impl AnimationScheduler {
                 let start = Instant::now();
 
                 let wants_continuous = continuous_redraw.load(Ordering::Relaxed);
-                let (has_active, _) = Self::tick_frame_inner(
+                let external_anim = external_anim_active.load(Ordering::Relaxed);
+                let (has_active_inner, _) = Self::tick_frame_inner(
                     &inner,
                     &needs_redraw,
                     wants_continuous,
                     wake_callback.as_ref(),
                     &last_active,
                 );
+                // Treat external animation drivers (node-editor's
+                // running-edge pulse, canvas-kit per-frame canvas
+                // closures, anything that calls
+                // `blinc_layout::set_external_anim_active(true)`) as
+                // contributing to has_active. Without this, the
+                // `!has_active && wants_continuous` half-rate
+                // downscale below dropped every external-driver
+                // animation to target_fps/2 whenever a text input
+                // was focused. Scheduler-internal primitives
+                // (springs/keyframes/timelines/tick_callbacks) drive
+                // the inner check; the external flag is a sticky
+                // bit drivers manage themselves.
+                let has_active = has_active_inner || external_anim;
                 let active = has_active || wants_continuous;
 
                 // Read target_fps BEFORE taking the wakeup lock — `wake_inner`
@@ -810,6 +840,32 @@ impl AnimationScheduler {
         self.continuous_redraw.load(Ordering::Relaxed)
     }
 
+    /// Set the external-animation-active flag.
+    ///
+    /// Drivers that paint per frame via direct time reads
+    /// (node-editor's running-edge pulses, canvas-kit's per-frame
+    /// canvas closures with time-dependent visuals, anything that
+    /// calls `blinc_layout::request_animation_tick`) flip this on
+    /// while they have live animation and off when they settle.
+    ///
+    /// When `true`, the scheduler treats the system as active —
+    /// the `!has_active && wants_continuous` half-rate downscale
+    /// (intended for "cursor-blink-only on an otherwise idle page")
+    /// does NOT fire, so external-driven animations keep their
+    /// configured cadence regardless of whether a text input is
+    /// focused.
+    pub fn set_external_anim_active(&self, active: bool) {
+        self.external_anim_active.store(active, Ordering::Release);
+        if active {
+            Self::wake_inner(&self.wakeup);
+        }
+    }
+
+    /// Check whether the external-anim-active flag is currently set.
+    pub fn is_external_anim_active(&self) -> bool {
+        self.external_anim_active.load(Ordering::Relaxed)
+    }
+
     /// Get a handle to this scheduler for passing to components
     pub fn handle(&self) -> SchedulerHandle {
         SchedulerHandle {
@@ -817,6 +873,7 @@ impl AnimationScheduler {
             needs_redraw: Arc::clone(&self.needs_redraw),
             wakeup: Arc::clone(&self.wakeup),
             wake_callback: self.wake_callback.clone(),
+            external_anim_active: Arc::clone(&self.external_anim_active),
         }
     }
 
@@ -1188,6 +1245,7 @@ impl Clone for AnimationScheduler {
             stop_flag: Arc::clone(&self.stop_flag),
             needs_redraw: Arc::clone(&self.needs_redraw),
             continuous_redraw: Arc::clone(&self.continuous_redraw),
+            external_anim_active: Arc::clone(&self.external_anim_active),
             // Cloned scheduler doesn't own the background thread
             thread_handle: None,
             wake_callback: self.wake_callback.clone(),
@@ -1267,6 +1325,12 @@ pub struct SchedulerHandle {
     /// nothing visible until some unrelated event happens to
     /// schedule a redraw.
     wake_callback: Option<WakeCallback>,
+    /// Shared `external_anim_active` flag with the parent scheduler.
+    /// Drivers that paint per frame via direct time reads flip this
+    /// through the handle so the scheduler's half-rate-on-cursor-blink
+    /// downscale doesn't suppress them. See
+    /// `AnimationScheduler::set_external_anim_active`.
+    external_anim_active: Arc<AtomicBool>,
 }
 
 // SAFETY: Mirrors the wasm-only safety boundary on `AnimationScheduler`.
@@ -1607,6 +1671,18 @@ impl SchedulerHandle {
     /// Check if the scheduler is still alive
     pub fn is_alive(&self) -> bool {
         self.inner.strong_count() > 0
+    }
+
+    /// Set the external-animation-active flag. See
+    /// [`AnimationScheduler::set_external_anim_active`] for the
+    /// rationale. Wakes the bg thread when transitioning to true so
+    /// it picks up the new cadence on the next iteration instead of
+    /// waiting out the prior (possibly half-rate) sleep window.
+    pub fn set_external_anim_active(&self, active: bool) {
+        self.external_anim_active.store(active, Ordering::Release);
+        if active {
+            self.wake();
+        }
     }
 
     // =========================================================================

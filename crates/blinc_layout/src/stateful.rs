@@ -302,6 +302,61 @@ pub fn peek_needs_redraw() -> bool {
     NEEDS_REDRAW.load(Ordering::SeqCst)
 }
 
+/// External-animation tick request. Set by code that drives its own
+/// frame loop (canvas-closure animations, edge state shimmers,
+/// custom render-driven effects) and consumed by the windowed
+/// app's end-of-frame redraw chain so the next vsync is requested.
+///
+/// Kept distinct from [`NEEDS_REDRAW`] because that flag also
+/// triggers prop-update / subtree-rebuild side effects on the
+/// next input event; this one is a pure "please paint another
+/// frame" signal with no side effects.
+static ANIMATION_TICK_REQUEST: AtomicBool = AtomicBool::new(false);
+
+/// Signal that another frame is wanted for an externally-driven
+/// animation (canvas closure, edge state shimmer, etc.). Idempotent
+/// — multiple calls in a frame collapse to a single tick.
+///
+/// Consumed by [`take_animation_tick_request`] in the windowed
+/// app's end-of-frame redraw chain. Each tick the caller wants
+/// another frame, it must re-call this — there's no "continuous"
+/// mode; the source closure is expected to re-request as long as
+/// the animation is live.
+///
+/// ALSO sets the animation scheduler's `external_anim_active` flag
+/// so its half-rate-on-cursor-blink downscale doesn't drag this
+/// driver's animation to target_fps/2 whenever a text input is
+/// focused. The flag is cleared by
+/// [`take_animation_tick_request`] when the runner sees no driver
+/// re-requested this frame — symmetric take-and-clear semantics
+/// with the local atomic, so a driver that stops calling
+/// `request_animation_tick` immediately releases the scheduler
+/// flag too.
+pub fn request_animation_tick() {
+    ANIMATION_TICK_REQUEST.store(true, Ordering::SeqCst);
+    if let Some(scheduler) = blinc_animation::try_get_scheduler() {
+        scheduler.set_external_anim_active(true);
+    }
+}
+
+/// Take and clear the animation-tick request flag. Mirrors the
+/// clear into the animation scheduler's `external_anim_active`
+/// flag — when no driver re-asks this frame, the scheduler stops
+/// considering external animation active and the half-rate
+/// downscale can correctly fire on the next idle cursor-blink-only
+/// frame. Drivers that want sustained cadence must call
+/// `request_animation_tick` every paint while their animation is
+/// live (which is the existing contract).
+pub fn take_animation_tick_request() -> bool {
+    let was_set = ANIMATION_TICK_REQUEST.swap(false, Ordering::SeqCst);
+    if !was_set {
+        if let Some(scheduler) = blinc_animation::try_get_scheduler() {
+            scheduler.set_external_anim_active(false);
+        }
+    }
+    was_set
+}
+
 // =========================================================================
 // Pending Prop Updates Queue
 // =========================================================================
