@@ -929,6 +929,36 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
                 EditorField::Description,
             );
         }
+        EditorEvent::ConnectionRejected { from, to, reason } => {
+            // Pop a cn::toast banner with the validator's reason
+            // (when supplied) so the user sees WHY the connection
+            // didn't take instead of just the red preview line that
+            // disappears on release. Falls back to a generic message
+            // when the host's `on_connect_request` returned a
+            // reason-less rejection.
+            let description = if reason.trim().is_empty() {
+                format!(
+                    "{}:{} → {}:{}: incompatible port types",
+                    from.node.as_str(),
+                    from.port.as_str(),
+                    to.node.as_str(),
+                    to.port.as_str(),
+                )
+            } else {
+                format!(
+                    "{}:{} → {}:{}: {}",
+                    from.node.as_str(),
+                    from.port.as_str(),
+                    to.node.as_str(),
+                    to.port.as_str(),
+                    reason,
+                )
+            };
+            blinc_cn::toast_error("Connection rejected")
+                .description(description)
+                .duration_ms(5000)
+                .show();
+        }
         EditorEvent::CreateGroupRequested(_)
         | EditorEvent::EdgeClicked { .. }
         | EditorEvent::NodeClicked { .. }
