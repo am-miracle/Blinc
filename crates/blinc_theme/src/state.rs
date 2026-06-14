@@ -368,11 +368,38 @@ impl ThemeState {
 
     /// Get a color token value (checks override first)
     pub fn color(&self, token: ColorToken) -> Color {
-        // Check override first
-        if let Some(color) = self.color_overrides.read().unwrap().get(&token) {
-            return *color;
+        let resolved = {
+            if let Some(color) = self.color_overrides.read().unwrap().get(&token) {
+                *color
+            } else {
+                self.colors.read().unwrap().get(token)
+            }
+        };
+        // Diagnostic: when `BLINC_DEBUG_COLOR_TOKEN=1` is set, log
+        // every unique (token, resolved Color) pair exactly once.
+        // Pair this with `BLINC_DEBUG_FILL_RECT=1` so the same hash
+        // appearing on a buggy widget can be traced back to the
+        // theme token that produced its colour.
+        if matches!(std::env::var("BLINC_DEBUG_COLOR_TOKEN").as_deref(), Ok("1")) {
+            use std::sync::{Mutex, OnceLock};
+            static SEEN: OnceLock<Mutex<std::collections::HashSet<(ColorToken, u32, u32, u32, u32)>>> =
+                OnceLock::new();
+            let seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+            let key = (
+                token,
+                resolved.r.to_bits(),
+                resolved.g.to_bits(),
+                resolved.b.to_bits(),
+                resolved.a.to_bits(),
+            );
+            if seen.lock().unwrap().insert(key) {
+                eprintln!(
+                    "[theme.color] {:?} → ({:.3},{:.3},{:.3},{:.3})",
+                    token, resolved.r, resolved.g, resolved.b, resolved.a,
+                );
+            }
         }
-        self.colors.read().unwrap().get(token)
+        resolved
     }
 
     /// Get all color tokens
