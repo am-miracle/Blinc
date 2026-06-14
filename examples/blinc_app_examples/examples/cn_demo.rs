@@ -55,7 +55,8 @@ fn main() -> Result<()> {
     WindowedApp::run_with_theme(
         config,
         theme_bundle(),
-        blinc_theme::detect_system_color_scheme(),
+        // blinc_theme::detect_system_color_scheme(),
+        ColorScheme::Dark,
         // Closure wrapper rather than passing `build_ui` directly: on
         // edition 2024, `fn build_ui(ctx) -> impl ElementBuilder`
         // captures `ctx`'s lifetime in the return type (RPIT capture

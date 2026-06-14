@@ -35,7 +35,7 @@ cn = ["dep:blinc_cn"]
 # `blinc_node_editor` — metadata-driven node-graph editor toolkit
 # (node_editor_demo). Implies `canvas` since the editor renders into
 # a `blinc_canvas_kit::CanvasKit` surface.
-node-editor = ["canvas", "dep:blinc_node_editor"]
+node-editor = ["canvas", "dep:blinc_node_editor", "dep:blinc_portal_ui"]
 
 # Tabler icon set (tabler_icons_demo).
 tabler-icons = ["dep:blinc_tabler_icons"]
@@ -114,6 +114,9 @@ blinc_canvas_kit = { path = "../../packages/blinc_canvas_kit", optional = true }
 # rev to bump in lockstep. Gated behind `node-editor` so default builds
 # don't pull the editor's rayon/taffy chain.
 blinc_node_editor = { path = "../../packages/blinc_node_editor", optional = true }
+# Immediate-mode widget toolkit used by node-editor's `with_content`
+# closures. Gated behind the same `node-editor` feature.
+blinc_portal_ui = { path = "../../packages/blinc_portal_ui", optional = true }
 blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "e510f26f627b9e7a3c4455e889a041940a530975", features = ["platform-assets", "bc-encode"], optional = true }
 blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "33d4fbd9655fe4cfd38d8e18004c978d020ed6e2", optional = true }
 blinc_input = { git = "https://github.com/project-blinc/blinc_input.git", rev = "3e94941bd59bafcd23ad59e8db504a44fa85b4f5", optional = true }
