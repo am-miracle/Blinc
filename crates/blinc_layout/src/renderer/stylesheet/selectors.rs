@@ -611,6 +611,87 @@ impl RenderTree {
         any_applied
     }
 
+    /// Restricted variant of [`Self::apply_complex_selector_styles`]
+    /// that runs only against `subtree_nodes` (the freshly-rebuilt
+    /// node set produced by `process_pending_subtree_rebuilds`).
+    ///
+    /// Driven from inside `apply_stylesheet_base_styles_for_subtree`
+    /// so that every subtree rebuild lands base styles AND the
+    /// matching state styles in a single pass. Phase 4's
+    /// fingerprint-gated `apply_stylesheet_state_styles` would
+    /// otherwise skip on animation-tick frames (focus / hover
+    /// unchanged frame-to-frame), letting the just-clobbered base
+    /// stand until a router-state change. Symptom this avoids:
+    /// cn::input / cn::textarea opened in a cn::popover whose
+    /// stateful refresh chain runs every animation tick — the
+    /// rebuild's base pass writes `.cn-input { background: idle }`
+    /// over the focused bg, and without this local state pass the
+    /// next paint shows an unfocused popup until mouse-move.
+    ///
+    /// No `prev_affected` reset path — the caller is rebuilding the
+    /// subtree from a fresh temp_div so there's no stale state to
+    /// roll back. Just save `base_styles` (so future Phase 4 resets
+    /// behave correctly) and overlay matching `:hover` / `:active` /
+    /// `:focus` rules.
+    pub(crate) fn apply_state_styles_for_subtree(
+        &mut self,
+        subtree_nodes: &[LayoutNodeId],
+        router: &crate::event_router::EventRouter,
+    ) -> bool {
+        if subtree_nodes.is_empty() {
+            return false;
+        }
+        let stylesheet = match &self.stylesheet {
+            Some(s) => s.clone(),
+            None => return false,
+        };
+        let complex_rules = stylesheet.complex_rules();
+        if complex_rules.is_empty() {
+            return false;
+        }
+        let hovered_nodes: HashSet<LayoutNodeId> = router.hovered_nodes().collect();
+        let pressed_nodes: HashSet<LayoutNodeId> =
+            router.pressed_target(self).into_iter().collect();
+        let focused_node: Option<LayoutNodeId> = router.focused();
+
+        let mut any_applied = false;
+        for (selector, style) in complex_rules {
+            if !selector.has_state() {
+                continue;
+            }
+            for &node_id in subtree_nodes {
+                if !self.complex_selector_matches(
+                    selector,
+                    node_id,
+                    &hovered_nodes,
+                    &pressed_nodes,
+                    focused_node,
+                ) {
+                    continue;
+                }
+                // Save base so Phase 4's reset path (which keys on
+                // `complex_state_affected`) returns to the correct
+                // baseline when the state later clears.
+                if !self.base_styles.contains_key(&node_id) {
+                    if let Some(render_node) = self.render_nodes.get(&node_id) {
+                        self.base_styles.insert(node_id, render_node.props.clone());
+                    }
+                }
+                if !self.base_taffy_styles.contains_key(&node_id) {
+                    if let Some(taffy_style) = self.layout_tree.get_style(node_id) {
+                        self.base_taffy_styles.insert(node_id, taffy_style);
+                    }
+                }
+                self.complex_state_affected.insert(node_id);
+                if let Some(render_node) = self.render_nodes.get_mut(&node_id) {
+                    Self::apply_element_style_to_props(&mut render_node.props, style);
+                    any_applied = true;
+                }
+            }
+        }
+        any_applied
+    }
+
     /// Apply SVG tag-name CSS rules (e.g., `path { fill: red; }`, `#my-svg circle { stroke: blue; }`).
     ///
     /// For each complex rule targeting an SVG tag name, finds SVG layout nodes whose

@@ -254,6 +254,25 @@ impl RenderTree {
     /// are dropped; otherwise the global queue stays non-empty forever and the
     /// app keeps requesting redraws while idle.
     pub fn process_pending_subtree_rebuilds(&mut self) -> bool {
+        self.process_pending_subtree_rebuilds_routed(None)
+    }
+
+    /// Router-aware variant of [`Self::process_pending_subtree_rebuilds`].
+    /// When `router` is `Some`, the per-rebuild
+    /// `apply_stylesheet_base_styles_for_subtree` call runs an extra
+    /// state-style pass restricted to the rebuilt subtree so
+    /// `:focus` / `:hover` / `:active` rules survive the base-class
+    /// write that ends every rebuild. Required on desktop because
+    /// animation-tick frames (Stateful refresh while a spring or
+    /// keyframe is still running) re-rebuild the subtree without
+    /// changing the EventRouter fingerprint, so Phase 4's gated
+    /// `apply_stylesheet_state_styles` would skip and leave the
+    /// just-clobbered base standing. Callers without a live router
+    /// (cold mobile/web paths, tests) pass `None`.
+    pub fn process_pending_subtree_rebuilds_routed(
+        &mut self,
+        router: Option<&crate::event_router::EventRouter>,
+    ) -> bool {
         let pending = crate::stateful::take_pending_subtree_rebuilds();
         if pending.is_empty() {
             return false;
@@ -431,7 +450,7 @@ impl RenderTree {
                 // styles are applied by apply_stylesheet_base_styles() which only
                 // runs at full tree creation. Without this, new children from
                 // stateful rebuilds lose CSS class styles (border-radius, etc.).
-                self.apply_stylesheet_base_styles_for_subtree(rebuild.parent_id);
+                self.apply_stylesheet_base_styles_for_subtree(rebuild.parent_id, router);
             } else if matches!(rebuild.kind, crate::stateful::RebuildKind::LayoutProps) {
                 // Layout-prop update — patch taffy `Style` + render
                 // props on every existing layout node, then mark the
@@ -440,11 +459,19 @@ impl RenderTree {
                 // registration. This is the path spring-animated
                 // `.w()` / `.h()` / `.left()` take.
                 needs_layout = true;
-                self.update_subtree_layout_recursive(rebuild.parent_id, &rebuild.new_child);
+                self.update_subtree_layout_recursive(
+                    rebuild.parent_id,
+                    &rebuild.new_child,
+                    router,
+                );
             } else {
                 // Visual-only update - just update render props of existing children
                 // Don't remove/rebuild, just walk the tree and update props
-                self.update_subtree_props_recursive(rebuild.parent_id, &rebuild.new_child);
+                self.update_subtree_props_recursive(
+                    rebuild.parent_id,
+                    &rebuild.new_child,
+                    router,
+                );
             }
         }
 
@@ -472,8 +499,9 @@ impl RenderTree {
         &mut self,
         parent_id: LayoutNodeId,
         new_element: &crate::div::Div,
+        router: Option<&crate::event_router::EventRouter>,
     ) {
-        self.update_subtree_props_from_builder(parent_id, new_element);
+        self.update_subtree_props_from_builder(parent_id, new_element, router);
     }
 
     /// Recursively update taffy `Style` AND render props for existing
@@ -491,6 +519,7 @@ impl RenderTree {
         &mut self,
         parent_id: LayoutNodeId,
         new_element: &crate::div::Div,
+        router: Option<&crate::event_router::EventRouter>,
     ) {
         // Update the parent node's own layout style + render props
         // FIRST (the existing `update_subtree_props_from_builder` only
@@ -512,13 +541,14 @@ impl RenderTree {
             new_props.motion = render_node.props.motion.clone();
             render_node.props = new_props;
         }
-        self.update_subtree_layout_from_builder(parent_id, new_element);
+        self.update_subtree_layout_from_builder(parent_id, new_element, router);
     }
 
     fn update_subtree_layout_from_builder(
         &mut self,
         parent_id: LayoutNodeId,
         new_element: &dyn crate::div::ElementBuilder,
+        router: Option<&crate::event_router::EventRouter>,
     ) {
         let existing_children = self.layout_tree.children(parent_id);
         let new_children = new_element.children_builders();
@@ -552,14 +582,18 @@ impl RenderTree {
                 }
 
                 if !new_child.children_builders().is_empty() {
-                    self.update_subtree_layout_from_builder(*child_id, new_child.as_ref());
+                    self.update_subtree_layout_from_builder(
+                        *child_id,
+                        new_child.as_ref(),
+                        router,
+                    );
                 }
             }
         }
 
         // Re-apply CSS base styles since the full-replace cleared them
         // (mirrors the visual path's final step).
-        self.apply_stylesheet_base_styles_for_subtree(parent_id);
+        self.apply_stylesheet_base_styles_for_subtree(parent_id, router);
     }
 
     /// Update subtree props from a generic ElementBuilder (for recursion)
@@ -571,6 +605,7 @@ impl RenderTree {
         &mut self,
         parent_id: LayoutNodeId,
         new_element: &dyn crate::div::ElementBuilder,
+        router: Option<&crate::event_router::EventRouter>,
     ) {
         let existing_children = self.layout_tree.children(parent_id);
         let new_children = new_element.children_builders();
@@ -619,12 +654,16 @@ impl RenderTree {
 
                 // Recursively update grandchildren
                 if !new_child.children_builders().is_empty() {
-                    self.update_subtree_props_from_builder(*child_id, new_child.as_ref());
+                    self.update_subtree_props_from_builder(
+                        *child_id,
+                        new_child.as_ref(),
+                        router,
+                    );
                 }
             }
         }
 
         // Re-apply CSS base styles since the full replace cleared them
-        self.apply_stylesheet_base_styles_for_subtree(parent_id);
+        self.apply_stylesheet_base_styles_for_subtree(parent_id, router);
     }
 }

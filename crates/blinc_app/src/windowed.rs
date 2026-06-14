@@ -4820,9 +4820,42 @@ impl WindowedApp {
                                 // Skip if gesture ended in this same event - go straight to bounce
                                 if gesture_ended {
                                     tracing::trace!("Skipping scroll delta - gesture ended, bouncing");
+                                } else if delta_x == 0.0 && delta_y == 0.0 {
+                                    // No-op scroll events fire from the platform layer with
+                                    // zero deltas as gesture momentum decays past the floor.
+                                    // canvas-kit's SCROLL branch still calls zoom_at with
+                                    // factor=1.000, which is a no-op for zoom magnitude but
+                                    // does write the viewport state through `update`,
+                                    // counting as a state mutation and (on canvas-backed
+                                    // hosts) feeding the dot-grid render. With the popover-
+                                    // open continuous_redraw firing frames every vsync,
+                                    // even noop scrolls compound visible cost. Drop them
+                                    // at the dispatch boundary.
+                                    tracing::trace!("Skipping zero-delta scroll");
                                 } else if has_overlay_backdrop {
                                     // Skip scroll when overlay is visible to prevent background scrolling
                                     tracing::trace!("Skipping scroll delta - overlay with backdrop is visible");
+                                } else if blinc_layout::widgets::has_focused_text_input() {
+                                    // A text widget owns the keyboard / scroll focus. The
+                                    // scroll event belongs to the input's scroll machinery
+                                    // (cursor-into-view, textarea scroll-physics), NOT to
+                                    // canvas-kit underneath. Trackpad inertia from a prior
+                                    // gesture, or system-synthesized noop scrolls during
+                                    // popover open, would otherwise accumulate canvas zoom
+                                    // while the user is interacting with the input. The
+                                    // dispatch_scroll_chain at line ~4852 still runs so
+                                    // the FOCUSED widget itself gets the event; we just
+                                    // skip the canvas-zoom side of that.
+                                    //
+                                    // Symptom this fixes (verified via the 06-14
+                                    // canvas_viewport_diag log capture): opening the
+                                    // inline title editor on node_editor_demo accumulated
+                                    // ~5-10 SCROLL events with cursor=(0,0) and small
+                                    // delta_y, each calling zoom_at and creeping the
+                                    // canvas zoom toward 2x while the popover was visible.
+                                    tracing::trace!(
+                                        "Skipping scroll delta - focused text input owns it"
+                                    );
                                 } else {
                                     tracing::trace!(
                                         "Scroll dispatch: pos=({:.1}, {:.1}) delta=({:.1}, {:.1})",
@@ -5543,10 +5576,186 @@ impl WindowedApp {
                                     }
                                 }
 
-                                // Process subtree rebuilds (from stateful changes OR overlay changes)
+                                // Process subtree rebuilds (from stateful changes OR overlay changes).
+                                // Pass the router so the per-rebuild base-style pass
+                                // re-applies matching `:focus` / `:hover` / `:active`
+                                // rules on top of the just-written base CSS — without
+                                // this, animation-tick frames (a Stateful refresh while
+                                // a spring is still running) reset `.cn-input` etc to
+                                // their idle CSS and Phase 4's gated state pass skips,
+                                // leaving the popup looking unfocused until a mouse-
+                                // move bumps the router fingerprint.
                                 let mut needs_layout = prop_effects.needs_layout;
+                                let mut had_subtree_rebuild = false;
                                 if let Some(ref mut tree) = ws.render_tree {
-                                    needs_layout |= tree.process_pending_subtree_rebuilds();
+                                    let rebuilt = tree.process_pending_subtree_rebuilds_routed(
+                                        Some(&windowed_ctx.event_router),
+                                    );
+                                    needs_layout |= rebuilt;
+                                    had_subtree_rebuild = rebuilt;
+                                }
+                                // Subtree rebuild only mutates render
+                                // nodes / base_styles / registry; it
+                                // does NOT set ws.did_rebuild and does
+                                // NOT touch the compositor cache. Next
+                                // frame's fast path would blit stale
+                                // bg + dispatch stale dyn batch until
+                                // some other input invalidated the
+                                // cache. Visible as a freshly-focused
+                                // cn::input losing its focused bg /
+                                // border for ~200ms post-open: the
+                                // Stateful refreshed Idle → Focused
+                                // but the cached primitives still hold
+                                // the Idle visuals. Invalidate here so
+                                // the post-rebuild paint runs the slow
+                                // walker once and repopulates.
+                                if had_subtree_rebuild {
+                                    blinc_app.invalidate_render_cache_tagged(
+                                        "subtree_rebuild_applied",
+                                    );
+                                }
+
+                                // Drain deferred-focus queues NOW that the
+                                // subtree rebuilds have actually applied
+                                // (Stateful::build set the focused widget's
+                                // node_id). Previously this ran BEFORE the
+                                // rebuild processing, so the focus was
+                                // applied to the data cell but
+                                // focused_text_input_node_id() returned
+                                // None (stateful_state.node_id still
+                                // unset). The downstream EventRouter
+                                // focus-sync at Phase 4 then read None,
+                                // didn't bridge focus to the cn::input's
+                                // node, and the CSS :focus selectors
+                                // never matched — visible as the input
+                                // appearing to lose its focus border /
+                                // bg the first few frames after open
+                                // (the cn::textarea case got lucky
+                                // because the mouse landed on it,
+                                // putting the FSM in FocusedHovered via
+                                // POINTER_ENTER instead). Draining post-
+                                // rebuild means node_id is set when
+                                // focus_text_input runs, so the very
+                                // next focus-sync sees the right
+                                // LayoutNodeId and the input stays
+                                // visually focused from frame 1.
+                                blinc_layout::widgets::process_pending_input_focus();
+                                blinc_layout::widgets::process_pending_area_focus();
+
+                                // focus_text_input / focus_text_area
+                                // drive the Stateful's `shared.state`
+                                // to Focused and call `refresh_stateful`,
+                                // which routes through `refresh_props_internal`
+                                // and `queue_prop_update(node, focused_props)`.
+                                // The drain at the top of this block
+                                // already ran before focus, so the
+                                // freshly-queued Focused props would sit
+                                // in the partial-update channel until the
+                                // NEXT frame — meaning this frame's slow
+                                // walker (the one we just invalidated for
+                                // above) still reads the Idle render
+                                // props baked by the rebuild and the
+                                // popup paints with no focus bg/border
+                                // until either a mouse-move triggers
+                                // another invalidation or the prop
+                                // update lands. Drain again now so the
+                                // Focused props flow into render_node.props
+                                // before Phase 4 paints this frame.
+                                let post_focus_updates =
+                                    blinc_layout::take_pending_partial_prop_updates();
+                                let had_post_focus_updates =
+                                    !post_focus_updates.is_empty();
+                                if had_post_focus_updates {
+                                    if let Some(ref mut tree) = ws.render_tree {
+                                        for upd in post_focus_updates {
+                                            prop_effects = prop_effects.or(upd.effects);
+                                            if let Some(write) = upd.render_write {
+                                                tree.update_render_props(
+                                                    upd.node_id,
+                                                    |p| write(p),
+                                                );
+                                            }
+                                            if let Some(write) = upd.layout_write {
+                                                if let Some(mut style) =
+                                                    tree.layout_tree.get_style(upd.node_id)
+                                                {
+                                                    write(&mut style);
+                                                    tree.layout_tree
+                                                        .set_style(upd.node_id, style);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    needs_layout |= prop_effects.needs_layout;
+                                    blinc_app.invalidate_render_cache_tagged(
+                                        "post_focus_prop_update",
+                                    );
+                                }
+
+                                // `refresh_props_internal` (driven by
+                                // focus_text_input / focus_text_area
+                                // via refresh_stateful) queues BOTH a
+                                // partial prop update AND a subtree
+                                // rebuild — the rebuild lives in
+                                // PENDING_SUBTREE_REBUILDS, NOT in the
+                                // partial channel, so the drain above
+                                // did NOT process it. cn::input /
+                                // cn::textarea hit the topology
+                                // rebuild path because their on_state
+                                // callback adds the cursor canvas only
+                                // when visual.is_focused(); Idle →
+                                // Focused therefore queues a full
+                                // structural rebuild whose post-step
+                                // calls apply_stylesheet_base_styles_for_subtree
+                                // and silently clobbers the focused
+                                // bg/border with the `.cn-input` /
+                                // `.cn-textarea` base CSS rule. Phase 4's
+                                // apply_stylesheet_state_styles is gated
+                                // on a router-state-fingerprint change;
+                                // focus didn't change between the
+                                // build frame and the next paint frame,
+                                // so the gate fails and `:focus` never
+                                // re-applies. The popup appears
+                                // unfocused until a mouse-move bumps
+                                // the fingerprint. Fix: unconditionally
+                                // drain the queued subtree rebuilds and
+                                // clear last_router_state_fp here so
+                                // (1) the focus-triggered rebuild
+                                // applies on the SAME frame as focus,
+                                // and (2) Phase 4 re-runs the state-
+                                // style pass and restores the :focus
+                                // visuals on top of the just-clobbered
+                                // base.
+                                let pending_after_focus =
+                                    blinc_layout::has_pending_subtree_rebuilds();
+                                if had_post_focus_updates || pending_after_focus {
+                                    // Bridge EventRouter.focus to the
+                                    // freshly-focused text input BEFORE
+                                    // the rebuild runs, so the routed
+                                    // base-pass sees the correct focused
+                                    // node when it evaluates `:focus`
+                                    // selectors against the subtree.
+                                    // (Phase 4's standard focus sync at
+                                    // line ~6354 runs too late for the
+                                    // state pass that fires inside
+                                    // process_pending_subtree_rebuilds_routed.)
+                                    let text_focus =
+                                        blinc_layout::widgets::text_input::focused_text_input_node_id()
+                                            .or_else(blinc_layout::widgets::text_input::focused_text_area_node_id);
+                                    let current_focus = windowed_ctx.event_router.focused();
+                                    if text_focus != current_focus {
+                                        windowed_ctx.event_router.set_focus(text_focus);
+                                    }
+                                    if let Some(ref mut tree) = ws.render_tree {
+                                        if tree.process_pending_subtree_rebuilds_routed(
+                                            Some(&windowed_ctx.event_router),
+                                        ) {
+                                            needs_layout = true;
+                                        }
+                                    }
+                                    blinc_app.invalidate_render_cache_tagged(
+                                        "post_focus_subtree_rebuild",
+                                    );
                                 }
 
                                 if needs_layout {

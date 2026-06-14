@@ -342,7 +342,11 @@ impl RenderTree {
     /// selectors (`.sort-item`, `.grid-item`, etc.) are resolved by
     /// `apply_stylesheet_base_styles()` which only runs at full tree creation.
     /// This method fills that gap for incrementally rebuilt subtrees.
-    pub(crate) fn apply_stylesheet_base_styles_for_subtree(&mut self, parent_id: LayoutNodeId) {
+    pub(crate) fn apply_stylesheet_base_styles_for_subtree(
+        &mut self,
+        parent_id: LayoutNodeId,
+        router: Option<&crate::event_router::EventRouter>,
+    ) {
         let stylesheet = match &self.stylesheet {
             Some(s) => s.clone(),
             None => return,
@@ -495,6 +499,26 @@ impl RenderTree {
                     }
                 }
             }
+        }
+
+        // Apply matching `:hover`, `:active`, `:focus` rules on top
+        // of the base CSS we just wrote, restricted to the rebuilt
+        // subtree. Without this, every subtree rebuild kind
+        // (Structural / LayoutProps / Visual) silently rewinds
+        // focused / hovered visuals on the rebuilt subtree because
+        // the class-base rule (`.cn-input { background: idle }` etc)
+        // overwrites whatever the rebuild's temp_div produced.
+        // Phase 4's gated state-style pass is the usual restorer,
+        // but it skips on frames where the router fingerprint hasn't
+        // moved — exactly the case for animation-tick-driven
+        // rebuilds (Stateful refresh while a spring / keyframe is
+        // still running). The router is plumbed through
+        // `process_pending_subtree_rebuilds`; callers without a live
+        // router (web/mobile cold paths, tests) pass `None` and lose
+        // the state-restore, which only matters when their rebuild
+        // chain races an in-flight focused-state animation.
+        if let Some(router) = router {
+            self.apply_state_styles_for_subtree(&subtree_nodes, router);
         }
     }
 
