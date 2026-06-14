@@ -242,6 +242,7 @@ impl<T: Clone + Send + 'static> Signal<T> {
         };
         notify_stateful_deps(&[self.id]);
         notify_property_bindings(self.id);
+        notify_portals(self.id);
         for d_id in dirty_derived {
             notify_property_bindings_for_derived(d_id);
         }
@@ -270,6 +271,7 @@ impl<T: Clone + Send + 'static> Signal<T> {
         GLOBAL_DIRTY.store(true, Ordering::SeqCst);
         notify_stateful_deps(&[self.id]);
         notify_property_bindings(self.id);
+        notify_portals(self.id);
         for d_id in dirty_derived {
             notify_property_bindings_for_derived(d_id);
         }
@@ -300,6 +302,7 @@ impl<T: Clone + Send + 'static> Signal<T> {
         };
         notify_stateful_deps(&[self.id]);
         notify_property_bindings(self.id);
+        notify_portals(self.id);
         for d_id in dirty_derived {
             notify_property_bindings_for_derived(d_id);
         }
@@ -324,6 +327,7 @@ impl<T: Clone + Send + 'static> Signal<T> {
         GLOBAL_DIRTY.store(true, Ordering::SeqCst);
         notify_stateful_deps(&[self.id]);
         notify_property_bindings(self.id);
+        notify_portals(self.id);
         for d_id in dirty_derived {
             notify_property_bindings_for_derived(d_id);
         }
@@ -970,6 +974,62 @@ pub(crate) fn notify_stateful_deps(ids: &[SignalId]) {
     }
 }
 
+/// Global notifier for portal subscribers (`blinc_portal_ui`). Mirrors
+/// [`set_property_binding_notifier`]: a single notifier installed on
+/// first portal creation routes per-`SignalId` change events to the
+/// portal-side subscription map, which in turn flips per-portal dirty
+/// flags so the next composite re-paints any portal that read the
+/// signal during its last frame. Fired alongside the retained-mode
+/// notifiers from every `Signal::set` / `Signal::update` —
+/// portal-bound and retained-bound visuals stay in sync on the same
+/// notification edge.
+static PORTAL_NOTIFIER: std::sync::OnceLock<Box<dyn Fn(SignalId) + Send + Sync + 'static>> =
+    std::sync::OnceLock::new();
+
+/// Install the global portal notifier. Idempotent: first installer wins.
+pub fn set_portal_notifier(notifier: impl Fn(SignalId) + Send + Sync + 'static) {
+    let _ = PORTAL_NOTIFIER.set(Box::new(notifier));
+}
+
+/// Fire the portal notifier. No-op if none installed.
+pub(crate) fn notify_portals(id: SignalId) {
+    if let Some(notifier) = PORTAL_NOTIFIER.get() {
+        notifier(id);
+    }
+}
+
+/// Run `f` with automatic dependency tracking enabled and return the
+/// closure's result paired with every [`SignalId`] read inside it.
+///
+/// This is the public seam over the same `tracking` cell that powers
+/// `create_effect` / `create_derived`: a portal calls this around its
+/// per-frame render closure, gets back the list of signals every
+/// `Signal::get()` (and `State::get()`) touched, and uses the diff
+/// against the previous frame's read set to keep its subscription map
+/// in sync. Nesting is safe — the prior tracking buffer (if any) is
+/// saved on entry and restored on exit so a portal running INSIDE an
+/// effect doesn't strand the outer tracker's deps.
+///
+/// The closure is free to read, write, or fire any other reactive
+/// operation; only reads observed via the standard `Signal::get` /
+/// `State::get` path are recorded.
+pub fn with_read_tracking<R>(f: impl FnOnce() -> R) -> (R, Vec<SignalId>) {
+    let graph = global_graph();
+    // Stash whatever tracker was active (effect, derived, or none) and
+    // install a fresh one for the closure.
+    let prev = {
+        let mut g = graph.lock().expect("reactive graph poisoned");
+        g.tracking.replace(Some(Vec::new()))
+    };
+    let result = f();
+    // Take what `f` accumulated, restore the prior tracker.
+    let deps = {
+        let mut g = graph.lock().expect("reactive graph poisoned");
+        g.tracking.replace(prev).unwrap_or_default()
+    };
+    (result, deps)
+}
+
 // =============================================================================
 // Process-global default reactive graph
 //
@@ -1101,6 +1161,7 @@ impl<T: Clone + Send + 'static> State<T> {
         }
         // Fire signal-bound property-binding subscribers (P2).
         notify_property_bindings(self.signal.id());
+        notify_portals(self.signal.id());
         // Fire derived-bound property-binding subscribers for every
         // derived that flipped to dirty during this set (Phase 8
         // follow-up: Derived ↔ IntoReactive bridge).
@@ -1127,6 +1188,7 @@ impl<T: Clone + Send + 'static> State<T> {
         // Property bindings still fire even on the rebuild path — a
         // signal-bound `.bg(&state)` should patch alongside the rebuild.
         notify_property_bindings(self.signal.id());
+        notify_portals(self.signal.id());
         for d_id in dirty_derived {
             notify_property_bindings_for_derived(d_id);
         }
@@ -1146,6 +1208,7 @@ impl<T: Clone + Send + 'static> State<T> {
             callback(&[self.signal.id()]);
         }
         notify_property_bindings(self.signal.id());
+        notify_portals(self.signal.id());
         for d_id in dirty_derived {
             notify_property_bindings_for_derived(d_id);
         }
@@ -1160,6 +1223,7 @@ impl<T: Clone + Send + 'static> State<T> {
         };
         self.dirty_flag.store(true, Ordering::SeqCst);
         notify_property_bindings(self.signal.id());
+        notify_portals(self.signal.id());
         for d_id in dirty_derived {
             notify_property_bindings_for_derived(d_id);
         }
