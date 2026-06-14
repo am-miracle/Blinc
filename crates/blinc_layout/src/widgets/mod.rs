@@ -88,7 +88,12 @@ pub use text_input::{
     elapsed_ms,
     // Programmatic focus
     focus_text_input,
+    // Deferred focus — enqueue + per-frame drain. See doc on
+    // focus_text_input_deferred for the timing rationale.
+    focus_text_input_deferred,
     has_focused_text_input,
+    process_pending_area_focus,
+    process_pending_input_focus,
     request_css_reparse,
     // Rebuild/relayout request functions
     request_full_rebuild,
@@ -107,7 +112,7 @@ pub use text_input::{
 // Re-export text area widget
 pub use text_area::{
     SharedTextAreaState, TextArea, TextAreaConfig, TextAreaState, TextPosition, focus_text_area,
-    text_area, text_area_state, text_area_state_with_placeholder,
+    focus_text_area_deferred, text_area, text_area_state, text_area_state_with_placeholder,
 };
 
 // Re-export scroll widget

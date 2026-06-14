@@ -383,6 +383,15 @@ pub struct TextAreaState {
     pub cursor: TextPosition,
     /// Selection start position (if selecting)
     pub selection_start: Option<TextPosition>,
+    /// Anchor position for drag-to-select. Set in on_mouse_down when
+    /// the user clicks (mouse, not touch) and read by the on_drag
+    /// handler to extend `selection_start` as the cursor moves while
+    /// pressed. `None` outside an active drag-select gesture.
+    /// Mirrors `TextInputData.drag_select_anchor` but uses a 2D
+    /// `TextPosition` because text_area positions are
+    /// (line, column) rather than the single `usize` byte offset
+    /// text_input uses.
+    pub(crate) drag_select_anchor: Option<TextPosition>,
     /// Visual state for styling
     pub visual: TextFieldState,
     /// Placeholder text
@@ -452,6 +461,7 @@ impl Default for TextAreaState {
             lines: vec![String::new()],
             cursor: TextPosition::default(),
             selection_start: None,
+            drag_select_anchor: None,
             visual: TextFieldState::Idle,
             placeholder: String::new(),
             disabled: false,
@@ -1496,10 +1506,22 @@ pub fn text_area_state_with_placeholder(placeholder: impl Into<String>) -> Share
 /// Idle→Focused transition that would otherwise cascade a tree
 /// rebuild while the parent overlay is opening (the same flicker
 /// motivation as [`text_input::focus_text_input`]).
+/// Enqueue a text_area for focus on the NEXT frame, after its widget
+/// has been built into the tree.
+///
+/// Companion to [`crate::widgets::text_input::focus_text_input_deferred`].
+/// See that function for the timing rationale: focusing BEFORE the
+/// matching overlay mounts triggers continuous_redraw against an
+/// unstable composition; deferring until after mount avoids that.
+pub fn focus_text_area_deferred(state: &SharedTextAreaState) {
+    crate::widgets::text_input::enqueue_pending_focus_area(Arc::downgrade(state));
+}
+
 pub fn focus_text_area(state: &SharedTextAreaState) {
+    use crate::stateful::refresh_stateful;
     use crate::widgets::text_input::{increment_focus_count, set_focused_text_area};
     use blinc_core::events::event_types;
-    if let Ok(mut s) = state.lock() {
+    let stateful_to_refresh = if let Ok(mut s) = state.lock() {
         if !s.visual.is_focused() {
             if let Some(new_state) = s.visual.on_event(event_types::FOCUS) {
                 s.visual = new_state;
@@ -1509,21 +1531,46 @@ pub fn focus_text_area(state: &SharedTextAreaState) {
             s.focus_time_ms = crate::widgets::text_input::elapsed_ms();
             s.reset_cursor_blink();
             increment_focus_count();
-            // Bump the stateful inner so its on_state callback re-runs
-            // with the new visual state — without this the focus
-            // border / bg colour don't reflect the change until the
-            // next event. Skipped when no stateful exists yet (the
-            // caller focused before constructing the widget — handled
-            // by TextArea::new's initial-visual read instead).
-            if let Some(ref stateful) = s.stateful_state {
+            // Drive the Stateful's shared FSM as well as data.visual.
+            // The Stateful's state_callback (which paints the focused
+            // bg/border) reads `shared.state`, NOT data.visual. Only
+            // flipping data.visual + needs_visual_update leaves the
+            // next build() reading the stale Idle shared.state and
+            // baking Idle visuals into the render tree, so the popup
+            // looks unfocused until a pointer event drives shared.state
+            // via the auto event handlers. refresh_stateful after the
+            // data lock drops queues a prop update for the current
+            // frame. Skipped when no stateful exists yet (caller
+            // focused before constructing the widget — handled by
+            // TextArea::new's initial-visual read instead).
+            let stateful_ref = s.stateful_state.clone();
+            if let Some(ref stateful) = stateful_ref {
                 if let Ok(mut shared) = stateful.lock() {
+                    if let Some(new_fsm) = shared.state.on_event(event_types::FOCUS) {
+                        shared.state = new_fsm;
+                    } else {
+                        shared.state = TextFieldState::Focused;
+                    }
                     shared.needs_visual_update = true;
                 }
             }
+            stateful_ref
+        } else {
+            None
         }
+    } else {
+        None
+    };
+    if let Some(ref stateful) = stateful_to_refresh {
+        refresh_stateful(stateful);
     }
     set_focused_text_area(state);
-    crate::stateful::request_redraw();
+    // Only redraw when this call ACTUALLY transitioned to focused.
+    // See `focus_text_input` for the rationale; same shape applies
+    // here.
+    if stateful_to_refresh.is_some() {
+        crate::stateful::request_redraw();
+    }
 }
 
 /// Ready-to-use text area element
@@ -1722,10 +1769,13 @@ impl TextArea {
         let data_for_click = Arc::clone(&data);
         let data_for_text = Arc::clone(&data);
         let data_for_key = Arc::clone(&data);
+        let data_for_drag = Arc::clone(&data);
         let config_for_click = Arc::clone(&config);
+        let config_for_drag = Arc::clone(&config);
         let shared_for_click = Arc::clone(&shared_state);
         let shared_for_text = Arc::clone(&shared_state);
         let shared_for_key = Arc::clone(&shared_state);
+        let shared_for_drag = Arc::clone(&shared_state);
 
         Stateful::with_shared_state(shared_state)
             // Handle mouse down to focus and position cursor
@@ -1733,20 +1783,28 @@ impl TextArea {
                 // First, forcibly blur any previously focused text input/area
                 set_focused_text_area(&data_for_click);
 
-                // Get click position from context for cursor positioning
-                let click_x = ctx.local_x;
-                let click_y = ctx.local_y;
-
-                // Get config values for visual line computation
-                // Note: We DON'T use padding offsets here because local_x/local_y from the event
-                // are relative to the innermost hit element (the text content), not the outer container
+                // Get click position from context for cursor positioning.
+                // `ctx.local_x` / `local_y` are relative to THIS handler's
+                // node — the outer Stateful wrapper — not the inner text
+                // content. The wrapper renders a `padding_x`-wide left
+                // spacer + a `border_width` border before the scroll
+                // container, and a `padding_y` top spacer before the
+                // middle row. Subtract both to get text-content-relative
+                // coordinates; otherwise every click lands `padding_x +
+                // border_width` ≈ 13.5px (≈ 2 chars at the default font)
+                // to the right of the intended character. Same fix shape
+                // text_input uses at its own click handler.
                 let cfg = config_for_click.lock().unwrap();
                 let font_size = cfg.font_size;
                 let line_height = cfg.font_size * cfg.line_height;
                 let available_width =
                     cfg.effective_width() - cfg.padding_x * 2.0 - cfg.border_width * 2.0;
                 let wrap_enabled = cfg.wrap;
+                let text_origin_x = cfg.padding_x + cfg.border_width;
+                let text_origin_y = cfg.padding_y + cfg.border_width;
                 drop(cfg);
+                let click_x = ctx.local_x - text_origin_x;
+                let click_y = ctx.local_y - text_origin_y;
 
                 let needs_refresh = {
                     let mut d = match data_for_click.lock() {
@@ -1828,6 +1886,17 @@ impl TextArea {
                     };
                     d.cursor = new_pos;
                     d.selection_start = None; // Clear any selection
+                    // Seed the drag-select anchor for desktop mouse
+                    // clicks (touch leaves anchor = None so a drag
+                    // becomes cursor reposition, mirroring
+                    // text_input's behaviour). The .on_drag handler
+                    // below reads this and extends `selection_start`
+                    // as the pointer moves while pressed.
+                    if crate::widgets::text_input::is_touch_input() {
+                        d.drag_select_anchor = None;
+                    } else {
+                        d.drag_select_anchor = Some(new_pos);
+                    }
                     d.reset_cursor_blink();
 
                     // Mobile UX touches: light haptic on every tap +
@@ -1868,6 +1937,80 @@ impl TextArea {
                 // Trigger incremental refresh AFTER releasing the data lock
                 if needs_refresh {
                     refresh_stateful(&shared_for_click);
+                }
+            })
+            // Mouse drag to extend selection.
+            //
+            // Mirrors text_input's on_drag at text_input.rs ~2491-2560:
+            // while pointer is pressed, recompute cursor position from
+            // the current local_x / local_y, then if drag_select_anchor
+            // is Some (seeded by on_mouse_down for desktop mouse), set
+            // selection_start = Some(anchor) and cursor = new_pos so
+            // the selection-rendering pass at
+            // text_area.rs:2217-2277 draws the highlight rects.
+            // Touch leaves anchor = None (set in on_mouse_down) so
+            // dragging on touch repositions the cursor instead of
+            // selecting — matches text_input's touch UX.
+            .on_drag(move |ctx| {
+                let cfg = config_for_drag.lock().unwrap();
+                let wrap_enabled = cfg.wrap;
+                let text_origin_x = cfg.padding_x + cfg.border_width;
+                let text_origin_y = cfg.padding_y + cfg.border_width;
+                drop(cfg);
+
+                let needs_refresh = {
+                    let mut d = match data_for_drag.lock() {
+                        Ok(d) => d,
+                        Err(_) => return,
+                    };
+                    if d.disabled || !d.visual.is_focused() {
+                        return;
+                    }
+                    if d.visual_lines.is_empty() || wrap_enabled {
+                        d.compute_visual_lines();
+                    }
+                    // Recompute the cursor position from the live drag
+                    // coordinates. clicked_visual_line is set by the
+                    // per-visual-line click handlers but only on
+                    // POINTER_DOWN — during drag we fall through to the
+                    // xy lookup. Subtract the left padding + border so
+                    // text_x lands in text-content space; same correction
+                    // the on_mouse_down handler applies.
+                    let text_x = (ctx.local_x - text_origin_x).max(0.0);
+                    let text_y = (ctx.local_y - text_origin_y).max(0.0);
+                    let new_pos = d.cursor_position_from_xy(text_x, text_y);
+
+                    if crate::widgets::text_input::is_touch_input() {
+                        // Touch drag = cursor reposition, no select.
+                        if new_pos != d.cursor {
+                            d.cursor = new_pos;
+                            d.selection_start = None;
+                            true
+                        } else {
+                            false
+                        }
+                    } else if let Some(anchor) = d.drag_select_anchor {
+                        if new_pos != anchor {
+                            d.selection_start = Some(anchor);
+                            d.cursor = new_pos;
+                            true
+                        } else {
+                            // Drag still on the anchor — clear any
+                            // residual selection so a zero-distance
+                            // drag matches a plain click.
+                            if d.selection_start.is_some() {
+                                d.selection_start = None;
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                };
+                if needs_refresh {
+                    refresh_stateful(&shared_for_drag);
                 }
             })
             // Handle text input

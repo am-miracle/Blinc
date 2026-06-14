@@ -327,6 +327,42 @@ static FOCUSED_TEXT_INPUT: Mutex<Option<Weak<Mutex<TextInputData>>>> = Mutex::ne
 static FOCUSED_TEXT_AREA: Mutex<Option<Weak<Mutex<crate::widgets::text_area::TextAreaState>>>> =
     Mutex::new(None);
 
+/// Push a text_area onto the deferred-focus queue.
+///
+/// Companion to [`focus_text_input_deferred`] — `focus_text_area_deferred`
+/// (in `text_area.rs`) delegates to this so the static lives in one
+/// place. See [`focus_text_input_deferred`] for the timing rationale.
+pub fn enqueue_pending_focus_area(state: Weak<Mutex<crate::widgets::text_area::TextAreaState>>) {
+    if let Ok(mut pending) = PENDING_FOCUS_AREA.lock() {
+        pending.push(state);
+    }
+    crate::stateful::request_redraw();
+}
+
+/// Pending deferred-focus requests for text inputs.
+///
+/// `focus_text_input_deferred(&data)` enqueues an entry here. The
+/// windowed-app frame loop calls [`process_pending_input_focus`] each
+/// tick AFTER the tree-build phase. The processor drains entries whose
+/// `stateful_state` has populated (i.e., the matching `TextInput` has
+/// been built into the live tree) and calls the regular
+/// [`focus_text_input`] on them; entries whose widget hasn't mounted
+/// yet stay queued for the next frame.
+///
+/// Use case: an inline editor popover that auto-focuses its input on
+/// open. Calling `focus_text_input` BEFORE the popover mounts triggers
+/// the `notify_continuous_redraw` chain while the popover is still
+/// being added to the tree, which on canvas-backed hosts causes the
+/// canvas to render in a broken zoomed-out state for ~4 seconds until
+/// a mouse-move forces a re-walk (verified by the 06-14 screen
+/// recording). Deferring focus until AFTER mount means the popover
+/// settles in the tree first, then focus side-effects apply against a
+/// stable composition.
+static PENDING_FOCUS_INPUT: Mutex<Vec<Weak<Mutex<TextInputData>>>> = Mutex::new(Vec::new());
+static PENDING_FOCUS_AREA: Mutex<
+    Vec<Weak<Mutex<crate::widgets::text_area::TextAreaState>>>,
+> = Mutex::new(Vec::new());
+
 /// Callback for setting continuous redraw on the animation scheduler
 /// This is set by the windowed app to bridge text widgets with the animation system
 #[allow(clippy::type_complexity)]
@@ -611,9 +647,102 @@ pub fn refresh_text_input(state: &SharedTextInputData) {
     crate::stateful::request_redraw();
 }
 
+/// Enqueue a text_input for focus on the NEXT frame, after its widget
+/// has been built into the tree.
+///
+/// Differs from [`focus_text_input`] only in TIMING: the actual focus
+/// (visual flip + focus-count bump + tracker registration) runs from
+/// [`process_pending_input_focus`] called by the windowed app's frame
+/// loop after the tree-build phase. By then any overlay containing the
+/// input has been mounted via `rebuild_overlay_subtree_if_dirty`, so
+/// the `notify_continuous_redraw` side-effect lands against a stable
+/// composition instead of racing the popover mount.
+///
+/// Pair with the regular [`focus_text_input`] for non-overlay
+/// scenarios where the input is already in the tree.
+pub fn focus_text_input_deferred(state: &SharedTextInputData) {
+    if let Ok(mut pending) = PENDING_FOCUS_INPUT.lock() {
+        pending.push(Arc::downgrade(state));
+    }
+    crate::stateful::request_redraw();
+}
+
+/// Drain the pending-focus queue, applying focus to entries whose
+/// widget has mounted (stateful_state populated). Entries whose widget
+/// hasn't built yet are re-queued for the next frame.
+///
+/// Called by the windowed frame loop AFTER tree-build phase (after
+/// `rebuild_overlay_subtree_if_dirty`) but BEFORE paint, so the focus
+/// state flip is visible on the same frame the popover paints — no
+/// visual delay between popover appearance and focus indicator.
+pub fn process_pending_input_focus() {
+    let drained: Vec<Weak<Mutex<TextInputData>>> = {
+        match PENDING_FOCUS_INPUT.lock() {
+            Ok(mut p) => std::mem::take(&mut *p),
+            Err(_) => return,
+        }
+    };
+    let mut requeue: Vec<Weak<Mutex<TextInputData>>> = Vec::new();
+    for weak in drained {
+        let Some(strong) = weak.upgrade() else {
+            continue;
+        };
+        let mounted = strong
+            .lock()
+            .ok()
+            .map(|d| d.stateful_state.is_some())
+            .unwrap_or(false);
+        if mounted {
+            focus_text_input(&strong);
+        } else {
+            requeue.push(Arc::downgrade(&strong));
+        }
+    }
+    if !requeue.is_empty() {
+        if let Ok(mut p) = PENDING_FOCUS_INPUT.lock() {
+            p.extend(requeue);
+        }
+        crate::stateful::request_redraw();
+    }
+}
+
+/// text_area sibling of [`process_pending_input_focus`]. The windowed
+/// frame loop calls both back-to-back; either covers its own widget
+/// type and the other is a no-op for empty queues.
+pub fn process_pending_area_focus() {
+    let drained: Vec<Weak<Mutex<crate::widgets::text_area::TextAreaState>>> = {
+        match PENDING_FOCUS_AREA.lock() {
+            Ok(mut p) => std::mem::take(&mut *p),
+            Err(_) => return,
+        }
+    };
+    let mut requeue: Vec<Weak<Mutex<crate::widgets::text_area::TextAreaState>>> = Vec::new();
+    for weak in drained {
+        let Some(strong) = weak.upgrade() else {
+            continue;
+        };
+        let mounted = strong
+            .lock()
+            .ok()
+            .map(|s| s.stateful_state.is_some())
+            .unwrap_or(false);
+        if mounted {
+            crate::widgets::text_area::focus_text_area(&strong);
+        } else {
+            requeue.push(Arc::downgrade(&strong));
+        }
+    }
+    if !requeue.is_empty() {
+        if let Ok(mut p) = PENDING_FOCUS_AREA.lock() {
+            p.extend(requeue);
+        }
+        crate::stateful::request_redraw();
+    }
+}
+
 pub fn focus_text_input(state: &SharedTextInputData) {
     use blinc_core::events::event_types;
-    if let Ok(mut s) = state.lock() {
+    let stateful_to_refresh = if let Ok(mut s) = state.lock() {
         if !s.visual.is_focused() {
             if let Some(new_state) = s.visual.on_event(event_types::FOCUS) {
                 s.visual = new_state;
@@ -623,18 +752,52 @@ pub fn focus_text_input(state: &SharedTextInputData) {
             s.focus_time_ms = elapsed_ms();
             s.reset_cursor_blink();
             increment_focus_count();
-            // Bump the stateful inner so its on_state callback re-runs
-            // with the new visual state — without this the focus border
-            // / bg colour don't reflect the change until the next event.
-            if let Some(ref stateful) = s.stateful_state {
+            // Bump the Stateful's shared FSM as well as data.visual.
+            // The Stateful's state_callback (the one that paints the
+            // focused bg/border) reads `shared.state`, NOT data.visual.
+            // If we only flip data.visual + needs_visual_update, the
+            // next build() reads the stale Idle shared.state and bakes
+            // Idle visuals into the render tree — so on first paint
+            // the focused popup looks unfocused until a pointer event
+            // (POINTER_ENTER) drives shared.state via the auto event
+            // handlers. Drive shared.state via the FOCUS event here so
+            // build() sees Focused, and call refresh_stateful after
+            // dropping the data lock so the callback queues a prop
+            // update for the current frame.
+            let stateful_ref = s.stateful_state.clone();
+            if let Some(ref stateful) = stateful_ref {
                 if let Ok(mut shared) = stateful.lock() {
+                    if let Some(new_fsm) = shared.state.on_event(event_types::FOCUS) {
+                        shared.state = new_fsm;
+                    } else {
+                        shared.state = TextFieldState::Focused;
+                    }
                     shared.needs_visual_update = true;
                 }
             }
+            stateful_ref
+        } else {
+            None
         }
+    } else {
+        None
+    };
+    let did_change = stateful_to_refresh.is_some();
+    if let Some(ref stateful) = stateful_to_refresh {
+        refresh_stateful(stateful);
     }
     set_focused_text_input(state);
-    crate::stateful::request_redraw();
+    // Only request a redraw when this call ACTUALLY transitioned the
+    // input to focused. The deferred-focus drain calls focus_text_input
+    // every frame the queue is non-empty; firing request_redraw
+    // unconditionally pinned NEEDS_REDRAW across animation ticks and
+    // helped lock the windowed runner into the 30 fps cap branch even
+    // after the popover-enter animation settled. The branch covering
+    // an already-focused input is an idempotent no-op; no redraw is
+    // needed.
+    if did_change {
+        crate::stateful::request_redraw();
+    }
 }
 
 pub(crate) fn set_focused_text_input(state: &SharedTextInputData) {
