@@ -393,6 +393,14 @@ pub struct CanvasPaintRecord {
     /// at paint time. Replayed onto the scratch context so colours
     /// inside the canvas closure pick up the same opacity.
     pub opacity: f32,
+    /// True when the walker emitted this canvas inside an
+    /// `is_overlay_root` subtree (portal / popover / dropdown /
+    /// dialog / toast). Canvases with this flag bucket into the
+    /// overlay-canvas pool and dispatch AFTER
+    /// `dispatch_dynamic_batch_overlay`, so caret canvases nested
+    /// inside a focused cn::input stay visible above the popover
+    /// bg/border their host paints into the dyn batch.
+    pub in_overlay_subtree: bool,
 }
 
 impl std::fmt::Debug for CanvasPaintRecord {
@@ -656,6 +664,14 @@ pub struct RenderTree {
     /// ignored after a cache invalidation; the next full paint
     /// repopulates from scratch.
     canvas_paint_records: RefCell<HashMap<LayoutNodeId, CanvasPaintRecord>>,
+    /// Sibling pool for canvases whose walker traversal was inside an
+    /// `is_overlay_root` subtree. Same shape and lifecycle as
+    /// `canvas_paint_records`, but iterated by a SEPARATE collect /
+    /// dispatch pair that fires AFTER `dispatch_dynamic_batch_overlay`
+    /// — so a caret canvas nested inside a focused cn::input stays
+    /// painted above the popover bg/border the overlay's dyn-batch
+    /// SDF pass paints.
+    overlay_canvas_paint_records: RefCell<HashMap<LayoutNodeId, CanvasPaintRecord>>,
     // --- Compositor v2 storage (Phase 1; populated by Phase 2) ---
     /// Unified per-region map: every node classified as
     /// `AnimationStatus::Animating` produces one entry here. The
@@ -941,6 +957,7 @@ impl RenderTree {
             composite_bindings: RefCell::new(HashMap::new()),
             css_anim_paint_records: RefCell::new(HashMap::new()),
             canvas_paint_records: RefCell::new(HashMap::new()),
+            overlay_canvas_paint_records: RefCell::new(HashMap::new()),
             dynamic_regions: RefCell::new(HashMap::new()),
             previous_animation_status: RefCell::new(HashMap::new()),
             current_animation_status: RefCell::new(HashMap::new()),
@@ -1396,6 +1413,23 @@ impl RenderTree {
         &self,
     ) -> std::cell::RefMut<'_, HashMap<LayoutNodeId, CanvasPaintRecord>> {
         self.canvas_paint_records.borrow_mut()
+    }
+
+    /// Borrow the overlay-subtree canvas pool. Same lifecycle as
+    /// `canvas_paint_records`; entries here belong to canvases
+    /// emitted inside an `is_overlay_root` ancestor, dispatched
+    /// AFTER the popover's dyn-batch overlay pass.
+    pub fn overlay_canvas_paint_records(
+        &self,
+    ) -> std::cell::Ref<'_, HashMap<LayoutNodeId, CanvasPaintRecord>> {
+        self.overlay_canvas_paint_records.borrow()
+    }
+
+    /// Mutable variant of [`Self::overlay_canvas_paint_records`].
+    pub fn overlay_canvas_paint_records_mut(
+        &self,
+    ) -> std::cell::RefMut<'_, HashMap<LayoutNodeId, CanvasPaintRecord>> {
+        self.overlay_canvas_paint_records.borrow_mut()
     }
 
     /// Borrow the Compositor v2 dynamic-region map. Populated by the

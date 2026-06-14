@@ -1670,6 +1670,22 @@ pub trait DrawContext {
     /// Get the current combined transform
     fn current_transform(&self) -> Transform;
 
+    /// Snapshot the current transform-stack depth. Pair with
+    /// [`Self::restore_transform_stack`] to bracket a paint section
+    /// against any inner code path that might leak a push (early
+    /// return, conditional pop with a mutated gate, panic-recover).
+    ///
+    /// Default returns `0` — non-GPU contexts that don't keep an
+    /// explicit stack can no-op this pair.
+    fn transform_stack_depth(&self) -> usize {
+        0
+    }
+
+    /// Truncate the transform stack back to the snapshot depth from
+    /// [`Self::transform_stack_depth`]. Default no-op for contexts
+    /// that don't keep an explicit stack.
+    fn restore_transform_stack(&mut self, _depth: usize) {}
+
     // ─────────────────────────────────────────────────────────────────────────
     // State Stack
     // ─────────────────────────────────────────────────────────────────────────
@@ -1747,6 +1763,26 @@ pub trait DrawContext {
 
     /// Pair with [`Self::push_motion_subtree`]. Default no-op.
     fn pop_motion_subtree(&mut self) {}
+
+    /// Notify the context that the walker is entering an
+    /// `is_overlay_root` subtree (portal / popover / dropdown /
+    /// dialog / toast). The renderer uses the depth this tracks to
+    /// bucket a canvas's `CanvasPaintRecord` into the overlay-
+    /// canvas pool instead of the global canvas-overlay pool, so
+    /// the canvas dispatches AFTER its surrounding overlay's
+    /// dyn-batch SDF pass — keeping caret blinks visible above the
+    /// popover bg/border their host input paints. Default no-op for
+    /// contexts without this distinction.
+    fn push_overlay_subtree(&mut self) {}
+
+    /// Pair with [`Self::push_overlay_subtree`]. Default no-op.
+    fn pop_overlay_subtree(&mut self) {}
+
+    /// True when the walker is currently inside one or more
+    /// `is_overlay_root` subtrees. Default false.
+    fn in_overlay_subtree(&self) -> bool {
+        false
+    }
 
     /// Walker entered a composite-promotable CSS-animated subtree.
     /// Subsequent primitive / path / glass emissions route into a

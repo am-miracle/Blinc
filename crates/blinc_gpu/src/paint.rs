@@ -215,6 +215,16 @@ pub struct GpuPaintContext<'a> {
     /// so nested motion bindings (rare but possible) still route
     /// correctly.
     motion_subtree_depth: u32,
+    /// How deep the walker currently is inside `is_overlay_root`
+    /// subtrees specifically (portals / popovers / dropdowns /
+    /// dialogs / toasts). Tracked separately from
+    /// `motion_subtree_depth` because the renderer uses it to bucket
+    /// `CanvasPaintRecord`s into a post-dyn-batch dispatch so a
+    /// canvas-emitted caret inside a focused cn::input lives ABOVE
+    /// the popover's bg/border in z-order. A motion-bound canvas
+    /// outside an overlay keeps its existing pre-dyn-batch
+    /// canvas-overlay slot.
+    overlay_subtree_depth: u32,
     /// Per-node scratch batches for composite-promotable CSS-animated
     /// subtrees. When [`Self::push_composite_layer`] sets
     /// `active_composite_layer = Some(node)`, every subsequent emit
@@ -362,6 +372,7 @@ impl<'a> GpuPaintContext<'a> {
             pending_gpu_passes: Vec::new(),
             dynamic_batch: PrimitiveBatch::new(),
             motion_subtree_depth: 0,
+            overlay_subtree_depth: 0,
             composite_layer_batches: std::collections::HashMap::new(),
             active_composite_layer: None,
             composite_layer_clip_base: Vec::new(),
@@ -420,6 +431,7 @@ impl<'a> GpuPaintContext<'a> {
             pending_gpu_passes: Vec::new(),
             dynamic_batch: PrimitiveBatch::new(),
             motion_subtree_depth: 0,
+            overlay_subtree_depth: 0,
             composite_layer_batches: std::collections::HashMap::new(),
             active_composite_layer: None,
             composite_layer_clip_base: Vec::new(),
@@ -447,6 +459,22 @@ impl<'a> GpuPaintContext<'a> {
     /// future caller forgets balance).
     pub fn pop_motion_subtree(&mut self) {
         self.motion_subtree_depth = self.motion_subtree_depth.saturating_sub(1);
+    }
+
+    /// Mark that the walker has entered an `is_overlay_root` subtree
+    /// (portal / popover / dropdown / dialog / toast). Tracked
+    /// independently of `motion_subtree_depth` so the renderer can
+    /// route canvases inside an overlay into a post-dyn-batch
+    /// dispatch — keeping caret canvases above the popover bg/border
+    /// their host input paints.
+    pub fn push_overlay_subtree(&mut self) {
+        self.overlay_subtree_depth = self.overlay_subtree_depth.saturating_add(1);
+    }
+
+    /// Pair with [`Self::push_overlay_subtree`]. Saturating sub so a
+    /// stray pop never underflows.
+    pub fn pop_overlay_subtree(&mut self) {
+        self.overlay_subtree_depth = self.overlay_subtree_depth.saturating_sub(1);
     }
 
     /// `true` if the walker is currently inside one or more motion-
@@ -1705,6 +1733,28 @@ impl<'a> GpuPaintContext<'a> {
         self.camera = None;
     }
 
+    /// Snapshot the current transform-stack depth. Pair with
+    /// [`Self::restore_transform_stack`] to GUARANTEE the stack
+    /// returns to this depth at the end of a paint section, even
+    /// when an inner code path leaks a push (early return, conditional
+    /// pop with mutated gate, panic-recover, etc.). Without this,
+    /// continuous_redraw frames that re-run the walker compound any
+    /// single-call leak — observed as `current_affine` doubling per
+    /// frame (`a`/`d` going 2 → 4 → 8 → 16) and the canvas appearing
+    /// to zoom out exponentially.
+    pub fn transform_stack_depth(&self) -> usize {
+        self.transform_stack.len()
+    }
+
+    /// Truncate the transform stack back to the snapshot depth
+    /// returned by [`Self::transform_stack_depth`]. Safe to call when
+    /// the stack is already at-or-below that depth (no-op then).
+    pub fn restore_transform_stack(&mut self, depth: usize) {
+        if self.transform_stack.len() > depth {
+            self.transform_stack.truncate(depth);
+        }
+    }
+
     /// Apply opacity to a brush by modifying the color's alpha channel
     /// Pre-sample a multi-stop gradient at every tessellated vertex's
     /// path-local position. Returns `None` for solids, 2-stop
@@ -1941,6 +1991,16 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         }
     }
 
+    fn transform_stack_depth(&self) -> usize {
+        self.transform_stack.len()
+    }
+
+    fn restore_transform_stack(&mut self, depth: usize) {
+        if self.transform_stack.len() > depth {
+            self.transform_stack.truncate(depth);
+        }
+    }
+
     fn current_transform(&self) -> Transform {
         Transform::Affine2D(self.current_affine())
     }
@@ -2046,6 +2106,24 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
 
     fn pop_motion_subtree(&mut self) {
         GpuPaintContext::pop_motion_subtree(self)
+    }
+
+    fn push_overlay_subtree(&mut self) {
+        // Override the no-op trait default. Inherent methods on
+        // the concrete `GpuPaintContext` don't dispatch via
+        // `&mut dyn DrawContext`; without this forwarder the
+        // walker's push at an overlay-root boundary would be a
+        // silent no-op and canvas inserts inside would route into
+        // the global pool.
+        GpuPaintContext::push_overlay_subtree(self)
+    }
+
+    fn pop_overlay_subtree(&mut self) {
+        GpuPaintContext::pop_overlay_subtree(self)
+    }
+
+    fn in_overlay_subtree(&self) -> bool {
+        self.overlay_subtree_depth > 0
     }
 
     fn push_composite_layer(&mut self, node_id: u64) {

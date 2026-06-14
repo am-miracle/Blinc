@@ -77,6 +77,10 @@ impl RenderTree {
         // rebuilds them on every full paint, the fast path consumes
         // them between full paints.
         self.canvas_paint_records.borrow_mut().clear();
+        // Sibling pool for canvases nested inside `is_overlay_root`
+        // subtrees — dispatched AFTER the popover's dyn-batch SDF
+        // pass so caret canvases survive above their overlay's bg.
+        self.overlay_canvas_paint_records.borrow_mut().clear();
         // Compositor v2 dynamic-region map — populated by the walker
         // (Phase 2: in parallel with the legacy records above; Phase 3:
         // becomes the sole source). Cleared at the top of every full
@@ -92,6 +96,17 @@ impl RenderTree {
         self.dynamic_regions.borrow_mut().clear();
 
         if let Some(root) = self.root {
+            // Bracket the entire walk against any inner-path transform
+            // leak. The slow walker runs every frame under
+            // continuous_redraw; even a one-push-per-frame leak
+            // compounds into exponential scale growth (canvas zoom-
+            // out flicker observed when an inline editor auto-focused
+            // its input — see the 06-14 canvas_viewport_diag log
+            // showing saved_affine going 2 → 4 → 8 → 16 per frame).
+            // Snapshot the depth now and truncate back at the end so
+            // any push that escapes its matching pop is forcibly
+            // discarded, contained to the frame it happened on.
+            let initial_depth = ctx.transform_stack_depth();
             // Apply DPI scale factor if set (for HiDPI display support)
             let has_scale = self.scale_factor != 1.0;
             if has_scale {
@@ -180,6 +195,12 @@ impl RenderTree {
             if has_scale {
                 ctx.pop_transform();
             }
+
+            // Defensive: if any inner code path skipped a pop_transform
+            // for any reason, truncate back to the depth at entry. See
+            // the comment at `initial_depth` above for the failure mode
+            // this contains (per-frame current_affine doubling).
+            ctx.restore_transform_stack(initial_depth);
         }
     }
 
@@ -238,6 +259,10 @@ impl RenderTree {
             }
         }
 
+        // Same defensive bracket as render_with_motion — see that
+        // function's comment for the failure mode (continuous_redraw
+        // + walker leak = exponential canvas scale doubling).
+        let initial_depth = ctx.transform_stack_depth();
         // Push the parent-environment affine that was active when the
         // walker reached the region's root last full paint.
         let parent_affine = blinc_core::layer::Affine2D {
@@ -299,6 +324,9 @@ impl RenderTree {
         if pushed_clip {
             ctx.pop_clip();
         }
+        // Defensive: truncate any inner-path transform leak. Same
+        // rationale as render_with_motion's bracket.
+        ctx.restore_transform_stack(initial_depth);
     }
 
     /// Render a layer with motion animation support
@@ -517,6 +545,15 @@ impl RenderTree {
             || render_node.props.is_overlay_root;
         if in_motion_subtree {
             ctx.push_motion_subtree();
+        }
+        // Track overlay-root subtrees with a separate counter (NOT
+        // the combined motion gate) so canvas inserts inside a
+        // portal/popover/dropdown route into the overlay-canvas
+        // pool. Motion-bound canvases outside an overlay keep their
+        // pre-dyn-batch slot.
+        let in_overlay_subtree_node = render_node.props.is_overlay_root;
+        if in_overlay_subtree_node {
+            ctx.push_overlay_subtree();
         }
         let composite_bg_start = in_motion_subtree.then(|| ctx.bg_primitive_count());
         // Phase 4b: bracket CSS-animated subtrees the same way
@@ -752,6 +789,9 @@ impl RenderTree {
             // when this early-out fires.
             if in_motion_subtree {
                 ctx.pop_motion_subtree();
+            }
+            if in_overlay_subtree_node {
+                ctx.pop_overlay_subtree();
             }
             // Same balancing for the composite-layer push.
             if pushed_composite_layer {
@@ -1696,19 +1736,34 @@ impl RenderTree {
                     // static canvas every frame either.
                     let is_static_canvas = canvas_data.is_static;
                     if layer_matches && (has_emission || skip_drawing) && !is_static_canvas {
-                        self.canvas_paint_records.borrow_mut().insert(
-                            node,
-                            super::super::CanvasPaintRecord {
-                                primitive_range: canvas_start..canvas_end,
-                                affine: saved_affine,
-                                bounds_wh: (bounds.width, bounds.height),
-                                render_fn: render_fn.clone(),
-                                clips_content: should_clip,
-                                ancestor_clip_aabb: saved_ancestor_clip,
-                                z_layer: saved_z_layer,
-                                opacity: saved_opacity,
-                            },
-                        );
+                        // Route into the overlay-subtree pool when
+                        // the walker is currently inside an
+                        // `is_overlay_root` ancestor. That pool is
+                        // dispatched AFTER the popover's dyn-batch
+                        // SDF so a caret canvas nested in a focused
+                        // cn::input stays above the popover bg/
+                        // border instead of being overdrawn by it.
+                        let nested_overlay = ctx.in_overlay_subtree();
+                        let record = super::super::CanvasPaintRecord {
+                            primitive_range: canvas_start..canvas_end,
+                            affine: saved_affine,
+                            bounds_wh: (bounds.width, bounds.height),
+                            render_fn: render_fn.clone(),
+                            clips_content: should_clip,
+                            ancestor_clip_aabb: saved_ancestor_clip,
+                            z_layer: saved_z_layer,
+                            opacity: saved_opacity,
+                            in_overlay_subtree: nested_overlay,
+                        };
+                        if nested_overlay {
+                            self.overlay_canvas_paint_records
+                                .borrow_mut()
+                                .insert(node, record);
+                        } else {
+                            self.canvas_paint_records
+                                .borrow_mut()
+                                .insert(node, record);
+                        }
 
                         // Compositor v2 parallel-populate: every
                         // canvas is unconditionally
@@ -2616,6 +2671,9 @@ impl RenderTree {
         // exit. Earlier early-return paths handle their own pop.
         if in_motion_subtree {
             ctx.pop_motion_subtree();
+        }
+        if in_overlay_subtree_node {
+            ctx.pop_overlay_subtree();
         }
         // Balance the composite-layer push (same reasoning — the
         // walker emits this node's primitives into the per-node

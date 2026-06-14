@@ -868,6 +868,18 @@ impl RenderContext {
         // batch (rebuild, layout change, scroll, hover state change,
         // CSS state change) also makes the cached texture stale.
         self.renderer.invalidate_static_layer();
+        // NOTE: `css_composited_textures` / `motion_subtree_textures`
+        // are intentionally NOT drained here. The per-key dirty-skip
+        // at the bake site (see `hash_composite_scratch`) already
+        // detects changed primitives / layer-command opacity per
+        // node, so an animating subtree re-bakes via hash mismatch.
+        // An earlier draft drained both maps on every invalidation
+        // to fix a stale-bake repro; that tanked steady-state perf
+        // by tearing down every live composite/motion texture in
+        // the scene on every hover flip, pointer move with handlers,
+        // scroll tick, and stateful refresh. If a stale-bake bug
+        // ever resurfaces, fix it at the hash function or at the
+        // specific node's bake key — never via a tree-wide drain.
     }
 
     /// Whether the renderer has a usable cached batch from the most
@@ -1080,16 +1092,48 @@ impl RenderContext {
         width: u32,
         height: u32,
     ) -> CanvasOverlay {
+        let records_ref = tree.canvas_paint_records();
+        let records: Vec<blinc_layout::renderer::CanvasPaintRecord> =
+            records_ref.values().cloned().collect();
+        drop(records_ref);
+        self.collect_canvas_overlay_from(records, width, height)
+    }
+
+    /// Sibling collector for canvases nested inside an
+    /// `is_overlay_root` ancestor. Returns the per-frame primitives
+    /// the renderer dispatches AFTER `dispatch_dynamic_batch_overlay`
+    /// so a caret canvas inside a focused cn::input stays painted
+    /// above its host popover's bg/border (which lives in the
+    /// dyn-batch overlay).
+    pub fn collect_overlay_canvas_overlay(
+        &mut self,
+        tree: &blinc_layout::RenderTree,
+        width: u32,
+        height: u32,
+    ) -> CanvasOverlay {
+        let records_ref = tree.overlay_canvas_paint_records();
+        let records: Vec<blinc_layout::renderer::CanvasPaintRecord> =
+            records_ref.values().cloned().collect();
+        drop(records_ref);
+        self.collect_canvas_overlay_from(records, width, height)
+    }
+
+    /// Shared body of [`Self::collect_canvas_overlay`] and
+    /// [`Self::collect_overlay_canvas_overlay`]. Takes an already-
+    /// extracted set of records so each pool can be drained
+    /// independently without re-walking the tree.
+    fn collect_canvas_overlay_from(
+        &mut self,
+        mut records: Vec<blinc_layout::renderer::CanvasPaintRecord>,
+        width: u32,
+        height: u32,
+    ) -> CanvasOverlay {
         use blinc_core::{DrawContext, Rect, Transform, layer::Affine2D};
         use blinc_gpu::GpuPaintContext;
 
-        let records_ref = tree.canvas_paint_records();
-        if records_ref.is_empty() {
+        if records.is_empty() {
             return CanvasOverlay::default();
         }
-        let mut records: Vec<blinc_layout::renderer::CanvasPaintRecord> =
-            records_ref.values().cloned().collect();
-        drop(records_ref);
 
         // Sort by z_layer so overlays render bottom-up. Stable
         // sort on (z_layer, primitive_range.start) keeps siblings
@@ -1297,26 +1341,45 @@ impl RenderContext {
         // tiebreaker — same convention `collect_canvas_overlay`
         // uses).
         //
-        // CssAnimated regions are EXCLUDED: their pixels live in
-        // `css_composited_textures` and get blitted by
-        // `composite_css_layers_overlay`. Re-walking them here would
-        // re-enter `render_layer_with_motion` from the scratch
-        // context, which then writes a fresh `dynamic_regions` entry
-        // — but the scratch's cumulative transform already has DPI
-        // pushed once (by the outer `push_transform` below) AND
-        // again via the region's `ambient.affine` (captured from the
-        // main walker, which had DPI baked in). The result compounds
-        // DPI by an extra factor every fast-path frame; the new
-        // `screen_aabb` is DPI² physical, then DPI³ next frame,
-        // then DPI⁴... visible as `dest_w` / `dest_h` / `dest_pos`
-        // doubling each tick until the texture blits land far
-        // off-screen and pulse / glow vanish.
+        // CssAnimated AND Canvas regions are EXCLUDED. Same compounding-
+        // DPI bug: re-walking them here re-enters `render_layer_with_motion`
+        // from the scratch context, which then writes a fresh
+        // `dynamic_regions` entry — but the scratch's cumulative
+        // transform already has DPI pushed once (by the outer
+        // `push_transform` below) AND again via the region's
+        // `ambient.affine` (captured from the main walker, which had
+        // DPI baked in). The result compounds DPI by an extra factor
+        // every fast-path frame; the new `screen_aabb` / canvas
+        // `saved_affine` is DPI² physical, then DPI³ next frame,
+        // then DPI⁴…
+        //
+        // Symptom for the canvas case (verified by the 06-14 zoom-
+        // flicker log capture): every fast-path frame after a
+        // continuous_redraw-triggering event (focused text input,
+        // motion animation) compounded the canvas record's
+        // `saved_affine` (logged as 2 → 4 → 8 → 16 by the diagnostic
+        // probe in motion.rs), making the node-editor canvas appear
+        // to zoom out exponentially while the popover was open. The
+        // canvas's per-frame render_fn replay in
+        // `collect_canvas_overlay` reads the (now-corrupted)
+        // `saved_affine` from the canvas paint record and emits the
+        // node-graph primitives at that scale. The cache stays locked
+        // at the broken affine until a fresh slow walker invalidation
+        // (mouse-move → hover-state cache invalidation) resets it.
+        //
+        // Canvas content goes through `collect_canvas_overlay` —
+        // which uses the slow walker's stored `canvas_paint_records`
+        // affine (UNCORRUPTED) — so excluding canvas from this re-
+        // walk loses nothing visually. Motion-bound subtrees that
+        // ARE valid here (DynamicKind::MotionSubtree, not the texture
+        // variant) keep going through.
         let mut ordered: Vec<_> = regions
             .values()
             .filter(|r| {
                 !matches!(
                     r.kind,
                     blinc_layout::renderer::DynamicKind::CssAnimated { .. }
+                        | blinc_layout::renderer::DynamicKind::Canvas { .. }
                 )
             })
             .cloned()
@@ -1378,21 +1441,60 @@ impl RenderContext {
     /// Hash a composite-layer scratch `PrimitiveBatch` for the
     /// rasterize-skip check in the slow-path texture step. Hashes
     /// only the channels that affect rendered pixels: the SDF
-    /// primitives, foreground primitives, and the `aux_data` buffer
-    /// (polygon-clip vertices, 3D group descriptors). Glass / nested-
-    /// glass primitives don't appear in composited subtrees today
-    /// (the walker doesn't promote glass) so they're omitted; if a
-    /// future change ever lets glass land in a composite scratch,
-    /// promotability would have to be reconsidered anyway.
+    /// primitives, foreground primitives, the `aux_data` buffer
+    /// (polygon-clip vertices, 3D group descriptors), AND the
+    /// `layer_commands` opacity bits. Glass / nested-glass primitives
+    /// don't appear in composited subtrees today (the walker doesn't
+    /// promote glass) so they're omitted; if a future change ever
+    /// lets glass land in a composite scratch, promotability would
+    /// have to be reconsidered anyway.
     ///
     /// `GpuPrimitive` and `aux_data` are `bytemuck::Pod`, so we hash
-    /// their raw bytes — cheap, allocation-free, deterministic.
+    /// their raw bytes. `LayerCommand` is a non-Pod enum (carries
+    /// `LayerConfig` with `Vec<LayerEffect>` etc.), so we hash the
+    /// discriminant + the bits that actually animate per frame
+    /// (Push.config.opacity for CSS-promoted subtrees, Sample's
+    /// source/dest rects, Pop is constant). Without the layer-command
+    /// hash, an animating `push_layer { opacity: t }` around a
+    /// composite-promoted subtree (e.g. cn::popover entry animation)
+    /// produces byte-identical primitives every frame → the dirty-
+    /// skip succeeds → the texture stays frozen at frame-1 (near-
+    /// zero opacity) for the lifetime of the animation. Visible
+    /// today as cn::input / cn::textarea opened inside a cn::popover
+    /// rendering invisible until a mouse-move trips the staleness
+    /// sweep that releases the layer texture.
     fn hash_composite_scratch(batch: &blinc_gpu::primitives::PrimitiveBatch) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         bytemuck::cast_slice::<_, u8>(&batch.primitives).hash(&mut hasher);
         bytemuck::cast_slice::<_, u8>(&batch.foreground_primitives).hash(&mut hasher);
         bytemuck::cast_slice::<_, u8>(&batch.aux_data).hash(&mut hasher);
+        for entry in &batch.layer_commands {
+            entry.primitive_index.hash(&mut hasher);
+            entry.foreground_primitive_index.hash(&mut hasher);
+            match &entry.command {
+                blinc_gpu::primitives::LayerCommand::Push { config } => {
+                    0u8.hash(&mut hasher);
+                    config.opacity.to_bits().hash(&mut hasher);
+                    std::mem::discriminant(&config.blend_mode).hash(&mut hasher);
+                    config.depth.hash(&mut hasher);
+                }
+                blinc_gpu::primitives::LayerCommand::Pop => {
+                    1u8.hash(&mut hasher);
+                }
+                blinc_gpu::primitives::LayerCommand::Sample { source, dest, .. } => {
+                    2u8.hash(&mut hasher);
+                    source.x().to_bits().hash(&mut hasher);
+                    source.y().to_bits().hash(&mut hasher);
+                    source.width().to_bits().hash(&mut hasher);
+                    source.height().to_bits().hash(&mut hasher);
+                    dest.x().to_bits().hash(&mut hasher);
+                    dest.y().to_bits().hash(&mut hasher);
+                    dest.width().to_bits().hash(&mut hasher);
+                    dest.height().to_bits().hash(&mut hasher);
+                }
+            }
+        }
         hasher.finish()
     }
 
@@ -2638,6 +2740,34 @@ impl RenderContext {
         let prims = dyn_batch.primitives.clone();
         self.rebind_glyph_atlas_for_overlay();
         self.renderer.render_primitives_overlay(target_view, &prims);
+    }
+
+    /// Dispatch the overlay-subtree canvas pool — caret canvases and
+    /// other canvases nested inside an `is_overlay_root` ancestor —
+    /// AFTER `dispatch_dynamic_batch_overlay` so they paint above
+    /// the popover bg/border their host overlay's dyn-batch SDF pass
+    /// just laid down. Mirrors `dispatch_dynamic_batch_overlay`'s
+    /// aux-rebind / glyph-atlas-rebind pattern: the previous dyn-batch
+    /// dispatch left its own aux_data on the GPU, so we must re-upload
+    /// this pool's aux_data before submitting its draw or every
+    /// mesh / 3D-group / polygon-clip primitive in here would sample
+    /// stale floats. The dynamic_images / meshes / gpu_passes channels
+    /// stay with the main canvas overlay (their dispatch paths live
+    /// just after this in the call sites).
+    fn dispatch_overlay_canvas_overlay(
+        &mut self,
+        target_view: &wgpu::TextureView,
+        overlay: &CanvasOverlay,
+    ) {
+        if overlay.primitives.is_empty() {
+            return;
+        }
+        if !overlay.aux_data.is_empty() {
+            self.renderer.update_aux_data_slice(&overlay.aux_data);
+        }
+        self.rebind_glyph_atlas_for_overlay();
+        self.renderer
+            .render_primitives_overlay(target_view, &overlay.primitives);
     }
 
     /// Shift every `aux_data` index on `prims` by `shift`.
@@ -7490,6 +7620,8 @@ impl RenderContext {
                 // pass — see dispatch_dynamic_batch_overlay for why
                 // the two are no longer merged into one dispatch.
                 let overlay = self.collect_canvas_overlay(tree, width, height);
+                let overlay_subtree_canvases =
+                    self.collect_overlay_canvas_overlay(tree, width, height);
                 if !tree.dynamic_regions().is_empty() {
                     let walked =
                         self.collect_dynamic_region_primitives(tree, render_state, width, height);
@@ -7503,6 +7635,10 @@ impl RenderContext {
                     &overlay.aux_data,
                 );
                 self.dispatch_dynamic_batch_overlay(target_view);
+                // Overlay-subtree canvases (e.g. caret blink inside a
+                // focused cn::input) dispatch HERE so they land above
+                // the dyn-batch SDF the popover just painted.
+                self.dispatch_overlay_canvas_overlay(target_view, &overlay_subtree_canvases);
                 // Foreground overlay — re-dispatch fg primitives on
                 // top of the canvas overlay so host overlays marked
                 // `RenderLayer::Foreground` win z-order over canvas
@@ -7806,6 +7942,8 @@ impl RenderContext {
                 // layer the dynamic images and meshes onto the same
                 // target.
                 let overlay = self.collect_canvas_overlay(tree, width, height);
+                let overlay_subtree_canvases =
+                    self.collect_overlay_canvas_overlay(tree, width, height);
                 // Compositor v2: motion-bound subtree primitives go
                 // into a separate `cached_dynamic_batch` (walker
                 // pushed motion subtree depth around them so they
@@ -7846,6 +7984,7 @@ impl RenderContext {
                     &overlay.aux_data,
                 );
                 self.dispatch_dynamic_batch_overlay(target_view);
+                self.dispatch_overlay_canvas_overlay(target_view, &overlay_subtree_canvases);
                 // Foreground overlay — re-dispatch fg primitives on
                 // top of the canvas overlay so host overlays marked
                 // `RenderLayer::Foreground` win z-order over canvas
@@ -8106,6 +8245,7 @@ impl RenderContext {
         // mode (it was dropped on the floor by the
         // primitives-only path).
         let overlay = self.collect_canvas_overlay(tree, width, height);
+        let overlay_subtree_canvases = self.collect_overlay_canvas_overlay(tree, width, height);
         // Compositor v2: motion-bound subtree primitives ride in a
         // SEPARATE SDF pass via dispatch_dynamic_batch_overlay,
         // mirroring the fast paths above. Splitting the dispatch
@@ -8124,6 +8264,7 @@ impl RenderContext {
             &overlay.aux_data,
         );
         self.dispatch_dynamic_batch_overlay(target_view);
+        self.dispatch_overlay_canvas_overlay(target_view, &overlay_subtree_canvases);
         // Foreground overlay — re-dispatch fg primitives on top of
         // the canvas overlay so host overlays marked
         // `RenderLayer::Foreground` win z-order over canvas content.

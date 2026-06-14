@@ -6042,7 +6042,7 @@ impl GpuRenderer {
     /// which carries the dynamic batch's aux_data separately from a
     /// `PrimitiveBatch`). Avoids constructing a throwaway batch just
     /// to satisfy the buffer-variant signature.
-    fn update_aux_data_slice(&mut self, aux_data: &[[f32; 4]]) {
+    pub fn update_aux_data_slice(&mut self, aux_data: &[[f32; 4]]) {
         if aux_data.is_empty() {
             return;
         }
