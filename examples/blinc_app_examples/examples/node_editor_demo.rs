@@ -426,6 +426,16 @@ struct ExpansionState {
     /// principle belong to multiple groups (rare but allowed by the
     /// current model).
     parent_groups: Vec<GroupId>,
+    /// Set true the first time the wrapper group experiences any
+    /// membership-changing event during this expansion (drag-in,
+    /// drag-out, delete-from-wrapper, etc.). Used by
+    /// `is_expansion_dirty` so a "net zero" edit sequence — add a
+    /// node then remove it within the same session — still surfaces
+    /// the save-changes confirmation dialog. Without this, capture
+    /// diff returns zero against the at-expand baseline and the
+    /// dialog never appears, leaving the user wondering whether
+    /// their edits were noticed at all.
+    edits_pending: bool,
 }
 
 /// Snapshot of an expanded subgraph's contents as seen through the
@@ -1107,6 +1117,11 @@ fn handle_event(
                     req.group.as_str()
                 );
             }
+            // If this group is a wrapping subgraph, mark the
+            // expansion as edited so the save-changes dialog
+            // surfaces on minimize even if the user later removes
+            // what they just added.
+            mark_wrapper_edits_pending(host, &req.group);
         }
         EditorEvent::RemoveFromGroupRequested(req) => {
             let prev_members = host
@@ -1140,6 +1155,35 @@ fn handle_event(
                     req.source,
                 );
             }
+            // Symmetric with AddToGroupRequested above — any
+            // wrapper-membership change marks the expansion edited
+            // so the save-changes dialog fires on minimize, even
+            // when add + remove net to zero against the baseline.
+            mark_wrapper_edits_pending(host, &req.group);
+            // Wrapping-subgraph special case: when a member of an
+            // expanded subgraph's wrapping group is dragged OUT, three
+            // things have to happen to keep it alive past the next
+            // minimize and prevent stale-routing leftovers:
+            //   1. Drop it from `state.inserted_nodes` so minimize
+            //      doesn't sweep it away with the other expansion
+            //      clones.
+            //   2. Drop any lifted external connections that targeted
+            //      it via the `__sub_route:<canonical>:` encoding —
+            //      otherwise they'd resurrect on minimize as wires
+            //      from outside pointing at a now-gone target, which
+            //      re-expansion would mis-route through the
+            //      entry/exit heuristic to a different inner node.
+            //   3. Strip the `expanded:<diamond>:` prefix off the
+            //      node's id (and its incident connections) so the
+            //      node lives in the host name space as a normal
+            //      node, not as an expansion artifact that would
+            //      collide with a fresh clone the next time the
+            //      same subgraph is opened.
+            // Step 3 is best-effort: if the un-prefixed id collides
+            // with an existing host node, the rename is skipped and
+            // the prefixed id sticks (logged so the user can rename
+            // manually if needed).
+            naturalize_wrapper_member_removal(editor, host, &req.group, &req.node);
         }
         EditorEvent::ToggleCollapseRequested(req) => {
             // Special case: if this group is a subgraph-expansion
@@ -1816,6 +1860,7 @@ fn expand_subgraph(
             id_prefix: prefix,
             baseline,
             parent_groups,
+            edits_pending: false,
         },
     );
 
@@ -1905,8 +1950,23 @@ fn minimize_subgraph(editor: &Editor, host: &HostGraph, group_id: GroupId) {
 /// verdict guarantees that a save would actually change the
 /// canonical subgraph (no spurious dialogs).
 fn is_expansion_dirty(state: &ExpansionState, host: &HostGraph) -> bool {
+    if state.edits_pending {
+        return true;
+    }
     let current = ExpansionBaseline::capture(host, &state.group_id, &state.id_prefix);
     current != state.baseline
+}
+
+/// Flip the `edits_pending` flag for an expansion if `group_id`
+/// names a live wrapping subgraph. No-op for non-wrapping groups.
+/// Called from membership-mutating event handlers so the
+/// save-changes dialog surfaces even when net diff against baseline
+/// is zero (drag-in-then-out, drag-out-then-in, drag-to-reposition
+/// inside the wrapper, etc.).
+fn mark_wrapper_edits_pending(host: &HostGraph, group_id: &GroupId) {
+    if let Some(s) = host.expanded.write().unwrap().get_mut(group_id) {
+        s.edits_pending = true;
+    }
 }
 
 /// Strip the `expanded:<diamond>:` prefix off the wrapper group's
@@ -2014,6 +2074,157 @@ fn writeback_expansion_to_subgraph(
             "writeback skipped: canonical subgraph not found in editor.subgraphs"
         );
     }
+}
+
+/// Apply the wrapping-subgraph removal aftermath when a node has
+/// just been removed from an expanded subgraph's wrapper group. No-
+/// op if `group_id` isn't an expanded subgraph or `removed` wasn't
+/// one of the wrapper's at-expand-time inserted nodes.
+///
+/// Mutates host + editor + expansion state in three steps:
+///
+/// 1. Strip `expanded:<diamond>:` off the dragged-out node's id and
+///    every connection endpoint pointing at it, so the node now
+///    lives in the host name space at its natural id. Skipped if
+///    the un-prefixed id already exists in the host (collision
+///    avoidance — better to keep the artifact than corrupt state).
+/// 2. Patch `state.inserted_nodes` to drop the removed id (in
+///    whichever form survived step 1) so the next minimize doesn't
+///    sweep the now-host-resident node into the void.
+/// 3. Patch `state.external_connections` to drop any lifted
+///    sub-route entries whose target was this node — they'd
+///    otherwise restore on minimize as wires pointing at a missing
+///    canonical id and re-expansion would silently mis-route them
+///    via the entry/exit fallback.
+/// 4. Recapture `state.baseline` so the save-changes diff reflects
+///    the new wrapper member list (the removal is now part of the
+///    "pending edit" set the dirty-check sees).
+fn naturalize_wrapper_member_removal(
+    editor: &Editor,
+    host: &HostGraph,
+    group_id: &GroupId,
+    removed: &NodeId,
+) {
+    // Snapshot the expansion state once — we mutate later under a
+    // write lock, so capture everything we need to plan first.
+    let snapshot = host.expanded.read().unwrap().get(group_id).cloned();
+    let Some(state) = snapshot else { return };
+    if !state.inserted_nodes.iter().any(|n| n == removed) {
+        return;
+    }
+
+    // Step 1: naturalize the id by stripping the expansion prefix.
+    // The stripped id IS the canonical-subgraph id we'd write back
+    // on save, so it doubles as the right token for the sub-route
+    // cleanup below.
+    let stripped: Option<NodeId> = removed
+        .as_str()
+        .strip_prefix(&state.id_prefix)
+        .map(|s| NodeId::from(s.to_string()));
+    let final_id: NodeId = match &stripped {
+        Some(new_id) => {
+            let collision = host
+                .nodes
+                .read()
+                .unwrap()
+                .iter()
+                .any(|n| n.id == *new_id);
+            if collision {
+                tracing::warn!(
+                    target: "node_editor_demo::subgraph",
+                    removed = %removed.as_str(),
+                    natural = %new_id.as_str(),
+                    "naturalize skipped — host already has a node with the un-prefixed id"
+                );
+                removed.clone()
+            } else {
+                rename_host_node(editor, host, removed, new_id);
+                new_id.clone()
+            }
+        }
+        None => removed.clone(),
+    };
+
+    // Step 2 + 3: rewrite the expansion state. Do NOT touch
+    // `state.baseline` — the at-expand snapshot is the canonical
+    // diff target for save-changes detection, and recapturing here
+    // would normalize the drag-out to zero (the user's removal
+    // would silently fall off the save dialog and the canonical
+    // subgraph would keep the now-dragged-out node as a phantom).
+    // We want is_expansion_dirty to return true so the save flow
+    // can write back the new wrapper membership.
+    let canonical_token = stripped.as_ref().map(|s| s.as_str().to_string());
+    let sub_route_marker = canonical_token
+        .as_ref()
+        .map(|c| format!("{SUB_ROUTE_PREFIX}{c}:"));
+    let mut expanded_w = host.expanded.write().unwrap();
+    if let Some(s) = expanded_w.get_mut(group_id) {
+        s.inserted_nodes.retain(|n| n != removed && n != &final_id);
+        if let Some(ref marker) = sub_route_marker {
+            s.external_connections.retain(|c| {
+                !c.from.port.as_str().starts_with(marker)
+                    && !c.to.port.as_str().starts_with(marker)
+            });
+        }
+    }
+}
+
+/// Rename a single host node from `old_id` to `new_id`, rewriting
+/// every connection endpoint that referenced the old id along the
+/// way. Mirrors the edit through the editor by removing the
+/// canonical node + reinserting under the new id, then doing the
+/// same for every incident connection. No-op when `old_id` doesn't
+/// resolve to a live host node.
+fn rename_host_node(editor: &Editor, host: &HostGraph, old_id: &NodeId, new_id: &NodeId) {
+    let renamed_node: Option<NodeInstance<()>> = {
+        let mut nodes = host.nodes.write().unwrap();
+        if let Some(n) = nodes.iter_mut().find(|n| n.id == *old_id) {
+            n.id = new_id.clone();
+            Some(n.clone())
+        } else {
+            None
+        }
+    };
+    let Some(renamed_node) = renamed_node else { return };
+
+    // Rewrite connection endpoints in the host mirror. Build a list
+    // of new Connection values (with the renamed endpoint) and the
+    // old ConnectionIds so the editor sync below can swap them.
+    let rewritten: Vec<Connection<()>> = {
+        let mut conns = host.connections.write().unwrap();
+        let mut out: Vec<Connection<()>> = Vec::new();
+        for c in conns.iter_mut() {
+            let mut touched = false;
+            if c.from.node == *old_id {
+                c.from.node = new_id.clone();
+                touched = true;
+            }
+            if c.to.node == *old_id {
+                c.to.node = new_id.clone();
+                touched = true;
+            }
+            if touched {
+                out.push(c.clone());
+            }
+        }
+        out
+    };
+
+    // Editor sync: drop the old node (which also drops its incident
+    // connections in the editor's mirror) and reinsert the renamed
+    // node + rewritten connections.
+    editor.remove_node(old_id);
+    editor.insert_node(renamed_node);
+    for c in rewritten {
+        editor.insert_connection(c);
+    }
+
+    tracing::info!(
+        target: "node_editor_demo::subgraph",
+        old = %old_id.as_str(),
+        new = %new_id.as_str(),
+        "host node naturalized after wrapper-group removal"
+    );
 }
 
 /// Save path used by [`confirm_minimize_subgraph`]'s on_confirm
@@ -2177,7 +2388,26 @@ fn confirm_minimize_subgraph(editor: &Editor, host: &HostGraph, group_id: GroupI
         None => return,
     };
 
-    if !is_expansion_dirty(&state, host) {
+    let dirty = is_expansion_dirty(&state, host);
+    // Tracing snapshot: dump the comparison source + result so a no-
+    // dialog reproduction can be diagnosed without re-instrumenting.
+    // Runs under the "node_editor_demo::subgraph" target so it's
+    // filterable in production builds.
+    {
+        let current = ExpansionBaseline::capture(host, &state.group_id, &state.id_prefix);
+        tracing::info!(
+            target: "node_editor_demo::subgraph",
+            group = %group_id.as_str(),
+            dirty,
+            baseline_node_count = state.baseline.nodes.len(),
+            current_node_count = current.nodes.len(),
+            baseline_conn_count = state.baseline.connections.len(),
+            current_conn_count = current.connections.len(),
+            "confirm_minimize_subgraph dirty-check snapshot"
+        );
+    }
+
+    if !dirty {
         minimize_subgraph(editor, host, group_id);
         return;
     }
@@ -3265,7 +3495,7 @@ fn main() -> blinc_app::Result<()> {
         config,
         HybridTheme::bundle().with_css(blinc_cn::cn_styles::CN_STYLES),
         // detect_system_color_scheme(),
-        ColorScheme::Dark,
+        ColorScheme::Light,
         build_ui,
     )
 }
