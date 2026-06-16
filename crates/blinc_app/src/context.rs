@@ -882,6 +882,56 @@ impl RenderContext {
         // specific node's bake key — never via a tree-wide drain.
     }
 
+    /// Drop the cached `LayerTexture` AND its scratch hash for each
+    /// listed `composite_promotion` / `motion_subtree_texture` key.
+    /// Forces the next paint to re-bake the listed subtrees regardless
+    /// of whether the walker emits byte-identical primitives.
+    ///
+    /// **Why this exists, separate from `invalidate_render_cache_tagged`:**
+    /// the per-key `hash_composite_scratch` dirty-skip locks in the
+    /// FIRST bake's texture and refuses to re-bake while the walker
+    /// emits the same primitives every frame. For a freshly-mounted
+    /// overlay (cn::context_menu / cn::dropdown / cn::popover etc.) on
+    /// a canvas-bearing page, the first bake happens INSIDE a frame
+    /// where the canvas overlay has already overwritten the GPU
+    /// `aux_data` buffer, and the overlay-stack's aux re-upload runs
+    /// AFTER the bake. So the texture captures the menu's SDF primitives
+    /// bound to whatever stale aux the canvas left behind — the menu
+    /// renders garbage / invisible / wrong colour until something
+    /// else (mouse motion → hover state change → cache invalidate)
+    /// trips a different invalidation path that finally drops the
+    /// texture so the next paint can re-bake against fresh aux.
+    ///
+    /// The fix: hook the structural-subtree-rebuild path
+    /// (windowed.rs:5612-ish) and, immediately after the rebuild
+    /// installs the new overlay subtree, drain the affected layer
+    /// textures so the next paint re-bakes against the now-current
+    /// GPU state.
+    ///
+    /// Steady-state animations (an existing menu animating each
+    /// frame) DO NOT pass through this call site — only freshly-mounted
+    /// subtrees do, so the per-frame perf cost is zero.
+    pub fn invalidate_overlay_mount_textures(&mut self, keys: &[u64]) {
+        if keys.is_empty() {
+            return;
+        }
+        for key in keys {
+            if let Some((old, _)) = self.css_composited_textures.remove(key) {
+                self.renderer.layer_texture_cache_mut().release(old);
+            }
+            self.css_composited_scratch_hash.remove(key);
+            if let Some((old, _)) = self.motion_subtree_textures.remove(key) {
+                self.renderer.layer_texture_cache_mut().release(old);
+            }
+            self.motion_subtree_scratch_hash.remove(key);
+        }
+        tracing::trace!(
+            target: "blinc_app::frame_timing",
+            count = keys.len(),
+            "invalidate_overlay_mount_textures",
+        );
+    }
+
     /// Whether the renderer has a usable cached batch from the most
     /// recent full paint. The Phase-4 fast path checks this before
     /// attempting the compositor route — if `false` (first paint
@@ -5578,6 +5628,47 @@ impl RenderContext {
         // Get the scale factor from the tree for DPI scaling
         let scale = tree.scale_factor();
 
+        // Build a snapshot of `(composite-promoted node → current
+        // animated opacity)` so descendant text / SVG / image elements
+        // can multiply that opacity into their per-glyph color alpha.
+        // Composite-promoted SDF primitives (the popover bg / border /
+        // shadow) already pick up the animated opacity via the per-frame
+        // blit in `composite_css_layers_overlay`, but text glyphs route
+        // through a separate `cached_motion_subtree_text_prims` pool
+        // that doesn't see the composite blit's opacity — without this
+        // snapshot, cn::context_menu / cn::popover / cn::dropdown BG
+        // would fade in 0→1 while text snapped in at full alpha.
+        //
+        // The snapshot is a map (not a flag) so we can also handle
+        // nested composite-promoted ancestors correctly — descendants
+        // multiply their effective opacity from the outermost composite
+        // ancestor through to the innermost.
+        let composite_layer_opacities: std::collections::HashMap<
+            blinc_layout::LayoutNodeId,
+            f32,
+        > = {
+            let promo = tree.composite_promotion();
+            let store = tree.css_anim_store();
+            if let Ok(guard) = store.lock() {
+                promo
+                    .iter()
+                    .filter_map(|&layout| {
+                        let stable = tree.stable_id(layout)?;
+                        let anim = guard.animations.get(&stable).or_else(|| {
+                            guard.transitions.get(&stable)
+                        })?;
+                        if !anim.is_playing {
+                            return None;
+                        }
+                        let opacity = anim.current_properties.opacity?;
+                        Some((layout, opacity))
+                    })
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            }
+        };
+
         if let Some(root) = tree.root() {
             let mut z_layer = 0u32;
             self.collect_elements_recursive(
@@ -5606,6 +5697,8 @@ impl RenderContext {
                 None,  // No 3D layer ancestor
                 false, // No ancestor pending motion at root
                 false, // No ancestor motion container at root
+                &composite_layer_opacities,
+                1.0, // Initial composite-layer opacity (no ancestor promoted)
             );
         }
 
@@ -5671,6 +5764,26 @@ impl RenderContext {
         // motion-bound bg primitives and text gets covered by the
         // overlay's bg paint.
         inside_motion_subtree: bool,
+        // Snapshot of `composite-promoted node → current animated
+        // opacity` built once at the top of
+        // `collect_render_elements_with_state`. Walker emits SDF for
+        // composite-promoted subtrees into a per-node scratch batch
+        // and `composite_css_layers_overlay` blits that texture with
+        // the animated opacity — but text glyphs / SVGs / images
+        // collected here route through separate post-overlay pools
+        // that don't see the composite blit's opacity. Lookups against
+        // this map multiply the composite-layer opacity into each
+        // collected element's per-channel alpha so glyphs / SVGs /
+        // images fade in / out in sync with the BG bake.
+        composite_layer_opacities: &std::collections::HashMap<
+            blinc_layout::LayoutNodeId,
+            f32,
+        >,
+        // Effective composite-layer opacity inherited from the nearest
+        // composite-promoted ancestor (multiplied through nested
+        // promotions). Multiplied into descendant text / SVG / image
+        // motion_opacity at construction.
+        inherited_composite_layer_opacity: f32,
     ) {
         use blinc_layout::Material;
 
@@ -5739,6 +5852,18 @@ impl RenderContext {
         // NOTE: effective_motion_translate only includes RenderState motion values,
         // NOT binding transforms (which are already in the position via new_offset)
         let effective_motion_opacity = inherited_motion_opacity * node_motion_opacity;
+        // If this node is a composite-promotion root (CSS animation
+        // running on opacity/transform), multiply its current animated
+        // opacity into the running composite-layer-opacity factor so
+        // descendants' glyphs / SVGs / images fade in lockstep with
+        // the composite blit. Identity (1.0) for nodes that are not
+        // themselves composite-promoted.
+        let node_composite_layer_opacity = composite_layer_opacities
+            .get(&node)
+            .copied()
+            .unwrap_or(1.0);
+        let effective_composite_layer_opacity =
+            inherited_composite_layer_opacity * node_composite_layer_opacity;
         let effective_motion_translate = (
             inherited_motion_translate.0 + node_motion_translate.0,
             inherited_motion_translate.1 + node_motion_translate.1,
@@ -6248,7 +6373,8 @@ impl RenderContext {
                         clip_bounds: scaled_clip,
                         motion_opacity: effective_motion_opacity
                             * render_node.props.opacity
-                            * inherited_css_opacity,
+                            * inherited_css_opacity
+                            * effective_composite_layer_opacity,
                         wrap: !is_nowrap && text_data.wrap,
                         line_height: text_data.line_height,
                         measured_width: scaled_measured_width,
@@ -6359,7 +6485,8 @@ impl RenderContext {
                         clip_bounds: scaled_clip,
                         motion_opacity: effective_motion_opacity
                             * render_node.props.opacity
-                            * inherited_css_opacity,
+                            * inherited_css_opacity
+                            * effective_composite_layer_opacity,
                         css_affine: node_css_affine,
                         tag_overrides: render_node.props.svg_tag_styles.clone(),
                         transform_3d_layer: inside_3d_layer.clone(),
@@ -6389,11 +6516,14 @@ impl RenderContext {
                         .map(|pn| &pn.props);
 
                     // Opacity: own CSS opacity * inherited CSS opacity chain * builder * motion
+                    // * composite-layer opacity (so images inside a composite-promoted
+                    // subtree fade in lockstep with the bake's blit).
                     let own_css_opacity = render_node.props.opacity;
                     let final_opacity = image_data.opacity
                         * own_css_opacity
                         * inherited_css_opacity
-                        * effective_motion_opacity;
+                        * effective_motion_opacity
+                        * effective_composite_layer_opacity;
 
                     // Border-radius: prefer own CSS, then builder.
                     // Parent clip (now at content-box) handles corner rounding.
@@ -6534,7 +6664,8 @@ impl RenderContext {
                             opacity: img_brush.opacity
                                 * render_node.props.opacity
                                 * inherited_css_opacity
-                                * effective_motion_opacity,
+                                * effective_motion_opacity
+                                * effective_composite_layer_opacity,
                             border_radius: render_node.props.border_radius.top_left * scale,
                             tint: [
                                 img_brush.tint.r,
@@ -6766,7 +6897,8 @@ impl RenderContext {
                             clip_bounds: scaled_clip,
                             motion_opacity: effective_motion_opacity
                                 * render_node.props.opacity
-                                * inherited_css_opacity,
+                                * inherited_css_opacity
+                                * effective_composite_layer_opacity,
                             wrap: false, // Don't wrap individual segments
                             line_height: styled_data.line_height,
                             measured_width: segment_width,
@@ -6891,6 +7023,8 @@ impl RenderContext {
                 child_3d_layer.clone(),
                 subtree_pending_motion,
                 child_inside_motion_subtree,
+                composite_layer_opacities,
+                effective_composite_layer_opacity,
             );
         }
 
@@ -7644,10 +7778,30 @@ impl RenderContext {
                 // `RenderLayer::Foreground` win z-order over canvas
                 // content. See `render_foreground_overlay` doc.
                 self.render_foreground_overlay(target_view);
+                // Composited CSS layers — blit each promoted subtree's
+                // texture with the current animation transform. MUST
+                // run BEFORE the motion-subtree text / SVG overlays
+                // below: composite-promoted subtrees (cn::context_menu,
+                // cn::popover, cn::dropdown) bake their BG SDF into a
+                // `LayerTexture`, but their text glyphs route through
+                // a separate `cached_motion_subtree_text_prims` pool
+                // because text is segregated from the SDF batch up in
+                // `render_tree_with_motion`. Dispatching text FIRST
+                // and the composite BG SECOND inverts tree-order
+                // z-ordering — the opaque BG texture lands on top of
+                // its own descendants' glyphs at the end of the entry
+                // animation and the menu reads as a blank rectangle.
+                // Symptom (2026-06-15): cn::context_menu BG faded in
+                // correctly post is_composite_promotable fix but the
+                // menu item text was invisible until a mouse-move
+                // path eventually re-dispatched it.
+                self.composite_css_layers_overlay(tree, target_view);
+                // P4.3 sibling: motion-subtree textures.
+                self.composite_motion_layers_overlay(tree, target_view);
                 // Motion-subtree text + SVG overlay — rendered on the
-                // surface after the motion-bound bg primitives so they
-                // land on top of the overlay paint instead of being
-                // covered. PRIM_TEXT primitives carry `local_affine`
+                // surface after the motion-bound bg primitives AND
+                // after the composite-layer blits so they land on top
+                // of both. PRIM_TEXT primitives carry `local_affine`
                 // so the motion container's scale / translate / rotate
                 // applies to each glyph. SVGs go through the same
                 // rasterized-image dispatch the static-cache path uses.
@@ -7664,11 +7818,6 @@ impl RenderContext {
                         self.render_rasterized_svgs(target_view, &motion_svgs, dpi);
                     }
                 }
-                // Composited CSS layers — blit each promoted subtree's
-                // texture with the current animation transform.
-                self.composite_css_layers_overlay(tree, target_view);
-                // P4.3 sibling: motion-subtree textures.
-                self.composite_motion_layers_overlay(tree, target_view);
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
                         .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -7990,13 +8139,20 @@ impl RenderContext {
                 // `RenderLayer::Foreground` win z-order over canvas
                 // content. See `render_foreground_overlay` doc.
                 self.render_foreground_overlay(target_view);
-                // Motion-subtree text + SVG overlay — rendered on the
-                // surface after the motion-bound bg primitives so they
-                // land on top of the overlay paint instead of being
-                // covered. PRIM_TEXT primitives carry `local_affine`
-                // so the motion container's scale / translate / rotate
-                // applies to each glyph. SVGs go through the same
-                // rasterized-image dispatch the static-cache path uses.
+                // Composited CSS layers — blit each promoted subtree's
+                // texture with the current animation transform. MUST
+                // run BEFORE the motion-subtree text / SVG overlays
+                // below — see the longer comment on the slow-path
+                // counterpart for the z-order rationale.
+                self.composite_css_layers_overlay(tree, target_view);
+                // P4.3 sibling: motion-subtree textures.
+                self.composite_motion_layers_overlay(tree, target_view);
+                // Motion-subtree text + SVG overlay — rendered after
+                // composite-layer blits so glyphs / SVGs land on top.
+                // PRIM_TEXT primitives carry `local_affine` so the
+                // motion container's scale / translate / rotate applies
+                // to each glyph. SVGs go through the same rasterized-
+                // image dispatch the static-cache path uses.
                 if let Some(motion_text_prims) = self.cached_motion_subtree_text_prims.clone() {
                     if !motion_text_prims.is_empty() {
                         self.rebind_glyph_atlas_for_overlay();
@@ -8010,11 +8166,6 @@ impl RenderContext {
                         self.render_rasterized_svgs(target_view, &motion_svgs, dpi);
                     }
                 }
-                // Composited CSS layers — blit each promoted subtree's
-                // texture with the current animation transform.
-                self.composite_css_layers_overlay(tree, target_view);
-                // P4.3 sibling: motion-subtree textures.
-                self.composite_motion_layers_overlay(tree, target_view);
                 if !overlay.dynamic_images.is_empty() {
                     self.renderer
                         .render_dynamic_images(target_view, &overlay.dynamic_images);
@@ -8504,10 +8655,6 @@ impl RenderContext {
                     let (layer_texture, content_size) = self
                         .renderer
                         .render_subtree_to_layer_texture(scratch_batch, layer_pos, layer_size);
-                    // Release any previous texture for this node
-                    // back to the pool before installing the new
-                    // one (saves the cache one acquire on the next
-                    // promotion of the same node).
                     if let Some((old, _)) = self.css_composited_textures.remove(&key) {
                         self.renderer.layer_texture_cache_mut().release(old);
                     }

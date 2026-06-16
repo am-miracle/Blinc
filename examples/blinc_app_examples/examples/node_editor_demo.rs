@@ -29,13 +29,14 @@ use blinc_app::windowed::WindowedContext;
 use blinc_canvas_kit::prelude::*;
 use blinc_core::layer::{Color, Point};
 use blinc_node_editor::prelude::*;
-use blinc_node_editor::{BadgeKind, Group, GroupId, StatusBadge};
+use blinc_node_editor::{
+    BadgeKind, ConnectionId, EditorCommand, Group, GroupId, History, StatusBadge,
+};
+use blinc_platform::AnimationFps;
 use blinc_portal_ui::Sense;
 use blinc_tabler_icons::outline;
-use blinc_theme::{
-    detect_system_color_scheme, themes::universal::HybridTheme, tokens::ColorToken, ThemeState,
-};
-use std::sync::{Arc, RwLock};
+use blinc_theme::{themes::universal::HybridTheme, tokens::ColorToken, ThemeState};
+use std::sync::{Arc, Mutex, RwLock};
 
 // Resolve a theme colour at build time, falling back to a sane
 // default when ThemeState isn't initialised (e.g. unit-test builds).
@@ -49,6 +50,15 @@ fn token(t: ColorToken, fallback: Color) -> Color {
 /// accent colour the editor reads via `PortKind::accent`. Real hosts
 /// would model their domain types here — reflow's `PortType`, ML
 /// tensor dtypes, audio frame formats, etc.
+
+/// Sentinel encoded into the diamond-side port of a lifted external
+/// connection so re-expansion can route it back to the SPECIFIC
+/// internal node the user wired up, instead of falling through to
+/// the demo's "entry == last inserted" heuristic and accidentally
+/// landing on a sibling sink. Format:
+/// `__sub_route:<canonical_internal_node_id>:<original_port>`.
+const SUB_ROUTE_PREFIX: &str = "__sub_route:";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum DemoPort {
     Number,
@@ -238,12 +248,26 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                 .with_description("Text payload to render in the sink view"),
         );
 
-    vec![source, filter, formatter, sink]
+    // Minimal template for subgraph-reference nodes. Zero ports —
+    // matches Zeal's `SubgraphNode` (the diamond is purely a
+    // navigation entry-point; cross-boundary data flow would land
+    // in proxy nodes registered separately). `default_shape =
+    // Diamond` is moot because the renderer FORCES Diamond on any
+    // instance with `subgraph_ref` set; we set it anyway so the
+    // palette preview also renders as a diamond.
+    let subgraph = NodeTemplate::<DemoPort>::new("subgraph", "Subgraph")
+        .with_category("navigation")
+        .with_subtitle("Open subgraph")
+        .with_icon(tabler_icon(outline::LINK))
+        .with_shape(NodeShape::Diamond);
+
+    vec![source, filter, formatter, sink, subgraph]
 }
 
 // ─── Initial graph ─────────────────────────────────────────────────
 
 type Editor = NodeEditor<DemoPort, (), (), ()>;
+type DemoHistory = Arc<Mutex<History<DemoPort, (), (), ()>>>;
 
 fn initial_nodes() -> Vec<NodeInstance<()>> {
     vec![
@@ -268,6 +292,19 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
         NodeInstance::new("sink/1", "sink", Point::new(660.0, 240.0))
             .with_size(200.0, 100.0)
             .with_badge(StatusBadge::info(3).with_tooltip("3 pending writes")),
+        // Subgraph-reference node. Renders as a diamond with the
+        // accent fill/stroke regardless of the template's shape (the
+        // editor forces Diamond on any instance with `subgraph_ref`
+        // set). Double-click emits `EditorEvent::SubgraphRequested`
+        // — handled in `handle_event` below by opening a `cn::dialog`
+        // summarising the subgraph's contents. Placed off to the
+        // right of the main pipeline so the diamond chrome reads
+        // clearly against the dot background, away from the existing
+        // group footprint.
+        NodeInstance::new("sub/sample", "subgraph", Point::new(960.0, 220.0))
+            .with_size(200.0, 140.0)
+            .with_subtitle("demo-workflow/sample-sub")
+            .with_subgraph_ref(SubgraphId::from("sample-sub")),
     ]
 }
 
@@ -294,6 +331,18 @@ fn initial_connections() -> Vec<Connection<()>> {
         Connection::new(
             PortAddress::new("fmt/1".into(), "out_str"),
             PortAddress::new("sink/1".into(), "in_str"),
+        ),
+        // Sample connection flowing INTO the subgraph diamond. The
+        // diamond has no template ports — the editor falls back to
+        // `closest_point_on_rect` (same routing as collapsed groups)
+        // so the line terminates on the side of the diamond that
+        // faces the source endpoint. The port-id string ("entry")
+        // is a host-defined namespaced reference; once Tier 1.3b
+        // lands proxy nodes will resolve the namespacing, but for
+        // now this just demonstrates the visual flow-in.
+        Connection::new(
+            PortAddress::new("fmt/1".into(), "out_str"),
+            PortAddress::new("sub/sample".into(), "entry"),
         ),
     ]
 }
@@ -324,9 +373,186 @@ struct HostGraph {
     nodes: Arc<RwLock<Vec<NodeInstance<()>>>>,
     connections: Arc<RwLock<Vec<Connection<()>>>>,
     groups: Arc<RwLock<Vec<Group<()>>>>,
+    /// Subgraphs the user has "opened" — diamond replaced in-place
+    /// by a colour-matched group container holding cloned internal
+    /// nodes / connections. Keyed by the wrapping group's id so the
+    /// minimize gesture (the host treats the group's collapse-chrome
+    /// click as a "go back to diamond" signal) can find + reverse
+    /// the expansion.
+    expanded: Arc<RwLock<std::collections::HashMap<GroupId, ExpansionState>>>,
 }
 
-fn build_editor() -> (Editor, HostGraph) {
+/// What the host saves when a subgraph diamond is expanded into a
+/// container, so the minimize gesture can fully reverse the
+/// operation. The diamond is removed from the live graph + every
+/// incident external connection is also lifted (saved here); on
+/// minimize they're restored verbatim.
+#[derive(Clone)]
+struct ExpansionState {
+    diamond: NodeInstance<()>,
+    external_connections: Vec<Connection<()>>,
+    inserted_nodes: Vec<NodeId>,
+    /// Tracked for debug / future history-integration use even though
+    /// `inserted_nodes`-driven `editor.remove_node` cleanup already
+    /// drops the incident edges, so we don't iterate this list during
+    /// `minimize_subgraph`.
+    #[allow(dead_code)]
+    inserted_connections: Vec<ConnectionId>,
+    group_id: GroupId,
+    /// Subgraph the diamond points at. Captured at expand-time so
+    /// the writeback path doesn't have to re-derive it from the
+    /// diamond's `subgraph_ref` (which is preserved on the diamond
+    /// for restoration but reading the diamond and stripping the
+    /// option adds noise to every call site).
+    subgraph_id: blinc_node_editor::SubgraphId,
+    /// Id prefix used to clone subgraph node ids into the host name
+    /// space (`expanded:<diamond>:…`). Storing it avoids
+    /// reconstructing the format string in the writeback /
+    /// dirty-detection paths.
+    id_prefix: String,
+    /// Snapshot of the wrapper group's contents at the moment
+    /// `expand_subgraph` finished mutating. Compared against the
+    /// current host state at minimize-time to decide whether the
+    /// user actually edited anything (adds, removes, repositions,
+    /// connection rewires) and therefore whether the
+    /// save-changes confirm dialog should fire.
+    baseline: ExpansionBaseline,
+    /// Parent groups the diamond was a member of (if any). On expand,
+    /// the diamond's id is swapped out of these groups' member lists
+    /// in favour of every inserted internal node so the parent
+    /// group's auto-bounds grows to enclose the expanded container.
+    /// On minimize, the reverse swap restores the diamond's
+    /// membership exactly. `Vec<GroupId>` because a node can in
+    /// principle belong to multiple groups (rare but allowed by the
+    /// current model).
+    parent_groups: Vec<GroupId>,
+}
+
+/// Snapshot of an expanded subgraph's contents as seen through the
+/// host's data: prefix-stripped node ids + topologically-meaningful
+/// connection endpoints. Used purely as a diff target — by stripping
+/// the `expanded:<diamond>:` prefix, the same baseline shape is
+/// directly comparable to what `writeback_expansion_to_subgraph`
+/// would write into `editor.subgraphs[subgraph_id]`.
+///
+/// Positions are included so a user drag-repositioning a node
+/// inside the wrapper container counts as an edit. Node `size` is
+/// included for completeness (resizable nodes drag-edit it).
+#[derive(Clone, Debug, PartialEq)]
+struct ExpansionBaseline {
+    /// Sorted by stripped id. `(stripped_id, position_xy, size_wh)`
+    nodes: Vec<(String, [f32; 2], Option<[f32; 2]>)>,
+    /// Sorted lexically. `(from_node_stripped, from_port,
+    /// to_node_stripped, to_port)`. Only connections where BOTH
+    /// endpoints are wrapper-group members count as "internal" and
+    /// are subject to the diff (external connections live in the
+    /// host's domain, not the subgraph's).
+    connections: Vec<(String, String, String, String)>,
+}
+
+impl ExpansionBaseline {
+    /// Walk the host's current state and synthesize the baseline
+    /// shape from the wrapper group's live members.
+    fn capture(host: &HostGraph, group_id: &GroupId, id_prefix: &str) -> Self {
+        use std::collections::HashSet;
+        let member_set: HashSet<NodeId> = host
+            .groups
+            .read()
+            .unwrap()
+            .iter()
+            .find(|g| g.id == *group_id)
+            .map(|g| g.members.iter().cloned().collect())
+            .unwrap_or_default();
+
+        let strip = |raw: &str| -> String {
+            raw.strip_prefix(id_prefix).unwrap_or(raw).to_string()
+        };
+
+        let mut nodes: Vec<(String, [f32; 2], Option<[f32; 2]>)> = host
+            .nodes
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|n| member_set.contains(&n.id))
+            .map(|n| {
+                (
+                    strip(n.id.as_str()),
+                    [n.position.x, n.position.y],
+                    n.size.map(|(w, h)| [w, h]),
+                )
+            })
+            .collect();
+        nodes.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut connections: Vec<(String, String, String, String)> = host
+            .connections
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|c| {
+                member_set.contains(&c.from.node) && member_set.contains(&c.to.node)
+            })
+            .map(|c| {
+                (
+                    strip(c.from.node.as_str()),
+                    c.from.port.as_str().to_string(),
+                    strip(c.to.node.as_str()),
+                    c.to.port.as_str().to_string(),
+                )
+            })
+            .collect();
+        connections.sort();
+
+        Self { nodes, connections }
+    }
+}
+
+/// Build (or retrieve, on a subsequent rebuild) the editor + host
+/// mirror + history. All three are cached behind
+/// `ctx.use_state_keyed` so they SURVIVE window-resize / paint
+/// rebuilds — without this, the build_ui closure would re-run on
+/// every resize, calling NodeEditor::new() fresh + re-instantiating
+/// initial_nodes(), which wipes user interaction state (drag
+/// positions, opened subgraphs, undo stack, etc.).
+///
+/// NodeEditor, HostGraph and DemoHistory are all Arc-backed (cheap
+/// to clone), so `State::get()` returns clones that share underlying
+/// storage with the cached originals. Mutations made through the
+/// cloned references mutate the cached state directly.
+fn build_editor(ctx: &mut WindowedContext) -> (Editor, HostGraph, DemoHistory) {
+    // ── Persist host + history across rebuilds ──────────────────
+    // Only HOST + HISTORY survive in `use_state_keyed`. The editor
+    // is freshly constructed each rebuild and re-syncs from the
+    // cached host via `set_graph` — this mirrors the working pattern
+    // that already preserved drag positions across rebuilds (the
+    // host mirror was the authoritative state; the editor was a
+    // view). Adding `host.expanded` to the persisted HostGraph
+    // fixes the subgraph-expansion-vanishes-on-resize issue without
+    // touching the editor's signal-registration paths.
+    //
+    // Caching the editor itself broke rendering (the cached
+    // canvas-kit click listeners + Arc'd state didn't replay through
+    // the new build's signal subscribers).
+    let host_state = ctx.use_state_keyed("node-editor-demo-host", || HostGraph {
+        nodes: Arc::new(RwLock::new(initial_nodes())),
+        connections: Arc::new(RwLock::new(initial_connections())),
+        groups: Arc::new(RwLock::new(initial_groups())),
+        expanded: Arc::new(RwLock::new(std::collections::HashMap::new())),
+    });
+    let history_state = ctx.use_state_keyed::<DemoHistory, _>(
+        "node-editor-demo-history",
+        || Arc::new(Mutex::new(History::with_default_cap())),
+    );
+    let host = host_state.try_get().unwrap_or_else(|| HostGraph {
+        nodes: Arc::new(RwLock::new(initial_nodes())),
+        connections: Arc::new(RwLock::new(initial_connections())),
+        groups: Arc::new(RwLock::new(initial_groups())),
+        expanded: Arc::new(RwLock::new(std::collections::HashMap::new())),
+    });
+    let history = history_state
+        .try_get()
+        .unwrap_or_else(|| Arc::new(Mutex::new(History::with_default_cap())));
+
     let editor: Editor = NodeEditor::new("node-editor-demo")
         .with_templates(build_templates())
         .with_background(
@@ -342,19 +568,59 @@ fn build_editor() -> (Editor, HostGraph) {
                 .with_zoom_adaptive(0.3, 5),
         );
 
-    let host = HostGraph {
-        nodes: Arc::new(RwLock::new(initial_nodes())),
-        connections: Arc::new(RwLock::new(initial_connections())),
-        groups: Arc::new(RwLock::new(initial_groups())),
-    };
-
-    // Initial sync.
+    // Initial sync from the persisted host. On first build the host
+    // carries `initial_nodes / initial_connections / initial_groups`
+    // (the use_state_keyed init); on subsequent rebuilds it carries
+    // whatever the user's interactions have mutated it to (drag
+    // positions, expansion state, etc.).
     editor.set_graph(
         host.nodes.read().unwrap().clone(),
         host.connections.read().unwrap().clone(),
         host.groups.read().unwrap().clone(),
         Vec::new(),
     );
+
+    // Register a sample subgraph the diamond node in `initial_nodes`
+    // refers to. Populate it with a few placeholder nodes so the
+    // SubgraphRequested handler has something to surface in its
+    // confirmation dialog. Hosts wire whatever editing flow they
+    // want on the dialog's "Open" button — for this demo we just
+    // display a summary.
+    let sample_id = editor.create_subgraph("sample-sub", "Sample Subgraph");
+    let _ = editor.set_subgraph_namespace(&sample_id, "demo-workflow/sample-sub");
+    editor.with_subgraph_graph_mut(&sample_id, |sub| {
+        sub.nodes.push(
+            NodeInstance::new("inner/1", "source", Point::new(40.0, 40.0))
+                .with_size(160.0, 70.0)
+                .with_subtitle("Inner source"),
+        );
+        sub.nodes.push(
+            NodeInstance::new("inner/2", "filter", Point::new(300.0, 80.0))
+                .with_size(180.0, 90.0)
+                .with_subtitle("Inner filter"),
+        );
+        sub.nodes.push(
+            NodeInstance::new("inner/3", "sink", Point::new(560.0, 80.0))
+                .with_size(180.0, 80.0)
+                .with_subtitle("Inner sink"),
+        );
+        // Internal flow: source feeds the filter's input; the filter's
+        // pass-through boolean feeds the sink's gate. Demonstrates that
+        // expand_subgraph rebuilds the internal data flow inside the
+        // container (otherwise the inner nodes would appear in
+        // isolation with no wires between them).
+        sub.connections.push(
+            Connection::new(
+                PortAddress::new("inner/1".into(), "out_num"),
+                PortAddress::new("inner/2".into(), "in_num"),
+            )
+            .with_state(ConnectionState::Running),
+        );
+        sub.connections.push(Connection::new(
+            PortAddress::new("inner/2".into(), "out_pass"),
+            PortAddress::new("inner/3".into(), "in_pass"),
+        ));
+    });
 
     // Validator — accept connections whose port kinds match. This is
     // the ONLY callback surface: validators answer mid-drag questions
@@ -373,7 +639,24 @@ fn build_editor() -> (Editor, HostGraph) {
         }
     });
 
-    (editor, host)
+    // Synchronous context-menu callback. cn::context_menu's overlay
+    // mount has to land BEFORE windowed.rs's overlay-stack dirty
+    // poll on the SAME frame — otherwise the menu's @keyframes
+    // enter animation misses `start_all_css_animations` and renders
+    // at its `from` sample (opacity 0) until a paint invalidation
+    // forces a re-bake (which mouse motion happens to trigger). The
+    // matching `EditorEvent::ContextMenuRequested` event still
+    // fires; hosts observing via `events_signal()` keep working.
+    let editor = {
+        let host_for_cb = host.clone();
+        let history_for_cb = history.clone();
+        let editor_for_cb = editor.clone();
+        editor.on_context_menu(move |target, anchor| {
+            open_context_menu(&editor_for_cb, &host_for_cb, &history_for_cb, target, anchor);
+        })
+    };
+
+    (editor, host, history)
 }
 
 /// Open a floating mini-toolbar at `anchor_screen` with Group +
@@ -385,6 +668,7 @@ fn build_editor() -> (Editor, HostGraph) {
 fn open_multi_select_toolbar(
     editor: &Editor,
     host: &HostGraph,
+    history: &DemoHistory,
     node_ids: Vec<NodeId>,
     anchor_screen: Point,
 ) {
@@ -432,6 +716,7 @@ fn open_multi_select_toolbar(
 
     let editor_for_group = editor.clone();
     let host_for_group = host.clone();
+    let history_for_group = history.clone();
     let ids_for_group = node_ids.clone();
     let editor_for_delete = editor.clone();
     let host_for_delete = host.clone();
@@ -478,6 +763,7 @@ fn open_multi_select_toolbar(
         .content(move || {
             let editor_g = editor_for_group.clone();
             let host_g = host_for_group.clone();
+            let history_g = history_for_group.clone();
             let group_ids = ids_for_group.clone();
             let slot_g = slot_for_group.clone();
             let editor_d = editor_for_delete.clone();
@@ -574,6 +860,7 @@ fn open_multi_select_toolbar(
                 let group_trigger = move || {
                     let editor_g = editor_g.clone();
                     let host_g = host_g.clone();
+                    let history_g = history_g.clone();
                     let group_ids = group_ids.clone();
                     let slot_g = slot_g.clone();
                     div().child(
@@ -600,7 +887,12 @@ fn open_multi_select_toolbar(
                                         group = group.add_member(nid.as_str());
                                     }
                                     host_g.groups.write().unwrap().push(group.clone());
-                                    editor_g.insert_group(group);
+                                    editor_g.insert_group(group.clone());
+                                    history_g.lock().unwrap().push(
+                                        EditorCommand::InsertGroup(group),
+                                        EditorCommand::RemoveGroup(new_id.clone()),
+                                        "Create Group",
+                                    );
                                     editor_g.clear_selection();
                                     if let Some(h) = slot_g.lock().unwrap().as_ref() {
                                         h.close();
@@ -721,13 +1013,26 @@ fn open_multi_select_toolbar(
 
 /// React to one [`EditorEvent`] by patching `host` and pushing the
 /// matching granular command back at the editor. Centralises the
-/// host-as-driver flow described in the roadmap.
-fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
+/// host-as-driver flow described in the roadmap. `history` records
+/// each user-driven mutation with its inverse so Cmd-Z / Cmd-Shift-Z
+/// can replay them.
+fn handle_event(
+    editor: &Editor,
+    host: &HostGraph,
+    history: &DemoHistory,
+    evt: EditorEvent<DemoPort>,
+) {
     match evt {
         EditorEvent::ConnectionAccepted(c) => {
             let conn = Connection::new(c.from.clone(), c.to.clone());
+            let conn_id = conn.id;
             host.connections.write().unwrap().push(conn.clone());
-            editor.insert_connection(conn);
+            editor.insert_connection(conn.clone());
+            history.lock().unwrap().push(
+                EditorCommand::InsertConnection(conn),
+                EditorCommand::RemoveConnection(conn_id),
+                "Add Connection",
+            );
             tracing::info!(
                 "connected {:?} -> {:?}",
                 (c.from.node.as_str(), c.from.port.as_str()),
@@ -735,82 +1040,48 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
             );
         }
         EditorEvent::NodeDragged { id, position } => {
+            // Snapshot the host's pre-drag position BEFORE writing the
+            // new one so the inverse command carries the right point.
+            let prev_position = host
+                .nodes
+                .read()
+                .unwrap()
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| n.position);
             if let Some(n) = host.nodes.write().unwrap().iter_mut().find(|n| n.id == id) {
                 n.position = position;
+            }
+            if let Some(prev) = prev_position {
+                if prev != position {
+                    history.lock().unwrap().push(
+                        EditorCommand::UpdateNodePosition(id.clone(), position),
+                        EditorCommand::UpdateNodePosition(id, prev),
+                        "Move Node",
+                    );
+                }
             }
             // Editor's drag handler already updated its internal copy
             // mid-drag — no need to re-push here. Host state is now in
             // sync for the next save/snapshot.
         }
         EditorEvent::DeleteConnectionRequested(id) => {
-            // Confirm via a cn alert-dialog before pulling the edge
-            // out of host state. Clones move into the on_confirm
-            // closure so the dialog can fire its callback after the
-            // event-handling call returns.
-            let editor_for_confirm = editor.clone();
-            let host_for_confirm = host.clone();
-            blinc_cn::dialog()
-                .title("Delete connection?")
-                .description("This will remove the edge from the graph. The connected nodes stay in place.")
-                .confirm_text("Delete")
-                .cancel_text("Cancel")
-                .confirm_destructive(true)
-                .on_confirm(move || {
-                    host_for_confirm.connections.write().unwrap().retain(|c| c.id != id);
-                    editor_for_confirm.remove_connection(id);
-                    tracing::info!("deleted connection {}", id.0);
-                })
-                .show();
+            confirm_delete_connection(editor, host, history, id);
         }
         EditorEvent::DeleteNodesRequested(ids) => {
-            if ids.is_empty() {
-                return;
-            }
-            let (title, description) = if ids.len() == 1 {
-                (
-                    "Delete node?".to_string(),
-                    "This will remove the node and every connection attached to it."
-                        .to_string(),
-                )
-            } else {
-                (
-                    format!("Delete {} nodes?", ids.len()),
-                    "This will remove the selected nodes and every connection attached to them."
-                        .to_string(),
-                )
-            };
-            let editor_for_confirm = editor.clone();
-            let host_for_confirm = host.clone();
-            let ids_for_confirm = ids.clone();
-            blinc_cn::dialog()
-                .title(title)
-                .description(description)
-                .confirm_text("Delete")
-                .cancel_text("Cancel")
-                .confirm_destructive(true)
-                .on_confirm(move || {
-                    let id_set: std::collections::HashSet<_> =
-                        ids_for_confirm.iter().cloned().collect();
-                    host_for_confirm.nodes.write().unwrap().retain(|n| !id_set.contains(&n.id));
-                    host_for_confirm
-                        .connections
-                        .write()
-                        .unwrap()
-                        .retain(|c| !id_set.contains(&c.from.node) && !id_set.contains(&c.to.node));
-                    for g in host_for_confirm.groups.write().unwrap().iter_mut() {
-                        g.members.retain(|m| !id_set.contains(m));
-                    }
-                    for id in &ids_for_confirm {
-                        editor_for_confirm.remove_node(id);
-                    }
-                    tracing::info!("deleted {} node(s)", ids_for_confirm.len());
-                })
-                .show();
+            confirm_delete_nodes(editor, host, history, ids);
         }
         EditorEvent::AddToGroupRequested(req) => {
             // Add the node to the target group's member list +
             // mirror the change into the editor via the granular
             // `set_group_members` command.
+            let prev_members = host
+                .groups
+                .read()
+                .unwrap()
+                .iter()
+                .find(|g| g.id == req.group)
+                .map(|g| g.members.clone());
             let updated = {
                 let mut groups = host.groups.write().unwrap();
                 groups
@@ -823,8 +1094,13 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
                         g.members.clone()
                     })
             };
-            if let Some(members) = updated {
-                editor.set_group_members(&req.group, members);
+            if let (Some(members), Some(prev)) = (updated, prev_members) {
+                editor.set_group_members(&req.group, members.clone());
+                history.lock().unwrap().push(
+                    EditorCommand::SetGroupMembers(req.group.clone(), members),
+                    EditorCommand::SetGroupMembers(req.group.clone(), prev),
+                    "Add to Group",
+                );
                 tracing::info!(
                     "added {} to group {}",
                     req.node.as_str(),
@@ -833,6 +1109,13 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
             }
         }
         EditorEvent::RemoveFromGroupRequested(req) => {
+            let prev_members = host
+                .groups
+                .read()
+                .unwrap()
+                .iter()
+                .find(|g| g.id == req.group)
+                .map(|g| g.members.clone());
             let updated = {
                 let mut groups = host.groups.write().unwrap();
                 groups
@@ -843,8 +1126,13 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
                         g.members.clone()
                     })
             };
-            if let Some(members) = updated {
-                editor.set_group_members(&req.group, members);
+            if let (Some(members), Some(prev)) = (updated, prev_members) {
+                editor.set_group_members(&req.group, members.clone());
+                history.lock().unwrap().push(
+                    EditorCommand::SetGroupMembers(req.group.clone(), members),
+                    EditorCommand::SetGroupMembers(req.group.clone(), prev),
+                    "Remove from Group",
+                );
                 tracing::info!(
                     "removed {} from group {} ({:?})",
                     req.node.as_str(),
@@ -854,10 +1142,29 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
             }
         }
         EditorEvent::ToggleCollapseRequested(req) => {
+            // Special case: if this group is a subgraph-expansion
+            // container (the user opened a diamond into a colour-
+            // coded group), interpret the collapse gesture as
+            // "minimize back to the diamond" rather than the usual
+            // collapse-to-chip. Reverses the expansion: drops the
+            // group + every inserted internal node / connection and
+            // restores the original diamond + any external
+            // connections that were lifted off it.
+            if host.expanded.read().unwrap().contains_key(&req.group) {
+                confirm_minimize_subgraph(editor, host, req.group.clone());
+                return;
+            }
             // Apply directly — collapse/expand is a benign visual
             // toggle, no destructive intent. Host mirrors via the
             // editor's granular command so the renderer's slot
             // cache invalidates.
+            let prev_collapsed = host
+                .groups
+                .read()
+                .unwrap()
+                .iter()
+                .find(|g| g.id == req.group)
+                .map(|g| g.is_collapsed);
             if let Some(g) = host
                 .groups
                 .write()
@@ -868,41 +1175,24 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
                 g.is_collapsed = req.collapsed;
             }
             editor.set_group_collapsed(&req.group, req.collapsed);
+            if let Some(prev) = prev_collapsed {
+                if prev != req.collapsed {
+                    history.lock().unwrap().push(
+                        EditorCommand::SetGroupCollapsed(req.group.clone(), req.collapsed),
+                        EditorCommand::SetGroupCollapsed(req.group.clone(), prev),
+                        if req.collapsed { "Collapse Group" } else { "Expand Group" },
+                    );
+                }
+            }
         }
         EditorEvent::DeleteGroupRequested(req) => {
-            let editor_for_confirm = editor.clone();
-            let host_for_confirm = host.clone();
-            let group_id = req.group.clone();
-            let name = host
-                .groups
-                .read()
-                .unwrap()
-                .iter()
-                .find(|g| g.id == group_id)
-                .map(|g| g.name.clone())
-                .unwrap_or_else(|| group_id.as_str().to_string());
-            blinc_cn::dialog()
-                .title(format!("Delete group \"{name}\"?"))
-                .description("The grouping is removed; member nodes and connections stay.")
-                .confirm_text("Delete")
-                .cancel_text("Cancel")
-                .confirm_destructive(true)
-                .on_confirm(move || {
-                    host_for_confirm
-                        .groups
-                        .write()
-                        .unwrap()
-                        .retain(|g| g.id != group_id);
-                    editor_for_confirm.remove_group(&group_id);
-                    tracing::info!("deleted group {}", group_id.as_str());
-                })
-                .show();
+            confirm_delete_group(editor, host, history, req.group);
         }
         EditorEvent::MultiSelectionSettled {
             node_ids,
             anchor_screen,
         } => {
-            open_multi_select_toolbar(editor, host, node_ids, anchor_screen);
+            open_multi_select_toolbar(editor, host, history, node_ids, anchor_screen);
         }
         EditorEvent::SelectionCleared => {
             // Demo doesn't need to do anything — click-outside on
@@ -913,6 +1203,7 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
             open_inline_text_editor(
                 editor,
                 host,
+                history,
                 group,
                 current,
                 anchor_screen,
@@ -923,10 +1214,27 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
             open_inline_text_editor(
                 editor,
                 host,
+                history,
                 group,
                 current,
                 anchor_screen,
                 EditorField::Description,
+            );
+        }
+        EditorEvent::EditGroupRequested {
+            group,
+            current_title,
+            current_description,
+            anchor_screen,
+        } => {
+            open_inline_group_form(
+                editor,
+                host,
+                history,
+                group,
+                current_title,
+                current_description,
+                anchor_screen,
             );
         }
         EditorEvent::ConnectionRejected { from, to, reason } => {
@@ -959,6 +1267,241 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
                 .duration_ms(5000)
                 .show();
         }
+        EditorEvent::UndoRequested => {
+            if let Some(label) = history.lock().unwrap().undo(editor) {
+                // Mirror the editor's resulting state back into the
+                // host. Cheapest path: re-read the editor's authoritative
+                // graph and overwrite the host mirror — the editor just
+                // applied the inverse, so its graph is the new source of
+                // truth.
+                resync_host_from_editor(editor, host);
+                blinc_cn::toast("Undo")
+                    .description(format!("Undid {}", label))
+                    .duration_ms(1500)
+                    .show();
+                tracing::info!("undo: {}", label);
+            }
+        }
+        EditorEvent::RedoRequested => {
+            if let Some(label) = history.lock().unwrap().redo(editor) {
+                resync_host_from_editor(editor, host);
+                blinc_cn::toast("Redo")
+                    .description(format!("Redid {}", label))
+                    .duration_ms(1500)
+                    .show();
+                tracing::info!("redo: {}", label);
+            }
+        }
+        EditorEvent::DuplicateNodesRequested(ids) => {
+            // Clone every selected node with a fresh id ("{old}#copy"
+            // or with a numeric suffix on collision) + a small visual
+            // offset. Ports on each clone are driven by the template
+            // via `NodeInstance::component`, which the clone preserves
+            // — so the cloned node lights up with the same port set
+            // as the original automatically. Connections between
+            // duplicated nodes (both endpoints in the selection) are
+            // also cloned, with endpoints remapped to the clone ids.
+            // Edges touching only one selected endpoint are skipped
+            // intentionally — duplicating those would create implicit
+            // fan-out the user didn't ask for. History records the
+            // composite of node + connection inserts as ONE undo.
+            if ids.is_empty() {
+                return;
+            }
+            let offset = Point::new(24.0, 24.0);
+            let mut clones: Vec<NodeInstance<()>> = Vec::new();
+            let mut id_map: std::collections::HashMap<NodeId, NodeId> =
+                std::collections::HashMap::new();
+            let existing_ids: std::collections::HashSet<NodeId> = host
+                .nodes
+                .read()
+                .unwrap()
+                .iter()
+                .map(|n| n.id.clone())
+                .collect();
+            let mut used_ids = existing_ids;
+            for id in &ids {
+                let Some(src) = host
+                    .nodes
+                    .read()
+                    .unwrap()
+                    .iter()
+                    .find(|n| n.id == *id)
+                    .cloned()
+                else {
+                    continue;
+                };
+                let mut clone = src.clone();
+                let mut candidate = format!("{}#copy", id.as_str());
+                let mut n = 2;
+                while used_ids.contains(&NodeId::from(candidate.as_str())) {
+                    candidate = format!("{}#copy{}", id.as_str(), n);
+                    n += 1;
+                }
+                let clone_id = NodeId::from(candidate.as_str());
+                clone.id = clone_id.clone();
+                clone.position = Point::new(clone.position.x + offset.x, clone.position.y + offset.y);
+                used_ids.insert(clone_id.clone());
+                id_map.insert(id.clone(), clone_id);
+                clones.push(clone);
+            }
+            if clones.is_empty() {
+                return;
+            }
+            let clone_ids: Vec<NodeId> = clones.iter().map(|c| c.id.clone()).collect();
+
+            // Internal edges: both endpoints in `id_map`. Clone each
+            // with endpoints remapped + a fresh ConnectionId (the
+            // Connection::new constructor mints one).
+            let cloned_connections: Vec<Connection<()>> = host
+                .connections
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|c| id_map.contains_key(&c.from.node) && id_map.contains_key(&c.to.node))
+                .map(|c| {
+                    let from = PortAddress::new(
+                        id_map.get(&c.from.node).unwrap().clone(),
+                        c.from.port.as_str(),
+                    );
+                    let to = PortAddress::new(
+                        id_map.get(&c.to.node).unwrap().clone(),
+                        c.to.port.as_str(),
+                    );
+                    let mut nc = Connection::new(from, to);
+                    nc.state = c.state.clone();
+                    nc
+                })
+                .collect();
+
+            // Apply to host first, then sync into the editor.
+            host.nodes.write().unwrap().extend(clones.iter().cloned());
+            host.connections.write().unwrap().extend(cloned_connections.iter().cloned());
+            for c in &clones {
+                editor.insert_node(c.clone());
+            }
+            for c in &cloned_connections {
+                editor.insert_connection(c.clone());
+            }
+
+            // Composite forward = every InsertNode + every
+            // InsertConnection. Composite inverse = every
+            // RemoveConnection (first, so edges drop before their
+            // endpoints) + every RemoveNode.
+            let mut forward: Vec<EditorCommand<DemoPort, (), (), ()>> = Vec::new();
+            forward.extend(clones.iter().cloned().map(EditorCommand::InsertNode));
+            forward.extend(
+                cloned_connections
+                    .iter()
+                    .cloned()
+                    .map(EditorCommand::InsertConnection),
+            );
+            let mut inverse: Vec<EditorCommand<DemoPort, (), (), ()>> = Vec::new();
+            inverse.extend(
+                cloned_connections
+                    .iter()
+                    .map(|c| EditorCommand::RemoveConnection(c.id)),
+            );
+            inverse.extend(
+                clone_ids
+                    .iter()
+                    .cloned()
+                    .map(EditorCommand::RemoveNode),
+            );
+            history.lock().unwrap().push(
+                EditorCommand::Composite(forward),
+                EditorCommand::Composite(inverse),
+                if clones.len() == 1 { "Duplicate Node" } else { "Duplicate Nodes" },
+            );
+            // Reselect the clones so the next gesture acts on them.
+            let selection: std::collections::HashSet<String> = clone_ids
+                .iter()
+                .map(|id| format!("node:{}", id.as_str()))
+                .collect();
+            editor.canvas_kit().set_selection(selection);
+            tracing::info!(
+                "duplicated {} node(s) + {} internal edge(s)",
+                clones.len(),
+                cloned_connections.len(),
+            );
+        }
+        EditorEvent::SelectAllRequested => {
+            // Build a selection set covering every node, edge, and
+            // group the host knows about.
+            let mut selection: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for n in host.nodes.read().unwrap().iter() {
+                selection.insert(format!("node:{}", n.id.as_str()));
+            }
+            for c in host.connections.read().unwrap().iter() {
+                selection.insert(format!("edge:{}", c.id.0));
+            }
+            for g in host.groups.read().unwrap().iter() {
+                selection.insert(format!("group:{}", g.id.as_str()));
+            }
+            editor.canvas_kit().set_selection(selection);
+        }
+        EditorEvent::ContextMenuRequested { .. } => {
+            // No-op: the demo opens the context menu via the
+            // synchronous `on_context_menu` callback in
+            // `build_editor`. The event is still fired by the editor
+            // so other observers (analytics, recorder, log) can
+            // subscribe via `events_signal()`.
+        }
+        EditorEvent::SubgraphRequested {
+            subgraph_id,
+            source_node,
+            source_anchor: _,
+        } => {
+            // Host policy: confirm the open via cn::dialog, then on
+            // confirm expand the diamond into a colour-matched group
+            // container that owns cloned copies of the subgraph's
+            // interior nodes / connections. The wrapping group's
+            // collapse-chrome doubles as the "minimize" affordance
+            // (handled in the ToggleCollapseRequested arm — see the
+            // expansion-state guard there).
+            let snapshot = editor.subgraph(&subgraph_id);
+            let (title, description) = match &snapshot {
+                Some(sub) => (
+                    format!("Open subgraph: {}", sub.name),
+                    format!(
+                        "{}\n{} nodes · {} connections · {} groups",
+                        sub.namespace,
+                        sub.nodes.len(),
+                        sub.connections.len(),
+                        sub.groups.len()
+                    ),
+                ),
+                None => (
+                    format!("Subgraph not found: {}", subgraph_id),
+                    "The referenced subgraph is no longer registered with the editor.".to_string(),
+                ),
+            };
+            tracing::info!(
+                target: "node_editor_demo::subgraph",
+                subgraph_id = %subgraph_id.as_str(),
+                "SubgraphRequested — host opening confirmation dialog"
+            );
+            let editor_for_open = editor.clone();
+            let host_for_open = host.clone();
+            let snapshot_for_open = snapshot;
+            let source_node_for_open = source_node.clone();
+            blinc_cn::dialog()
+                .title(title)
+                .description(description)
+                .confirm_text("Open")
+                .cancel_text("Close")
+                .on_confirm(move || {
+                    if let Some(sub) = snapshot_for_open.clone() {
+                        expand_subgraph(
+                            &editor_for_open,
+                            &host_for_open,
+                            source_node_for_open.clone(),
+                            sub,
+                        );
+                    }
+                })
+                .show();
+        }
         EditorEvent::CreateGroupRequested(_)
         | EditorEvent::EdgeClicked { .. }
         | EditorEvent::NodeClicked { .. }
@@ -967,6 +1510,1160 @@ fn handle_event(editor: &Editor, host: &HostGraph, evt: EditorEvent<DemoPort>) {
             // command palette / inspector / layout code.
         }
     }
+}
+
+/// Replace the subgraph-ref diamond `diamond_id` with a colour-
+/// matched group container that holds cloned copies of `sub`'s
+/// internal nodes / connections / groups. External connections that
+/// terminated at the diamond are LIFTED OFF — saved into the
+/// expansion state so the matching `minimize_subgraph` can restore
+/// them when the user collapses the container.
+///
+/// Cloned internal entities get id-prefixed (`expanded:<diamond>:…`)
+/// so the same subgraph can be opened in multiple places without id
+/// collisions across diamond instances.
+fn expand_subgraph(
+    editor: &Editor,
+    host: &HostGraph,
+    diamond_id: NodeId,
+    sub: blinc_node_editor::Subgraph<DemoPort, (), (), ()>,
+) {
+    // Skip if this diamond is already expanded (defensive — double-
+    // click + dialog flow could in theory fire twice).
+    let already_expanded = host
+        .expanded
+        .read()
+        .unwrap()
+        .values()
+        .any(|st| st.diamond.id == diamond_id);
+    if already_expanded {
+        tracing::warn!(
+            target: "node_editor_demo::subgraph",
+            diamond = %diamond_id.as_str(),
+            "expand_subgraph called for already-expanded diamond — skipping"
+        );
+        return;
+    }
+
+    // Snapshot the diamond + external connections before mutation.
+    let diamond = match host
+        .nodes
+        .read()
+        .unwrap()
+        .iter()
+        .find(|n| n.id == diamond_id)
+        .cloned()
+    {
+        Some(d) => d,
+        None => return,
+    };
+    let external_connections: Vec<Connection<()>> = host
+        .connections
+        .read()
+        .unwrap()
+        .iter()
+        .filter(|c| c.from.node == diamond_id || c.to.node == diamond_id)
+        .cloned()
+        .collect();
+
+    // Map old internal ids → new prefixed ids so two expansions of
+    // the same subgraph don't collide. Connection endpoints get
+    // rewritten through the same map.
+    let prefix = format!("expanded:{}:", diamond_id.as_str());
+    let id_map: std::collections::HashMap<NodeId, NodeId> = sub
+        .nodes
+        .iter()
+        .map(|n| (n.id.clone(), NodeId::from(format!("{prefix}{}", n.id.as_str()))))
+        .collect();
+
+    // Layout: drop internal nodes into a tidy row to the right of
+    // the diamond's left edge so the user sees them appear "near"
+    // where the diamond was. A real host would re-layout via the
+    // editor's layout strategies; this is the smallest visible
+    // implementation.
+    let mut new_nodes: Vec<NodeInstance<()>> = Vec::with_capacity(sub.nodes.len());
+    let mut x_cursor = diamond.position.x;
+    let row_y = diamond.position.y;
+    let h_gap = 240.0;
+    for n in &sub.nodes {
+        let new_id = id_map.get(&n.id).unwrap().clone();
+        let mut clone = n.clone();
+        clone.id = new_id;
+        clone.position = Point::new(x_cursor, row_y);
+        x_cursor += h_gap;
+        new_nodes.push(clone);
+    }
+
+    // Re-wire internal connections with the prefixed ids. Fresh
+    // ConnectionId so they don't clash with any pre-existing
+    // connections in the host.
+    let mut new_connections: Vec<Connection<()>> = Vec::with_capacity(sub.connections.len());
+    for c in &sub.connections {
+        let from_node = id_map
+            .get(&c.from.node)
+            .cloned()
+            .unwrap_or_else(|| c.from.node.clone());
+        let to_node = id_map
+            .get(&c.to.node)
+            .cloned()
+            .unwrap_or_else(|| c.to.node.clone());
+        let mut nc = Connection::new(
+            PortAddress::new(from_node, c.from.port.as_str()),
+            PortAddress::new(to_node, c.to.port.as_str()),
+        );
+        nc.state = c.state.clone();
+        new_connections.push(nc);
+    }
+
+    // Wrap in a Group whose ACCENT (border + header chrome only,
+    // NOT body fill — see Group::accent) matches the diamond's
+    // warning accent so the container reads as "this is the open
+    // subgraph" without flooding the interior with colour. The
+    // user's collapse-chrome click on this group fires
+    // `ToggleCollapseRequested` — the handler upstream intercepts
+    // it as a "minimize back to diamond" signal because the group's
+    // id is in `host.expanded`.
+    let group_id = GroupId::from(format!("{prefix}group"));
+    let warning_accent =
+        blinc_theme::ThemeState::get().color(blinc_theme::tokens::ColorToken::Warning);
+    let group = Group::<()>::new(group_id.clone(), sub.name.clone())
+        .with_description(sub.namespace.clone())
+        .with_accent(warning_accent);
+    // Members are the inserted nodes — auto-bounds will pull the
+    // group rect tight around them.
+    let group = new_nodes.iter().fold(group, |g, n| g.add_member(n.id.clone()));
+
+    // External connections that previously terminated at the diamond
+    // get re-routed to the LAST inserted internal node (the demo's
+    // designated "entry" — sinks tend to be the natural inbound
+    // boundary; a real host would honour a declared graph-input /
+    // proxy-input mapping). External connections that ORIGINATED
+    // from the diamond re-route to come FROM the FIRST inserted
+    // internal node. Originals are saved in ExpansionState so
+    // minimize can restore them verbatim.
+    let entry_id = new_nodes.last().map(|n| n.id.clone());
+    let exit_id = new_nodes.first().map(|n| n.id.clone());
+    let mut rerouted_externals: Vec<Connection<()>> = Vec::new();
+    // Try to resolve a `__sub_route:<canonical_node>:<port>`-encoded
+    // diamond-side port to the corresponding prefixed internal node
+    // + port. Returns the prefixed `NodeId` + port name on a clean
+    // parse + a matching new_nodes entry; `None` otherwise so the
+    // caller falls through to the legacy entry/exit heuristic.
+    //
+    // The encoding is written into the diamond-side port name by
+    // `promote_added_members_to_subgraph` whenever the user moves a
+    // host node INTO a subgraph during expansion. It carries which
+    // SPECIFIC internal node the lifted external connection should
+    // re-attach to on re-expand, so two sinks with different
+    // identities aren't confused for one another.
+    let resolve_sub_route = |port: &str| -> Option<(NodeId, String)> {
+        let rest = port.strip_prefix(SUB_ROUTE_PREFIX)?;
+        let (canonical, original_port) = rest.split_once(':')?;
+        let target_id = NodeId::from(format!("{prefix}{canonical}"));
+        if new_nodes.iter().any(|n| n.id == target_id) {
+            Some((target_id, original_port.to_string()))
+        } else {
+            None
+        }
+    };
+    for ext in &external_connections {
+        // Connection terminates at the diamond — re-route the to.node.
+        if ext.to.node == diamond_id {
+            // Prefer the encoded routing (user-added node from a
+            // previous save) — it points to the specific internal
+            // node the user wired up. Falls back to entry-heuristic
+            // for original-subgraph externals captured at first
+            // expand-time, which have plain port names.
+            if let Some((target, port)) = resolve_sub_route(ext.to.port.as_str()) {
+                let mut rerouted = Connection::new(
+                    PortAddress::new(ext.from.node.clone(), ext.from.port.as_str()),
+                    PortAddress::new(target, port.as_str()),
+                );
+                rerouted.state = ext.state.clone();
+                rerouted_externals.push(rerouted);
+            } else if let Some(ref entry) = entry_id {
+                // Demo-pragmatic port mapping: pick a real input port
+                // on the entry node. The sink template's `in_str` is
+                // a String input matching the demo's external source
+                // (fmt/1.out_str). If the entry node is something
+                // else, pick its first declared input via the host's
+                // template knowledge — for the demo, hard-code by
+                // name since we know the subgraph's interior.
+                let port = match entry.as_str() {
+                    s if s.ends_with("inner/3") => "in_str",
+                    _ => "in_str",
+                };
+                let mut rerouted = Connection::new(
+                    PortAddress::new(ext.from.node.clone(), ext.from.port.as_str()),
+                    PortAddress::new(entry.clone(), port),
+                );
+                rerouted.state = ext.state.clone();
+                rerouted_externals.push(rerouted);
+            }
+        } else if ext.from.node == diamond_id {
+            if let Some((target, port)) = resolve_sub_route(ext.from.port.as_str()) {
+                let mut rerouted = Connection::new(
+                    PortAddress::new(target, port.as_str()),
+                    PortAddress::new(ext.to.node.clone(), ext.to.port.as_str()),
+                );
+                rerouted.state = ext.state.clone();
+                rerouted_externals.push(rerouted);
+            } else if let Some(ref exit) = exit_id {
+                let port = "out_num";
+                let mut rerouted = Connection::new(
+                    PortAddress::new(exit.clone(), port),
+                    PortAddress::new(ext.to.node.clone(), ext.to.port.as_str()),
+                );
+                rerouted.state = ext.state.clone();
+                rerouted_externals.push(rerouted);
+            }
+        }
+    }
+
+    // Find any parent group(s) the diamond is a member of so we can
+    // swap its id out for the inserted internal node ids. Without
+    // this, the parent group's auto-bounds would still reference the
+    // (now-removed) diamond and the expanded container would sit
+    // outside the parent group's footprint visually.
+    let parent_groups: Vec<GroupId> = host
+        .groups
+        .read()
+        .unwrap()
+        .iter()
+        .filter(|g| g.members.contains(&diamond_id))
+        .map(|g| g.id.clone())
+        .collect();
+
+    // ── Mutation: remove diamond + external connections, insert
+    // new nodes / connections / group. Host first, then editor sync.
+    {
+        let mut nodes = host.nodes.write().unwrap();
+        nodes.retain(|n| n.id != diamond_id);
+        nodes.extend(new_nodes.iter().cloned());
+    }
+    {
+        let mut conns = host.connections.write().unwrap();
+        conns.retain(|c| c.from.node != diamond_id && c.to.node != diamond_id);
+        conns.extend(new_connections.iter().cloned());
+        conns.extend(rerouted_externals.iter().cloned());
+    }
+    // Rewrite parent-group membership: drop diamond_id, push every
+    // inserted internal node id so the parent's auto-bounds expands
+    // to enclose the expanded container.
+    if !parent_groups.is_empty() {
+        let inserted_ids: Vec<NodeId> = new_nodes.iter().map(|n| n.id.clone()).collect();
+        let mut groups_w = host.groups.write().unwrap();
+        for pg in &parent_groups {
+            if let Some(g) = groups_w.iter_mut().find(|gr| gr.id == *pg) {
+                g.members.retain(|m| *m != diamond_id);
+                for nid in &inserted_ids {
+                    if !g.members.contains(nid) {
+                        g.members.push(nid.clone());
+                    }
+                }
+            }
+        }
+    }
+    host.groups.write().unwrap().push(group.clone());
+
+    editor.remove_node(&diamond_id);
+    for n in &new_nodes {
+        editor.insert_node(n.clone());
+    }
+    for c in &new_connections {
+        editor.insert_connection(c.clone());
+    }
+    for c in &rerouted_externals {
+        editor.insert_connection(c.clone());
+    }
+    editor.insert_group(group.clone());
+    // Mirror the parent-group member swap into the editor so the
+    // editor's slot cache + graph_rev reflect the new membership and
+    // selection / hit-testing stay consistent.
+    if !parent_groups.is_empty() {
+        let groups_r = host.groups.read().unwrap();
+        for pg in &parent_groups {
+            if let Some(g) = groups_r.iter().find(|gr| gr.id == *pg) {
+                editor.set_group_members(pg, g.members.clone());
+            }
+        }
+    }
+
+    // Record expansion state so the minimize gesture can fully
+    // reverse this operation. `inserted_connections` covers both
+    // the internal flow and the rerouted-external connections so
+    // minimize wipes them in one pass.
+    let mut all_inserted_conns: Vec<ConnectionId> =
+        new_connections.iter().map(|c| c.id).collect();
+    all_inserted_conns.extend(rerouted_externals.iter().map(|c| c.id));
+
+    // Capture the at-this-moment baseline AFTER all the mutations
+    // above have committed. ExpansionBaseline::capture walks the
+    // live host state through the wrapper group's members so any
+    // subsequent edit (drag-reposition, add-to-group, port rewire)
+    // shows up as a diff against this snapshot.
+    let baseline = ExpansionBaseline::capture(host, &group_id, &prefix);
+
+    host.expanded.write().unwrap().insert(
+        group_id.clone(),
+        ExpansionState {
+            diamond,
+            external_connections,
+            inserted_nodes: new_nodes.iter().map(|n| n.id.clone()).collect(),
+            inserted_connections: all_inserted_conns,
+            group_id,
+            subgraph_id: sub.id.clone(),
+            id_prefix: prefix,
+            baseline,
+            parent_groups,
+        },
+    );
+
+    tracing::info!(
+        target: "node_editor_demo::subgraph",
+        diamond = %diamond_id.as_str(),
+        nodes = new_nodes.len(),
+        conns = new_connections.len(),
+        "subgraph expanded into colour-matched group container"
+    );
+}
+
+/// Reverse [`expand_subgraph`]: drop every inserted entity and
+/// restore the diamond + external connections.
+fn minimize_subgraph(editor: &Editor, host: &HostGraph, group_id: GroupId) {
+    let state = match host.expanded.write().unwrap().remove(&group_id) {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Remove inserted nodes (also strips any incident connections
+    // automatically via editor.remove_node).
+    {
+        let mut nodes = host.nodes.write().unwrap();
+        nodes.retain(|n| !state.inserted_nodes.contains(&n.id));
+    }
+    {
+        let mut conns = host.connections.write().unwrap();
+        conns.retain(|c| {
+            !state.inserted_nodes.contains(&c.from.node)
+                && !state.inserted_nodes.contains(&c.to.node)
+        });
+    }
+    for nid in &state.inserted_nodes {
+        editor.remove_node(nid);
+    }
+
+    // Drop the wrapping group.
+    host.groups.write().unwrap().retain(|g| g.id != state.group_id);
+    editor.remove_group(&state.group_id);
+
+    // Restore parent-group membership: drop the inserted node ids
+    // and put the diamond back where it was. Mirror to the editor's
+    // set_group_members so the slot cache + graph_rev refresh.
+    if !state.parent_groups.is_empty() {
+        let inserted: &[NodeId] = &state.inserted_nodes;
+        let diamond_id = state.diamond.id.clone();
+        let mut groups_w = host.groups.write().unwrap();
+        for pg in &state.parent_groups {
+            if let Some(g) = groups_w.iter_mut().find(|gr| gr.id == *pg) {
+                g.members.retain(|m| !inserted.contains(m));
+                if !g.members.contains(&diamond_id) {
+                    g.members.push(diamond_id.clone());
+                }
+            }
+        }
+        drop(groups_w);
+        let groups_r = host.groups.read().unwrap();
+        for pg in &state.parent_groups {
+            if let Some(g) = groups_r.iter().find(|gr| gr.id == *pg) {
+                editor.set_group_members(pg, g.members.clone());
+            }
+        }
+    }
+
+    // Restore the diamond + its external connections.
+    host.nodes.write().unwrap().push(state.diamond.clone());
+    editor.insert_node(state.diamond.clone());
+    for c in &state.external_connections {
+        host.connections.write().unwrap().push(c.clone());
+        editor.insert_connection(c.clone());
+    }
+
+    tracing::info!(
+        target: "node_editor_demo::subgraph",
+        group = %group_id.as_str(),
+        restored_external = state.external_connections.len(),
+        "subgraph minimized back to diamond"
+    );
+}
+
+/// Returns true when the live wrapper-group state diverges from the
+/// at-expand baseline — i.e. the user has added / removed nodes,
+/// repositioned a node, or rewired an internal connection while the
+/// subgraph was open. Compares the same shape that
+/// `writeback_expansion_to_subgraph` would persist, so a "dirty"
+/// verdict guarantees that a save would actually change the
+/// canonical subgraph (no spurious dialogs).
+fn is_expansion_dirty(state: &ExpansionState, host: &HostGraph) -> bool {
+    let current = ExpansionBaseline::capture(host, &state.group_id, &state.id_prefix);
+    current != state.baseline
+}
+
+/// Strip the `expanded:<diamond>:` prefix off the wrapper group's
+/// live members and persist them as the new canonical subgraph
+/// contents. Internal connections (both endpoints inside the
+/// wrapper) get the same treatment.
+///
+/// External connections that the user rewired during expansion live
+/// at the host boundary, NOT inside the subgraph definition, so
+/// they're intentionally NOT written back here — minimize already
+/// drops them and restores the original `state.external_connections`.
+///
+/// Best-effort: if the canonical subgraph is missing (deleted
+/// behind the user's back), the writeback is a no-op and we log a
+/// warning instead of panicking.
+fn writeback_expansion_to_subgraph(
+    editor: &Editor,
+    host: &HostGraph,
+    state: &ExpansionState,
+    rename: &std::collections::HashMap<NodeId, NodeId>,
+) {
+    use std::collections::HashSet;
+    let member_set: HashSet<NodeId> = host
+        .groups
+        .read()
+        .unwrap()
+        .iter()
+        .find(|g| g.id == state.group_id)
+        .map(|g| g.members.iter().cloned().collect())
+        .unwrap_or_default();
+    if member_set.is_empty() {
+        tracing::warn!(
+            target: "node_editor_demo::subgraph",
+            group = %state.group_id.as_str(),
+            "writeback skipped: wrapper group has no live members"
+        );
+        return;
+    }
+
+    // Two-step id resolution applied uniformly to nodes + internal
+    // connection endpoints: (1) strip the `expanded:<diamond>:`
+    // prefix off original-subgraph clones; (2) substitute via
+    // `rename` for user-added nodes that needed a unique canonical
+    // id to avoid colliding with existing subgraph nodes. Either
+    // step can be a no-op and the id flows through unchanged.
+    let resolve_canonical = |raw: &NodeId| -> NodeId {
+        if let Some(renamed) = rename.get(raw) {
+            return renamed.clone();
+        }
+        let stripped = raw
+            .as_str()
+            .strip_prefix(&state.id_prefix)
+            .unwrap_or(raw.as_str())
+            .to_string();
+        NodeId::from(stripped)
+    };
+
+    let new_nodes: Vec<NodeInstance<()>> = host
+        .nodes
+        .read()
+        .unwrap()
+        .iter()
+        .filter(|n| member_set.contains(&n.id))
+        .map(|n| {
+            let mut clone = n.clone();
+            clone.id = resolve_canonical(&n.id);
+            clone
+        })
+        .collect();
+    let new_connections: Vec<Connection<()>> = host
+        .connections
+        .read()
+        .unwrap()
+        .iter()
+        .filter(|c| member_set.contains(&c.from.node) && member_set.contains(&c.to.node))
+        .map(|c| {
+            let mut nc = Connection::new(
+                PortAddress::new(resolve_canonical(&c.from.node), c.from.port.as_str()),
+                PortAddress::new(resolve_canonical(&c.to.node), c.to.port.as_str()),
+            );
+            nc.state = c.state.clone();
+            nc
+        })
+        .collect();
+
+    let applied = editor
+        .with_subgraph_graph_mut(&state.subgraph_id, |sub| {
+            sub.nodes = new_nodes.clone();
+            sub.connections = new_connections.clone();
+        })
+        .is_some();
+
+    if applied {
+        tracing::info!(
+            target: "node_editor_demo::subgraph",
+            subgraph = %state.subgraph_id.as_str(),
+            nodes = new_nodes.len(),
+            conns = new_connections.len(),
+            "subgraph writeback applied"
+        );
+    } else {
+        tracing::warn!(
+            target: "node_editor_demo::subgraph",
+            subgraph = %state.subgraph_id.as_str(),
+            "writeback skipped: canonical subgraph not found in editor.subgraphs"
+        );
+    }
+}
+
+/// Save path used by [`confirm_minimize_subgraph`]'s on_confirm
+/// callback. Three jobs:
+///
+/// 1. Identify wrapper-group members the user *added* during
+///    expansion (anything in the wrapper that wasn't in
+///    `state.inserted_nodes` at expand-time).
+/// 2. Lift those members' boundary-crossing connections (one
+///    endpoint in the wrapper, one outside) onto the diamond, since
+///    the moved-in nodes are about to disappear from the host. The
+///    lifted connections become new entries in
+///    `state.external_connections` so minimize re-attaches them to
+///    the restored diamond and a future re-expansion can route them
+///    via the entry/exit convention.
+/// 3. Patch `state.inserted_nodes` so the added members get
+///    deleted from the host on minimize (closing the "copied in
+///    both places" gap).
+///
+/// Returns the updated state so the caller can persist it into
+/// `host.expanded` before calling [`minimize_subgraph`]. Does NOT
+/// itself remove anything from the host — that's
+/// [`minimize_subgraph`]'s job, which inherits the patched
+/// `inserted_nodes` and does the cleanup uniformly.
+fn promote_added_members_to_subgraph(
+    editor: &Editor,
+    state: &ExpansionState,
+    host: &HostGraph,
+) -> (ExpansionState, std::collections::HashMap<NodeId, NodeId>) {
+    use std::collections::{HashMap, HashSet};
+    let member_set: HashSet<NodeId> = host
+        .groups
+        .read()
+        .unwrap()
+        .iter()
+        .find(|g| g.id == state.group_id)
+        .map(|g| g.members.iter().cloned().collect())
+        .unwrap_or_default();
+    let original_inserted: HashSet<NodeId> = state.inserted_nodes.iter().cloned().collect();
+    let added_members: Vec<NodeId> = member_set
+        .iter()
+        .filter(|m| !original_inserted.contains(*m))
+        .cloned()
+        .collect();
+    if added_members.is_empty() {
+        return (state.clone(), HashMap::new());
+    }
+    let added_set: HashSet<NodeId> = added_members.iter().cloned().collect();
+
+    // Build a host_id → canonical_subgraph_id map for the added
+    // members. The canonical id has to be unique within the target
+    // subgraph's existing node set, AND unique across other added
+    // members we're inserting in the same save (two main-graph nodes
+    // with colliding ids — e.g. user dropped two host "sink/1"s
+    // somehow — would otherwise stomp each other). Strategy: if the
+    // host id is already free, use it verbatim; else suffix
+    // `/imported_<n>` with the smallest n that resolves.
+    let existing_canonical_ids: HashSet<String> = editor
+        .with_subgraph(&state.subgraph_id, |sub| {
+            sub.nodes
+                .iter()
+                .map(|n| n.id.as_str().to_string())
+                .collect::<HashSet<String>>()
+        })
+        .unwrap_or_default();
+    let mut taken: HashSet<String> = existing_canonical_ids.clone();
+    let mut canonical_rename: HashMap<NodeId, NodeId> = HashMap::new();
+    for host_id in &added_members {
+        let raw = host_id.as_str().to_string();
+        let canonical = if !taken.contains(&raw) {
+            raw.clone()
+        } else {
+            let mut n: u32 = 1;
+            loop {
+                let candidate = format!("{raw}/imported_{n}");
+                if !taken.contains(&candidate) {
+                    break candidate;
+                }
+                n += 1;
+            }
+        };
+        taken.insert(canonical.clone());
+        canonical_rename.insert(host_id.clone(), NodeId::from(canonical));
+    }
+
+    // For each connection currently in the host:
+    //  - internal (both endpoints in wrapper) → drop, subgraph
+    //    writeback already captured it.
+    //  - boundary-crossing where the wrapper endpoint is in the
+    //    added set → lift to the diamond. The diamond-side port
+    //    encodes the SUB_ROUTE_PREFIX + canonical_node_id + original
+    //    port so re-expansion targets the user-added node
+    //    specifically. Without the encoding the rerouting code's
+    //    "entry == last inserted" fallback would land all lifted
+    //    incoming connections on a single shared node — fine for
+    //    one added sink, broken for two.
+    //  - boundary-crossing where the wrapper endpoint is in the
+    //    ORIGINAL inserted set → leave alone, minimize already
+    //    handles those via `state.external_connections` restore.
+    let lifted: Vec<Connection<()>> = host
+        .connections
+        .read()
+        .unwrap()
+        .iter()
+        .filter_map(|c| {
+            let from_added = added_set.contains(&c.from.node);
+            let to_added = added_set.contains(&c.to.node);
+            let from_member = member_set.contains(&c.from.node);
+            let to_member = member_set.contains(&c.to.node);
+            if from_added && !to_member {
+                let canonical = canonical_rename.get(&c.from.node).unwrap();
+                let encoded = format!(
+                    "{SUB_ROUTE_PREFIX}{}:{}",
+                    canonical.as_str(),
+                    c.from.port.as_str()
+                );
+                let mut nc = Connection::new(
+                    PortAddress::new(state.diamond.id.clone(), encoded.as_str()),
+                    PortAddress::new(c.to.node.clone(), c.to.port.as_str()),
+                );
+                nc.state = c.state.clone();
+                Some(nc)
+            } else if to_added && !from_member {
+                let canonical = canonical_rename.get(&c.to.node).unwrap();
+                let encoded = format!(
+                    "{SUB_ROUTE_PREFIX}{}:{}",
+                    canonical.as_str(),
+                    c.to.port.as_str()
+                );
+                let mut nc = Connection::new(
+                    PortAddress::new(c.from.node.clone(), c.from.port.as_str()),
+                    PortAddress::new(state.diamond.id.clone(), encoded.as_str()),
+                );
+                nc.state = c.state.clone();
+                Some(nc)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut updated = state.clone();
+    updated.external_connections.extend(lifted);
+    updated.inserted_nodes.extend(added_members);
+    (updated, canonical_rename)
+}
+
+/// Minimize the wrapper group back into a diamond, with a
+/// save-changes confirm dialog interposed when the user has actually
+/// edited the expanded view. Three outcomes:
+///
+/// * **No edits** → minimize immediately (dialog would be noise).
+/// * **Edits + "Save changes"** → persist the diff into
+///   `editor.subgraphs[subgraph_id]`, then minimize.
+/// * **Edits + "Discard"** → minimize without persisting.
+/// * **Edits + backdrop / Escape** → no-op; user stays in the
+///   expanded view to keep editing.
+fn confirm_minimize_subgraph(editor: &Editor, host: &HostGraph, group_id: GroupId) {
+    let state = match host.expanded.read().unwrap().get(&group_id).cloned() {
+        Some(s) => s,
+        None => return,
+    };
+
+    if !is_expansion_dirty(&state, host) {
+        minimize_subgraph(editor, host, group_id);
+        return;
+    }
+
+    let editor_for_save = editor.clone();
+    let host_for_save = host.clone();
+    let state_for_save = state.clone();
+    let editor_for_discard = editor.clone();
+    let host_for_discard = host.clone();
+    let group_for_discard = group_id.clone();
+
+    let title = format!("Save changes to {}?", state.subgraph_id.as_str());
+    let description = "You have unsaved edits inside this subgraph. \
+        Save to update the canonical subgraph definition, or discard \
+        to drop the edits and minimize back to the diamond."
+        .to_string();
+
+    blinc_cn::dialog()
+        .title(title)
+        .description(description)
+        .confirm_text("Save changes")
+        .cancel_text("Discard")
+        .on_confirm(move || {
+            // Build a save-time state that promotes wrapper-added
+            // nodes into `inserted_nodes` (so minimize removes them
+            // from the host) and lifts their boundary-crossing
+            // connections onto the diamond (so minimize re-attaches
+            // them via `external_connections`). Without this, a
+            // node the user dragged in from the main graph survives
+            // minimize as a duplicate AND its incoming wires stay
+            // pointed at the now-orphaned host copy. The rename map
+            // carries any host_id → unique canonical_id swaps so the
+            // writeback path can apply them uniformly to nodes and
+            // internal connections in the canonical subgraph.
+            let (updated, rename) = promote_added_members_to_subgraph(
+                &editor_for_save,
+                &state_for_save,
+                &host_for_save,
+            );
+            host_for_save
+                .expanded
+                .write()
+                .unwrap()
+                .insert(updated.group_id.clone(), updated.clone());
+            writeback_expansion_to_subgraph(
+                &editor_for_save,
+                &host_for_save,
+                &updated,
+                &rename,
+            );
+            minimize_subgraph(
+                &editor_for_save,
+                &host_for_save,
+                updated.group_id.clone(),
+            );
+        })
+        .on_cancel(move || {
+            minimize_subgraph(&editor_for_discard, &host_for_discard, group_for_discard.clone());
+        })
+        .show();
+}
+
+/// Open the right-click context menu anchored at the cursor's
+/// screen-space point. Branches on the [`ContextMenuTarget`] variant
+/// to surface the most relevant actions for what the user clicked.
+/// Callbacks capture editor / host / history clones and either push
+/// `EditorEvent`s (so the host event-drain loop already in place
+/// runs them) or invoke editor methods directly (for actions with
+/// no host-side state to mirror, like `focus_on_node` or
+/// `zoom_to_fit`).
+fn open_context_menu(
+    editor: &Editor,
+    host: &HostGraph,
+    history: &DemoHistory,
+    target: blinc_node_editor::ContextMenuTarget,
+    anchor: Point,
+) {
+    use blinc_node_editor::ContextMenuTarget as T;
+    // Platform-aware modifier hint for shortcut display. Tabler's
+    // own convention is "Ctrl+X" on win/linux and "⌘X" on macOS;
+    // we follow that here.
+    let mod_key = if cfg!(target_os = "macos") { "⌘ + " } else { "Ctrl+" };
+
+    let mut menu = blinc_cn::context_menu().at(anchor.x, anchor.y);
+    match target {
+        T::Node(id) => {
+            let e_dup = editor.clone();
+            let e_focus = editor.clone();
+            let e_disable = editor.clone();
+            let id_dup = id.clone();
+            let id_focus = id.clone();
+            let id_disable = id.clone();
+            let id_delete = id.clone();
+
+            menu = menu
+                .item_with_shortcut(
+                    "Duplicate",
+                    format!("{mod_key}D"),
+                    move || {
+                        e_dup.push_event(EditorEvent::DuplicateNodesRequested(vec![id_dup.clone()]));
+                    },
+                )
+                .item("Focus", move || {
+                    e_focus.focus_on_node(&id_focus);
+                })
+                .item("Toggle disable", move || {
+                    // Read authoritative state from the editor, not
+                    // the host mirror — `set_node_disabled` doesn't
+                    // sync back to the host, so the host's `disabled`
+                    // flag would stay stuck at the initial value and
+                    // the toggle would be one-way.
+                    let current = e_disable.is_node_disabled(&id_disable).unwrap_or(false);
+                    e_disable.set_node_disabled(&id_disable, !current);
+                })
+                .separator()
+                .item_with_shortcut(
+                    "Delete",
+                    "DEL",
+                    {
+                        let e_delete = editor.clone();
+                        move || {
+                            // Push an event instead of calling
+                            // `confirm_delete_nodes` directly. Either
+                            // path now works since `cn::context_menu`
+                            // closes the menu BEFORE running our cb()
+                            // (no more UnwindFromBelow cascade killing
+                            // freshly-pushed dialogs), but routing
+                            // through the event drain keeps all delete
+                            // chains symmetric: keyboard DEL, multi-
+                            // selection toolbar, and the context menu
+                            // all funnel into the same
+                            // `confirm_delete_nodes` site.
+                            e_delete.push_event(EditorEvent::DeleteNodesRequested(vec![
+                                id_delete.clone(),
+                            ]));
+                        }
+                    },
+                );
+        }
+        T::Edge(id) => {
+            let e_delete = editor.clone();
+            menu = menu.item_with_shortcut("Delete connection", "DEL", move || {
+                // Same defer rationale as the node Delete arm.
+                e_delete.push_event(EditorEvent::DeleteConnectionRequested(id));
+            });
+        }
+        T::Group(id) => {
+            let id_edit = id.clone();
+            let id_collapse = id.clone();
+            let id_disable = id.clone();
+            let id_delete = id.clone();
+            let e_edit = editor.clone();
+            let host_edit = host.clone();
+            let e_collapse = editor.clone();
+            let host_collapse = host.clone();
+            let e_disable = editor.clone();
+            let e_zoom = editor.clone();
+
+            menu = menu
+                .item("Edit…", move || {
+                    let snapshot = host_edit
+                        .groups
+                        .read()
+                        .unwrap()
+                        .iter()
+                        .find(|g| g.id == id_edit)
+                        .cloned();
+                    if let Some(g) = snapshot {
+                        // Anchor at title rect like the chrome chip
+                        // path does so the cn::dialog shape matches
+                        // — dialog is modal-centred so the exact
+                        // anchor coord doesn't matter visually, but
+                        // it keeps the event payload consistent.
+                        let anchor = blinc_core::layer::Rect::new(0.0, 0.0, 0.0, 0.0);
+                        e_edit.push_event(EditorEvent::EditGroupRequested {
+                            group: id_edit.clone(),
+                            current_title: g.name,
+                            current_description: g.description.unwrap_or_default(),
+                            anchor_screen: anchor,
+                        });
+                    }
+                })
+                .item("Toggle collapse", move || {
+                    let current = host_collapse
+                        .groups
+                        .read()
+                        .unwrap()
+                        .iter()
+                        .find(|g| g.id == id_collapse)
+                        .map(|g| g.is_collapsed)
+                        .unwrap_or(false);
+                    e_collapse.push_event(EditorEvent::ToggleCollapseRequested(
+                        blinc_node_editor::ToggleCollapseRequest {
+                            group: id_collapse.clone(),
+                            collapsed: !current,
+                        },
+                    ));
+                })
+                .item("Zoom to group", {
+                    let id_zoom = id.clone();
+                    move || {
+                        // `zoom_to_selection` only looks at NODE
+                        // selections — right-clicking a group puts
+                        // `group:{id}` in the selection set, not its
+                        // members, so the old call was a no-op.
+                        // `focus_on_group` walks the group's member
+                        // ids and frames their union.
+                        e_zoom.focus_on_group(&id_zoom);
+                    }
+                })
+                .item("Toggle disable", move || {
+                    // Read editor state, not host mirror (same
+                    // rationale as the node-toggle callback above).
+                    let current = e_disable.is_group_disabled(&id_disable).unwrap_or(false);
+                    e_disable.set_group_disabled(&id_disable, !current);
+                })
+                .separator()
+                .item("Delete group", {
+                    let e_delete = editor.clone();
+                    move || {
+                        // Defer to next-frame drain so the menu
+                        // close-cascade doesn't unwind the dialog.
+                        e_delete.push_event(EditorEvent::DeleteGroupRequested(
+                            blinc_node_editor::DeleteGroupRequest {
+                                group: id_delete.clone(),
+                            },
+                        ));
+                    }
+                });
+        }
+        T::Canvas => {
+            // Forwarding to the existing UndoRequested / RedoRequested
+            // / SelectAllRequested event handlers keeps the side-
+            // effects (toast banner, host resync) consistent with the
+            // keyboard path — don't call `history.undo()` directly
+            // here or we'd double-undo (once here + once in the arm).
+            let _ = history; // keep capture for ownership symmetry
+            let e_sel_all = editor.clone();
+            let e_fit = editor.clone();
+            let e_undo = editor.clone();
+            let e_redo = editor.clone();
+
+            menu = menu
+                .item_with_shortcut("Select all", format!("{mod_key}A"), move || {
+                    e_sel_all.push_event(EditorEvent::SelectAllRequested);
+                })
+                .item("Zoom to fit", move || {
+                    e_fit.zoom_to_fit();
+                })
+                .separator()
+                .item_with_shortcut("Undo", format!("{mod_key}Z"), move || {
+                    e_undo.push_event(EditorEvent::UndoRequested);
+                })
+                .item_with_shortcut(
+                    "Redo",
+                    if cfg!(target_os = "macos") {
+                        "⌘ + ⇧ + Z".to_string()
+                    } else {
+                        "Ctrl + Shift + Z".to_string()
+                    },
+                    move || {
+                        e_redo.push_event(EditorEvent::RedoRequested);
+                    },
+                );
+        }
+    }
+    let _ = menu.show();
+}
+
+/// Open a cn::dialog confirming a connection delete + run the
+/// host/editor/history mutation chain on confirm. Used by both the
+/// `DeleteConnectionRequested` event-drain arm AND the context-menu
+/// "Delete connection" item so the two paths can't drift.
+fn confirm_delete_connection(
+    editor: &Editor,
+    host: &HostGraph,
+    history: &DemoHistory,
+    id: ConnectionId,
+) {
+    let editor_for_confirm = editor.clone();
+    let host_for_confirm = host.clone();
+    let history_for_confirm = history.clone();
+    blinc_cn::dialog()
+        .title("Delete connection?")
+        .description("This will remove the edge from the graph. The connected nodes stay in place.")
+        .confirm_text("Delete")
+        .cancel_text("Cancel")
+        .confirm_destructive(true)
+        .on_confirm(move || {
+            let prev = host_for_confirm
+                .connections
+                .read()
+                .unwrap()
+                .iter()
+                .find(|c| c.id == id)
+                .cloned();
+            host_for_confirm.connections.write().unwrap().retain(|c| c.id != id);
+            editor_for_confirm.remove_connection(id);
+            if let Some(prev) = prev {
+                history_for_confirm.lock().unwrap().push(
+                    EditorCommand::RemoveConnection(id),
+                    EditorCommand::InsertConnection(prev),
+                    "Delete Connection",
+                );
+            }
+            tracing::info!("deleted connection {}", id.0);
+        })
+        .show();
+}
+
+/// Open a cn::dialog confirming a node-delete + run the
+/// snapshot/mutate/history chain on confirm. Snapshots node + every
+/// incident connection + per-group member list BEFORE mutation so
+/// the composite inverse can re-insert everything on undo.
+fn confirm_delete_nodes(
+    editor: &Editor,
+    host: &HostGraph,
+    history: &DemoHistory,
+    ids: Vec<NodeId>,
+) {
+    if ids.is_empty() {
+        return;
+    }
+    let (title, description) = if ids.len() == 1 {
+        (
+            "Delete node?".to_string(),
+            "This will remove the node and every connection attached to it.".to_string(),
+        )
+    } else {
+        (
+            format!("Delete {} nodes?", ids.len()),
+            "This will remove the selected nodes and every connection attached to them.".to_string(),
+        )
+    };
+    let editor_for_confirm = editor.clone();
+    let host_for_confirm = host.clone();
+    let history_for_confirm = history.clone();
+    let ids_for_confirm = ids.clone();
+    blinc_cn::dialog()
+        .title(title)
+        .description(description)
+        .confirm_text("Delete")
+        .cancel_text("Cancel")
+        .confirm_destructive(true)
+        .on_confirm(move || {
+            let id_set: std::collections::HashSet<_> =
+                ids_for_confirm.iter().cloned().collect();
+            let removed_nodes: Vec<NodeInstance<()>> = host_for_confirm
+                .nodes
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|n| id_set.contains(&n.id))
+                .cloned()
+                .collect();
+            let removed_conns: Vec<Connection<()>> = host_for_confirm
+                .connections
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|c| id_set.contains(&c.from.node) || id_set.contains(&c.to.node))
+                .cloned()
+                .collect();
+            let group_membership_before: Vec<(GroupId, Vec<NodeId>)> = host_for_confirm
+                .groups
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|g| g.members.iter().any(|m| id_set.contains(m)))
+                .map(|g| (g.id.clone(), g.members.clone()))
+                .collect();
+
+            host_for_confirm
+                .nodes
+                .write()
+                .unwrap()
+                .retain(|n| !id_set.contains(&n.id));
+            host_for_confirm
+                .connections
+                .write()
+                .unwrap()
+                .retain(|c| !id_set.contains(&c.from.node) && !id_set.contains(&c.to.node));
+            for g in host_for_confirm.groups.write().unwrap().iter_mut() {
+                g.members.retain(|m| !id_set.contains(m));
+            }
+            for id in &ids_for_confirm {
+                editor_for_confirm.remove_node(id);
+            }
+
+            let mut inverse: Vec<EditorCommand<DemoPort, (), (), ()>> = Vec::new();
+            inverse.extend(removed_nodes.iter().cloned().map(EditorCommand::InsertNode));
+            inverse.extend(
+                removed_conns
+                    .iter()
+                    .cloned()
+                    .map(EditorCommand::InsertConnection),
+            );
+            inverse.extend(
+                group_membership_before
+                    .iter()
+                    .cloned()
+                    .map(|(g, m)| EditorCommand::SetGroupMembers(g, m)),
+            );
+            let forward = EditorCommand::Composite(
+                ids_for_confirm
+                    .iter()
+                    .cloned()
+                    .map(EditorCommand::RemoveNode)
+                    .collect(),
+            );
+            let label = if ids_for_confirm.len() == 1 {
+                "Delete Node"
+            } else {
+                "Delete Nodes"
+            };
+            history_for_confirm
+                .lock()
+                .unwrap()
+                .push(forward, EditorCommand::Composite(inverse), label);
+            tracing::info!("deleted {} node(s)", ids_for_confirm.len());
+        })
+        .show();
+}
+
+/// Open a cn::dialog confirming a group delete + run the
+/// host/editor/history chain. The members stay in place — only the
+/// grouping is removed.
+fn confirm_delete_group(
+    editor: &Editor,
+    host: &HostGraph,
+    history: &DemoHistory,
+    group_id: GroupId,
+) {
+    let editor_for_confirm = editor.clone();
+    let host_for_confirm = host.clone();
+    let history_for_confirm = history.clone();
+    let name = host
+        .groups
+        .read()
+        .unwrap()
+        .iter()
+        .find(|g| g.id == group_id)
+        .map(|g| g.name.clone())
+        .unwrap_or_else(|| group_id.as_str().to_string());
+    blinc_cn::dialog()
+        .title(format!("Delete group \"{name}\"?"))
+        .description("The grouping is removed; member nodes and connections stay.")
+        .confirm_text("Delete")
+        .cancel_text("Cancel")
+        .confirm_destructive(true)
+        .on_confirm(move || {
+            let prev = host_for_confirm
+                .groups
+                .read()
+                .unwrap()
+                .iter()
+                .find(|g| g.id == group_id)
+                .cloned();
+            host_for_confirm
+                .groups
+                .write()
+                .unwrap()
+                .retain(|g| g.id != group_id);
+            editor_for_confirm.remove_group(&group_id);
+            if let Some(prev) = prev {
+                history_for_confirm.lock().unwrap().push(
+                    EditorCommand::RemoveGroup(group_id.clone()),
+                    EditorCommand::InsertGroup(prev),
+                    "Delete Group",
+                );
+            }
+            tracing::info!("deleted group {}", group_id.as_str());
+        })
+        .show();
+}
+
+/// Pull the editor's authoritative graph back into the host mirror.
+/// Called after an undo / redo: the inverse command was applied
+/// against the editor, so its in-memory graph is the new truth — the
+/// host's RwLock-protected mirror needs to catch up so subsequent
+/// "snapshot before mutate" reads see the right state.
+fn resync_host_from_editor(editor: &Editor, host: &HostGraph) {
+    let (nodes, conns, groups, _exposed) = editor.graph_snapshot();
+    *host.nodes.write().unwrap() = nodes;
+    *host.connections.write().unwrap() = conns;
+    *host.groups.write().unwrap() = groups;
 }
 
 /// Which group field a double-click is editing. Drives the editor
@@ -988,6 +2685,7 @@ enum EditorField {
 fn open_inline_text_editor(
     editor: &Editor,
     host: &HostGraph,
+    history: &DemoHistory,
     group: GroupId,
     current: String,
     anchor_screen: blinc_core::layer::Rect,
@@ -1097,6 +2795,7 @@ fn open_inline_text_editor(
     // updated group back through the editor's command surface.
     let editor_for_save = editor.clone();
     let host_for_save = host.clone();
+    let history_for_save = history.clone();
     let group_for_save = group.clone();
     let input_for_save = input_data.clone();
     let area_for_save = area_state.clone();
@@ -1114,21 +2813,28 @@ fn open_inline_text_editor(
         let Some(new_value) = new_value else {
             return;
         };
+        // Snapshot the pre-edit group BEFORE applying any change. The
+        // inverse undo is `InsertGroup(prev)` — it walks back the
+        // title or description to the value that was there when the
+        // user opened the inline editor.
+        let prev_group = host_for_save
+            .groups
+            .read()
+            .unwrap()
+            .iter()
+            .find(|g| g.id == group_for_save)
+            .cloned();
         // Skip the round-trip when the user pressed Enter without
         // changing anything — no need to bump graph_rev.
-        let unchanged = {
-            let groups = host_for_save.groups.read().unwrap();
-            groups
-                .iter()
-                .find(|g| g.id == group_for_save)
-                .map(|g| match field_for_save {
-                    EditorField::Title => g.name == new_value,
-                    EditorField::Description => {
-                        g.description.as_deref().unwrap_or("") == new_value
-                    }
-                })
-                .unwrap_or(false)
-        };
+        let unchanged = prev_group
+            .as_ref()
+            .map(|g| match field_for_save {
+                EditorField::Title => g.name == new_value,
+                EditorField::Description => {
+                    g.description.as_deref().unwrap_or("") == new_value
+                }
+            })
+            .unwrap_or(false);
         if !unchanged {
             // Patch host first, then sync the editor's copy.
             let updated = {
@@ -1149,8 +2855,17 @@ fn open_inline_text_editor(
                     None
                 }
             };
-            if let Some(g) = updated {
-                editor_for_save.insert_group(g);
+            if let (Some(updated), Some(prev)) = (updated, prev_group) {
+                editor_for_save.insert_group(updated.clone());
+                let label = match field_for_save {
+                    EditorField::Title => "Edit Group Title",
+                    EditorField::Description => "Edit Group Description",
+                };
+                history_for_save.lock().unwrap().push(
+                    EditorCommand::InsertGroup(updated),
+                    EditorCommand::InsertGroup(prev),
+                    label,
+                );
             }
             tracing::info!(
                 "inline edit committed: group={} field={:?}",
@@ -1277,10 +2992,139 @@ fn open_inline_text_editor(
     let _ = BlincContextState::get;
 }
 
+/// Combined group editor — title input above a description textarea,
+/// rendered inside the same `blinc_cn::dialog` chrome that the
+/// delete-confirm flow uses. Fired by the edit chip in the group
+/// header (`EditorEvent::EditGroupRequested`). Both fields commit
+/// together as ONE history entry so undo reverts the whole edit
+/// atomically, not field-by-field.
+///
+/// `anchor_screen` is ignored — cn's dialog is modal-centred over
+/// the viewport. We keep the parameter on the event so a future
+/// non-modal variant (popover anchored at the chip) can subscribe
+/// without an API break.
+fn open_inline_group_form(
+    _editor_ignored: &Editor,
+    host: &HostGraph,
+    history: &DemoHistory,
+    group: GroupId,
+    current_title: String,
+    current_description: String,
+    _anchor_screen: blinc_core::layer::Rect,
+) {
+    let editor_for_form = _editor_ignored.clone();
+    // Backing state — pre-filled so the user can edit in place.
+    let title_data = blinc_layout::widgets::text_input::text_input_data();
+    title_data.lock().unwrap().value = current_title;
+    let desc_state = blinc_layout::widgets::text_area::text_area_state();
+    {
+        let mut s = desc_state.lock().unwrap();
+        s.lines = if current_description.is_empty() {
+            vec![String::new()]
+        } else {
+            current_description.split('\n').map(String::from).collect()
+        };
+    }
+    // Auto-focus title on open — same convention as the single-
+    // field inline editor.
+    blinc_layout::widgets::text_input::focus_text_input_deferred(&title_data);
+
+    // cn::dialog renders the body closure on every internal repaint,
+    // so the input + textarea references live in `Arc`s captured by
+    // both the body closure AND the on_confirm callback. State cells
+    // already use `Arc<Mutex<...>>` so cloning is cheap.
+    let title_for_body = title_data.clone();
+    let desc_for_body = desc_state.clone();
+    let label_color = token(ColorToken::TextSecondary, Color::rgb(0.65, 0.65, 0.7));
+
+    let host_for_confirm = host.clone();
+    let history_for_confirm = history.clone();
+    let group_for_confirm = group.clone();
+    let title_for_confirm = title_data.clone();
+    let desc_for_confirm = desc_state.clone();
+
+    blinc_cn::dialog()
+        .title("Edit group")
+        .description("Rename the group or update its description.")
+        .content(move || {
+            let title = title_for_body.clone();
+            let desc = desc_for_body.clone();
+            // Spacing on the 4 px scale: label-to-field uses 1 gap
+            // (4 px), field-to-field uses 2 gaps (8 px). The dialog
+            // chrome supplies its own outer padding, so we don't
+            // double-up here.
+            let title_field = div()
+                .flex_col()
+                .gap(1.0)
+                .child(text("Title").size(11.0).color(label_color))
+                .child(blinc_cn::input(&title));
+            let desc_field = div()
+                .flex_col()
+                .gap(1.0)
+                .child(text("Description").size(11.0).color(label_color))
+                .child(div().h(80.0).child(blinc_cn::textarea(&desc)));
+            div()
+                .flex_col()
+                .gap(2.0)
+                .child(title_field)
+                .child(desc_field)
+        })
+        .confirm_text("Save")
+        .cancel_text("Cancel")
+        .on_confirm(move || {
+            let new_title = title_for_confirm.lock().unwrap().value.clone();
+            let new_description = desc_for_confirm.lock().unwrap().lines.join("\n");
+
+            let prev_group = host_for_confirm
+                .groups
+                .read()
+                .unwrap()
+                .iter()
+                .find(|g| g.id == group_for_confirm)
+                .cloned();
+            let unchanged = prev_group
+                .as_ref()
+                .map(|g| {
+                    g.name == new_title
+                        && g.description.as_deref().unwrap_or("") == new_description
+                })
+                .unwrap_or(false);
+            if unchanged {
+                return;
+            }
+            let updated = {
+                let mut groups = host_for_confirm.groups.write().unwrap();
+                if let Some(g) = groups.iter_mut().find(|g| g.id == group_for_confirm) {
+                    g.name = new_title.clone();
+                    g.description = if new_description.is_empty() {
+                        None
+                    } else {
+                        Some(new_description.clone())
+                    };
+                    Some(g.clone())
+                } else {
+                    None
+                }
+            };
+            if let (Some(updated), Some(prev)) = (updated, prev_group) {
+                editor_for_form.insert_group(updated.clone());
+                // Single history entry covers BOTH fields so Cmd-Z
+                // reverts the whole edit, not field-by-field.
+                history_for_confirm.lock().unwrap().push(
+                    EditorCommand::InsertGroup(updated),
+                    EditorCommand::InsertGroup(prev),
+                    "Edit Group",
+                );
+            }
+            tracing::info!("group form committed: group={}", group_for_confirm.as_str());
+        })
+        .show();
+}
+
 // ─── UI scaffold ───────────────────────────────────────────────────
 
 pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
-    let (mut editor, host) = build_editor();
+    let (mut editor, host, history) = build_editor(ctx);
 
     // Drain the editor's event queue whenever any event is pushed.
     // A zero-size `stateful_with_key` widget with `deps` on the
@@ -1291,12 +3135,13 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     // reactive lifecycle.
     let drain_editor = editor.clone();
     let drain_host = host.clone();
+    let drain_history = history.clone();
     let evts_signal = editor.events_signal();
     let drainer = stateful_with_key::<NoState>("node-editor-event-drain")
         .deps([evts_signal])
         .on_state(move |_ctx| {
             for evt in drain_editor.drain_events() {
-                handle_event(&drain_editor, &drain_host, evt);
+                handle_event(&drain_editor, &drain_host, &drain_history, evt);
             }
             div().w(0.0).h(0.0)
         });
@@ -1409,7 +3254,8 @@ fn main() -> blinc_app::Result<()> {
         // without this the FpsAdapter ramps up to 120 fps under
         // continuous animation — pinning ~40% CPU in debug. A
         // fixed cap disables the adaptive ramp.
-        animation_fps_cap: Some(30),
+        // animation_fps_cap: Some(30),
+        animation_fps: AnimationFps::Adaptive,
         ..Default::default()
     };
 

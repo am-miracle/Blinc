@@ -551,6 +551,15 @@ impl BlincApp {
         self.ctx.invalidate_render_cache_tagged(source);
     }
 
+    /// Drop cached `LayerTexture`s for newly-mounted composite-promoted
+    /// subtrees so the next paint re-bakes against fresh GPU `aux_data`.
+    /// See [`crate::context::RenderContext::invalidate_overlay_mount_textures`]
+    /// for the rationale + the cn-context-menu invisible-on-first-mount
+    /// bug it patches.
+    pub fn invalidate_overlay_mount_textures(&mut self, keys: &[u64]) {
+        self.ctx.invalidate_overlay_mount_textures(keys);
+    }
+
     /// Set the alpha used when clearing the main render target.
     ///
     /// The desktop runner calls this before each window's render so that

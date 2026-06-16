@@ -478,8 +478,35 @@ impl KeyframeProperties {
         // touches_non_compositable so a rotate-bearing keyframe
         // takes the slow path even if every other property is
         // promotable.
-        if self.rotate.is_some() {
-            return false;
+        //
+        // Identity rotation (`Some(0.0)` or near-zero) is BENIGN:
+        // the CSS @keyframes parser at `css_parser.rs::style_to_keyframe_properties`
+        // fills `rotate = Some(0.0)` whenever ANY transform component
+        // is present so that `lerp_opt` interpolates rotate consistently
+        // across keyframes (mixing `None` + `Some` would cause a jump).
+        // That parser invariant means a translate-or-scale-only @keyframes
+        // (no rotation in the CSS at all) still has `rotate=Some(0.0)`
+        // in every sampled `current_properties`. Rejecting it here would
+        // misroute every such animation through the slow path — observed
+        // as cn::context_menu / cn::popover / cn::dropdown surface bg
+        // stuck at opacity 0 on canvas-bearing pages (the slow path's
+        // `apply_keyframe_props_to_render` writes the interpolated
+        // opacity into `RenderProps.opacity`, the SDF emits at color.a
+        // ≈ 0, glyphs bypass that propagation and stay visible).
+        //
+        // The 1e-3 epsilon covers floating-point drift in the lerp
+        // between two `Some(0.0)` endpoints. A keyframe with actual
+        // non-trivial rotation lands a `current_properties.rotate`
+        // well above this threshold and correctly takes the slow path.
+        // At the instant a real rotate animation crosses zero, the
+        // texture briefly promotes; the rendered output matches the
+        // slow-path output at that point (zero rotation = identity),
+        // so there's no visible discontinuity.
+        // promotable.
+        if let Some(r) = self.rotate {
+            if r.abs() > 1e-3 {
+                return false;
+            }
         }
         // At least one promotable property must be Some — an empty
         // properties block means "no animation tick", not "promote
@@ -1596,6 +1623,40 @@ mod composite_promotable_tests {
             ..Default::default()
         };
         assert!(!p.is_composite_promotable());
+    }
+
+    #[test]
+    fn identity_rotate_is_benign() {
+        // The CSS @keyframes parser fills rotate=Some(0.0) whenever
+        // any transform component is present, even if no keyframe
+        // mentions rotation, so lerp_opt stays Some↔Some across all
+        // sample times. Treating Some(0.0) as a disqualifier would
+        // misroute every translate-or-scale-only @keyframes through
+        // the slow path — the regression that hid cn::context_menu /
+        // cn::popover / cn::dropdown surface BG on canvas pages until
+        // a mouse-move invalidated the cache.
+        let p = KeyframeProperties {
+            opacity: Some(0.5),
+            scale_x: Some(0.96),
+            scale_y: Some(0.96),
+            translate_x: Some(0.0),
+            translate_y: Some(-2.0),
+            rotate: Some(0.0),
+            ..Default::default()
+        };
+        assert!(p.is_composite_promotable());
+    }
+
+    #[test]
+    fn near_zero_rotate_within_epsilon_is_benign() {
+        // Float drift in the lerp between two Some(0.0) endpoints
+        // can produce values like 1e-7. Stay promotable.
+        let p = KeyframeProperties {
+            opacity: Some(0.5),
+            rotate: Some(1e-7),
+            ..Default::default()
+        };
+        assert!(p.is_composite_promotable());
     }
 
     #[test]

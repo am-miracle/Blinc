@@ -740,11 +740,30 @@ fn build_menu_content(
 
             let mut row = row_content.on_click(move |_| {
                 if !item_disabled && !has_submenu {
+                    // Close the root FIRST, then run the user's callback.
+                    // `close_with_reason` snapshots `entries_above_to_unwind`
+                    // at call-time and cascade-closes them with
+                    // `UnwindFromBelow`. If we ran `cb()` first and `cb()`
+                    // synchronously pushed an overlay (e.g. via
+                    // `editor.push_event` → drainer-stateful → `cn::dialog().show()`),
+                    // that overlay would land ABOVE the menu in the stack
+                    // and then get killed by the close cascade. Stateful
+                    // subscribers fire synchronously within signal-set
+                    // dispatch, so the "next frame" deferral the original
+                    // ordering relied on doesn't actually exist — verified
+                    // by `node_editor_demo` Delete-action timestamps
+                    // showing dialog-push immediately followed by
+                    // close-cascade with the dialog handle in
+                    // `entries_above_to_unwind`.
+                    //
+                    // Reversing the order: close marks the menu (and any
+                    // existing entries above it) for exit, THEN `cb()` can
+                    // push fresh overlays at the top of the stack and they
+                    // survive — the cascade has already been computed.
+                    root_handle.close();
                     if let Some(ref cb) = item_on_click {
                         cb();
                     }
-                    // Closing the root cascades-closes the whole chain.
-                    root_handle.close();
                 }
             });
 

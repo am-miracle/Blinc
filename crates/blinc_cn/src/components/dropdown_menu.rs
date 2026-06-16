@@ -800,11 +800,14 @@ fn build_dropdown_menu_div(
 
             let mut row = row_content.on_click(move |_| {
                 if !item_disabled && !has_submenu {
+                    // Close root FIRST so `cb()`-pushed overlays (e.g. a
+                    // confirm dialog) aren't immediately cascade-closed by
+                    // the menu's `UnwindFromBelow`. See cn::context_menu
+                    // for the full rationale + verified trace.
+                    root_handle.close();
                     if let Some(ref cb) = item_on_click {
                         cb();
                     }
-                    // Close root cascades down through any open submenus.
-                    root_handle.close();
                 }
             });
 
