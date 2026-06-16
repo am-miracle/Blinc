@@ -205,6 +205,14 @@ strip = "symbols"
 # any new `BuiltinVar` / `ClipShape` variant.
 [patch."https://github.com/project-blinc/Blinc.git"]
 blinc_core = { path = "crates/blinc_core" }
+# blinc_animation patched too — `/packages/blinc_node_editor` needs
+# `TickCallbackId` for its viewport-tween scheduler hook and pulls
+# the crate via the git URL. Without this redirect, the editor's
+# blinc_animation resolves to a separate copy from the one
+# blinc_layout transitively links, producing the "multiple
+# different versions of crate blinc_animation" type mismatch on
+# TickCallbackId.
+blinc_animation = { path = "crates/blinc_animation" }
 blinc_layout = { path = "crates/blinc_layout" }
 blinc_platform = { path = "crates/blinc_platform" }
 blinc_gpu = { path = "crates/blinc_gpu" }

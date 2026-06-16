@@ -27,6 +27,7 @@
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
 use blinc_canvas_kit::prelude::*;
+use blinc_core::State;
 use blinc_core::layer::{Color, Point};
 use blinc_node_editor::prelude::*;
 use blinc_node_editor::{
@@ -2525,7 +2526,7 @@ fn open_context_menu(
                 .separator()
                 .item_with_shortcut(
                     "Delete",
-                    "DEL",
+                    "Shift+DEL",
                     {
                         let e_delete = editor.clone();
                         move || {
@@ -2549,7 +2550,7 @@ fn open_context_menu(
         }
         T::Edge(id) => {
             let e_delete = editor.clone();
-            menu = menu.item_with_shortcut("Delete connection", "DEL", move || {
+            menu = menu.item_with_shortcut("Delete connection", "Shift+DEL", move || {
                 // Same defer rationale as the node Delete arm.
                 e_delete.push_event(EditorEvent::DeleteConnectionRequested(id));
             });
@@ -3419,9 +3420,71 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
                     .color(Color::rgb(0.92, 0.92, 0.95)),
                 )
                 .child(
-                    text("press D to toggle disabled on selection")
+                    text("press Shift+D to toggle disabled on selection")
                         .size(10.0)
                         .color(Color::rgb(0.65, 0.65, 0.70)),
+                )
+        });
+
+    // Search bar — wraps `cn::input` and reactively shows a
+    // "N matches" hint. `on_change` calls `editor.search_and_focus`
+    // on every keystroke; the canvas itself demonstrates the
+    // framework's multi-vs-single-match policy (multi → zoom out +
+    // outline all; single → zoom in tight). The count is held in a
+    // reactive `State<usize>` keyed under `use_state_keyed` so the
+    // label rebuilds independently of the rest of the UI.
+    // Persist the search input's backing data across `build_ui`
+    // re-invocations (currently only window resize triggers a
+    // rebuild). Without `use_state_keyed`, every rebuild would
+    // mint a fresh `SharedTextInputData` and the user's typed
+    // query would silently reset to empty on resize.
+    let search_data: blinc_layout::widgets::text_input::SharedTextInputData = ctx
+        .use_state_keyed(
+            "ne-search-input-data",
+            blinc_layout::widgets::text_input::text_input_data,
+        )
+        .get();
+    let search_count: State<usize> = ctx.use_state_keyed("ne-search-count", || 0usize);
+    let search_active: State<bool> = ctx.use_state_keyed("ne-search-active", || false);
+    let search_editor = editor.clone();
+    let search_count_setter = search_count.clone();
+    let search_active_setter = search_active.clone();
+    let search_input = blinc_cn::input(&search_data)
+        .placeholder("Search nodes, groups, subgraphs…")
+        .w(320.0)
+        .on_change(move |q| {
+            let hits = search_editor.search_and_focus(q);
+            search_count_setter.set(hits.len());
+            search_active_setter.set(!q.trim().is_empty());
+        });
+    let search_count_for_label = search_count.clone();
+    let search_active_for_label = search_active.clone();
+    let search_label = stateful_with_key::<NoState>("ne-search-result-label")
+        .deps([search_count.signal_id(), search_active.signal_id()])
+        .on_state(move |_| {
+            // Always render the result count — including the empty-
+            // query "0 matches" state. Hiding the label until
+            // `search_active` flips reshuffled the flex row mid-
+            // keystroke (the label's first appearance changed its
+            // sibling input's pixel position between the pointer-
+            // focus event and the first key event, and `cn::input`
+            // dropped the in-flight character). Always-on label +
+            // `flex_shrink_0` keeps the slot rectangular regardless
+            // of count value or query state.
+            let _active = search_active_for_label.get();
+            let count = search_count_for_label.get();
+            let label = if count == 1 {
+                "1 match".to_string()
+            } else {
+                format!("{count} matches")
+            };
+            div()
+                .min_w(110.0)
+                .flex_shrink_0()
+                .child(
+                    text(&label)
+                        .size(12.0)
+                        .color(token(ColorToken::TextSecondary, Color::rgb(0.65, 0.65, 0.70))),
                 )
         });
 
@@ -3432,7 +3495,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
         .w(ctx.width)
         .h(ctx.height)
         .flex_col()
-        .child(header_bar())
+        .child(header_bar(search_input, search_label))
         .child(
             div()
                 .flex_grow()
@@ -3445,25 +3508,60 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
         )
 }
 
-fn header_bar() -> Div {
+fn header_bar(
+    search_input: impl ElementBuilder + 'static,
+    search_label: impl ElementBuilder + 'static,
+) -> Div {
     div()
         .w_full()
-        .h(50.0)
+        .h(56.0)
         .bg(token(ColorToken::SurfaceElevated, Color::rgb(0.12, 0.12, 0.18)))
         .flex_row()
         .items_center()
-        .justify_center()
-        .gap(20.0)
+        .justify_between()
+        .px(4.0)
+        .gap(16.0)
+        // Title + tagline on the left.
         .child(
-            text("Node Editor Demo")
-                .size(22.0)
-                .weight(FontWeight::Bold)
-                .color(token(ColorToken::TextPrimary, Color::WHITE)),
+            div()
+                .flex_row()
+                .items_center()
+                .gap(16.0)
+                .child(
+                    text("Node Editor Demo")
+                        .size(20.0)
+                        .weight(FontWeight::Bold)
+                        .color(token(ColorToken::TextPrimary, Color::WHITE)),
+                )
+                .child(
+                    text("Drag output ports → input ports. Scroll = zoom, drag bg = pan.")
+                        .size(12.0)
+                        .color(token(ColorToken::TextSecondary, Color::rgb(0.55, 0.55, 0.65))),
+                ),
         )
+        // Search bar on the right — wired to
+        // `editor.search_and_focus` in `build_ui`. The framework
+        // handles the matching + viewport policy; the host just
+        // surfaces the input and a result-count hint.
+        //
+        // `.flex_shrink_0()` is load-bearing here: `cn::input`'s
+        // container sets a fixed `.w(320)`, but the default flex
+        // shrink factor on flex children is non-zero, so a wide
+        // left column (title + tagline) will squeeze the search
+        // wrapper below 320 px. When that happens, the cn::input's
+        // text-scroll-to-cursor clips leading characters out of
+        // view — the data is intact (search_and_focus sees the
+        // full string) but the visual reads as "characters got
+        // chopped off." Pinning shrink to 0 holds the declared
+        // width regardless of how wide the left column gets.
         .child(
-            text("Drag from output ports → input ports. Scroll = zoom, drag background = pan.")
-                .size(13.0)
-                .color(token(ColorToken::TextSecondary, Color::rgb(0.55, 0.55, 0.65))),
+            div()
+                .flex_row()
+                .items_center()
+                .gap(8.0)
+                .flex_shrink_0()
+                .child(search_input)
+                .child(search_label),
         )
 }
 
