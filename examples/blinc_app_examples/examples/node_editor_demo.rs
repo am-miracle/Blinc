@@ -3863,6 +3863,14 @@ fn header_bar(
         )
 }
 
+// `main` is desktop-only. The wasm wrapper includes this file
+// verbatim (via build-web-examples codegen) and provides its own
+// `#[wasm_bindgen(start)]` entry that hands `build_ui` to
+// `WebApp::run_with_async_setup`. Without this cfg gate the
+// included `main` would reference `WindowedApp::run_with_theme`
+// (gated `#[cfg(feature = "windowed")]`) under the wasm wrapper's
+// `web`-only blinc_app and break the build.
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> blinc_app::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
