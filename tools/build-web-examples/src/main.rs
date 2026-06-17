@@ -144,7 +144,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // / `DivInputExt` / the gamepad types since the blinc_input absorption
         // — wrappers that use `blinc_canvas_kit::InputState` resolve through
         // this single entry.
-        r#"{ git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "3bc3f570dbe16e8f72c892e9fbad64cb7cd9af95" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "c5315c30cbbff5f419edc1bfc7566b4d5debe78e" }"#,
     ),
     (
         "blinc_gpu::",
