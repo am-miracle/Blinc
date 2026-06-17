@@ -1224,6 +1224,24 @@ impl RenderTree {
             .retain(|stable| valid.contains(&stable));
     }
 
+    /// Drop CSS animation and transition entries whose stable id no
+    /// longer has a live mapping in `stable_to_layout`. Called after
+    /// `mint_stable_ids_walk` in every rebuild path so survivors of a
+    /// subtree rebuild (same stable id re-minted on a fresh
+    /// LayoutNodeId) keep their `ActiveCssAnimation` intact while
+    /// genuinely-removed entries are evicted. Replaces the eager
+    /// per-node drain that used to live in `remove_subtree_nodes` —
+    /// see the comment there for why eager drain caused the
+    /// cn-context-menu submenu-hover opacity flicker.
+    pub(crate) fn sweep_stale_css_animations(&mut self) {
+        let valid: std::collections::HashSet<crate::tree::StableNodeId> =
+            self.stable_to_layout.keys().copied().collect();
+        if let Ok(mut store) = self.css_anim_store.lock() {
+            store.animations.retain(|stable, _| valid.contains(stable));
+            store.transitions.retain(|stable, _| valid.contains(stable));
+        }
+    }
+
     /// Fill in `stable_key` on `LayoutAnimationConfig` entries that
     /// don't already have one, using the freshly-minted
     /// `StableNodeId` for each node. Run right after

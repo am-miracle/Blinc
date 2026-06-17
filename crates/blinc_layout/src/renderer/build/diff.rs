@@ -70,6 +70,7 @@ impl RenderTree {
 
         self.auto_fill_animation_stable_keys();
         self.sweep_stale_handlers();
+        self.sweep_stale_css_animations();
     }
 
     /// Analyze what categories of changes occurred between stored tree and new element

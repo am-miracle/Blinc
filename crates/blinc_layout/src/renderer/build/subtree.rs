@@ -167,6 +167,7 @@ impl RenderTree {
         self.collect_render_props(new_child, new_child_id);
         self.auto_fill_animation_stable_keys();
         self.sweep_stale_handlers();
+        self.sweep_stale_css_animations();
 
         new_child_id
     }
@@ -215,18 +216,23 @@ impl RenderTree {
         // Phase 2.
         crate::binding::unregister_node(node_id);
 
-        // Remove CSS animations/transitions for this node from the
-        // shared store. The store is now stable-keyed (Phase 5), so
-        // we look up the stable id before dropping the mapping
-        // below. Skipping this when there's no mapping is safe — a
-        // node without a stable id never had a chance to register
-        // CSS animations through the stable-keyed path.
-        if let Some(stable) = self.stable_id(node_id) {
-            if let Ok(mut store) = self.css_anim_store.lock() {
-                store.animations.remove(&stable);
-                store.transitions.remove(&stable);
-            }
-        }
+        // CSS animations/transitions are stable-keyed and intentionally
+        // NOT drained here. The eager drain conflated "node removed"
+        // with "node about to be re-registered under the same stable
+        // id" — pushing a sibling overlay onto OverlayStack triggers a
+        // Structural rebuild of the overlay layer, which torn down
+        // every existing entry's wrapper. For a survivor (cn-context-
+        // menu while a submenu is being added) the wrapper re-mints
+        // with the SAME stable id, but the drain had already wiped its
+        // ActiveCssAnimation, so start_all_css_animations's
+        // already_has gate fell through and restarted the enter
+        // animation — visible as an opacity flicker.
+        //
+        // Survivor-aware cleanup runs after mint via
+        // sweep_stale_css_animations: any stable_id with no live
+        // stable_to_layout mapping after re-mint is genuinely gone and
+        // gets dropped. This mirrors handler_registry's
+        // sweep_stale_handlers contract.
 
         // Drop the stable-id mapping for this layout node. The
         // post-rebuild `mint_stable_ids_walk` will repopulate
@@ -444,6 +450,7 @@ impl RenderTree {
 
                 self.auto_fill_animation_stable_keys();
                 self.sweep_stale_handlers();
+                self.sweep_stale_css_animations();
 
                 // Apply CSS base styles (class/complex selectors) to new subtree nodes.
                 // collect_render_props_boxed only applies #id styles; class-based
