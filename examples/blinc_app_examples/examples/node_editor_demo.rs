@@ -185,7 +185,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             PortDesc::new("out_pass", "pass?", Direction::Output, DemoPort::Boolean)
                 .with_description("true when input >= threshold"),
         )
-        // Typed config schema (Tier 2.1). Hosts walk this via
+        // Typed config schema. Hosts walk this via
         // `blinc_node_editor::inspector::fields()` to render an
         // inspector pane; `blinc_node_editor::inspector::apply_patch`
         // merges patch requests back into `NodeInstance::config`.
@@ -209,7 +209,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                 .option("error", "Raise an error")
                 .default("warn"),
         )
-        // Tier 2.2 rule cascade: switching `on_block` to "error"
+        // Reactive cascade rule: switching `on_block` to "error"
         // implies strict semantics — auto-flip the `strict` toggle.
         // Observe the cascade in tracing logs (see `handle_event`'s
         // NodeConfigChanged arm).
@@ -344,8 +344,8 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
         NodeInstance::new("src/1", "source", Point::new(80.0, 120.0))
             .with_size(180.0, 80.0)
             .with_badge(StatusBadge::success()),
-        // `with_disabled(true)` demonstrates Tier 4.7 — the
-        // renderer dims the body / icon / title via
+        // `with_disabled(true)` demonstrates the soft-disable flag:
+        // the renderer dims the body / icon / title via
         // `theme.node_disabled_alpha()` and downgrades every
         // incident edge (only `src/threshold → filter/in_threshold`
         // here) to the faded `Pending` style. Press `D` while a
@@ -407,9 +407,9 @@ fn initial_connections() -> Vec<Connection<()>> {
         // `closest_point_on_rect` (same routing as collapsed groups)
         // so the line terminates on the side of the diamond that
         // faces the source endpoint. The port-id string ("entry")
-        // is a host-defined namespaced reference; once Tier 1.3b
-        // lands proxy nodes will resolve the namespacing, but for
-        // now this just demonstrates the visual flow-in.
+        // is a host-defined namespaced reference; proxy-node
+        // resolution lands in a follow-up, so for now this
+        // just demonstrates the visual flow-in.
         Connection::new(
             PortAddress::new("fmt/1".into(), "out_str"),
             PortAddress::new("sub/sample".into(), "entry"),
@@ -1528,9 +1528,13 @@ fn handle_event(
                 if clones.len() == 1 { "Duplicate Node" } else { "Duplicate Nodes" },
             );
             // Reselect the clones so the next gesture acts on them.
+            // RegionId::encode produces the canvas-kit wire format
+            // canvas-kit's set_selection expects — same payload the
+            // editor itself emits, so this stays in sync if the wire
+            // format ever changes.
             let selection: std::collections::HashSet<String> = clone_ids
                 .iter()
-                .map(|id| format!("node:{}", id.as_str()))
+                .map(|id| RegionId::Node(id.clone()).encode())
                 .collect();
             editor.canvas_kit().set_selection(selection);
             tracing::info!(
@@ -1541,16 +1545,17 @@ fn handle_event(
         }
         EditorEvent::SelectAllRequested => {
             // Build a selection set covering every node, edge, and
-            // group the host knows about.
+            // group the host knows about. RegionId::encode is the
+            // single source of truth for the canvas-kit wire format.
             let mut selection: std::collections::HashSet<String> = std::collections::HashSet::new();
             for n in host.nodes.read().unwrap().iter() {
-                selection.insert(format!("node:{}", n.id.as_str()));
+                selection.insert(RegionId::Node(n.id.clone()).encode());
             }
             for c in host.connections.read().unwrap().iter() {
-                selection.insert(format!("edge:{}", c.id.0));
+                selection.insert(RegionId::Edge(c.id).encode());
             }
             for g in host.groups.read().unwrap().iter() {
-                selection.insert(format!("group:{}", g.id.as_str()));
+                selection.insert(RegionId::Group(g.id.clone()).encode());
             }
             editor.canvas_kit().set_selection(selection);
         }
@@ -3655,8 +3660,8 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
     // either the graph changes (nodes added / removed) or the
     // viewport pans / zooms. Reads `editor.last_render_stats()` —
     // populated at the end of every render frame — so the displayed
-    // counts demonstrate Tier 9.1 frustum culling: pan / zoom out
-    // and the `visible` numbers drop while `total` stays put.
+    // counts demonstrate the editor's frustum culling: pan / zoom
+    // out and the `visible` numbers drop while `total` stays put.
     let hud_editor = editor.clone();
     let hud_deps = [editor.graph_signal(), editor.canvas_kit().viewport_signal()];
     let stats_hud = stateful_with_key::<NoState>("node-editor-cull-hud")
