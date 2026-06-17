@@ -1557,6 +1557,24 @@ impl WebApp {
                         alt,
                         meta,
                     };
+
+                    // Suppress browser default actions for app-level
+                    // keyboard chords before dispatching, so e.g.
+                    // Cmd+D doesn't open the bookmark dialog on top
+                    // of the Blinc canvas. The rule: any Cmd / Ctrl
+                    // + letter chord is treated as an app shortcut.
+                    // Digits and function keys are left alone so
+                    // Cmd+1..9 (browser tab switching) and F1..F12
+                    // (devtools) keep working. Clipboard chords
+                    // (Cmd+C / V / X) are still safe to suppress
+                    // here — the browser fires its `copy` / `cut` /
+                    // `paste` events independently of the keydown
+                    // default, and Blinc's paste listener attaches
+                    // to those events directly.
+                    let is_letter = (0x41..=0x5A).contains(&key_code);
+                    if (meta || ctrl) && is_letter {
+                        evt.prevent_default();
+                    }
                     Self::dispatch_key_down(&mut app, key_code, shift, ctrl, alt, meta);
 
                     // For printable single-character keys, also
