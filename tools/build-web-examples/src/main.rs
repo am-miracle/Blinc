@@ -224,7 +224,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // repo (`github.com/project-blinc/blinc_node_editor`) and is
         // pinned to the same rev `examples/blinc_app_examples/Cargo.toml`
         // uses. Bump in lockstep.
-        r#"{ git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "48855511cd7810be2ed8d163be4ca2bff8b819d9" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "460c0ef765e6fb7f822b212fd2a64d68ae06b890" }"#,
     ),
     (
         "blinc_portal_ui::",
