@@ -185,6 +185,43 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             PortDesc::new("out_pass", "pass?", Direction::Output, DemoPort::Boolean)
                 .with_description("true when input >= threshold"),
         )
+        // Typed config schema (Tier 2.1). Hosts walk this via
+        // `blinc_node_editor::inspector::fields()` to render an
+        // inspector pane; `blinc_node_editor::inspector::apply_patch`
+        // merges patch requests back into `NodeInstance::config`.
+        .with_property(
+            NumberProperty::new("threshold", "Threshold")
+                .description("Values >= this pass through")
+                .default(0.5)
+                .range(0.0, 1.0)
+                .step(0.01),
+        )
+        .with_property(
+            BooleanProperty::new("strict", "Strict mode")
+                .description("Use > instead of >=")
+                .default(false),
+        )
+        .with_property(
+            SelectProperty::new("on_block", "On block")
+                .description("Behaviour when the gate rejects a value")
+                .option("drop", "Drop silently")
+                .option("warn", "Log a warning")
+                .option("error", "Raise an error")
+                .default("warn"),
+        )
+        // Tier 2.2 rule cascade: switching `on_block` to "error"
+        // implies strict semantics — auto-flip the `strict` toggle.
+        // Observe the cascade in tracing logs (see `handle_event`'s
+        // NodeConfigChanged arm).
+        .with_rule(
+            PropertyRule::new()
+                .trigger("on_block")
+                .when(Predicate::Eq {
+                    key: "on_block".into(),
+                    value: JsonValue::String("error".into()),
+                })
+                .set("strict", JsonValue::Bool(true)),
+        )
         // Portal content slot — 80px of immediate-mode UI under the
         // header. The slider edits the shared `threshold` signal;
         // any frame mutating it from anywhere repaints the canvas
@@ -206,6 +243,25 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
         .with_output(
             PortDesc::new("out_str", "text", Direction::Output, DemoPort::String)
                 .with_description("Stringified value ready for display"),
+        )
+        .with_property(
+            TextProperty::new("prefix", "Prefix")
+                .description("Prepended to every emitted string")
+                .placeholder("value=")
+                .max_length(16),
+        )
+        .with_property(
+            NumberProperty::new("decimals", "Decimals")
+                .description("Digits after the decimal point")
+                .integer()
+                .default(2.0)
+                .range(0.0, 8.0),
+        )
+        .with_property(
+            CodeEditorProperty::new("template", "Template")
+                .description("Optional handlebars-style template")
+                .language("handlebars")
+                .line_numbers(false),
         )
         // Portal content slot — proves cross-portal reactive state.
         // The label_signal here re-renders whenever the FILTER
@@ -1605,6 +1661,27 @@ fn handle_event(
             // its current position to the target with ease-out-cubic
             // over LAYOUT_TWEEN_MS, then self-unregisters.
             animate_layout_transition(editor.clone(), host.clone(), updates);
+        }
+        EditorEvent::NodeConfigChanged {
+            node,
+            key,
+            previous,
+            value,
+            from_rule,
+        } => {
+            // Real hosts propagate the new value into their runtime
+            // model (reflow Graph.set_node_config etc.). Demo just
+            // logs the trail so cascades are observable in the
+            // tracing output.
+            tracing::info!(
+                target: "node_editor_demo::config",
+                node = %node.as_str(),
+                key = %key,
+                ?previous,
+                ?value,
+                from_rule,
+                "node config changed"
+            );
         }
         EditorEvent::CreateGroupRequested(_)
         | EditorEvent::EdgeClicked { .. }
