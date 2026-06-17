@@ -1,0 +1,32 @@
+# Node-editor demo — pre-wired graph with three node types, typed
+
+What it shows:
+
+- **Metadata-driven**: nodes render from declarative
+  `NodeTemplate`s. The editor never hardcodes shape — adding a new
+  template adds a new node type.
+- **Generic over port kind**: hosts impl `PortKind` for their own
+  port-type enum. Here, [`DemoPort`] models `Number` / `String` /
+  `Boolean`; the editor delegates compatibility to
+  `DemoPort::compatible_with`.
+- **Theme-aware**: chrome (background, header, border, badge) pulls
+  from `ThemeState`. Switch theme bundles to recolor; squircle
+  profile, shadows, typography, and spacing tokens flow through.
+- **Group with badge**: two nodes are wrapped in a group with a
+  status badge in the header.
+- **Drag-to-connect**: drag from an output port to an input port;
+  the validator accepts compatible kinds.
+- **Pan + zoom + selection**: inherited from `blinc_canvas_kit`.
+
+<iframe
+  src="../../examples/node_editor_demo/index.html"
+  width="100%"
+  height="560"
+  loading="lazy"
+  style="border:1px solid #45475a;border-radius:8px;background:#181825;"
+  title="Blinc node_editor_demo example"
+></iframe>
+
+> **Tip:** Some demos are best viewed in a full browser window. Click "Open in a new tab" below for the full experience.
+
+[Open in a new tab](../../examples/node_editor_demo/index.html) · [View source on GitHub](https://github.com/project-blinc/Blinc/blob/main/examples/blinc_app_examples/examples/node_editor_demo.rs)

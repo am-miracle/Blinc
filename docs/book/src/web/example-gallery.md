@@ -38,6 +38,7 @@ manageable.
 - [**3D Mesh Demo — renders the Khronos glTF `DamagedHelmet` sample model**](./example-gallery/mesh_3d_demo.md) — Demonstrates:
 - [**Motion Demo**](./example-gallery/motion_demo.md) — Auto-built from the cross-target source.
 - [**Music Player Glass Card**](./example-gallery/music_player.md) — Recreates an iOS-style "Now Playing" music player card with liquid glass
+- [**Node-editor demo — pre-wired graph with three node types, typed**](./example-gallery/node_editor_demo.md) — What it shows:
 - [**Notch Menu Bar**](./example-gallery/notch_demo.md) — Demonstrates a macOS-style menu bar with a notched dropdown that
 - [**Overflow Fade**](./example-gallery/overflow_fade_demo.md) — Demonstrates the `overflow-fade` CSS property which applies smooth alpha
 - [**Overlay System**](./example-gallery/overlay_demo.md) — This example demonstrates the overlay infrastructure for modals, dialogs,

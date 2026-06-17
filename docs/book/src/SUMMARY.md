@@ -41,6 +41,7 @@
   - [3D Mesh Demo — renders the Khronos glTF `DamagedHelmet` sample model](./web/example-gallery/mesh_3d_demo.md)
   - [Motion Demo](./web/example-gallery/motion_demo.md)
   - [Music Player Glass Card](./web/example-gallery/music_player.md)
+  - [Node-editor demo — pre-wired graph with three node types, typed](./web/example-gallery/node_editor_demo.md)
   - [Notch Menu Bar](./web/example-gallery/notch_demo.md)
   - [Overflow Fade](./web/example-gallery/overflow_fade_demo.md)
   - [Overlay System](./web/example-gallery/overlay_demo.md)

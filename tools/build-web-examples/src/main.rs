@@ -483,11 +483,27 @@ fn extract_title(source: &str) -> Option<String> {
 }
 
 /// Extract the example's short description from its top-of-file
-/// doc comment block. The description is everything between the
-/// title line and either the first `Run with:` footer or the end
-/// of the doc block, with `//!` prefixes stripped. Blank `//!`
-/// lines become paragraph breaks; lines that start with `- ` stay
-/// as bullet list entries.
+/// doc comment block. The description is everything inside the
+/// `//!` block after the title line, with `//!` prefixes stripped.
+/// Blank `//!` lines become paragraph breaks; lines that start
+/// with `- ` stay as bullet list entries.
+///
+/// `Run with:` paragraphs are SKIPPED in place rather than
+/// terminating the description so examples whose convention is
+///
+///   //! Title
+///   //!
+///   //! Run with:
+///   //! ```
+///   //! cargo run ...
+///   //! ```
+///   //!
+///   //! What it shows:
+///   //! ...
+///
+/// still emit the "What it shows" body to the gallery. A `Run with:`
+/// block ends at the next blank `//!` line (or, when wrapped in a
+/// `///! `\`\`\`` ` fence, at the closing fence).
 ///
 /// If the example has no description (i.e. only a title line in
 /// its doc block), this returns an empty string — callers fall back
@@ -495,6 +511,8 @@ fn extract_title(source: &str) -> Option<String> {
 fn extract_description(source: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut past_title = false;
+    let mut skipping_run_with = false;
+    let mut in_run_with_fence = false;
     for line in source.lines() {
         let trimmed = line.trim_start();
         let Some(body) = trimmed.strip_prefix("//!") else {
@@ -516,10 +534,53 @@ fn extract_description(source: &str) -> String {
             continue;
         }
 
-        // Stop at the trailing `Run with: cargo run ...` footer.
-        // Every example uses the same convention.
+        // Skip a `Run with:` paragraph in place — the gallery page
+        // already links the source file, so reproducing the cargo
+        // invocation here is noise. Detection runs at the start of
+        // each line so the skip works whether `Run with:` lives at
+        // the end of the doc block or in the middle (between the
+        // tagline and a "What it shows:" section).
+        //
+        // Two shapes are accepted:
+        //   - inline:  `Run with: cargo run ...`
+        //   - block:   `Run with:\n\n\`\`\`sh\ncargo ...\n\`\`\``
+        //
+        // Blank `//!` lines are NOT a terminator while we're
+        // skipping — a `Run with:` line followed by one blank
+        // `//!` then a `\`\`\`sh` fence is the common shape.
+        // We exit the skip when the fence closes or when we hit
+        // the first non-blank non-fence content (treating that
+        // content as the next paragraph and letting it fall
+        // through to normal collection).
+        if skipping_run_with {
+            let bt = body.trim_start();
+            if in_run_with_fence {
+                if bt.starts_with("```") {
+                    in_run_with_fence = false;
+                    skipping_run_with = false;
+                }
+                continue;
+            }
+            if bt.starts_with("```") {
+                in_run_with_fence = true;
+                continue;
+            }
+            if body.trim().is_empty() {
+                continue;
+            }
+            // Non-blank non-fence content — the Run-with block is
+            // implicitly closed. End the skip and let this line
+            // through to the normal description collector below.
+            skipping_run_with = false;
+        }
         if body.trim_start().starts_with("Run with:") {
-            break;
+            skipping_run_with = true;
+            // Drop the trailing blank that just preceded the
+            // `Run with:` so paragraphs around it merge cleanly.
+            while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+                lines.pop();
+            }
+            continue;
         }
 
         lines.push(body.to_string());
@@ -529,6 +590,11 @@ fn extract_description(source: &str) -> String {
     // end with gratuitous whitespace.
     while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
         lines.pop();
+    }
+    // Trim leading blanks left by a Run-with block sitting between
+    // the title and the first prose paragraph.
+    while lines.first().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        lines.remove(0);
     }
 
     lines.join("\n")

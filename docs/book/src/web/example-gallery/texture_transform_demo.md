@@ -15,6 +15,11 @@ comparison — toggling swaps between the parsed `Material` and a
 clone with `texture_transform: None`, exercising the shader's
 identity path.
 
+# License
+
+Asset: `marble_cliff_02` by Rob Tuytel, published under CC0
+(<https://polyhaven.com/a/marble_cliff_02>).
+
 <iframe
   src="../../examples/texture_transform_demo/index.html"
   width="100%"
