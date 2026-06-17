@@ -3863,6 +3863,20 @@ fn header_bar(
         )
 }
 
+/// Theme bundle shared by the desktop entry point and the wasm
+/// wrapper. `build-web-examples`' codegen detects this `pub fn` and
+/// hands the returned bundle to `ThemeState::init` BEFORE
+/// `WebApp::run_with_async_setup`. Without that hook the wasm wrapper
+/// falls back to whatever theme `WebApp::new` auto-installs, which
+/// has no `cn_styles::CN_STYLES` attached — and every cn class
+/// (`.cn-dialog`, `.cn-context-menu-item`, `.cn-tooltip`, etc.) loses
+/// its padding / border / hover surface. Desktop avoided the issue
+/// because `main()` calls `WindowedApp::run_with_theme` with the
+/// bundle below directly.
+pub fn theme_bundle() -> blinc_theme::ThemeBundle {
+    HybridTheme::bundle().with_css(blinc_cn::cn_styles::CN_STYLES)
+}
+
 // `main` is desktop-only. The wasm wrapper includes this file
 // verbatim (via build-web-examples codegen) and provides its own
 // `#[wasm_bindgen(start)]` entry that hands `build_ui` to
@@ -3897,7 +3911,7 @@ fn main() -> blinc_app::Result<()> {
     // ShapeTokens + multi-layer shadows the editor consumes.
     blinc_app::windowed::WindowedApp::run_with_theme(
         config,
-        HybridTheme::bundle().with_css(blinc_cn::cn_styles::CN_STYLES),
+        theme_bundle(),
         detect_system_color_scheme(),
         build_ui,
     )
