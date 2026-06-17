@@ -2308,6 +2308,15 @@ impl WebApp {
         // [`windowed.rs:3684`](crate::windowed).
         app.needs_rebuild = true;
         app.needs_full_rebuild = true;
+
+        // Drop every cached render texture so the next paint
+        // re-rasterises against the new physical surface. Mirrors
+        // windowed.rs:3647 — without this, any motion-subtree or
+        // composite-layer texture baked at the old size keeps
+        // blitting at its old extent and the post-resize frame
+        // shows a window-shaped artefact where the cache lives.
+        app.blinc_app
+            .invalidate_render_cache_tagged("window_resized");
     }
 
     /// Install (or replace) the UI builder closure.
@@ -2369,7 +2378,8 @@ impl WebApp {
         // ─── Phase 0b: drain accumulated wheel delta ─────────────
         let (pending_dx, pending_dy) = self.pending_wheel_delta;
         self.pending_wheel_delta = (0.0, 0.0);
-        if pending_dx != 0.0 || pending_dy != 0.0 {
+        let had_scroll = pending_dx != 0.0 || pending_dy != 0.0;
+        if had_scroll {
             // Pass small (trackpad-sized) deltas straight through so
             // trackpad scrolling feels native, and only compress the
             // tail above a threshold so discrete mouse-wheel ticks
@@ -2388,6 +2398,17 @@ impl WebApp {
                 }
             };
             Self::dispatch_scroll(self, damp(pending_dx), damp(pending_dy));
+            // Mirror windowed.rs:5099 — scroll updates `tree.scroll_offsets`
+            // and (when the scroll reaches a canvas-kit kit) the
+            // viewport pan/zoom matrix. Neither routes through the
+            // compositor's natural invalidation paths, so any
+            // motion-subtree / composite-layer texture baked before
+            // the scroll keeps blitting at pre-scroll coords. On web
+            // this manifested as SVG icons baked inside an overlay's
+            // composite scratch staying at their old content-space
+            // positions when the user zoomed the canvas after closing
+            // the overlay.
+            self.blinc_app.invalidate_render_cache_tagged("had_scroll");
         }
 
         // ─── Phase 1a: scroll physics + pending refs ─────────────
@@ -2547,6 +2568,16 @@ impl WebApp {
                 needs_relayout |= tree.process_pending_subtree_rebuilds();
             }
             if needs_relayout {
+                // Mirror windowed.rs:5088 — a structural rebuild
+                // produces fresh element ids / positions; any
+                // composite layer or motion-subtree texture baked
+                // against the old tree must be dropped so the next
+                // paint repopulates from the new state. Without this
+                // the overlay opens and queues a rebuild, the
+                // rebuild renames node ids, but the cached texture
+                // keeps blitting the old content-space coords.
+                self.blinc_app
+                    .invalidate_render_cache_tagged("subtree_rebuild_applied");
                 if let Some(ref mut tree) = self.current_tree {
                     // Mirror windowed.rs:3660-3676: after subtree
                     // rebuilds, the new children need CSS layout
@@ -2727,6 +2758,11 @@ impl WebApp {
                     needs_relayout |= tree.process_pending_subtree_rebuilds();
                 }
                 if needs_relayout {
+                    // Animation-driven subtree rebuilds also need the
+                    // cache wipe — same rationale as the Phase-2
+                    // subtree-rebuild block above.
+                    self.blinc_app
+                        .invalidate_render_cache_tagged("animation_subtree_rebuild_applied");
                     if let Some(ref mut tree) = self.current_tree {
                         tree.compute_layout(self.ctx.width, self.ctx.height);
                     }
