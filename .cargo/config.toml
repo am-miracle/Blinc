@@ -22,6 +22,16 @@ ar = "llvm-ar"
 linker = "i686-linux-android35-clang"
 ar = "llvm-ar"
 
+# wasm32-unknown-unknown — `getrandom 0.3` (pulled by `ahash 0.8.12`
+# from `blinc_node_editor` + `blinc_portal_ui`) requires opting into
+# its `wasm_js` backend via a build-time cfg. Enabling the cargo
+# feature alone is insufficient (the crate's own compile_error says
+# so). Setting the cfg here makes every wasm32 build of the workspace
+# pick the browser-backed RNG; demos that don't transitively pull
+# getrandom 0.3 are unaffected.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+
 # iOS targets (requires Xcode)
 [target.aarch64-apple-ios]
 # Uses default Apple toolchain

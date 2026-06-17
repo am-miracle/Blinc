@@ -883,6 +883,13 @@ console_error_panic_hook = "0.1"
 tracing = {{ workspace = true }}
 tracing-wasm = "0.2"
 tracing-subscriber = {{ workspace = true, features = ["registry"] }}
+# Enable getrandom 0.3's `wasm_js` backend for any demo that
+# transitively pulls it (today: node_editor_demo via ahash). The
+# feature wires up the wasm_js codepath; the `--cfg getrandom_backend`
+# rustflag in the workspace `.cargo/config.toml` selects it. Both are
+# required per getrandom 0.3's own diagnostic. No-op for demos that
+# resolve only getrandom 0.2.
+getrandom = {{ version = "0.3", features = ["wasm_js"] }}
 "#,
         crate_name = crate_name,
         name = meta.name,
