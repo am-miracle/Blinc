@@ -471,6 +471,19 @@ pub struct WebApp {
     /// Required for `@keyframes` animations and `transition:` to
     /// progress frame-over-frame.
     css_anim_store: Arc<Mutex<blinc_layout::CssAnimationStore>>,
+    /// Cached keyboard modifier state. Browser pointer events
+    /// (`mousedown` / `mousemove` / `wheel`) carry their own
+    /// `shiftKey` / `ctrlKey` / `altKey` / `metaKey` flags, but the
+    /// runner reads them inside the DOM closures and never threaded
+    /// them through to `dispatch_pending`, which then dispatched
+    /// every PointerEvent with `shift=ctrl=alt=meta=false`. As a
+    /// consequence, host code branching on modifier state at
+    /// POINTER_DOWN / DRAG (e.g. canvas-kit's Shift+Drag rubber-
+    /// band add-to-selection, or any widget's Cmd+click chord)
+    /// never saw the held key. Mirrors the desktop runner's
+    /// `cached_modifiers` at [`windowed.rs:399`](crate::windowed),
+    /// which has the same merge-on-dispatch contract.
+    cached_modifiers: blinc_platform::Modifiers,
     /// Timestamp of the previous frame in `now_ms()` epoch, used to
     /// compute `dt_ms` for CSS animation/transition ticking. `0`
     /// on the first frame (the tick code treats that as 16 ms).
@@ -785,6 +798,7 @@ impl WebApp {
             last_cursor: "default",
             last_wheel_time_ms: None,
             pending_wheel_delta: (0.0, 0.0),
+            cached_modifiers: blinc_platform::Modifiers::default(),
             render_state,
             css_anim_store,
             last_frame_time_ms: 0,
@@ -1149,6 +1163,7 @@ impl WebApp {
             let app_rc = Rc::clone(&app_rc);
             let closure = Closure::<dyn FnMut(_)>::new(move |evt: web_sys::MouseEvent| {
                 if let Ok(mut app) = app_rc.try_borrow_mut() {
+                    Self::stamp_modifiers_from_mouse(&mut app, &evt);
                     let x = evt.offset_x() as f32;
                     let y = evt.offset_y() as f32;
                     Self::dispatch_mouse_move(&mut app, x, y);
@@ -1188,6 +1203,7 @@ impl WebApp {
                     return;
                 }
                 if let Ok(mut app) = app_rc.try_borrow_mut() {
+                    Self::stamp_modifiers_from_mouse(&mut app, &evt);
                     let x = evt.offset_x() as f32;
                     let y = evt.offset_y() as f32;
                     let button = blinc_platform_web::input::convert_mouse_button(evt.button());
@@ -1215,6 +1231,7 @@ impl WebApp {
                     return;
                 }
                 if let Ok(mut app) = app_rc.try_borrow_mut() {
+                    Self::stamp_modifiers_from_mouse(&mut app, &evt);
                     let x = evt.offset_x() as f32;
                     let y = evt.offset_y() as f32;
                     let button = blinc_platform_web::input::convert_mouse_button(evt.button());
@@ -1249,6 +1266,15 @@ impl WebApp {
                 // scrolling can revisit this in a future config knob.
                 evt.prevent_default();
                 if let Ok(mut app) = app_rc.try_borrow_mut() {
+                    // WheelEvent extends MouseEvent — `shift_key()` /
+                    // `ctrl_key()` / `alt_key()` / `meta_key()` come
+                    // through inherited.
+                    app.cached_modifiers = blinc_platform::Modifiers {
+                        shift: evt.shift_key(),
+                        ctrl: evt.ctrl_key(),
+                        alt: evt.alt_key(),
+                        meta: evt.meta_key(),
+                    };
                     // Normalise wheel delta to pixels. delta_mode 0 is
                     // pixels (most browsers); 1 is lines (Firefox
                     // legacy); 2 is pages.
@@ -1525,6 +1551,12 @@ impl WebApp {
                     let ctrl = evt.ctrl_key();
                     let alt = evt.alt_key();
                     let meta = evt.meta_key();
+                    app.cached_modifiers = blinc_platform::Modifiers {
+                        shift,
+                        ctrl,
+                        alt,
+                        meta,
+                    };
                     Self::dispatch_key_down(&mut app, key_code, shift, ctrl, alt, meta);
 
                     // For printable single-character keys, also
@@ -1564,6 +1596,12 @@ impl WebApp {
                     let ctrl = evt.ctrl_key();
                     let alt = evt.alt_key();
                     let meta = evt.meta_key();
+                    app.cached_modifiers = blinc_platform::Modifiers {
+                        shift,
+                        ctrl,
+                        alt,
+                        meta,
+                    };
                     Self::dispatch_key_up(&mut app, key_code, shift, ctrl, alt, meta);
                 }
             });
@@ -1706,6 +1744,26 @@ impl WebApp {
     // the calling closure) and runs the EventRouter call → dispatch
     // pending events through the cached render tree. Factored out so
     // every event-handler closure stays a one-liner.
+
+    /// Refresh `cached_modifiers` from a browser MouseEvent's modifier
+    /// flags. Every mouse-class DOM event we receive (mousemove /
+    /// mousedown / mouseup / wheel) calls this immediately on entry
+    /// so subsequent dispatch through `dispatch_pending` sees the
+    /// modifier state that was held *at the time of the event* —
+    /// not whatever happened to be cached from the last keydown.
+    /// Without this, the user could hold Shift, click on the canvas,
+    /// and the resulting POINTER_DOWN would still report `shift=false`
+    /// because no keydown event fires while the modifier is just
+    /// being held (only the first press fires keydown; held repeats
+    /// arrive as autorepeat after a delay).
+    fn stamp_modifiers_from_mouse(app: &mut Self, evt: &web_sys::MouseEvent) {
+        app.cached_modifiers = blinc_platform::Modifiers {
+            shift: evt.shift_key(),
+            ctrl: evt.ctrl_key(),
+            alt: evt.alt_key(),
+            meta: evt.meta_key(),
+        };
+    }
 
     fn dispatch_mouse_move(app: &mut Self, x: f32, y: f32) {
         let tree = match app.current_tree.as_ref() {
@@ -2164,6 +2222,15 @@ impl WebApp {
         }
         let (mx, my) = app.ctx.event_router.mouse_position();
         let (drag_dx, drag_dy) = app.ctx.event_router.drag_delta();
+        // Snapshot cached modifier state. Browser pointer events
+        // don't propagate modifier flags down through `dispatch_pending`
+        // automatically; the caller stamps `cached_modifiers` from the
+        // originating DOM event (`mousedown` / `mousemove` / `wheel`)
+        // before invoking us, so every PointerEvent that goes through
+        // here carries the modifiers held *at the time of the event*.
+        // Mirrors the desktop runner's `cached_modifiers_for_dispatch`
+        // snapshot at [`windowed.rs:4780`](crate::windowed).
+        let mods = app.cached_modifiers;
         // Snapshot per-node bounds before borrowing the tree mutably
         // — `get_node_bounds` lives on `EventRouter`, and we'd
         // otherwise have a `&self.ctx` + `&mut self.current_tree`
@@ -2206,9 +2273,23 @@ impl WebApp {
                     (0.0, 0.0)
                 };
                 tree.dispatch_event_full(
-                    node, event_type, mx, my, local_x, local_y, bx, by, bw, bh, dx, dy,
-                    /* pinch_scale */ 1.0, /* shift */ false, /* ctrl */ false,
-                    /* alt */ false, /* meta */ false,
+                    node,
+                    event_type,
+                    mx,
+                    my,
+                    local_x,
+                    local_y,
+                    bx,
+                    by,
+                    bw,
+                    bh,
+                    dx,
+                    dy,
+                    /* pinch_scale */ 1.0,
+                    mods.shift,
+                    mods.ctrl,
+                    mods.alt,
+                    mods.meta,
                 );
             }
         }

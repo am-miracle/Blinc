@@ -247,9 +247,18 @@ impl Modifiers {
     }
 
     /// Check if command key is pressed (Ctrl on non-macOS, Meta on macOS)
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
     pub const fn command(&self) -> bool {
         self.ctrl()
+    }
+
+    /// On wasm the host OS is unknown at compile time — accept either
+    /// Cmd (Mac browsers) or Ctrl (Windows/Linux browsers) so the
+    /// same keyboard shortcut works regardless of which OS the user
+    /// is running their browser on.
+    #[cfg(target_arch = "wasm32")]
+    pub const fn command(&self) -> bool {
+        self.meta() || self.ctrl()
     }
 }
 
