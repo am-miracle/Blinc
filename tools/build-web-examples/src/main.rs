@@ -144,7 +144,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // / `DivInputExt` / the gamepad types since the blinc_input absorption
         // — wrappers that use `blinc_canvas_kit::InputState` resolve through
         // this single entry.
-        r#"{ git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "c5315c30cbbff5f419edc1bfc7566b4d5debe78e" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "8347d7d97d3932da7bb80b28ca8eec1f9a01679f" }"#,
     ),
     (
         "blinc_gpu::",
@@ -224,7 +224,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // repo (`github.com/project-blinc/blinc_node_editor`) and is
         // pinned to the same rev `examples/blinc_app_examples/Cargo.toml`
         // uses. Bump in lockstep.
-        r#"{ git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "460c0ef765e6fb7f822b212fd2a64d68ae06b890" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "f19cdd046c8fc2014d5e05065f8de33241fa1db4" }"#,
     ),
     (
         "blinc_portal_ui::",
@@ -232,7 +232,7 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // Immediate-mode widget toolkit pulled by node_editor_demo for
         // its node body closures. Same downstream-repo pattern as
         // canvas_kit / node_editor — pinned to the workspace rev.
-        r#"{ git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "454d095f06cf1ac54afefe7aab030fe1bf5f801b" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "3fef94453d1f87dec281d031ba414955f1c0ef1a" }"#,
     ),
     // `blinc_input` was absorbed into `blinc_canvas_kit::input` and the
     // standalone repo archived. Demos that previously imported
