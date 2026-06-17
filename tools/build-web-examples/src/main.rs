@@ -217,6 +217,23 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         "blinc_skeleton",
         r#"{ git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "4cd786055f0b4649b23b96934778c2fad8ac8d65" }"#,
     ),
+    (
+        "blinc_node_editor::",
+        "blinc_node_editor",
+        // Metadata-driven node-graph editor toolkit. Lives in its own
+        // repo (`github.com/project-blinc/blinc_node_editor`) and is
+        // pinned to the same rev `examples/blinc_app_examples/Cargo.toml`
+        // uses. Bump in lockstep.
+        r#"{ git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "653c29b4f05bf3374aad6edf474aa7340ba53e40" }"#,
+    ),
+    (
+        "blinc_portal_ui::",
+        "blinc_portal_ui",
+        // Immediate-mode widget toolkit pulled by node_editor_demo for
+        // its node body closures. Same downstream-repo pattern as
+        // canvas_kit / node_editor — pinned to the workspace rev.
+        r#"{ git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "326c1cfd0bebbcaea8584bb0ec4cda64534cbe09" }"#,
+    ),
     // `blinc_input` was absorbed into `blinc_canvas_kit::input` and the
     // standalone repo archived. Demos that previously imported
     // `blinc_input::InputState` now resolve it through the canvas_kit
