@@ -31,12 +31,15 @@ use blinc_core::State;
 use blinc_core::layer::{Color, Point};
 use blinc_node_editor::prelude::*;
 use blinc_node_editor::{
-    BadgeKind, ConnectionId, EditorCommand, Group, GroupId, History, StatusBadge,
+    BadgeKind, ConnectionId, EditorCommand, ForceConfig, Group, GroupId, History, LayeredConfig,
+    LayoutOrientation, LayoutStrategy, StatusBadge,
 };
 use blinc_platform::AnimationFps;
 use blinc_portal_ui::Sense;
 use blinc_tabler_icons::outline;
-use blinc_theme::{themes::universal::HybridTheme, tokens::ColorToken, ThemeState};
+use blinc_theme::{
+    detect_system_color_scheme, themes::universal::HybridTheme, tokens::ColorToken, ThemeState,
+};
 use std::sync::{Arc, Mutex, RwLock};
 
 // Resolve a theme colour at build time, falling back to a sane
@@ -105,11 +108,21 @@ impl PortKind for DemoPort {
 /// 1.0 CSS px (2 physical px on retina) which the rasterizer can
 /// align to a pixel grid.
 fn tabler_icon(path_data: &str) -> NodeIcon {
+    NodeIcon::from_svg_str(&tabler_svg_str(path_data)).expect("valid SVG")
+}
+
+/// Wrap a Tabler-outline path-fragment constant (which is just the
+/// inner `<path .../>` markup) in a full `<svg>` document. Used by
+/// anything outside the node header that needs a renderable SVG
+/// string — e.g. `cn::context_menu().item_with_icon(label, svg,
+/// ...)` expects a complete SVG, and the raw tabler constants only
+/// hold path fragments. The raster pipeline rejects the fragment
+/// (`"unknown token at 1:61"`) without the wrapper.
+fn tabler_svg_str(path_data: &str) -> String {
     let colour_hex = token_hex(ColorToken::TextPrimary, "#e8e8e8");
-    let svg = format!(
+    format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{colour_hex}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">{path_data}</svg>"#
-    );
-    NodeIcon::from_svg_str(&svg).expect("valid SVG")
+    )
 }
 
 /// Resolve a theme colour to a `#rrggbb` hex string. Tabler's
@@ -1547,10 +1560,55 @@ fn handle_event(
                 })
                 .show();
         }
+        EditorEvent::LayoutApplied(updates) => {
+            // Auto-layout produced new positions. Two jobs:
+            //   1. Push an `UpdateNodePosition` history entry per
+            //      node so `Cmd-Z` reverts the layout in one shot.
+            //   2. Animate from the CURRENT positions to the new
+            //      ones over ~500 ms so the canvas slides rather
+            //      than jump-cutting — same ease-out-cubic curve
+            //      the viewport tween uses.
+            //
+            // Step 1 fires BEFORE the animation so undo captures the
+            // pre-layout positions; the redo path replays the targets.
+            // History push is a single composite entry; one Cmd-Z
+            // restores all positions atomically.
+            let pre_positions: Vec<(NodeId, Point)> = {
+                let nodes = host.nodes.read().unwrap();
+                updates
+                    .iter()
+                    .filter_map(|(id, _)| {
+                        nodes
+                            .iter()
+                            .find(|n| n.id == *id)
+                            .map(|n| (id.clone(), n.position))
+                    })
+                    .collect()
+            };
+            if !pre_positions.is_empty() {
+                let undo_cmds: Vec<EditorCommand<DemoPort, (), (), ()>> = pre_positions
+                    .iter()
+                    .map(|(id, p)| EditorCommand::UpdateNodePosition(id.clone(), *p))
+                    .collect();
+                let redo_cmds: Vec<EditorCommand<DemoPort, (), (), ()>> = updates
+                    .iter()
+                    .map(|(id, p)| EditorCommand::UpdateNodePosition(id.clone(), *p))
+                    .collect();
+                history.lock().unwrap().push(
+                    EditorCommand::Composite(redo_cmds),
+                    EditorCommand::Composite(undo_cmds),
+                    "Auto-layout",
+                );
+            }
+            // Kick off the animated transition. The helper schedules
+            // a per-frame tick callback that lerps each node from
+            // its current position to the target with ease-out-cubic
+            // over LAYOUT_TWEEN_MS, then self-unregisters.
+            animate_layout_transition(editor.clone(), host.clone(), updates);
+        }
         EditorEvent::CreateGroupRequested(_)
         | EditorEvent::EdgeClicked { .. }
-        | EditorEvent::NodeClicked { .. }
-        | EditorEvent::LayoutApplied(_) => {
+        | EditorEvent::NodeClicked { .. } => {
             // Unhandled in this demo; real hosts dispatch to their
             // command palette / inspector / layout code.
         }
@@ -2471,6 +2529,99 @@ fn confirm_minimize_subgraph(editor: &Editor, host: &HostGraph, group_id: GroupI
         .show();
 }
 
+/// Animate every node from its current position to the layout-
+/// supplied target over `LAYOUT_TWEEN_MS` using ease-out-cubic, so
+/// the canvas slides smoothly instead of jump-cutting when the user
+/// triggers auto-layout. Same scheduler-tick pattern the editor's
+/// viewport tween uses; the callback self-unregisters when the
+/// transition settles so the scheduler can return to its idle rate.
+///
+/// Each frame writes the lerped position to BOTH the host node
+/// store and the editor's graph via `update_node_position`, so the
+/// canvas + any host UI that reads positions stay in sync.
+fn animate_layout_transition(editor: Editor, host: HostGraph, updates: Vec<(NodeId, Point)>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    /// 480 ms feels like a deliberate "settle into place" beat —
+    /// short enough not to drag, long enough that the user reads
+    /// the motion as repositioning rather than a flash.
+    const LAYOUT_TWEEN_MS: f32 = 480.0;
+
+    let starts: Vec<(NodeId, Point, Point)> = {
+        let nodes = host.nodes.read().unwrap();
+        updates
+            .into_iter()
+            .filter_map(|(id, target)| {
+                nodes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .map(|n| (id, n.position, target))
+            })
+            .collect()
+    };
+    if starts.is_empty() {
+        return;
+    }
+
+    let Some(scheduler) = blinc_layout::get_global_scheduler() else {
+        // No scheduler (headless / unit test) → snap to targets.
+        let mut nodes = host.nodes.write().unwrap();
+        for (id, _, target) in &starts {
+            if let Some(n) = nodes.iter_mut().find(|n| n.id == *id) {
+                n.position = *target;
+            }
+            editor.update_node_position(id, *target);
+        }
+        return;
+    };
+
+    let elapsed = Arc::new(AtomicU64::new(0));
+    let cb_id_slot: Arc<Mutex<Option<blinc_animation::TickCallbackId>>> =
+        Arc::new(Mutex::new(None));
+
+    let elapsed_for_cb = elapsed.clone();
+    let cb_id_slot_for_cb = cb_id_slot.clone();
+    let editor_for_cb = editor.clone();
+    let host_for_cb = host.clone();
+
+    let cb_id = scheduler.register_tick_callback(move |dt_secs| {
+        // `dt` from the scheduler is in seconds (see scheduler.rs
+        // `raw_dt = ... as_secs_f32()`). Convert to ms to match
+        // LAYOUT_TWEEN_MS's units.
+        let dt_ms = dt_secs * 1000.0;
+        let prev_ms = f32::from_bits(elapsed_for_cb.load(Ordering::Relaxed) as u32);
+        let new_ms = prev_ms + dt_ms;
+        elapsed_for_cb.store(new_ms.to_bits() as u64, Ordering::Relaxed);
+        let raw_t = (new_ms / LAYOUT_TWEEN_MS).clamp(0.0, 1.0);
+        let eased = blinc_animation::Easing::EaseOutCubic.apply(raw_t);
+
+        {
+            let mut nodes = host_for_cb.nodes.write().unwrap();
+            for (id, from, to) in &starts {
+                let x = from.x + (to.x - from.x) * eased;
+                let y = from.y + (to.y - from.y) * eased;
+                let pos = Point::new(x, y);
+                if let Some(n) = nodes.iter_mut().find(|n| n.id == *id) {
+                    n.position = pos;
+                }
+                editor_for_cb.update_node_position(id, pos);
+            }
+        }
+        blinc_layout::request_redraw();
+
+        if raw_t >= 1.0 {
+            let id = cb_id_slot_for_cb.lock().unwrap().take();
+            if let Some(id) = id {
+                if let Some(s) = blinc_layout::get_global_scheduler() {
+                    s.remove_tick_callback(id);
+                }
+            }
+        }
+    });
+    if let Some(id) = cb_id {
+        *cb_id_slot.lock().unwrap() = Some(id);
+    }
+}
+
 /// Open the right-click context menu anchored at the cursor's
 /// screen-space point. Branches on the [`ContextMenuTarget`] variant
 /// to surface the most relevant actions for what the user clicked.
@@ -2651,12 +2802,58 @@ fn open_context_menu(
             let e_undo = editor.clone();
             let e_redo = editor.clone();
 
+            let e_force = editor.clone();
+            let e_layered_ltr = editor.clone();
+            let e_layered_ttb = editor.clone();
+
             menu = menu
                 .item_with_shortcut("Select all", format!("{mod_key}A"), move || {
                     e_sel_all.push_event(EditorEvent::SelectAllRequested);
                 })
                 .item("Zoom to fit", move || {
                     e_fit.zoom_to_fit();
+                })
+                .separator()
+                // Auto-layout submenu — three strategies under a
+                // single parent. Each child swaps the editor's
+                // layout strategy then dispatches; the
+                // LayoutApplied handler upstream mirrors positions
+                // back to host + editor and animates the transition.
+                .submenu("Auto-layout", move |sub| {
+                    sub.item_with_icon(
+                        "Force-directed",
+                        tabler_svg_str(outline::AFFILIATE),
+                        move || {
+                            e_force.set_layout_strategy(LayoutStrategy::Force(ForceConfig::default()));
+                            e_force.apply_layout();
+                        },
+                    )
+                    .item_with_icon(
+                        "Left-to-right",
+                        tabler_svg_str(outline::HIERARCHY),
+                        move || {
+                            e_layered_ltr.set_layout_strategy(LayoutStrategy::Layered(
+                                LayeredConfig {
+                                    orientation: LayoutOrientation::LeftToRight,
+                                    ..LayeredConfig::default()
+                                },
+                            ));
+                            e_layered_ltr.apply_layout();
+                        },
+                    )
+                    .item_with_icon(
+                        "Top-to-bottom",
+                        tabler_svg_str(outline::HIERARCHY_3),
+                        move || {
+                            e_layered_ttb.set_layout_strategy(LayoutStrategy::Layered(
+                                LayeredConfig {
+                                    orientation: LayoutOrientation::TopToBottom,
+                                    ..LayeredConfig::default()
+                                },
+                            ));
+                            e_layered_ttb.apply_layout();
+                        },
+                    )
                 })
                 .separator()
                 .item_with_shortcut("Undo", format!("{mod_key}Z"), move || {
@@ -3592,8 +3789,7 @@ fn main() -> blinc_app::Result<()> {
     blinc_app::windowed::WindowedApp::run_with_theme(
         config,
         HybridTheme::bundle().with_css(blinc_cn::cn_styles::CN_STYLES),
-        // detect_system_color_scheme(),
-        ColorScheme::Light,
+        detect_system_color_scheme(),
         build_ui,
     )
 }
