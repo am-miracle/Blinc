@@ -118,6 +118,7 @@ mod tests {
     /// NOT the reload path — see module docs.
     #[test]
     fn clear_all_destructive_wipes_every_substrate() {
+        let _guard = crate::GLOBAL_REGISTRY_TEST_LOCK.lock().unwrap();
         // Plant: fsm registry
         fsm::with_fsm_registry_mut(|r| {
             r.register(fsm::FsmDefinition {
@@ -176,6 +177,7 @@ mod tests {
     /// sees the cleared state and does nothing harmful.
     #[test]
     fn clear_all_destructive_is_idempotent() {
+        let _guard = crate::GLOBAL_REGISTRY_TEST_LOCK.lock().unwrap();
         clear_all_destructive();
         clear_all_destructive();
         assert!(fsm::with_fsm_registry(|r| r.is_empty()));
@@ -193,6 +195,7 @@ mod tests {
     /// any handoff.
     #[test]
     fn fsm_register_replaces_by_name_without_rotating_id() {
+        let _guard = crate::GLOBAL_REGISTRY_TEST_LOCK.lock().unwrap();
         clear_all_destructive();
 
         let first = fsm::with_fsm_registry_mut(|r| {

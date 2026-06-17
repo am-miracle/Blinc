@@ -18,6 +18,20 @@ pub mod reload;
 pub mod signal;
 pub mod view;
 
+/// Test-only mutex that serializes every test touching the
+/// process-wide registries (signal table, fsm registry, component
+/// registry, guard dispatcher). Without it, `signal::tests::*`,
+/// `reload::tests::*`, and any other test that calls
+/// `signal::clear_all` / `clear_all_destructive` race each other
+/// under parallel `cargo test` and intermittently observe a
+/// just-planted signal as `None` because a sibling test wiped it
+/// between the `set` and the `assert_eq!`. Surfaces most often
+/// under `cargo llvm-cov` instrumentation where slowdowns shift
+/// test interleaving. Acquire at the top of every test that
+/// mutates one of those globals.
+#[cfg(test)]
+pub(crate) static GLOBAL_REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // Convenience re-exports — `Reactive<T>` is the first DSL value
 // type and lives at the top of every consumer's import list.
 pub use reactive_value::{

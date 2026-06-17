@@ -203,6 +203,7 @@ mod tests {
     /// storage.
     #[test]
     fn i32_round_trip_through_signal_primitive() {
+        let _guard = crate::GLOBAL_REGISTRY_TEST_LOCK.lock().unwrap();
         clear_all();
         assert_eq!(get_i32("count_test"), None);
         set_i32("count_test", 42);
@@ -213,6 +214,7 @@ mod tests {
 
     #[test]
     fn typed_mismatch_returns_none() {
+        let _guard = crate::GLOBAL_REGISTRY_TEST_LOCK.lock().unwrap();
         clear_all();
         set_i32("conflict", 100);
         // Reading as f64 misses — different SignalType in the map.
@@ -223,6 +225,7 @@ mod tests {
 
     #[test]
     fn f64_and_str_round_trip() {
+        let _guard = crate::GLOBAL_REGISTRY_TEST_LOCK.lock().unwrap();
         clear_all();
         assert_eq!(get_f64_or_default("progress_t"), 0.0);
         set_f64("progress_t", 0.75);

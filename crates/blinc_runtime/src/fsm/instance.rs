@@ -163,6 +163,7 @@ mod tests {
     /// Loading, no other transition matches.
     #[test]
     fn on_event_walks_registry_transitions() {
+        let _guard = DISPATCHER_TEST_LOCK.lock().unwrap();
         let id = publish_loader();
         let s = FsmStateId::new(id, 0); // Idle
 
@@ -286,6 +287,7 @@ mod tests {
     /// `from_fsm_name` looks up by user-facing FSM name.
     #[test]
     fn from_fsm_name_resolves_initial_state() {
+        let _guard = DISPATCHER_TEST_LOCK.lock().unwrap();
         let id = publish_loader();
         let s = FsmStateId::from_fsm_name("Loader_test").unwrap();
         assert_eq!(s.fsm_id, id);

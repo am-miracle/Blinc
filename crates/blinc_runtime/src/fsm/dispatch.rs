@@ -139,14 +139,16 @@ pub(crate) fn call_action(symbol: &str) -> Option<()> {
     dispatcher.call_action(symbol)
 }
 
-/// Test-only mutex that serializes every test toggling
-/// `GUARD_DISPATCHER`. The dispatcher slot is process-wide, so
-/// parallel tests in this crate (`dispatch::tests::*` and
-/// `instance::tests::on_tick_*`) clobber each other without
-/// serialization. Acquire at the top of any test that calls
-/// `set_guard_dispatcher` / `clear_guard_dispatcher`.
+/// Test-only mutex alias — folded into the crate-wide
+/// [`crate::GLOBAL_REGISTRY_TEST_LOCK`] so that dispatcher tests
+/// serialize against `reload::tests::*` and `signal::tests::*`,
+/// not just against each other. Previously a separate mutex, but
+/// `clear_all_destructive` (in `reload::tests`) mutates the
+/// dispatcher slot too, so the locks must be the same one to
+/// prevent the race. Kept under this name so existing call sites
+/// (`fsm/instance.rs`, `fsm/dispatch.rs`) don't need to be touched.
 #[cfg(test)]
-pub(crate) static DISPATCHER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) use crate::GLOBAL_REGISTRY_TEST_LOCK as DISPATCHER_TEST_LOCK;
 
 #[cfg(test)]
 mod tests {
