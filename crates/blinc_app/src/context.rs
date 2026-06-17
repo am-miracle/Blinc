@@ -9820,6 +9820,22 @@ impl RenderContext {
                 let mut z0_batch = PrimitiveBatch::new();
                 z0_batch.primitives = z0_primitives;
                 z0_batch.paths = batch.paths.clone();
+                // Clone the aux_data too. MESH primitives reference
+                // their triangle vertices via `border.z = aux_offset`
+                // into this buffer; the subsequent
+                // `render_primitives_overlay` calls for z>0 layers
+                // don't re-upload aux_data, so the z=0 pass's upload
+                // is the only chance for the GPU to see fresh mesh
+                // triangles. Without this clone, the buffer uploads
+                // empty (`PrimitiveBatch::new()` has `aux_data =
+                // vec![]`) and every MESH primitive (SVG icons,
+                // tessellated paths with solid brush) reads garbage
+                // at its offset — visible on web (any 1×-sample
+                // target with `stack_layer()` in the tree) as icons
+                // stuck at content-space origin (0, 0) while node
+                // bodies (PRIM_RECT, using `bounds` directly) track
+                // viewport changes correctly.
+                z0_batch.aux_data = batch.aux_data.clone();
                 self.renderer.render_with_clear(
                     target,
                     &z0_batch,
