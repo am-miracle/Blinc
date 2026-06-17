@@ -3600,11 +3600,19 @@ impl RenderContext {
                 );
             }
 
-            // Render background paths with MSAA for smooth edges on curved shapes like notch
-            // (render_glass_frame uses 1x sampled path rendering, so we need MSAA overlay)
-            if use_msaa_overlay && bg_batch.has_paths() {
-                self.renderer
-                    .render_paths_overlay_msaa(target, &bg_batch, self.sample_count);
+            // Render background paths. MSAA overlay smooths curves
+            // (notch, custom shapes) when sample_count > 1; on
+            // 1×-sample targets (web's webgpu/webgl backend, headless
+            // tests) we still have to dispatch the paths, just without
+            // the multisample resolve — otherwise SVG icons / subgraph
+            // diamonds / any fill_path content stays invisible.
+            if bg_batch.has_paths() {
+                if use_msaa_overlay {
+                    self.renderer
+                        .render_paths_overlay_msaa(target, &bg_batch, self.sample_count);
+                } else {
+                    self.renderer.render_paths_overlay(target, &bg_batch);
+                }
             }
 
             // Render remaining bg images to target (only if not already pre-rendered)
@@ -3654,10 +3662,16 @@ impl RenderContext {
                     self.render_unified(target, &unified_primitives);
                 }
 
-                // Render paths with MSAA for smooth edges (paths are not included in unified primitives)
-                if use_msaa_overlay && fg_batch.has_paths() {
-                    self.renderer
-                        .render_paths_overlay_msaa(target, &fg_batch, self.sample_count);
+                // Render paths (not included in unified primitives).
+                // MSAA when available; non-MSAA dispatch when not so
+                // web (sample_count = 1) still gets fill_path content.
+                if fg_batch.has_paths() {
+                    if use_msaa_overlay {
+                        self.renderer
+                            .render_paths_overlay_msaa(target, &fg_batch, self.sample_count);
+                    } else {
+                        self.renderer.render_paths_overlay(target, &fg_batch);
+                    }
                 }
 
                 // Render SVGs as rasterized images for high-quality anti-aliasing
@@ -3678,6 +3692,18 @@ impl RenderContext {
                 // Step 7: Render text
                 if !all_glyphs.is_empty() {
                     self.render_text(target, &all_glyphs);
+                }
+
+                // Paths in the legacy branch also need a 1×-sample
+                // fallback dispatch — same reason as the unified
+                // branch above.
+                if fg_batch.has_paths() {
+                    if use_msaa_overlay {
+                        self.renderer
+                            .render_paths_overlay_msaa(target, &fg_batch, self.sample_count);
+                    } else {
+                        self.renderer.render_paths_overlay(target, &fg_batch);
+                    }
                 }
 
                 // Render SVGs as rasterized images for high-quality anti-aliasing
@@ -3708,10 +3734,15 @@ impl RenderContext {
                 [0.0, 0.0, 0.0, self.clear_alpha as f64],
             );
 
-            // Render background paths with MSAA for smooth edges on curved shapes like notch
-            if use_msaa_overlay && bg_batch.has_paths() {
-                self.renderer
-                    .render_paths_overlay_msaa(target, &bg_batch, self.sample_count);
+            // Render background paths. Same MSAA/non-MSAA split as the
+            // glass branch — 1×-sample targets still have to dispatch.
+            if bg_batch.has_paths() {
+                if use_msaa_overlay {
+                    self.renderer
+                        .render_paths_overlay_msaa(target, &bg_batch, self.sample_count);
+                } else {
+                    self.renderer.render_paths_overlay(target, &bg_batch);
+                }
             }
 
             // Render images after background primitives
@@ -3755,10 +3786,15 @@ impl RenderContext {
                     self.render_unified(target, &unified_primitives);
                 }
 
-                // Render paths with MSAA for smooth edges (paths are not included in unified primitives)
-                if use_msaa_overlay && fg_batch.has_paths() {
-                    self.renderer
-                        .render_paths_overlay_msaa(target, &fg_batch, self.sample_count);
+                // Render paths (not included in unified primitives).
+                // 1×-sample fallback dispatch so web still emits.
+                if fg_batch.has_paths() {
+                    if use_msaa_overlay {
+                        self.renderer
+                            .render_paths_overlay_msaa(target, &fg_batch, self.sample_count);
+                    } else {
+                        self.renderer.render_paths_overlay(target, &fg_batch);
+                    }
                 }
 
                 // Render SVGs as rasterized images for high-quality anti-aliasing
@@ -3779,6 +3815,17 @@ impl RenderContext {
                 // Render text
                 if !all_glyphs.is_empty() {
                     self.render_text(target, &all_glyphs);
+                }
+
+                // Paths in the legacy branch — 1×-sample fallback so
+                // web emits fill_path / stroke_path content.
+                if fg_batch.has_paths() {
+                    if use_msaa_overlay {
+                        self.renderer
+                            .render_paths_overlay_msaa(target, &fg_batch, self.sample_count);
+                    } else {
+                        self.renderer.render_paths_overlay(target, &fg_batch);
+                    }
                 }
 
                 // Render SVGs as rasterized images for high-quality anti-aliasing
@@ -9625,11 +9672,16 @@ impl RenderContext {
                 );
             }
 
-            // Render paths with MSAA for smooth edges on curved shapes like notch
-            // (render_glass_frame uses 1x sampled path rendering)
-            if use_msaa_overlay && batch.has_paths() {
-                self.renderer
-                    .render_paths_overlay_msaa(target, &batch, self.sample_count);
+            // Render paths. MSAA when sample_count > 1; non-MSAA
+            // dispatch when not so 1×-sample targets (web) still emit
+            // fill_path / stroke_path content.
+            if batch.has_paths() {
+                if use_msaa_overlay {
+                    self.renderer
+                        .render_paths_overlay_msaa(target, &batch, self.sample_count);
+                } else {
+                    self.renderer.render_paths_overlay(target, &batch);
+                }
             }
 
             // Render remaining bg images (only if not already pre-rendered for glass)
@@ -9743,10 +9795,15 @@ impl RenderContext {
                         .render_dynamic_images(target, &batch.dynamic_images);
                 }
 
-                // Render paths with MSAA for smooth edges on curved shapes like notch
-                if use_msaa_overlay && z0_batch.has_paths() {
-                    self.renderer
-                        .render_paths_overlay_msaa(target, &z0_batch, self.sample_count);
+                // Render paths. MSAA/non-MSAA split so 1×-sample
+                // targets still dispatch fill_path / stroke_path.
+                if z0_batch.has_paths() {
+                    if use_msaa_overlay {
+                        self.renderer
+                            .render_paths_overlay_msaa(target, &z0_batch, self.sample_count);
+                    } else {
+                        self.renderer.render_paths_overlay(target, &z0_batch);
+                    }
                 }
 
                 // Render z=0 images
@@ -9853,13 +9910,18 @@ impl RenderContext {
                         .render_dynamic_images(target, &batch.dynamic_images);
                 }
 
-                // Path overlay MSAA. The main pass above is always
-                // single-sampled now, so this runs whenever MSAA is
-                // configured — no more conditional skip for the
-                // (previously) MSAA main path.
-                if batch.has_paths() && self.sample_count > 1 {
-                    self.renderer
-                        .render_paths_overlay_msaa(target, &batch, self.sample_count);
+                // Path overlay. MSAA when configured; non-MSAA
+                // dispatch otherwise so 1×-sample targets (web) still
+                // emit fill_path / stroke_path. The main pass above is
+                // always single-sampled so paths always need their own
+                // dispatch here.
+                if batch.has_paths() {
+                    if self.sample_count > 1 {
+                        self.renderer
+                            .render_paths_overlay_msaa(target, &batch, self.sample_count);
+                    } else {
+                        self.renderer.render_paths_overlay(target, &batch);
+                    }
                 }
 
                 self.render_images(target, &images, width as f32, height as f32, scale_factor);
