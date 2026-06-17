@@ -4608,7 +4608,11 @@ fn skip_failed_rule(input: &str) -> Option<usize> {
             _ => {}
         }
     }
-    if input.is_empty() { None } else { Some(input.len()) }
+    if input.is_empty() {
+        None
+    } else {
+        Some(input.len())
+    }
 }
 
 /// Result of parsing a CSS rule — either a simple #id rule or a complex selector rule

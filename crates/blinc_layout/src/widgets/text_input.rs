@@ -359,9 +359,8 @@ pub fn enqueue_pending_focus_area(state: Weak<Mutex<crate::widgets::text_area::T
 /// settles in the tree first, then focus side-effects apply against a
 /// stable composition.
 static PENDING_FOCUS_INPUT: Mutex<Vec<Weak<Mutex<TextInputData>>>> = Mutex::new(Vec::new());
-static PENDING_FOCUS_AREA: Mutex<
-    Vec<Weak<Mutex<crate::widgets::text_area::TextAreaState>>>,
-> = Mutex::new(Vec::new());
+static PENDING_FOCUS_AREA: Mutex<Vec<Weak<Mutex<crate::widgets::text_area::TextAreaState>>>> =
+    Mutex::new(Vec::new());
 
 /// Callback for setting continuous redraw on the animation scheduler
 /// This is set by the windowed app to bridge text widgets with the animation system

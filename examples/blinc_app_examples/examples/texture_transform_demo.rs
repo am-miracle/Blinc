@@ -31,11 +31,11 @@ use std::sync::{Arc, OnceLock};
 use blinc_animation::get_scheduler;
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
+use blinc_canvas_kit::InputState;
 use blinc_canvas_kit::prelude::*;
 use blinc_core::events::KeyCode;
 use blinc_core::{Color, Light, Mat4, MeshData, State, Vec3};
 use blinc_gltf::GltfScene;
-use blinc_canvas_kit::InputState;
 
 const GLTF_PATH: &str = "examples/blinc_app_examples/examples/assets/3d/marble_cliff_02_2k.gltf/marble_cliff_02_2k.gltf";
 

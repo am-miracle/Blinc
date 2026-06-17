@@ -38,14 +38,16 @@ use blinc_platform::AnimationFps;
 use blinc_portal_ui::Sense;
 use blinc_tabler_icons::outline;
 use blinc_theme::{
-    detect_system_color_scheme, themes::universal::HybridTheme, tokens::ColorToken, ThemeState,
+    ThemeState, detect_system_color_scheme, themes::universal::HybridTheme, tokens::ColorToken,
 };
 use std::sync::{Arc, Mutex, RwLock};
 
 // Resolve a theme colour at build time, falling back to a sane
 // default when ThemeState isn't initialised (e.g. unit-test builds).
 fn token(t: ColorToken, fallback: Color) -> Color {
-    ThemeState::try_get().map(|s| s.color(t)).unwrap_or(fallback)
+    ThemeState::try_get()
+        .map(|s| s.color(t))
+        .unwrap_or(fallback)
 }
 
 // ─── Host-side port type ───────────────────────────────────────────
@@ -131,7 +133,12 @@ fn token_hex(t: ColorToken, fallback: &str) -> String {
         return fallback.to_string();
     };
     let to_byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!("#{:02x}{:02x}{:02x}", to_byte(c.r), to_byte(c.g), to_byte(c.b))
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        to_byte(c.r),
+        to_byte(c.g),
+        to_byte(c.b)
+    )
 }
 
 /// Shared signals the portal widgets read + write. Same `Signal<T>`
@@ -275,7 +282,11 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
                 ui.label("running");
                 ui.switch_signal(&sigs.running);
             });
-            ui.label(if sigs.running.get() { "● live" } else { "○ paused" });
+            ui.label(if sigs.running.get() {
+                "● live"
+            } else {
+                "○ paused"
+            });
 
             // Free-form painting — a moving sparkline driven by
             // the portal's monotonic clock. Proves
@@ -356,8 +367,7 @@ fn initial_nodes() -> Vec<NodeInstance<()>> {
         NodeInstance::new("filter/1", "filter", Point::new(360.0, 180.0))
             .with_size(200.0, 100.0)
             .with_badge(StatusBadge::running()),
-        NodeInstance::new("fmt/1", "formatter", Point::new(360.0, 360.0))
-            .with_size(200.0, 80.0),
+        NodeInstance::new("fmt/1", "formatter", Point::new(360.0, 360.0)).with_size(200.0, 80.0),
         NodeInstance::new("sink/1", "sink", Point::new(660.0, 240.0))
             .with_size(200.0, 100.0)
             .with_badge(StatusBadge::info(3).with_tooltip("3 pending writes")),
@@ -417,18 +427,18 @@ fn initial_connections() -> Vec<Connection<()>> {
 }
 
 fn initial_groups() -> Vec<Group<()>> {
-    vec![Group::<()>::new(GroupId::from("transforms"), "Transforms")
-        .with_description("Filter + formatter")
-        .with_description_placeholder("Enter a description")
-        .add_member("filter/1")
-        .add_member("fmt/1")
-        .with_badge(
-            StatusBadge {
+    vec![
+        Group::<()>::new(GroupId::from("transforms"), "Transforms")
+            .with_description("Filter + formatter")
+            .with_description_placeholder("Enter a description")
+            .add_member("filter/1")
+            .add_member("fmt/1")
+            .with_badge(StatusBadge {
                 kind: BadgeKind::Running,
                 count: Some(2),
                 tooltip: Some("2 active operations".into()),
-            },
-        )]
+            }),
+    ]
 }
 
 // ─── Editor wiring ─────────────────────────────────────────────────
@@ -543,9 +553,8 @@ impl ExpansionBaseline {
             .map(|g| g.members.iter().cloned().collect())
             .unwrap_or_default();
 
-        let strip = |raw: &str| -> String {
-            raw.strip_prefix(id_prefix).unwrap_or(raw).to_string()
-        };
+        let strip =
+            |raw: &str| -> String { raw.strip_prefix(id_prefix).unwrap_or(raw).to_string() };
 
         let mut nodes: Vec<(String, [f32; 2], Option<[f32; 2]>)> = host
             .nodes
@@ -568,9 +577,7 @@ impl ExpansionBaseline {
             .read()
             .unwrap()
             .iter()
-            .filter(|c| {
-                member_set.contains(&c.from.node) && member_set.contains(&c.to.node)
-            })
+            .filter(|c| member_set.contains(&c.from.node) && member_set.contains(&c.to.node))
             .map(|c| {
                 (
                     strip(c.from.node.as_str()),
@@ -618,10 +625,9 @@ fn build_editor(ctx: &mut WindowedContext) -> (Editor, HostGraph, DemoHistory) {
         groups: Arc::new(RwLock::new(initial_groups())),
         expanded: Arc::new(RwLock::new(std::collections::HashMap::new())),
     });
-    let history_state = ctx.use_state_keyed::<DemoHistory, _>(
-        "node-editor-demo-history",
-        || Arc::new(Mutex::new(History::with_default_cap())),
-    );
+    let history_state = ctx.use_state_keyed::<DemoHistory, _>("node-editor-demo-history", || {
+        Arc::new(Mutex::new(History::with_default_cap()))
+    });
     let host = host_state.try_get().unwrap_or_else(|| HostGraph {
         nodes: Arc::new(RwLock::new(initial_nodes())),
         connections: Arc::new(RwLock::new(initial_connections())),
@@ -731,7 +737,13 @@ fn build_editor(ctx: &mut WindowedContext) -> (Editor, HostGraph, DemoHistory) {
         let history_for_cb = history.clone();
         let editor_for_cb = editor.clone();
         editor.on_context_menu(move |target, anchor| {
-            open_context_menu(&editor_for_cb, &host_for_cb, &history_for_cb, target, anchor);
+            open_context_menu(
+                &editor_for_cb,
+                &host_for_cb,
+                &history_for_cb,
+                target,
+                anchor,
+            );
         })
     };
 
@@ -757,11 +769,9 @@ fn open_multi_select_toolbar(
     // currently model. Delete stays available regardless.
     let can_group = {
         let groups = host.groups.read().unwrap();
-        !node_ids.iter().any(|id| {
-            groups
-                .iter()
-                .any(|g| g.members.iter().any(|m| m == id))
-        })
+        !node_ids
+            .iter()
+            .any(|id| groups.iter().any(|g| g.members.iter().any(|m| m == id)))
     };
     use blinc_layout::click_outside;
     use blinc_layout::overlay_state::overlay_stack;
@@ -884,43 +894,34 @@ fn open_multi_select_toolbar(
                             .icon(icon)
                             .on_click(move |_| {
                                 editor.align_nodes(&ids, edge);
-                                tracing::info!(
-                                    "align {:?} on {} nodes",
-                                    edge,
-                                    ids.len()
-                                );
+                                tracing::info!("align {:?} on {} nodes", edge, ids.len());
                             }),
                     )
                 };
                 blinc_cn::TooltipBuilder::with_key(trigger, key).text(label)
             };
-            let mk_distribute =
-                |axis: DistributeAxis, icon: &'static str, label: &'static str| {
-                    let editor = editor_a.clone();
-                    let ids = ids_a.clone();
-                    let key = blinc_layout::key::InstanceKey::explicit(format!(
-                        "ne-multi-toolbar-tooltip:{label}"
-                    ));
-                    let trigger = move || {
-                        let editor = editor.clone();
-                        let ids = ids.clone();
-                        div().child(
-                            blinc_cn::button("")
-                                .variant(blinc_cn::ButtonVariant::Ghost)
-                                .icon(icon)
-                                .disabled(!can_distribute)
-                                .on_click(move |_| {
-                                    editor.distribute_nodes(&ids, axis);
-                                    tracing::info!(
-                                        "distribute {:?} on {} nodes",
-                                        axis,
-                                        ids.len()
-                                    );
-                                }),
-                        )
-                    };
-                    blinc_cn::TooltipBuilder::with_key(trigger, key).text(label)
+            let mk_distribute = |axis: DistributeAxis, icon: &'static str, label: &'static str| {
+                let editor = editor_a.clone();
+                let ids = ids_a.clone();
+                let key = blinc_layout::key::InstanceKey::explicit(format!(
+                    "ne-multi-toolbar-tooltip:{label}"
+                ));
+                let trigger = move || {
+                    let editor = editor.clone();
+                    let ids = ids.clone();
+                    div().child(
+                        blinc_cn::button("")
+                            .variant(blinc_cn::ButtonVariant::Ghost)
+                            .icon(icon)
+                            .disabled(!can_distribute)
+                            .on_click(move |_| {
+                                editor.distribute_nodes(&ids, axis);
+                                tracing::info!("distribute {:?} on {} nodes", axis, ids.len());
+                            }),
+                    )
                 };
+                blinc_cn::TooltipBuilder::with_key(trigger, key).text(label)
+            };
 
             let mut row = div()
                 .id(&toolbar_id_for_content)
@@ -933,9 +934,8 @@ fn open_multi_select_toolbar(
                 .rounded(radius)
                 .shadow_lg();
             if can_group {
-                let group_key = blinc_layout::key::InstanceKey::explicit(
-                    "ne-multi-toolbar-tooltip:group",
-                );
+                let group_key =
+                    blinc_layout::key::InstanceKey::explicit("ne-multi-toolbar-tooltip:group");
                 let group_trigger = move || {
                     let editor_g = editor_g.clone();
                     let host_g = host_g.clone();
@@ -947,42 +947,37 @@ fn open_multi_select_toolbar(
                             .variant(blinc_cn::ButtonVariant::Ghost)
                             .icon(blinc_cn::prelude::icons::GROUP)
                             .on_click(move |_| {
-                                    let new_id = GroupId::from(format!(
-                                        "g-{}",
-                                        web_time::SystemTime::now()
-                                            .duration_since(web_time::UNIX_EPOCH)
-                                            .map(|d| d.as_millis())
-                                            .unwrap_or(0)
-                                    ));
-                                    let mut group =
-                                        Group::<()>::new(new_id.clone(), "New Group")
-                                            .with_description(
-                                                "Group created from multi-select",
-                                            )
-                                            .with_description_placeholder(
-                                                "Enter a description",
-                                            );
-                                    for nid in &group_ids {
-                                        group = group.add_member(nid.as_str());
-                                    }
-                                    host_g.groups.write().unwrap().push(group.clone());
-                                    editor_g.insert_group(group.clone());
-                                    history_g.lock().unwrap().push(
-                                        EditorCommand::InsertGroup(group),
-                                        EditorCommand::RemoveGroup(new_id.clone()),
-                                        "Create Group",
-                                    );
-                                    editor_g.clear_selection();
-                                    if let Some(h) = slot_g.lock().unwrap().as_ref() {
-                                        h.close();
-                                    }
-                                    tracing::info!(
-                                        "grouped {} nodes into {}",
-                                        group_ids.len(),
-                                        new_id.as_str()
-                                    );
-                                }),
-                        )
+                                let new_id = GroupId::from(format!(
+                                    "g-{}",
+                                    web_time::SystemTime::now()
+                                        .duration_since(web_time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis())
+                                        .unwrap_or(0)
+                                ));
+                                let mut group = Group::<()>::new(new_id.clone(), "New Group")
+                                    .with_description("Group created from multi-select")
+                                    .with_description_placeholder("Enter a description");
+                                for nid in &group_ids {
+                                    group = group.add_member(nid.as_str());
+                                }
+                                host_g.groups.write().unwrap().push(group.clone());
+                                editor_g.insert_group(group.clone());
+                                history_g.lock().unwrap().push(
+                                    EditorCommand::InsertGroup(group),
+                                    EditorCommand::RemoveGroup(new_id.clone()),
+                                    "Create Group",
+                                );
+                                editor_g.clear_selection();
+                                if let Some(h) = slot_g.lock().unwrap().as_ref() {
+                                    h.close();
+                                }
+                                tracing::info!(
+                                    "grouped {} nodes into {}",
+                                    group_ids.len(),
+                                    new_id.as_str()
+                                );
+                            }),
+                    )
                 };
                 row = row.child(
                     blinc_cn::TooltipBuilder::with_key(group_trigger, group_key)
@@ -997,20 +992,36 @@ fn open_multi_select_toolbar(
             // Tabler's `LAYOUT_ALIGN_*` glyph family reads as align
             // affordances at every size.
             row = row
-                .child(mk_align(AlignEdge::Left, outline::LAYOUT_ALIGN_LEFT, "Align left"))
+                .child(mk_align(
+                    AlignEdge::Left,
+                    outline::LAYOUT_ALIGN_LEFT,
+                    "Align left",
+                ))
                 .child(mk_align(
                     AlignEdge::CenterX,
                     outline::LAYOUT_ALIGN_CENTER,
                     "Align centre (horizontal)",
                 ))
-                .child(mk_align(AlignEdge::Right, outline::LAYOUT_ALIGN_RIGHT, "Align right"))
-                .child(mk_align(AlignEdge::Top, outline::LAYOUT_ALIGN_TOP, "Align top"))
+                .child(mk_align(
+                    AlignEdge::Right,
+                    outline::LAYOUT_ALIGN_RIGHT,
+                    "Align right",
+                ))
+                .child(mk_align(
+                    AlignEdge::Top,
+                    outline::LAYOUT_ALIGN_TOP,
+                    "Align top",
+                ))
                 .child(mk_align(
                     AlignEdge::CenterY,
                     outline::LAYOUT_ALIGN_MIDDLE,
                     "Align middle (vertical)",
                 ))
-                .child(mk_align(AlignEdge::Bottom, outline::LAYOUT_ALIGN_BOTTOM, "Align bottom"))
+                .child(mk_align(
+                    AlignEdge::Bottom,
+                    outline::LAYOUT_ALIGN_BOTTOM,
+                    "Align bottom",
+                ))
                 .child(blinc_cn::separator().vertical())
                 .child(mk_distribute(
                     DistributeAxis::Horizontal,
@@ -1024,9 +1035,8 @@ fn open_multi_select_toolbar(
                 ))
                 .child(blinc_cn::separator().vertical());
 
-            let delete_key = blinc_layout::key::InstanceKey::explicit(
-                "ne-multi-toolbar-tooltip:delete",
-            );
+            let delete_key =
+                blinc_layout::key::InstanceKey::explicit("ne-multi-toolbar-tooltip:delete");
             let delete_trigger = move || {
                 let host_d = host_d.clone();
                 let editor_d = editor_d.clone();
@@ -1046,8 +1056,7 @@ fn open_multi_select_toolbar(
                                 .unwrap()
                                 .retain(|n| !id_set.contains(&n.id));
                             host_d.connections.write().unwrap().retain(|c| {
-                                !id_set.contains(&c.from.node)
-                                    && !id_set.contains(&c.to.node)
+                                !id_set.contains(&c.from.node) && !id_set.contains(&c.to.node)
                             });
                             for g in host_d.groups.write().unwrap().iter_mut() {
                                 g.members.retain(|m| !id_set.contains(m));
@@ -1081,13 +1090,9 @@ fn open_multi_select_toolbar(
     // == toolbar_id (the chrome rect). Mirrors cn::popover's
     // pattern; without this only Escape would dismiss.
     let handle_for_outside = handle;
-    click_outside::register_click_outside(
-        &click_outside_key,
-        &toolbar_id,
-        move || {
-            handle_for_outside.close();
-        },
-    );
+    click_outside::register_click_outside(&click_outside_key, &toolbar_id, move || {
+        handle_for_outside.close();
+    });
 }
 
 /// React to one [`EditorEvent`] by patching `host` and pushing the
@@ -1163,15 +1168,12 @@ fn handle_event(
                 .map(|g| g.members.clone());
             let updated = {
                 let mut groups = host.groups.write().unwrap();
-                groups
-                    .iter_mut()
-                    .find(|g| g.id == req.group)
-                    .map(|g| {
-                        if !g.members.contains(&req.node) {
-                            g.members.push(req.node.clone());
-                        }
-                        g.members.clone()
-                    })
+                groups.iter_mut().find(|g| g.id == req.group).map(|g| {
+                    if !g.members.contains(&req.node) {
+                        g.members.push(req.node.clone());
+                    }
+                    g.members.clone()
+                })
             };
             if let (Some(members), Some(prev)) = (updated, prev_members) {
                 editor.set_group_members(&req.group, members.clone());
@@ -1202,13 +1204,10 @@ fn handle_event(
                 .map(|g| g.members.clone());
             let updated = {
                 let mut groups = host.groups.write().unwrap();
-                groups
-                    .iter_mut()
-                    .find(|g| g.id == req.group)
-                    .map(|g| {
-                        g.members.retain(|m| m != &req.node);
-                        g.members.clone()
-                    })
+                groups.iter_mut().find(|g| g.id == req.group).map(|g| {
+                    g.members.retain(|m| m != &req.node);
+                    g.members.clone()
+                })
             };
             if let (Some(members), Some(prev)) = (updated, prev_members) {
                 editor.set_group_members(&req.group, members.clone());
@@ -1293,7 +1292,11 @@ fn handle_event(
                     history.lock().unwrap().push(
                         EditorCommand::SetGroupCollapsed(req.group.clone(), req.collapsed),
                         EditorCommand::SetGroupCollapsed(req.group.clone(), prev),
-                        if req.collapsed { "Collapse Group" } else { "Expand Group" },
+                        if req.collapsed {
+                            "Collapse Group"
+                        } else {
+                            "Expand Group"
+                        },
                     );
                 }
             }
@@ -1312,7 +1315,11 @@ fn handle_event(
             // the overlay already dismisses it. Real hosts might
             // close inspector panels or update breadcrumbs here.
         }
-        EditorEvent::EditGroupTitleRequested { group, current, anchor_screen } => {
+        EditorEvent::EditGroupTitleRequested {
+            group,
+            current,
+            anchor_screen,
+        } => {
             open_inline_text_editor(
                 editor,
                 host,
@@ -1323,7 +1330,11 @@ fn handle_event(
                 EditorField::Title,
             );
         }
-        EditorEvent::EditGroupDescriptionRequested { group, current, anchor_screen } => {
+        EditorEvent::EditGroupDescriptionRequested {
+            group,
+            current,
+            anchor_screen,
+        } => {
             open_inline_text_editor(
                 editor,
                 host,
@@ -1453,7 +1464,8 @@ fn handle_event(
                 }
                 let clone_id = NodeId::from(candidate.as_str());
                 clone.id = clone_id.clone();
-                clone.position = Point::new(clone.position.x + offset.x, clone.position.y + offset.y);
+                clone.position =
+                    Point::new(clone.position.x + offset.x, clone.position.y + offset.y);
                 used_ids.insert(clone_id.clone());
                 id_map.insert(id.clone(), clone_id);
                 clones.push(clone);
@@ -1489,7 +1501,10 @@ fn handle_event(
 
             // Apply to host first, then sync into the editor.
             host.nodes.write().unwrap().extend(clones.iter().cloned());
-            host.connections.write().unwrap().extend(cloned_connections.iter().cloned());
+            host.connections
+                .write()
+                .unwrap()
+                .extend(cloned_connections.iter().cloned());
             for c in &clones {
                 editor.insert_node(c.clone());
             }
@@ -1515,16 +1530,15 @@ fn handle_event(
                     .iter()
                     .map(|c| EditorCommand::RemoveConnection(c.id)),
             );
-            inverse.extend(
-                clone_ids
-                    .iter()
-                    .cloned()
-                    .map(EditorCommand::RemoveNode),
-            );
+            inverse.extend(clone_ids.iter().cloned().map(EditorCommand::RemoveNode));
             history.lock().unwrap().push(
                 EditorCommand::Composite(forward),
                 EditorCommand::Composite(inverse),
-                if clones.len() == 1 { "Duplicate Node" } else { "Duplicate Nodes" },
+                if clones.len() == 1 {
+                    "Duplicate Node"
+                } else {
+                    "Duplicate Nodes"
+                },
             );
             // Reselect the clones so the next gesture acts on them.
             // RegionId::encode produces the canvas-kit wire format
@@ -1757,7 +1771,12 @@ fn expand_subgraph(
     let id_map: std::collections::HashMap<NodeId, NodeId> = sub
         .nodes
         .iter()
-        .map(|n| (n.id.clone(), NodeId::from(format!("{prefix}{}", n.id.as_str()))))
+        .map(|n| {
+            (
+                n.id.clone(),
+                NodeId::from(format!("{prefix}{}", n.id.as_str())),
+            )
+        })
         .collect();
 
     // Layout: drop internal nodes into a tidy row to the right of
@@ -1815,7 +1834,9 @@ fn expand_subgraph(
         .with_accent(warning_accent);
     // Members are the inserted nodes — auto-bounds will pull the
     // group rect tight around them.
-    let group = new_nodes.iter().fold(group, |g, n| g.add_member(n.id.clone()));
+    let group = new_nodes
+        .iter()
+        .fold(group, |g, n| g.add_member(n.id.clone()));
 
     // External connections that previously terminated at the diamond
     // get re-routed to the LAST inserted internal node (the demo's
@@ -1977,8 +1998,7 @@ fn expand_subgraph(
     // reverse this operation. `inserted_connections` covers both
     // the internal flow and the rerouted-external connections so
     // minimize wipes them in one pass.
-    let mut all_inserted_conns: Vec<ConnectionId> =
-        new_connections.iter().map(|c| c.id).collect();
+    let mut all_inserted_conns: Vec<ConnectionId> = new_connections.iter().map(|c| c.id).collect();
     all_inserted_conns.extend(rerouted_externals.iter().map(|c| c.id));
 
     // Capture the at-this-moment baseline AFTER all the mutations
@@ -2039,7 +2059,10 @@ fn minimize_subgraph(editor: &Editor, host: &HostGraph, group_id: GroupId) {
     }
 
     // Drop the wrapping group.
-    host.groups.write().unwrap().retain(|g| g.id != state.group_id);
+    host.groups
+        .write()
+        .unwrap()
+        .retain(|g| g.id != state.group_id);
     editor.remove_group(&state.group_id);
 
     // Restore parent-group membership: drop the inserted node ids
@@ -2263,12 +2286,7 @@ fn naturalize_wrapper_member_removal(
         .map(|s| NodeId::from(s.to_string()));
     let final_id: NodeId = match &stripped {
         Some(new_id) => {
-            let collision = host
-                .nodes
-                .read()
-                .unwrap()
-                .iter()
-                .any(|n| n.id == *new_id);
+            let collision = host.nodes.read().unwrap().iter().any(|n| n.id == *new_id);
             if collision {
                 tracing::warn!(
                     target: "node_editor_demo::subgraph",
@@ -2302,8 +2320,7 @@ fn naturalize_wrapper_member_removal(
         s.inserted_nodes.retain(|n| n != removed && n != &final_id);
         if let Some(ref marker) = sub_route_marker {
             s.external_connections.retain(|c| {
-                !c.from.port.as_str().starts_with(marker)
-                    && !c.to.port.as_str().starts_with(marker)
+                !c.from.port.as_str().starts_with(marker) && !c.to.port.as_str().starts_with(marker)
             });
         }
     }
@@ -2325,7 +2342,9 @@ fn rename_host_node(editor: &Editor, host: &HostGraph, old_id: &NodeId, new_id: 
             None
         }
     };
-    let Some(renamed_node) = renamed_node else { return };
+    let Some(renamed_node) = renamed_node else {
+        return;
+    };
 
     // Rewrite connection endpoints in the host mirror. Build a list
     // of new Connection values (with the renamed endpoint) and the
@@ -2592,20 +2611,15 @@ fn confirm_minimize_subgraph(editor: &Editor, host: &HostGraph, group_id: GroupI
                 .write()
                 .unwrap()
                 .insert(updated.group_id.clone(), updated.clone());
-            writeback_expansion_to_subgraph(
-                &editor_for_save,
-                &host_for_save,
-                &updated,
-                &rename,
-            );
-            minimize_subgraph(
-                &editor_for_save,
-                &host_for_save,
-                updated.group_id.clone(),
-            );
+            writeback_expansion_to_subgraph(&editor_for_save, &host_for_save, &updated, &rename);
+            minimize_subgraph(&editor_for_save, &host_for_save, updated.group_id.clone());
         })
         .on_cancel(move || {
-            minimize_subgraph(&editor_for_discard, &host_for_discard, group_for_discard.clone());
+            minimize_subgraph(
+                &editor_for_discard,
+                &host_for_discard,
+                group_for_discard.clone(),
+            );
         })
         .show();
 }
@@ -2722,7 +2736,11 @@ fn open_context_menu(
     // Platform-aware modifier hint for shortcut display. Tabler's
     // own convention is "Ctrl+X" on win/linux and "⌘X" on macOS;
     // we follow that here.
-    let mod_key = if cfg!(target_os = "macos") { "⌘ + " } else { "Ctrl+" };
+    let mod_key = if cfg!(target_os = "macos") {
+        "⌘ + "
+    } else {
+        "Ctrl+"
+    };
 
     let mut menu = blinc_cn::context_menu().at(anchor.x, anchor.y);
     match target {
@@ -2736,13 +2754,9 @@ fn open_context_menu(
             let id_delete = id.clone();
 
             menu = menu
-                .item_with_shortcut(
-                    "Duplicate",
-                    format!("{mod_key}D"),
-                    move || {
-                        e_dup.push_event(EditorEvent::DuplicateNodesRequested(vec![id_dup.clone()]));
-                    },
-                )
+                .item_with_shortcut("Duplicate", format!("{mod_key}D"), move || {
+                    e_dup.push_event(EditorEvent::DuplicateNodesRequested(vec![id_dup.clone()]));
+                })
                 .item("Focus", move || {
                     e_focus.focus_on_node(&id_focus);
                 })
@@ -2756,29 +2770,24 @@ fn open_context_menu(
                     e_disable.set_node_disabled(&id_disable, !current);
                 })
                 .separator()
-                .item_with_shortcut(
-                    "Delete",
-                    "Shift+DEL",
-                    {
-                        let e_delete = editor.clone();
-                        move || {
-                            // Push an event instead of calling
-                            // `confirm_delete_nodes` directly. Either
-                            // path now works since `cn::context_menu`
-                            // closes the menu BEFORE running our cb()
-                            // (no more UnwindFromBelow cascade killing
-                            // freshly-pushed dialogs), but routing
-                            // through the event drain keeps all delete
-                            // chains symmetric: keyboard DEL, multi-
-                            // selection toolbar, and the context menu
-                            // all funnel into the same
-                            // `confirm_delete_nodes` site.
-                            e_delete.push_event(EditorEvent::DeleteNodesRequested(vec![
-                                id_delete.clone(),
-                            ]));
-                        }
-                    },
-                );
+                .item_with_shortcut("Delete", "Shift+DEL", {
+                    let e_delete = editor.clone();
+                    move || {
+                        // Push an event instead of calling
+                        // `confirm_delete_nodes` directly. Either
+                        // path now works since `cn::context_menu`
+                        // closes the menu BEFORE running our cb()
+                        // (no more UnwindFromBelow cascade killing
+                        // freshly-pushed dialogs), but routing
+                        // through the event drain keeps all delete
+                        // chains symmetric: keyboard DEL, multi-
+                        // selection toolbar, and the context menu
+                        // all funnel into the same
+                        // `confirm_delete_nodes` site.
+                        e_delete
+                            .push_event(EditorEvent::DeleteNodesRequested(vec![id_delete.clone()]));
+                    }
+                });
         }
         T::Edge(id) => {
             let e_delete = editor.clone();
@@ -2905,7 +2914,8 @@ fn open_context_menu(
                         "Force-directed",
                         tabler_svg_str(outline::AFFILIATE),
                         move || {
-                            e_force.set_layout_strategy(LayoutStrategy::Force(ForceConfig::default()));
+                            e_force
+                                .set_layout_strategy(LayoutStrategy::Force(ForceConfig::default()));
                             e_force.apply_layout();
                         },
                     )
@@ -2983,7 +2993,11 @@ fn confirm_delete_connection(
                 .iter()
                 .find(|c| c.id == id)
                 .cloned();
-            host_for_confirm.connections.write().unwrap().retain(|c| c.id != id);
+            host_for_confirm
+                .connections
+                .write()
+                .unwrap()
+                .retain(|c| c.id != id);
             editor_for_confirm.remove_connection(id);
             if let Some(prev) = prev {
                 history_for_confirm.lock().unwrap().push(
@@ -3018,7 +3032,8 @@ fn confirm_delete_nodes(
     } else {
         (
             format!("Delete {} nodes?", ids.len()),
-            "This will remove the selected nodes and every connection attached to them.".to_string(),
+            "This will remove the selected nodes and every connection attached to them."
+                .to_string(),
         )
     };
     let editor_for_confirm = editor.clone();
@@ -3032,8 +3047,7 @@ fn confirm_delete_nodes(
         .cancel_text("Cancel")
         .confirm_destructive(true)
         .on_confirm(move || {
-            let id_set: std::collections::HashSet<_> =
-                ids_for_confirm.iter().cloned().collect();
+            let id_set: std::collections::HashSet<_> = ids_for_confirm.iter().cloned().collect();
             let removed_nodes: Vec<NodeInstance<()>> = host_for_confirm
                 .nodes
                 .read()
@@ -3102,10 +3116,11 @@ fn confirm_delete_nodes(
             } else {
                 "Delete Nodes"
             };
-            history_for_confirm
-                .lock()
-                .unwrap()
-                .push(forward, EditorCommand::Composite(inverse), label);
+            history_for_confirm.lock().unwrap().push(
+                forward,
+                EditorCommand::Composite(inverse),
+                label,
+            );
             tracing::info!("deleted {} node(s)", ids_for_confirm.len());
         })
         .show();
@@ -3211,7 +3226,10 @@ fn open_inline_text_editor(
     // the cn::input / cn::textarea widget itself (bg, border,
     // shadow). We only need the spacing token for our id'd
     // wrapper's padding allowance.
-    let _ = (theme.color(ColorToken::SurfaceElevated), theme.color(ColorToken::Border));
+    let _ = (
+        theme.color(ColorToken::SurfaceElevated),
+        theme.color(ColorToken::Border),
+    );
     let padding = theme.spacing_value(blinc_theme::tokens::SpacingToken::Space2);
 
     // Estimate the popover footprint for window-bounds clamping
@@ -3339,9 +3357,7 @@ fn open_inline_text_editor(
             .as_ref()
             .map(|g| match field_for_save {
                 EditorField::Title => g.name == new_value,
-                EditorField::Description => {
-                    g.description.as_deref().unwrap_or("") == new_value
-                }
+                EditorField::Description => g.description.as_deref().unwrap_or("") == new_value,
             })
             .unwrap_or(false);
         if !unchanged {
@@ -3482,8 +3498,8 @@ fn open_inline_text_editor(
                         // inserts a newline). Title: plain Enter
                         // commits unconditionally — single-line
                         // input.
-                        let allow_newline = matches!(field_for_keys, EditorField::Description)
-                            && evt.shift;
+                        let allow_newline =
+                            matches!(field_for_keys, EditorField::Description) && evt.shift;
                         if !allow_newline {
                             (save_for_keys)();
                         }
@@ -3594,8 +3610,7 @@ fn open_inline_group_form(
             let unchanged = prev_group
                 .as_ref()
                 .map(|g| {
-                    g.name == new_title
-                        && g.description.as_deref().unwrap_or("") == new_description
+                    g.name == new_title && g.description.as_deref().unwrap_or("") == new_description
                 })
                 .unwrap_or(false);
             if unchanged {
@@ -3759,11 +3774,10 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
             div()
                 .min_w(110.0)
                 .flex_shrink_0()
-                .child(
-                    text(&label)
-                        .size(12.0)
-                        .color(token(ColorToken::TextSecondary, Color::rgb(0.65, 0.65, 0.70))),
-                )
+                .child(text(&label).size(12.0).color(token(
+                    ColorToken::TextSecondary,
+                    Color::rgb(0.65, 0.65, 0.70),
+                )))
         });
 
     // No manual `.bg(...)` here — the editor's `element()` paints
@@ -3793,7 +3807,10 @@ fn header_bar(
     div()
         .w_full()
         .h(56.0)
-        .bg(token(ColorToken::SurfaceElevated, Color::rgb(0.12, 0.12, 0.18)))
+        .bg(token(
+            ColorToken::SurfaceElevated,
+            Color::rgb(0.12, 0.12, 0.18),
+        ))
         .flex_row()
         .items_center()
         .justify_between()
@@ -3814,7 +3831,10 @@ fn header_bar(
                 .child(
                     text("Drag output ports → input ports. Scroll = zoom, drag bg = pan.")
                         .size(12.0)
-                        .color(token(ColorToken::TextSecondary, Color::rgb(0.55, 0.55, 0.65))),
+                        .color(token(
+                            ColorToken::TextSecondary,
+                            Color::rgb(0.55, 0.55, 0.65),
+                        )),
                 ),
         )
         // Search bar on the right — wired to

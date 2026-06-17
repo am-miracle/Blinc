@@ -483,13 +483,7 @@ impl RenderTree {
                         // interaction state.
                         let empty: std::collections::HashSet<crate::tree::LayoutNodeId> =
                             std::collections::HashSet::new();
-                        if !self.compound_matches(
-                            last_compound,
-                            svg_node,
-                            &empty,
-                            &empty,
-                            None,
-                        ) {
+                        if !self.compound_matches(last_compound, svg_node, &empty, &empty, None) {
                             false
                         } else if ancestor_segments.len() == 1 {
                             true

@@ -50,8 +50,8 @@ use blinc_core::{
 };
 
 use crate::path::{
-    extract_brush_info, tessellate_fill_with_tolerance, tessellate_stroke_with_tolerance,
-    DEFAULT_TESSELLATION_TOLERANCE,
+    DEFAULT_TESSELLATION_TOLERANCE, extract_brush_info, tessellate_fill_with_tolerance,
+    tessellate_stroke_with_tolerance,
 };
 use crate::primitives::{
     ClipType, FillType, GlassType, GpuGlassPrimitive, GpuPrimitive, PrimitiveBatch, PrimitiveType,
@@ -2406,7 +2406,7 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let brush_info = extract_brush_info(&brush);
 
         let tess_tolerance = scale_aware_tolerance(self.current_uniform_scale());
-            let mut tessellated = tessellate_fill_with_tolerance(path, &brush, tess_tolerance);
+        let mut tessellated = tessellate_fill_with_tolerance(path, &brush, tess_tolerance);
 
         let affine = self.current_affine();
         for vertex in &mut tessellated.vertices {
@@ -2452,7 +2452,8 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         // the rationale.
         if matches!(brush, Brush::Solid(_) | Brush::Gradient(_)) {
             let tess_tolerance = scale_aware_tolerance(self.current_uniform_scale());
-            let mut tessellated = tessellate_stroke_with_tolerance(path, stroke, &brush, tess_tolerance);
+            let mut tessellated =
+                tessellate_stroke_with_tolerance(path, stroke, &brush, tess_tolerance);
             let affine = self.current_affine();
             let per_vertex_colors = Self::sample_per_vertex_gradient(&tessellated, &brush);
             for vertex in &mut tessellated.vertices {
@@ -2482,7 +2483,8 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
         let brush_info = extract_brush_info(&brush);
 
         let tess_tolerance = scale_aware_tolerance(self.current_uniform_scale());
-            let mut tessellated = tessellate_stroke_with_tolerance(path, stroke, &brush, tess_tolerance);
+        let mut tessellated =
+            tessellate_stroke_with_tolerance(path, stroke, &brush, tess_tolerance);
 
         let affine = self.current_affine();
         for vertex in &mut tessellated.vertices {
@@ -2569,12 +2571,27 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                         eprintln!(
                             "[fill_rect#{:x}] solid bounds=({:.1},{:.1},{:.1},{:.1}) color=({:.3},{:.3},{:.3},{:.3}) cr=({:.1},{:.1},{:.1},{:.1}) clip={}({:.1},{:.1},{:.1},{:.1}) clip_r=({:.1},{:.1},{:.1},{:.1}) fg={}",
                             key & 0xFFFF,
-                            rect.x(), rect.y(), rect.width(), rect.height(),
-                            c.r, c.g, c.b, c.a,
-                            corner_radius.top_left, corner_radius.top_right,
-                            corner_radius.bottom_right, corner_radius.bottom_left,
-                            ct_name, cb[0], cb[1], cb[2], cb[3],
-                            cr[0], cr[1], cr[2], cr[3],
+                            rect.x(),
+                            rect.y(),
+                            rect.width(),
+                            rect.height(),
+                            c.r,
+                            c.g,
+                            c.b,
+                            c.a,
+                            corner_radius.top_left,
+                            corner_radius.top_right,
+                            corner_radius.bottom_right,
+                            corner_radius.bottom_left,
+                            ct_name,
+                            cb[0],
+                            cb[1],
+                            cb[2],
+                            cb[3],
+                            cr[0],
+                            cr[1],
+                            cr[2],
+                            cr[3],
                             self.is_foreground,
                         );
                     }
@@ -2591,8 +2608,15 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                         eprintln!(
                             "[fill_rect#{:x}] GRADIENT bounds=({:.1},{:.1},{:.1},{:.1}) clip={}({:.1},{:.1},{:.1},{:.1})",
                             key & 0xFFFF,
-                            rect.x(), rect.y(), rect.width(), rect.height(),
-                            ct_name, cb[0], cb[1], cb[2], cb[3],
+                            rect.x(),
+                            rect.y(),
+                            rect.width(),
+                            rect.height(),
+                            ct_name,
+                            cb[0],
+                            cb[1],
+                            cb[2],
+                            cb[3],
                         );
                     }
                 }
@@ -2886,7 +2910,12 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                 _ => (1.0, 0.0, 6.0 - hue * 6.0),
             };
             let outline = Color::rgba(r, g, b, 0.95);
-            self.stroke_rect(rect, corner_radius, &Stroke::new(1.0), Brush::Solid(outline));
+            self.stroke_rect(
+                rect,
+                corner_radius,
+                &Stroke::new(1.0),
+                Brush::Solid(outline),
+            );
         }
     }
 
@@ -3161,13 +3190,28 @@ impl<'a> DrawContext for GpuPaintContext<'a> {
                 eprintln!(
                     "[stroke_rect#{:x}] bounds=({:.1},{:.1},{:.1},{:.1}) w={:.1} color=({:.3},{:.3},{:.3},{:.3}) cr=({:.1},{:.1},{:.1},{:.1}) clip={}({:.1},{:.1},{:.1},{:.1}) clip_r=({:.1},{:.1},{:.1},{:.1}) fg={}",
                     key & 0xFFFF,
-                    rect.x(), rect.y(), rect.width(), rect.height(),
+                    rect.x(),
+                    rect.y(),
+                    rect.width(),
+                    rect.height(),
                     stroke.width,
-                    color[0], color[1], color[2], color[3],
-                    corner_radius.top_left, corner_radius.top_right,
-                    corner_radius.bottom_right, corner_radius.bottom_left,
-                    ct_name, clip_bounds[0], clip_bounds[1], clip_bounds[2], clip_bounds[3],
-                    clip_radius[0], clip_radius[1], clip_radius[2], clip_radius[3],
+                    color[0],
+                    color[1],
+                    color[2],
+                    color[3],
+                    corner_radius.top_left,
+                    corner_radius.top_right,
+                    corner_radius.bottom_right,
+                    corner_radius.bottom_left,
+                    ct_name,
+                    clip_bounds[0],
+                    clip_bounds[1],
+                    clip_bounds[2],
+                    clip_bounds[3],
+                    clip_radius[0],
+                    clip_radius[1],
+                    clip_radius[2],
+                    clip_radius[3],
                     self.is_foreground,
                 );
             }

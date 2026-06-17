@@ -118,7 +118,13 @@ impl RenderTree {
                 SelectorPart::Is(selectors) => {
                     // :is(sel1, sel2, ...) — matches if ANY inner selector matches
                     let any_match = selectors.iter().any(|s| {
-                        self.compound_matches(s, node_id, hovered_nodes, pressed_nodes, focused_node)
+                        self.compound_matches(
+                            s,
+                            node_id,
+                            hovered_nodes,
+                            pressed_nodes,
+                            focused_node,
+                        )
                     });
                     if !any_match {
                         return false;

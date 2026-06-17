@@ -31,11 +31,11 @@ use blinc_animation::get_scheduler;
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
 use blinc_canvas_kit::AutoFramer;
+use blinc_canvas_kit::InputState;
 use blinc_canvas_kit::prelude::*;
 use blinc_core::events::KeyCode;
 use blinc_core::{Color, DrawContext, Light, Mat4, MeshData, State, Vec3};
 use blinc_gltf::{GltfAnimation, GltfScene};
-use blinc_canvas_kit::InputState;
 use blinc_layout::prelude::text;
 use web_time::Instant;
 

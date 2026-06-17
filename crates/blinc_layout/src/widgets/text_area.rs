@@ -2360,8 +2360,7 @@ impl TextArea {
                 let (start, end) = data.order_positions(sel_start, data.cursor);
                 if start != end {
                     let sel_color = config.selection_color;
-                    let use_visual_lines =
-                        config.wrap && !data.visual_lines.is_empty();
+                    let use_visual_lines = config.wrap && !data.visual_lines.is_empty();
                     if use_visual_lines {
                         for (vl_idx, vl) in data.visual_lines.iter().enumerate() {
                             // Skip visual lines outside [start.line, end.line].
@@ -2468,15 +2467,13 @@ impl TextArea {
                                 line_char_count
                             };
                             let x_start = if col_start > 0 {
-                                let before: String =
-                                    line_text.chars().take(col_start).collect();
+                                let before: String = line_text.chars().take(col_start).collect();
                                 crate::text_measure::measure_text(&before, config.font_size).width
                             } else {
                                 0.0
                             };
                             let x_end = if col_end > 0 {
-                                let before: String =
-                                    line_text.chars().take(col_end).collect();
+                                let before: String = line_text.chars().take(col_end).collect();
                                 crate::text_measure::measure_text(&before, config.font_size).width
                             } else {
                                 0.0

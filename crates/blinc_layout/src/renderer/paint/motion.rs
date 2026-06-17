@@ -1760,9 +1760,7 @@ impl RenderTree {
                                 .borrow_mut()
                                 .insert(node, record);
                         } else {
-                            self.canvas_paint_records
-                                .borrow_mut()
-                                .insert(node, record);
+                            self.canvas_paint_records.borrow_mut().insert(node, record);
                         }
 
                         // Compositor v2 parallel-populate: every

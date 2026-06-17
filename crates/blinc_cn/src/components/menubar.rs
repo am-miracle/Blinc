@@ -916,20 +916,19 @@ fn build_menubar_menu_div(
                 // `.cn-menubar-content:has(.cn-menubar-item--has-submenu:hover)`.
                 row = row.class("cn-menubar-item--has-submenu");
             }
-            row = row
-                .on_click(move |_| {
-                    if !item_disabled && !has_submenu {
-                        // Close root FIRST so `cb()`-pushed overlays (e.g.
-                        // a confirm dialog) aren't immediately
-                        // cascade-closed by the menubar's
-                        // `UnwindFromBelow`. See cn::context_menu for the
-                        // full rationale + verified trace.
-                        root_handle.close();
-                        if let Some(ref cb) = item_on_click {
-                            cb();
-                        }
+            row = row.on_click(move |_| {
+                if !item_disabled && !has_submenu {
+                    // Close root FIRST so `cb()`-pushed overlays (e.g.
+                    // a confirm dialog) aren't immediately
+                    // cascade-closed by the menubar's
+                    // `UnwindFromBelow`. See cn::context_menu for the
+                    // full rationale + verified trace.
+                    root_handle.close();
+                    if let Some(ref cb) = item_on_click {
+                        cb();
                     }
-                });
+                }
+            });
 
             // Submenu hover-to-open at this level.
             if has_submenu && !item_disabled {

@@ -466,19 +466,11 @@ impl RenderTree {
                 // registration. This is the path spring-animated
                 // `.w()` / `.h()` / `.left()` take.
                 needs_layout = true;
-                self.update_subtree_layout_recursive(
-                    rebuild.parent_id,
-                    &rebuild.new_child,
-                    router,
-                );
+                self.update_subtree_layout_recursive(rebuild.parent_id, &rebuild.new_child, router);
             } else {
                 // Visual-only update - just update render props of existing children
                 // Don't remove/rebuild, just walk the tree and update props
-                self.update_subtree_props_recursive(
-                    rebuild.parent_id,
-                    &rebuild.new_child,
-                    router,
-                );
+                self.update_subtree_props_recursive(rebuild.parent_id, &rebuild.new_child, router);
             }
         }
 
@@ -589,11 +581,7 @@ impl RenderTree {
                 }
 
                 if !new_child.children_builders().is_empty() {
-                    self.update_subtree_layout_from_builder(
-                        *child_id,
-                        new_child.as_ref(),
-                        router,
-                    );
+                    self.update_subtree_layout_from_builder(*child_id, new_child.as_ref(), router);
                 }
             }
         }
@@ -661,11 +649,7 @@ impl RenderTree {
 
                 // Recursively update grandchildren
                 if !new_child.children_builders().is_empty() {
-                    self.update_subtree_props_from_builder(
-                        *child_id,
-                        new_child.as_ref(),
-                        router,
-                    );
+                    self.update_subtree_props_from_builder(*child_id, new_child.as_ref(), router);
                 }
             }
         }

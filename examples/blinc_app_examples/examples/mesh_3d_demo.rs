@@ -45,11 +45,11 @@ use std::sync::{Arc, OnceLock};
 use blinc_animation::get_scheduler;
 use blinc_app::prelude::*;
 use blinc_app::windowed::WindowedContext;
+use blinc_canvas_kit::InputState;
 use blinc_canvas_kit::prelude::*;
 use blinc_core::{
     AlphaMode, Color, Light, Mat4, Material, MeshData, State, TextureData, Vec3, Vertex,
 };
-use blinc_canvas_kit::InputState;
 
 const HELMET_GLTF_DIR: &str = "examples/blinc_app_examples/examples/assets/3d/DamagedHelmet";
 const HDR_PATH: &str = "examples/blinc_app_examples/examples/assets/3d/rogland_clear_night_2k.hdr";

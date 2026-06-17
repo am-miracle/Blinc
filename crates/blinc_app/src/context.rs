@@ -1332,10 +1332,7 @@ impl RenderContext {
             //     any canvas closure that pushes a polygon clip
             //     (e.g. cn::spinner arcs once those were canvas-
             //     hosted) — same garbage-read failure mode.
-            Self::shift_aux_offsets(
-                &mut new_batch.primitives,
-                overlay.aux_data.len() as f32,
-            );
+            Self::shift_aux_offsets(&mut new_batch.primitives, overlay.aux_data.len() as f32);
 
             overlay.aux_data.extend(new_batch.aux_data);
             overlay.primitives.extend(new_batch.primitives);
@@ -5644,10 +5641,7 @@ impl RenderContext {
         // nested composite-promoted ancestors correctly — descendants
         // multiply their effective opacity from the outermost composite
         // ancestor through to the innermost.
-        let composite_layer_opacities: std::collections::HashMap<
-            blinc_layout::LayoutNodeId,
-            f32,
-        > = {
+        let composite_layer_opacities: std::collections::HashMap<blinc_layout::LayoutNodeId, f32> = {
             let promo = tree.composite_promotion();
             let store = tree.css_anim_store();
             if let Ok(guard) = store.lock() {
@@ -5655,9 +5649,10 @@ impl RenderContext {
                     .iter()
                     .filter_map(|&layout| {
                         let stable = tree.stable_id(layout)?;
-                        let anim = guard.animations.get(&stable).or_else(|| {
-                            guard.transitions.get(&stable)
-                        })?;
+                        let anim = guard
+                            .animations
+                            .get(&stable)
+                            .or_else(|| guard.transitions.get(&stable))?;
                         if !anim.is_playing {
                             return None;
                         }
@@ -5776,10 +5771,7 @@ impl RenderContext {
         // this map multiply the composite-layer opacity into each
         // collected element's per-channel alpha so glyphs / SVGs /
         // images fade in / out in sync with the BG bake.
-        composite_layer_opacities: &std::collections::HashMap<
-            blinc_layout::LayoutNodeId,
-            f32,
-        >,
+        composite_layer_opacities: &std::collections::HashMap<blinc_layout::LayoutNodeId, f32>,
         // Effective composite-layer opacity inherited from the nearest
         // composite-promoted ancestor (multiplied through nested
         // promotions). Multiplied into descendant text / SVG / image
@@ -5859,10 +5851,8 @@ impl RenderContext {
         // descendants' glyphs / SVGs / images fade in lockstep with
         // the composite blit. Identity (1.0) for nodes that are not
         // themselves composite-promoted.
-        let node_composite_layer_opacity = composite_layer_opacities
-            .get(&node)
-            .copied()
-            .unwrap_or(1.0);
+        let node_composite_layer_opacity =
+            composite_layer_opacities.get(&node).copied().unwrap_or(1.0);
         let effective_composite_layer_opacity =
             inherited_composite_layer_opacity * node_composite_layer_opacity;
         let effective_motion_translate = (
