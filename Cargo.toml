@@ -236,3 +236,10 @@ blinc_svg = { path = "crates/blinc_svg" }
 # path target exists, so CI builds without `/packages/` skip it.
 [patch."https://github.com/project-blinc/blinc_canvas_kit.git"]
 blinc_canvas_kit = { path = "packages/blinc_canvas_kit" }
+
+# Sibling downstream `blinc_portal_ui` lives in its own repo too — same
+# rationale as the canvas_kit patch above: keep the path-dep'd
+# `/packages/blinc_node_editor` and the git-pinned downstream
+# resolved against the same in-graph copy.
+[patch."https://github.com/project-blinc/blinc_portal_ui.git"]
+blinc_portal_ui = { path = "packages/blinc_portal_ui" }
