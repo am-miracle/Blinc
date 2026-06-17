@@ -96,29 +96,20 @@ blinc_media = { path = "../../crates/blinc_media", optional = true }
 # `canvas` and `gltf` features below; default builds don't touch
 # any of these git URLs. `blinc_input` was later absorbed into
 # `canvas_kit` directly so the standalone crate no longer exists.
-# LOCAL-DEV OVERRIDE — `blinc_canvas_kit` is path-dep'd directly so
-# it shares a single source-id with the `packages/blinc_node_editor`
-# crate's own path dep. The workspace `[patch]` redirect for the
-# canvas_kit git URL only applies to deps that REQUEST the git URL;
-# a direct path dep here is what guarantees cargo unifies both
-# consumers onto the SAME local copy. Without this, the example
-# pulled the git rev (5dbdad2…) while node_editor pulled the path,
-# producing two parallel `CanvasBackground` / `CanvasKit` types
-# that `editor.element()` and the host's call site refused to
-# unify — visible as `mismatched types` errors with the
-# "multiple different versions of crate `blinc_canvas_kit`" note.
-#
-# Restore the git pin (and reactivate the workspace `[patch]` for
-# it) before publishing — local dev only.
-blinc_canvas_kit = { path = "../../packages/blinc_canvas_kit", optional = true }
-# Standalone downstream package — colocated under `/packages/` (gitignored,
-# workspace-excluded). Path-dep keeps local-dev iteration fast; no git
-# rev to bump in lockstep. Gated behind `node-editor` so default builds
-# don't pull the editor's rayon/taffy chain.
-blinc_node_editor = { path = "../../packages/blinc_node_editor", optional = true }
-# Immediate-mode widget toolkit used by node-editor's `with_content`
-# closures. Gated behind the same `node-editor` feature.
-blinc_portal_ui = { path = "../../packages/blinc_portal_ui", optional = true }
+# All three are git-pinned to their upstream revs; the workspace
+# `[patch]` block redirects each URL to the colocated
+# `packages/<name>/` checkout when one exists (local dev) and is
+# silently skipped on fresh clones (CI / downstream consumers).
+# That lets cargo unify both `[dependencies]` slots and any
+# transitive resolution onto the SAME local source whenever the
+# packages dir is present, while a fresh clone still resolves the
+# git rev normally. Path-deps here would fail in CI: cargo
+# validates path-dep manifests at resolve time even when the dep
+# is optional + gated, and the gitignored `/packages/` directory
+# isn't present.
+blinc_canvas_kit = { git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "3bc3f570dbe16e8f72c892e9fbad64cb7cd9af95", optional = true }
+blinc_node_editor = { git = "https://github.com/project-blinc/blinc_node_editor.git", rev = "2e838db671bd78c8c2793ff4313b5cac39c99757", optional = true }
+blinc_portal_ui = { git = "https://github.com/project-blinc/blinc_portal_ui.git", rev = "e3fdf53889218aea54590a4581c5733986b97086", optional = true }
 blinc_gltf = { git = "https://github.com/project-blinc/blinc_gltf.git", rev = "1c1e7105bec95faa4e9f13cb25d2548113149b14", features = ["platform-assets", "bc-encode"], optional = true }
 blinc_skeleton = { git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "4cd786055f0b4649b23b96934778c2fad8ac8d65", optional = true }
 

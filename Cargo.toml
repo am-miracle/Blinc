@@ -196,13 +196,16 @@ opt-level = "z"
 panic = "abort"
 strip = "symbols"
 
-# Local-dev path-patch for downstream `/packages/blinc_*` crates so
-# their pinned git deps resolve back to this workspace. CI builds
-# without `/packages/` checked out skip the patch (resolver only
-# applies patches whose `path` exists). `blinc_gpu` is patched too —
-# without it, pinned `packages/*` would compile their own GPU code
-# against the local `blinc_core`, breaking exhaustive matches on
-# any new `BuiltinVar` / `ClipShape` variant.
+# Path-patch for downstream `/packages/blinc_*` crates so their
+# pinned git deps on `Blinc.git` (blinc_core / blinc_layout /
+# blinc_gpu / etc.) resolve back to this workspace's `crates/*`
+# tree. The crates always exist on every checkout — including CI —
+# so this block stays active everywhere.
+#
+# `blinc_gpu` is patched here too: without it, pinned `packages/*`
+# would compile their own GPU code against the local `blinc_core`,
+# breaking exhaustive matches on any new `BuiltinVar` / `ClipShape`
+# variant.
 [patch."https://github.com/project-blinc/Blinc.git"]
 blinc_core = { path = "crates/blinc_core" }
 # blinc_animation patched too — `/packages/blinc_node_editor` needs
@@ -226,14 +229,27 @@ blinc_theme = { path = "crates/blinc_theme" }
 # the pinned git rev.
 blinc_svg = { path = "crates/blinc_svg" }
 
+# Local-dev redirects for the /packages/* sibling crates.
+#
+# Everything below this marker is stripped by `scripts/ci-strip-
+# local-patch.sh` before cargo runs in CI — the `/packages/`
+# directory is gitignored and isn't present on a fresh CI clone,
+# so the path-target lookups fail at resolve time even though the
+# patched deps are optional + feature-gated. On local dev the
+# packages dir IS present, the redirects fire, and every consumer
+# (workspace example, sibling /packages/ crates) resolves to the
+# SAME local source for canvas_kit / portal_ui / node_editor.
+#
+# DO NOT add patches above this marker — the strip script removes
+# from this comment line onwards.
+
 # Patch the sibling downstream `blinc_canvas_kit` git URL to the
 # local `packages/blinc_canvas_kit` copy. Without this entry, the
 # example crate's git dep on canvas_kit (at a pinned rev) and the
 # path-dep that `/packages/blinc_node_editor` uses end up as two
 # different in-graph copies — `editor.element()` returns one
 # version's `Div` while the example imports the other's, and the
-# types refuse to unify. Cargo only applies the patch when the
-# path target exists, so CI builds without `/packages/` skip it.
+# types refuse to unify.
 [patch."https://github.com/project-blinc/blinc_canvas_kit.git"]
 blinc_canvas_kit = { path = "packages/blinc_canvas_kit" }
 
@@ -243,3 +259,10 @@ blinc_canvas_kit = { path = "packages/blinc_canvas_kit" }
 # resolved against the same in-graph copy.
 [patch."https://github.com/project-blinc/blinc_portal_ui.git"]
 blinc_portal_ui = { path = "packages/blinc_portal_ui" }
+
+# `blinc_node_editor` lives in its own repo as well. Same rationale
+# as canvas_kit / portal_ui: redirect the git URL to the local
+# checkout for source-local iteration, silently skip the patch on
+# fresh clones (CI) where `/packages/` isn't present.
+[patch."https://github.com/project-blinc/blinc_node_editor.git"]
+blinc_node_editor = { path = "packages/blinc_node_editor" }
