@@ -2011,12 +2011,7 @@ impl WebApp {
         // the event router there.
         let focused = blinc_layout::widgets::text_input::focused_editable_node_id();
         if focused.is_none() {
-            Self::dispatch_mouse_down(
-                app,
-                canvas_x,
-                canvas_y,
-                blinc_platform::MouseButton::Right,
-            );
+            Self::dispatch_mouse_down(app, canvas_x, canvas_y, blinc_platform::MouseButton::Right);
             // Pair the DOWN with an UP at the same point so handlers
             // that key off press+release (and the event router's
             // pressed-target reset) don't strand the canvas in a
@@ -2024,12 +2019,7 @@ impl WebApp {
             // already fires on POINTER_DOWN via the layout filter, so
             // a missing UP wouldn't bury the menu — but the router's
             // book-keeping would stay dirty.
-            Self::dispatch_mouse_up(
-                app,
-                canvas_x,
-                canvas_y,
-                blinc_platform::MouseButton::Right,
-            );
+            Self::dispatch_mouse_up(app, canvas_x, canvas_y, blinc_platform::MouseButton::Right);
             let _ = (page_x, page_y);
             return;
         }
@@ -2273,23 +2263,8 @@ impl WebApp {
                     (0.0, 0.0)
                 };
                 tree.dispatch_event_full(
-                    node,
-                    event_type,
-                    mx,
-                    my,
-                    local_x,
-                    local_y,
-                    bx,
-                    by,
-                    bw,
-                    bh,
-                    dx,
-                    dy,
-                    /* pinch_scale */ 1.0,
-                    mods.shift,
-                    mods.ctrl,
-                    mods.alt,
-                    mods.meta,
+                    node, event_type, mx, my, local_x, local_y, bx, by, bw, bh, dx, dy,
+                    /* pinch_scale */ 1.0, mods.shift, mods.ctrl, mods.alt, mods.meta,
                 );
             }
         }
@@ -2401,8 +2376,7 @@ impl WebApp {
         // And the layer textures themselves — their content-space
         // sizing was computed against the previous physical width
         // and won't match the new one.
-        app.blinc_app
-            .drain_all_layer_textures("window_resized");
+        app.blinc_app.drain_all_layer_textures("window_resized");
     }
 
     /// Install (or replace) the UI builder closure.

@@ -3704,8 +3704,11 @@ impl RenderContext {
                 // web (sample_count = 1) still gets fill_path content.
                 if fg_batch.has_paths() {
                     if use_msaa_overlay {
-                        self.renderer
-                            .render_paths_overlay_msaa(target, &fg_batch, self.sample_count);
+                        self.renderer.render_paths_overlay_msaa(
+                            target,
+                            &fg_batch,
+                            self.sample_count,
+                        );
                     } else {
                         self.renderer.render_paths_overlay(target, &fg_batch);
                     }
@@ -3736,8 +3739,11 @@ impl RenderContext {
                 // branch above.
                 if fg_batch.has_paths() {
                     if use_msaa_overlay {
-                        self.renderer
-                            .render_paths_overlay_msaa(target, &fg_batch, self.sample_count);
+                        self.renderer.render_paths_overlay_msaa(
+                            target,
+                            &fg_batch,
+                            self.sample_count,
+                        );
                     } else {
                         self.renderer.render_paths_overlay(target, &fg_batch);
                     }
@@ -3827,8 +3833,11 @@ impl RenderContext {
                 // 1×-sample fallback dispatch so web still emits.
                 if fg_batch.has_paths() {
                     if use_msaa_overlay {
-                        self.renderer
-                            .render_paths_overlay_msaa(target, &fg_batch, self.sample_count);
+                        self.renderer.render_paths_overlay_msaa(
+                            target,
+                            &fg_batch,
+                            self.sample_count,
+                        );
                     } else {
                         self.renderer.render_paths_overlay(target, &fg_batch);
                     }
@@ -3858,8 +3867,11 @@ impl RenderContext {
                 // web emits fill_path / stroke_path content.
                 if fg_batch.has_paths() {
                     if use_msaa_overlay {
-                        self.renderer
-                            .render_paths_overlay_msaa(target, &fg_batch, self.sample_count);
+                        self.renderer.render_paths_overlay_msaa(
+                            target,
+                            &fg_batch,
+                            self.sample_count,
+                        );
                     } else {
                         self.renderer.render_paths_overlay(target, &fg_batch);
                     }
@@ -9852,8 +9864,11 @@ impl RenderContext {
                 // targets still dispatch fill_path / stroke_path.
                 if z0_batch.has_paths() {
                     if use_msaa_overlay {
-                        self.renderer
-                            .render_paths_overlay_msaa(target, &z0_batch, self.sample_count);
+                        self.renderer.render_paths_overlay_msaa(
+                            target,
+                            &z0_batch,
+                            self.sample_count,
+                        );
                     } else {
                         self.renderer.render_paths_overlay(target, &z0_batch);
                     }
