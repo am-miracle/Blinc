@@ -107,6 +107,14 @@ krio-core      = { git = "https://github.com/darmie/krio.git", rev = "fe0177c" }
 wgpu = "=26.0.1"
 wgpu-hal = "=26.0.5"
 naga = "=26.0.0"
+# `gpu-alloc 0.6.1` was published as a patch but introduces a
+# breaking `AsRef<MD>` bound on `GpuAllocator::{alloc,dealloc,cleanup}`
+# that `wgpu-hal 26.0.5` (authored against 0.6.0) does not satisfy.
+# Pin to `=0.6.0` so cargo's unification can't pick up the broken
+# patch when the [patch] block is stripped on CI and re-resolution
+# happens. `blinc_gpu` declares `gpu-alloc.workspace = true` so the
+# pin propagates without any source import.
+gpu-alloc = "=0.6.0"
 bytemuck = { version = "1.14", features = ["derive"] }
 
 # Layout engine

@@ -52,6 +52,13 @@ wgpu.workspace = true
 # blinc_gpu is the natural home since it already owns every other
 # wgpu touchpoint.
 wgpu-hal.workspace = true
+# Declared but not imported here. Workspace pins `gpu-alloc = "=0.6.0"`
+# to keep the resolver off `0.6.1`, whose breaking `AsRef<MD>` bound
+# on `GpuAllocator::{alloc,dealloc,cleanup}` doesn't satisfy
+# `wgpu-hal 26.0.5`. The pin only propagates if some workspace crate
+# declares `gpu-alloc` directly; blinc_gpu is the natural home next
+# to the wgpu-hal touchpoint above.
+gpu-alloc.workspace = true
 naga.workspace = true
 bytemuck.workspace = true
 
