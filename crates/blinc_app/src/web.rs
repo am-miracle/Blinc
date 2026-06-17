@@ -2585,22 +2585,26 @@ impl WebApp {
             }
             if needs_relayout {
                 // Mirror windowed.rs:5088 — a structural rebuild
-                // produces fresh element ids / positions; any
-                // composite layer or motion-subtree texture baked
-                // against the old tree must be dropped so the next
-                // paint repopulates from the new state. Without this
-                // the overlay opens and queues a rebuild, the
-                // rebuild renames node ids, but the cached texture
-                // keeps blitting the old content-space coords.
+                // produces fresh element ids / positions; the batch
+                // caches keyed against the old tree must be dropped
+                // so the next paint repopulates from the new state.
                 self.blinc_app
                     .invalidate_render_cache_tagged("subtree_rebuild_applied");
-                // Subtree rebuilds invalidate the SCRATCH HASH input
-                // (different node ids → different bake key), but the
-                // per-key dirty-skip can still match on identical
-                // primitive bytes from an unrelated subtree. Drop
-                // every layer texture so the new tree starts clean.
-                self.blinc_app
-                    .drain_all_layer_textures("subtree_rebuild_applied");
+                // NOTE: we DO NOT drain `css_composited_textures` /
+                // `motion_subtree_textures` here. A subtree rebuild
+                // fired when a child overlay (submenu, context menu)
+                // mounts — draining at that point wipes the surviving
+                // parent overlay's CSS-promoted texture and the next
+                // bake captures frame-1 of the still-running enter
+                // animation (opacity ≈ 0), then the per-key hash-skip
+                // refuses to re-bake while the closure emits the
+                // same primitives. Result: parent / freshly-mounted
+                // overlay frozen near-invisible until a mouse-move
+                // trips a different invalidation. See
+                // `gotcha-css-anim-eager-drain` for the same shape on
+                // desktop (resolved via `sweep_stale_css_animations`
+                // — which runs as part of the rebuild walker and
+                // handles texture-side invalidation surgically).
                 if let Some(ref mut tree) = self.current_tree {
                     // Mirror windowed.rs:3660-3676: after subtree
                     // rebuilds, the new children need CSS layout
@@ -2782,12 +2786,12 @@ impl WebApp {
                 }
                 if needs_relayout {
                     // Animation-driven subtree rebuilds also need the
-                    // cache wipe — same rationale as the Phase-2
-                    // subtree-rebuild block above.
+                    // batch-cache wipe — same rationale as the
+                    // Phase-2 subtree-rebuild block above. Layer
+                    // textures are intentionally NOT drained here
+                    // for the same enter-animation-restart reason.
                     self.blinc_app
                         .invalidate_render_cache_tagged("animation_subtree_rebuild_applied");
-                    self.blinc_app
-                        .drain_all_layer_textures("animation_subtree_rebuild_applied");
                     if let Some(ref mut tree) = self.current_tree {
                         tree.compute_layout(self.ctx.width, self.ctx.height);
                     }
@@ -2843,11 +2847,15 @@ impl WebApp {
             let time_sec = now as f64 / 1000.0;
             let registry = Arc::clone(self.ctx.element_registry());
             let router = &self.ctx.event_router;
+            let tree_for_hover = self.current_tree.as_ref();
             self.ctx
                 .pointer_query
                 .update(mx, my, is_pressed, dt_sec, time_sec, |id| {
                     let node = registry.get(id)?;
-                    if router.is_hovered(node) {
+                    // is_hovered is stable-id-keyed now; use the
+                    // layout-id shim that resolves via the tree.
+                    let tree = tree_for_hover?;
+                    if router.is_hovered_layout(tree, node) {
                         router.get_node_bounds(node)
                     } else {
                         None

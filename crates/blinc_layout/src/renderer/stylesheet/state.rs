@@ -335,14 +335,14 @@ impl RenderTree {
                 continue;
             }
 
-            // Get current interaction state from router. `is_pressed`
-            // is keyed by stable id so it survives rebuilds; resolve
+            // Get current interaction state from router. Both
+            // `is_hovered` and `is_pressed` are keyed by stable id
+            // (they survive rebuilds — see
+            // `gotcha_event_router_layout_id_staleness`); resolve
             // the layout id to a stable id before asking.
-            let hovered = router.is_hovered(node_id);
-            let pressed = self
-                .stable_id(node_id)
-                .map(|s| router.is_pressed(s))
-                .unwrap_or(false);
+            let stable = self.stable_id(node_id);
+            let hovered = stable.is_some_and(|s| router.is_hovered(s));
+            let pressed = stable.is_some_and(|s| router.is_pressed(s));
             let focused = router.is_focused(node_id);
 
             // Apply state styles
@@ -459,8 +459,13 @@ impl RenderTree {
                 }
             }
 
-            // Hover state (overrides base)
-            if router.is_hovered(node_id) {
+            // Hover state (overrides base) — router stores hover by
+            // stable id (survives rebuilds); resolve the layout id
+            // first.
+            if self
+                .stable_id(node_id)
+                .is_some_and(|s| router.is_hovered(s))
+            {
                 if let Some(hover) = stylesheet.get_with_state(element_id, ElementState::Hover) {
                     if let Some(ref dps) = hover.dynamic_properties {
                         dynamic_props.extend(dps.iter());

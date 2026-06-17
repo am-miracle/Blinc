@@ -6451,11 +6451,21 @@ impl WindowedApp {
                                     mx, my, is_pressed, dt_sec, time_sec,
                                     |id| {
                                         let node = element_registry.get(id)?;
-                                        if windowed_ctx.event_router.is_hovered(node) {
-                                            windowed_ctx.event_router.get_node_bounds(node)
-                                        } else {
-                                            None
+                                        // is_hovered is stable-id-keyed
+                                        // now (see event_router doc);
+                                        // use the layout-id shim that
+                                        // resolves internally.
+                                        if let Some(ref tree) = ws.render_tree {
+                                            if windowed_ctx
+                                                .event_router
+                                                .is_hovered_layout(tree, node)
+                                            {
+                                                return windowed_ctx
+                                                    .event_router
+                                                    .get_node_bounds(node);
+                                            }
                                         }
+                                        None
                                     },
                                 );
                                 // Evaluate dynamic calc(env(...)) properties with current pointer state

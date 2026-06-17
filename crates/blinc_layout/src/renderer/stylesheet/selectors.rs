@@ -401,7 +401,14 @@ impl RenderTree {
         }
 
         // Collect current interaction state into sets for efficient lookup
-        let hovered_nodes: HashSet<LayoutNodeId> = router.hovered_nodes().collect();
+        // `router.hovered_nodes()` is now stable-id-keyed (so a
+        // subtree rebuild between mouse-moves doesn't fake an
+        // unhover); resolve back to live layout ids for the
+        // `contains(layout_id)` checks below.
+        let hovered_nodes: HashSet<LayoutNodeId> = router
+            .hovered_nodes()
+            .filter_map(|s| self.layout_id(s))
+            .collect();
         let pressed_nodes: HashSet<LayoutNodeId> =
             router.pressed_target(self).into_iter().collect();
         // Use the router's focused node directly. Previously we walked
@@ -674,7 +681,14 @@ impl RenderTree {
         if complex_rules.is_empty() {
             return false;
         }
-        let hovered_nodes: HashSet<LayoutNodeId> = router.hovered_nodes().collect();
+        // `router.hovered_nodes()` is now stable-id-keyed (so a
+        // subtree rebuild between mouse-moves doesn't fake an
+        // unhover); resolve back to live layout ids for the
+        // `contains(layout_id)` checks below.
+        let hovered_nodes: HashSet<LayoutNodeId> = router
+            .hovered_nodes()
+            .filter_map(|s| self.layout_id(s))
+            .collect();
         let pressed_nodes: HashSet<LayoutNodeId> =
             router.pressed_target(self).into_iter().collect();
         let focused_node: Option<LayoutNodeId> = router.focused();
@@ -737,7 +751,14 @@ impl RenderTree {
         }
 
         // Collect interaction state
-        let hovered_nodes: HashSet<LayoutNodeId> = router.hovered_nodes().collect();
+        // `router.hovered_nodes()` is now stable-id-keyed (so a
+        // subtree rebuild between mouse-moves doesn't fake an
+        // unhover); resolve back to live layout ids for the
+        // `contains(layout_id)` checks below.
+        let hovered_nodes: HashSet<LayoutNodeId> = router
+            .hovered_nodes()
+            .filter_map(|s| self.layout_id(s))
+            .collect();
         let pressed_nodes: HashSet<LayoutNodeId> =
             router.pressed_target(self).into_iter().collect();
         let focused_node: Option<LayoutNodeId> = {

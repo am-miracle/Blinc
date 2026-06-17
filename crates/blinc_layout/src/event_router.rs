@@ -117,8 +117,20 @@ pub struct EventRouter {
     last_hit_bounds_width: f32,
     last_hit_bounds_height: f32,
 
-    /// Elements currently under the pointer (for enter/leave tracking)
-    hovered: HashSet<LayoutNodeId>,
+    /// Elements currently under the pointer, keyed by `StableNodeId`
+    /// so a subtree rebuild between mouse-moves doesn't invalidate
+    /// the set. Pre-fix this was `HashSet<LayoutNodeId>` and any
+    /// rebuild (the OverlayStack rebuilds the overlay layer when a
+    /// submenu mounts, for instance) replaced layout ids for the
+    /// same logical elements → the next mouse-move's hit test saw
+    /// "all new" ids → diff fired POINTER_LEAVE on the (now-dead)
+    /// old ids AND POINTER_ENTER on the new ones for unchanged
+    /// hover state → cn::context_menu's submenu trigger ran its
+    /// `on_hover_enter` close-and-reopen logic on every mouse move,
+    /// re-spawning the submenu and restarting its enter animation =
+    /// constant flicker. Mirrors `pressed_target`'s `StableNodeId`
+    /// keying — see `gotcha_event_router_layout_id_staleness`.
+    hovered: HashSet<crate::tree::StableNodeId>,
 
     /// Element where mouse button was pressed (for proper release
     /// targeting). Stored as `StableNodeId` so rebuilds between
@@ -320,9 +332,24 @@ impl EventRouter {
         self.is_dragging
     }
 
-    /// Check if a specific node is currently hovered
-    pub fn is_hovered(&self, node_id: LayoutNodeId) -> bool {
-        self.hovered.contains(&node_id)
+    /// Check if a specific node is currently hovered.
+    ///
+    /// Callers holding a `LayoutNodeId` should resolve to the stable
+    /// id via `tree.stable_id(node)` first — `self.hovered` is
+    /// stable-id-keyed so a subtree rebuild between mouse-move
+    /// frames doesn't drop the hover state. Convenience shim that
+    /// takes a tree + layout id is below.
+    pub fn is_hovered(&self, stable: crate::tree::StableNodeId) -> bool {
+        self.hovered.contains(&stable)
+    }
+
+    /// `is_hovered` for callers that only have a `LayoutNodeId` and
+    /// the tree — resolves the stable id internally.
+    pub fn is_hovered_layout(&self, tree: &RenderTree, node_id: LayoutNodeId) -> bool {
+        match tree.stable_id(node_id) {
+            Some(s) => self.hovered.contains(&s),
+            None => false,
+        }
     }
 
     /// Check if a specific node is currently pressed, by its
@@ -338,8 +365,11 @@ impl EventRouter {
         self.focused == Some(node_id)
     }
 
-    /// Get all currently hovered node IDs
-    pub fn hovered_nodes(&self) -> impl Iterator<Item = LayoutNodeId> + '_ {
+    /// Get all currently hovered node IDs (stable). Callers wanting
+    /// live `LayoutNodeId`s for dispatch should resolve via
+    /// `tree.layout_id(stable)`; this iterator returns the
+    /// stable-keyed canonical set.
+    pub fn hovered_nodes(&self) -> impl Iterator<Item = crate::tree::StableNodeId> + '_ {
         self.hovered.iter().copied()
     }
 
@@ -747,26 +777,59 @@ impl EventRouter {
             self.last_leaf_children_bounds.clear();
         }
 
-        // Elements that were hovered but no longer are -> POINTER_LEAVE
-        let left: Vec<_> = self.hovered.difference(&current_hovered).copied().collect();
-        for node in left {
-            self.emit_event(node, event_types::POINTER_LEAVE);
-            events.push((node, event_types::POINTER_LEAVE));
+        // Resolve current hover set to stable ids so the diff against
+        // `self.hovered` survives any subtree rebuild that fired
+        // between this mouse-move and the previous. Build a side-map
+        // back to layout ids so we can dispatch to the right node.
+        // Nodes without a stable id (anonymous layout-only nodes
+        // inserted by the pipeline) drop out of hover tracking — they
+        // wouldn't have stable handlers anyway.
+        let mut current_hovered_layout: std::collections::HashMap<
+            crate::tree::StableNodeId,
+            LayoutNodeId,
+        > = std::collections::HashMap::with_capacity(current_hovered.len());
+        for &lid in &current_hovered {
+            if let Some(stable) = tree.stable_id(lid) {
+                current_hovered_layout.insert(stable, lid);
+            }
+        }
+        let current_hovered_stable: HashSet<crate::tree::StableNodeId> =
+            current_hovered_layout.keys().copied().collect();
 
-            // Record hover leave event (only if recording is enabled)
-            #[cfg(feature = "recorder")]
-            if recorder_bridge::is_recording() {
-                recorder_bridge::record_event(RecorderEventData::HoverLeave {
-                    element_id: format!("{:?}", node),
-                    x,
-                    y,
-                });
+        // Elements that were hovered but no longer are -> POINTER_LEAVE
+        let left: Vec<_> = self
+            .hovered
+            .difference(&current_hovered_stable)
+            .copied()
+            .collect();
+        for stable in left {
+            // Resolve the (now potentially recycled) stable id to a
+            // live layout id for dispatch. None means the node was
+            // removed entirely by a rebuild — LEAVE has no live target
+            // to fire on, so skip.
+            if let Some(node) = tree.layout_id(stable) {
+                self.emit_event(node, event_types::POINTER_LEAVE);
+                events.push((node, event_types::POINTER_LEAVE));
+
+                // Record hover leave event (only if recording is enabled)
+                #[cfg(feature = "recorder")]
+                if recorder_bridge::is_recording() {
+                    recorder_bridge::record_event(RecorderEventData::HoverLeave {
+                        element_id: format!("{:?}", node),
+                        x,
+                        y,
+                    });
+                }
             }
         }
 
         // Elements that are newly hovered -> POINTER_ENTER
-        let entered: Vec<_> = current_hovered.difference(&self.hovered).copied().collect();
-        for node in entered {
+        let entered: Vec<_> = current_hovered_stable
+            .difference(&self.hovered)
+            .copied()
+            .collect();
+        for stable in entered {
+            let node = current_hovered_layout[&stable];
             self.emit_event(node, event_types::POINTER_ENTER);
             events.push((node, event_types::POINTER_ENTER));
 
@@ -816,7 +879,7 @@ impl EventRouter {
             });
         }
 
-        self.hovered = current_hovered;
+        self.hovered = current_hovered_stable;
 
         // Drag detection: if we have a pressed target and moved, emit DRAG.
         // `pressed_target` is a stable id; resolve to the live layout id
@@ -1144,11 +1207,16 @@ impl EventRouter {
             self.drag_delta_y = 0.0;
         }
 
-        // Emit POINTER_LEAVE to all hovered elements
-        let nodes: Vec<_> = self.hovered.iter().copied().collect();
-        for node in nodes {
-            self.emit_event(node, event_types::POINTER_LEAVE);
-            events.push((node, event_types::POINTER_LEAVE));
+        // Emit POINTER_LEAVE to all hovered elements (resolved from
+        // their stable ids to current LayoutNodeIds; nodes that
+        // disappeared since the last mouse-move have no live target
+        // and are silently skipped).
+        let stable_nodes: Vec<_> = self.hovered.iter().copied().collect();
+        for stable in stable_nodes {
+            if let Some(node) = tree.layout_id(stable) {
+                self.emit_event(node, event_types::POINTER_LEAVE);
+                events.push((node, event_types::POINTER_LEAVE));
+            }
         }
 
         self.hovered.clear();
@@ -1380,9 +1448,10 @@ impl EventRouter {
     pub fn on_unmount(&mut self, tree: &RenderTree, node: LayoutNodeId) {
         self.emit_event(node, event_types::UNMOUNT);
 
-        // Clear any state associated with this node
-        self.hovered.remove(&node);
+        // Clear any state associated with this node (hover + pressed
+        // both stable-id-keyed; resolve once).
         if let Some(stable) = tree.stable_id(node) {
+            self.hovered.remove(&stable);
             if self.pressed_target == Some(stable) {
                 self.pressed_target = None;
                 self.pressed_ancestors.clear();
