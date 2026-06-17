@@ -1934,16 +1934,45 @@ impl WebApp {
     /// (the browser clipboard read API is async-only and can't
     /// satisfy the widget's sync `Option<String>` contract).
     fn handle_context_menu(app: &mut Self, canvas_x: f32, canvas_y: f32, page_x: f32, page_y: f32) {
-        // Hit-test the click position so we can decide whether
-        // there's anything worth popping a menu for. We bail if the
-        // click doesn't land on a focused editable widget.
+        // Two consumers compete for the right-click on a Blinc canvas
+        // page: (a) focused editable widgets that want Cut / Copy /
+        // Paste, and (b) host apps that wire `Div::on_right_click`
+        // (node-editor's context menu, canvas-kit demos that paint
+        // their own surface, etc.).
+        //
+        // When an editable widget owns the focus we keep the
+        // historical edit-menu behaviour. Otherwise we synthesise a
+        // right-button POINTER_DOWN through the event router so the
+        // layout's `Div::on_right_click` handlers fire. Without this
+        // fan-out, the canvas's mousedown listener (which filters out
+        // button != 0) swallowed every right-click that didn't land
+        // on a focused input — leaving any host-installed right-click
+        // surface (e.g. cn::context_menu opened from a node-editor's
+        // on_right_click callback) silently inert on web. Desktop has
+        // no equivalent intercept; the gesture flows straight into
+        // the event router there.
         let focused = blinc_layout::widgets::text_input::focused_editable_node_id();
         if focused.is_none() {
-            // No focused editable — let the click pass through to
-            // normal mouse_down handling so it can focus an input
-            // first. We could re-fire the right-click as a left
-            // mouse_down here, but that interferes with apps that
-            // want to use right-click for their own menus.
+            Self::dispatch_mouse_down(
+                app,
+                canvas_x,
+                canvas_y,
+                blinc_platform::MouseButton::Right,
+            );
+            // Pair the DOWN with an UP at the same point so handlers
+            // that key off press+release (and the event router's
+            // pressed-target reset) don't strand the canvas in a
+            // half-pressed state. The host's on_right_click closure
+            // already fires on POINTER_DOWN via the layout filter, so
+            // a missing UP wouldn't bury the menu — but the router's
+            // book-keeping would stay dirty.
+            Self::dispatch_mouse_up(
+                app,
+                canvas_x,
+                canvas_y,
+                blinc_platform::MouseButton::Right,
+            );
+            let _ = (page_x, page_y);
             return;
         }
 
