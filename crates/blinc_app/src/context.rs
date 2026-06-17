@@ -932,6 +932,43 @@ impl RenderContext {
         );
     }
 
+    /// Drain every cached `css_composited_textures` / `motion_subtree_textures`
+    /// entry and release its `LayerTexture` back to the renderer's pool.
+    /// Use when EVERY texture is provably stale — a viewport pan/zoom on
+    /// a canvas-bearing page, for instance: each texture's content was
+    /// rasterised against a content-space affine that no longer applies,
+    /// and the per-key hash-mismatch heuristic doesn't detect viewport
+    /// changes (the bake's input primitives can be byte-identical when
+    /// the canvas closure's geometry is content-space). Don't reach for
+    /// this on routine state changes — it tears down every live
+    /// composite / motion texture, which is the exact perf cost the
+    /// surgical `invalidate_render_cache_tagged` path is designed to
+    /// avoid. The web runner calls this on scroll because viewport
+    /// changes there don't otherwise route through any signal that
+    /// would re-bake the textures.
+    pub fn drain_all_layer_textures(&mut self, source: &'static str) {
+        if self.css_composited_textures.is_empty() && self.motion_subtree_textures.is_empty() {
+            return;
+        }
+        let css_count = self.css_composited_textures.len();
+        let motion_count = self.motion_subtree_textures.len();
+        for (_, (tex, _)) in self.css_composited_textures.drain() {
+            self.renderer.layer_texture_cache_mut().release(tex);
+        }
+        self.css_composited_scratch_hash.clear();
+        for (_, (tex, _)) in self.motion_subtree_textures.drain() {
+            self.renderer.layer_texture_cache_mut().release(tex);
+        }
+        self.motion_subtree_scratch_hash.clear();
+        tracing::trace!(
+            target: "blinc_app::frame_timing",
+            source,
+            css_count,
+            motion_count,
+            "drain_all_layer_textures",
+        );
+    }
+
     /// Whether the renderer has a usable cached batch from the most
     /// recent full paint. The Phase-4 fast path checks this before
     /// attempting the compositor route — if `false` (first paint

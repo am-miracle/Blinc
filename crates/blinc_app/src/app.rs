@@ -560,6 +560,15 @@ impl BlincApp {
         self.ctx.invalidate_overlay_mount_textures(keys);
     }
 
+    /// Drain every cached composite / motion-subtree layer texture.
+    /// See [`crate::context::RenderContext::drain_all_layer_textures`]
+    /// for the rationale — use only when EVERY texture is provably
+    /// stale (viewport pan/zoom on a canvas-bearing page,
+    /// post-resize), not on routine state changes.
+    pub fn drain_all_layer_textures(&mut self, source: &'static str) {
+        self.ctx.drain_all_layer_textures(source);
+    }
+
     /// Set the alpha used when clearing the main render target.
     ///
     /// The desktop runner calls this before each window's render so that

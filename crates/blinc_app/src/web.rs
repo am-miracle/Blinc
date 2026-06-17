@@ -2317,6 +2317,11 @@ impl WebApp {
         // shows a window-shaped artefact where the cache lives.
         app.blinc_app
             .invalidate_render_cache_tagged("window_resized");
+        // And the layer textures themselves — their content-space
+        // sizing was computed against the previous physical width
+        // and won't match the new one.
+        app.blinc_app
+            .drain_all_layer_textures("window_resized");
     }
 
     /// Install (or replace) the UI builder closure.
@@ -2409,6 +2414,17 @@ impl WebApp {
             // positions when the user zoomed the canvas after closing
             // the overlay.
             self.blinc_app.invalidate_render_cache_tagged("had_scroll");
+            // The batch-cache wipe above doesn't drain the
+            // composite / motion-subtree layer textures (per the
+            // doc comment at invalidate_render_cache_tagged). On a
+            // canvas-bearing page a viewport pan/zoom invalidates
+            // EVERY texture's content-space layout, and the per-key
+            // hash heuristic can't detect that (the bake's input
+            // primitives may still be byte-identical when the
+            // canvas closure re-emits at new positions). Drop them
+            // all so the next paint re-bakes against the new
+            // viewport.
+            self.blinc_app.drain_all_layer_textures("had_scroll");
         }
 
         // ─── Phase 1a: scroll physics + pending refs ─────────────
@@ -2578,6 +2594,13 @@ impl WebApp {
                 // keeps blitting the old content-space coords.
                 self.blinc_app
                     .invalidate_render_cache_tagged("subtree_rebuild_applied");
+                // Subtree rebuilds invalidate the SCRATCH HASH input
+                // (different node ids → different bake key), but the
+                // per-key dirty-skip can still match on identical
+                // primitive bytes from an unrelated subtree. Drop
+                // every layer texture so the new tree starts clean.
+                self.blinc_app
+                    .drain_all_layer_textures("subtree_rebuild_applied");
                 if let Some(ref mut tree) = self.current_tree {
                     // Mirror windowed.rs:3660-3676: after subtree
                     // rebuilds, the new children need CSS layout
@@ -2763,6 +2786,8 @@ impl WebApp {
                     // subtree-rebuild block above.
                     self.blinc_app
                         .invalidate_render_cache_tagged("animation_subtree_rebuild_applied");
+                    self.blinc_app
+                        .drain_all_layer_textures("animation_subtree_rebuild_applied");
                     if let Some(ref mut tree) = self.current_tree {
                         tree.compute_layout(self.ctx.width, self.ctx.height);
                     }
