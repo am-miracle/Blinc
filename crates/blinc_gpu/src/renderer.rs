@@ -6037,11 +6037,12 @@ impl GpuRenderer {
         self.update_aux_data_buffer(batch);
     }
 
-    /// Slice-variant of [`Self::update_aux_data_buffer`] for callers that
-    /// only have an `&[[f32; 4]]` (e.g. the compositor overlay path
-    /// which carries the dynamic batch's aux_data separately from a
-    /// `PrimitiveBatch`). Avoids constructing a throwaway batch just
-    /// to satisfy the buffer-variant signature.
+    /// Slice-variant of `update_aux_data_buffer` (private, batch-
+    /// keyed) for callers that only have an `&[[f32; 4]]` — e.g.
+    /// the compositor overlay path which carries the dynamic
+    /// batch's aux_data separately from a `PrimitiveBatch`. Avoids
+    /// constructing a throwaway batch just to satisfy the buffer-
+    /// variant signature.
     pub fn update_aux_data_slice(&mut self, aux_data: &[[f32; 4]]) {
         if aux_data.is_empty() {
             return;

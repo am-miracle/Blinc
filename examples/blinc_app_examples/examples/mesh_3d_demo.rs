@@ -49,7 +49,7 @@ use blinc_canvas_kit::prelude::*;
 use blinc_core::{
     AlphaMode, Color, Light, Mat4, Material, MeshData, State, TextureData, Vec3, Vertex,
 };
-use blinc_input::InputState;
+use blinc_canvas_kit::InputState;
 
 const HELMET_GLTF_DIR: &str = "examples/blinc_app_examples/examples/assets/3d/DamagedHelmet";
 const HDR_PATH: &str = "examples/blinc_app_examples/examples/assets/3d/rogland_clear_night_2k.hdr";

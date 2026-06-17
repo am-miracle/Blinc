@@ -140,8 +140,11 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
         // Standalone downstream package (lives at `packages/blinc_canvas_kit/`,
         // gitignored). Workspace `[patch]` redirects the git URL to the local
         // path so wasm wrappers iterate without a push/rev cycle. Bump the
-        // rev when the published repo gets new releases.
-        r#"{ git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "5dbdad2bfdf7189446ee211da9cbd28b3edd4186" }"#,
+        // rev when the published repo gets new releases. Carries `InputState`
+        // / `DivInputExt` / the gamepad types since the blinc_input absorption
+        // — wrappers that use `blinc_canvas_kit::InputState` resolve through
+        // this single entry.
+        r#"{ git = "https://github.com/project-blinc/blinc_canvas_kit.git", rev = "3bc3f570dbe16e8f72c892e9fbad64cb7cd9af95" }"#,
     ),
     (
         "blinc_gpu::",
@@ -207,18 +210,17 @@ const INFERABLE_DEPS: &[(&str, &str, &str)] = &[
     (
         "blinc_gltf::",
         "blinc_gltf",
-        r#"{ git = "https://github.com/project-blinc/blinc_gltf.git", rev = "e510f26f627b9e7a3c4455e889a041940a530975", features = ["platform-assets"] }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_gltf.git", rev = "1c1e7105bec95faa4e9f13cb25d2548113149b14", features = ["platform-assets"] }"#,
     ),
     (
         "blinc_skeleton::",
         "blinc_skeleton",
-        r#"{ git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "33d4fbd9655fe4cfd38d8e18004c978d020ed6e2" }"#,
+        r#"{ git = "https://github.com/project-blinc/blinc_skeleton.git", rev = "4cd786055f0b4649b23b96934778c2fad8ac8d65" }"#,
     ),
-    (
-        "blinc_input::",
-        "blinc_input",
-        r#"{ git = "https://github.com/project-blinc/blinc_input.git", rev = "3e94941bd59bafcd23ad59e8db504a44fa85b4f5" }"#,
-    ),
+    // `blinc_input` was absorbed into `blinc_canvas_kit::input` and the
+    // standalone repo archived. Demos that previously imported
+    // `blinc_input::InputState` now resolve it through the canvas_kit
+    // entry above. No source-scan entry needed.
     // Non-`blinc_*` crate that the 3D animation demos use to get a
     // wasm32-safe monotonic clock. `std::time::Instant::now()`
     // panics on `wasm32-unknown-unknown`; `web_time::Instant` wraps

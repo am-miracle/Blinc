@@ -50,11 +50,6 @@ fn token(t: ColorToken, fallback: Color) -> Color {
 
 // ─── Host-side port type ───────────────────────────────────────────
 
-/// The host's port kind. Three semantic types, each with its own
-/// accent colour the editor reads via `PortKind::accent`. Real hosts
-/// would model their domain types here — reflow's `PortType`, ML
-/// tensor dtypes, audio frame formats, etc.
-
 /// Sentinel encoded into the diamond-side port of a lifted external
 /// connection so re-expansion can route it back to the SPECIFIC
 /// internal node the user wired up, instead of falling through to
@@ -63,6 +58,10 @@ fn token(t: ColorToken, fallback: Color) -> Color {
 /// `__sub_route:<canonical_internal_node_id>:<original_port>`.
 const SUB_ROUTE_PREFIX: &str = "__sub_route:";
 
+/// The host's port kind. Three semantic types, each with its own
+/// accent colour the editor reads via `PortKind::accent`. Real hosts
+/// would model their domain types here — reflow's `PortType`, ML
+/// tensor dtypes, audio frame formats, etc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum DemoPort {
     Number,
@@ -301,7 +300,7 @@ fn build_templates() -> Vec<NodeTemplate<DemoPort>> {
             use blinc_core::layer::Brush;
             let stroke = blinc_core::draw::Stroke::new(1.5);
             p.stroke_path(&path, &stroke, Brush::Solid(color));
-            drop(p);
+            let _ = p;
             ui.request_animation();
         });
 
@@ -1483,7 +1482,7 @@ fn handle_event(
                         c.to.port.as_str(),
                     );
                     let mut nc = Connection::new(from, to);
-                    nc.state = c.state.clone();
+                    nc.state = c.state;
                     nc
                 })
                 .collect();
@@ -1796,7 +1795,7 @@ fn expand_subgraph(
             PortAddress::new(from_node, c.from.port.as_str()),
             PortAddress::new(to_node, c.to.port.as_str()),
         );
-        nc.state = c.state.clone();
+        nc.state = c.state;
         new_connections.push(nc);
     }
 
@@ -1864,7 +1863,7 @@ fn expand_subgraph(
                     PortAddress::new(ext.from.node.clone(), ext.from.port.as_str()),
                     PortAddress::new(target, port.as_str()),
                 );
-                rerouted.state = ext.state.clone();
+                rerouted.state = ext.state;
                 rerouted_externals.push(rerouted);
             } else if let Some(ref entry) = entry_id {
                 // Demo-pragmatic port mapping: pick a real input port
@@ -1882,7 +1881,7 @@ fn expand_subgraph(
                     PortAddress::new(ext.from.node.clone(), ext.from.port.as_str()),
                     PortAddress::new(entry.clone(), port),
                 );
-                rerouted.state = ext.state.clone();
+                rerouted.state = ext.state;
                 rerouted_externals.push(rerouted);
             }
         } else if ext.from.node == diamond_id {
@@ -1891,7 +1890,7 @@ fn expand_subgraph(
                     PortAddress::new(target, port.as_str()),
                     PortAddress::new(ext.to.node.clone(), ext.to.port.as_str()),
                 );
-                rerouted.state = ext.state.clone();
+                rerouted.state = ext.state;
                 rerouted_externals.push(rerouted);
             } else if let Some(ref exit) = exit_id {
                 let port = "out_num";
@@ -1899,7 +1898,7 @@ fn expand_subgraph(
                     PortAddress::new(exit.clone(), port),
                     PortAddress::new(ext.to.node.clone(), ext.to.port.as_str()),
                 );
-                rerouted.state = ext.state.clone();
+                rerouted.state = ext.state;
                 rerouted_externals.push(rerouted);
             }
         }
@@ -2188,7 +2187,7 @@ fn writeback_expansion_to_subgraph(
                 PortAddress::new(resolve_canonical(&c.from.node), c.from.port.as_str()),
                 PortAddress::new(resolve_canonical(&c.to.node), c.to.port.as_str()),
             );
-            nc.state = c.state.clone();
+            nc.state = c.state;
             nc
         })
         .collect();
@@ -2486,7 +2485,7 @@ fn promote_added_members_to_subgraph(
                     PortAddress::new(state.diamond.id.clone(), encoded.as_str()),
                     PortAddress::new(c.to.node.clone(), c.to.port.as_str()),
                 );
-                nc.state = c.state.clone();
+                nc.state = c.state;
                 Some(nc)
             } else if to_added && !from_member {
                 let canonical = canonical_rename.get(&c.to.node).unwrap();
@@ -2499,7 +2498,7 @@ fn promote_added_members_to_subgraph(
                     PortAddress::new(c.from.node.clone(), c.from.port.as_str()),
                     PortAddress::new(state.diamond.id.clone(), encoded.as_str()),
                 );
-                nc.state = c.state.clone();
+                nc.state = c.state;
                 Some(nc)
             } else {
                 None
@@ -3683,7 +3682,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
                 .gap(4.0)
                 .flex_col()
                 .child(
-                    text(&format!(
+                    text(format!(
                         "visible nodes: {} / {}",
                         s.visible_nodes, s.total_nodes
                     ))
@@ -3691,7 +3690,7 @@ pub fn build_ui(ctx: &mut WindowedContext) -> impl ElementBuilder + use<> {
                     .color(Color::rgb(0.92, 0.92, 0.95)),
                 )
                 .child(
-                    text(&format!(
+                    text(format!(
                         "visible edges: {} / {}",
                         s.visible_edges, s.total_edges
                     ))

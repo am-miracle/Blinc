@@ -382,8 +382,9 @@ impl ThemeState {
         // theme token that produced its colour.
         if matches!(std::env::var("BLINC_DEBUG_COLOR_TOKEN").as_deref(), Ok("1")) {
             use std::sync::{Mutex, OnceLock};
-            static SEEN: OnceLock<Mutex<std::collections::HashSet<(ColorToken, u32, u32, u32, u32)>>> =
-                OnceLock::new();
+            // (token, r_bits, g_bits, b_bits, a_bits)
+            type SeenKey = (ColorToken, u32, u32, u32, u32);
+            static SEEN: OnceLock<Mutex<std::collections::HashSet<SeenKey>>> = OnceLock::new();
             let seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
             let key = (
                 token,

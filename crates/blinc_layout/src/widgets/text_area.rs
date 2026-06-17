@@ -1500,12 +1500,13 @@ pub fn text_area_state_with_placeholder(placeholder: impl Into<String>) -> Share
 /// an inline editor popover that should land cursor-ready).
 ///
 /// Safe to call BEFORE the matching [`TextArea`] is constructed: when
-/// the widget's [`Self::new`] runs it reads `state.visual` and seeds
-/// the inner `Stateful` with that value, so a pre-set `Focused`
-/// initialises the FSM in `Focused` directly — avoids a mid-frame
-/// Idle→Focused transition that would otherwise cascade a tree
-/// rebuild while the parent overlay is opening (the same flicker
-/// motivation as [`text_input::focus_text_input`]).
+/// the widget's `TextArea::new` runs it reads `state.visual` and
+/// seeds the inner `Stateful` with that value, so a pre-set
+/// `Focused` initialises the FSM in `Focused` directly — avoids a
+/// mid-frame Idle→Focused transition that would otherwise cascade
+/// a tree rebuild while the parent overlay is opening (the same
+/// flicker motivation as
+/// [`crate::widgets::text_input::focus_text_input`]).
 /// Enqueue a text_area for focus on the NEXT frame, after its widget
 /// has been built into the tree.
 ///

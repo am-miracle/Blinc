@@ -42,7 +42,7 @@ use blinc_canvas_kit::prelude::*;
 use blinc_core::events::KeyCode;
 use blinc_core::{Color, DrawContext, Light, Mat4, MeshData, State, Vec3};
 use blinc_gltf::{GltfAnimation, GltfScene};
-use blinc_input::{DivInputExt, InputState};
+use blinc_canvas_kit::{DivInputExt, InputState};
 use blinc_layout::prelude::text;
 use web_time::Instant;
 

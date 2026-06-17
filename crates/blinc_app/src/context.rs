@@ -2689,11 +2689,12 @@ impl RenderContext {
     ///   re-paints canvas on top of the cached fg pixels.
     ///
     /// Re-dispatching the cached foreground primitives after the
-    /// canvas overlay restores the intended z-order: cache (bg + glass
-    /// + fg) → canvas overlay → fg overlay. The double-paint of fg
-    /// pixels (once from cache, once from this dispatch) is identical
-    /// for opaque content. Semi-transparent fg over a canvas will
-    /// blend twice (acceptable for most overlay use; revisit if a
+    /// canvas overlay restores the intended z-order:
+    /// `cache (bg + glass + fg) → canvas overlay → fg overlay`.
+    /// The double-paint of fg pixels (once from cache, once from
+    /// this dispatch) is identical for opaque content.
+    /// Semi-transparent fg over a canvas will blend twice
+    /// (acceptable for most overlay use; revisit if a
     /// pixel-perfect single-blend variant is needed).
     ///
     fn render_foreground_overlay(&mut self, target_view: &wgpu::TextureView) {
