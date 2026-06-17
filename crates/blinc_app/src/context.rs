@@ -7759,7 +7759,28 @@ impl RenderContext {
                 if !tree.dynamic_regions().is_empty() {
                     let walked =
                         self.collect_dynamic_region_primitives(tree, render_state, width, height);
-                    self.cached_dynamic_batch = Some(walked);
+                    // Only overwrite when the re-walk produced
+                    // primitives. `collect_dynamic_region_primitives`
+                    // filters out `DynamicKind::CssAnimated` and
+                    // `DynamicKind::Canvas` — both paint through their
+                    // own paths (composite_css_layers_overlay /
+                    // canvas overlay). When the only dynamic regions
+                    // present are those two kinds (e.g. a settled
+                    // cn::context_menu parent + an actively-entering
+                    // submenu + the node-editor canvas), the filtered
+                    // ordered set is empty and `walked` is
+                    // `PrimitiveBatch::new()`. Overwriting with an
+                    // empty batch wipes the prior slow-walker-emitted
+                    // overlay-subtree primitives (panel bg, border,
+                    // item :hover bg) routed through dynamic_batch
+                    // via the `is_overlay_root` motion-subtree gate
+                    // in paint/motion.rs — the parent menu would
+                    // disappear from the surface until the submenu's
+                    // CSS enter animation settles and the next slow
+                    // walker runs.
+                    if !walked.primitives.is_empty() {
+                        self.cached_dynamic_batch = Some(walked);
+                    }
                 }
                 self.rebind_glyph_atlas_for_overlay();
                 self.renderer.composite_frame(
@@ -8123,7 +8144,19 @@ impl RenderContext {
                 if css_only_active && !tree.dynamic_regions().is_empty() {
                     let walked =
                         self.collect_dynamic_region_primitives(tree, render_state, width, height);
-                    self.cached_dynamic_batch = Some(walked);
+                    // See sibling gate in the css_patch_eligible
+                    // branch above for the rationale: a walked batch
+                    // that's empty after filtering CssAnimated /
+                    // Canvas regions must NOT overwrite the prior
+                    // slow-walker overlay-subtree primitives. Without
+                    // this guard a settled parent cn::context_menu
+                    // (or popover / dropdown) sitting beside an
+                    // actively-animating CSS-promoted sibling loses
+                    // its panel bg + border for the duration of the
+                    // sibling's enter animation.
+                    if !walked.primitives.is_empty() {
+                        self.cached_dynamic_batch = Some(walked);
+                    }
                 }
                 self.rebind_glyph_atlas_for_overlay();
                 self.renderer.composite_frame(
